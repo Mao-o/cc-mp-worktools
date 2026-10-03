@@ -148,7 +148,7 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading
 | `vercel` | Vercel | あり |
 | `render` | Render | 一部 (同上。125 中 121) |
 | `mcp` | Model Context Protocol | あり |
-| `codex` | OpenAI Codex | 一部 (同上。178 中 175) |
+| `codex` | OpenAI Codex + ChatGPT docs (`learn.chatgpt.com/docs/llms-full.txt`。Codex の CLI / IDE / cloud / SDK に加え、ChatGPT の desktop app / Work / 管理のページを含む) | 一部 (同上。178 中 175) |
 | `ollama` | Ollama | あり |
 | `agentskills` | Agent Skills (`SKILL.md` の仕様) | あり |
 | `cloudflare-<製品>` | Cloudflare の製品別 `/<製品>/llms-full.txt`。製品は `workers` / `d1` / `r2` / `kv` / `durable-objects` / `pages` / `queues` / `workers-ai` / `vectorize` / `hyperdrive` / `agents` / `workflows` / `ai-gateway` / `browser-rendering` / `containers` | あり (`index.md`)。`browser-rendering` だけは旧テンプレートでページ内に URL が無く、`llms.txt` との突き合わせで 47 中 40 |
@@ -191,7 +191,7 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `url_base` | | ページ URL が相対 (`/guide.md`) のときに前に付ける基点 |
 | `drop_lines` | | 本文から除く行の正規表現のリスト (行頭から照合したいときは `^` を付ける)。全ページに付く定型行 (「Skip to content」など) が検索に当たらないようにする。コードブロック内の行は除かない。ページ URL は除く前に読む |
 | `skip_empty` | | `true` で、本文が空 (空行と水平線だけ) のページを捨てる (Hono の `# Start of Hono documentation`、Codex のカテゴリ見出しのような見出しだけの行) |
-| `index_url` | | サイトの `llms.txt`。URL を持たないページに、タイトルが完全に一致する (大文字小文字・空白・`*_` の記号は無視) 項目の URL を付ける。同じタイトルの項目が 2 つ以上あるページ、同じタイトルのページが 2 つ以上あるとき (Zod はサイト冒頭と `packages/zod` のページがどちらも `Zod`)、近いだけのタイトル (`Basic Auth` と `Basic Auth Middleware`) には付けない (誤った URL は URL が無いより悪いため)。`llms.txt` は絶対 URL の項目だけを読む。取得に失敗しても警告だけで本文は読める |
+| `index_url` | | `url` の `llms-full.txt` と同じ範囲の `llms.txt` (他の `llms.txt` へのリンク集になっている 2 段の索引は指さない。下の「対象外」)。URL を持たないページに、タイトルが完全に一致する (大文字小文字・空白・`*_` の記号は無視) 項目の URL を付ける。同じタイトルの項目が 2 つ以上あるページ、同じタイトルのページが 2 つ以上あるとき (Zod はサイト冒頭と `packages/zod` のページがどちらも `Zod`)、近いだけのタイトル (`Basic Auth` と `Basic Auth Middleware`) には付けない (誤った URL は URL が無いより悪いため)。`llms.txt` は絶対 URL の項目だけを読み、`llms.txt` や `llms-<名前>.txt` (`llms-full.txt` / `llms-small.txt` など) を指す項目はページではないので除く。取得に失敗しても警告だけで本文は読める |
 | `h1_needs_url` | | `split: h1` で `true` のとき、`page_url` (`line:` / `link:`) の URL が見つからない H1 をページの区切りにせず、前のページの見出しとして残す (ページ本文の中で H1 を使うサイト向け) |
 
 source 名は `^[a-z0-9][a-z0-9-]*$` (キャッシュのファイル名になるため)。未知のキーや不正な値は
@@ -214,6 +214,12 @@ source 名は `^[a-z0-9][a-z0-9-]*$` (キャッシュのファイル名になる
 `/llms.txt`。製品別の `llms-full.txt` は上のとおり読める)、ページごとに別ファイルで公開する
 サイト、`llms.txt` の index と本文のタイトル以外での突き合わせ (`index_url` は完全一致のタイトルだけ)。URL を持たないページでは `URL:` 行と `# source:` 行を
 出さない。
+
+2 段 index は `index_url` にも書かない。別の `llms.txt` を指す項目は突き合わせから除くので、そのファイルの URL が
+ページに付くことはないが、`url` の `llms-full.txt` に含まれない別の docs のページ (学習トラックなど) の項目が、ページと
+タイトルを共有すると、その項目の URL が付く (OpenAI のルートの `llms.txt` を書いたとき、API ガイドの
+`Model optimization` に学習トラックのページの URL が付いた)。タイトルだけでは区別できないため防げない。`index_url` には、
+`url` の `llms-full.txt` と同じ範囲の `llms.txt` (製品別の `/<製品>/llms.txt` など) を書く。
 
 ## 既知の制約
 

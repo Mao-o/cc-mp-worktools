@@ -2,6 +2,53 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.28.1] - 2026-10-03
+
+### 修正: preset `codex` の取得先を移転先 (`learn.chatgpt.com/docs`) にし、範囲の説明を直す
+
+`developers.openai.com/codex/llms-full.txt` と `/codex/llms.txt` が HTTP 308 で
+`learn.chatgpt.com/docs/llms-full.txt` / `/docs/llms.txt` (別ホスト) へ移った。転送には追従するため読めては
+いたが、取得先を直接指すようにした。ファイルは Codex のページに加えて ChatGPT の製品ページ (desktop app /
+Work / 管理者向けの設定など) も含むようになっており、preset の description が実態と合っていなかった。
+
+- **preset** — `url` / `index_url` を移転先にし、`description` を「OpenAI Codex + ChatGPT docs」に更新した。
+  README の presets 表と、`researching-library-docs` の対応表 (Step 0) の説明も合わせた。skill の
+  description と Triggers は変えていない (自動で起動する対象は従来どおり)
+- **実測** — 移転元から転送で取った内容と、移転先から直接取った内容はバイト単位で同じ。ページ数は 178、
+  URL が付くページは 175 で、移転前 (0.28.0) と同じ。`llms.txt` の死にリンク 2 件と、別のタイトルの項目が
+  同じ URL を指す組 2 つはサイト側の問題で、手を入れていない (`docs/generic-llms-txt-source.md`)
+- **キャッシュ** — 取得先が変わるため、初回はキャッシュのファイル名が変わって再取得する。古い
+  `generic-codex-…` のキャッシュのファイルは残る (消してよい)
+- テスト: preset の `index_url` が `url` の `llms-full.txt` と同じディレクトリの `llms.txt` であることを固定
+  した。移転元が転送している間は片方だけ古くても動くため見落としやすい。`index_url` を移転元・サイトの
+  ルート・`llms-full.txt` にする変異、`url` だけ移転元に残す変異、別の preset (zod) の範囲をずらす変異の
+  5 通りが、いずれも assertion の失敗で落ちる
+
+### 修正: `index_url` の突き合わせで、別の `llms.txt` を指す項目をページとして扱わない (汎用 loader)
+
+他の `llms.txt` へのリンク集になっている 2 段の索引 (OpenAI や Cloudflare のルートの `llms.txt`) を
+`index_url` に書くと、別の `llms.txt` を指す項目がページとタイトルで突き合わされ、そのファイルの URL が
+ページに付いた (Sign in with ChatGPT のページに `siwc/llms.txt`)。README は `index_url` を「サイトの
+`llms.txt`」と案内しており、ルートが 2 段になっているサイトでは利用者がそのまま書きうる形だった。
+
+- **除く項目** — URL の最後の区間が `llms.txt` または `llms-<名前>.txt` (`llms-full.txt` / `llms-small.txt` /
+  `llms-ctx-full.txt` など。大文字小文字・query・fragment・末尾のスラッシュは問わない) の項目を、タイトルを
+  比べる前に捨てる。`llms.txt.md` や `not-llms.txt`、`/llms.txt/intro` は除かない。除いた項目は、同じ
+  タイトルの別の項目との重複にも数えない (ページの項目が 1 つ残れば、そのページに付く)
+- **実測** — 実在の索引 7 件の項目を数えた: OpenAI のルートは 40 件中 12、Cloudflare のルートは 113 件すべて、
+  Hono は 1 件 (`llms-small.txt`)、Codex は 2 件 (`llms-full.txt` と `use-cases/llms.txt`)。`index_url` を
+  持つ presets 5 件 (zod / hono / render / codex / cloudflare-browser-rendering) では、0.28.0 と 0.28.1 で
+  ページごとの URL が変わらない (差の行 0)。専用 3 script の索引 (Claude Code / Claude Platform /
+  Firebase) には該当の項目が無く、この修正は汎用 loader だけに入れた (`docs/generic-llms-txt-source.md`)
+- **防げないもの** — `url` の `llms-full.txt` に含まれない別の docs のページ (OpenAI のルートにある学習
+  トラックなど) の項目が、ページとタイトルを共有すると、その項目の URL が付く。タイトルだけでは本物の一致と
+  区別できないため、README の `index_url` の説明と「対象外」に、2 段の索引を `index_url` に書かないことを
+  追記した (`index_url` の検証エラーの文言も合わせた)
+- `AGENTS.md` のレビュー規則に、別の `llms.txt` を指す項目の URL を付けることを指摘対象に、上の衝突を
+  対象外に加えた
+- テスト: 索引ファイルの項目の形 8 種と、似ているがページの形 5 種 (表駆動)、2 段の索引の見本、索引ファイルの
+  項目がタイトルの重複に数えられないこと。実装の各条件を壊す 10 通りの変異がいずれも assertion の失敗で落ちる
+
 ## [0.28.0] - 2026-10-03
 
 ### profile キー `index_url`: URL の無いページに `llms.txt` から URL を付ける (汎用 loader)

@@ -134,7 +134,7 @@ Drizzle の区切り行は共有の追跡でも 496 / 496 になる (インデ�
 | Ollama (`docs.ollama.com`) | 同上 | 同上 | 69 | 同上 69 |
 | Vercel (`/docs/llms-full.txt`, 10MB) | frontmatter を `-` 80 個の行で囲む。`description` が複数行の二重引用符の値になるページが 3 つ | frontmatter の `source:` | 1529 | `source:` 行 1529 (= 80 個の `-` の行 3058 の半分) |
 | Render (`/docs/llms-full.txt`) | H1 (ファイル冒頭に「Each h1 designates a new page」とある) | なし | 125 | CommonMark どおりに数えたコードブロック外の H1 125。0.26.0 の `FenceTracker` では 110 (言語名付きの行 521 個で開閉が反転していた) |
-| OpenAI Codex (`developers.openai.com/codex`) | H1。カテゴリ名の H1 の直後が `---` だけ | なし | 178 (`skip_empty` でカテゴリ 9 つを除く) | コードブロック外の H1 187 − カテゴリ 9 |
+| OpenAI Codex (`developers.openai.com/codex`。0.28.1 で `learn.chatgpt.com/docs` へ移転。下の「0.28.1: preset codex の移転」) | H1。カテゴリ名の H1 の直後が `---` だけ | なし | 178 (`skip_empty` でカテゴリ 9 つを除く) | コードブロック外の H1 187 − カテゴリ 9 |
 
 `h1_needs_url` は、URL を持たない H1 を前のページの中の H1 見出しとして残す (行は失わない。
 Bun / MCP / Ollama で本文の行数 + ページごとの H1 1 行がファイルの行数に一致することを確かめた)。
@@ -198,6 +198,57 @@ presets 28 件のページ数・URL 数は変わらない。
 ブロックを疑った。Cloudflare はすべてのコードブロックを言語名の無い `` ``` `` で出し (言語名は前の
 行に書く)、Browser Rendering にはその中の frontmatter の見本もあるため、「言語名の無い fence の中の
 区切りは採用する」という規則も使えない。
+
+### 2026-10-03 実測 (0.28.1)
+
+**`index_url` で別の `llms.txt` を指す項目を除く**: 2 段の索引 (他の `llms.txt` へのリンク集) を
+`index_url` に書くと、別の `llms.txt` を指す項目がページとして突き合わされ、そのファイルの URL が付いた
+(OpenAI のルートの `llms.txt` では、Sign in with ChatGPT のページに `siwc/llms.txt` が付いた)。
+`llms.txt` の項目 (絶対 URL のもの) の URL の最後の区間を実測し、`llms.txt` と `llms-<名前>.txt` の形を
+索引ファイルとして除く。
+
+| 索引 | 項目 | 最後の区間が `llms.txt` / `llms-<名前>.txt` | 内訳 |
+|---|---|---|---|
+| OpenAI のルート (2 段) | 40 | 12 | すべて `llms.txt`。残り 28 は `.md` のページ 19 と拡張子の無いリンク 9 |
+| Cloudflare のルート (2 段) | 113 | 113 | すべて `/<製品>/llms.txt` |
+| Zod / Render / Cloudflare Browser Rendering | 326 / 359 / 52 | 0 / 0 / 0 | |
+| Hono | 89 | 1 | `llms-small.txt` (Tiny Docs) |
+| Codex (`developers.openai.com/codex/llms.txt` の転送先) | 189 | 2 | `llms-full.txt` (Combined ChatGPT docs)、`use-cases/llms.txt` |
+| 専用 script の索引 (Claude Code / Claude Platform / Firebase) | 231 / 753 / 7209 | 0 / 0 / 0 | 専用 script は `join_index_urls` を使わず、この変更で出力は変わらない |
+
+- `index_url` を持つ presets 5 件 (zod / hono / render / codex / cloudflare-browser-rendering) に同じ
+  `llms-full.txt` と `llms.txt` を流し、0.28.0 と 0.28.1 でページごとの URL を比べた。ページ数と URL の
+  付いたページ (17 中 12 / 87 中 21 / 125 中 121 / 178 中 175 / 47 中 40) もページごとの URL も変わらない
+  (差の行 0)。Hono と Codex の索引ファイルの項目は、どのページのタイトルとも一致していなかった
+- 除くのは `llms.txt` / `llms-full.txt` / `llms-small.txt` / `llms-ctx-full.txt` の形 (大文字小文字・
+  query・fragment・末尾のスラッシュは問わない)。`llms.txt.md` (ページ)、`not-llms.txt`、
+  `/llms.txt/intro` (ディレクトリ名) は除かない。除いた項目は、同じタイトルの別の項目との重複にも数えない
+- 防げないもの: OpenAI のルートに残る 28 項目のうち、`url` の `llms-full.txt` に無い別の docs のページ
+  (学習トラックの `Model optimization` など) の項目は、ページとタイトルが衝突すると URL が付く。
+  タイトルだけでは本物の一致と区別できないため、2 段の索引を `index_url` に書かないことを README に書いた
+
+### 2026-10-03 実測 (0.28.1): preset codex の移転
+
+`developers.openai.com/codex/llms-full.txt` と `/codex/llms.txt` は HTTP 308 で
+`learn.chatgpt.com/docs/llms-full.txt` / `/docs/llms.txt` (別ホスト) へ移った。urllib は 3.11 から 308 に
+追従し (README の要件は 3.11 以上。3.14 で追従を確認)、移転元から取った内容と移転先から直接取った内容は
+バイト単位で同じ (full 2,285,847 バイト、`llms.txt` 30,990 バイト)。移転元のままでも読めるが、
+preset の `url` / `index_url` を移転先にし、`description` を更新した
+(取得先が変わるとキャッシュのファイル名が変わるため、初回は再取得する。古いキャッシュは残る)。
+
+- ファイルの冒頭は `# Codex — full documentation` と「Single-file Markdown export of ChatGPT docs for
+  Codex across the CLI, IDE, cloud, and SDK.」。Codex のページに加えて、ChatGPT の製品ページ
+  (desktop app、Work、管理者向けの設定・セキュリティ・分析など) を含む
+- ページ数は 178、URL が付くのは 175 で、移転前の値 (0.28.0) と同じ。付かない 3 つは、全体の表題
+  (`Codex — full documentation`) と、ページ側で重複する `Permissions` 2 つ
+- `llms.txt` の死にリンクが 2 件 (どちらも HTTP 404): `use-cases/llms.txt` と `videos.md`。前者は索引
+  ファイルなので除かれ (0.28.1)、後者はタイトルの合うページが無い。どちらもページの URL にはなっていない。
+  別のタイトルの項目 2 つが同じ URL を指す組が 2 つある (`developer-commands.md?surface=cli` と
+  `?surface=ide`)。この 4 ページは、組ごとに同じ URL を持つ。どれもサイト側の問題で、手を入れない
+- `index_url` は `url` の `llms-full.txt` と同じディレクトリの `llms.txt` (`/docs/llms.txt`)。5 件の
+  presets (zod / hono / render / codex / cloudflare-browser-rendering) はいずれもこの形。移転元が転送して
+  いる間は片方だけ古くても動くため気付きにくく、`url` と `index_url` が別のサイト・別の範囲を指さない
+  ことをテストで固定した
 
 ## 3. 需要の根拠
 

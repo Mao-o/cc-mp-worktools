@@ -564,6 +564,19 @@ class PresetsTest(unittest.TestCase):
                 self.assertTrue(p["url"].endswith("/llms-full.txt"), p["url"])
                 self.assertTrue(p["description"])
 
+    def test_a_preset_index_url_is_the_llms_txt_next_to_its_llms_full_txt(self):
+        # index_url joins page URLs by title, so it must be the llms.txt of the
+        # same docs set as url: not a site root (a 2-level index), not another
+        # host. A site that moves is easy to half-update, and an old host that
+        # redirects hides it.
+        presets = generic._read_sources_file(generic.PRESETS_FILE)
+        with_index = {name: p for name, p in presets.items() if p["index_url"]}
+        self.assertTrue(with_index)
+        for name, p in with_index.items():
+            with self.subTest(name):
+                self.assertTrue(p["index_url"].endswith("/llms.txt"), p["index_url"])
+                self.assertEqual(p["index_url"].rsplit("/", 1)[0], p["url"].rsplit("/", 1)[0])
+
     def test_skill_source_table_matches_the_presets(self):
         # researching-library-docs lists the presets by hand (description and
         # the Step 0 table); a preset added or renamed without the skill would
@@ -638,6 +651,21 @@ INDEX = """\
 - [Basic Auth](https://example.com/docs/basic-auth)
 """
 
+# a site root whose llms.txt mostly links one llms.txt per product (a 2-level
+# index), plus a learning-track page that is a page after all
+TWO_LEVEL_INDEX = """\
+# Example Developers
+
+> Each product below links to its own llms.txt.
+
+## Documentation sets
+- [Sign in with Example](https://example.com/siwc/llms.txt): Quickstart and integration.
+- [Example API guides](https://example.com/api/llms.txt): Guides and endpoint reference.
+
+## Learning tracks
+- [Model optimization](https://example.com/tracks/model-optimization.md): Fine-tune and optimize models.
+"""
+
 
 class IndexJoinTest(unittest.TestCase):
     """index_url: page URLs from llms.txt by exact title."""
@@ -672,6 +700,74 @@ class IndexJoinTest(unittest.TestCase):
         docs[0]["url"] = "https://zod.dev/"
         self.assertEqual(generic.join_index_urls(docs, index), 0)
         self.assertEqual(docs[1]["url"], "")
+
+    # Entries that link an llms.txt-family file (another index, a full-text
+    # export) are not pages: a page of the same title must not get that URL.
+    INDEX_FILES = {
+        "Per-product index": "https://example.com/siwc/llms.txt",
+        "Full-text export": "https://example.com/docs/llms-full.txt",
+        "Small export": "https://example.com/llms-small.txt",
+        "Context export": "https://example.com/llms-ctx-full.txt",
+        "Upper case": "https://example.com/docs/LLMS.TXT",
+        "With query": "https://example.com/docs/llms.txt?lang=en",
+        "With fragment": "https://example.com/docs/llms.txt#top",
+        "Trailing slash": "https://example.com/docs/llms.txt/",
+    }
+    # URLs that only look like an index file are pages and keep joining
+    PAGES_LIKE_INDEX_FILES = {
+        "Markdown twin": "https://example.com/docs/llms.txt.md",
+        "Other file name": "https://example.com/docs/not-llms.txt",
+        "No extension": "https://example.com/docs/llms",
+        "Directory": "https://example.com/llms.txt/intro",
+        "Host only": "https://llms.txt",
+    }
+
+    def join_by_title(self, url_by_title: dict) -> dict:
+        """Join an index of one entry per title against one page per title."""
+        index = _lines("".join(f"- [{title}]({url})\n" for title, url in url_by_title.items()))
+        corpus = "".join(f"# {title}\n\nBody of {title}.\n\n" for title in url_by_title)
+        docs = generic.split_documents(_lines(corpus), _profile(split="h1"))
+        generic.join_index_urls(docs, index)
+        return {d["title"]: d["url"] for d in docs}
+
+    def test_entries_linking_an_llms_txt_file_are_not_pages(self):
+        got = self.join_by_title(self.INDEX_FILES)
+        for title in self.INDEX_FILES:
+            with self.subTest(title):
+                self.assertEqual(got[title], "")
+
+    def test_urls_that_only_look_like_an_index_file_still_join(self):
+        got = self.join_by_title(self.PAGES_LIKE_INDEX_FILES)
+        for title, url in self.PAGES_LIKE_INDEX_FILES.items():
+            with self.subTest(title):
+                self.assertEqual(got[title], url)
+
+    def test_two_level_index_gives_no_llms_txt_url(self):
+        # index_url pointed at a site root whose llms.txt links other llms.txt
+        # files: no page gets one of those URLs. A learning-track entry that
+        # shares a title with a page still joins; that cannot be told apart
+        # from a real match, which is why the README says not to use a
+        # 2-level index as index_url.
+        corpus = "# Sign in with Example\n\nx\n\n# Example API guides\n\nx\n\n# Model optimization\n\nx\n"
+        docs = generic.split_documents(_lines(corpus), _profile(split="h1"))
+        joined = generic.join_index_urls(docs, _lines(TWO_LEVEL_INDEX))
+        self.assertEqual({d["title"]: d["url"] for d in docs}, {
+            "Sign in with Example": "",
+            "Example API guides": "",
+            "Model optimization": "https://example.com/tracks/model-optimization.md",
+        })
+        self.assertEqual(joined, 1)
+
+    def test_an_index_file_entry_does_not_make_a_page_title_ambiguous(self):
+        # the entry for the guide's own llms.txt is not a second candidate for
+        # the page "Guide": the page entry is the only one left
+        index = _lines(
+            "- [Guide](https://example.com/guide/llms.txt): the guide's own index\n"
+            "- [Guide](https://example.com/docs/guide.md): the guide page\n"
+        )
+        docs = generic.split_documents(_lines("# Guide\n\nx\n"), _profile(split="h1"))
+        self.assertEqual(generic.join_index_urls(docs, index), 1)
+        self.assertEqual(docs[0]["url"], "https://example.com/docs/guide.md")
 
     def cli(self, *extra, env=None):
         with tempfile.TemporaryDirectory() as tmp:
