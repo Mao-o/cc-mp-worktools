@@ -155,6 +155,28 @@ class TestPlanGcloud(_TmpBase):
         )
         self.assertTrue(any("get-value" in note for note in plan.notes))
 
+    def test_configuration_that_cannot_be_statted_is_skipped(self):
+        """stat できない構成ファイル (長すぎる名前を指す symlink など) は、読めない構成と同じく
+        候補にしない (v0.19.0)。旧版は存在確認に `Path.is_file()` を使い、Python 3.13 までは
+        例外が pin-env の外まで抜けていた。3.14 以降でも再現するため `Path.is_file` を差し替える。
+        """
+        env = self._env({"work": "[core]\nproject = p1\n"})
+        broken = Path(env["CLOUDSDK_CONFIG"]) / "configurations" / "config_broken"
+        os.symlink("a" * 300, broken)  # 1 要素が 255 バイトを超える → stat が ENAMETOOLONG
+        patcher = _testutil.patch_is_file_like_py313()
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        with self.assertRaises(OSError):  # 前提: 3.13 までの失敗を再現できている
+            broken.is_file()
+        _testutil.assert_real_is_file_on_this_version(self, broken)
+        try:
+            plan = pin_env.plan_gcloud("p1", env)
+        except OSError as e:
+            self.fail(f"stat できない構成で plan_gcloud から {type(e).__name__} が抜けた")
+        self.assertEqual(
+            plan.pins, (pin_env.Pin("CLOUDSDK_ACTIVE_CONFIG_NAME", "work", ("work",)),)
+        )
+
     def test_project_only_fallback_has_no_account_pin(self):
         env = self._env({})
         plan = pin_env.plan_gcloud("p1", env)

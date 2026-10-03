@@ -7,7 +7,6 @@ import os
 import re
 import shlex
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -588,20 +587,54 @@ def _should_emit_deprecation_warn(project_dir: str) -> bool:
     alert fatigue を避けるため、同一プロジェクトへの deprecation warn は
     1 日に 1 回のみ発火する。deny メッセージ内の note は制限しない
     (deny は実行阻止のため常に表示すべき)。
+
+    記録は成功 cache と同じ dir に置き、その dir が自分の所有で他のユーザーが書けないとき
+    だけ使う (`cache.state_dir`)。旧実装は共有の `/tmp` の同名 dir を確かめずに使い、別の
+    ユーザーが置いた記録で案内を止められ、置かれた symlink を辿って空のファイルを書きえた。
+    使えなければ 1 日 1 回に絞れないので、毎回出す。
     """
+    flag_dir = cache.state_dir()
+    if flag_dir is None:
+        return True
     key = hashlib.sha256(f"deprecation-warn:{project_dir}".encode()).hexdigest()[:16]
-    flag_dir = Path(tempfile.gettempdir()) / "cc-mp-verify-cloud-account"
     flag_path = flag_dir / f"deprecation-{key}.flag"
     try:
         if flag_path.exists():
             mtime = flag_path.stat().st_mtime
             if time.time() - mtime < _DEPRECATION_WARN_TTL:
                 return False
-        flag_dir.mkdir(parents=True, exist_ok=True)
         flag_path.write_text("")
     except OSError:
         pass
     return True
+
+
+def _format_unstattable(conflicts: list[tuple[str, Path]]) -> str | None:
+    """競合 (D4) に数えた配置パスに stat できないものがあれば、その deny 本文を返す (無ければ None)。
+
+    stat できない配置パスはファイルがあるかどうかを確かめられないので「ある」に数える
+    (`paths._may_hold_accounts`)。その階層の `.claude` に権限が無いと 3 つの配置パスすべてが
+    そうなるので、`_format_conflicts` の「複数のパスに存在します」と migrate / rm の案内は事実と
+    合わず、案内どおりにしても直らない。確かめられないパスとその理由だけを示す。
+    """
+    failures = []
+    for kind, path in conflicts:
+        err = paths.stat_failure(path)
+        if err is not None:
+            failures.append((kind, path, err))
+    if not failures:
+        return None
+    lines = [
+        "accounts.local.json の配置パスを確かめられません "
+        "(期待値ファイルがあるかどうかが分からないため検証を停止):"
+    ]
+    for kind, path, err in failures:
+        lines.append(f"  - {path} ({kind}): {err.strerror or type(err).__name__}")
+    lines.append(
+        "途中のディレクトリの権限と、symlink の行き先を確認してください。期待値ファイルで"
+        "ないもの (行き先を辿れない symlink など) は削除してください。"
+    )
+    return "\n".join(lines)
 
 
 def _format_conflicts(conflicts: list[tuple[str, Path]]) -> str:
@@ -707,7 +740,7 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         source_note = _ancestor_note(project_dir, resolved_dir)
 
     if conflicts:
-        body = _format_conflicts(conflicts)
+        body = _format_unstattable(conflicts) or _format_conflicts(conflicts)
         if source_note:
             body = source_note + "\n\n" + body
         return _decide(pre_file_mode, body, mode_notes)

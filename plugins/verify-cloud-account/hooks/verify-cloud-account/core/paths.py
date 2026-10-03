@@ -11,7 +11,10 @@ assertion で basename が "accounts.local.json" であることを保証する
 """
 from __future__ import annotations
 
+import errno
+import os
 import re
+import stat
 from pathlib import Path
 
 ACCOUNTS_FILE_NEW = Path(".claude") / "verify-cloud-account" / "accounts.local.json"
@@ -19,6 +22,48 @@ ACCOUNTS_FILE_DEPRECATED = Path(".claude") / "accounts.local.json"
 ACCOUNTS_FILE_LEGACY = Path(".claude") / "accounts.json"
 
 _ALLOWED_BASENAME = "accounts.local.json"
+
+# 配置パスの stat の失敗のうち、そこにファイルが**無い**と確かめられたもの。これ以外の
+# 失敗 (権限の無い EACCES・長すぎる名前を指す symlink の ENAMETOOLONG・symlink のループの
+# ELOOP など) は、ファイルがあるかどうかを確かめられない = 読めない期待値ファイルとして扱う。
+_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR})
+
+
+def _may_hold_accounts(path: Path) -> bool:
+    """配置パスに期待値ファイルがある (または、無いと確かめられない) なら True。
+
+    - 通常のファイル → True
+    - 無い (ENOENT / ENOTDIR。行き先の無い symlink も) か、通常のファイルでない
+      (ディレクトリなど) → False
+    - **stat がそれ以外の理由で失敗した → True**。呼び出し側はこのパスを採用し、読み込みに
+      失敗して「読めない期待値ファイル」として deny する (同じ階層にほかの配置パスもあれば
+      複数のパスの競合 (D4) として deny)
+
+    pathlib の `Path.is_file()` は使わない。Python 3.13 までは EACCES・ENAMETOOLONG などを
+    例外にし (try の外で呼んでいたので dispatch() の外まで抜け、__main__ の最終防波堤が検証を
+    スキップしていた)、3.14 からはそれらも False (= 無い) にして、同じ階層のほかの配置パス →
+    親ディレクトリ → グローバル既定へ黙って探索を進める (ELOOP はどの版でも False)。リポジトリに
+    置ける stat できない symlink で、3.13 までは検証そのものを、3.14 からは同じ階層の正しい
+    ファイルとの競合 (D4) を外せていた。
+    """
+    try:
+        st = os.stat(path)
+    except OSError as e:
+        return e.errno not in _ABSENT_ERRNOS
+    return stat.S_ISREG(st.st_mode)
+
+
+def stat_failure(path: Path) -> OSError | None:
+    """配置パスの stat が「無い」以外の理由で失敗したら、その OSError を返す (それ以外は None)。
+
+    `_may_hold_accounts` が「ある」に数えた stat できない候補を、deny の文面で区別するため
+    (dispatcher の `_format_unstattable`)。
+    """
+    try:
+        os.stat(path)
+    except OSError as e:
+        return None if e.errno in _ABSENT_ERRNOS else e
+    return None
 
 
 def accounts_file_new(project_dir: str) -> Path:
@@ -46,10 +91,12 @@ def accounts_file_legacy(project_dir: str) -> Path:
 
 
 def discover_all_accounts_files(project_dir: str) -> list[tuple[str, Path]]:
-    """配置候補のうち存在するものを (kind, absolute_path) のリストで返す。
+    """配置候補のうち存在するもの (stat できないものを含む) を (kind, absolute_path) のリストで返す。
 
     kind は "new" / "deprecated" / "legacy" のいずれか。優先度順
-    (new → deprecated → legacy) で並ぶ。
+    (new → deprecated → legacy) で並ぶ。stat できない候補も「ある」に数える
+    (`_may_hold_accounts`)。無いことにすると、その階層の正しいファイルだけが残って
+    競合 (D4) が外れるか、探索が親ディレクトリ・グローバル既定へ黙って進む。
 
     返却リストの長さが 2 以上なら、dispatcher は fail-closed で deny する。
     """
@@ -58,7 +105,7 @@ def discover_all_accounts_files(project_dir: str) -> list[tuple[str, Path]]:
         ("deprecated", accounts_file_deprecated(project_dir)),
         ("legacy", accounts_file_legacy(project_dir)),
     ]
-    return [(kind, path) for kind, path in candidates if path.is_file()]
+    return [(kind, path) for kind, path in candidates if _may_hold_accounts(path)]
 
 
 # 親ディレクトリ遡及の最大階層数。`project_dir` 自身を含めてこの段数まで
@@ -426,7 +473,8 @@ def discover_accounts_files_with_ancestors(
 
     探索ポリシー:
       - cwd 階層に何か 1 つでも見つかれば、そこで採用判定する
-        (親階層は見ない、cwd 優先)
+        (親階層は見ない、cwd 優先)。stat できない配置パスも「見つかった」に数え、
+        その階層で止まる (`_may_hold_accounts`)
       - 同一階層に複数 tier が同居する場合は呼び出し側で fail-closed (D4)
       - **git repo の境界を越えない** — `.git` ディレクトリを持つ階層
         (通常の toplevel) と、`.git` ファイルが submodule の gitdir
@@ -599,6 +647,9 @@ def resolve_accounts_file_for_verification(
     グローバル既定へ落ちると、プロジェクト設定を作るつもりの編集が**利用者の
     全プロジェクトに効く**ファイルを書き換えてしまう。
 
+    stat できないグローバル既定も採用する (プロジェクト側と同じく `_may_hold_accounts`)。
+    dispatcher は読み込みに失敗して、読めない期待値ファイルとして deny する。
+
     Returns:
         (path, kind, conflicts, resolved_dir, source)
           - source: "project" / "global" / None (見つからなかった)
@@ -610,6 +661,6 @@ def resolve_accounts_file_for_verification(
     if path is not None:
         return path, kind, [], resolved_dir, SOURCE_PROJECT
     global_path = global_accounts_file()
-    if global_path is not None and global_path.is_file():
+    if global_path is not None and _may_hold_accounts(global_path):
         return global_path, "new", [], global_path.parent, SOURCE_GLOBAL
     return None, None, [], None, None

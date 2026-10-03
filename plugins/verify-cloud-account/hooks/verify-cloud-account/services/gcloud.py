@@ -427,7 +427,10 @@ def configurations_matching(expected, env=None) -> list[str] | None:
         return []
     names = []
     for path in entries:
-        if not path.name.startswith(_CONFIG_FILE_PREFIX) or not path.is_file():
+        # `os.path.isfile`: pathlib の `Path.is_file()` は Python 3.13 まで、stat できない構成
+        # (長すぎる名前を指す symlink など) で例外を投げる。stat できない構成は、読めない構成
+        # (下の read_text が None) と同じく候補にしない。
+        if not path.name.startswith(_CONFIG_FILE_PREFIX) or not os.path.isfile(path):
             continue
         name = path.name[len(_CONFIG_FILE_PREFIX):]
         if not _CONFIG_NAME_RE.match(name):

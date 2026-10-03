@@ -180,14 +180,16 @@ def _guard_path(service_name: str):
 
 
 def _read_records(service_name: str) -> dict:
-    path = _guard_path(service_name)
-    if path is None or not path.is_file():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (ValueError, OSError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    """切替の記録。無い・読めない記録 (stat できない・壊れた・入れ子が深い・オブジェクトで
+    ない。`cache.read_state`) と、cache の dir を使えないときは、記録が無いのと同じ。
+
+    ガードはベストエフォート (`record_switch` も書けなくても判定を変えない)。旧実装は存在
+    確認に `Path.is_file()` を使い、Python 3.13 までは stat できない記録で例外にしていた
+    (dispatcher の `_auto_switch` が握って「内部エラーのため自動切替を行わない」になり、
+    3.14 からは記録が無いのと同じで切り替えていた)。
+    """
+    records = cache.read_state(_guard_path(service_name))
+    return records if records is not None else {}
 
 
 def conflicting_switch(

@@ -324,8 +324,19 @@ PreToolUse は Bash のたびに発火するので、`gh pr list && gh pr view &
   書かない
 - **成功のみ**: 失敗 (文字列返却) は常に再検証する。切り替え直後に使いたいため
 - **無効化**: TTL 超過 / `accounts.local.json` の mtime 変化 / 破損・欠損 (UTF-8 で
-  ない・入れ子が深い entry を含む。v0.18.0) / アカウント状態を変えうるコマンドの検出 /
-  epoch 不一致
+  ない・入れ子が深い entry を含む。v0.18.0) / 値が期待した型でない (v0.19.0。下の項) /
+  アカウント状態を変えうるコマンドの検出 / epoch 不一致
+- **cache dir の JSON は `cache.read_state` で読む** (v0.19.0): 成功 cache の entry・epoch・
+  自動切替の記録を同じ関数で読む (存在確認は `os.path.isfile`、読めないものは None)。値の型は
+  呼び出し側が確かめる: entry の timestamp は float にできる有限の数で、書いてから TTL 以内
+  (数値でない値の TypeError・float に収まらない整数の OverflowError を例外にしない。NaN・
+  無限大・未来の時刻は期限が切れないので使わない)、success は `true` だけ、epoch / tombstone は
+  int64 に収まる非負の整数だけ (`int()` で変換すると `Infinity` で OverflowError)
+- **dir は自分の所有で、他のユーザーが書けない実ディレクトリのときだけ使う** (v0.19.0。
+  `_cache_dir`)。`os.lstat` で symlink でないことも見る。作るときは 0700。満たさない dir は
+  直さずに使わない (中に他のユーザーが置いたファイルが残りうる)。使えないときは成功 cache も
+  epoch も補助ファイル (自動切替の記録・移行案内の記録) も読まず書かない。所有者と mode が
+  POSIX の意味を持たない OS (`os.geteuid` が無い) では確かめない
 - **書き込み失敗は無視** (best-effort)。キャッシュ書けないことで deny は出さない
 
 意図的にしないこと: 失敗のキャッシュ (切替直後に再検証したい) / 長時間キャッシュ
@@ -362,6 +373,11 @@ timeout に落ちる。fail-open を塞ぐ目的には締切の伝播で足り�
 
 - **複数 tier が同一階層に同居したら fail-closed で deny** (D4)。どれが正本か
   曖昧なまま検証を通すと、どの設定が効いているか不透明になる
+- **stat できない配置パスは「ある (が読めない)」に数える** (v0.19.0。`_may_hold_accounts`)。
+  無いとするのは ENOENT / ENOTDIR と、通常のファイルでないものだけ。読み込みに失敗して読めない
+  期待値ファイルとして deny し、同じ階層にほかの配置パスもあれば D4 の分岐で deny する (文面は
+  `_format_unstattable`)。グローバル既定も同じ。pathlib の `Path.is_file()` は使わない
+  (3.13 までは例外、3.14 からは False = 無い)
 - **親遡及**は「worktree に accounts.local.json を複製せず親 repo の設定を継承する」
   ための経路。cwd 階層で 1 つでも見つかればそこで採用 (cwd 優先)
 - 遡及の停止条件は **階層数 + git repo の境界 + `$HOME`**。階層数だけを上限に
@@ -1447,6 +1463,87 @@ verify() は CLI が出した現在値 (前後の空白を除いた値) と期�
 - 確認 (Python 3.9): 実プロセスの `__main__` で、accounts.local.json は 25〜40 段と
   975〜1,000 段、`.firebaserc` は 975〜1,000 段のすべての深さで、warn (検証のスキップ) に
   ならないことを確かめた
+
+### 0.19.0 (stat できない accounts.local.json / 成功 cache の値と dir で検証を飛ばさない)
+
+**stat できない配置パスを、無いものではなく読めない期待値ファイルとして扱う**
+
+0.18.0 が `.firebaserc` と成功 cache で塞いだのと同じ形 (try の外の pathlib の述語) が、
+accounts.local.json の探索に残っていた (内部バックログ)。`Path.is_file()` は Python 3.13 まで
+ENOENT / ENOTDIR / EBADF / ELOOP 以外の stat の失敗を例外にし、例外が `__main__` の最終防波堤
+まで抜けて検証をスキップしていた。3.14 からは False を返し、同じ階層のほかの配置パス → 親
+ディレクトリ → グローバル既定へ探索を進めていた。どちらの版でも、リポジトリに置ける長すぎる
+名前を指す symlink (旧パスの `.claude/accounts.json`) で、ふつうのファイルなら競合 (D4) で deny
+になる配置を外せた。
+
+場所ごとに、stat できないときにどちらへ倒すかを決めた (hook の経路を grep した結果):
+
+| 場所 | stat できないとき | 読めないとき (従来) | 理由 |
+|---|---|---|---|
+| accounts の 3 配置パス (祖先の階層も) `discover_all_accounts_files` | ある → deny | deny (0.18.0) | 無いとすると、同じ階層の正しいファイルとの競合が外れ、親・グローバル既定へ黙って進む |
+| グローバル既定 `resolve_accounts_file_for_verification` | ある → deny | deny | 同上 |
+| 自動切替の記録 `auto_switch._read_records` | 無い (記録なし) | 無い (壊れた記録と同じ) | ガードはベストエフォート (`record_switch` も書けなくても判定を変えない) |
+| gcloud の構成 `gcloud.configurations_matching` | 無い (候補にしない) | 無い (`read_text` が None) | builder の pin-env だけが使う。hook の判定に関わらない |
+| 成功 cache の entry / epoch (0.18.0 で `os.path.isfile`) | 無い (miss / epoch 0) | 無い | cache は速度のためのもの。無ければ通常の照合 |
+
+- 無いとするのは stat が ENOENT / ENOTDIR で失敗したとき (行き先の無い symlink を含む) と、
+  stat できて通常のファイルでないとき (ディレクトリなど。読みに行くと FIFO で止まりうる。従来
+  どおり)。symlink のループ (ELOOP) は pathlib がどの版でも無いものとしていたが、「確かめられ
+  ない」に入れて deny に変えた (リポジトリに置ける形で、競合 (D4) を外せるのは同じ)
+- stat できない候補は**その階層のほかの候補と並べて返す** (「その候補だけを返す」形は採らない)。
+  builder の `migrate` は同じ関数で統合元を集めるので、候補だけを返すと新パスの正しいファイルが
+  統合元から消え、Python 3.14 では空の内容で新パスを書きうる (`_load_existing` は stat できない
+  ファイルを 3.14 では空として読む)。並べて返せば hook は D4 の分岐で deny し、`migrate` は新パスの
+  内容を残す
+- その D4 の分岐の文面は、stat できない候補があれば `_format_unstattable` にする。その階層の
+  `.claude` に権限が無いと 3 つの候補すべてが stat できず、`_format_conflicts` の「複数のパスに
+  存在します」と migrate / rm の案内は事実と合わない (案内どおりにしても直らない)。候補が 1 つ
+  だけなら、読み込みの失敗の文面 (`… の読み込みに失敗しました: <理由>`) のまま
+- hook の経路のほかの pathlib の述語は try の中にある (`_inspect_dot_git` /
+  `_linked_worktree_common` の `.git` の判定、deprecation 案内の記録の `exists()` / `stat()`)。
+  builder (`scripts/accounts_builder.py` の `is_file()` / `exists()`、`scripts/pin_env.py` の
+  `settings_env`) にも try の外の述語が残るが、hook の経路ではない (Python 3.13 までは builder が
+  traceback で止まるだけで、検証には関わらない)。この変更では触っていない
+- 確認: 実プロセスの hook を Python 3.9.6 と 3.14.0 で 7 形動かした (旧パスの stat できない
+  symlink と新パスの正しいファイル / それだけの旧パスで書込 / 同じくリモート read / 祖先の権限の
+  無い `.claude` でリモート read / stat できないグローバル既定でリモート read / symlink のループと
+  新パス / 行き先の無い symlink と新パス)。0.18.0 は、3.9.6 で前の 5 形が warn (スキップ)、
+  3.14.0 で 1 形目が allow (新パスで照合)・2〜5 形目が未設定の扱い (書込は deny、リモート read は
+  警告で通す)。ループと行き先の無い symlink は両版で allow。0.19.0 は両版で前の 6 形が deny、
+  行き先の無い symlink だけが allow
+
+**成功 cache の値の型と、cache の dir の所有者を確かめる**
+
+- `get_success` は timestamp の型を確かめずに `time.time() - ts` を計算し、数値でない値の
+  TypeError と float に収まらない整数の OverflowError で検証をスキップしていた (内部バックログ)。
+  `_read_epoch` も `int()` で変換し、`Infinity` の OverflowError で同じだった (cache を読む箇所を
+  grep して見つけた)。読むのを `read_state` に寄せ、値は呼び出し側で確かめる (上の「短期
+  キャッシュ」の節)。期待した型でない entry は cache miss、epoch は 0 (無効化の記録なし)
+- 同じ確認で、NaN・無限大・未来の timestamp (期限が切れない) と、真に数えていた success の
+  文字列も cache miss にした。epoch の上限 (int64) は、`invalidate` が `max(現在 + 1, time_ns)`
+  を `json.dumps` で書き戻すとき、読める上限の桁の整数に 1 を足した値で ValueError を投げうるため
+- `_cache_dir` は TMPDIR が無いと共有の `/tmp` を使い、所有者も mode も確かめずに
+  `mkdir(exist_ok=True)` していた (内部バックログ)。別のユーザーが先に作った dir を使うと、
+  置かれた entry で検証を省き (上の型の誤りと組み合わせればスキップ)、置かれた symlink を辿って
+  書く (`_write_atomic` の一時ファイル、移行案内の記録の `write_text("")`)。自分の所有・group /
+  other に w が無い・symlink でない、のときだけ使う。満たさない dir を chmod で直す案は採らない
+  (中に置かれたファイルが残る)。代償: umask 002 の環境で以前の版が作った dir (0775) は使われ
+  なくなり、消すまで毎回検証する (README に書いた)
+- 移行案内を 1 日 1 回に絞る記録 (`_should_emit_deprecation_warn`) は `tempfile.gettempdir()` の
+  同名 dir を確かめずに使っていたので、`cache.state_dir()` に寄せた。使えなければ毎回出す
+  (従来の OSError のときと同じ向き)。テストでは `tempfile.gettempdir()` が最初の呼び出しの値を
+  覚えるため、記録が実際の一時ディレクトリに書かれていたが、TMPDIR に従うようになった
+- 自動切替の記録 (`_read_records`) も `read_state` で読む。0.18.0 は存在確認が `Path.is_file()`
+  で、入れ子の深い記録の RecursionError も捕まえていなかったが、どちらも dispatcher の
+  `_auto_switch` が例外を握る (自動切替を「内部エラー」で見送り、deny のまま) ので、検証の
+  スキップではなかった。3.14 と揃えて記録が無いのと同じにした (壊れた記録の扱いと同じ)
+- 確認: 実プロセスの hook (3.9.6 / 3.14.0) で、通常の照合なら deny になる状態 (正しい entry
+  なら cache hit で allow) を作って entry / epoch を書き換えた。entry の timestamp が文字列・
+  null・配列・float に収まらない整数は、0.18.0 で warn (スキップ)、0.19.0 で通常の照合 (deny)。
+  NaN・未来の時刻・`"false"` の success と、他のユーザーが書ける dir の正しい entry は、0.18.0 で
+  cache hit (allow)、0.19.0 で通常の照合 (deny)。epoch の `Infinity` は、0.18.0 で warn
+  (スキップ)、0.19.0 で epoch 0 (無効化の記録なし) として読み、epoch 0 で書かれたこの entry は
+  cache hit (allow) のまま
 
 ## 既知の制限
 
