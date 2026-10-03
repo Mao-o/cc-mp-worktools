@@ -112,7 +112,9 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" content <page_ref> "<h
 - **タイトルの部分一致**: 一意に決まる場合のみ (曖昧ならエラーで候補を出す)
 - **URL の部分一致**: ページ URL を持つ source のみ (例: `get-started`)
 
-`zod` / `hono` / `render` / `codex` の llms-full.txt はページ URL を持たない。引用元はタイトル + heading_path で表す。
+`zod` / `hono` / `render` / `codex` / `cloudflare-browser-rendering` は llms-full.txt にページ URL が無く、`llms.txt` と
+タイトルが一致したページにだけ URL が付く (Hono は 4 分の 1 程度)。URL の無いページの引用元はタイトル +
+heading_path で表す。
 
 ## heading_path の指定方法
 

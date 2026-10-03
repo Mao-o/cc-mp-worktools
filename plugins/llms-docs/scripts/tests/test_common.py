@@ -129,6 +129,29 @@ class FenceTrackerCloserTest(unittest.TestCase):
         tracker = _common.FenceTracker()
         return [tracker.update(line) for line in lines]
 
+    def test_stray_indented_closer_after_indented_code_opens_nothing(self):
+        # Firebase: indented code in a list item, then a lone indented ```
+        lines = ["1. Step\n", "\n", "       code();\n", "       ```\n", "\n",
+                 "### Java\n", "text\n"]
+        self.assertEqual(self._states(lines), [False] * 7)
+        # and a heading after it is extracted
+        paths = [s["heading_path"] for s in _common.extract_sections(lines)]
+        self.assertIn("Java", paths)
+
+    def test_indented_bare_opener_with_code_at_its_depth_still_opens(self):
+        lines = ["1. Run:\n", "\n", "    ```\n", "    # not a heading\n", "    ```\n", "## After\n"]
+        # the opener is reported outside until the next line confirms it
+        self.assertEqual(self._states(lines), [False, False, False, True, False, False])
+        self.assertEqual([s["title"] for s in _common.extract_sections(lines)], ["After"])
+
+    def test_tentative_rule_is_only_for_bare_runs_indented_four_or_more(self):
+        # an info string, or an indent under 4, opens as before even when
+        # the next line is shallower
+        self.assertEqual(self._states(["    ```ts\n", "code\n"]), [True, True])
+        self.assertEqual(self._states(["   ```\n", "code\n"]), [True, True])
+        # an empty indented block (opener then closer at the same depth) closes
+        self.assertEqual(self._states(["    ```\n", "    ```\n", "text\n"]), [False, False, False])
+
     def test_info_string_line_inside_an_open_block_is_content(self):
         self.assertEqual(
             self._states(["```\n", "```ts\n", "code\n", "```\n", "text\n"]),
@@ -916,6 +939,15 @@ class TruncateContentPreservesMarkdownBoundariesTest(unittest.TestCase):
         self.assertIn("intro text here", visible_body)
         self.assertNotIn("```", visible_body)  # backed up before the fence entirely
         self.assertIn("chars truncated", result)
+
+    def test_cut_after_an_unconfirmed_indented_opener_backs_up_before_it(self):
+        # A bare run indented 4+ spaces opens a block only once the next
+        # non-blank line confirms it; a cut in between would end the output
+        # on a lone fence line.
+        content = "intro line\n\n        ```\n\n        code line one\n        code line two\n        ```\n\nafter\n"
+        for max_chars in range(content.index("```") + 4, content.rindex("```") + 3):
+            result = _common.truncate_content(content, max_chars, narrow_hint="hint")
+            self.assertEqual(result.split("\n... (")[0], "intro line\n\n", max_chars)
 
     def test_cut_inside_table_backs_up_to_before_the_table(self):
         content = (

@@ -2,6 +2,37 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.28.0] - 2026-10-03
+
+### profile キー `index_url`: URL の無いページに `llms.txt` から URL を付ける (汎用 loader)
+
+ページ URL を本文に持たないサイト (Zod / Hono / Render / Codex、Browser Rendering の旧テンプレート) は、
+`content` / `search` の結果に URL が出なかった。`index_url` にサイトの `llms.txt` を書くと、タイトルが
+完全に一致する項目の URL を付ける。
+
+- **完全一致・一意だけ** — 大文字小文字・空白・`*_` の記号は無視して比べる。近いだけのタイトル
+  (`Basic Auth` と `Basic Auth Middleware`)、`llms.txt` で重複するタイトル、2 つ以上のページが持つ
+  タイトル (Zod はサイト冒頭と `packages/zod` のページがどちらも `Zod`) には付けない。語の前方一致を
+  試すと Hono で 40 中 4 件が別のページの URL だったため、誤った URL より URL なしを選んだ
+- **presets** — zod 12 / 17、hono 21 / 87、render 121 / 125、codex 175 / 178、
+  cloudflare-browser-rendering 40 / 47 ページに URL が付く (`docs/generic-llms-txt-source.md`)
+- **取得** — `llms.txt` の取得に失敗しても警告だけで本文は読める。`--file` で手元の `llms-full.txt`
+  を読むときは取得せず、`--index-file` で手元の `llms.txt` を渡せる (`Next:` ヒントも引き継ぐ)。
+  `llms.txt` は絶対 URL の項目だけを読む
+
+### 修正: インデントされた対応のない閉じ fence の後ろの見出しを隠さない (4 script 共通)
+
+Firebase はリスト項目の中のコードをインデントした行で書き、最後にインデント付きの ```` ``` ```` だけを
+残すことがある。0.26.1 でインデント 4 以上の開きを認めたため、この行が新しいコードブロックを開き、
+後ろの見出しを隠していた (Render と Firebase の個別ページ 4 件で見出しなど 33 行)。インデント 4 以上の
+言語名の無い記号は、次の空でない行が同じ深さ以上で続いたときだけコードブロックを開く。手元の
+869 ファイルで隠れるようになった行は 0、presets のページ数は変わらない。
+
+### 修正: `--max-chars` の切り詰めで、確定前の開き fence の直後で切らない
+
+上の変更で、開きの確定を待つ間の行は fence の外と報告される。切り詰めがその直後で切ると、出力が
+対応のない fence 記号の行で終わっていた。確定を待つ間の行は切れ目に使わない。
+
 ## [0.27.1] - 2026-10-03
 
 ### Cloudflare presets の定型行の除去と、1 ページの取りこぼしを修正
