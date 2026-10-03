@@ -142,16 +142,16 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading
 | `nextjs` | Next.js (`/docs/llms-full.txt`) | あり |
 | `vite` / `vitest` | Vite / Vitest | あり (`.md`) |
 | `drizzle` | Drizzle ORM | あり |
-| `zod` | Zod | なし |
-| `hono` | Hono | なし |
+| `zod` | Zod | 一部 (`llms.txt` とタイトルで突き合わせ。17 中 14) |
+| `hono` | Hono | 一部 (同上。87 中 21) |
 | `bun` | Bun | あり |
 | `vercel` | Vercel | あり |
-| `render` | Render | なし |
+| `render` | Render | 一部 (同上。125 中 121) |
 | `mcp` | Model Context Protocol | あり |
-| `codex` | OpenAI Codex | なし |
+| `codex` | OpenAI Codex | 一部 (同上。178 中 175) |
 | `ollama` | Ollama | あり |
 | `agentskills` | Agent Skills (`SKILL.md` の仕様) | あり |
-| `cloudflare-<製品>` | Cloudflare の製品別 `/<製品>/llms-full.txt`。製品は `workers` / `d1` / `r2` / `kv` / `durable-objects` / `pages` / `queues` / `workers-ai` / `vectorize` / `hyperdrive` / `agents` / `workflows` / `ai-gateway` / `browser-rendering` / `containers` | あり (`index.md`)。`browser-rendering` だけは旧テンプレートでページ内に URL が無く、なし |
+| `cloudflare-<製品>` | Cloudflare の製品別 `/<製品>/llms-full.txt`。製品は `workers` / `d1` / `r2` / `kv` / `durable-objects` / `pages` / `queues` / `workers-ai` / `vectorize` / `hyperdrive` / `agents` / `workflows` / `ai-gateway` / `browser-rendering` / `containers` | あり (`index.md`)。`browser-rendering` だけは旧テンプレートでページ内に URL が無く、`llms.txt` との突き合わせで 47 中 40 |
 
 他の製品や他のサイトは、下の `sources.json` に profile を書けば読める。
 
@@ -182,7 +182,7 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 
 | キー | 必須 | 意味 |
 |---|---|---|
-| `url` | ○ | サイトの `llms-full.txt` (http / https)。このファイルだけを取得する |
+| `url` | ○ | サイトの `llms-full.txt` (http / https)。取得するのはこれと `index_url` だけ |
 | `split` | ○ | ページの区切り方。`h1` = コードブロック外の H1 ごと / `frontmatter` = YAML frontmatter ごと / `line` = `line_prefix` で始まる行ごと |
 | `frontmatter_key` | | `split: frontmatter` のとき、ページの frontmatter に必ずあるキー (既定 `title`)。これが無い `---` の組は区切りとみなさない (本文の水平線を誤認しないため) |
 | `frontmatter_delimiter` | | `split: frontmatter` のとき、frontmatter を囲む行 (既定 `---`。`-` か `+` を 3 個以上)。Vercel は `-` 80 個 |
@@ -191,10 +191,12 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `url_base` | | ページ URL が相対 (`/guide.md`) のときに前に付ける基点 |
 | `drop_lines` | | 本文から除く行の正規表現のリスト (行頭から照合したいときは `^` を付ける)。全ページに付く定型行 (「Skip to content」など) が検索に当たらないようにする。コードブロック内の行は除かない。ページ URL は除く前に読む |
 | `skip_empty` | | `true` で、本文が空 (空行と水平線だけ) のページを捨てる (Hono の `# Start of Hono documentation`、Codex のカテゴリ見出しのような見出しだけの行) |
+| `index_url` | | サイトの `llms.txt`。URL を持たないページに、タイトルが完全に一致する (大文字小文字・空白・`*_` の記号は無視) 項目の URL を付ける。同じタイトルの項目が 2 つ以上あるページ、同じタイトルのページが 2 つ以上あるとき (Zod はサイト冒頭と `packages/zod` のページがどちらも `Zod`)、近いだけのタイトル (`Basic Auth` と `Basic Auth Middleware`) には付けない (誤った URL は URL が無いより悪いため)。`llms.txt` は絶対 URL の項目だけを読む。取得に失敗しても警告だけで本文は読める |
 | `h1_needs_url` | | `split: h1` で `true` のとき、`page_url` (`line:` / `link:`) の URL が見つからない H1 をページの区切りにせず、前のページの見出しとして残す (ページ本文の中で H1 を使うサイト向け) |
 
 source 名は `^[a-z0-9][a-z0-9-]*$` (キャッシュのファイル名になるため)。未知のキーや不正な値は
-エラーにする。profile を試すときは `--file <手元の llms-full.txt>` で取得せずに読める。
+エラーにする。profile を試すときは `--file <手元の llms-full.txt>` で取得せずに読める (`--file` のときは
+`index_url` も取得しない。手元の `llms.txt` を `--index-file` で渡せば突き合わせる)。
 
 実測した形状 (詳細は `docs/generic-llms-txt-source.md`):
 
@@ -210,7 +212,7 @@ source 名は `^[a-z0-9][a-z0-9-]*$` (キャッシュのファイル名になる
 
 対象外: `llms.txt` が別の `llms.txt` へのリンク集になっている 2 段 index (Cloudflare のルート
 `/llms.txt`。製品別の `llms-full.txt` は上のとおり読める)、ページごとに別ファイルで公開する
-サイト、`llms.txt` の index と本文の join。URL を持たないページでは `URL:` 行と `# source:` 行を
+サイト、`llms.txt` の index と本文のタイトル以外での突き合わせ (`index_url` は完全一致のタイトルだけ)。URL を持たないページでは `URL:` 行と `# source:` 行を
 出さない。
 
 ## 既知の制約

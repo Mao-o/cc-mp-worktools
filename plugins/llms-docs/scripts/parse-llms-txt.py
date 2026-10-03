@@ -22,7 +22,9 @@ Out of scope (use a dedicated loader or WebFetch): two-level indexes whose
 ``llms.txt`` only links to more ``llms.txt`` files (Cloudflare's root; its
 per-product ``/<product>/llms-full.txt`` files are supported), sites that
 publish one file per page, and joining an ``llms.txt`` index against the full
-text. Only the single ``llms-full.txt`` named in the profile is fetched.
+text other than by exact title. Only the profile's ``url`` (the
+``llms-full.txt``) and, when set, its ``index_url`` (the ``llms.txt``, used
+to give URL-less pages a URL by exact title) are fetched.
 """
 
 import argparse
@@ -38,6 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 from _common import (  # noqa: E402
     FenceTracker,
+    FetchError,
     add_cache_dir_arg,
     add_heading_path_arg,
     add_include_changelog_priority_arg,
@@ -52,6 +55,7 @@ from _common import (  # noqa: E402
     full_corpus_body_search,
     load_lines,
     next_hint,
+    parse_llms_index,
     search_content_in_body,
     search_index_entries,
     search_rank_key,
@@ -80,7 +84,7 @@ _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _SPLITS = ("h1", "frontmatter", "line")
 _PROFILE_KEYS = {
     "url", "split", "frontmatter_key", "line_prefix", "page_url", "url_base", "description",
-    "drop_lines", "skip_empty", "frontmatter_delimiter", "h1_needs_url",
+    "drop_lines", "skip_empty", "frontmatter_delimiter", "h1_needs_url", "index_url",
 }
 PRESETS_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "presets.json")
 _PAGE_URL_FORMS = '"none", "frontmatter:<key>", "line:<prefix>" or "link:<link text>"'
@@ -211,6 +215,10 @@ def _validate_profile(path: str, name: str, raw) -> dict:
         if not isinstance(base, str) or not re.match(r"^https?://\S+$", base):
             _bad(path, f"sources.{name}.url_base must be an http(s) URL")
         profile["url_base"] = base
+    index_url = raw.get("index_url")
+    if index_url is not None and (not isinstance(index_url, str) or not re.match(r"^https?://\S+$", index_url)):
+        _bad(path, f"sources.{name}.index_url must be an http(s) URL of the site's llms.txt")
+    profile["index_url"] = index_url
     return profile
 
 
@@ -642,7 +650,67 @@ def _load_docs(args) -> tuple[dict, str, list[dict]]:
         path = args.file
     docs = split_documents(load_lines(path), profile)
     assert_parsed(profile["name"], len(docs), path)
+    if profile["index_url"]:
+        index_lines = _load_index_lines(args, profile)
+        if index_lines is not None:
+            join_index_urls(docs, index_lines)
     return profile, path, docs
+
+
+def _load_index_lines(args, profile: dict) -> list[str] | None:
+    """The profile's ``llms.txt`` for URL joining: ``--index-file`` if
+    given, else fetched to the cache — but not when ``--file`` reads a local
+    corpus (that mode never touches the network). A failed fetch only costs
+    the URLs, so it warns instead of exiting."""
+    if args.index_file is not None:
+        if not os.path.exists(args.index_file):
+            die(f"--index-file '{args.index_file}' does not exist")
+        return load_lines(args.index_file)
+    if args.file is not None:
+        return None
+    digest = hashlib.sha256(profile["index_url"].encode("utf-8")).hexdigest()[:12]
+    cache = os.path.join(args.cache_dir, f"generic-{profile['name']}-{digest}-llms.txt")
+    try:
+        return load_lines(fetch_url(profile["index_url"], cache, user_agent=USER_AGENT,
+                                    timeout=60, max_age=args.max_age, raise_on_error=True))
+    except FetchError as e:
+        print(f"WARNING: could not fetch {profile['index_url']} ({e}); page URLs from the index are omitted",
+              file=sys.stderr)
+        return None
+
+
+def _title_key(title: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[`*_]", "", title)).strip().lower()
+
+
+def join_index_urls(docs: list[dict], index_lines: list[str]) -> int:
+    """Give a URL to each page that has none, from the ``llms.txt`` entry
+    with the same title. Only an exact title (ignoring case, spacing and
+    ``*_``` marks) that is unique on both sides counts: a near match (index
+    "Basic Auth" for page "Basic Auth Middleware"), a title shared by two
+    entries, or one shared by two pages (Zod's site banner and its
+    ``packages/zod`` page are both "Zod") is left without a URL, because a
+    wrong URL misleads more than a missing one (measured on Hono:
+    word-prefix matching gave 4 wrong URLs in 40). Entries are read with
+    the shared ``parse_llms_index`` (absolute URLs only). Returns the number
+    of pages that got a URL."""
+    by_title: dict[str, set] = {}
+    for entry in parse_llms_index(index_lines):
+        by_title.setdefault(_title_key(entry["title"]), set()).add(entry["url"])
+    pages_per_title: dict[str, int] = {}
+    for d in docs:
+        key = _title_key(d["title"])
+        pages_per_title[key] = pages_per_title.get(key, 0) + 1
+    joined = 0
+    for d in docs:
+        if d["url"]:
+            continue
+        key = _title_key(d["title"])
+        urls = by_title.get(key, set())
+        if len(urls) == 1 and pages_per_title[key] == 1:
+            d["url"] = next(iter(urls))
+            joined += 1
+    return joined
 
 
 def _source_hint_args(args) -> tuple:
@@ -654,6 +722,8 @@ def _source_hint_args(args) -> tuple:
     out = ["--source", shlex.quote(args.source)]
     if args.sources_file_explicit:
         out += ["--sources-file", shlex.quote(args.sources_file)]
+    if getattr(args, "index_file", None) is not None:
+        out += ["--index-file", shlex.quote(args.index_file)]
     return tuple(out)
 
 
@@ -892,6 +962,8 @@ def _add_common(parser, *, source: bool = True) -> None:
                         help="Profile name (a bundled preset or one in the sources file; see `sources`)")
     parser.add_argument("--file", default=None,
                         help="Read a local llms-full.txt instead of fetching the profile's url")
+    parser.add_argument("--index-file", default=None,
+                        help="Read a local llms.txt for the profile's index_url (page URLs by title)")
     add_cache_dir_arg(parser)
     add_max_age_arg(parser)
 

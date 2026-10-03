@@ -465,6 +465,7 @@ class ProfileValidationTest(unittest.TestCase):
             "drop_lines not a list": {"sources": {"x": {**ok, "drop_lines": "^x"}}},
             "drop_lines bad regex": {"sources": {"x": {**ok, "drop_lines": ["("]}}},
             "skip_empty not bool": {"sources": {"x": {**ok, "skip_empty": "yes"}}},
+            "non-http index_url": {"sources": {"x": {**ok, "index_url": "llms.txt"}}},
             "h1_needs_url without page_url": {"sources": {"x": {**ok, "h1_needs_url": True}}},
             "h1_needs_url not bool": {"sources": {"x": {**ok, "page_url": "line:Source: ", "h1_needs_url": 1}}},
             "h1_needs_url on frontmatter": {"sources": {"x": {**ok, "split": "frontmatter", "page_url": "link:x",
@@ -625,6 +626,91 @@ class PresetsTest(unittest.TestCase):
         cf = generic.split_documents(_lines(CLOUDFLARE_LIKE), presets["cloudflare-workers"])
         self.assertEqual(cf[0]["url"], "https://example.com/product/index.md")
         self.assertFalse(any(re.match(r"^Last updated", line) for line in cf[0]["body_lines"]))
+
+
+INDEX = """\
+# Site
+
+- [Schemas](https://example.com/docs/schemas): Defining schemas
+- [**Errors**](https://example.com/docs/errors)
+- [Site](https://example.com/a)
+- [Site](https://example.com/b)
+- [Basic Auth](https://example.com/docs/basic-auth)
+"""
+
+
+class IndexJoinTest(unittest.TestCase):
+    """index_url: page URLs from llms.txt by exact title."""
+
+    def docs(self):
+        return generic.split_documents(_lines(H1_NO_URL + "\n# Basic Auth Middleware\n\nx\n"), _profile(split="h1"))
+
+    def test_exact_unique_titles_get_urls(self):
+        docs = self.docs()
+        joined = generic.join_index_urls(docs, _lines(INDEX))
+        urls = {d["title"]: d["url"] for d in docs}
+        self.assertEqual(urls["Schemas"], "https://example.com/docs/schemas")
+        self.assertEqual(urls["Errors"], "https://example.com/docs/errors")  # ** marks ignored
+        self.assertEqual(urls["Site"], "")  # two entries share the title: no guess
+        self.assertEqual(urls["Basic Auth Middleware"], "")  # near match is not a match
+        self.assertEqual(joined, 2)
+
+    def test_a_page_that_has_a_url_keeps_it(self):
+        docs = self.docs()
+        docs[1]["url"] = "https://example.com/own"
+        generic.join_index_urls(docs, _lines(INDEX))
+        self.assertEqual(docs[1]["url"], "https://example.com/own")
+
+    def test_a_title_shared_by_two_pages_gets_no_url(self):
+        # Zod: the site banner and the packages/zod page are both "Zod"
+        index = _lines("- [Zod](https://zod.dev/packages/zod): The zod package\n")
+        corpus = "# Zod\n\nZod is a TypeScript-first schema library.\n\n# Zod\n\nThe zod package.\n"
+        docs = generic.split_documents(_lines(corpus), _profile(split="h1"))
+        self.assertEqual(generic.join_index_urls(docs, index), 0)
+        self.assertEqual([d["url"] for d in docs], ["", ""])
+        # one of the two already has a URL: the index entry may be that page's
+        docs[0]["url"] = "https://zod.dev/"
+        self.assertEqual(generic.join_index_urls(docs, index), 0)
+        self.assertEqual(docs[1]["url"], "")
+
+    def cli(self, *extra, env=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            sources = Path(tmp, "s.json")
+            sources.write_text(json.dumps({"sources": {"site": {
+                "url": "https://example.com/llms-full.txt", "split": "h1",
+                "index_url": "https://example.com/llms.txt"}}}), encoding="utf-8")
+            corpus = Path(tmp, "full.txt")
+            corpus.write_text(H1_NO_URL, encoding="utf-8")
+            index = Path(tmp, "llms.txt")
+            index.write_text(INDEX, encoding="utf-8")
+            argv = ["parse-llms-txt.py", "fetch-index", "--source", "site", "--sources-file", str(sources),
+                    "--cache-dir", tmp]
+            argv += [a.replace("{corpus}", str(corpus)).replace("{index}", str(index)) for a in extra]
+            return _loader.run_cli(generic, argv)
+
+    def test_local_corpus_without_index_file_does_not_fetch(self):
+        with mock.patch.object(generic, "fetch_url", side_effect=AssertionError("fetched")):
+            code, out, err = self.cli("--file", "{corpus}")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("url:", out)
+
+    def test_index_file_gives_urls_and_stays_in_the_hint(self):
+        code, out, err = self.cli("--file", "{corpus}", "--index-file", "{index}")
+        self.assertEqual(code, 0, err)
+        self.assertIn("url: https://example.com/docs/schemas", out)
+        self.assertIn("--index-file", out.strip().splitlines()[-1])
+
+    def test_failed_index_fetch_only_warns(self):
+        def fake_fetch(url, cache_path, **kw):
+            if url.endswith("/llms.txt"):
+                raise generic.FetchError(url, OSError("down"))
+            Path(cache_path).write_text(H1_NO_URL, encoding="utf-8")
+            return cache_path
+        with mock.patch.object(generic, "fetch_url", side_effect=fake_fetch):
+            code, out, err = self.cli()
+        self.assertEqual(code, 0, err)
+        self.assertIn("WARNING", err)
+        self.assertIn("documents total", out)
 
 
 class CacheIdentityTest(unittest.TestCase):

@@ -31,13 +31,15 @@
     "zod": {
       "url": "https://zod.dev/llms-full.txt",
       "split": "h1",
-      "description": "Zod"
+      "description": "Zod",
+      "index_url": "https://zod.dev/llms.txt"
     },
     "hono": {
       "url": "https://hono.dev/llms-full.txt",
       "split": "h1",
       "skip_empty": true,
-      "description": "Hono"
+      "description": "Hono",
+      "index_url": "https://hono.dev/llms.txt"
     },
     "agentskills": {
       "url": "https://agentskills.io/llms-full.txt",
@@ -62,7 +64,8 @@
     "render": {
       "url": "https://render.com/docs/llms-full.txt",
       "split": "h1",
-      "description": "Render"
+      "description": "Render",
+      "index_url": "https://render.com/docs/llms.txt"
     },
     "mcp": {
       "url": "https://modelcontextprotocol.io/llms-full.txt",
@@ -75,7 +78,8 @@
       "url": "https://developers.openai.com/codex/llms-full.txt",
       "split": "h1",
       "skip_empty": true,
-      "description": "OpenAI Codex (CLI / IDE / cloud / SDK)"
+      "description": "OpenAI Codex (CLI / IDE / cloud / SDK)",
+      "index_url": "https://developers.openai.com/codex/llms.txt"
     },
     "ollama": {
       "url": "https://docs.ollama.com/llms-full.txt",
@@ -292,7 +296,8 @@
         "^\\[ Edit page \\]\\(",
         "^(Copy page|Explain Code|Terminal window)\\s*$"
       ],
-      "description": "Cloudflare Browser Rendering"
+      "description": "Cloudflare Browser Rendering",
+      "index_url": "https://developers.cloudflare.com/browser-rendering/llms.txt"
     },
     "cloudflare-containers": {
       "url": "https://developers.cloudflare.com/containers/llms-full.txt",
