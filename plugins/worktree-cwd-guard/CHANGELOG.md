@@ -37,9 +37,9 @@ helper / 基底クラス) で、`GIT_CONFIG_COUNT` だけを当てる・`GIT_CON
   - 外側の env に、止めない側の値 (`GIT_CONFIG_GLOBAL` = 空の file、`GIT_CONFIG_COUNT` で
     `maintenance.auto=true`) を置いてから流し、当てる側が勝つことを見る。外側の env に
     `GIT_CONFIG_NOSYSTEM` があっても、先に外すので当て損ねは隠れない
-  - 床が止める側の値を持たないことも見る (`test_the_floor_alone_stops_nothing`。マージ前レビューの指摘)。
-    当てる側が当てる前の env (床の env) だけで起動した git で、3 本のどれも止める側にならないこと
-    (repo 自身の止めない側の値が見え、global の一覧が空で、system の目印が読める)。床が止める側の値
+  - 床が当てる側の値を持たないことも見る (`test_the_floor_alone_stops_nothing`。マージ前レビューの指摘)。
+    当てる側が当てる前の env (床の env) だけで起動した git で、3 本が見るもののどれにも当てる側の値が
+    見えないこと (repo 自身の止めない側の値が見え、global の一覧が空で、system の目印が読める)。床が当てる側の値
     (`GIT_CONFIG_NOSYSTEM`、fixture を指す `GIT_CONFIG_GLOBAL`、止める側の `GIT_CONFIG_COUNT`) を持つ形に
     戻ると、当てる側の当て損ねを床が埋めて、上の 3 本が黙って通るため
   - hook の git (`family._git`) は、非ゼロ終了も起動の失敗も `None` にして握りつぶす。そのため
@@ -69,7 +69,7 @@ helper / 基底クラス) で、`GIT_CONFIG_COUNT` だけを当てる・`GIT_CON
   assertion の失敗 (`failures=`) で落ちた (`errors=` は 0)。落ちるテストの集合は 3 つの HOME で同一。
   外側の env に `GIT_CONFIG_NOSYSTEM=1` を入れても、定数 / helper / 基底クラスの `GIT_CONFIG_NOSYSTEM`
   抜きの 3 件を検出する
-- 床が止める側の値を持つ形に戻る変異 3 件 (床が `GIT_CONFIG_NOSYSTEM` を立てる / それに加えて helper が
+- 床が当てる側の値を持つ形に戻る変異 3 件 (床が `GIT_CONFIG_NOSYSTEM` を立てる / それに加えて helper が
   `GIT_CONFIG_NOSYSTEM` を渡し損ねる / 床の外側の `GIT_CONFIG_GLOBAL` が fixture を指し、基底クラスが
   `GIT_CONFIG_GLOBAL` を渡し損ねる) は、`test_the_floor_alone_stops_nothing` を足す前は空の HOME で
   生き残った。足した後は 3 つの HOME すべてで、このテスト (3 クラス分) だけが assertion の失敗で落ちる

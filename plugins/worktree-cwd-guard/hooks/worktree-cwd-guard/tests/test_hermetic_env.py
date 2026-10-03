@@ -26,10 +26,10 @@
 
 「patch していない」状態は `isolate_git_config` で作る。`GIT_CONFIG_*` を外し、global を空にし、
 system の config を目印の file に向けるが、**`GIT_CONFIG_NOSYSTEM` は床の側で立てない**。床の側で
-立てると、helper・基底クラス・定数が `GIT_CONFIG_NOSYSTEM` / `GIT_CONFIG_GLOBAL` を当て損ねても
-(部分適用)、床が埋めて通る。目印は `NOSYSTEM` が効いていなければ読めるので、当て損ねが見える。
-床が止める側の値を持たないこと自体も、当てる側が当てる前の env (床の env) だけで起動した git で
-確かめる (`test_the_floor_alone_stops_nothing`)。床が止める側の値を持つ形に戻ると、当て損ねを床が
+立てると、helper・基底クラス・定数が `GIT_CONFIG_NOSYSTEM` を当て損ねても (部分適用)、床が埋めて
+通る。目印は `NOSYSTEM` が効いていなければ読めるので、当て損ねが見える。
+床が当てる側の値を持たないこと自体も、当てる側が当てる前の env (床の env) だけで起動した git で
+確かめる (`test_the_floor_alone_stops_nothing`)。床が当てる側の値を持つ形に戻ると、当て損ねを床が
 埋めて、上の 3 本が黙って通るため。
 開発者の本物の system / global の config (そこに `maintenance.auto=false` があると、迂回した git も
 maintenance を起動せず、床が黙って通る) は、目印と空の HOME で置き換わるので読まれない。
@@ -256,13 +256,14 @@ class TestPlainBareOriginStartsNoMaintenance(unittest.TestCase):
 
 
 class _HermeticConfigChecks:
-    """git が見る設定を、止める経路ごとに 1 本ずつ確かめる共通の検査。
+    """git が見る設定を、出どころ (env / global の fixture / system) ごとに 1 本ずつ確かめる共通の検査。
 
     起動の仕方 (`query`) は継承先が決める。`setUp` は「patch していない」状態を先に作ってから
-    (`isolate_git_config`)、`super().setUp()` で基底クラスがあれば env を当てさせる。床が先に global /
-    system を空にしたり `GIT_CONFIG_NOSYSTEM` を立てたりすると、基底クラスの当て損ねを床が埋めて
-    しまうので、床は外すだけで足さない。外側の env (開発者の shell など) に `GIT_CONFIG_NOSYSTEM` が
-    あっても、`isolate_git_config` が先に外すので、当て損ねは隠れない。
+    (`isolate_git_config`)、`super().setUp()` で基底クラスがあれば env を当てさせる。床が当てる側の値
+    (`GIT_CONFIG_NOSYSTEM`、fixture を指す `GIT_CONFIG_GLOBAL`、止める側の `GIT_CONFIG_COUNT`) を持つと、
+    基底クラスの当て損ねを床が埋めてしまうので、床は当てる側の値を持たない
+    (`test_the_floor_alone_stops_nothing` で確かめる)。外側の env (開発者の shell など) に
+    `GIT_CONFIG_NOSYSTEM` があっても、`isolate_git_config` が先に外すので、当て損ねは隠れない。
 
     その間に、外側の env として止めない側の値 (`GIT_CONFIG_GLOBAL` = 空の file、`GIT_CONFIG_COUNT` で
     `maintenance.auto=true`) を置く。当てる側 (定数 / helper / 基底クラス) は外側の env に勝つこと。
@@ -290,7 +291,7 @@ class _HermeticConfigChecks:
                 "GIT_CONFIG_VALUE_0": "true",
             }
         )
-        # 当てる側が当てる前の env。床が止める側の値を持たないことの確認に使う
+        # 当てる側が当てる前の env。床が当てる側の値を持たないことの確認に使う
         self.floor_env = dict(os.environ)
         super().setUp()
         self.repo = os.path.join(self.tmp, "repo")
@@ -300,9 +301,9 @@ class _HermeticConfigChecks:
             _testutil.sh(Path(self.repo), "config", key, value)
 
     def test_the_floor_alone_stops_nothing(self):
-        """床の env だけで起動した git では、3 本のどれも止める側にならないこと。
+        """床の env だけで起動した git では、下の 3 本が見るもののどれにも当てる側の値が見えないこと。
 
-        床が止める側の値 (`GIT_CONFIG_NOSYSTEM`、fixture を指す `GIT_CONFIG_GLOBAL`、止める側の
+        床が当てる側の値 (`GIT_CONFIG_NOSYSTEM`、fixture を指す `GIT_CONFIG_GLOBAL`、止める側の
         `GIT_CONFIG_COUNT`) を持つ形に戻ると、当てる側の当て損ねを床が埋めて、下の 3 本が黙って通る。
         """
 
