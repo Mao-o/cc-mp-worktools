@@ -947,10 +947,10 @@ class UrlPageRefTest(unittest.TestCase):
                     code, out, run_err = self.run_printed(line)
                     self.assertEqual(code, 0, run_err)
 
-    def test_non_url_failure_is_unchanged(self):
+    def test_non_url_non_slug_failure_is_unchanged(self):
         code, out, err = self.run_argv(
-            [self.SCRIPT, "content", "zzz-no-such-page", *self.corpus_options()])
-        self.assertEqual((code, err), (1, "Error: No document found for: zzz-no-such-page\n"))
+            [self.SCRIPT, "content", "zzz no such page", *self.corpus_options()])
+        self.assertEqual((code, err), (1, "Error: No document found for: zzz no such page\n"))
 
     def test_a_url_is_still_not_resolved(self):
         # the spec (a URL is for citing): no output from the page is printed
@@ -963,6 +963,173 @@ class UrlPageRefTest(unittest.TestCase):
             [self.SCRIPT, "sections", "cach", *self.corpus_options()])
         self.assertEqual(code, 0, err)
         self.assertIn("Caching", out)
+
+
+class SlugPageRefTest(unittest.TestCase):
+    """URL の最後の段 (slug。例 ``prune-messages``) を page_ref に渡した失敗が、その
+    ページを読むコマンドを出す。slug は解決しない (仕様) ので終了コードは 1 のまま。
+    タイトルの部分一致が先に効き、slug の分岐は一致しなかったときだけ。
+
+    fixture の frontmatter は実 corpus (ai-sdk.dev の llms-full.txt) から切り出した形
+    (最後の段が同じ 2 ページ ``multistep-interfaces`` を含む)。"""
+
+    SCRIPT = UrlPageRefTest.SCRIPT
+    PRUNE = UrlPageRefTest.PRUNE
+    FIXTURE = UrlPageRefTest.FIXTURE + (
+        "\n---\n"
+        "title: Multistep Interfaces\n"
+        "description: Concepts behind building multistep interfaces\n"
+        'url: "https://ai-sdk.dev/docs/advanced/multistep-interfaces"\n'
+        "docs_index: /llms.txt\n"
+        "---\n\n"
+        "# Multistep Interfaces\n\n"
+        "## Overview\n"
+        "advmarker body.\n"
+        "\n---\n"
+        "title: Multistep Interfaces\n"
+        "description: Overview of Building Multistep Interfaces with AI SDK RSC\n"
+        'url: "https://ai-sdk.dev/docs/ai-sdk-rsc/multistep-interfaces"\n'
+        "docs_index: /llms.txt\n"
+        "---\n\n"
+        "# Multistep Interfaces\n\n"
+        "## Overview\n"
+        "rscmarker body.\n"
+        "\n---\n"
+        "title: Tool-Calling Basics\n"
+        "description: Title contains a slug that is another page's last segment.\n"
+        'url: "https://ai-sdk.dev/docs/foundations/tools-basics"\n'
+        "docs_index: /llms.txt\n"
+        "---\n\n"
+        "# Tool-Calling Basics\n\n"
+        "## Overview\n"
+        "basicsmarker body.\n"
+        "\n---\n"
+        "title: Calling Guide\n"
+        "description: Last segment is tool-calling.\n"
+        'url: "https://ai-sdk.dev/docs/guides/tool-calling"\n'
+        "docs_index: /llms.txt\n"
+        "---\n\n"
+        "# Calling Guide\n\n"
+        "## Overview\n"
+        "guidemarker body.\n"
+    )
+    PRUNE_IDX = 0
+
+    setUp = UrlPageRefTest.setUp
+    run_argv = UrlPageRefTest.run_argv
+    corpus_options = UrlPageRefTest.corpus_options
+    offered = UrlPageRefTest.offered
+    one_offered = UrlPageRefTest.one_offered
+    run_printed = UrlPageRefTest.run_printed
+    failure_with = UrlPageRefTest.failure_with
+
+    def fail(self, *argv):
+        argv = list(argv)
+        at = argv.index("--") if "--" in argv else len(argv)
+        argv[at:at] = self.corpus_options()
+        return self.failure_with([self.SCRIPT, *argv])
+
+    def test_a_suffix_of_a_last_segment_is_not_a_match(self):
+        # "ools-basics" ends "tools-basics" but is not that last segment
+        err = self.fail("content", "ools-basics")
+        self.assertIn("No page has a url ending in /ools-basics", err)
+
+    def test_slug_offers_the_command_for_the_page_with_that_last_segment(self):
+        for sub in ("content", "sections"):
+            with self.subTest(sub=sub):
+                err = self.fail(sub, "prune-messages")
+                self.assertIn("No document found for: prune-messages", err)
+                self.assertIn("A page has a url ending in /prune-messages", err)
+                line = self.one_offered(err)
+                self.assertEqual(shlex.split(line, comments=True)[-2:], ["--", str(self.PRUNE_IDX)])
+                code, out, run_err = self.run_printed(line)
+                self.assertEqual(code, 0, run_err)
+                self.assertIn("pruneMessages", out)
+                self.assertIn(self.PRUNE, out)
+
+    def test_search_content_slug_keeps_the_query(self):
+        err = self.fail("search-content", "--page-ref", "prune-messages", "--", "prunemarker")
+        line = self.one_offered(err)
+        code, out, run_err = self.run_printed(line)
+        self.assertEqual(code, 0, run_err)
+        self.assertIn("prunemarker", out)
+
+    def test_printed_command_keeps_heading_path_and_options(self):
+        err = self.fail("content", "--max-chars", "99", "--", "prune-messages", "Usage")
+        line = self.one_offered(err)
+        self.assertIn("content --max-chars 99 ", line)
+        self.assertTrue(line.endswith(f" -- {self.PRUNE_IDX} Usage"), line)
+        code, out, run_err = self.run_printed(line)
+        self.assertEqual(code, 0, run_err)
+        self.assertIn("prunemarker", out)
+        # the reader swaps the heading as the line invites; a "-" word is no option
+        printed = shlex.split(line, comments=True)
+        for heading in ("-x", "--help", "---", "\\_"):
+            with self.subTest(heading=heading):
+                code, out, run_err = self.run_argv(printed[:-1] + [heading])
+                self.assertNotEqual(code, 2, run_err)
+
+    def test_last_segment_shared_by_two_pages_lists_both(self):
+        err = self.fail("content", "multistep-interfaces")
+        self.assertIn("Pages have urls ending in /multistep-interfaces", err)
+        lines = self.offered(err)
+        self.assertEqual(len(lines), 2, err)
+        seen = []
+        for line in lines:
+            code, out, run_err = self.run_printed(line)
+            self.assertEqual(code, 0, run_err)
+            seen.append(("advmarker" in out, "rscmarker" in out))
+        self.assertEqual(sorted(seen), [(False, True), (True, False)])
+
+    def test_unknown_slug_offers_a_search_on_its_words(self):
+        err = self.fail("content", "prune-message")
+        self.assertIn("No page has a url ending in /prune-message", err)
+        line = self.one_offered(err)
+        self.assertEqual(shlex.split(line, comments=True)[1:3], ["search", "prune message"])
+        code, out, run_err = self.run_printed(line)
+        self.assertEqual(code, 0, run_err)
+
+    def test_title_substring_still_wins_over_the_slug(self):
+        # "tool-calling" is inside a title, and is also another page's last segment
+        code, out, err = self.run_argv(
+            [self.SCRIPT, "sections", "tool-calling", *self.corpus_options()])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Tool-Calling Basics", out)
+
+    def test_a_last_segment_that_is_a_title_substring_resolves(self):
+        code, out, err = self.run_argv(
+            [self.SCRIPT, "sections", "advanced", *self.corpus_options()])
+        self.assertEqual(code, 0, err)
+
+    def test_not_slug_shaped_failures_are_unchanged(self):
+        for ref in ["zzz no such", "Zzz-No-Such", "zzz_no_such", "zzz."]:
+            with self.subTest(ref=ref):
+                code, out, err = self.run_argv(
+                    [self.SCRIPT, "content", *self.corpus_options(), "--", ref])
+                self.assertEqual((code, err), (1, f"Error: No document found for: {ref}\n"))
+
+    def test_hostile_words_end_without_a_crash_or_an_option(self):
+        for ref in ["-x", "--help", "---", "\\_"]:
+            with self.subTest(ref=ref):
+                code, out, err = self.run_argv(
+                    [self.SCRIPT, "content", *self.corpus_options(), "--", ref])
+                self.assertEqual(code, 1, err)
+                self.assertEqual(self.offered(err), [])
+        for ref in ["a", "0x", "zz-", "the"]:
+            with self.subTest(ref=ref):
+                code, out, err = self.run_argv(
+                    [self.SCRIPT, "content", *self.corpus_options(), "--", ref])
+                self.assertEqual(code, 1, err)
+                for line in self.offered(err):
+                    code, out, run_err = self.run_printed(line)
+                    self.assertEqual(code, 0, run_err)
+
+
+class SlugPageRefFileTest(SlugPageRefTest):
+    """The same with ``--file`` (the printed command keeps ``--file``)."""
+
+    def corpus_options(self):
+        return ["--file", self.full]
 
 
 class UrlPageRefFileTest(UrlPageRefTest):

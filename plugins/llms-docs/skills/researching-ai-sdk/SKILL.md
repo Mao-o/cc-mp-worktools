@@ -134,7 +134,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" fetch-index --compact
 - **整数 index** (推奨): `42` — `search` / `search-index` の結果に表示される `[<doc_idx>]` の数字
 - **タイトル部分一致**: `"Event Callbacks"` — 一意に決まる場合のみ。曖昧な場合はエラーになる
 
-AI SDK の各ページは frontmatter に `url:` を持ち、`sections` / `content` / `search` / `search-content` が表示する (`URL:` 行、`content` では `# source:` 行)。ただし page_ref としては解決しないので、URL / slug 形式は受け付けない (整数 index を使うこと)。表示された URL を貼ってしまったときは `No document found` で exit 1 になるが、その URL を `url:` に持つページがあれば、そのページを読む `content <index>` (`sections` / `search-content --page-ref` ならそのコマンド) の行を続けて出す。その行をそのまま実行する。持つページが無ければ、URL の最後の段から作った `search` の行を出す。`url:` が無いページには行が付かない。
+AI SDK の各ページは frontmatter に `url:` を持ち、`sections` / `content` / `search` / `search-content` が表示する (`URL:` 行、`content` では `# source:` 行)。ただし page_ref としては解決しないので、URL / slug 形式は受け付けない (整数 index を使うこと)。表示された URL を貼ってしまったときは `No document found` で exit 1 になるが、その URL を `url:` に持つページがあれば、そのページを読む `content <index>` (`sections` / `search-content --page-ref` ならそのコマンド) の行を続けて出す。その行をそのまま実行する。持つページが無ければ、URL の最後の段から作った `search` の行を出す。URL の最後の段だけ (`prune-messages` など) を渡し、どのページのタイトルにも一致しなかったときも同様で、その最後の段を持つページのコマンドを出す。最後の段がタイトルの一部にも当たるとタイトルの一致が先に効き、そのページがそのまま開く (同じ最後の段を持つ別ページがあっても出ない。例 `acp`)。開いたページの `URL:` 行が目的のページかを確かめる。`url:` が無いページには行が付かない。
 
 ## コマンドリファレンス
 
@@ -193,6 +193,7 @@ AI SDK の各ページは frontmatter に `url:` を持ち、`sections` / `conte
 | キャッシュ破損 | パースエラー / 不正なインデックス | `--max-age 0` で強制再取得 (キャッシュディレクトリは既定 `~/.cache/llms-docs`、`--cache-dir` で確認・変更可) |
 | 結果ゼロ | `No matching ...` の下に `Why nothing matched:` (語ごとのドキュメント数) | 全語が 0 件なら言い換えを続けず、別の語・`search-index`・`fetch-index --compact` に切り替える。一部の語だけ 0 件ならその語を落とす。全語が corpus にあるのに 0 件 (同じセクションに揃わない) なら語を減らす。いずれも続けて出る `Next:` がそのまま実行できる |
 | URL を page_ref に渡した | `No document found for: <URL>` と `page_ref takes an integer index or a title substring.` | URL は引用元の表示用で page_ref には使えない。続けて出る、その URL を持つページのコマンド (整数 index) をそのまま実行する。持つページが無ければ続く `search` を使う |
+| URL の最後の段 (slug) を page_ref に渡した | `No document found for: prune-messages` と `A URL's last segment is not resolved; ...` | タイトルに一致しなかった `a-z0-9-` だけの 1 語が対象。最後の段がそれと等しい URL のページが 1 つなら、そのページのコマンド (整数 index。見出しとオプションは引き継ぐ) が続く。2 つ以上なら全部が並ぶので選んで実行する。無ければ slug の語から作った `search` を使う |
 | 曖昧な page_ref | `Ambiguous title substring '...'. Matches:` | 候補ごとに実行できるコマンドが付く。選んでそのまま実行する |
 | heading が見つからない | `Error: heading '...' not found.` | `Closest sections:` の候補 (コマンド付き) を先に使う。全見出しは `Available sections:` に続く |
 | Python バージョン不足 | 起動直後に PEP 604 のユニオン型記法が原因の `TypeError: unsupported operand type(s) for ...` | `python3 --version` を確認し 3.11 以上を用意する (`mise use python@3.11` 等)。3.11 未満では動作しない |
