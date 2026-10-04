@@ -179,7 +179,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" fetch-index --offset 1
 
 ## page_ref の指定方法
 
-3 形式を受け付ける (claude-docs / ai-sdk と統一):
+3 形式を受け付ける (claude-docs と統一。ai-sdk は URL を page_ref に使えず、整数 index とタイトル部分一致の 2 形式):
 
 - **整数 index** (推奨): `42` — `search` / `search-index` の結果に表示される `[<doc_idx>]` の数字
 - **URL slug**: `"vector-search"` — Firebase docs の URL 末尾 path component。一意に決まる場合のみ
@@ -189,7 +189,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" fetch-index --offset 1
 
 | コマンド | 引数 | 説明 |
 |---------|------|------|
-| `search` | `<query> [--top-n N] [--max-hits N] [--context N] [--max-snippet-chars N] [--include-changelog-priority]` | 推奨入口。title/desc 上位 N 件 fetch + 本文 hits。並び順は全キーワードが揃うか → ページタイトルと見出し (祖先の見出しを含む) が全キーワードを語として含むか (キーワードが 1 語のときはページの順に使わない) → 本文 hits 数 → index score (changelog / release notes は既定で末尾、`--include-changelog-priority` で解除) |
+| `search` | `<query> [--top-n N] [--max-hits N] [--context N] [--max-snippet-chars N] [--include-changelog-priority]` | 推奨入口。title/desc 上位 N 件 fetch + 本文 hits。並び順は全キーワードが揃うか → ページタイトルと見出し (祖先の見出しを含む) が全キーワードを語として含むか (キーワードが 1 語のときはページの順に使わない) → 本文 hits 数 → index score (changelog / release notes は既定で末尾、`--include-changelog-priority` で解除)。ページ内の節は、見出しが全キーワードを含む節の中で、自分の見出しがあって初めて全語が揃う節を、見出しを受け継ぐだけの子孫より先に出し、その後ヒット数の順 |
 | `search-index` | `<query> [--limit N]` | title/description でキーワード検索（候補だけ取得） |
 | `search-content` | `<query> [--page-ref REF] [--limit N] [--context N] [--max-hits N] [--max-snippet-chars N]` | 指定ページ (省略時は全ページ) の本文を横断検索 |
 | `fetch-index` | `[--offset N] [--limit N]` | page index を paginated 表示（default --limit 100、フォールバック用） |

@@ -30,6 +30,7 @@ Passing ``--file`` is optional — if omitted, the cached copy under
 import argparse
 import os
 import re
+import shlex
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
@@ -51,6 +52,7 @@ from _common import (
     full_corpus_extra_hits,
     load_lines,
     next_hint,
+    normalize_doc_url,
     retry_for_page_ref,
     search_content_in_body,
     search_content_rank_key,
@@ -350,7 +352,45 @@ def _warn_if_untitled_ratio_high(docs: list[dict], path: str) -> None:
 # Page reference resolution (int / title substring)
 # ---------------------------------------------------------------------------
 
-def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None) -> int:
+_URL_LIKE_RE = re.compile(r"^(?:[a-z][a-z0-9+.-]*://|[a-z0-9-]+(?:\.[a-z0-9-]+)+/)", re.I)
+
+
+def _url_key(url: str) -> str:
+    """``normalize_doc_url`` without the scheme, lowercased, so a pasted
+    ``http://`` / scheme-less / trailing-slash form of a page's URL compares equal."""
+    return re.sub(r"^[a-z][a-z0-9+.-]*://", "", normalize_doc_url(url.strip()),
+                  flags=re.I).lower()
+
+
+def _die_url_page_ref(docs: list[dict], page_ref: str, retry, hint_args: tuple) -> None:
+    """Exit 1 for a URL given as page_ref: say it is not resolved, and print the
+    command for the page whose ``url:`` equals it (or a ``search`` on its slug)."""
+    key = _url_key(page_ref)
+    rows = []
+    for i, doc in enumerate(docs):
+        fm = parse_frontmatter(doc["frontmatter_lines"])
+        if key and _url_key(fm.get("url") or "") == key:
+            rows.append((i, (fm.get("title") or "").strip()))
+    lines = [f"No document found for: {page_ref}",
+             "  A URL is printed for citing; page_ref takes an integer index or a title substring."]
+    if rows:
+        lines.append("  A page has this url:" if len(rows) == 1 else "  Pages have this url:")
+        for idx, title in rows:
+            lines.append(f"  [{idx}] {title or '(untitled)'}")
+            cmd = retry(idx) if retry is not None else f"parse-ai-sdk.py content {idx}"
+            lines.append(f"    {cmd}")
+    else:
+        lines.append("  No page has this url.")
+        words = re.findall(r"[A-Za-z0-9]+", normalize_doc_url(page_ref.strip()).rsplit("/", 1)[-1])
+        if words:
+            tail = (" " + " ".join(hint_args)) if hint_args else ""
+            lines.append(f"    {os.path.basename(sys.argv[0])} search "
+                         f"{shlex.quote(' '.join(words))}{tail}")
+    die("\n".join(lines))
+
+
+def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
+                      hint_args: tuple = ()) -> int:
     """Resolve a page reference to a doc index.
 
     Tries, in order:
@@ -384,6 +424,8 @@ def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None) -> int:
         return candidates[0][0]
     if len(candidates) > 1:
         die_ambiguous_page("title substring", page_ref, candidates, retry)
+    if _URL_LIKE_RE.match(page_ref.strip()):
+        _die_url_page_ref(docs, page_ref, retry, hint_args)
     die(f"No document found for: {page_ref}")
 
 
@@ -446,7 +488,8 @@ def _page_view(args) -> tuple[str, PageView]:
     """Load the corpus and describe ``args.page_ref`` as a ``PageView``."""
     file_path, docs = _load_docs(args.file, args.cache_dir, max_age=args.max_age)
     idx = _resolve_page_ref(docs, args.page_ref,
-                            retry_for_page_ref(args, corpus_hint_args(args)))
+                            retry_for_page_ref(args, corpus_hint_args(args)),
+                            corpus_hint_args(args))
     doc = docs[idx]
     fm = parse_frontmatter(doc["frontmatter_lines"])
     page = PageView(
@@ -533,7 +576,8 @@ def cmd_search_content(args):
 
     if args.page_ref is not None:
         target_docs = [_resolve_page_ref(docs, args.page_ref,
-                                         retry_for_page_ref(args, corpus_hint_args(args)))]
+                                         retry_for_page_ref(args, corpus_hint_args(args)),
+                                         corpus_hint_args(args))]
     else:
         target_docs = list(range(len(docs)))
 
