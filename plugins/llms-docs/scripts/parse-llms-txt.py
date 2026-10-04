@@ -750,6 +750,8 @@ def join_index_urls(docs: list[dict], index_lines: list[str]) -> int:
         # A section-anchor entry (``<page>?id=<slug>``, ``<page>#<slug>``)
         # is not a page: when exactly one candidate has neither mark, it is
         # the page, and the anchors do not make the title ambiguous.
+        # Query URLs that are real pages (Codex's ``?surface=cli``) are
+        # treated the same; a plain entry of the same title wins over them.
         plain = {u for u in urls if "?" not in u and "#" not in u}
         if len(plain) == 1:
             d["url"] = next(iter(plain))

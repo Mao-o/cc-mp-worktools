@@ -327,6 +327,10 @@ Render は CommonMark では、引用が終わった所で引用の中のブロ�
 | zod | 17 → 18 | 306 → 309 | `Release notes` が独立 (節 30)。`Migration guide` は 87 → 60 (Release notes の節が抜ける) |
 | render | 125 → 126 | 2169 → 2189 | `Deploy a Prebuilt Docker Image` が独立 (節 19)。`Docker on Render` は 21 → 9 (同じページの節が抜け、隠れていた `Docker or native runtime?` など 6 つが戻る)。`Deploying on Render` は 29 → 42 (引用の中のブロックの後ろで隠れていた `Managing deploys` / `Deployment concepts` 以下が戻る) |
 
+### 2026-10-04 追記 (0.35.3): 節アンカー項目と同じタイトルのページ
+
+zod の `Codecs` / `Ecosystem` / `Versioning` に URL が付くようになった (18 中 13 → 16)。llms.txt で、同じタイトルの節への項目 (`?id=…`) と並んでいたため曖昧として扱われていた。`?` か `#` を含まない項目がちょうど 1 つならそれを使う。index_url を持つ他の source は変化なし (Codex の `?surface=cli` のような、クエリ付きの本物のページは同じタイトルの項目と重ならず、これまでどおり付く)。
+
 ## 3. 需要の根拠
 
 `llms.txt` を公開していて、かつこの plugin が使われる環境で実際に依存しているもの:
