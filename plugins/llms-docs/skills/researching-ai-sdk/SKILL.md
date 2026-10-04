@@ -192,6 +192,7 @@ AI SDK の各ページは frontmatter に `url:` を持ち、`sections` / `conte
 | ネットワーク失敗 | fetch timeout / connection error | 既存キャッシュがあれば WARNING を出して stale cache のまま継続 (exit 0)。無ければ Error で exit 1。復旧後に最新化したい場合は `--max-age 0` で強制再取得 |
 | キャッシュ破損 | パースエラー / 不正なインデックス | `--max-age 0` で強制再取得 (キャッシュディレクトリは既定 `~/.cache/llms-docs`、`--cache-dir` で確認・変更可) |
 | 結果ゼロ | `No matching ...` の下に `Why nothing matched:` (語ごとのドキュメント数) | 全語が 0 件なら言い換えを続けず、別の語・`search-index`・`fetch-index --compact` に切り替える。一部の語だけ 0 件ならその語を落とす。全語が corpus にあるのに 0 件 (同じセクションに揃わない) なら語を減らす。いずれも続けて出る `Next:` がそのまま実行できる |
+| URL を page_ref に渡した | `No document found for: <URL>` と `page_ref takes an integer index or a title substring.` | URL は引用元の表示用で page_ref には使えない。続けて出る、その URL を持つページのコマンド (整数 index) をそのまま実行する。持つページが無ければ続く `search` を使う |
 | 曖昧な page_ref | `Ambiguous title substring '...'. Matches:` | 候補ごとに実行できるコマンドが付く。選んでそのまま実行する |
 | heading が見つからない | `Error: heading '...' not found.` | `Closest sections:` の候補 (コマンド付き) を先に使う。全見出しは `Available sections:` に続く |
 | Python バージョン不足 | 起動直後に PEP 604 のユニオン型記法が原因の `TypeError: unsupported operand type(s) for ...` | `python3 --version` を確認し 3.11 以上を用意する (`mise use python@3.11` 等)。3.11 未満では動作しない |

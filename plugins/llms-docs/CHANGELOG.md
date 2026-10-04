@@ -11,7 +11,7 @@ All notable changes to this plugin will be documented here.
   URL を page_ref として解決しない仕様 (表示は引用元のため) は変えず、URL の形の page_ref が失敗したときに限り、
   その URL を `url:` に持つページを読むコマンド (整数 index で、元の `heading_path` / `--max-chars` / `--file` /
   `--cache-dir` を引き継ぐ) を続けて出す。コマンドは加工せずそのまま実行できる。URL は scheme の違い (`http://`・
-  scheme なし)・ホストの大文字小文字・末尾の `/`・`.md`・`#fragment`・`?query` を無視して、完全一致で突き合わせる
+  scheme なし)・大文字小文字 (ホストもパスも)・末尾の `/`・`.md`・`#fragment`・`?query` を無視して、完全一致で突き合わせる
   (`/docs/advanced` が `/docs/advanced/caching` に当たることはない)。持つページが無い URL には、URL の最後の段から
   作った `search '<語>'` を出す。URL の形でない page_ref の失敗は従来どおり。実 corpus (526 ページ) で、全ページを
   表示された URL で引き直し、出たコマンドを実行して 526 件とも元のページに届くことを確かめた

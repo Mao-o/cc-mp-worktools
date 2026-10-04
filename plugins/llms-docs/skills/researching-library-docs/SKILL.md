@@ -150,7 +150,7 @@ general-purpose の subagent など、Skill ツールを使えない文脈では
 
 `zod` / `hono` / `render` / `codex` / `openai-plugins` / `openai-api-docs` / `factory` は
 llms-full.txt にページ URL が無く、`llms.txt` とタイトルが一致したページにだけ URL が付く
-(付く割合は source で違う。Hono は 4 分の 1 程度、`factory` はほぼ全ページ。README の presets 表)。
+(付く割合は source で違う。Hono は 4 分の 1 程度、`factory` は全ページ。README の presets 表)。
 `agent-plugins` は URL が全く無い。URL の無いページの引用元はタイトル + heading_path で表す。
 
 ## heading_path の指定方法

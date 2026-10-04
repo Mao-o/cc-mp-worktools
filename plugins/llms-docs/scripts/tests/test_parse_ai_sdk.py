@@ -889,6 +889,30 @@ class UrlPageRefTest(unittest.TestCase):
                 code, out, run_err = self.run_printed(line)
                 self.assertEqual(code, 0, run_err)
 
+    def test_two_pages_with_the_url_each_get_a_command(self):
+        dup = self.FIXTURE + (
+            "\n---\n"
+            "title: Caching v2\n"
+            "description: Caching again.\n"
+            f'url: "{self.CACHING}/"\n'
+            "docs_index: /llms.txt\n"
+            "---\n\n"
+            "# Caching v2\n\n"
+            "## Overview\n"
+            "dupmarker body.\n"
+        )
+        _write_fixture(self.tmp, dup)
+        err = self.failure("content", self.CACHING)
+        self.assertIn("Pages have this url", err)
+        lines = self.offered(err)
+        self.assertEqual(len(lines), 2, err)
+        seen = []
+        for line in lines:
+            code, out, run_err = self.run_printed(line)
+            self.assertEqual(code, 0, run_err)
+            seen.append("dupmarker" in out)
+        self.assertEqual(sorted(seen), [False, True])
+
     def test_hostile_urls_end_in_the_same_plain_failure(self):
         # words that are all symbols / escapes / dashes give no search command
         # and must not crash; a slug starting with "-" never becomes an option
