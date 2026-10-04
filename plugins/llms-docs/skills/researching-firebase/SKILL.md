@@ -144,7 +144,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" content <page_ref> "<h
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" content <page_ref>
 ```
 
-**サブセクション一覧**と次の `content` 呼び出し例を、本文の前後両方 (metadata header 直後 と 末尾) に自動出力する (`--no-subsection-hints` で抑制可)。本文は既定 24000 文字で切り詰められ (`--max-chars 0` で無制限)、超過時は `... (N chars truncated; narrow with ...)` を出す。
+**サブセクション一覧**と次の `content` 呼び出し例を、本文の前後両方 (metadata header 直後 と 末尾) に自動出力する (`--no-subsection-hints` で抑制可)。本文は既定 24000 文字で切り詰められ (`--max-chars 0` で無制限)、超過時は `... (N chars truncated; narrow with ...)` を出す。子見出しの無い節 (絞る先が無い) では代わりに `Next: ... search-content <節の見出し> --page-ref N --context 0` を出す。そのまま実行でき、keyword を探したい語に差し替えて使う。
 
 ### 補助: セクション一覧を確認したいとき
 

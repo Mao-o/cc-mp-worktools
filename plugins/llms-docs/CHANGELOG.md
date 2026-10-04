@@ -2,6 +2,36 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.33.0] - 2026-10-04
+
+### 修正: 記号を含む見出しの anchor をページ内リンクに合わせる / snippet で一致行を残す / AI SDK の URL を出す / 子見出しの無い節の案内
+
+実 corpus (Claude Code docs と Platform docs の `llms-full.txt`) で、検索結果の出力を使う側から見て行き止まりになる 3 点を直した。
+
+- **見出しの anchor (`Section:` 行の `URL#anchor`)**: 見出しの記号 (`.` `(` `/` `--` など) を削るだけで
+  ハイフンにしていなかったため、`loop.md` が `loopmd` になり、実際の id (`loop-md`) と食い違った。
+  英数字と `_` 以外の記号の連続を 1 つの `-` にし (`worktree.baseRef` は `worktree-baseref`、
+  `/security-review` は `security-review`)、アポストロフィは削り (`Can't` は `cant`)、`\_` のような
+  バックスラッシュのエスケープは先に外す。ページ内リンク (`](#...)`) と突き合わせられる見出し 2077 件のうち、
+  生成した anchor が一致するのは 1966 件から 2065 件になった。残り 12 件は、リンク側が `/` や全角の
+  アポストロフィを残す手書きの id などで、規則では寄せていない。Firebase (DevSite) の規則は、実測の
+  根拠が無いので変えていない
+- **snippet の一致行**: 文字数の予算 (`--max-snippet-chars`、既定 500) を、一致行の前の長い表の行が使い切り、
+  一致行 (`→` の行) が `... (N chars truncated)` の向こうに消えていた。予算を超えるときは一致行を先に残し、
+  一致行に近い文脈の行から足し、入らなかった行は `  ...` で示す。予算に収まる snippet は従来と同じ。
+  一致行だけで予算を超えるときは、従来どおり末尾から切る。Claude Code docs / Platform docs の
+  22 クエリ (全ページ、5763 セクション) で、一致行が 1 行も見えないセクションは 331 件から 0 件。
+  変わったのは、従来も切り詰められていたセクションだけ。「more hits」の行と `  ...` の行は予算に数えない
+- **子見出しの無い節を `content` で切り詰めたときの案内**: 従来は `narrow with content N "<heading_path>"` と
+  出したが、子見出しが無い節では絞る先が無い (環境変数の表 1 節 148k 字など)。その場合は、本文内を検索する
+  `Next: <script> search-content <節の見出し> --page-ref N --context 0 ...` を 1 行で出す。その行は加工せずに
+  実行でき、キーワードを差し替えて使う。`--source` / `--file` / `--cache-dir` は従来どおり引き継ぐ。
+  子見出しのある節の案内は変えない。見出しの無いページ全体の切り詰めも、同じ理由でこの案内になる
+- **AI SDK**: 各ページの frontmatter の `url:` を、`sections` (`  URL:` 行)、`content` (`# source:` 行)、
+  `search` / `search-content` (`    URL:` 行) に出す。`url:` の無いページは従来どおり行を足さない。
+  page_ref としては解決しない (整数 index とタイトルの部分一致のまま)。SKILL.md の「URL を持たない」の
+  記述を直した。AI SDK の `Section:` 行の `URL#anchor` は、見出し id の規則を確かめていないので付けない
+
 ## [0.32.0] - 2026-10-04
 
 ### 変更: 節とページの順位に「タイトルと見出しが全キーワードを語として含むか」を入れ、機能語を照合から外す

@@ -1215,11 +1215,13 @@ def heading_anchor_slug(title: str, style: str = "github") -> str:
     Two platform families generate heading ids differently, so *style*
     selects which one to reproduce:
 
-    - ``"github"`` (default, also matches Mintlify): lowercase, strip
-      characters that aren't a letter/digit/underscore/hyphen/space, then
-      collapse whitespace runs to a single hyphen. Used by GitHub-flavored
-      Markdown renderers and Mintlify docs (e.g. code.claude.com,
-      platform.claude.com).
+    - ``"github"`` (default, also matches Mintlify): lowercase, drop
+      apostrophes, turn every run of characters that aren't a
+      letter/digit/underscore into a single hyphen (``loop.md`` becomes
+      ``loop-md``, ``Can't`` becomes ``cant``), and trim hyphens at both
+      ends. Checked against the in-page ``#anchor`` links of the
+      code.claude.com / platform.claude.com corpus. Used by Mintlify docs
+      (e.g. code.claude.com, platform.claude.com).
     - ``"devsite"``: Google DevSite (firebase.google.com) joins words with
       an underscore instead of a hyphen. Live-verified on
       https://firebase.google.com/docs/firestore/manage-data/add-data —
@@ -1243,10 +1245,17 @@ def heading_anchor_slug(title: str, style: str = "github") -> str:
     heading) — callers should treat that as "no anchor available".
     """
     s = _strip_heading_markup(title).lower()
-    s = re.sub(r"[^\w\s-]", "", s)
     if style == "devsite":
+        s = re.sub(r"[^\w\s-]", "", s)
         return re.sub(r"\s+", "_", s).strip("_")
-    return re.sub(r"\s+", "-", s).strip("-")
+    # 記号は削らずハイフンにし、連続は 1 つにまとめる。`loop.md` は `loop-md`、
+    # `--bg` は `bg` になる (ページ内リンクの id と突き合わせて確認した形)。`\_` のような
+    # バックスラッシュのエスケープは先に外し、アポストロフィは単語を割らないよう削る。
+    # `_` は単語文字なのでそのまま残る
+    s = re.sub(r"\\(.)", r"\1", s)
+    s = re.sub(r"['’]", "", s)
+    s = re.sub(r"[^\w]+", "-", s)
+    return s.strip("-")
 
 
 def section_url_anchor(url: str, title: str, style: str = "github") -> str:
@@ -1326,6 +1335,54 @@ def _section_heading_texts(sections, page_title: str) -> list[str]:
     return texts
 
 
+def _fit_snippet(lines, max_chars, tail: str = "") -> str:
+    """Join the snippet *lines* (``(text, is_hit)``) within *max_chars*.
+
+    Fits as is when it can (``0`` / ``None`` = no limit). Otherwise the hit
+    lines are kept first and the context lines nearest to a hit are added
+    while they fit, so a long table row beside the match cannot push the
+    matching line out of view. Lines left out are replaced by one ``...``
+    line per gap. When the hit lines alone are over the limit the text is
+    cut from the end, as before. *tail* (the "more hits" note) is appended
+    after the fit and does not count against the limit.
+    """
+    def finish(text):
+        return text + ("\n" + tail if tail else "")
+
+    full = "\n".join(text for text, _hit in lines)
+    if not max_chars or len(full) <= max_chars:
+        return finish(full)
+
+    hit_pos = [i for i, (_t, hit) in enumerate(lines) if hit]
+    keep = set(hit_pos)
+    used = sum(len(lines[i][0]) + 1 for i in keep) - 1
+    if used <= max_chars:
+        by_distance = sorted(
+            (i for i in range(len(lines)) if i not in keep),
+            key=lambda i: (min(abs(i - h) for h in hit_pos), i))
+        for i in by_distance:
+            cost = len(lines[i][0]) + 1
+            if used + cost <= max_chars:
+                keep.add(i)
+                used += cost
+        out = []
+        prev = None
+        for i in sorted(keep):
+            if prev is not None and i != prev + 1:
+                out.append("  ...")
+            out.append(lines[i][0])
+            prev = i
+        if sorted(keep)[0] != 0:
+            out.insert(0, "  ...")
+        if prev != len(lines) - 1:
+            out.append("  ...")
+        return finish("\n".join(out))
+
+    only_hits = "\n".join(lines[i][0] for i in sorted(keep))
+    cut = len(only_hits) - max_chars
+    return finish(only_hits[:max_chars] + f"\n  ... ({cut} chars truncated)")
+
+
 def _build_section_results(section_hits, sections, body_lines, keywords,
                            min_coverage, context_lines, max_snippet_chars,
                            page_title=""):
@@ -1364,17 +1421,12 @@ def _build_section_results(section_hits, sections, body_lines, keywords,
         snippet_end = min(len(body_lines), visible_hits[-1] + context_lines + 1)
         hit_set = set(visible_hits)
 
-        snippet_lines = []
-        for j in range(snippet_start, snippet_end):
-            marker = "→ " if j in hit_set else "  "
-            snippet_lines.append(f"{marker}{body_lines[j].rstrip()}")
-        if truncated:
-            snippet_lines.append(f"  ... ({truncated} more hits in this section)")
-
-        snippet = "\n".join(snippet_lines)
-        if max_snippet_chars and len(snippet) > max_snippet_chars:
-            cut = len(snippet) - max_snippet_chars
-            snippet = snippet[:max_snippet_chars] + f"\n  ... ({cut} chars truncated)"
+        snippet = _fit_snippet(
+            [(f"{'→ ' if j in hit_set else '  '}{body_lines[j].rstrip()}", j in hit_set)
+             for j in range(snippet_start, snippet_end)],
+            max_snippet_chars,
+            tail=f"  ... ({truncated} more hits in this section)" if truncated else "",
+        )
 
         # "title" is the section's own leaf heading text (or "(top)"),
         # kept separate from "heading_path" (the ancestor breadcrumb) so
@@ -1738,6 +1790,19 @@ def content_command(script: str, ref, heading_path, hint_args: tuple = ()) -> st
         parts.append(shlex.quote(heading_path))
     parts += list(hint_args)
     return " ".join(parts)
+
+
+def search_in_page_command(script: str, ref, title: str, hint_args: tuple = ()) -> str | None:
+    """A runnable ``search-content`` command over page *ref* that shows only
+    the matching lines (``--context 0``), with *title* (the section's or
+    page's own heading, as a stand-in keyword) as the keyword. The reader
+    swaps in the term they need. ``None`` when *title* has no words."""
+    keyword = " ".join(query_terms(_heading_text(title)))
+    if not keyword:
+        return None
+    parts = [script, "search-content", shlex.quote(keyword),
+             "--page-ref", str(ref), "--context", "0"]
+    return " ".join(parts + list(hint_args))
 
 
 def die_heading_not_found(heading_path: str, sections, retry=None) -> None:
@@ -2198,7 +2263,8 @@ def add_max_snippet_chars_arg(parser) -> None:
     )
 
 
-def truncate_content(content: str, max_chars: int, *, narrow_hint: str) -> str:
+def truncate_content(content: str, max_chars: int, *, narrow_hint: str,
+                     next_command: str | None = None) -> str:
     """Truncate *content* to at most *max_chars* characters (``<= 0``
     disables this), cutting at a line boundary that is not inside a
     fenced code block or Markdown table.
@@ -2219,7 +2285,10 @@ def truncate_content(content: str, max_chars: int, *, narrow_hint: str) -> str:
     Appends a note showing how many characters were cut and a caller-
     supplied *narrow_hint* — typically a fuller ``content <ref>
     "<heading_path>"`` invocation string — telling the reader how to fetch
-    a smaller slice instead of the same truncated one again. Callers
+    a smaller slice instead of the same truncated one again. When the
+    content has no subsection to narrow to, the caller passes
+    *next_command* (a complete, runnable ``search-content`` command) and it
+    is printed as a ``Next:`` line in place of *narrow_hint*. Callers
     should apply this AFTER every other content transform (link
     annotation, where applicable, adds text too) so the truncation point
     reflects the actual length of what the reader receives, not a
@@ -2248,6 +2317,17 @@ def truncate_content(content: str, max_chars: int, *, narrow_hint: str) -> str:
     # function exists to prevent; emitting no body at all before the
     # notice is always well-formed, if less useful.
     cut = len(content) - safe_cut
+    if next_command:
+        # A section with no subsections cannot be narrowed by heading: point
+        # at a search inside the page instead, as a line of its own that can
+        # be run as printed (like every ``Next:`` line)
+        return (
+            content[:safe_cut]
+            + f"\n... ({cut} chars truncated; this section has no subsections "
+              f"to narrow to. Search inside the page for the line you need "
+              f"(replace the keyword):)\n"
+            + f"Next: {next_command}\n"
+        )
     return (
         content[:safe_cut]
         + f"\n... ({cut} chars truncated; narrow with {narrow_hint})\n"
@@ -2257,6 +2337,39 @@ def truncate_content(content: str, max_chars: int, *, narrow_hint: str) -> str:
 # ---------------------------------------------------------------------------
 # Subsection hints (``content`` subcommand)
 # ---------------------------------------------------------------------------
+
+def subsection_children(sections, body_lines, heading_path, min_level: int):
+    """``(label, children, target)`` for the direct child sections of
+    *heading_path* (the top-level sections when it is ``None``), or ``None``
+    when *heading_path* is not one of *sections*. *target* is the section
+    itself (``None`` for the page top)."""
+    if heading_path is None:
+        children = [s for s in sections if s["level"] == min_level]
+        return "Top-level sections", children, None
+    target = None
+    for s in sections:
+        if s["heading_path"] == heading_path:
+            target = s
+            break
+    if target is None:
+        return None
+    target_idx = sections.index(target)
+    # Block extent = up to the next section at same or higher (smaller-
+    # number) level. ``target["line_end"]`` only spans until the
+    # immediate next heading, which would stop at the first child and
+    # miss the rest of the block.
+    block_end = len(body_lines)
+    for s in sections[target_idx + 1:]:
+        if s["level"] <= target["level"]:
+            block_end = s["line_start"]
+            break
+    child_level = target["level"] + 1
+    children = [
+        s for s in sections[target_idx + 1:]
+        if s["line_start"] < block_end and s["level"] == child_level
+    ]
+    return f"Subsections of '{target['heading_path']}'", children, target
+
 
 def print_subsection_hints(body_lines, page_ref, heading_path, *,
                             min_level: int = 2, extra_hint_args: tuple = ()) -> None:
@@ -2288,35 +2401,10 @@ def print_subsection_hints(body_lines, page_ref, heading_path, *,
     sections = extract_sections(body_lines, min_level=min_level)
     if not sections:
         return
-
-    if heading_path is None:
-        children = [s for s in sections if s["level"] == min_level]
-        label = "Top-level sections"
-    else:
-        target = None
-        for s in sections:
-            if s["heading_path"] == heading_path:
-                target = s
-                break
-        if target is None:
-            return
-        target_idx = sections.index(target)
-        # Block extent = up to the next section at same or higher (smaller-
-        # number) level. ``target["line_end"]`` only spans until the
-        # immediate next heading, which would stop at the first child and
-        # miss the rest of the block.
-        block_end = len(body_lines)
-        for s in sections[target_idx + 1:]:
-            if s["level"] <= target["level"]:
-                block_end = s["line_start"]
-                break
-        child_level = target["level"] + 1
-        children = [
-            s for s in sections[target_idx + 1:]
-            if s["line_start"] < block_end and s["level"] == child_level
-        ]
-        label = f"Subsections of '{target['heading_path']}'"
-
+    found = subsection_children(sections, body_lines, heading_path, min_level)
+    if found is None:
+        return
+    label, children, _target = found
     if not children:
         return
 

@@ -528,7 +528,7 @@ class SectionsHeadingPathTest(unittest.TestCase):
         ])
         self.assertEqual(code, 0, err)
         self.assertIn("chars truncated", out)
-        self.assertIn('narrow with parse-firebase.py content 0 "<heading_path>"', out)
+        self.assertIn("Next: parse-firebase.py search-content doc --page-ref 0 --context 0", out)
         self.assertNotIn("0123456789 0123456789 0123456789 0123456789 0123456789", out)
 
 

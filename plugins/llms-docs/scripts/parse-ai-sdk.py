@@ -202,13 +202,16 @@ def _unquote(value: str) -> str:
 
 
 def parse_frontmatter(fm_lines: list[str]) -> dict:
-    """Extract title, description, and tags from frontmatter lines.
+    """Extract title, description, url, and tags from frontmatter lines.
+
+    ``url`` is the page's own address (``url: "https://..."``); a page
+    without one keeps ``""``.
 
     ``tags`` is read from the inline form (``[a, b]`` or ``a, b``) and from the
     block form (``tags:`` followed by ``- a`` lines), which is the form the
     published corpus uses.
     """
-    result: dict = {"title": "", "description": "", "tags": []}
+    result: dict = {"title": "", "description": "", "url": "", "tags": []}
     current_key = None
     current_value_lines: list[str] = []
 
@@ -232,7 +235,7 @@ def parse_frontmatter(fm_lines: list[str]) -> dict:
         current_value_lines = []
 
     for line in fm_lines:
-        m = re.match(r"^(title|description|tags)\s*:\s*(.*)", line)
+        m = re.match(r"^(title|description|url|tags)\s*:\s*(.*)", line)
         if m:
             _flush()
             current_key = m.group(1)
@@ -354,9 +357,9 @@ def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None) -> int:
       1. integer index into *docs*
       2. title substring (case-insensitive); unique match wins
 
-    AI SDK's llms-full.txt has no Source/URL line in document bodies, so
-    URL / slug matching is not supported here (use the integer index from
-    ``search-index`` / ``search`` instead).
+    URL / slug matching is not supported here even though each page's
+    frontmatter carries a ``url:`` (it is printed for citing, not resolved):
+    use the integer index from ``search-index`` / ``search`` instead.
     """
     if page_ref is None or page_ref == "":
         die("page_ref required: integer index or title substring")
@@ -428,6 +431,17 @@ def cmd_fetch_index(args):
     next_hint("sections", "<page_ref>", *corpus_hint_args(args))
 
 
+def _url_and_tags_lines(info: dict) -> list[str]:
+    """``    URL: ...`` / ``    tags: ...`` lines under a result heading
+    (*info* is a frontmatter dict or a result row; either may lack a url)."""
+    lines = []
+    if info.get("url"):
+        lines.append(f"    URL: {info['url']}")
+    if info.get("tags"):
+        lines.append(f"    tags: {', '.join(info['tags'])}")
+    return lines
+
+
 def _page_view(args) -> tuple[str, PageView]:
     """Load the corpus and describe ``args.page_ref`` as a ``PageView``."""
     file_path, docs = _load_docs(args.file, args.cache_dir, max_age=args.max_age)
@@ -439,10 +453,11 @@ def _page_view(args) -> tuple[str, PageView]:
         idx=idx,
         title=fm["title"] or "(untitled)",
         body_lines=doc["body_lines"],
-        header_lines=[f"  (file: {file_path})"],
+        header_lines=([f"  URL: {fm['url']}"] if fm["url"] else [])
+        + [f"  (file: {file_path})"],
         min_level=1,
         protect_tables=False,
-        meta={"tags": fm["tags"] or None},
+        meta={"source": fm["url"] or None, "tags": fm["tags"] or None},
     )
     return file_path, page
 
@@ -565,7 +580,7 @@ def cmd_search_content(args):
         shown.append((idx, hits, ()))
 
         print_page_hits(f"[{idx}] {title}", hits, noun="document",
-                        extra_lines=[f"    tags: {', '.join(fm['tags'])}"] if fm["tags"] else [])
+                        extra_lines=_url_and_tags_lines(fm))
 
     hint_args = corpus_hint_args(args)
     if total_hits == 0:
@@ -636,6 +651,7 @@ def cmd_search(args):
             "doc_idx": idx,
             "title": fm["title"] or "(untitled)",
             "tags": fm["tags"],
+            "url": fm["url"],
             "index_score": score,
             "body_hits": body_hits,
             "body_only": False,
@@ -666,6 +682,7 @@ def cmd_search(args):
             "doc_idx": idx,
             "title": fms[idx]["title"] or "(untitled)",
             "tags": fms[idx]["tags"],
+            "url": fms[idx]["url"],
             "index_score": None,
             "body_hits": hits,
             "body_only": True,
@@ -694,7 +711,7 @@ def cmd_search(args):
     for r in results:
         score_tag = " [body-only]" if r["body_only"] else f" (index_score: {r['index_score']})"
         print_search_result(f"[{r['doc_idx']}] {r['title']}{score_tag}", r["body_hits"],
-                            extra_lines=[f"    tags: {', '.join(r['tags'])}"] if r["tags"] else [])
+                            extra_lines=_url_and_tags_lines(r))
 
     print(f"({len(results)} documents, ranked via index → body)")
     print()

@@ -354,7 +354,7 @@ Firebase 側に `llms-full.txt` が存在しないため、index + per-page on-d
 
 3 script で API を 0.7.0 で揃えた: `search` / `search-index` / `search-content` /
 `sections` / `content` / `fetch-index` の 6 サブコマンドが共通、`<page_ref>` は
-int / URL slug / 完全 URL を受け付ける (ai-sdk のみ URL がないため int / title 部分一致)、
+int / URL slug / 完全 URL を受け付ける (ai-sdk は frontmatter の URL を表示するが page_ref には使えず、int / title 部分一致)、
 `--file` flag は省略時に cache を auto-fetch する。
 
 共通ロジック (code-fence scanner / section & content extraction / llms.txt index parser /

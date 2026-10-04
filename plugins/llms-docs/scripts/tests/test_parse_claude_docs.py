@@ -223,7 +223,7 @@ class SectionUrlAnchorSlashInTitleIntegrationTest(unittest.TestCase):
             "--page-ref", "hooks", "--cache-dir", self.tmp,
         ])
         self.assertEqual(code, 0, err)
-        self.assertIn("[https://example.com/hooks#cicd]", out)
+        self.assertIn("[https://example.com/hooks#ci-cd]", out)
         self.assertNotIn("#cd]", out)
 
     def test_search_anchor_uses_full_leaf_title(self):
@@ -232,7 +232,7 @@ class SectionUrlAnchorSlashInTitleIntegrationTest(unittest.TestCase):
             "--cache-dir", self.tmp,
         ])
         self.assertEqual(code, 0, err)
-        self.assertIn("[https://example.com/hooks#cicd]", out)
+        self.assertIn("[https://example.com/hooks#ci-cd]", out)
         self.assertNotIn("#cd]", out)
 
 
@@ -981,7 +981,8 @@ class ContentMaxCharsTruncationTest(unittest.TestCase):
         ])
         self.assertEqual(code, 0, err)
         self.assertIn("chars truncated", out)
-        self.assertIn('narrow with parse-claude-docs.py content 0 "<heading_path>"', out)
+        # この page は見出しが無く、見出しでは絞れない: 本文内の検索の案内になる
+        self.assertIn("Next: parse-claude-docs.py search-content hooks --page-ref 0 --context 0", out)
         self.assertNotIn("0123456789 0123456789 0123456789 0123456789 0123456789", out)
 
     def test_narrow_hint_retains_both_source_and_file(self):
@@ -1005,8 +1006,8 @@ class ContentMaxCharsTruncationTest(unittest.TestCase):
         mock_urlopen.assert_not_called()
         self.assertEqual(code, 0, err)
         self.assertIn(
-            f'narrow with parse-claude-docs.py content 0 "<heading_path>" '
-            f"--source platform --file {snapshot}", out,
+            f"Next: parse-claude-docs.py search-content doc --page-ref 0 --context 0 "
+            f"--source platform --file {snapshot}\n", out,
         )
         self.assertNotIn("--cache-dir", out)  # --file makes it irrelevant
 

@@ -103,7 +103,7 @@ title / description / tags / 見出しでスコアリングして上位 5 件（
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" content <page_ref> "<heading_path>"
 ```
 
-`heading_path` を省略するとドキュメント全体を取得。**サブセクション一覧**と次の `content` 呼び出し例を、本文の前後両方（metadata header 直後 と 末尾）に自動出力する（`--no-subsection-hints` で抑制可）。本文は既定 24000 文字で切り詰められ (`--max-chars 0` で無制限)、超過時は `... (N chars truncated; narrow with ...)` を出す。
+`heading_path` を省略するとドキュメント全体を取得。**サブセクション一覧**と次の `content` 呼び出し例を、本文の前後両方（metadata header 直後 と 末尾）に自動出力する（`--no-subsection-hints` で抑制可）。本文は既定 24000 文字で切り詰められ (`--max-chars 0` で無制限)、超過時は `... (N chars truncated; narrow with ...)` を出す。子見出しの無い節 (絞る先が無い) では代わりに `Next: ... search-content <節の見出し> --page-ref N --context 0` を出す。そのまま実行でき、keyword を探したい語に差し替えて使う。
 
 ### 補助: セクション一覧を確認したいとき
 
@@ -134,7 +134,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" fetch-index --compact
 - **整数 index** (推奨): `42` — `search` / `search-index` の結果に表示される `[<doc_idx>]` の数字
 - **タイトル部分一致**: `"Event Callbacks"` — 一意に決まる場合のみ。曖昧な場合はエラーになる
 
-AI SDK の llms-full.txt は URL を持たないため、URL / slug 形式は受け付けない (整数 index を使うこと)。
+AI SDK の各ページは frontmatter に `url:` を持ち、`sections` / `content` / `search` / `search-content` が表示する (`URL:` 行、`content` では `# source:` 行)。ただし page_ref としては解決しないので、URL / slug 形式は受け付けない (整数 index を使うこと)。`url:` が無いページには行が付かない。
 
 ## コマンドリファレンス
 
@@ -211,9 +211,9 @@ AI SDK の llms-full.txt は URL を持たないため、URL / slug 形式は受
 
 - **発見事項**: 何が分かったか (見出し名は任意)
 - **引用元**: 使用したドキュメントの URL またはタイトル + セクション (verbatim 引用は必ず出典を併記)。
-  AI SDK の llms-full.txt には URL 自体が無いため (`page_ref の指定方法` 参照)、`search`/`search-content`
-  の `Section:` 行に `URL#anchor` は付かない (claude-docs / firebase と異なり対象外) — 引用元は
-  タイトル + heading_path で表す
+  AI SDK は `search`/`search-content` の結果に、ページの URL (frontmatter の `url:`) が `URL:` 行で付く。
+  `Section:` 行の `URL#anchor` は付かない (claude-docs / firebase と異なり、AI SDK サイトの見出し id の
+  規則を確かめていないため対象外) — 引用元は URL + タイトル + heading_path で表す
 - **コード例**: ドキュメントから直接引用したもののみ (該当する場合)
 - **注意事項**: 制約・バージョン要件・既知の罠 (該当する場合)
 

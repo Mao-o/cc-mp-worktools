@@ -34,6 +34,8 @@ from _common import (
     print_subsection_hints,
     query_terms,
     retry_option_args,
+    search_in_page_command,
+    subsection_children,
     truncate_content,
 )
 
@@ -115,7 +117,18 @@ def render_content(page: PageView, args, *, script: str, hint_args: tuple,
 
     hint_suffix = (" " + " ".join(hint_args)) if hint_args else ""
     narrow_hint = f'{script} content {page.idx} "<heading_path>"{hint_suffix}'
-    content = truncate_content(content, args.max_chars, narrow_hint=narrow_hint)
+    # A page or section with no subsections cannot be narrowed by heading: the
+    # truncation notice then points at a search inside the page instead.
+    next_command = None
+    sections = extract_sections(page.body_lines, **page._level_kwargs())
+    found = subsection_children(sections, page.body_lines, resolved_heading_path,
+                                page._indent_floor())
+    if found is None or not found[1]:
+        target = found[2] if found else None
+        title = target["title"] if target else page.title
+        next_command = search_in_page_command(script, page.idx, title, hint_args)
+    content = truncate_content(content, args.max_chars, narrow_hint=narrow_hint,
+                               next_command=next_command)
 
     print_metadata_header(page.title, heading_path=resolved_heading_path, **page.meta)
 
