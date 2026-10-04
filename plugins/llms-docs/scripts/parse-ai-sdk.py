@@ -389,6 +389,39 @@ def _die_url_page_ref(docs: list[dict], page_ref: str, retry, hint_args: tuple) 
     die("\n".join(lines))
 
 
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def _die_slug_page_ref(docs: list[dict], page_ref: str, retry, hint_args: tuple) -> None:
+    """Exit 1 for a slug (the last segment of a page's URL) given as page_ref:
+    say it is not resolved, and print the command for the page(s) whose URL
+    ends in it (or a ``search`` on its words). A title substring never gets
+    here: that match is tried first."""
+    rows = []
+    for i, doc in enumerate(docs):
+        fm = parse_frontmatter(doc["frontmatter_lines"])
+        last = normalize_doc_url((fm.get("url") or "").strip()).rsplit("/", 1)[-1].lower()
+        if last == page_ref:
+            rows.append((i, (fm.get("title") or "").strip()))
+    lines = [f"No document found for: {page_ref}",
+             "  A URL's last segment is not resolved; page_ref takes an integer index or a title substring."]
+    if rows:
+        lines.append(f"  A page has a url ending in /{page_ref}:" if len(rows) == 1
+                     else f"  Pages have urls ending in /{page_ref}:")
+        for idx, title in rows:
+            lines.append(f"  [{idx}] {title or '(untitled)'}")
+            cmd = retry(idx) if retry is not None else f"parse-ai-sdk.py content {idx}"
+            lines.append(f"    {cmd}")
+    else:
+        lines.append(f"  No page has a url ending in /{page_ref}.")
+        words = re.findall(r"[A-Za-z0-9]+", page_ref)
+        if words:
+            tail = (" " + " ".join(hint_args)) if hint_args else ""
+            lines.append(f"    {os.path.basename(sys.argv[0])} search "
+                         f"{shlex.quote(' '.join(words))}{tail}")
+    die("\n".join(lines))
+
+
 def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
                       hint_args: tuple = ()) -> int:
     """Resolve a page reference to a doc index.
@@ -400,6 +433,8 @@ def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
     URL / slug matching is not supported here even though each page's
     frontmatter carries a ``url:`` (it is printed for citing, not resolved):
     use the integer index from ``search-index`` / ``search`` instead.
+    A failure for a URL or for a slug (the last segment of a page's URL)
+    still exits 1, but prints the command for the page that owns it.
     """
     if page_ref is None or page_ref == "":
         die("page_ref required: integer index or title substring")
@@ -426,6 +461,8 @@ def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
         die_ambiguous_page("title substring", page_ref, candidates, retry)
     if _URL_LIKE_RE.match(page_ref.strip()):
         _die_url_page_ref(docs, page_ref, retry, hint_args)
+    if _SLUG_RE.match(page_ref):
+        _die_slug_page_ref(docs, page_ref, retry, hint_args)
     die(f"No document found for: {page_ref}")
 
 
