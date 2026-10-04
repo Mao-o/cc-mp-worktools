@@ -65,17 +65,22 @@ class FenceTracker:
       would hide the text that follows. A ``{/*`` inside a code block is
       content (a page showing how to write a comment), and so is the
       ```` ``` */} ```` after it: that block closes at a bare closer.
-      A block opened inside such a comment also closes at any line holding
-      ``*/}``, run or not: MDX never renders the comment, so a closer lost
-      inside it (Zod closes one with two backticks) must not leave the block
-      open past the comment and hide the next page's H1.
+      A block opened inside such a comment also closes at a line holding
+      ``*/}`` with no ``/*`` before it on that line, run or not: MDX never
+      renders the comment, so a closer lost inside it (Zod closes one with
+      two backticks) must not leave the block open past the comment and hide
+      the next page's H1. A ``/* ... */}`` on one line is a comment written
+      in the code and stays content.
     - Blockquote markers (``>``, each with one optional space) come off
       before a line is tested as a fence, both outside a block and inside a
       block that opened on a quoted line, so a fence line behind ``>`` opens
       a block and an unquoted ```` ``` ```` may close it (Render opens a block inside a
       note and closes it outside). Inside a block opened unquoted, a quoted
       line stays content: a Markdown example of a quoted code block must not
-      close the block that shows it.
+      close the block that shows it. A block opened on a quoted line also
+      closes at a truly blank line (no ``>``): the blank line ends the
+      quote, so a closer the quote never got must not keep the block open
+      past it.
 
     One narrow guard for the indentation departure: a bare run (no info
     string) indented 4+ spaces opens a block only once the next non-blank
@@ -125,6 +130,11 @@ class FenceTracker:
             if m:
                 text = line[m.end():]
                 quoted = True
+        if self.in_fence and self._opened_quoted and not line.strip():
+            # a truly blank line (no ``>``) ends the blockquote, and with it
+            # a block opened inside the quote whose closer never came
+            self._close()
+            return False
         if self._pending is not None:
             if not text.strip():
                 return self.in_fence
@@ -162,9 +172,12 @@ class FenceTracker:
                     self._in_mdx_comment = True
                 elif "*/}" in line:
                     self._in_mdx_comment = False
-            elif self._opened_in_comment and "*/}" in line:
+            elif (self._opened_in_comment and "*/}" in line
+                    and "/*" not in line[:line.find("*/}")]):
                 # the comment ends, and with it a block opened inside it
-                # whose closer was lost (MDX never renders the comment)
+                # whose closer was lost (MDX never renders the comment).
+                # A ``*/}`` with its own ``/*`` earlier on the line is a
+                # comment written inside the code, not the comment's end.
                 self._close()
                 self._in_mdx_comment = False
         return self.in_fence

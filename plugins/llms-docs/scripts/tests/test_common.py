@@ -274,6 +274,54 @@ class FenceTrackerCloserTest(unittest.TestCase):
         sections = _common.extract_sections(["## Top\n"] + lines, min_level=2)
         self.assertEqual([s["title"] for s in sections], ["Top", "After"])
 
+    def test_comment_end_after_a_comment_opened_on_the_same_line_is_content(self):
+        """A block opened inside ``{/* ... */}`` does not close at a code line
+        whose ``*/}`` has its own ``/*`` before it (a JS block comment, a
+        nested JSX comment): the real closer after it would then open a
+        block that hides the next heading."""
+        cases = {
+            "js empty body": ["{/*\n", "```js\n", "function f() { /* noop */}\n", "```\n", "*/}\n"],
+            "nested jsx comment": ["{/*\n", "```jsx\n", "<div>{/* note */}</div>\n", "```\n", "*/}\n"],
+        }
+        for label, middle in cases.items():
+            with self.subTest(label):
+                body = ["## P1\n"] + middle + ["\n", "## P2\n", "body\n"]
+                self.assertEqual(self._states(body)[1:6], [False, True, True, False, False])
+                sections = _common.extract_sections(body, min_level=2)
+                self.assertEqual([s["title"] for s in sections], ["P1", "P2"])
+
+    def test_comment_state_is_cleared_when_the_comment_end_closes_a_block(self):
+        """After the comment's end closes the block opened inside it (Zod),
+        no comment is open any more: a later block opened outside any
+        comment is not closed by a ``*/}`` in its code."""
+        body = ["## Top\n", "{/* ## Changed\n", "  ```ts\n", "  code();\n", "  ``\n", "  */}\n",
+                "\n", "```js\n", "x */}\n", "## not a heading\n", "```\n", "## After\n"]
+        sections = _common.extract_sections(body, min_level=2)
+        self.assertEqual([s["title"] for s in sections], ["Top", "After"])
+
+    def test_indented_quoted_opener_is_confirmed_as_quoted(self):
+        """A bare 4+-indented opener behind ``>`` waits for the next line,
+        and the block it opens is still a quoted one: the quoted closer
+        ends it."""
+        body = [">     ```\n", ">     code\n", ">     ```\n", "\n", "## After\n"]
+        self.assertEqual(self._states(body), [False, True, False, False, False])
+        self.assertEqual([s["title"] for s in _common.extract_sections(body, min_level=2)], ["After"])
+
+    def test_quoted_block_ends_with_the_blockquote(self):
+        """CommonMark: a block opened inside a blockquote ends where the
+        quote ends (a blank line with no ``>``), closer or not. A fence
+        pair after it is a block of its own and hides nothing."""
+        body = ["## A\n", "> ```js\n", "> code\n", "\n", "Text after quote.\n", "\n", "## B\n",
+                "\n", "```bash\n", "# install\n", "```\n", "## C\n"]
+        self.assertEqual(self._states(body)[1:5], [True, True, False, False])
+        sections = _common.extract_sections(body, min_level=2)
+        self.assertEqual([s["title"] for s in sections], ["A", "B", "C"])
+        # a blank line inside the quote (``>`` alone) does not end it
+        body = ["## Top\n", "> ```\n", "> a\n", ">\n", "> b\n", "> ```\n", "\n", "## After\n"]
+        self.assertEqual(self._states(body)[1:7], [True, True, True, True, False, False])
+        sections = _common.extract_sections(body, min_level=2)
+        self.assertEqual([s["title"] for s in sections], ["Top", "After"])
+
     def test_blockquote_fence_opens_and_closes(self):
         """Render opens a block inside a note and closes it outside; other
         sites open and close it inside the note. Both close."""

@@ -186,11 +186,11 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading
 | `nextjs` | Next.js (`/docs/llms-full.txt`) | あり |
 | `vite` / `vitest` | Vite / Vitest | あり (`.md`) |
 | `drizzle` | Drizzle ORM | あり |
-| `zod` | Zod | 一部 (`llms.txt` とタイトルで突き合わせ。17 中 14) |
+| `zod` | Zod | 一部 (`llms.txt` とタイトルで突き合わせ。18 中 13) |
 | `hono` | Hono | 一部 (同上。87 中 21) |
 | `bun` | Bun | あり |
 | `vercel` | Vercel | あり |
-| `render` | Render | 一部 (同上。125 中 121) |
+| `render` | Render | 一部 (同上。126 中 122) |
 | `mcp` | Model Context Protocol | あり |
 | `codex` | OpenAI Codex + ChatGPT docs (`learn.chatgpt.com/docs/llms-full.txt`。Codex の CLI / IDE / cloud / SDK に加え、ChatGPT の desktop app / Work / 管理のページを含む) | 一部 (同上。178 中 175) |
 | `ollama` | Ollama | あり |

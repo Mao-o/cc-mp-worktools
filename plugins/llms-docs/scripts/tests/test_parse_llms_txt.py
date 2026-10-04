@@ -521,6 +521,19 @@ class SplitH1KeepsPagesAfterBrokenFenceTest(unittest.TestCase):
         self.assertEqual([s["title"] for s in _common.extract_sections(docs[1]["body_lines"])],
                          ["Image requirements"])
 
+    def test_unclosed_quoted_fence_ends_with_the_blockquote(self):
+        """CommonMark: a block opened inside a blockquote ends when the
+        blockquote ends (a truly blank line), closer or not."""
+        cases = {
+            "no closer": "> ```js\n> foo()\n",
+            "no closer, later fence pair": "> ```\n> foo\n\nText\n\n```\nx\n```\n",
+            "prose that looks like a fence": "> ``` starts a code block\n",
+        }
+        for label, middle in cases.items():
+            with self.subTest(label):
+                docs = self._docs("# P1\n" + middle + "\n# P2\nbody\n")
+                self.assertEqual([d["title"] for d in docs], ["P1", "P2"])
+
 
 class ProfileValidationTest(unittest.TestCase):
     def load(self, data) -> tuple[int, str]:
