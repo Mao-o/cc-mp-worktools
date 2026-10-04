@@ -1356,7 +1356,9 @@ def _cut_hit_line(text: str, width: int, span) -> str:
     room = width - SNIPPET_MARK_WIDTH
     if span is None or span[1] <= room:
         return text[:width] + "…"
-    begin = max(0, span[0] - room // 3)
+    # a third of the width before the word, but never past the point where
+    # the window would run off the end of the line
+    begin = max(0, min(span[0] - room // 3, len(rest) - room))
     window = rest[begin:begin + room]
     return (mark + ("…" if begin > 0 else "") + window
             + ("…" if begin + room < len(rest) else ""))
@@ -1421,6 +1423,10 @@ def _first_keyword_span(line: str, keywords):
     matched as ``search_content_in_body`` matches them (a substring, case
     ignored); ``None`` when none is there."""
     lower = line.lower()
+    if len(lower) != len(line):
+        # a character whose lowercase is longer (e.g. U+0130) shifts the
+        # positions; fall back to cutting from the start of the line
+        return None
     spans = [(i, i + len(kw)) for kw in keywords
              for i in [lower.find(kw)] if i >= 0]
     return min(spans) if spans else None

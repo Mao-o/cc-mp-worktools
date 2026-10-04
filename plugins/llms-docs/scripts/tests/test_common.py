@@ -901,6 +901,22 @@ class SnippetBudgetTest(unittest.TestCase):
         result = _common.search_content_in_body(body, query, max_snippet_chars=500, **kw)
         return result["results"][0]["snippet"]
 
+    def test_a_word_at_the_end_of_a_long_line_closes_the_window(self):
+        text = "→ " + "a" * 300 + " keyword"
+        span = _common._first_keyword_span(text[2:], ["keyword"])
+        cut = _common._cut_hit_line(text, 82, span)
+        self.assertTrue(cut.endswith("keyword"), cut)
+        self.assertEqual(len(cut), 82 + 1)  # the window is used up, plus the leading …
+
+    def test_a_word_across_the_cut_is_kept_whole(self):
+        # the word starts inside the first 80 characters and ends past them
+        text = "→ " + "x" * 76 + " keyword " + "z" * 200
+        span = _common._first_keyword_span(text[2:], ["keyword"])
+        self.assertIn("keyword", _common._cut_hit_line(text, 82, span))
+
+    def test_a_lowercase_of_another_length_gives_no_span(self):
+        self.assertIsNone(_common._first_keyword_span("\u0130" * 5 + " keyword", ["keyword"]))
+
     def test_match_line_after_a_long_table_row_is_visible(self):
         body = ["## Variables\n", self.LONG_ROW + "\n", "the needleword is here\n", "after\n"]
         snippet = self._snippet(body, "needleword")
