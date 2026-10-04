@@ -842,6 +842,89 @@ class IndexJoinTest(unittest.TestCase):
         self.assertEqual(generic.join_index_urls(docs, index), 0)
         self.assertEqual(docs[1]["url"], "")
 
+    # Cut from the real zod llms.txt (2026-10-04): every page entry is followed
+    # by entries for its sections (``?id=<slug>``), and a section can share
+    # a page's title (Codecs, Ecosystem, Versioning).
+    ZOD_INDEX_CUT = (
+        "- [Defining schemas](https://zod.dev/api): Complete API reference\n"
+        "- [Codecs](https://zod.dev/api?id=codecs)\n"
+        "- [Codecs](https://zod.dev/codecs): Bidirectional transformations with encode and decode\n"
+        "- [Inverting codecs](https://zod.dev/codecs?id=inverting-codecs)\n"
+        "- [Codecs](https://zod.dev/codecs?id=codecs)\n"
+        "- [Ecosystem](https://zod.dev/ecosystem): Overview of the Zod ecosystem\n"
+        "- [Ecosystem](https://zod.dev/?id=ecosystem)\n"
+        "- [Versioning](https://zod.dev/v4?id=versioning)\n"
+        "- [Versioning](https://zod.dev/v4/versioning): Versioning strategy\n"
+        "- [Versioning](https://zod.dev/v4/versioning?id=versioning)\n"
+    )
+
+    def join_titles(self, titles: list, index_text: str) -> dict:
+        corpus = "".join(f"# {t}\n\nBody of {t}.\n\n" for t in titles)
+        docs = generic.split_documents(_lines(corpus), _profile(split="h1"))
+        generic.join_index_urls(docs, _lines(index_text))
+        return {d["title"]: d["url"] for d in docs}
+
+    def test_page_entry_wins_over_section_anchor_entries(self):
+        got = self.join_titles(["Defining schemas", "Codecs", "Ecosystem", "Versioning"], self.ZOD_INDEX_CUT)
+        self.assertEqual(got, {
+            "Defining schemas": "https://zod.dev/api",
+            "Codecs": "https://zod.dev/codecs",
+            "Ecosystem": "https://zod.dev/ecosystem",
+            "Versioning": "https://zod.dev/v4/versioning",
+        })
+
+    # (index entries for one title, expected URL). A page entry is a URL with
+    # neither ? nor #: exactly one of them wins over any anchors; none or two
+    # or more keeps the old rule (one candidate: used; several: no guess).
+    SECTION_CASES = {
+        "query anchor only, alone": (["https://e.com/a?id=x"], "https://e.com/a?id=x"),
+        "fragment anchor only, alone": (["https://e.com/a#x"], "https://e.com/a#x"),
+        "two query anchors only": (["https://e.com/a?id=x", "https://e.com/b?id=x"], ""),
+        "query and fragment anchors only": (["https://e.com/a?id=x", "https://e.com/a#x"], ""),
+        "page plus query anchor": (["https://e.com/a", "https://e.com/a?id=x"], "https://e.com/a"),
+        "page plus fragment anchor": (["https://e.com/a#x", "https://e.com/a"], "https://e.com/a"),
+        "page plus bare question mark": (["https://e.com/a", "https://e.com/a?"], "https://e.com/a"),
+        "page plus bare hash": (["https://e.com/a", "https://e.com/a#"], "https://e.com/a"),
+        "two pages": (["https://e.com/a", "https://e.com/b"], ""),
+        "two pages plus anchor": (["https://e.com/a", "https://e.com/b", "https://e.com/a?id=x"], ""),
+    }
+
+    def test_section_anchor_entries_only_when_exactly_one_page_entry(self):
+        for label, (urls, expected) in self.SECTION_CASES.items():
+            with self.subTest(label):
+                index = "".join(f"- [Topic]({u})\n" for u in urls)
+                self.assertEqual(self.join_titles(["Topic"], index)["Topic"], expected)
+
+    def test_anchor_rule_does_not_cross_titles(self):
+        # an anchor entry titled like another page's title does not give that
+        # page a URL, and a page entry of one title does not settle another
+        index = ("- [Alpha](https://e.com/alpha)\n- [Beta](https://e.com/alpha?id=beta)\n"
+                 "- [Beta](https://e.com/beta?id=beta)\n")
+        got = self.join_titles(["Alpha", "Beta"], index)
+        self.assertEqual(got, {"Alpha": "https://e.com/alpha", "Beta": ""})
+
+    def test_page_entry_still_needs_a_single_page_with_that_title(self):
+        docs = generic.split_documents(_lines("# Codecs\n\nx\n\n# Codecs\n\ny\n"), _profile(split="h1"))
+        self.assertEqual(generic.join_index_urls(docs, _lines(self.ZOD_INDEX_CUT)), 0)
+
+    def test_cli_shows_the_page_url_for_a_title_that_has_section_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sources = Path(tmp, "s.json")
+            sources.write_text(json.dumps({"sources": {"site": {
+                "url": "https://example.com/llms-full.txt", "split": "h1",
+                "index_url": "https://example.com/llms.txt"}}}), encoding="utf-8")
+            corpus = Path(tmp, "full.txt")
+            corpus.write_text("# Codecs\n\nBody.\n\n# Ecosystem\n\nBody.\n", encoding="utf-8")
+            index = Path(tmp, "llms.txt")
+            index.write_text(self.ZOD_INDEX_CUT, encoding="utf-8")
+            code, out, err = _loader.run_cli(generic, [
+                "parse-llms-txt.py", "fetch-index", "--source", "site", "--sources-file", str(sources),
+                "--cache-dir", tmp, "--file", str(corpus), "--index-file", str(index)])
+        self.assertEqual(code, 0, err)
+        self.assertIn("    URL: https://zod.dev/codecs\n", out)
+        self.assertIn("    URL: https://zod.dev/ecosystem\n", out)
+        self.assertNotIn("?id=", out)
+
     # Entries that link an llms.txt-family file (another index, a full-text
     # export) are not pages: a page of the same title must not get that URL.
     INDEX_FILES = {

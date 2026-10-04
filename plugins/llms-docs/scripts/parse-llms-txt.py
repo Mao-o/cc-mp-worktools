@@ -719,7 +719,11 @@ def join_index_urls(docs: list[dict], index_lines: list[str]) -> int:
     entries, or one shared by two pages (Zod's site banner and its
     ``packages/zod`` page are both "Zod") is left without a URL, because a
     wrong URL misleads more than a missing one (measured on Hono:
-    word-prefix matching gave 4 wrong URLs in 40). Entries are read with
+    word-prefix matching gave 4 wrong URLs in 40). Entries that link a
+    section of a page (a ``?`` or ``#`` in the URL) are not counted as
+    page candidates when exactly one entry of the title has neither; if
+    every candidate has one (or two have none), the title is left as
+    before: one candidate is used, two or more are ambiguous. Entries are read with
     the shared ``parse_llms_index`` (absolute URLs only). An entry that
     links another ``llms.txt``-family file is not a page and is skipped
     before the titles are compared (a 2-level index such as OpenAI's root
@@ -741,7 +745,18 @@ def join_index_urls(docs: list[dict], index_lines: list[str]) -> int:
             continue
         key = _title_key(d["title"])
         urls = by_title.get(key, set())
-        if len(urls) == 1 and pages_per_title[key] == 1:
+        if pages_per_title[key] != 1:
+            continue
+        # A section-anchor entry (``<page>?id=<slug>``, ``<page>#<slug>``)
+        # is not a page: when exactly one candidate has neither mark, it is
+        # the page, and the anchors do not make the title ambiguous.
+        # Query URLs that are real pages (Codex's ``?surface=cli``) are
+        # treated the same; a plain entry of the same title wins over them.
+        plain = {u for u in urls if "?" not in u and "#" not in u}
+        if len(plain) == 1:
+            d["url"] = next(iter(plain))
+            joined += 1
+        elif len(urls) == 1:
             d["url"] = next(iter(urls))
             joined += 1
     return joined
