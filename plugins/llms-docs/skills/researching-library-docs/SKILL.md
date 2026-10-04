@@ -134,7 +134,7 @@ general-purpose の subagent など、Skill ツールを使えない文脈では
 - `search`: スペース区切りの複数キーワード (AND。揃わなければ半分以上が揃うセクションへ
   緩め、`[partial match]` と表示)。未取得なら自動で取得してキャッシュする (Vercel は 10MB、
   Cloudflare Workers は 5MB あるので初回は数秒かかる)。キーワードは英語のドキュメント用語で書く。
-  上位 N 件がどれも部分一致 (`[partial match]`) のときは、全文検索で全キーワードが 1 セクションに揃うページを最大 2 件探して `[body-only]` として追記する (既存の行は残り、`Next:` には index の最上位候補の行も残る。全キーワードが揃う候補が Changelog / Release notes だけのときも探す。全キーワードが揃う候補があっても、どの候補もページタイトルと見出しに全キーワードを語として含まなければ、含むページを同じく最大 2 件足す。キーワードが 1 語のときは足さない)
+  index の上位 N 件に本文ヒットが 1 件も無いときは、全文検索のヒットを `--top-n` 件まで (全キーワードが揃うページを先に、部分一致のページも含めて) `[body-only]` として足す。上位 N 件がどれも部分一致 (`[partial match]`) のときは、全文検索で全キーワードが 1 セクションに揃うページを最大 2 件探して `[body-only]` として足す (既存の行は残り、`Next:` には index の最上位候補の行も残る。全キーワードが揃う候補が Changelog / Release notes だけのときも探す。全キーワードが揃う候補があっても、どの候補もページタイトルと見出しに全キーワードを語として含まなければ、含むページを同じく最大 2 件足す。キーワードが 1 語のときは足さない)。足したページは末尾に追記されるのではなく、`search` の並び順の中に入る (本文ヒットのあるページは本文ヒットの無い index の候補より上に並ぶので、1 位になることが多い。その index の候補は `(no body hits — index match only)` で下位に回る)
 - `content`: `heading_path` を省略するとページ全体。本文は既定 24000 文字で切り詰め、
   前後にサブセクション一覧と次の呼び出し例を出す。子見出しの無い節が切り詰められたときは、
   代わりに `Next: ... search-content --page-ref N --context 0 -- <節の見出し>` を出す (注記が名指しする仮置きの語を差し替えて使う。
@@ -148,9 +148,10 @@ general-purpose の subagent など、Skill ツールを使えない文脈では
 - **タイトルの部分一致**: 一意に決まる場合のみ (曖昧ならエラーで候補を出す)
 - **URL の部分一致**: ページ URL を持つ source のみ (例: `get-started`)
 
-`zod` / `hono` / `render` / `codex` は llms-full.txt にページ URL が無く、`llms.txt` と
-タイトルが一致したページにだけ URL が付く (Hono は 4 分の 1 程度)。URL の無いページの引用元はタイトル +
-heading_path で表す。
+`zod` / `hono` / `render` / `codex` / `openai-plugins` / `openai-api-docs` / `factory` は
+llms-full.txt にページ URL が無く、`llms.txt` とタイトルが一致したページにだけ URL が付く
+(付く割合は source で違う。Hono は 4 分の 1 程度、`factory` はほぼ全ページ。README の presets 表)。
+`agent-plugins` は URL が全く無い。URL の無いページの引用元はタイトル + heading_path で表す。
 
 ## heading_path の指定方法
 
@@ -201,7 +202,7 @@ heading_path で表す。
 
 ### WebFetch フォールバック
 
-スクリプトで解決できない場合のみ、ページ URL (`url:` 行) を WebFetch で取得する。要約モデル
+スクリプトで解決できない場合のみ、ページ URL (`URL:` 行。`content` では `# source:` 行) を WebFetch で取得する。要約モデル
 経由のため field の抜け落ちがありうる — 取得内容を鵜呑みにせず、その旨を回答に書く。
 
 ### 対象外のサイト

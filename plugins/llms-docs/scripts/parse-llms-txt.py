@@ -797,7 +797,7 @@ def _headings(body_lines: list[str]) -> list[str]:
 
 
 def _url_line(doc: dict) -> list[str]:
-    return [f"    url: {doc['url']}"] if doc["url"] else []
+    return [f"    URL: {doc['url']}"] if doc["url"] else []
 
 
 # ---------------------------------------------------------------------------

@@ -2,6 +2,32 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.35.0] - 2026-10-04
+
+### 変更: AI SDK で表示された URL を page_ref に貼った失敗に次の一手を出す / 汎用 loader の URL 行を `URL:` にそろえる / 文書を実装に合わせる
+
+- **AI SDK の page_ref に URL を貼ったとき**: 0.33.0 から各結果に URL が出るが、その URL を `content` /
+  `sections` / `search-content --page-ref` の page_ref に渡すと `No document found` だけで、次の一手が無かった。
+  URL を page_ref として解決しない仕様 (表示は引用元のため) は変えず、URL の形の page_ref が失敗したときに限り、
+  その URL を `url:` に持つページを読むコマンド (整数 index で、元の `heading_path` / `--max-chars` / `--file` /
+  `--cache-dir` を引き継ぐ) を続けて出す。コマンドは加工せずそのまま実行できる。URL は scheme の違い (`http://`・
+  scheme なし)・ホストの大文字小文字・末尾の `/`・`.md`・`#fragment`・`?query` を無視して、完全一致で突き合わせる
+  (`/docs/advanced` が `/docs/advanced/caching` に当たることはない)。持つページが無い URL には、URL の最後の段から
+  作った `search '<語>'` を出す。URL の形でない page_ref の失敗は従来どおり。実 corpus (526 ページ) で、全ページを
+  表示された URL で引き直し、出たコマンドを実行して 526 件とも元のページに届くことを確かめた
+- **汎用 loader (`parse-llms-txt.py`) の URL 行**: `fetch-index` / `search-index` / `search` / `search-content` の
+  ページ URL の行が小文字の `url:` で、`sections` の `URL:` や、ほかの 3 script・README と表記が違っていた。
+  `URL:` にそろえた (行頭の字下げは変えていない)。出力を読む hook やスクリプトは無い
+- **文書を実装に合わせた** (挙動の変更なし):
+  - `[body-only]` の説明に、index の候補に本文ヒットが 1 件も無いとき `--top-n` 件まで足す経路と、足したページが
+    末尾でなく並び順の中に入る (多くは 1 位になる) ことを書いた (claude-docs / ai-sdk / library の SKILL)
+  - 0.34.0 の節の順位 (自分の見出しがあって初めて全語が揃う節を、見出しを受け継ぐだけの子孫より先に出す) を、
+    README と、ai-sdk / firebase / claude-docs の SKILL の並び順の説明に足した
+  - README の soft-AND の説明を、コーパス全体でなくページごとの話に直した
+  - library SKILL の「URL の無い preset」を、`index_url` で突き合わせる 7 つと、URL が全く無い `agent-plugins` に直した
+  - firebase SKILL の page_ref の「ai-sdk と統一 (3 形式)」を、claude-docs と統一に直した (ai-sdk は 2 形式)
+  - claude-docs SKILL の規模を、実測の Claude Code 220 ページ / 8.7MB、Platform 634 ページ / 35.7MB (平均 約 56KB) に直した
+
 ## [0.34.0] - 2026-10-04
 
 ### 変更: 見出しが全キーワードを含む節を、その見出しを受け継ぐだけの子孫より上に出す / snippet で切った一致行に一致した語を残す

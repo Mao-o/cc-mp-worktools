@@ -834,12 +834,12 @@ class IndexJoinTest(unittest.TestCase):
         with mock.patch.object(generic, "fetch_url", side_effect=AssertionError("fetched")):
             code, out, err = self.cli("--file", "{corpus}")
         self.assertEqual(code, 0, err)
-        self.assertNotIn("url:", out)
+        self.assertNotIn("URL:", out)
 
     def test_index_file_gives_urls_and_stays_in_the_hint(self):
         code, out, err = self.cli("--file", "{corpus}", "--index-file", "{index}")
         self.assertEqual(code, 0, err)
-        self.assertIn("url: https://example.com/docs/schemas", out)
+        self.assertIn("    URL: https://example.com/docs/schemas", out)
         self.assertIn("--index-file", out.strip().splitlines()[-1])
 
     def test_failed_index_fetch_only_warns(self):
@@ -891,6 +891,17 @@ class CliTest(unittest.TestCase):
         self.assertIn("--sources-file", hint)
         self.assertIn("--file", hint)
         self.assertIn("URL: https://example.com/docs/install", out)
+
+    def test_every_subcommand_labels_the_page_url_URL(self):
+        # the label is the same everywhere (README / SKILL name it ``URL:``);
+        # fetch-index / search-index / search / search-content / sections
+        for argv in (("fetch-index",), ("search-index", "install"), ("search", "requirements"),
+                     ("search-content", "requirements"), ("sections", "install")):
+            with self.subTest(argv=argv):
+                code, out, err = self.run_cmd(*argv, "--source", "fm", "--file", str(self.fm_file))
+                self.assertEqual(code, 0, err)
+                self.assertRegex(out, r"(?m)^ +URL: https://example\.com/docs/install$")
+                self.assertNotRegex(out, r"(?m)^\s*url:")
 
     def test_pages_without_url_print_no_url_lines(self):
         code, out, _ = self.run_cmd("content", "schemas", "--source", "plain", "--file", str(self.h1_file))

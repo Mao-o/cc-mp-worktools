@@ -94,7 +94,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" search "<キーワード
 スペース区切りで複数キーワード（AND）。未取得なら自動でネットワークから取得する。
 title / description / tags / 見出しでスコアリングして上位 5 件（`--top-n N` で変更可）を選び、
 各候補ドキュメントの body を keyword 検索して heading_path + スニペットを返す。
-上位 N 件がどれも部分一致 (`[partial match]`) のときは、全文検索で全キーワードが 1 セクションに揃うページを最大 2 件探して `[body-only]` として追記する (既存の行は残り、`Next:` には index の最上位候補の行も残る。全キーワードが揃う候補が Changelog / Release notes だけのときも探す。全キーワードが揃う候補があっても、どの候補もページタイトルと見出しに全キーワードを語として含まなければ、含むページを同じく最大 2 件足す。キーワードが 1 語のときは足さない)。
+index の上位 N 件に本文ヒットが 1 件も無いときは、全文検索のヒットを `--top-n` 件まで (全キーワードが揃うページを先に、部分一致のページも含めて) `[body-only]` として足す。上位 N 件がどれも部分一致 (`[partial match]`) のときは、全文検索で全キーワードが 1 セクションに揃うページを最大 2 件探して `[body-only]` として足す (既存の行は残り、`Next:` には index の最上位候補の行も残る。全キーワードが揃う候補が Changelog / Release notes だけのときも探す。全キーワードが揃う候補があっても、どの候補もページタイトルと見出しに全キーワードを語として含まなければ、含むページを同じく最大 2 件足す。キーワードが 1 語のときは足さない)。足したページは末尾に追記されるのではなく、`search` の並び順の中に入る (本文ヒットのあるページは本文ヒットの無い index の候補より上に並ぶので、1 位になることが多い。その index の候補は `(no body hits — index match only)` で下位に回る)。
 結果に表示される `[<doc_idx>]` は `content` / `sections` にそのまま渡せる。
 
 ### Step 2: 必要なセクションの本文を取得
@@ -134,13 +134,13 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" fetch-index --compact
 - **整数 index** (推奨): `42` — `search` / `search-index` の結果に表示される `[<doc_idx>]` の数字
 - **タイトル部分一致**: `"Event Callbacks"` — 一意に決まる場合のみ。曖昧な場合はエラーになる
 
-AI SDK の各ページは frontmatter に `url:` を持ち、`sections` / `content` / `search` / `search-content` が表示する (`URL:` 行、`content` では `# source:` 行)。ただし page_ref としては解決しないので、URL / slug 形式は受け付けない (整数 index を使うこと)。`url:` が無いページには行が付かない。
+AI SDK の各ページは frontmatter に `url:` を持ち、`sections` / `content` / `search` / `search-content` が表示する (`URL:` 行、`content` では `# source:` 行)。ただし page_ref としては解決しないので、URL / slug 形式は受け付けない (整数 index を使うこと)。表示された URL を貼ってしまったときは `No document found` で exit 1 になるが、その URL を `url:` に持つページがあれば、そのページを読む `content <index>` (`sections` / `search-content --page-ref` ならそのコマンド) の行を続けて出す。その行をそのまま実行する。持つページが無ければ、URL の最後の段から作った `search` の行を出す。`url:` が無いページには行が付かない。
 
 ## コマンドリファレンス
 
 | コマンド | 引数 | 説明 |
 |---------|------|------|
-| `search` | `<query> [--file F] [--top-n N] [--max-hits N] [--context N] [--max-snippet-chars N] [--include-changelog-priority]` | 推奨入口。title/desc/tags で top N 絞り込み + 本文 hits。並び順は全キーワードが揃うか → ページタイトルと見出し (祖先の見出しを含む) が全キーワードを語として含むか (キーワードが 1 語のときはページの順に使わない) → 本文 hits 数 → index score (changelog / release notes は既定で末尾、`--include-changelog-priority` で解除) |
+| `search` | `<query> [--file F] [--top-n N] [--max-hits N] [--context N] [--max-snippet-chars N] [--include-changelog-priority]` | 推奨入口。title/desc/tags で top N 絞り込み + 本文 hits。並び順は全キーワードが揃うか → ページタイトルと見出し (祖先の見出しを含む) が全キーワードを語として含むか (キーワードが 1 語のときはページの順に使わない) → 本文 hits 数 → index score (changelog / release notes は既定で末尾、`--include-changelog-priority` で解除)。ページ内の節は、見出しが全キーワードを含む節の中で、自分の見出しがあって初めて全語が揃う節を、見出しを受け継ぐだけの子孫より先に出し、その後ヒット数の順 |
 | `search-index` | `<query> [--file F] [--limit N] [--show-sections]` | title/description/tags/見出しで候補だけ取得 |
 | `search-content` | `<query> [--file F] [--page-ref REF] [--limit N] [--context N] [--max-hits N] [--max-snippet-chars N] [--include-changelog-priority]` | 本文を横断キーワード検索、heading_path + スニペットを返す |
 | `fetch-index` | `[--file F] [--compact] [--cache-dir DIR]` | 全ドキュメント一覧を表示（フォールバック用） |

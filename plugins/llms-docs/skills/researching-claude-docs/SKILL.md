@@ -85,8 +85,8 @@ general-purpose の subagent など、Skill ツールを使えない文脈では
 
 | ソース | `--source` | ドキュメント | 規模 |
 |--------|-----------|-------------|------|
-| Claude Code | `code` (デフォルト) | code.claude.com/docs | ~64p / 1.4MB |
-| Claude Developer Platform | `platform` | platform.claude.com/docs | ~699p / 40MB |
+| Claude Code | `code` (デフォルト) | code.claude.com/docs | ~220p / 8.7MB |
+| Claude Developer Platform | `platform` | platform.claude.com/docs | ~634p / 35.7MB |
 
 スクリプトパス: `${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py`
 
@@ -115,7 +115,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" search "<キーワ�
 
 `<キーワード>` は 2〜3 語のスペース区切り（例: `"PostCompact input compact_summary"`）。
 
-出力は `[doc_idx] タイトル` + `URL` + 本文ヒットセクション (heading_path 付きスニペット)。並び順は全キーワードが揃うか → ページタイトルと見出し (祖先の見出しを含む) が全キーワードを語として含むか (キーワードが 1 語のときはページの順に使わない) → 本文 hits 数 → index score (title/description 一致) の順で、Changelog / Release notes は自動で末尾に deprioritize される (`--include-changelog-priority` で解除)。ai-sdk / firebase の `search` も同じ並び順。上位 N 件がどれも部分一致 (`[partial match]`) のときは、全文検索で全キーワードが 1 セクションに揃うページを最大 2 件探して `[body-only]` として追記する (既存の行は残り、`Next:` には index の最上位候補の行も残る。全キーワードが揃う候補が Changelog / Release notes だけのときも探す。全キーワードが揃う候補があっても、どの候補もページタイトルと見出しに全キーワードを語として含まなければ、含むページを同じく最大 2 件足す。キーワードが 1 語のときは足さない)。表示しきれなかった本文ヒットがある場合は `Other sections with hits (not shown):` として heading_path とヒット数の一覧が末尾に表示される。
+出力は `[doc_idx] タイトル` + `URL` + 本文ヒットセクション (heading_path 付きスニペット)。並び順は全キーワードが揃うか → ページタイトルと見出し (祖先の見出しを含む) が全キーワードを語として含むか (キーワードが 1 語のときはページの順に使わない) → 本文 hits 数 → index score (title/description 一致) の順で (ページ内の節は、見出しが全キーワードを含む節の中で、自分の見出しがあって初めて全語が揃う節を、見出しを受け継ぐだけの子孫より先に出し、その後ヒット数の順)、Changelog / Release notes は自動で末尾に deprioritize される (`--include-changelog-priority` で解除)。ai-sdk / firebase の `search` も同じ並び順。index の上位 N 件に本文ヒットが 1 件も無いときは、全文検索のヒットを `--top-n` 件まで (全キーワードが揃うページを先に、部分一致のページも含めて) `[body-only]` として足す。上位 N 件がどれも部分一致 (`[partial match]`) のときは、全文検索で全キーワードが 1 セクションに揃うページを最大 2 件探して `[body-only]` として足す (既存の行は残り、`Next:` には index の最上位候補の行も残る。全キーワードが揃う候補が Changelog / Release notes だけのときも探す。全キーワードが揃う候補があっても、どの候補もページタイトルと見出しに全キーワードを語として含まなければ、含むページを同じく最大 2 件足す。キーワードが 1 語のときは足さない)。足したページは末尾に追記されるのではなく、`search` の並び順の中に入る (本文ヒットのあるページは本文ヒットの無い index の候補より上に並ぶので、1 位になることが多い。その index の候補は `(no body hits — index match only)` で下位に回る)。表示しきれなかった本文ヒットがある場合は `Other sections with hits (not shown):` として heading_path とヒット数の一覧が末尾に表示される。
 
 各 `Section:` 行には `[<URL>#<anchor>]` が付く (末尾見出しタイトルから生成したベストエフォートの Mintlify 互換 slug)。引用元を答えるときはこの URL#anchor をそのまま使ってよい — 同名見出しがページ内に複数ある場合の `-1`/`-2` 連番までは再現しない best-effort である点に注意。見出しタイトル自体に `/` を含む場合 (例: `## CI/CD`) は `ci-cd` にする (ページによっては `/` を残す id があり、一致しない)。
 
@@ -135,7 +135,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content <doc_idx>
 
 `content` は **サブセクション一覧** (`Subsections of '...'`) と次の `content` 呼び出し例を、本文の**前後両方**（metadata header 直後 と 本文末尾）に自動で出力する。長いページで本文が途中で切り詰められても（ターミナル/ツール側の出力上限）前側のヒントは必ず見える。さらに深掘りする際は `sections` を再度呼ばずに、そのまま次の `content` クエリに heading_path を渡せる。出力に含めたくない場合は `--no-subsection-hints` を付ける。
 
-本文が長い場合は既定で 24000 文字に切り詰められ、`... (N chars truncated; narrow with ...)` を出す。子見出しの無い節や見出しの無いページ (絞る先が無い) では代わりに、仮置きの語 (節の見出しかページタイトル) を名指しする注記と `Next: ... search-content --page-ref N --context 0 -- <仮置きの語>` を出す (語は常に `--` の後ろに置くので、`--resume` のような語に差し替えても打てる)。そのまま実行でき、注記の語を探したい語に差し替えて使う。`--max-chars 0` で無制限にできるが、Platform ページ (平均 ~38KB) は Bash tool の出力上限に達しやすいので通常は既定のままにする。
+本文が長い場合は既定で 24000 文字に切り詰められ、`... (N chars truncated; narrow with ...)` を出す。子見出しの無い節や見出しの無いページ (絞る先が無い) では代わりに、仮置きの語 (節の見出しかページタイトル) を名指しする注記と `Next: ... search-content --page-ref N --context 0 -- <仮置きの語>` を出す (語は常に `--` の後ろに置くので、`--resume` のような語に差し替えても打てる)。そのまま実行でき、注記の語を探したい語に差し替えて使う。`--max-chars 0` で無制限にできるが、Platform ページ (平均 ~56KB) は Bash tool の出力上限に達しやすいので通常は既定のままにする。
 
 本文中の Markdown リンク (`[Text](/en/...)` や `[Text](https://code.claude.com/...)`) のうち同 source 内の既知ページを指すものには、自動で `→ [doc_idx N]` のアノテーションが付く。follow-up の `content` で page を切り替える時の手数を減らす。コードフェンス内と Markdown テーブル行は対象外。抑制したい場合は `--no-link-annotations`。
 

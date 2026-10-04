@@ -8,6 +8,7 @@ cache-dir fixtures so no network access is needed.
 """
 
 import os
+import shlex
 import shutil
 import tempfile
 import unittest
@@ -744,6 +745,188 @@ class FrontmatterUrlTest(unittest.TestCase):
         self.assertNotIn("# source:", out)
         out = self._run("search-content", "onFinishUnique")
         self.assertEqual(out.count("URL:"), 1)
+
+
+class UrlPageRefTest(unittest.TestCase):
+    """表示された URL をそのまま page_ref に貼った失敗が、次の一手 (その
+    ページを読む実行できるコマンド) を出す。URL は解決しない (仕様) ので終了コードは 1 のまま。
+
+    fixture の frontmatter は実 corpus (ai-sdk.dev の llms-full.txt) から切り出した形
+    (`url:` は引用符つきで、`/docs/advanced` は他のページの URL の接頭辞)。"""
+
+    SCRIPT = "parse-ai-sdk.py"
+    PRUNE = "https://ai-sdk.dev/docs/reference/ai-sdk-ui/prune-messages"
+    ADVANCED = "https://ai-sdk.dev/docs/advanced"
+    CACHING = "https://ai-sdk.dev/docs/advanced/caching"
+
+    FIXTURE = (
+        "---\n"
+        "title: pruneMessages\n"
+        "description: API Reference for pruneMessages.\n"
+        f'url: "{PRUNE}"\n'
+        "docs_index: /llms.txt\n"
+        "---\n\n"
+        "# pruneMessages\n\n"
+        "## Usage\n"
+        "prunemarker body.\n"
+        "\n"
+        "---\n"
+        "title: Advanced\n"
+        "description: Advanced topics.\n"
+        f'url: "{ADVANCED}"\n'
+        "docs_index: /llms.txt\n"
+        "---\n\n"
+        "# Advanced\n\n"
+        "## Overview\n"
+        "advancedmarker body.\n"
+        "\n"
+        "---\n"
+        "title: Caching\n"
+        "description: Caching responses.\n"
+        f'url: "{CACHING}"\n'
+        "docs_index: /llms.txt\n"
+        "---\n\n"
+        "# Caching\n\n"
+        "## Overview\n"
+        "cachingmarker body.\n"
+    )
+    TITLES = {PRUNE: "pruneMessages", ADVANCED: "Advanced", CACHING: "Caching"}
+    MARKERS = {PRUNE: "prunemarker", ADVANCED: "advancedmarker", CACHING: "cachingmarker"}
+    # (page URL, a way to write it that is not the stored string)
+    VARIANTS = [
+        (PRUNE, PRUNE),
+        (PRUNE, PRUNE + "/"),
+        (PRUNE, PRUNE.replace("https://", "http://")),
+        (PRUNE, PRUNE.replace("https://", "")),
+        (PRUNE, PRUNE + ".md"),
+        (PRUNE, PRUNE + "#usage"),
+        (PRUNE, PRUNE + "?x=1"),
+        (PRUNE, PRUNE.replace("ai-sdk.dev", "AI-SDK.dev")),
+        (ADVANCED, ADVANCED),
+        (CACHING, CACHING),
+    ]
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        _write_fixture(self.tmp, self.FIXTURE)
+        self.full = str(Path(self.tmp, "ai-sdk-llms-full.txt"))
+
+    def run_argv(self, argv):
+        return _loader.run_cli(parse_ai_sdk, argv)
+
+    def corpus_options(self):
+        return ["--cache-dir", self.tmp]
+
+    def failure(self, sub, ref, query="foo"):
+        argv = [self.SCRIPT, sub]
+        argv += [query, "--page-ref", ref] if sub == "search-content" else [ref]
+        code, out, err = self.run_argv(argv + self.corpus_options())
+        self.assertEqual(code, 1, (sub, ref, out, err))
+        self.assertIn(f"No document found for: {ref}", err)
+        return err
+
+    def offered(self, err):
+        return [ln.strip() for ln in err.splitlines()
+                if ln.strip().startswith(self.SCRIPT + " ")]
+
+    def one_offered(self, err):
+        lines = self.offered(err)
+        self.assertEqual(len(lines), 1, err)
+        return lines[0]
+
+    def run_printed(self, line):
+        """The line as a shell splits it, unmodified. It must name the corpus the
+        failing command used (checked first: without it, it reads the default corpus)."""
+        self.assertTrue(line.endswith(" ".join(self.corpus_options())), line)
+        return self.run_argv(shlex.split(line, comments=True))
+
+    def test_url_failure_offers_the_command_for_that_page(self):
+        for sub in ("content", "sections", "search-content"):
+            for page_url, ref in self.VARIANTS:
+                with self.subTest(sub=sub, ref=ref):
+                    err = self.failure(sub, ref, self.MARKERS[page_url])
+                    self.assertIn("integer index", err)
+                    lines = self.offered(err)
+                    self.assertEqual(len(lines), 1, err)
+                    code, out, run_err = self.run_printed(lines[0])
+                    self.assertEqual(code, 0, run_err)
+                    self.assertIn(self.TITLES[page_url], out)
+                    if sub == "search-content":
+                        self.assertIn(self.MARKERS[page_url], out)
+                    # the page it reads is the one that owns the URL (not the
+                    # page whose URL merely starts with it, nor the reverse)
+                    if sub != "search-content":
+                        self.assertIn(page_url, out)
+
+    def test_printed_command_keeps_the_corpus_and_other_options(self):
+        err = self.failure_with(
+            [self.SCRIPT, "content", self.CACHING, "Overview", "--max-chars", "99",
+             *self.corpus_options()])
+        line = self.one_offered(err)
+        self.assertIn("content 2 Overview --max-chars 99 ", line)
+        self.assertTrue(line.endswith(" ".join(self.corpus_options())), line)
+        code, out, run_err = self.run_printed(line)
+        self.assertEqual(code, 0, run_err)
+        self.assertIn("cachingmarker", out)
+
+    def failure_with(self, argv):
+        code, out, err = self.run_argv(argv)
+        self.assertEqual(code, 1, (out, err))
+        return err
+
+    def test_unknown_url_offers_a_search_on_its_slug(self):
+        for ref, query in [
+            ("https://ai-sdk.dev/docs/reference/ai-sdk-ui/prune-message", "prune message"),
+            ("https://ai-sdk.dev/docs/nope-x/y-z/", "y z"),
+            ("https://ai-sdk.dev/docs/caching.md", "caching"),
+        ]:
+            with self.subTest(ref=ref):
+                err = self.failure("content", ref)
+                self.assertIn("No page has this url", err)
+                line = self.one_offered(err)
+                self.assertEqual(shlex.split(line)[1:3], ["search", query])
+                code, out, run_err = self.run_printed(line)
+                self.assertEqual(code, 0, run_err)
+
+    def test_hostile_urls_end_in_the_same_plain_failure(self):
+        # words that are all symbols / escapes / dashes give no search command
+        # and must not crash; a slug starting with "-" never becomes an option
+        for ref in ["https://ai-sdk.dev/docs/---", "https://ai-sdk.dev/docs/\\_",
+                    "https://ai-sdk.dev/docs/-x", "https://ai-sdk.dev/docs/'", "https://",
+                    "https://ai-sdk.dev/docs/the"]:
+            with self.subTest(ref=ref):
+                code, out, err = self.run_argv(
+                    [self.SCRIPT, "content", *self.corpus_options(), "--", ref])
+                self.assertEqual(code, 1, err)
+                self.assertTrue(err.startswith(f"Error: No document found for: {ref}"), err)
+                for line in self.offered(err):
+                    code, out, run_err = self.run_printed(line)
+                    self.assertEqual(code, 0, run_err)
+
+    def test_non_url_failure_is_unchanged(self):
+        code, out, err = self.run_argv(
+            [self.SCRIPT, "content", "zzz-no-such-page", *self.corpus_options()])
+        self.assertEqual((code, err), (1, "Error: No document found for: zzz-no-such-page\n"))
+
+    def test_a_url_is_still_not_resolved(self):
+        # the spec (a URL is for citing): no output from the page is printed
+        code, out, err = self.run_argv(
+            [self.SCRIPT, "content", self.CACHING, *self.corpus_options()])
+        self.assertEqual((code, out), (1, ""))
+
+    def test_a_title_that_is_not_a_url_still_resolves(self):
+        code, out, err = self.run_argv(
+            [self.SCRIPT, "sections", "cach", *self.corpus_options()])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Caching", out)
+
+
+class UrlPageRefFileTest(UrlPageRefTest):
+    """The same with ``--file`` (the printed command keeps ``--file``)."""
+
+    def corpus_options(self):
+        return ["--file", self.full]
 
 
 if __name__ == "__main__":
