@@ -521,9 +521,12 @@ class _Fence:
 
     Differs from ``FenceTracker`` in the opener, which must be indented 0-3
     spaces and, for backticks, carry no backtick in its info string (inline
-    code), and in having no MDX comment rule (``FenceTracker`` closes on a
-    run followed by ``*/}`` when the ``{/*`` comment opened outside any
-    block, and never opens on one).
+    code), and in having no MDX comment or blockquote rule (``FenceTracker``
+    closes on a run followed by ``*/}`` when the ``{/*`` comment opened
+    outside any block, closes a block opened inside a comment when the
+    comment ends, and reads fences behind ``>`` markers). ``split_line``
+    does not need them: a delimiter inside a fence that never closes before
+    the next delimiter is taken as a boundary anyway.
     """
 
     def __init__(self):

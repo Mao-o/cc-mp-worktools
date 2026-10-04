@@ -32,6 +32,10 @@ import zlib
 # Core: code-fence scanner
 # ---------------------------------------------------------------------------
 
+# leading blockquote markers (``>``, ``> >``), each with one optional space
+_QUOTE_MARKERS_RE = re.compile(r"^(?: {0,3}> ?)+")
+
+
 class FenceTracker:
     """Tracks whether the current line is inside a fenced code block.
 
@@ -61,6 +65,22 @@ class FenceTracker:
       would hide the text that follows. A ``{/*`` inside a code block is
       content (a page showing how to write a comment), and so is the
       ```` ``` */} ```` after it: that block closes at a bare closer.
+      A block opened inside such a comment also closes at a line holding
+      ``*/}`` with no ``/*`` before it on that line, run or not: MDX never
+      renders the comment, so a closer lost inside it (Zod closes one with
+      two backticks) must not leave the block open past the comment and hide
+      the next page's H1. A ``/* ... */}`` on one line is a comment written
+      in the code and stays content.
+    - Blockquote markers (``>``, each with one optional space) come off
+      before a line is tested as a fence, both outside a block and inside a
+      block that opened on a quoted line, so a fence line behind ``>`` opens
+      a block and an unquoted ```` ``` ```` may close it (Render opens a block inside a
+      note and closes it outside). Inside a block opened unquoted, a quoted
+      line stays content: a Markdown example of a quoted code block must not
+      close the block that shows it. A block opened on a quoted line also
+      closes at a truly blank line (no ``>``): the blank line ends the
+      quote, so a closer the quote never got must not keep the block open
+      past it.
 
     One narrow guard for the indentation departure: a bare run (no info
     string) indented 4+ spaces opens a block only once the next non-blank
@@ -79,21 +99,51 @@ class FenceTracker:
         self._fence_len = 0
         self._fence_char = ""
         self._in_mdx_comment = False  # a ``{/*`` seen outside a fence, not yet closed
-        self._pending = None  # (indent, run, char) of a bare 4+-indented opener not yet confirmed
+        self._pending = None  # (indent, run, char, quoted) of a bare 4+-indented opener not yet confirmed
+        self._opened_in_comment = False  # the open block began inside an MDX comment
+        self._opened_quoted = False  # the open block began on a blockquote line
+
+    def _open(self, run: int, ch: str, quoted: bool) -> None:
+        self.in_fence = True
+        self._fence_len = run
+        self._fence_char = ch
+        self._opened_in_comment = self._in_mdx_comment
+        self._opened_quoted = quoted
+
+    def _close(self) -> None:
+        self.in_fence = False
+        self._fence_len = 0
+        self._fence_char = ""
+        self._opened_in_comment = False
+        self._opened_quoted = False
 
     def update(self, line: str) -> bool:
         """Update state for *line* and return True if inside a fence AFTER update."""
+        # Blockquote markers come off before the fence test whenever a block
+        # could open or close here: outside any block, or inside one that
+        # opened on a quoted line. Inside a block opened unquoted, a quoted
+        # line is content (a Markdown example of a quoted code block).
+        text = line
+        quoted = False
+        if not self.in_fence or self._opened_quoted:
+            m = _QUOTE_MARKERS_RE.match(line)
+            if m:
+                text = line[m.end():]
+                quoted = True
+        if self.in_fence and self._opened_quoted and not line.strip():
+            # a truly blank line (no ``>``) ends the blockquote, and with it
+            # a block opened inside the quote whose closer never came
+            self._close()
+            return False
         if self._pending is not None:
-            if not line.strip():
+            if not text.strip():
                 return self.in_fence
-            (indent, run, ch), self._pending = self._pending, None
-            if len(line) - len(line.lstrip(" ")) >= indent:
+            (indent, run, ch, was_quoted), self._pending = self._pending, None
+            if len(text) - len(text.lstrip(" ")) >= indent:
                 # content at the opener's depth: the block did open
-                self.in_fence = True
-                self._fence_len = run
-                self._fence_char = ch
+                self._open(run, ch, was_quoted)
             # else: a stray closer, nothing opened; read this line afresh
-        stripped = line.lstrip()
+        stripped = text.lstrip()
         for ch in ("`", "~"):
             if stripped.startswith(ch * 3):
                 run = len(stripped) - len(stripped.lstrip(ch))
@@ -103,29 +153,33 @@ class FenceTracker:
                     if mdx_comment_end:
                         self._in_mdx_comment = False
                     else:
-                        indent = len(line) - len(line.lstrip(" "))
+                        indent = len(text) - len(text.lstrip(" "))
                         if not after and indent >= 4:
-                            self._pending = (indent, run, ch)
+                            self._pending = (indent, run, ch, quoted)
                         else:
-                            self.in_fence = True
-                            self._fence_len = run
-                            self._fence_char = ch
+                            self._open(run, ch, quoted)
                 elif (ch == self._fence_char and run >= self._fence_len
                         and (not after or (mdx_comment_end and self._in_mdx_comment))):
-                    self.in_fence = False
-                    self._fence_len = 0
-                    self._fence_char = ""
+                    self._close()
                     if mdx_comment_end:
                         self._in_mdx_comment = False
                 break
         else:
-            # not a fence line: track an MDX comment opened outside any block
             if not self.in_fence:
+                # not a fence line: track an MDX comment opened outside any block
                 start = line.rfind("{/*")
                 if start >= 0 and "*/}" not in line[start:]:
                     self._in_mdx_comment = True
                 elif "*/}" in line:
                     self._in_mdx_comment = False
+            elif (self._opened_in_comment and "*/}" in line
+                    and "/*" not in line[:line.find("*/}")]):
+                # the comment ends, and with it a block opened inside it
+                # whose closer was lost (MDX never renders the comment).
+                # A ``*/}`` with its own ``/*`` earlier on the line is a
+                # comment written inside the code, not the comment's end.
+                self._close()
+                self._in_mdx_comment = False
         return self.in_fence
 
 
