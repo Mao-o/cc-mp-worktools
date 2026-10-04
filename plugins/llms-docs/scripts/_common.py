@@ -1102,7 +1102,7 @@ def query_terms(query: str) -> list[str]:
             seen.add(low)
             tokens.append(tok)
     content = [t for t in tokens
-               if t.lower() not in QUERY_STOPWORDS or (len(t) > 1 and t.isupper())]
+               if t.lower() not in QUERY_STOPWORDS or (len(t) > 1 and t.isupper() and t.lower() not in {"and", "or"})]
     return content or tokens
 
 

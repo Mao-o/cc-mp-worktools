@@ -60,6 +60,9 @@ class QueryTermsTest(unittest.TestCase):
     def test_an_abbreviation_in_capitals_is_kept(self):
         # "DO" is Durable Objects, not the function word "do"
         self.assertEqual(_common.query_terms("DO alarm"), ["DO", "alarm"])
+        # an operator in capitals is still a function word, not an abbreviation
+        self.assertEqual(_common.query_terms("hooks OR skills"), ["hooks", "skills"])
+        self.assertEqual(_common.query_terms("PreToolUse AND matcher"), ["PreToolUse", "matcher"])
         self.assertEqual(_common.query_terms("do alarm"), ["alarm"])
         # one capital letter is still the article
         self.assertEqual(_common.query_terms("A alarm"), ["alarm"])

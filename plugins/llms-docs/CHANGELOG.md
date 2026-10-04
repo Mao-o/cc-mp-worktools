@@ -23,7 +23,7 @@ All notable changes to this plugin will be documented here.
   API 名 1 語の `search` (`streamText` / `generateText` / `useChat` / `convertToModelMessages` /
   `createUIMessageStream` / `useCompletion`) は、1 本目の `Next:` が 0.31.0 と同じページを指す
 - `the` / `in` / `when` / `how` などの機能語 (小さく固定した一覧) を、index の点数と本文の照合の両方から外す。
-  クエリが機能語だけのときと、`DO` のように大文字で書いた 2 文字以上の語 (略語) は外さない。外した語は、
+  クエリが機能語だけのときと、`DO` のように大文字で書いた 2 文字以上の語 (略語) は外さない (`AND` / `OR` は大文字でも外す)。外した語は、
   0 件のときの「Why nothing matched」に加えて、ヒットがあるときも `Next:` の前に
   `(not searched, too common: ...)` と 1 行出す。同じ語の重複も 1 つにまとめる
 - `search` の全文の追加探索は、全キーワードが揃う候補があっても、どの候補もタイトルと見出しに全キーワードを
