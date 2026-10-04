@@ -134,7 +134,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" fetch-index --compact
 - **整数 index** (推奨): `42` — `search` / `search-index` の結果に表示される `[<doc_idx>]` の数字
 - **タイトル部分一致**: `"Event Callbacks"` — 一意に決まる場合のみ。曖昧な場合はエラーになる
 
-AI SDK の各ページは frontmatter に `url:` を持ち、`sections` / `content` / `search` / `search-content` が表示する (`URL:` 行、`content` では `# source:` 行)。ただし page_ref としては解決しないので、URL / slug 形式は受け付けない (整数 index を使うこと)。表示された URL を貼ってしまったときは `No document found` で exit 1 になるが、その URL を `url:` に持つページがあれば、そのページを読む `content <index>` (`sections` / `search-content --page-ref` ならそのコマンド) の行を続けて出す。その行をそのまま実行する。持つページが無ければ、URL の最後の段から作った `search` の行を出す。URL の最後の段だけ (`prune-messages` など) を渡したときも同様で、その最後の段を持つページのコマンドを出す。`url:` が無いページには行が付かない。
+AI SDK の各ページは frontmatter に `url:` を持ち、`sections` / `content` / `search` / `search-content` が表示する (`URL:` 行、`content` では `# source:` 行)。ただし page_ref としては解決しないので、URL / slug 形式は受け付けない (整数 index を使うこと)。表示された URL を貼ってしまったときは `No document found` で exit 1 になるが、その URL を `url:` に持つページがあれば、そのページを読む `content <index>` (`sections` / `search-content --page-ref` ならそのコマンド) の行を続けて出す。その行をそのまま実行する。持つページが無ければ、URL の最後の段から作った `search` の行を出す。URL の最後の段だけ (`prune-messages` など) を渡し、どのページのタイトルにも一致しなかったときも同様で、その最後の段を持つページのコマンドを出す。最後の段がタイトルの一部にも当たるとタイトルの一致が先に効き、そのページがそのまま開く (同じ最後の段を持つ別ページがあっても出ない。例 `acp`)。開いたページの `URL:` 行が目的のページかを確かめる。`url:` が無いページには行が付かない。
 
 ## コマンドリファレンス
 

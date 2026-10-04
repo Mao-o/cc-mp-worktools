@@ -947,7 +947,7 @@ class UrlPageRefTest(unittest.TestCase):
                     code, out, run_err = self.run_printed(line)
                     self.assertEqual(code, 0, run_err)
 
-    def test_non_url_failure_is_unchanged(self):
+    def test_non_url_non_slug_failure_is_unchanged(self):
         code, out, err = self.run_argv(
             [self.SCRIPT, "content", "zzz no such page", *self.corpus_options()])
         self.assertEqual((code, err), (1, "Error: No document found for: zzz no such page\n"))
@@ -1028,6 +1028,11 @@ class SlugPageRefTest(unittest.TestCase):
         at = argv.index("--") if "--" in argv else len(argv)
         argv[at:at] = self.corpus_options()
         return self.failure_with([self.SCRIPT, *argv])
+
+    def test_a_suffix_of_a_last_segment_is_not_a_match(self):
+        # "ools-basics" ends "tools-basics" but is not that last segment
+        err = self.fail("content", "ools-basics")
+        self.assertIn("No page has a url ending in /ools-basics", err)
 
     def test_slug_offers_the_command_for_the_page_with_that_last_segment(self):
         for sub in ("content", "sections"):
