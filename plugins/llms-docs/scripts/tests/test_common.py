@@ -678,7 +678,8 @@ class HeadingAnchorSlugTest(unittest.TestCase):
 
     def test_backslash_escaped_underscore_is_the_underscore(self):
         """Markdown の `\\_` は `_` として表示される。バックスラッシュ を記号として
-        ハイフンにしない。"""
+        ハイフンにしない。これは best-effort で、`\\_` を `-` にする id のページもある
+        (その形には寄せていない)。"""
         self.assertEqual(_common.heading_anchor_slug(r"subagent\_type is required"),
                          "subagent_type-is-required")
         self.assertEqual(_common.heading_anchor_slug(r"REVIEW\.md"), "review-md")
@@ -901,11 +902,25 @@ class SnippetBudgetTest(unittest.TestCase):
         self.assertEqual(self._snippet(body, "needleword"),
                          "  ## S\n  before\n→ needleword\n  after")
 
-    def test_hit_lines_over_the_budget_are_cut_from_the_end(self):
-        body = ["## S\n", "needleword " + "x" * 600 + "\n"]
+    def test_hit_lines_over_the_budget_each_keep_a_share(self):
+        """一致行だけで予算を超えるときは、末尾から切ると後ろの一致行が消える。
+        予算を一致行の数で割り、各行をその字数 (80 字未満にはしない) で … 付きに切る。"""
+        body = ["## S\n"] + [f"needleword {i} " + "x" * 600 + "\n" for i in range(3)]
         snippet = self._snippet(body, "needleword")
-        self.assertIn("→ needleword", snippet)
-        self.assertIn("chars truncated", snippet)
+        hit_lines = [ln for ln in snippet.splitlines() if ln.startswith("→ ")]
+        self.assertEqual([ln[:14] for ln in hit_lines],
+                         ["→ needleword 0", "→ needleword 1", "→ needleword 2"])
+        for ln in hit_lines:
+            self.assertEqual(len(ln), 500 // 3 + 1)
+            self.assertTrue(ln.endswith("x…"), ln)
+
+    def test_hit_lines_are_not_cut_below_80_chars(self):
+        body = ["## S\n"] + [f"needleword {i} " + "x" * 300 + "\n" for i in range(3)]
+        result = _common.search_content_in_body(body, "needleword", max_snippet_chars=120)
+        hit_lines = [ln for ln in result["results"][0]["snippet"].splitlines()
+                     if ln.startswith("→ ")]
+        self.assertEqual(len(hit_lines), 3)
+        self.assertEqual({len(ln) for ln in hit_lines}, {81})
 
     def test_more_hits_note_is_kept(self):
         body = ["## S\n"] + [f"needleword {i}\n" for i in range(5)]

@@ -974,7 +974,7 @@ class ContentMaxCharsTruncationTest(unittest.TestCase):
             "0123456789 0123456789 0123456789 0123456789 0123456789\n",
         )
 
-    def test_content_longer_than_max_chars_is_truncated_with_narrow_hint(self):
+    def test_content_longer_than_max_chars_points_at_search_in_page(self):
         code, out, err = _loader.run_cli(parse_claude_docs, [
             "parse-claude-docs.py", "content", "0",
             "--cache-dir", self.tmp, "--max-chars", "20",

@@ -102,7 +102,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" content <page_ref> "<h
   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py"` に置き換える。`--source` などは `Next:` が引き継いでいる)
 - 同じ論点で `search` を **3 回外したら**、言い換えを続けない。`search-index` / `sections` で構造から当たるか、
   「ドキュメントに記載なし」として返す
-- **`--max-chars 0`** は、出力に `... (N chars truncated; narrow with ...)` が出て、既定の上限 (24000 字) で
+- **`--max-chars 0`** は、出力に `... (N chars truncated; ...)` が出て、既定の上限 (24000 字) で
   切れたと確かめてからだけ使う。`| head` / `| grep` で出力を切らず、`--max-chars` と `sections` で絞る
   (パイプで切ると末尾の `Next:` が見えなくなる)
 - この Skill の実行中 (fork の中) では、同じ Skill をもう呼ばない (`already executing in this forked
@@ -137,7 +137,8 @@ general-purpose の subagent など、Skill ツールを使えない文脈では
   上位 N 件がどれも部分一致 (`[partial match]`) のときは、全文検索で全キーワードが 1 セクションに揃うページを最大 2 件探して `[body-only]` として追記する (既存の行は残り、`Next:` には index の最上位候補の行も残る。全キーワードが揃う候補が Changelog / Release notes だけのときも探す。全キーワードが揃う候補があっても、どの候補もページタイトルと見出しに全キーワードを語として含まなければ、含むページを同じく最大 2 件足す。キーワードが 1 語のときは足さない)
 - `content`: `heading_path` を省略するとページ全体。本文は既定 24000 文字で切り詰め、
   前後にサブセクション一覧と次の呼び出し例を出す。子見出しの無い節が切り詰められたときは、
-  代わりに `Next: ... search-content <節の見出し> --page-ref N --context 0` を出す (keyword を差し替えて使う)
+  代わりに `Next: ... search-content <節の見出し> --page-ref N --context 0` を出す (注記が名指しする仮置きの語を差し替えて使う。
+  語が `-` で始まるときは `--` の後ろに置く)
 - 見つからないときは、同じ論点で `search` を 3 回まで試し (言い換えより `search-index` / `sections`)、
   それでも無ければ `fetch-index --compact --source <name>` で一覧を見るか「ドキュメントに記載なし」として返す
 

@@ -646,7 +646,7 @@ class SkillGuidanceTest(unittest.TestCase):
             "## 調査の進め方 (手数の目安)",
             "**`search` 1 回 → `content` 1〜2 回**",
             "同じ論点で `search` を **3 回外したら**",
-            "**`--max-chars 0`** は、出力に `... (N chars truncated; narrow with ...)` が出て",
+            "**`--max-chars 0`** は、出力に `... (N chars truncated; ...)` が出て",
             "`| head` / `| grep` で出力を切らず",
             "`already executing in this forked",
             "## Skill を呼べない文脈 (subagent など)",

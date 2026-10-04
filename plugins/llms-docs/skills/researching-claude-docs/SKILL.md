@@ -64,7 +64,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content <doc_idx> "
   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py"` に置き換える)
 - 同じ論点で `search` を **3 回外したら**、言い換えを続けない。`search-index` / `sections` で構造から当たるか、
   「ドキュメントに記載なし」として返す
-- **`--max-chars 0`** は、出力に `... (N chars truncated; narrow with ...)` が出て、既定の上限 (24000 字) で
+- **`--max-chars 0`** は、出力に `... (N chars truncated; ...)` が出て、既定の上限 (24000 字) で
   切れたと確かめてからだけ使う。`| head` / `| grep` で出力を切らず、`--max-chars` と `sections` で絞る
   (パイプで切ると末尾の `Next:` が見えなくなる)
 - この Skill の実行中 (fork の中) では、同じ Skill をもう呼ばない (`already executing in this forked
@@ -117,7 +117,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" search "<キーワ�
 
 出力は `[doc_idx] タイトル` + `URL` + 本文ヒットセクション (heading_path 付きスニペット)。並び順は全キーワードが揃うか → ページタイトルと見出し (祖先の見出しを含む) が全キーワードを語として含むか (キーワードが 1 語のときはページの順に使わない) → 本文 hits 数 → index score (title/description 一致) の順で、Changelog / Release notes は自動で末尾に deprioritize される (`--include-changelog-priority` で解除)。ai-sdk / firebase の `search` も同じ並び順。上位 N 件がどれも部分一致 (`[partial match]`) のときは、全文検索で全キーワードが 1 セクションに揃うページを最大 2 件探して `[body-only]` として追記する (既存の行は残り、`Next:` には index の最上位候補の行も残る。全キーワードが揃う候補が Changelog / Release notes だけのときも探す。全キーワードが揃う候補があっても、どの候補もページタイトルと見出しに全キーワードを語として含まなければ、含むページを同じく最大 2 件足す。キーワードが 1 語のときは足さない)。表示しきれなかった本文ヒットがある場合は `Other sections with hits (not shown):` として heading_path とヒット数の一覧が末尾に表示される。
 
-各 `Section:` 行には `[<URL>#<anchor>]` が付く (末尾見出しタイトルから生成したベストエフォートの GitHub/Mintlify 互換 slug)。引用元を答えるときはこの URL#anchor をそのまま使ってよい — 同名見出しがページ内に複数ある場合の `-1`/`-2` 連番までは再現しない best-effort である点に注意。見出しタイトル自体に `/` を含む場合 (例: `## CI/CD`) も正しく slug 化される。
+各 `Section:` 行には `[<URL>#<anchor>]` が付く (末尾見出しタイトルから生成したベストエフォートの Mintlify 互換 slug)。引用元を答えるときはこの URL#anchor をそのまま使ってよい — 同名見出しがページ内に複数ある場合の `-1`/`-2` 連番までは再現しない best-effort である点に注意。見出しタイトル自体に `/` を含む場合 (例: `## CI/CD`) は `ci-cd` にする (ページによっては `/` を残す id があり、一致しない)。
 
 **anchor の正規化範囲 (これ以外は best-effort)**: slug は見出しのレンダリング後テキストから作る。英数字と `_` 以外の記号の連続は 1 つの `-` にする (`loop.md` は `loop-md`、`/security-review` は `security-review`)。アポストロフィは削る (`Can't` は `cant`)。正規化するのは インライン / 参照形式リンク (`[text](url)` / `[text][ref]`)・画像 (alt を採用)・脚注マーカー・HTML タグ・HTML 実体参照・コードスパン (中身は逐語)・`*` `~` と単語境界の `_` 強調記号。同名見出しの連番、ページ側の独自 ID 指定、上記以外の記法は再現しない。anchor が解決しない場合は URL 本体 (`#` の前) でページを開き、見出しを目視で探す。
 
@@ -135,7 +135,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content <doc_idx>
 
 `content` は **サブセクション一覧** (`Subsections of '...'`) と次の `content` 呼び出し例を、本文の**前後両方**（metadata header 直後 と 本文末尾）に自動で出力する。長いページで本文が途中で切り詰められても（ターミナル/ツール側の出力上限）前側のヒントは必ず見える。さらに深掘りする際は `sections` を再度呼ばずに、そのまま次の `content` クエリに heading_path を渡せる。出力に含めたくない場合は `--no-subsection-hints` を付ける。
 
-本文が長い場合は既定で 24000 文字に切り詰められ、`... (N chars truncated; narrow with ...)` を出す。子見出しの無い節 (絞る先が無い) では代わりに `Next: ... search-content <節の見出し> --page-ref N --context 0` を出す。そのまま実行でき、keyword を探したい語に差し替えて使う。`--max-chars 0` で無制限にできるが、Platform ページ (平均 ~38KB) は Bash tool の出力上限に達しやすいので通常は既定のままにする。
+本文が長い場合は既定で 24000 文字に切り詰められ、`... (N chars truncated; narrow with ...)` を出す。子見出しの無い節や見出しの無いページ (絞る先が無い) では代わりに、仮置きの語 (節の見出しかページタイトル) を名指しする注記と `Next: ... search-content <仮置きの語> --page-ref N --context 0` を出す (語が `-` で始まるときは、オプションの後に `--` を挟んで語を最後に置く)。そのまま実行でき、注記の語を探したい語に差し替えて使う。`--max-chars 0` で無制限にできるが、Platform ページ (平均 ~38KB) は Bash tool の出力上限に達しやすいので通常は既定のままにする。
 
 本文中の Markdown リンク (`[Text](/en/...)` や `[Text](https://code.claude.com/...)`) のうち同 source 内の既知ページを指すものには、自動で `→ [doc_idx N]` のアノテーションが付く。follow-up の `content` で page を切り替える時の手数を減らす。コードフェンス内と Markdown テーブル行は対象外。抑制したい場合は `--no-link-annotations`。
 

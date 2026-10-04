@@ -344,7 +344,7 @@ class SearchContentMaxSnippetCharsTest(unittest.TestCase):
             "--cache-dir", self.tmp,
         ])
         self.assertEqual(code, 0, err)
-        self.assertNotIn("chars truncated", out)
+        self.assertNotIn("…", out)
         self.assertIn("end of line", out)
 
     def test_max_snippet_chars_truncates_a_long_snippet(self):
@@ -353,7 +353,8 @@ class SearchContentMaxSnippetCharsTest(unittest.TestCase):
             "--cache-dir", self.tmp, "--max-snippet-chars", "20",
         ])
         self.assertEqual(code, 0, err)
-        self.assertIn("chars truncated", out)
+        # 一致行だけで予算を超えるときは、一致行を (80 字未満には切らずに) … 付きで切る
+        self.assertIn("→ keywordhit " + "x" * 67 + "…", out)
         self.assertNotIn("end of line", out)
 
 

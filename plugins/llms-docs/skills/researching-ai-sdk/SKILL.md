@@ -50,7 +50,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" content <doc_idx> "<head
   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py"` に置き換える)
 - 同じ論点で `search` を **3 回外したら**、言い換えを続けない。`search-index` / `sections` で構造から当たるか、
   「ドキュメントに記載なし」として返す
-- **`--max-chars 0`** は、出力に `... (N chars truncated; narrow with ...)` が出て、既定の上限 (24000 字) で
+- **`--max-chars 0`** は、出力に `... (N chars truncated; ...)` が出て、既定の上限 (24000 字) で
   切れたと確かめてからだけ使う。`| head` / `| grep` で出力を切らず、`--max-chars` と `sections` で絞る
   (パイプで切ると末尾の `Next:` が見えなくなる)
 - この Skill の実行中 (fork の中) では、同じ Skill をもう呼ばない (`already executing in this forked
@@ -103,7 +103,7 @@ title / description / tags / 見出しでスコアリングして上位 5 件（
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" content <page_ref> "<heading_path>"
 ```
 
-`heading_path` を省略するとドキュメント全体を取得。**サブセクション一覧**と次の `content` 呼び出し例を、本文の前後両方（metadata header 直後 と 末尾）に自動出力する（`--no-subsection-hints` で抑制可）。本文は既定 24000 文字で切り詰められ (`--max-chars 0` で無制限)、超過時は `... (N chars truncated; narrow with ...)` を出す。子見出しの無い節 (絞る先が無い) では代わりに `Next: ... search-content <節の見出し> --page-ref N --context 0` を出す。そのまま実行でき、keyword を探したい語に差し替えて使う。
+`heading_path` を省略するとドキュメント全体を取得。**サブセクション一覧**と次の `content` 呼び出し例を、本文の前後両方（metadata header 直後 と 末尾）に自動出力する（`--no-subsection-hints` で抑制可）。本文は既定 24000 文字で切り詰められ (`--max-chars 0` で無制限)、超過時は `... (N chars truncated; narrow with ...)` を出す。子見出しの無い節や見出しの無いページ (絞る先が無い) では代わりに、仮置きの語 (節の見出しかページタイトル) を名指しする注記と `Next: ... search-content <仮置きの語> --page-ref N --context 0` を出す (語が `-` で始まるときは、オプションの後に `--` を挟んで語を最後に置く)。そのまま実行でき、注記の語を探したい語に差し替えて使う。
 
 ### 補助: セクション一覧を確認したいとき
 
