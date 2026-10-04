@@ -40,6 +40,27 @@ SANDBOX_BODY = (
     "### Network access\n"
     "Allow sandbox network hosts.\n"
 )
+# Cut from the real Claude Code docs (the "Hooks reference" page): the
+# headings and the lines that hold a keyword of "Run hooks in the
+# background". Every child inherits the heading match from the parent, and
+# two of them have more hit lines than the parent.
+RUN_IN_BACKGROUND_BODY = "\n".join([
+    "## Run hooks in the background",
+    "By default, hooks block Claude's execution until they complete. For long-running tasks like deployments, test suites, or external API calls, set `\"async\": true` to run the hook in the background while Claude continues working.",
+    "### Configure an async hook",
+    "Add `\"async\": true` to a command hook's configuration to run it in the background without blocking Claude. This field is only available on `type: \"command\"` hooks.",
+    "This hook runs a test script after every `Write` tool call. Claude continues working immediately while `run-tests.sh` executes. When the script finishes, its output is delivered on the next conversation turn:",
+    "Once an async hook is running in the background, Claude Code doesn't enforce `timeout` on it. Claude Code still enforces `timeout` on a hook you run with `asyncRewake`.",
+    "Claude Code delivers an async hook's results only while the session runs:",
+    "* In [non-interactive mode](/docs/en/headless) with the `-p` flag, Claude Code kills any async hook still running at teardown and finalizes it with outcome `cancelled`",
+    "### How async hooks execute",
+    "After the background process exits, Claude Code delivers the `additionalContext` and `systemMessage` fields from the hook's JSON response to Claude on the next conversation turn.",
+    "### Run tests after file changes",
+    "This hook starts a test suite in the background whenever Claude writes a file, then reports the results back to Claude when the tests finish. Save this script to `.claude/hooks/run-tests-async.sh` in your project and make it executable with `chmod +x`:",
+    "Then add this configuration to `.claude/settings.json` in your project root. The `async: true` flag lets Claude keep working while tests run:",
+    "### Limitations",
+    "* Each execution creates a separate background process. There is no deduplication across multiple firings of the same async hook.",
+]) + "\n"
 
 
 def _hits(body: str, query: str, **kw) -> dict:
@@ -148,6 +169,34 @@ class SectionRankTest(unittest.TestCase):
         hits = _hits(body, "hook process inherits environment")
         self.assertEqual(hits["results"][0]["heading_path"], "Wrapper scripts")
         self.assertEqual(hits["best_fit"], 1)
+
+    def test_the_section_whose_own_heading_matches_beats_its_descendants(self):
+        # The child holds every keyword on more lines, but only inherits the
+        # heading match from its parent.
+        body = ("## Explicit cache breakpoints\n"
+                "Set a breakpoint.\n"
+                "### Child\n"
+                + "explicit cache breakpoints here\n" * 3)
+        hits = _hits(body, "explicit cache breakpoints", page_title="Hooks reference")
+        self.assertEqual(hits["results"][0]["heading_path"], "Explicit cache breakpoints")
+        self.assertEqual([r["heading_own"] for r in hits["results"]], [True, False])
+        self.assertEqual(hits["best_fit"], 0)
+
+    def test_a_real_page_puts_the_heading_typed_as_a_query_first(self):
+        hits = _hits(RUN_IN_BACKGROUND_BODY, "Run hooks in the background",
+                     page_title="Hooks reference")
+        self.assertEqual(hits["results"][0]["heading_path"], "Run hooks in the background")
+        # the descendants still follow by hit count
+        self.assertEqual(hits["results"][1]["heading_path"],
+                         "Run hooks in the background/Configure an async hook")
+
+    def test_a_title_naming_every_keyword_leaves_the_hit_count_to_decide(self):
+        body = ("## Stream options\nstream options\n"
+                "## Other\n" + "stream options\n" * 3)
+        hits = _hits(body, "stream options", page_title="Stream options")
+        # the section headed "Stream options" adds nothing to the title
+        self.assertEqual([r["heading_own"] for r in hits["results"]], [False, False])
+        self.assertEqual(hits["results"][0]["heading_path"], "Other")
 
     def test_one_keyword_orders_sections_but_not_pages(self):
         body = "## Intro\nuseChat a\nuseChat b\n## `useChat` changes\nuseChat c\n"

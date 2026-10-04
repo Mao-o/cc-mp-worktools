@@ -310,17 +310,19 @@ class SkippedLevelChildrenTest(unittest.TestCase):
 
 class AdversarialHeadingRoundTripTest(unittest.TestCase):
     """案内の keyword は見出しから作る。見出しが ``-`` で始まる、``\\_`` の
-    エスケープを含む、機能語だけ、記号だけのときも、出力された行を加工せずに
-    実行でき、その節に届く。注記は仮置きの語を名指しする。"""
+    エスケープを含む、機能語だけ、記号だけ、アポストロフィを含むときも、出力
+    された行を加工せずに実行でき、その節に届く。注記は仮置きの語を名指しし、
+    クォートが要る語は案内の行と同じ shell の語で書く。"""
 
-    # (見出し, 案内に入る keyword)
+    # (見出し, 案内に入る keyword, 注記に出る語)
     CASES = [
-        ("--bg", "--bg"),
-        ("--help", "--help"),
-        ("--persist", "--persist"),
-        ("max\\_tokens", "max\\_tokens"),
-        ("How to", "how to"),
-        ("()", "()"),
+        ("--bg", "--bg", "'--bg'"),
+        ("--help", "--help", "'--help'"),
+        ("--persist", "--persist", "'--persist'"),
+        ("max\\_tokens", "max\\_tokens", "'max\\_tokens'"),
+        ("How to", "how to", "'how to'"),
+        ("()", "()", "'()'"),
+        ("Don't ask mode", "don't ask mode", "'don'\"'\"'t ask mode'"),
     ]
 
     def write_corpus(self, tmp, heading):
@@ -335,7 +337,7 @@ class AdversarialHeadingRoundTripTest(unittest.TestCase):
         return full
 
     def test_next_line_runs_as_printed_and_reaches_the_section(self):
-        for heading, keyword in self.CASES:
+        for heading, keyword, note_word in self.CASES:
             tmp = tempfile.mkdtemp()
             self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
             full = self.write_corpus(tmp, heading)
@@ -348,13 +350,18 @@ class AdversarialHeadingRoundTripTest(unittest.TestCase):
                         "parse-claude-docs.py", "content", *corpus,
                         "--max-chars", "3000", "--", "0", heading])
                     self.assertEqual(code, 0, err)
-                    self.assertIn(f"run the command below with '{keyword}' "
+                    self.assertIn(f"run the command below with {note_word} "
                                   f"(the section heading, a stand-in) replaced by", out)
                     nexts = [ln[len("Next: "):] for ln in out.splitlines()
                              if ln.startswith("Next: ")]
                     self.assertEqual(len(nexts), 1, out)
                     argv = shlex.split(nexts[0], comments=True)
                     self.assertEqual(argv[-2:], ["--", keyword], nexts[0])
+                    # the note's word is that shell word, and a word that
+                    # needs quoting reads the same in the note and the line
+                    self.assertEqual(shlex.split(note_word), [keyword])
+                    if "'" in keyword:
+                        self.assertTrue(nexts[0].endswith(" -- " + note_word), nexts[0])
                     code, got, err = _loader.run_cli(claude, argv)
                     self.assertEqual(code, 0, err)
                     self.assertIn("[0] Env vars", got)

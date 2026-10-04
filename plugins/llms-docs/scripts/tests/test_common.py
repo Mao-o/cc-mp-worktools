@@ -862,6 +862,35 @@ class SectionUrlAnchorTest(unittest.TestCase):
         )
 
 
+ADD_DIR_ROW = (
+    "| `/add-dir <path>` | Add a working directory for file access during the current session. "
+    "Type a partial path to see matching directory suggestions; press `Tab` to accept one. "
+    "Most `.claude/` configuration [isn't discovered](/docs/en/permissions#additional-directories-"
+    "grant-file-access-not-configuration) from the added directory. You can't add most "
+    "[network paths](/docs/en/errors#working-directory-is-a-network-path), such as "
+    "`\\\\server\\share`. After a successful add, your [`DirectoryAdded` hooks]"
+    "(/docs/en/hooks#directoryadded) run. When you run it while Claude is responding, Claude Code "
+    "asks you to confirm the directory right away, and once you confirm, Claude's next tool call "
+    "in the same turn can access it. Before v2.1.234, Claude Code queued the command until the "
+    "turn finished |")
+BATCH_ROW = (
+    "| `/batch <instruction>` | **[Skill](/docs/en/skills#bundled-skills).** Orchestrate "
+    "large-scale changes across a codebase in parallel. Researches the codebase, decomposes the "
+    "work into 5 to 30 independent units, and presents a plan. Once approved, spawns one "
+    "[background subagent](/docs/en/sub-agents#run-subagents-in-foreground-or-background) per "
+    "unit in an isolated [worktree](/docs/en/worktrees). Each subagent implements its unit, runs "
+    "tests, and publishes its change. Requires a git repository or a [`WorktreeCreate` hook]"
+    "(/docs/en/worktrees#non-git-version-control) that creates the worktrees. Outside a git "
+    "repository, `/batch` requires Claude Code v2.1.281 or later. Example: `/batch migrate src/ "
+    "from JavaScript to TypeScript` |")
+HOOKS_ROW = "| `/hooks` | View [hook](/docs/en/hooks#the-%2Fhooks-menu) configurations |"
+UPDATE_CONFIG_ROW = (
+    "| `/update-config [request]` | **[Skill](/docs/en/skills#bundled-skills).** Describe a "
+    "settings change, such as allowing a command, setting an environment variable, or adding a "
+    "[hook](/docs/en/hooks), and Claude edits the matching [`settings.json`](/docs/en/settings) "
+    "file. For options such as theme and model, use `/config` instead |")
+
+
 class SnippetBudgetTest(unittest.TestCase):
     """snippet の文字数の予算を、一致行の前の長い表の行が使い切って一致行が
     見えなくなっていた。一致行を優先して残し、文脈の行から削る。"""
@@ -921,6 +950,36 @@ class SnippetBudgetTest(unittest.TestCase):
                      if ln.startswith("→ ")]
         self.assertEqual(len(hit_lines), 3)
         self.assertEqual({len(ln) for ln in hit_lines}, {81})
+
+    def test_a_hit_line_cut_to_its_share_shows_the_matched_word(self):
+        """一致した語が切る幅より後ろにあるときは、行の先頭からではなく語の前後を
+        切り出す (前後に …)。→ の印は窓の外に残す。"""
+        body = ["## S", "| " + "a" * 300 + " keyword " + "b" * 140 + " |",
+                "keyword short line"]
+        result = _common.search_content_in_body(body, "keyword", max_snippet_chars=300)
+        hit_lines = [ln for ln in result["results"][0]["snippet"].splitlines()
+                     if ln.startswith("→ ")]
+        self.assertEqual(len(hit_lines), 2)
+        for ln in hit_lines:
+            self.assertIn("keyword", ln)
+        self.assertTrue(hit_lines[0].startswith("→ …a"), hit_lines[0])
+        self.assertTrue(hit_lines[0].endswith("b…"), hit_lines[0])
+        self.assertEqual(hit_lines[1], "→ keyword short line")
+
+    def test_rows_of_a_real_command_table_show_the_matched_word(self):
+        # Rows of the "All commands" table of the Claude Code docs: "hook"
+        # sits far into the first two, near the start of the third.
+        body = ["## All commands", "| Command | Purpose |", "| :-- | :-- |",
+                ADD_DIR_ROW, BATCH_ROW, HOOKS_ROW, UPDATE_CONFIG_ROW]
+        result = _common.search_content_in_body(body, "hook", page_title="Commands",
+                                                max_snippet_chars=500)
+        snippet = result["results"][0]["snippet"]
+        hit_lines = [ln for ln in snippet.splitlines() if ln.startswith("→ ")]
+        self.assertEqual(len(hit_lines), 3)
+        for ln in hit_lines:
+            self.assertIn("hook", ln.lower())
+        self.assertTrue(hit_lines[2].startswith("→ | `/hooks` |"), hit_lines[2])
+        self.assertIn("(1 more hits in this section)", snippet)
 
     def test_more_hits_note_is_kept(self):
         body = ["## S\n"] + [f"needleword {i}\n" for i in range(5)]
