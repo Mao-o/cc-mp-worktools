@@ -840,7 +840,9 @@ class UrlPageRefTest(unittest.TestCase):
         failing command used (checked first: without it, it reads the default corpus)."""
         argv = shlex.split(line, comments=True)
         opts = self.corpus_options()
-        self.assertTrue(any(argv[i:i + len(opts)] == opts for i in range(len(argv))), line)
+        end = argv.index("--") if "--" in argv else len(argv)
+        self.assertTrue(any(argv[i:i + len(opts)] == opts
+                            for i in range(end - len(opts) + 1)), line)
         return self.run_argv(shlex.split(line, comments=True))
 
     def test_url_failure_offers_the_command_for_that_page(self):

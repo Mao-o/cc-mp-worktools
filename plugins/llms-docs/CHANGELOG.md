@@ -22,6 +22,8 @@ All notable changes to this plugin will be documented here.
   行の末尾の語を別の `-` 始まりの語に差し替えた行も実行する。文字列の形を固定していた既存の検査は、
   新しい並びに合わせた
 
+## [0.35.0] - 2026-10-04
+
 ### 変更: AI SDK で表示された URL を page_ref に貼った失敗に次の一手を出す / 汎用 loader の URL 行を `URL:` にそろえる / 文書を実装に合わせる
 
 - **AI SDK の page_ref に URL を貼ったとき**: 0.33.0 から各結果に URL が出るが、その URL を `content` /

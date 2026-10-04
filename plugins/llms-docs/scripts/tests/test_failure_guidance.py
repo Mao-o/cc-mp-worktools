@@ -121,12 +121,15 @@ class _GuidanceTests:
         self.assertGreaterEqual(len(commands), at_least, text)
         for line, _count in commands:
             with self.subTest(command=line):
-                # the corpus options come last on every command; without them
-                # the command reads (or fetches) the default corpus instead
+                # the corpus options are on every command, before "--" (after
+                # it they are positionals); without them the command reads
+                # (or fetches) the default corpus instead
                 argv = shlex.split(line, comments=True)
                 tail = shlex.split(self.tail)
+                end = argv.index("--") if "--" in argv else len(argv)
                 self.assertTrue(
-                    any(argv[i:i + len(tail)] == tail for i in range(len(argv))), line)
+                    any(argv[i:i + len(tail)] == tail
+                        for i in range(end - len(tail) + 1)), line)
                 code, out, err = self.run_line(line)
                 self.assertEqual(code, 0, err)
                 if "--" in argv:  # every positional is after "--": <page> [heading]
