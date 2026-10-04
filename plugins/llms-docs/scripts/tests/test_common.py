@@ -257,6 +257,47 @@ class FenceTrackerCloserTest(unittest.TestCase):
                 sections = _common.extract_sections(body, min_level=2)
                 self.assertEqual([s["title"] for s in sections], ["Top", "Next"])
 
+    def test_mdx_comment_end_closes_block_opened_inside_it_without_a_run(self):
+        """Zod: a block opened inside a comment loses its closer (two
+        backticks) and the comment ends on a bare ``*/}`` line. The block
+        ends with the comment."""
+        lines = ["{/* ## Changed\n", "  ```ts\n", "  code();\n", "  ``\n", "  */}\n",
+                 "\n", "## After\n"]
+        self.assertEqual(self._states(lines), [False, True, True, True, False, False, False])
+
+    def test_comment_end_inside_a_block_opened_outside_a_comment_is_content(self):
+        """Only a block opened inside a comment ends with it: a ``*/}`` in a
+        block opened outside any comment is code, and the bare closer ends
+        the block."""
+        lines = ["```js\n", "/* note */}\n", "## not a heading\n", "```\n", "## After\n"]
+        self.assertEqual(self._states(lines), [True, True, True, False, False])
+        sections = _common.extract_sections(["## Top\n"] + lines, min_level=2)
+        self.assertEqual([s["title"] for s in sections], ["Top", "After"])
+
+    def test_blockquote_fence_opens_and_closes(self):
+        """Render opens a block inside a note and closes it outside; other
+        sites open and close it inside the note. Both close."""
+        shapes = {
+            "closed outside the quote": [">    ```\n", "   code\n", "   ```\n"],
+            "closed inside the quote": ["> ```bash\n", "> npm i\n", "> ```\n"],
+            "nested quote": ["> > ```\n", "> > code\n", "> > ```\n"],
+        }
+        for name, block in shapes.items():
+            with self.subTest(shape=name):
+                body = ["## Top\n", "> note\n"] + block + ["\n", "## After\n"]
+                states = self._states(body)
+                self.assertEqual(states[2:5], [True, True, False])
+                sections = _common.extract_sections(body, min_level=2)
+                self.assertEqual([s["title"] for s in sections], ["Top", "After"])
+
+    def test_quoted_fence_inside_an_unquoted_block_is_content(self):
+        """A Markdown example of a quoted code block: the quoted lines are
+        inside the block that shows them and close nothing."""
+        body = ["## Quotes\n", "```md\n", "> ```js\n", "> code\n", "> ```\n",
+                "## not a heading\n", "```\n", "\n", "## Next\n"]
+        sections = _common.extract_sections(body, min_level=2)
+        self.assertEqual([s["title"] for s in sections], ["Quotes", "Next"])
+
     def test_fence_indented_in_jsx_is_still_a_block(self):
         """Deliberately looser than CommonMark's 0-3 spaces: MDX code blocks
         nested in JSX are indented 4+ spaces and render as code. With the

@@ -440,6 +440,88 @@ class SplitTest(unittest.TestCase):
                          ["Site — full documentation", "Agent approvals", "Config basics"])
 
 
+# Cut down from Zod's llms-full.txt (Migration guide -> Release notes): a
+# code block written inside an MDX comment is closed with two backticks (a
+# typo upstream), and the comment then ends with ``*/}``. MDX never renders
+# the comment, so "# Release notes" is the next page.
+ZOD_MDX_COMMENT_UNCLOSED = """\
+# Migration guide
+
+Some migration text.
+
+{/* ## Changed: `.refine()`
+
+  ```ts
+  const longString = z.string().refine((val) => val.length > 10, {
+  error: (issue) => `${issue.input} is not more than 10 characters`,
+  });
+  ``
+  */}
+
+
+# Release notes
+
+After a year of active development: Zod 4 is now stable!
+
+## Stringbool
+
+```ts
+const strbool = z.stringbool();
+```
+"""
+
+# Cut down from Render's llms-full.txt (Docker on Render -> Deploy a
+# Prebuilt Docker Image): a code block opened inside a blockquote
+# (``>    ```) and closed outside it.
+RENDER_BLOCKQUOTE_FENCE = """\
+# Docker on Render
+
+> *To run multiple commands, provide them to `/bin/sh -c`.*
+>
+>    For example, here's a *Docker Command* for a Django service:
+>
+>    ```
+   /bin/sh -c python manage.py migrate && gunicorn myapp.wsgi:application
+   ```
+>
+>    If your Docker image includes Bash, you can use `/bin/bash -c` instead.
+
+Note that you can't customize the command that Render uses to build your image.
+
+
+# Deploy a Prebuilt Docker Image
+
+You can deploy a prebuilt Docker image to any of the following Render service types.
+
+## Image requirements
+
+The image must be built for linux/amd64.
+"""
+
+
+class SplitH1KeepsPagesAfterBrokenFenceTest(unittest.TestCase):
+    """An H1 page after a code block whose closer is lost (inside an MDX
+    comment) or written outside the blockquote that opened it stays a page
+    of its own instead of being folded into the page before it."""
+
+    def _docs(self, text: str) -> list[dict]:
+        return generic.split_documents(_lines(text), _profile(split="h1"))
+
+    def test_mdx_comment_end_closes_block_opened_inside_it(self):
+        docs = self._docs(ZOD_MDX_COMMENT_UNCLOSED)
+        self.assertEqual([d["title"] for d in docs], ["Migration guide", "Release notes"])
+        # the next page's sections are its own, not the previous page's
+        self.assertEqual([s["title"] for s in _common.extract_sections(docs[1]["body_lines"])],
+                         ["Stringbool"])
+
+    def test_blockquote_fence_does_not_swallow_next_h1(self):
+        docs = self._docs(RENDER_BLOCKQUOTE_FENCE)
+        self.assertEqual([d["title"] for d in docs],
+                         ["Docker on Render", "Deploy a Prebuilt Docker Image"])
+        self.assertEqual([s["title"] for s in _common.extract_sections(docs[1]["body_lines"])],
+                         ["Image requirements"])
+
+
 class ProfileValidationTest(unittest.TestCase):
     def load(self, data) -> tuple[int, str]:
         with tempfile.TemporaryDirectory() as tmp:
