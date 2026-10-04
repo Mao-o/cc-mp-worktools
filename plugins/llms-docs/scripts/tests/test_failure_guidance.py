@@ -121,15 +121,24 @@ class _GuidanceTests:
         self.assertGreaterEqual(len(commands), at_least, text)
         for line, _count in commands:
             with self.subTest(command=line):
-                # the corpus options come last on every command; without them
-                # the command reads (or fetches) the default corpus instead
+                # the corpus options are on every command, before "--" (after
+                # it they are positionals); without them the command reads
+                # (or fetches) the default corpus instead
                 argv = shlex.split(line, comments=True)
                 tail = shlex.split(self.tail)
-                self.assertEqual(argv[-len(tail):], tail, line)
+                end = argv.index("--") if "--" in argv else len(argv)
+                self.assertTrue(
+                    any(argv[i:i + len(tail)] == tail
+                        for i in range(end - len(tail) + 1)), line)
                 code, out, err = self.run_line(line)
                 self.assertEqual(code, 0, err)
-                if argv[1] == "content" and len(argv) > 3 and not argv[3].startswith("--"):
-                    self.assertIn(f"# heading_path: {argv[3]}\n", out)
+                if "--" in argv:  # every positional is after "--": <page> [heading]
+                    heading = argv[argv.index("--") + 1:][1:]
+                    heading = heading[0] if heading else None
+                else:
+                    heading = argv[3] if len(argv) > 3 and not argv[3].startswith("--") else None
+                if argv[1] == "content" and heading is not None:
+                    self.assertIn(f"# heading_path: {heading}\n", out)
         return commands
 
     # 1. ambiguous page reference
@@ -141,7 +150,7 @@ class _GuidanceTests:
         for idx in (0, 1):
             self.assertRegex(
                 err,
-                rf"{re.escape(self.script)} content {idx} 'Hook events' {re.escape(self.tail)}",
+                rf"{re.escape(self.script)} content {re.escape(self.tail)} -- {idx} 'Hook events'",
             )
 
     def test_ambiguous_reference_keeps_the_query_of_search_content(self):
@@ -149,12 +158,12 @@ class _GuidanceTests:
         self.assertEqual(code, 1)
         for idx in (0, 1):
             self.assertIn(
-                f"{self.script} search-content 'alphaterm beta' --page-ref {idx} {self.tail}", err)
+                f"{self.script} search-content --page-ref {idx} {self.tail} -- 'alphaterm beta'", err)
 
     def test_ambiguous_reference_in_sections_has_no_heading(self):
         code, out, err = self.run_cmd("sections", "hooks")
         self.assertEqual(code, 1)
-        self.assertIn(f"{self.script} sections 0 {self.tail}", err)
+        self.assertIn(f"{self.script} sections {self.tail} -- 0", err)
 
     # 2. heading not found
 
@@ -287,6 +296,80 @@ class _GuidanceTests:
         self.assertEqual(code, 1)
         self.assert_commands_run(err, at_least=2)
 
+    # Words a caller types, or a printed line says to swap in, that look like
+    # options or carry no word: every positional of a printed retry follows "--".
+    HOSTILE = ["-x", "--limit", "\\_", "the", "---", "'", "-"]
+
+    def ambiguous_retries(self, *argv):
+        """The retry lines of an ambiguous page ref, split as a shell splits them."""
+        code, out, err = _loader.run_cli(
+            self.module, [self.script, *argv])
+        self.assertEqual(code, 1, (out, err))
+        self.assertIn("Ambiguous", err)
+        lines = [ln.strip() for ln in err.splitlines()
+                 if ln.strip().startswith(self.script + " ")]
+        self.assertEqual(len(lines), 2, err)
+        split = []
+        for ln in lines:
+            try:
+                split.append(shlex.split(ln, comments=True))
+            except ValueError as exc:  # an unquoted word the shell cannot split
+                self.fail(f"not a shell line ({exc}): {ln}")
+        return split
+
+    def assert_parsed_and_reached(self, argv, page, code, err):
+        """Exit 2 is argparse refusing the line; the page must be the one named."""
+        self.assertNotEqual(code, 2, (argv, err))
+        self.assertIn(str(page), argv)
+
+    def test_retry_lines_keep_a_dash_query_or_heading_a_value(self):
+        for word in self.HOSTILE:
+            with self.subTest(sub="search-content", word=word):
+                retries = self.ambiguous_retries(
+                    "search-content", "--page-ref", "hooks", *self.corpus_args, "--", word)
+                for idx, argv in enumerate(retries):
+                    self.assertEqual(argv[-2:], ["--", word])
+                    self.assertNotIn(word, argv[:-2] if word.startswith("-") else [])
+                    code, out, err = _loader.run_cli(self.module, argv)
+                    self.assert_parsed_and_reached(argv, idx, code, err)
+                    # the printed value is a swap-in: another dash word still parses
+                    swapped = argv[:-1] + ["--resume"]
+                    code, out, err = _loader.run_cli(self.module, swapped)
+                    self.assertNotEqual(code, 2, (swapped, err))
+            with self.subTest(sub="content", word=word):
+                retries = self.ambiguous_retries(
+                    "content", *self.corpus_args, "--", "hooks", word)
+                for idx, argv in enumerate(retries):
+                    self.assertEqual(argv[-3:], ["--", str(idx), word])
+                    code, out, err = _loader.run_cli(self.module, argv)
+                    self.assertEqual(code, 1, (argv, err))  # reads the page, no such heading
+                    self.assertIn("not found", err)
+                    swapped = argv[:-1] + ["--resume"]
+                    code, out, err = _loader.run_cli(self.module, swapped)
+                    self.assertEqual(code, 1, (swapped, err))
+                    self.assertIn("not found", err)
+
+    def test_retry_lines_keep_the_options_before_the_dashes(self):
+        retries = self.ambiguous_retries(
+            "search-content", "--page-ref", "hooks", "--limit", "3", "--context", "1",
+            *self.corpus_args, "--", "-x")
+        for idx, argv in enumerate(retries):
+            self.assertEqual(argv[:4], [self.script, "search-content", "--page-ref", str(idx)])
+            self.assertEqual(argv[4:8], ["--limit", "3", "--context", "1"])
+            code, out, err = _loader.run_cli(self.module, argv)
+            self.assertNotEqual(code, 2, err)
+        retries = self.ambiguous_retries(
+            "content", "--max-chars", "100", *self.corpus_args, "--", "hooks", "Hook events")
+        for idx, argv in enumerate(retries):
+            self.assertEqual(argv[:4], [self.script, "content", "--max-chars", "100"])
+            self.assertEqual(argv[-3:], ["--", str(idx), "Hook events"])
+        retries = self.ambiguous_retries("sections", *self.corpus_args, "--", "hooks")
+        for idx, argv in enumerate(retries):
+            self.assertEqual(argv[-2:], ["--", str(idx)])
+            code, out, err = _loader.run_cli(self.module, argv)
+            self.assertEqual(code, 0, err)
+            self.assertIn(f"Sections in [{idx}]", out)
+
     def test_zero_hit_next_lines_run_as_printed(self):
         for sub in ("search-content", "search"):
             for query in ("zzzmissing qqqmissing", "alphaterm zzzmissing",
@@ -300,11 +383,11 @@ class _GuidanceTests:
     def test_retries_keep_the_other_options(self):
         code, out, err = self.run_cmd("content", "hooks", "Hook events", "--max-chars", "100")
         self.assertEqual(code, 1)
-        self.assertIn(f"{self.script} content 0 'Hook events' --max-chars 100 ", err)
+        self.assertIn(f"{self.script} content --max-chars 100 {self.tail} -- 0 'Hook events'", err)
         code, out, err = self.run_cmd("search-content", "alphaterm", "--page-ref", "hooks",
                                       "--limit", "3", "--context", "1")
         self.assertEqual(code, 1)
-        self.assertIn("--page-ref 0 --limit 3 --context 1 ", err)
+        self.assertIn(f"search-content --page-ref 0 --limit 3 --context 1 {self.tail} -- alphaterm", err)
         code, out, err = self.run_cmd("content", "0", "Eror handling", "--max-chars", "50")
         self.assertEqual(code, 1)
         self.assertIn(f"{self.script} content 0 '{self.path_prefix}Error handling' --max-chars 50 ", err)
@@ -605,11 +688,11 @@ class ClaudeDocsSlugTest(unittest.TestCase):
     def test_note_ends_with_a_command_for_the_other_page(self):
         code, out, err = self.run_cmd("content", "hooks", "Overview", "--max-chars", "100")
         self.assertEqual(code, 1)  # page 1 has no "Overview"; the Note comes first
-        self.assertIn(f"For [0]: parse-claude-docs.py content 0 Overview --max-chars 100 "
-                      f"--cache-dir {self.tmp}", err)
+        self.assertIn(f"For [0]: parse-claude-docs.py content --max-chars 100 "
+                      f"--cache-dir {self.tmp} -- 0 Overview", err)
         code, out, err = self.run_cmd("sections", "hooks")
         commands = offered_commands(err, "parse-claude-docs.py")
-        self.assertEqual(commands, [(f"parse-claude-docs.py sections 0 --cache-dir {self.tmp}", 1)])
+        self.assertEqual(commands, [(f"parse-claude-docs.py sections --cache-dir {self.tmp} -- 0", 1)])
         code, out, err = _loader.run_cli(claude, shlex.split(commands[0][0], comments=True))
         self.assertEqual(code, 0, err)
         self.assertIn('Sections in [0] "Agent SDK Hooks"', out)
@@ -626,7 +709,8 @@ class ClaudeDocsSlugTest(unittest.TestCase):
         code, out, err = self.run_cmd("sections", "hooks")
         self.assertEqual(code, 1)
         self.assertIn("Ambiguous slug 'hooks'", err)
-        self.assertIn("parse-claude-docs.py sections 1 --cache-dir", err)
+        self.assertIn("parse-claude-docs.py sections --cache-dir", err)
+        self.assertIn(" -- 1", err)
 
 
 SKILLS_DIR = Path(_loader.SCRIPTS_DIR).parent / "skills"

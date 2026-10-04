@@ -838,7 +838,11 @@ class UrlPageRefTest(unittest.TestCase):
     def run_printed(self, line):
         """The line as a shell splits it, unmodified. It must name the corpus the
         failing command used (checked first: without it, it reads the default corpus)."""
-        self.assertTrue(line.endswith(" ".join(self.corpus_options())), line)
+        argv = shlex.split(line, comments=True)
+        opts = self.corpus_options()
+        end = argv.index("--") if "--" in argv else len(argv)
+        self.assertTrue(any(argv[i:i + len(opts)] == opts
+                            for i in range(end - len(opts) + 1)), line)
         return self.run_argv(shlex.split(line, comments=True))
 
     def test_url_failure_offers_the_command_for_that_page(self):
@@ -859,13 +863,28 @@ class UrlPageRefTest(unittest.TestCase):
                     if sub != "search-content":
                         self.assertIn(page_url, out)
 
+    def test_printed_search_command_runs_for_a_query_that_looks_like_an_option(self):
+        for query in ["-x", "--limit", "\\_", "the", "---"]:
+            with self.subTest(query=query):
+                argv = [self.SCRIPT, "search-content", "--page-ref", self.CACHING,
+                        *self.corpus_options(), "--", query]
+                err = self.failure_with(argv)
+                line = self.one_offered(err)
+                printed = shlex.split(line, comments=True)
+                self.assertEqual(printed[-2:], ["--", query])
+                code, out, run_err = self.run_printed(line)
+                self.assertNotEqual(code, 2, run_err)
+                swapped = printed[:-1] + ["--resume"]
+                self.assertNotEqual(self.run_argv(swapped)[0], 2)
+
     def test_printed_command_keeps_the_corpus_and_other_options(self):
         err = self.failure_with(
             [self.SCRIPT, "content", self.CACHING, "Overview", "--max-chars", "99",
              *self.corpus_options()])
         line = self.one_offered(err)
-        self.assertIn("content 2 Overview --max-chars 99 ", line)
-        self.assertTrue(line.endswith(" ".join(self.corpus_options())), line)
+        self.assertIn("content --max-chars 99 ", line)
+        self.assertTrue(line.endswith(" -- 2 Overview"), line)
+        self.assertIn(" ".join(self.corpus_options()), line)
         code, out, run_err = self.run_printed(line)
         self.assertEqual(code, 0, run_err)
         self.assertIn("cachingmarker", out)
