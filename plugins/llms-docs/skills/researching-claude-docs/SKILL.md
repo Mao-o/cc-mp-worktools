@@ -135,7 +135,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content <doc_idx>
 
 `content` は **サブセクション一覧** (`Subsections of '...'`) と次の `content` 呼び出し例を、本文の**前後両方**（metadata header 直後 と 本文末尾）に自動で出力する。長いページで本文が途中で切り詰められても（ターミナル/ツール側の出力上限）前側のヒントは必ず見える。さらに深掘りする際は `sections` を再度呼ばずに、そのまま次の `content` クエリに heading_path を渡せる。出力に含めたくない場合は `--no-subsection-hints` を付ける。
 
-本文が長い場合は既定で 24000 文字に切り詰められ、`... (N chars truncated; narrow with ...)` を出す。子見出しの無い節や見出しの無いページ (絞る先が無い) では代わりに、仮置きの語 (節の見出しかページタイトル) を名指しする注記と `Next: ... search-content <仮置きの語> --page-ref N --context 0` を出す (語が `-` で始まるときは、オプションの後に `--` を挟んで語を最後に置く)。そのまま実行でき、注記の語を探したい語に差し替えて使う。`--max-chars 0` で無制限にできるが、Platform ページ (平均 ~38KB) は Bash tool の出力上限に達しやすいので通常は既定のままにする。
+本文が長い場合は既定で 24000 文字に切り詰められ、`... (N chars truncated; narrow with ...)` を出す。子見出しの無い節や見出しの無いページ (絞る先が無い) では代わりに、仮置きの語 (節の見出しかページタイトル) を名指しする注記と `Next: ... search-content --page-ref N --context 0 -- <仮置きの語>` を出す (語は常に `--` の後ろに置くので、`--resume` のような語に差し替えても打てる)。そのまま実行でき、注記の語を探したい語に差し替えて使う。`--max-chars 0` で無制限にできるが、Platform ページ (平均 ~38KB) は Bash tool の出力上限に達しやすいので通常は既定のままにする。
 
 本文中の Markdown リンク (`[Text](/en/...)` や `[Text](https://code.claude.com/...)`) のうち同 source 内の既知ページを指すものには、自動で `→ [doc_idx N]` のアノテーションが付く。follow-up の `content` で page を切り替える時の手数を減らす。コードフェンス内と Markdown テーブル行は対象外。抑制したい場合は `--no-link-annotations`。
 

@@ -982,7 +982,8 @@ class ContentMaxCharsTruncationTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn("chars truncated", out)
         # この page は見出しが無く、見出しでは絞れない: 本文内の検索の案内になる
-        self.assertIn("Next: parse-claude-docs.py search-content hooks --page-ref 0 --context 0", out)
+        self.assertIn("Next: parse-claude-docs.py search-content --page-ref 0 --context 0 ", out)
+        self.assertIn(" -- hooks\n", out)
         self.assertNotIn("0123456789 0123456789 0123456789 0123456789 0123456789", out)
 
     def test_narrow_hint_retains_both_source_and_file(self):
@@ -1006,8 +1007,8 @@ class ContentMaxCharsTruncationTest(unittest.TestCase):
         mock_urlopen.assert_not_called()
         self.assertEqual(code, 0, err)
         self.assertIn(
-            f"Next: parse-claude-docs.py search-content doc --page-ref 0 --context 0 "
-            f"--source platform --file {snapshot}\n", out,
+            f"Next: parse-claude-docs.py search-content --page-ref 0 --context 0 "
+            f"--source platform --file {snapshot} -- doc\n", out,
         )
         self.assertNotIn("--cache-dir", out)  # --file makes it irrelevant
 

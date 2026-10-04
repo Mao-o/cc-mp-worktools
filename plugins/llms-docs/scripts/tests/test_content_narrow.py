@@ -62,6 +62,8 @@ class _NarrowBase:
         # 出力された行を加工せずに実行する
         argv = shlex.split(nexts[0], comments=True)
         self.assertEqual(argv[:2], [self.script, "search-content"], nexts[0])
+        # the stand-in keyword is always last, after "--"
+        self.assertEqual(argv[-2:], ["--", "variables"], nexts[0])
         self.assertEqual(argv[argv.index("--page-ref") + 1], "0")
         self.assertIn("--context", argv)
         self.assertEqual(argv[argv.index("--context") + 1], "0")
@@ -70,7 +72,7 @@ class _NarrowBase:
         self.assertIn(f"[0] {self.page_title}", got)
         self.assertIn("→ ", got)
         # 利用者が keyword を差し替えると、長い表の行の後ろの一致行に届く
-        swapped = [argv[0], argv[1], "NEEDLE_VARIABLE", *argv[3:]]
+        swapped = argv[:-1] + ["NEEDLE_VARIABLE"]
         code, got, err = _loader.run_cli(self.module, swapped)
         self.assertEqual(code, 0, err)
         self.assertIn("→ | `NEEDLE_VARIABLE` | the row that the reader wants |", got)
@@ -349,15 +351,16 @@ class AdversarialHeadingRoundTripTest(unittest.TestCase):
                              if ln.startswith("Next: ")]
                     self.assertEqual(len(nexts), 1, out)
                     argv = shlex.split(nexts[0], comments=True)
-                    if keyword.startswith("-"):
-                        self.assertEqual(argv[-2:], ["--", keyword], nexts[0])
-                    else:
-                        self.assertEqual(argv[2], keyword, nexts[0])
+                    self.assertEqual(argv[-2:], ["--", keyword], nexts[0])
                     code, got, err = _loader.run_cli(claude, argv)
                     self.assertEqual(code, 0, err)
                     self.assertIn("[0] Env vars", got)
                     self.assertIn(f"Section: {heading}  (", got)
                     self.assertIn(f"→ The row about {heading} is here.", got)
+                    # replaced as the note says, with an option name
+                    swapped = argv[:-1] + ["--from-env"]
+                    code, got, err = _loader.run_cli(claude, swapped)
+                    self.assertEqual(code, 0, err)
 
 
 if __name__ == "__main__":

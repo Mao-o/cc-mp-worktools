@@ -103,7 +103,7 @@ title / description / tags / 見出しでスコアリングして上位 5 件（
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" content <page_ref> "<heading_path>"
 ```
 
-`heading_path` を省略するとドキュメント全体を取得。**サブセクション一覧**と次の `content` 呼び出し例を、本文の前後両方（metadata header 直後 と 末尾）に自動出力する（`--no-subsection-hints` で抑制可）。本文は既定 24000 文字で切り詰められ (`--max-chars 0` で無制限)、超過時は `... (N chars truncated; narrow with ...)` を出す。子見出しの無い節や見出しの無いページ (絞る先が無い) では代わりに、仮置きの語 (節の見出しかページタイトル) を名指しする注記と `Next: ... search-content <仮置きの語> --page-ref N --context 0` を出す (語が `-` で始まるときは、オプションの後に `--` を挟んで語を最後に置く)。そのまま実行でき、注記の語を探したい語に差し替えて使う。
+`heading_path` を省略するとドキュメント全体を取得。**サブセクション一覧**と次の `content` 呼び出し例を、本文の前後両方（metadata header 直後 と 末尾）に自動出力する（`--no-subsection-hints` で抑制可）。本文は既定 24000 文字で切り詰められ (`--max-chars 0` で無制限)、超過時は `... (N chars truncated; narrow with ...)` を出す。子見出しの無い節や見出しの無いページ (絞る先が無い) では代わりに、仮置きの語 (節の見出しかページタイトル) を名指しする注記と `Next: ... search-content --page-ref N --context 0 -- <仮置きの語>` を出す (語は常に `--` の後ろに置くので、`--resume` のような語に差し替えても打てる)。そのまま実行でき、注記の語を探したい語に差し替えて使う。
 
 ### 補助: セクション一覧を確認したいとき
 

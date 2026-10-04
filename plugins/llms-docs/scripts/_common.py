@@ -1818,13 +1818,11 @@ def search_in_page_command(script: str, ref, title: str, hint_args: tuple = ()) 
     keyword = search_in_page_keyword(title)
     if not keyword:
         return None
-    quoted = shlex.quote(keyword)
-    if keyword.startswith("-"):
-        parts = [script, "search-content", "--page-ref", str(ref), "--context", "0",
-                 *hint_args, "--", quoted]
-    else:
-        parts = [script, "search-content", quoted,
-                 "--page-ref", str(ref), "--context", "0", *hint_args]
+    # The keyword always goes last, after "--": it is a stand-in the reader
+    # replaces, often with an option name such as --resume, which argparse
+    # would otherwise read as an option.
+    parts = [script, "search-content", "--page-ref", str(ref), "--context", "0",
+             *hint_args, "--", shlex.quote(keyword)]
     return " ".join(parts)
 
 

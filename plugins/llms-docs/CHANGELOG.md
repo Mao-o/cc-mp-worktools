@@ -25,7 +25,7 @@ All notable changes to this plugin will be documented here.
   変わったのは、従来も切り詰められていたセクションだけ。「more hits」の行と `  ...` の行は予算に数えない
 - **子見出しの無い節を `content` で切り詰めたときの案内**: 従来は `narrow with content N "<heading_path>"` と
   出したが、子見出しが無い節では絞る先が無い (環境変数の表 1 節 148k 字など)。その場合は、本文内を検索する
-  `Next: <script> search-content <節の見出し> --page-ref N --context 0 ...` を 1 行で出す。その行は加工せずに
+  `Next: <script> search-content --page-ref N --context 0 ... -- <節の見出し>` (語は常に `--` の後ろ。`--resume` のような語に差し替えても打てる) を 1 行で出す。その行は加工せずに
   実行でき、キーワードを差し替えて使う。`--source` / `--file` / `--cache-dir` は従来どおり引き継ぐ。
   子見出しのある節の案内は変えない。見出しが 1 つも無いページ全体の切り詰めも、同じ理由でこの案内になる
 - **AI SDK**: 各ページの frontmatter の `url:` を、`sections` (`  URL:` 行)、`content` (`# source:` 行)、
@@ -44,8 +44,8 @@ All notable changes to this plugin will be documented here.
 - **注記が仮置きの語を名指しする**: `To find a line inside it, run the command below with '<語>'
   (the section heading, a stand-in) replaced by the term you are looking for:` の 1 行を `Next:` の前に出す
   (ページ全体のときは `the page title`)。何を差し替えればよいかが行から分かる
-- **`-` で始まる見出し** (`--bg` など): 語がオプションとして読まれ usage エラーになっていた。0.30.1 と同じく、
-  オプションを先に置き、`--` を挟んで語を最後に置く
+- **`-` で始まる語** (`--bg` などの見出し、差し替えた `--resume` など): 語がオプションとして読まれ usage エラーに
+  なっていた。0.30.1 と同じく、オプションを先に置き、語は常に `--` の後ろに置く
 - **エスケープを含む見出し** (`max\_tokens`): 語を作るときにエスケープを外していたため、本文の生の行
   (`max\_tokens` のまま) と一致せず、案内どおりに打つと何も見つからなかった。エスケープは外さない
 - 往復テストは、案内の行を加工せずに shell の規則で分割して実行する。`-` で始まる見出し・`\_` のエスケープ・
