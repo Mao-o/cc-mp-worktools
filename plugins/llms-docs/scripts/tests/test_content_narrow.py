@@ -341,9 +341,12 @@ class AdversarialHeadingRoundTripTest(unittest.TestCase):
             full = self.write_corpus(tmp, heading)
             for corpus in (["--cache-dir", tmp], ["--file", str(full), "--cache-dir", tmp]):
                 with self.subTest(heading=heading, corpus=corpus[0]):
+                    # every positional after "--" (argparse before 3.12 rejects
+                    # an optional positional that follows "--" once the
+                    # required one was given before the options)
                     code, out, err = _loader.run_cli(claude, [
-                        "parse-claude-docs.py", "content", "0", *corpus,
-                        "--max-chars", "3000", "--", heading])
+                        "parse-claude-docs.py", "content", *corpus,
+                        "--max-chars", "3000", "--", "0", heading])
                     self.assertEqual(code, 0, err)
                     self.assertIn(f"run the command below with '{keyword}' "
                                   f"(the section heading, a stand-in) replaced by", out)
