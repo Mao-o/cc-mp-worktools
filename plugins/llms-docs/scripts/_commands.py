@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 
 from _common import (
     content_command,
+    dropped_query_terms,
     duplicate_heading_note,
     extract_content,
     extract_sections,
@@ -31,6 +32,7 @@ from _common import (
     next_hint,
     print_metadata_header,
     print_subsection_hints,
+    query_terms,
     retry_option_args,
     truncate_content,
 )
@@ -278,9 +280,21 @@ def hit_candidates(ranked, *, limit: int = NEXT_CONTENT_LIMIT, keep=None) -> lis
     return picked
 
 
-def render_next_content(candidates: list, *, hint_args: tuple) -> None:
+def dropped_terms_note(query: str) -> None:
+    """Print one line naming the function words *query* was searched
+    without (``dropped_query_terms``); nothing when none was dropped."""
+    dropped = dropped_query_terms(query)
+    if dropped:
+        print(f"(not searched, too common: {', '.join(dropped)})")
+        print()
+
+
+def render_next_content(candidates: list, *, hint_args: tuple,
+                        query: str | None = None) -> None:
     """Print up to three ``Next: ... content <page> "<heading>"`` lines, filled
     in from the search results just shown (no placeholders to copy by hand).
+    With *query*, the function words it was searched without are named first
+    (``dropped_terms_note``).
 
     Falls back to the generic placeholder hint when *candidates* is empty.
     Each candidate is ``(ref, heading_path | None, extra_args,
@@ -289,6 +303,8 @@ def render_next_content(candidates: list, *, hint_args: tuple) -> None:
     after the command: the command reads the first, which may not be the
     section that matched.
     """
+    if query is not None:
+        dropped_terms_note(query)
     if not candidates:
         next_hint("content", "<page_ref>", '"<heading_path>"', *hint_args)
         return
@@ -302,15 +318,11 @@ def render_next_content(candidates: list, *, hint_args: tuple) -> None:
 def term_page_counts(texts, query: str) -> tuple:
     """``([(term, pages_containing_it), ...], pages_checked)`` for *query*.
 
-    Terms are the whitespace-separated keywords ``search_content_in_body``
-    uses, matched the same way (case-insensitive substring). *texts* yields
-    one string (or list of lines) per page.
+    Terms are the keywords ``search_content_in_body`` uses (``query_terms``:
+    function words dropped), matched the same way (case-insensitive
+    substring). *texts* yields one string (or list of lines) per page.
     """
-    terms = []
-    for t in query.split():
-        t = t.lower()
-        if t not in terms:
-            terms.append(t)
+    terms = [t.lower() for t in query_terms(query)]
     counts = {t: 0 for t in terms}
     checked = 0
     for text in texts:
@@ -351,6 +363,9 @@ def render_zero_hits(query: str, texts, *, subcommand: str, hint_args: tuple,
     for term, n in counts:
         note = "  <- not in this corpus" if n == 0 else ""
         print(f'  "{term}": {n} of {checked}{note}')
+    dropped = dropped_query_terms(query)
+    if dropped:
+        print(f"  (not searched, too common: {', '.join(dropped)})")
     present = [t for t, n in counts if n]
     absent = [t for t, n in counts if not n]
     reduced = None

@@ -115,7 +115,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" search "<キーワ�
 
 `<キーワード>` は 2〜3 語のスペース区切り（例: `"PostCompact input compact_summary"`）。
 
-出力は `[doc_idx] タイトル` + `URL` + 本文ヒットセクション (heading_path 付きスニペット)。並び順は本文 hits 数 → index score (title/description 一致) の順で、Changelog / Release notes は自動で末尾に deprioritize される (`--include-changelog-priority` で解除)。ai-sdk / firebase の `search` も同じ並び順。上位 N 件がどれも部分一致 (`[partial match]`) のときは、全文検索で全キーワードが 1 セクションに揃うページを最大 2 件探して `[body-only]` として追記する (既存の行は残り、`Next:` には index の最上位候補の行も残る。全キーワードが揃う候補が Changelog / Release notes だけのときも探す)。表示しきれなかった本文ヒットがある場合は `Other sections with hits (not shown):` として heading_path とヒット数の一覧が末尾に表示される。
+出力は `[doc_idx] タイトル` + `URL` + 本文ヒットセクション (heading_path 付きスニペット)。並び順は全キーワードが揃うか → ページタイトルと見出し (祖先の見出しを含む) が全キーワードを語として含むか (キーワードが 1 語のときはページの順に使わない) → 本文 hits 数 → index score (title/description 一致) の順で、Changelog / Release notes は自動で末尾に deprioritize される (`--include-changelog-priority` で解除)。ai-sdk / firebase の `search` も同じ並び順。上位 N 件がどれも部分一致 (`[partial match]`) のときは、全文検索で全キーワードが 1 セクションに揃うページを最大 2 件探して `[body-only]` として追記する (既存の行は残り、`Next:` には index の最上位候補の行も残る。全キーワードが揃う候補が Changelog / Release notes だけのときも探す。全キーワードが揃う候補があっても、どの候補もページタイトルと見出しに全キーワードを語として含まなければ、含むページを同じく最大 2 件足す。キーワードが 1 語のときは足さない)。表示しきれなかった本文ヒットがある場合は `Other sections with hits (not shown):` として heading_path とヒット数の一覧が末尾に表示される。
 
 各 `Section:` 行には `[<URL>#<anchor>]` が付く (末尾見出しタイトルから生成したベストエフォートの GitHub/Mintlify 互換 slug)。引用元を答えるときはこの URL#anchor をそのまま使ってよい — 同名見出しがページ内に複数ある場合の `-1`/`-2` 連番までは再現しない best-effort である点に注意。見出しタイトル自体に `/` を含む場合 (例: `## CI/CD`) も正しく slug 化される。
 

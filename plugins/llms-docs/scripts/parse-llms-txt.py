@@ -903,7 +903,7 @@ def _body_hits(args, d: dict):
     return search_content_in_body(
         d["body_lines"], args.query, context_lines=args.context,
         max_matches_per_doc=args.max_hits, min_level=d["min_level"] or 2,
-        max_snippet_chars=args.max_snippet_chars,
+        max_snippet_chars=args.max_snippet_chars, page_title=d["title"] or "",
     )
 
 
@@ -952,7 +952,8 @@ def cmd_search_content(args):
     print(f"({total} hits across {matched} documents, showing top {printed})")
     print()
     render_next_content(hit_candidates(shown),
-                        hint_args=_source_hint_args(args) + corpus_hint_args(args))
+                        hint_args=_source_hint_args(args) + corpus_hint_args(args),
+                        query=args.query)
 
 
 def cmd_search(args):
@@ -979,7 +980,7 @@ def cmd_search(args):
         max_matches_per_doc=args.max_hits, max_snippet_chars=args.max_snippet_chars,
         min_level=level, limit=args.top_n,
         include_changelog_priority=args.include_changelog_priority,
-        titles=[d["title"] for d in docs],
+        titles=[d["title"] or "" for d in docs],
     ):
         results.append({"doc_idx": idx, "index_score": None, "body_hits": hits, "body_only": True,
                         "title": docs[idx]["title"] or "(untitled)"})
@@ -1009,7 +1010,8 @@ def cmd_search(args):
     keep = next(((r["doc_idx"], ()) for r in results if not r["body_only"]), None)
     render_next_content(hit_candidates([(r["doc_idx"], r["body_hits"], ()) for r in results],
                                        keep=keep),
-                        hint_args=_source_hint_args(args) + corpus_hint_args(args))
+                        hint_args=_source_hint_args(args) + corpus_hint_args(args),
+                        query=args.query)
 
 
 # ---------------------------------------------------------------------------

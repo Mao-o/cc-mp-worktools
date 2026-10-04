@@ -537,6 +537,7 @@ def cmd_search_content(args):
             max_matches_per_doc=args.max_hits,
             min_level=1,
             max_snippet_chars=args.max_snippet_chars,
+            page_title=parse_frontmatter(doc["frontmatter_lines"])["title"] or "",
         )
 
         if hits["total_matches"] == 0:
@@ -579,7 +580,7 @@ def cmd_search_content(args):
         return
     print(f"({total_hits} hits across {docs_matched} documents, showing top {printed_docs})")
     print()
-    render_next_content(hit_candidates(shown), hint_args=hint_args)
+    render_next_content(hit_candidates(shown), hint_args=hint_args, query=args.query)
 
 
 def cmd_search(args):
@@ -629,6 +630,7 @@ def cmd_search(args):
             max_matches_per_doc=args.max_hits,
             min_level=1,
             max_snippet_chars=args.max_snippet_chars,
+            page_title=fms[idx]["title"] or "",
         )
         results.append({
             "doc_idx": idx,
@@ -701,7 +703,7 @@ def cmd_search(args):
     keep = next(((r["doc_idx"], ()) for r in results if not r["body_only"]), None)
     render_next_content(hit_candidates([(r["doc_idx"], r["body_hits"], ()) for r in results],
                                        keep=keep),
-                        hint_args=corpus_hint_args(args))
+                        hint_args=corpus_hint_args(args), query=args.query)
 
 
 # ---------------------------------------------------------------------------

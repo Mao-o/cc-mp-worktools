@@ -2,6 +2,46 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.32.0] - 2026-10-04
+
+### 変更: 節とページの順位に「タイトルと見出しが全キーワードを語として含むか」を入れ、機能語を照合から外す
+
+節の順位がヒット行の数だけで決まっていたため、どのクエリでも全キーワードを含む巨大な 1 節
+(Claude Code docs の環境変数の表「Variables」約 148k 字、コマンド一覧「All commands」など) が 1 位になった。
+見出しをそのまま打った `search "When edits take effect"` でも、その見出しの節
+(settings#when-edits-take-effect) は出ず、`search "Run hooks in the background"` は `in` / `the` が
+タイトルに部分一致した cloud 系のページを返した。
+
+- 節の順位を「全キーワードが揃うか → 見出しが全キーワードを含むか → ヒット行の数 → 位置」にする。
+  「見出しが含む」は、ページタイトルとその節の見出しパス (祖先の見出しを含む) の中に、全キーワードが
+  **語として** 現れること (前後が英数字でない。末尾の s / es の複数形は許す)。`hook` は `Hooks` に一致し、
+  `Webhooks` には一致しない。`env` は `Environment` に、`add` は `Additional` に一致しない。見出しは
+  リンクの URL などを除いた表示上の文字で比べる
+- ページの順位 (`search` / `search-content`) も、そのページで最も当たりの良い節が見出し一致かを
+  ヒット数より先に見る。ただしキーワードが 1 語のときはページの順に使わない (節の順にだけ使う)。
+  1 語の見出し一致は、移行ガイドの「`useCompletion` hook」のような節にもあり、ページの決め手にならない。
+  API 名 1 語の `search` (`streamText` / `generateText` / `useChat` / `convertToModelMessages` /
+  `createUIMessageStream` / `useCompletion`) は、1 本目の `Next:` が 0.31.0 と同じページを指す
+- `the` / `in` / `when` / `how` などの機能語 (小さく固定した一覧) を、index の点数と本文の照合の両方から外す。
+  クエリが機能語だけのときと、`DO` のように大文字で書いた 2 文字以上の語 (略語) は外さない (`AND` / `OR` は大文字でも外す)。外した語は、
+  0 件のときの「Why nothing matched」に加えて、ヒットがあるときも `Next:` の前に
+  `(not searched, too common: ...)` と 1 行出す。同じ語の重複も 1 つにまとめる
+- `search` の全文の追加探索は、全キーワードが揃う候補があっても、どの候補もタイトルと見出しに全キーワードを
+  含まなければ走り、含むページだけを最大 2 件 `[body-only]` で足す。キーワードが 1 語のときは足さない
+  (0.31.0 と同じ)
+- 並べ替えのキーは `_common.py` の `section_rank_key` / `search_content_rank_key` / `search_rank_key` に
+  まとめたまま変えており、4 本の script で共通。各 script はページタイトルを本文の照合に渡す。Firebase は
+  本文の全文探索を持たないため、追加探索の変更は対象外
+- 実 corpus のコピーでの比較 (期待する節を事前に決めた 22 本): 1 本目の `Next:` が期待する節に届いたのは
+  0.31.0 で 4 本、この版で 14 本。再現クエリのうち `When edits take effect` は目的の節が 1 本目、
+  `Run hooks in the background` は目的の節の子 (Run tests after file changes) が 1 本目になる。
+  `hook process inherits environment` と `settings hooks reload session` は 0.31.0 と同じで直らない
+  (目的の節の見出しがクエリの語を含まない)
+- 上位が入れ替わって悪くなったクエリもある。機能語を外すため、コードの語を含むクエリ (`for await textStream`)
+  では `for` が効かなくなり、`for await (... of textStream)` の例がある節が 1 本目から外れる。
+  `useChat transport` では、移行ガイドの「Chat Transport Architecture」節が追記されて Transport のページの
+  `Next:` が 2 本目から 3 本目に下がる
+
 ## [0.31.0] - 2026-10-04
 
 ### 修正: `search` が、上位 N 件がすべて部分一致のときも全キーワードの揃うページを出す
