@@ -1089,8 +1089,10 @@ def query_terms(query: str) -> list[str]:
 
     Whitespace-separated tokens, duplicates (case-insensitive) dropped, and
     ``QUERY_STOPWORDS`` dropped when at least one other token remains — a
-    query made only of function words ("how to") is searched as typed. The
-    original spelling is kept (``_norm`` reads the case of "iOS").
+    query made only of function words ("how to") is searched as typed. A
+    token typed in capitals ("DO" for Durable Objects) is an abbreviation,
+    not a function word, and stays. The original spelling is kept (``_norm``
+    reads the case of "iOS").
     """
     tokens = []
     seen = set()
@@ -1099,7 +1101,8 @@ def query_terms(query: str) -> list[str]:
         if low not in seen:
             seen.add(low)
             tokens.append(tok)
-    content = [t for t in tokens if t.lower() not in QUERY_STOPWORDS]
+    content = [t for t in tokens
+               if t.lower() not in QUERY_STOPWORDS or (len(t) > 1 and t.isupper())]
     return content or tokens
 
 
@@ -1289,16 +1292,55 @@ def section_url_anchor(url: str, title: str, style: str = "github") -> str:
     return f"  [{url}#{slug}]"
 
 
+def _heading_text(title: str) -> str:
+    """Rendered, lowercased text of one heading (or page title) for
+    ``names_every_keyword``: a link's URL must not supply the words
+    ("[Alarm Handler](https://.../durable-objects/...)"), and a Markdown
+    escape (``max\\_tokens``) reads as the character it escapes."""
+    return re.sub(r"\\(.)", r"\1", _strip_heading_markup(title)).lower()
+
+
+def names_every_keyword(text_lower: str, keywords) -> bool:
+    """True when each of *keywords* (lowercase) appears in *text_lower* as a
+    word: not next to another ASCII letter or digit, a plural ``s`` / ``es``
+    allowed ("hook" names "Hooks", but not "Webhooks"; "as" does not name
+    "Constructor")."""
+    return all(re.search(r"(?<![a-z0-9])" + re.escape(kw) + r"(?:e?s)?(?![a-z0-9])",
+                         text_lower)
+               for kw in keywords)
+
+
+def _section_heading_texts(sections, page_title: str) -> list[str]:
+    """Per section, the page title and every heading on its path (the
+    section's own and its ancestors'), as one text for
+    ``names_every_keyword``. Built from the levels, not by splitting
+    ``heading_path`` (a heading may contain a slash)."""
+    texts = []
+    stack: list = []
+    base = _heading_text(page_title) if page_title else ""
+    for s in sections:
+        while stack and stack[-1][0] >= s["level"]:
+            stack.pop()
+        stack.append((s["level"], _heading_text(s["title"])))
+        texts.append("\n".join([base] + [t for _, t in stack]))
+    return texts
+
+
 def _build_section_results(section_hits, sections, body_lines, keywords,
-                           min_coverage, context_lines, max_snippet_chars):
+                           min_coverage, context_lines, max_snippet_chars,
+                           page_title=""):
     """Build result list from sections matching >= *min_coverage* keywords.
 
     ``heading_count`` is how many sections of the page share the result's
     heading_path (a command that names it reads the first of them).
+    ``heading_match`` is whether the page title and the section's headings
+    (its own and its ancestors') name every keyword (``names_every_keyword``).
     """
     results = []
     total = 0
     path_counts = heading_path_counts(sections)
+    heading_texts = _section_heading_texts(sections, page_title)
+    top_text = _heading_text(page_title) if page_title else ""
     for si, hits in section_hits.items():
         all_matched = set()
         for _, m in hits:
@@ -1340,9 +1382,7 @@ def _build_section_results(section_hits, sections, body_lines, keywords,
         # heading whose own title contains a slash (e.g. "## CI/CD") would
         # otherwise be misread as a nested breadcrumb (merge-review finding).
         title = sections[si]["title"] if si is not None else "(top)"
-        # Rendered heading text: a link's URL must not supply the words
-        # ("[Alarm Handler](https://.../durable-objects/...)").
-        title_lower = _strip_heading_markup(title).lower() if si is not None else ""
+        names_text = heading_texts[si] if si is not None else top_text
         results.append({
             "heading_path": heading_path,
             "title": title,
@@ -1351,62 +1391,27 @@ def _build_section_results(section_hits, sections, body_lines, keywords,
             "matched_keywords": sorted(all_matched),
             "hit_count": len(hits),
             "heading_count": path_counts.get(heading_path, 1),
-            "heading_match": all(kw in title_lower for kw in keywords),
-            "close": any(_keywords_close(body_lines[i], all_matched)
-                         for i, m in hits if len(m) == len(all_matched)),
+            "heading_match": names_every_keyword(names_text, keywords),
         })
     return results, total
 
 
-# Keywords that all lie on one line within this many characters of each
-# other (about one sentence) are close together. A section that only has the
-# words farther apart merely contains them somewhere: the shape of a huge
-# reference section (one environment-variable table, one command list) that
-# matches almost any query and used to win on its sheer number of hit lines.
-# A long line (an image's alt text, a paragraph of links) holding every word
-# far apart does not count either.
-CLOSE_CHARS = 200
-
-
-def _keywords_close(line: str, keywords) -> bool:
-    """True when one stretch of *line* of at most ``CLOSE_CHARS`` characters
-    contains every keyword in *keywords* (case-insensitive substring)."""
-    low = line.lower()
-    occ = sorted((m.start(), m.end(), kw) for kw in keywords
-                 for m in re.finditer(re.escape(kw), low))
-    need = len(set(keywords))
-    for i, (start, _, _) in enumerate(occ):
-        seen = set()
-        end = 0
-        for _, e, kw in occ[i:]:
-            seen.add(kw)
-            end = max(end, e)
-            if end - start > CLOSE_CHARS:
-                break
-            if len(seen) == need:
-                return True
-    return False
-
-
-def section_fit(heading_match: bool, close: bool) -> int:
-    """How well one section fits the query: 0 its heading names every
-    keyword, 1 one of its lines has every keyword close together
-    (``CLOSE_CHARS``), 2 the keywords are only spread over the section."""
-    if heading_match:
-        return 0
-    return 1 if close else 2
+def section_fit(heading_match: bool) -> int:
+    """How well one section fits the query: 0 when the page title and the
+    section's headings name every keyword (``heading_match``), else 1."""
+    return 0 if heading_match else 1
 
 
 def section_rank_key(result: dict) -> tuple:
     """Sort key for the sections of one page (best first).
 
-    Most keywords first, then ``section_fit`` (heading names every keyword,
-    then keywords close together), then most hit lines, then position. Hit
-    lines alone favour a huge section that happens to contain every word
-    somewhere; the fit finds the section that is about the query.
+    Most keywords first, then ``section_fit`` (the headings name every
+    keyword), then most hit lines, then position. Hit lines alone favour a
+    huge section that happens to contain every word somewhere; the headings
+    find the section that is about the query.
     """
     return (-len(result["matched_keywords"]),
-            section_fit(result.get("heading_match", False), result.get("close", True)),
+            section_fit(result.get("heading_match", False)),
             -result["hit_count"],
             result["line_offset"])
 
@@ -1414,7 +1419,8 @@ def section_rank_key(result: dict) -> tuple:
 def page_fit(hits: dict) -> int:
     """``section_fit`` of a page's best section, from a
     ``search_content_in_body`` result. A result built without the field
-    counts as close (1), so such pages rank as they did before the fit."""
+    counts as 1 (no heading match), so such pages rank as they did before
+    the fit."""
     return hits.get("best_fit", 1)
 
 
@@ -1422,7 +1428,8 @@ def search_content_in_body(body_lines, query: str, *,
                            context_lines: int = 2,
                            max_matches_per_doc: int = 5,
                            min_level: int = 2,
-                           max_snippet_chars: int | None = None):
+                           max_snippet_chars: int | None = None,
+                           page_title: str = ""):
     """Search *body_lines* for *query* keywords (soft-AND, case-insensitive).
 
     First tries strict AND (all keywords in same section). If no results and
@@ -1430,11 +1437,16 @@ def search_content_in_body(body_lines, query: str, *,
     The ``match_mode`` field indicates which strategy produced results.
 
     Keywords come from ``query_terms`` (function words dropped). Sections
-    are ordered by ``section_rank_key``.
+    are ordered by ``section_rank_key``; *page_title* (the page's H1 when the
+    body does not carry it) counts as a heading of every section.
 
     Returns a dict with ``total_matches``, ``results``, ``match_mode``
     (``"and"`` | ``"partial"`` | ``"none"``), ``overflow_sections`` and
-    ``best_fit`` (``section_fit`` of the first section; 2 when none).
+    ``best_fit`` (``section_fit`` of the first section; 1 when none, and
+    always 1 for a one-keyword query: a heading that holds one word — a
+    migration guide's "`useChat` changes" — says little about the page, so
+    the page order of a one-word query stays by hit count, while its
+    sections are still ordered by ``section_rank_key``).
     """
     keywords = [k.lower() for k in query_terms(query)]
     if not keywords:
@@ -1458,7 +1470,8 @@ def search_content_in_body(body_lines, query: str, *,
         section_hits.setdefault(si, []).append((i, matched))
 
     build_args = (section_hits, sections, body_lines, keywords)
-    build_kw = dict(context_lines=context_lines, max_snippet_chars=max_snippet_chars)
+    build_kw = dict(context_lines=context_lines, max_snippet_chars=max_snippet_chars,
+                    page_title=page_title)
 
     # Strict AND
     results, total_matches = _build_section_results(*build_args, len(keywords), **build_kw)
@@ -1474,7 +1487,7 @@ def search_content_in_body(body_lines, query: str, *,
         match_mode = "none"
 
     results.sort(key=section_rank_key)
-    best_fit = section_rank_key(results[0])[1] if results else 2
+    best_fit = section_rank_key(results[0])[1] if results and len(keywords) > 1 else 1
 
     overflow_sections: list = []
     if max_matches_per_doc > 0 and len(results) > max_matches_per_doc:
@@ -1506,7 +1519,8 @@ def full_corpus_body_search(docs_body_lines, query: str, *,
                             max_matches_per_doc: int = 3,
                             max_snippet_chars: int | None = None,
                             min_level: int = 2,
-                            limit: int = 5):
+                            limit: int = 5,
+                            titles=None):
     """Search *query* across every doc's body, ignoring index ranking.
 
     Fallback for when title/description-based ranking finds no candidates,
@@ -1523,7 +1537,8 @@ def full_corpus_body_search(docs_body_lines, query: str, *,
     ``[partial match]`` docs), then ``page_fit``, then total_matches desc, then doc_idx asc,
     truncated to *limit*. Strength comes first so that a page whose sections
     mention only some keywords many times cannot push the page that has all
-    of them together past the limit.
+    of them together past the limit. *titles* (one per doc) are the page
+    titles ``search_content_in_body`` reads as headings.
     """
     results = []
     for idx, body_lines in enumerate(docs_body_lines):
@@ -1533,6 +1548,7 @@ def full_corpus_body_search(docs_body_lines, query: str, *,
             max_matches_per_doc=max_matches_per_doc,
             min_level=min_level,
             max_snippet_chars=max_snippet_chars,
+            page_title=titles[idx] if titles is not None else "",
         )
         if hits["total_matches"] > 0:
             results.append((idx, hits))
@@ -1572,12 +1588,15 @@ def full_corpus_extra_hits(results, docs_body_lines, query: str, *,
       partial pages would only repeat the kind of row the candidates already
       show, and the existing rows stay.
 
-    - candidates have strict-AND hits, but none whose best section's heading
-      names every keyword (``page_fit`` above 0): strict pages with a
-      better fit than the best candidate are added, at most
-      ``EXTRA_STRICT_LIMIT``. A huge section that contains every word
+    - candidates have strict-AND hits, but on none of them do the page title
+      or the best section's headings name every keyword (``page_fit`` 1):
+      strict pages whose title or headings do (``page_fit`` 0) are added, at
+      most ``EXTRA_STRICT_LIMIT``. A huge section that contains every word
       somewhere on an index candidate must not hide the page whose section
       is about the query ("When edits take effect" typed as the heading).
+      A one-keyword query never gets here: its pages all have
+      ``page_fit`` 1 (see ``search_content_in_body``), so any strict
+      candidate is enough, as before the fit.
 
     Pages already in *results* are never returned twice. With *titles* (one
     per page), the pages are ranked by ``search_content_rank_key`` before the
@@ -1599,7 +1618,7 @@ def full_corpus_extra_hits(results, docs_body_lines, query: str, *,
         docs_body_lines, query,
         context_lines=context_lines, max_matches_per_doc=max_matches_per_doc,
         max_snippet_chars=max_snippet_chars, min_level=min_level,
-        limit=len(docs_body_lines),
+        limit=len(docs_body_lines), titles=titles,
     )
     if titles is not None:
         found.sort(key=lambda t: search_content_rank_key(
@@ -1986,8 +2005,8 @@ def search_content_rank_key(idx: int, title: str, hits: dict, *,
 
     Order: changelog-style pages last (unless *include_changelog_priority*),
     then strict-AND pages before ``[partial match]`` pages, then the page's
-    best section (``page_fit``: a heading naming every keyword, then the
-    keywords close together), then most hits, then lowest *idx*.
+    best section (``page_fit``: the page title and the section's headings
+    name every keyword), then most hits, then lowest *idx*.
     ``--limit`` cuts only after this ordering.
     """
     bucket = 0 if include_changelog_priority else (1 if is_low_priority(title) else 0)

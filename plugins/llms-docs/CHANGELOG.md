@@ -4,7 +4,7 @@ All notable changes to this plugin will be documented here.
 
 ## [0.32.0] - 2026-10-04
 
-### 変更: 節とページの順位に「見出しの一致」と「1 行での近さ」を入れ、機能語を照合から外す
+### 変更: 節とページの順位に「タイトルと見出しが全キーワードを語として含むか」を入れ、機能語を照合から外す
 
 節の順位がヒット行の数だけで決まっていたため、どのクエリでも全キーワードを含む巨大な 1 節
 (Claude Code docs の環境変数の表「Variables」約 148k 字、コマンド一覧「All commands」など) が 1 位になった。
@@ -12,30 +12,35 @@ All notable changes to this plugin will be documented here.
 (settings#when-edits-take-effect) は出ず、`search "Run hooks in the background"` は `in` / `the` が
 タイトルに部分一致した cloud 系のページを返した。
 
-- 節の順位を「全キーワードが揃うか → 見出しに全キーワードを含む → 1 行の 200 字以内に全キーワードが揃う →
-  ヒット行の数 → 位置」にする。ページの順位 (`search` / `search-content`) も、そのページで最も当たりの良い
-  節の段階をヒット数より先に見る。見出しはリンクの URL などを除いた表示上の文字で比べる
-- 「近さ」は 1 行の中の 200 字の範囲で測る。行をまたぐ距離 (行数) で測ると、短い節どうしの比較で
-  ヒット数より細かい差が効きすぎ、既存の当たり (`PostToolUse async` の Configure an async hook、
-  `PreToolUse hook classifier` の PreToolUse decision control など) が外れた。画像の alt や長い段落の
-  端と端に語が散っているだけの行は近いと見なさない
+- 節の順位を「全キーワードが揃うか → 見出しが全キーワードを含むか → ヒット行の数 → 位置」にする。
+  「見出しが含む」は、ページタイトルとその節の見出しパス (祖先の見出しを含む) の中に、全キーワードが
+  **語として** 現れること (前後が英数字でない。末尾の s / es の複数形は許す)。`hook` は `Hooks` に一致し、
+  `Webhooks` には一致しない。`env` は `Environment` に、`add` は `Additional` に一致しない。見出しは
+  リンクの URL などを除いた表示上の文字で比べる
+- ページの順位 (`search` / `search-content`) も、そのページで最も当たりの良い節が見出し一致かを
+  ヒット数より先に見る。ただしキーワードが 1 語のときはページの順に使わない (節の順にだけ使う)。
+  1 語の見出し一致は、移行ガイドの「`useCompletion` hook」のような節にもあり、ページの決め手にならない。
+  API 名 1 語の `search` (`streamText` / `generateText` / `useChat` / `convertToModelMessages` /
+  `createUIMessageStream` / `useCompletion`) は、1 本目の `Next:` が 0.31.0 と同じページを指す
 - `the` / `in` / `when` / `how` などの機能語 (小さく固定した一覧) を、index の点数と本文の照合の両方から外す。
-  クエリが機能語だけのときは外さない。0 件時の「Why nothing matched」には外した語を
-  `(not searched, too common: ...)` と出す。同じ語の重複も 1 つにまとめる
-- `search` の全文の追加探索は、全キーワードが揃う候補があっても、どの候補にも見出しに全キーワードを含む節が
-  無ければ走る。そのときは候補の最良より当たりの良い節を持つページだけを、最大 2 件 `[body-only]` で足す。
-  index 上位の弱い一致 (self-hosted の Wrapper scripts) が本文の強い一致
-  (`hook process inherits environment` に対する hooks#common-input-fields) を隠していた
+  クエリが機能語だけのときと、`DO` のように大文字で書いた 2 文字以上の語 (略語) は外さない。外した語は、
+  0 件のときの「Why nothing matched」に加えて、ヒットがあるときも `Next:` の前に
+  `(not searched, too common: ...)` と 1 行出す。同じ語の重複も 1 つにまとめる
+- `search` の全文の追加探索は、全キーワードが揃う候補があっても、どの候補もタイトルと見出しに全キーワードを
+  含まなければ走り、含むページだけを最大 2 件 `[body-only]` で足す。キーワードが 1 語のときは足さない
+  (0.31.0 と同じ)
 - 並べ替えのキーは `_common.py` の `section_rank_key` / `search_content_rank_key` / `search_rank_key` に
-  まとめたまま変えており、4 本の script で共通。Firebase は本文の全文探索を持たないため、追加探索の変更は
-  対象外 (節とページの順位、機能語の扱いは同じになる)
-- 実 corpus のコピーでの比較: 再現クエリ 4 本 (`When edits take effect` / `hook process inherits environment` /
-  `Run hooks in the background` / `settings hooks reload session`) は目的の節が 1 位の `Next:` になった。
-  `edits take effect running session` は直らない (take / effect は見出し行にしかなく、見出しに running /
-  session が無い)
-- 上位が入れ替わったクエリもある。見出しが一致した節が上に来る (`KV namespace binding` で Terraform の
-  「KV Namespace Binding」節が 1 位)、1 行に全キーワードが揃う節がヒット数の多い節より上に来る
-  (`subagent memory frontmatter` で Frontmatter reference より What loads at startup が先) など
+  まとめたまま変えており、4 本の script で共通。各 script はページタイトルを本文の照合に渡す。Firebase は
+  本文の全文探索を持たないため、追加探索の変更は対象外
+- 実 corpus のコピーでの比較 (期待する節を事前に決めた 22 本): 1 本目の `Next:` が期待する節に届いたのは
+  0.31.0 で 4 本、この版で 14 本。再現クエリのうち `When edits take effect` は目的の節が 1 本目、
+  `Run hooks in the background` は目的の節の子 (Run tests after file changes) が 1 本目になる。
+  `hook process inherits environment` と `settings hooks reload session` は 0.31.0 と同じで直らない
+  (目的の節の見出しがクエリの語を含まない)
+- 上位が入れ替わって悪くなったクエリもある。機能語を外すため、コードの語を含むクエリ (`for await textStream`)
+  では `for` が効かなくなり、`for await (... of textStream)` の例がある節が 1 本目から外れる。
+  `useChat transport` では、移行ガイドの「Chat Transport Architecture」節が追記されて Transport のページの
+  `Next:` が 2 本目から 3 本目に下がる
 
 ## [0.31.0] - 2026-10-04
 

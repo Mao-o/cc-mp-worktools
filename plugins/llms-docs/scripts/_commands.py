@@ -280,9 +280,21 @@ def hit_candidates(ranked, *, limit: int = NEXT_CONTENT_LIMIT, keep=None) -> lis
     return picked
 
 
-def render_next_content(candidates: list, *, hint_args: tuple) -> None:
+def dropped_terms_note(query: str) -> None:
+    """Print one line naming the function words *query* was searched
+    without (``dropped_query_terms``); nothing when none was dropped."""
+    dropped = dropped_query_terms(query)
+    if dropped:
+        print(f"(not searched, too common: {', '.join(dropped)})")
+        print()
+
+
+def render_next_content(candidates: list, *, hint_args: tuple,
+                        query: str | None = None) -> None:
     """Print up to three ``Next: ... content <page> "<heading>"`` lines, filled
     in from the search results just shown (no placeholders to copy by hand).
+    With *query*, the function words it was searched without are named first
+    (``dropped_terms_note``).
 
     Falls back to the generic placeholder hint when *candidates* is empty.
     Each candidate is ``(ref, heading_path | None, extra_args,
@@ -291,6 +303,8 @@ def render_next_content(candidates: list, *, hint_args: tuple) -> None:
     after the command: the command reads the first, which may not be the
     section that matched.
     """
+    if query is not None:
+        dropped_terms_note(query)
     if not candidates:
         next_hint("content", "<page_ref>", '"<heading_path>"', *hint_args)
         return

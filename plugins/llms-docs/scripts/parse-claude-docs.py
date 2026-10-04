@@ -875,6 +875,7 @@ def cmd_search_content(args):
             max_matches_per_doc=args.max_hits,
             min_level=2,
             max_snippet_chars=args.max_snippet_chars,
+            page_title=doc["title"],
         )
         if hits["total_matches"] == 0:
             continue
@@ -913,7 +914,7 @@ def cmd_search_content(args):
     print(f"({total_hits} hits across {docs_matched} pages, showing top {len(printed)})")
     print()
     render_next_content(hit_candidates([(idx, hits, ()) for idx, _doc, hits in printed]),
-                        hint_args=hint_args)
+                        hint_args=hint_args, query=args.query)
 
 
 def _search_one_source(args, source_key: str) -> list[dict]:
@@ -962,6 +963,7 @@ def _search_one_source(args, source_key: str) -> list[dict]:
             max_matches_per_doc=args.max_hits,
             min_level=2,
             max_snippet_chars=args.max_snippet_chars,
+            page_title=docs[full_idx]["title"],
         )
         results.append({
             "source_key": source_key,
@@ -1118,7 +1120,8 @@ def cmd_search(args):
         hint_args = corpus_hint_args(args)
     else:
         hint_args = _source_hint_args(args) + corpus_hint_args(args)
-    render_next_content(hit_candidates(ranked, keep=keep), hint_args=hint_args)
+    render_next_content(hit_candidates(ranked, keep=keep), hint_args=hint_args,
+                        query=args.query)
 
 
 # ---------------------------------------------------------------------------

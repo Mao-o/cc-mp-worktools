@@ -418,6 +418,7 @@ def cmd_search_content(args):
             max_matches_per_doc=args.max_hits,
             min_level=2,
             max_snippet_chars=args.max_snippet_chars,
+            page_title=entry["title"] or "",
         )
 
         if hits["total_matches"] == 0:
@@ -454,7 +455,7 @@ def cmd_search_content(args):
                          restricted_to=args.page_ref,
                          restricted_only=args.page_ref is not None)
         return
-    render_next_content(hit_candidates(shown), hint_args=hint_args)
+    render_next_content(hit_candidates(shown), hint_args=hint_args, query=args.query)
 
 
 def cmd_search(args):
@@ -516,6 +517,7 @@ def cmd_search(args):
             max_matches_per_doc=args.max_hits,
             min_level=2,
             max_snippet_chars=args.max_snippet_chars,
+            page_title=entry["title"] or "",
         )
         results.append({
             "doc_idx": idx,
@@ -538,7 +540,7 @@ def cmd_search(args):
         print(f"({len(skipped)} pages skipped — fetch failed, see stderr)")
     print()
     render_next_content(hit_candidates([(r["doc_idx"], r["body_hits"], ()) for r in results]),
-                        hint_args=corpus_hint_args(args))
+                        hint_args=corpus_hint_args(args), query=args.query)
 
 
 # ---------------------------------------------------------------------------
