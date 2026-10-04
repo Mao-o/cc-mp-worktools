@@ -1898,6 +1898,14 @@ def content_command(script: str, ref, heading_path, hint_args: tuple = ()) -> st
     *hint_args* is the same tuple the ``Next:`` hints carry (``--source`` /
     ``--file`` / ``--cache-dir`` ...), already shell-quoted.
     """
+    if heading_path is not None and heading_path.startswith("-"):
+        # A heading that starts with "-" would be read as an option. Every
+        # positional goes after one "--", options before it (Python 3.11's
+        # argparse rejects an optional positional after "--" when the
+        # required one precedes the options). Other headings keep the plain
+        # form so the common output does not change.
+        return " ".join([script, "content", *hint_args, "--", str(ref),
+                         shlex.quote(heading_path)])
     parts = [script, "content", str(ref)]
     if heading_path is not None:
         parts.append(shlex.quote(heading_path))

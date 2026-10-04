@@ -897,5 +897,101 @@ class HitCandidatesTest(unittest.TestCase):
         self.assertEqual(_commands.hit_candidates(ranked), [(2, "R/I", (), 2)])
 
 
+# A page whose headings look like options (a CLI reference: "## --help"),
+# next to an ordinary one.
+DASH_BODY = (
+    "## Hook events\nplain\n"
+    "## -x\nxword\n"
+    "## --limit\nlimitword\n"
+    "## ---\nrulerword\n"
+    "## -\nbareword\n"
+    "## --help\nhelpword\n"
+    "## --help-all\nhelpallword\n"
+)
+
+
+class ContentCommandDashHeadingTest(unittest.TestCase):
+    """``content_command`` lines for a heading that starts with ``-``: every
+    positional goes after one ``--``, and a line run exactly as printed
+    reaches that section. Other headings keep the old form byte for byte."""
+
+    DASH_HEADINGS = ["-x", "--limit", "---", "-", "--help", "--help-all"]
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        pages = [("Hooks", "https://example.com/en/cli/hooks", DASH_BODY)]
+        for prefix in ("claude-code", "claude-platform"):
+            Path(self.tmp, f"{prefix}-llms.txt").write_text(
+                "".join(f"- [{t}]({u}): about {t}\n" for t, u, _b in pages), encoding="utf-8")
+            Path(self.tmp, f"{prefix}-llms-full.txt").write_text(
+                "".join(f"# {t}\nSource: {u}\n\n{b}\n" for t, u, b in pages), encoding="utf-8")
+        patcher = mock.patch.dict(os.environ, {"LLMS_DOCS_CACHE_DIR": self.tmp})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        full = str(Path(self.tmp, "claude-code-llms-full.txt"))
+        self.corpus = {"--cache-dir": ["--cache-dir", self.tmp], "--file": ["--file", full]}
+
+    def assert_reads(self, line, heading):
+        argv = shlex.split(line, comments=True)
+        code, out, err = _loader.run_cli(claude, argv)
+        self.assertEqual(code, 0, (line, err))
+        self.assertIn(f"# heading_path: {heading}\n", out, line)
+
+    def test_every_dash_heading_round_trips_for_both_corpus_options(self):
+        for opt, args in self.corpus.items():
+            hint = tuple(shlex.quote(a) for a in args)
+            for heading in self.DASH_HEADINGS:
+                with self.subTest(opt=opt, heading=heading):
+                    line = _common.content_command("parse-claude-docs.py", 0, heading, hint)
+                    words = shlex.split(line)
+                    self.assertEqual(words[:2], ["parse-claude-docs.py", "content"])
+                    self.assertEqual(words[-3:], ["--", "0", heading], line)
+                    self.assert_reads(line, heading)
+
+    def test_options_stay_before_the_dashes(self):
+        line = _common.content_command(
+            "s.py", 3, "--a b", ("--max-chars", "100", "--cache-dir", "'/a b'"))
+        self.assertEqual(
+            shlex.split(line),
+            ["s.py", "content", "--max-chars", "100", "--cache-dir", "/a b", "--", "3", "--a b"])
+
+    def test_printed_candidates_run_as_printed(self):
+        # an ambiguous heading ("help" matches two), and typos with the
+        # nearest heading offered: each printed command reads its section
+        cases = [("help", {"--help", "--help-all"}), ("--limt", {"--limit"}),
+                 ("-x-", {"-x"}), ("--helpp", {"--help"})]
+        for opt, args in self.corpus.items():
+            for query, expected in cases:
+                with self.subTest(opt=opt, query=query):
+                    code, out, err = _loader.run_cli(
+                        claude, ["parse-claude-docs.py", "content", *args, "--", "0", query])
+                    self.assertEqual(code, 1, err)
+                    # the candidates printed before "Available sections:"
+                    offered = [c for c, _n in offered_commands(
+                        err.split("Available sections:")[0], "parse-claude-docs.py")]
+                    got = set()
+                    for line in offered:
+                        argv = shlex.split(line, comments=True)
+                        self.assertEqual(argv[-3:-1], ["--", "0"], line)
+                        self.assert_reads(line, argv[-1])
+                        got.add(argv[-1])
+                    self.assertEqual(got, expected, err)
+
+    def test_ordinary_headings_keep_the_plain_form(self):
+        cases = [
+            ((0, "Hook events", ("--cache-dir", "/c")),
+             "s.py content 0 'Hook events' --cache-dir /c"),
+            ((2, "Tools/Error handling", ()), "s.py content 2 'Tools/Error handling'"),
+            ((1, "a-b", ("--file", "/f")), "s.py content 1 a-b --file /f"),
+            ((1, "Opts/--x", ()), "s.py content 1 Opts/--x"),
+            ((4, None, ("--file", "/f")), "s.py content 4 --file /f"),
+        ]
+        for (ref, heading, hint), expected in cases:
+            with self.subTest(heading=heading):
+                self.assertEqual(
+                    _common.content_command("s.py", ref, heading, hint), expected)
+
+
 if __name__ == "__main__":
     unittest.main()
