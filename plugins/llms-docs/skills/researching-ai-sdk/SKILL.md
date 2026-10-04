@@ -94,7 +94,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" search "<キーワード
 スペース区切りで複数キーワード（AND）。未取得なら自動でネットワークから取得する。
 title / description / tags / 見出しでスコアリングして上位 5 件（`--top-n N` で変更可）を選び、
 各候補ドキュメントの body を keyword 検索して heading_path + スニペットを返す。
-上位 N 件がどれも部分一致 (`[partial match]`) のときは、全文検索で全キーワードが 1 セクションに揃うページを最大 2 件探して `[body-only]` として追記する (既存の行は残り、`Next:` には index の最上位候補の行も残る。全キーワードが揃う候補が Changelog / Release notes だけのときも探す)。
+上位 N 件がどれも部分一致 (`[partial match]`) のときは、全文検索で全キーワードが 1 セクションに揃うページを最大 2 件探して `[body-only]` として追記する (既存の行は残り、`Next:` には index の最上位候補の行も残る。全キーワードが揃う候補が Changelog / Release notes だけのときも探す。全キーワードが揃う候補があっても、見出しに全キーワードを含む節が無ければ、それより当たりの良い節を持つページを同じく最大 2 件足す)。
 結果に表示される `[<doc_idx>]` は `content` / `sections` にそのまま渡せる。
 
 ### Step 2: 必要なセクションの本文を取得
@@ -140,7 +140,7 @@ AI SDK の llms-full.txt は URL を持たないため、URL / slug 形式は受
 
 | コマンド | 引数 | 説明 |
 |---------|------|------|
-| `search` | `<query> [--file F] [--top-n N] [--max-hits N] [--context N] [--max-snippet-chars N] [--include-changelog-priority]` | 推奨入口。title/desc/tags で top N 絞り込み + 本文 hits。並び順は本文 hits 数 → index score (changelog / release notes は既定で末尾、`--include-changelog-priority` で解除) |
+| `search` | `<query> [--file F] [--top-n N] [--max-hits N] [--context N] [--max-snippet-chars N] [--include-changelog-priority]` | 推奨入口。title/desc/tags で top N 絞り込み + 本文 hits。並び順は全キーワードが揃うか → 節の当たり方 (見出しに全キーワード → 1 行の 200 字以内に全キーワード) → 本文 hits 数 → index score (changelog / release notes は既定で末尾、`--include-changelog-priority` で解除) |
 | `search-index` | `<query> [--file F] [--limit N] [--show-sections]` | title/description/tags/見出しで候補だけ取得 |
 | `search-content` | `<query> [--file F] [--page-ref REF] [--limit N] [--context N] [--max-hits N] [--max-snippet-chars N] [--include-changelog-priority]` | 本文を横断キーワード検索、heading_path + スニペットを返す |
 | `fetch-index` | `[--file F] [--compact] [--cache-dir DIR]` | 全ドキュメント一覧を表示（フォールバック用） |

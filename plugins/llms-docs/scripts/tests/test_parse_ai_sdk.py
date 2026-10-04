@@ -654,11 +654,13 @@ class SearchRankingTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        # No heading names the keyword: a heading match outranks hit counts,
+        # and this test is about the changelog bucket only.
         _write_fixture(
             self.tmp,
             "---\ntitle: Changelog\ndescription: streamText updates\n---\n\n# Changelog\n\n"
             "## 5.0\nstreamText a\nstreamText b\nstreamText c\nstreamText d\n\n"
-            "---\ntitle: streamText\ndescription: streamText reference\n---\n\n# streamText\n\n"
+            "---\ntitle: streamText\ndescription: streamText reference\n---\n\n# Reference\n\n"
             "## Usage\nstreamText once.\n",
         )
 
