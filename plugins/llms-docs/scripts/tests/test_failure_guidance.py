@@ -949,6 +949,26 @@ class ContentCommandDashHeadingTest(unittest.TestCase):
                     self.assertEqual(words[-3:], ["--", "0", heading], line)
                     self.assert_reads(line, heading)
 
+    def test_search_next_line_for_a_dash_heading_runs_as_printed(self):
+        # the Next: lines of search / search-content are built separately
+        # from content_command; they need the same form
+        cases = [("search-content", "helpword"), ("search-content", "xword"),
+                 ("search", "limitword")]
+        for opt, args in self.corpus.items():
+            for sub, word in cases:
+                with self.subTest(opt=opt, sub=sub, word=word):
+                    code, out, err = _loader.run_cli(
+                        claude, ["parse-claude-docs.py", sub, *args, "--", word])
+                    self.assertEqual(code, 0, err)
+                    nexts = [ln[len("Next: "):] for ln in out.splitlines()
+                             if ln.startswith("Next: parse-claude-docs.py content ")]
+                    self.assertTrue(nexts, out)
+                    argv = shlex.split(nexts[0], comments=True)
+                    self.assertIn("--", argv, nexts[0])
+                    code, body, err = _loader.run_cli(claude, argv)
+                    self.assertEqual(code, 0, (nexts[0], err))
+                    self.assertIn(word, body, nexts[0])
+
     def test_options_stay_before_the_dashes(self):
         line = _common.content_command(
             "s.py", 3, "--a b", ("--max-chars", "100", "--cache-dir", "'/a b'"))

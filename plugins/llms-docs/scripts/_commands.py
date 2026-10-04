@@ -335,10 +335,16 @@ def render_next_content(candidates: list, *, hint_args: tuple,
         next_hint("content", "<page_ref>", '"<heading_path>"', *hint_args)
         return
     for ref, heading, extra, count in candidates[:NEXT_CONTENT_LIMIT]:
-        heading_args = (shlex.quote(heading),) if heading is not None else ()
         note = duplicate_heading_note(count)
-        next_hint("content", str(ref), *heading_args, *extra, *hint_args,
-                  *((note.strip(),) if note else ()))
+        note_args = (note.strip(),) if note else ()
+        if heading is not None and heading.startswith("-"):
+            # same form as content_command: a heading that starts with "-"
+            # would be read as an option, so every positional goes after "--"
+            next_hint("content", *extra, *hint_args, "--", str(ref),
+                      shlex.quote(heading), *note_args)
+            continue
+        heading_args = (shlex.quote(heading),) if heading is not None else ()
+        next_hint("content", str(ref), *heading_args, *extra, *hint_args, *note_args)
 
 
 def term_page_counts(texts, query: str) -> tuple:
