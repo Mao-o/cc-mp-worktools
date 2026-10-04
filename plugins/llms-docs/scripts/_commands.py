@@ -33,6 +33,7 @@ from _common import (
     print_metadata_header,
     print_subsection_hints,
     query_terms,
+    quoted_keyword,
     retry_option_args,
     search_in_page_command,
     search_in_page_keyword,
@@ -136,7 +137,7 @@ def render_content(page: PageView, args, *, script: str, hint_args: tuple,
                 "no_narrow_reason": ("this section has no subsections to narrow to" if target
                                      else "this page has no headings to narrow to"),
                 "next_note": (f"To find a line inside it, run the command below with "
-                              f"'{search_in_page_keyword(title)}' ({stand_in}, a stand-in) "
+                              f"{quoted_keyword(search_in_page_keyword(title))} ({stand_in}, a stand-in) "
                               f"replaced by the term you are looking for:"),
             }
     content = truncate_content(content, args.max_chars, narrow_hint=narrow_hint,

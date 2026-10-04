@@ -1319,24 +1319,53 @@ def names_every_keyword(text_lower: str, keywords) -> bool:
                for kw in keywords)
 
 
-def _section_heading_texts(sections, page_title: str) -> list[str]:
-    """Per section, the page title and every heading on its path (the
-    section's own and its ancestors'), as one text for
-    ``names_every_keyword``. Built from the levels, not by splitting
-    ``heading_path`` (a heading may contain a slash)."""
+def _section_heading_texts(sections, page_title: str) -> list[tuple[str, str]]:
+    """Per section, two texts for ``names_every_keyword``: the page title
+    and every heading on its path (the section's own and its ancestors'),
+    and the same without the section's own heading (what it inherits).
+    Built from the levels, not by splitting ``heading_path`` (a heading may
+    contain a slash)."""
     texts = []
     stack: list = []
     base = _heading_text(page_title) if page_title else ""
     for s in sections:
         while stack and stack[-1][0] >= s["level"]:
             stack.pop()
+        inherited = "\n".join([base] + [t for _, t in stack])
         stack.append((s["level"], _heading_text(s["title"])))
-        texts.append("\n".join([base] + [t for _, t in stack]))
+        texts.append(("\n".join([base] + [t for _, t in stack]), inherited))
     return texts
 
 
+SNIPPET_MARK_WIDTH = 2  # "→ " / "  " in front of each snippet line
+
+
+def _cut_hit_line(text: str, width: int, span) -> str:
+    """Cut one snippet line (*text*, its ``→ `` mark included) to about
+    *width* characters so that the matched word stays in view.
+
+    *span* is ``(start, end)`` of the first matched keyword in the line
+    after the mark (``None`` when unknown). When the word ends within the
+    first *width* characters the line is cut from its start, as before;
+    otherwise a window starting a third of the width before the word is
+    cut out, with ``…`` on each side that was cut. The mark stays in
+    front of the window."""
+    if len(text) <= width:
+        return text
+    mark, rest = text[:SNIPPET_MARK_WIDTH], text[SNIPPET_MARK_WIDTH:]
+    room = width - SNIPPET_MARK_WIDTH
+    if span is None or span[1] <= room:
+        return text[:width] + "…"
+    # a third of the width before the word, but never past the point where
+    # the window would run off the end of the line
+    begin = max(0, min(span[0] - room // 3, len(rest) - room))
+    window = rest[begin:begin + room]
+    return (mark + ("…" if begin > 0 else "") + window
+            + ("…" if begin + room < len(rest) else ""))
+
+
 def _fit_snippet(lines, max_chars, tail: str = "") -> str:
-    """Join the snippet *lines* (``(text, is_hit)``) within *max_chars*.
+    """Join the snippet *lines* (``(text, is_hit, span)``) within *max_chars*.
 
     Fits as is when it can (``0`` / ``None`` = no limit). Otherwise the hit
     lines are kept first and the context lines nearest to a hit are added
@@ -1344,26 +1373,28 @@ def _fit_snippet(lines, max_chars, tail: str = "") -> str:
     matching line out of view. Lines left out are replaced by one ``...``
     line per gap. When the hit lines alone are over the limit, only the
     hit lines are kept and each is cut to ``max(max_chars // n_hits, 80)``
-    characters with a trailing ``…``, so every hit stays in view (with many
-    hits the total can go over *max_chars*: no line is cut below 80
-    characters). *tail*
+    characters with ``…`` where it was cut, so every hit stays in view (with
+    many hits the total can go over *max_chars*: no line is cut below 80
+    characters). A hit line whose matched word lies past that width is cut
+    around the word instead of from its start (``_cut_hit_line``; *span* is
+    where the first matched keyword sits in the line after its mark). *tail*
     (the "more hits" note) is appended after the fit and does not count
     against the limit.
     """
     def finish(text):
         return text + ("\n" + tail if tail else "")
 
-    full = "\n".join(text for text, _hit in lines)
+    full = "\n".join(text for text, _hit, _span in lines)
     if not max_chars or len(full) <= max_chars:
         return finish(full)
 
-    hit_pos = [i for i, (_t, hit) in enumerate(lines) if hit]
+    hit_pos = [i for i, (_t, hit, _s) in enumerate(lines) if hit]
     keep = set(hit_pos)
     used = sum(len(lines[i][0]) + 1 for i in keep) - 1
     if used > max_chars:
         width = max(max_chars // len(hit_pos), 80)
-        lines = [(text if len(text) <= width else text[:width] + "…", hit)
-                 for text, hit in lines]
+        lines = [(_cut_hit_line(text, width, span), hit, span)
+                 for text, hit, span in lines]
     else:
         by_distance = sorted(
             (i for i in range(len(lines)) if i not in keep),
@@ -1387,6 +1418,20 @@ def _fit_snippet(lines, max_chars, tail: str = "") -> str:
     return finish("\n".join(out))
 
 
+def _first_keyword_span(line: str, keywords):
+    """``(start, end)`` of the earliest of *keywords* (lowercase) in *line*,
+    matched as ``search_content_in_body`` matches them (a substring, case
+    ignored); ``None`` when none is there."""
+    lower = line.lower()
+    if len(lower) != len(line):
+        # a character whose lowercase is longer (e.g. U+0130) shifts the
+        # positions; fall back to cutting from the start of the line
+        return None
+    spans = [(i, i + len(kw)) for kw in keywords
+             for i in [lower.find(kw)] if i >= 0]
+    return min(spans) if spans else None
+
+
 def _build_section_results(section_hits, sections, body_lines, keywords,
                            min_coverage, context_lines, max_snippet_chars,
                            page_title=""):
@@ -1396,6 +1441,9 @@ def _build_section_results(section_hits, sections, body_lines, keywords,
     heading_path (a command that names it reads the first of them).
     ``heading_match`` is whether the page title and the section's headings
     (its own and its ancestors') name every keyword (``names_every_keyword``).
+    ``heading_own`` is whether that match needs the section's own heading:
+    false when the title and the ancestors already name every keyword (then
+    every descendant matches as well) or when there is no heading match.
     """
     results = []
     total = 0
@@ -1426,7 +1474,8 @@ def _build_section_results(section_hits, sections, body_lines, keywords,
         hit_set = set(visible_hits)
 
         snippet = _fit_snippet(
-            [(f"{'→ ' if j in hit_set else '  '}{body_lines[j].rstrip()}", j in hit_set)
+            [(f"{'→ ' if j in hit_set else '  '}{body_lines[j].rstrip()}", j in hit_set,
+              _first_keyword_span(body_lines[j], keywords) if j in hit_set else None)
              for j in range(snippet_start, snippet_end)],
             max_snippet_chars,
             tail=f"  ... ({truncated} more hits in this section)" if truncated else "",
@@ -1438,7 +1487,9 @@ def _build_section_results(section_hits, sections, body_lines, keywords,
         # heading whose own title contains a slash (e.g. "## CI/CD") would
         # otherwise be misread as a nested breadcrumb (merge-review finding).
         title = sections[si]["title"] if si is not None else "(top)"
-        names_text = heading_texts[si] if si is not None else top_text
+        names_text, inherited_text = (heading_texts[si] if si is not None
+                                      else (top_text, top_text))
+        heading_match = names_every_keyword(names_text, keywords)
         results.append({
             "heading_path": heading_path,
             "title": title,
@@ -1447,7 +1498,8 @@ def _build_section_results(section_hits, sections, body_lines, keywords,
             "matched_keywords": sorted(all_matched),
             "hit_count": len(hits),
             "heading_count": path_counts.get(heading_path, 1),
-            "heading_match": names_every_keyword(names_text, keywords),
+            "heading_match": heading_match,
+            "heading_own": heading_match and not names_every_keyword(inherited_text, keywords),
         })
     return results, total
 
@@ -1462,12 +1514,15 @@ def section_rank_key(result: dict) -> tuple:
     """Sort key for the sections of one page (best first).
 
     Most keywords first, then ``section_fit`` (the headings name every
-    keyword), then most hit lines, then position. Hit lines alone favour a
-    huge section that happens to contain every word somewhere; the headings
-    find the section that is about the query.
+    keyword), then the section whose own heading completes that match
+    (``heading_own``) before its descendants, which inherit it, then most
+    hit lines, then position. Hit lines alone favour a huge section that
+    happens to contain every word somewhere; the headings find the section
+    that is about the query.
     """
     return (-len(result["matched_keywords"]),
             section_fit(result.get("heading_match", False)),
+            0 if result.get("heading_own", False) else 1,
             -result["hit_count"],
             result["line_offset"])
 
@@ -1803,6 +1858,15 @@ def search_in_page_keyword(title: str) -> str:
     search compares the keyword with the raw lines of the body, where the
     escape is still there. ``""`` when *title* has no words."""
     return " ".join(query_terms(_strip_heading_markup(title).lower()))
+
+
+def quoted_keyword(keyword: str) -> str:
+    """*keyword* as the note naming the stand-in keyword prints it: in
+    quotes, and as the same shell word the ``search_in_page_command`` line
+    carries when that word needs quoting (``'don'"'"'t ask'`` for a heading
+    with an apostrophe), so the reader finds the note's word in the line."""
+    quoted = shlex.quote(keyword)
+    return quoted if quoted.startswith("'") else f"'{keyword}'"
 
 
 def search_in_page_command(script: str, ref, title: str, hint_args: tuple = ()) -> str | None:
