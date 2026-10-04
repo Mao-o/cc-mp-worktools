@@ -7,6 +7,7 @@ overflow reporting, and the format-change detection helpers
 (assert_parsed / check_join_rate / full_corpus_body_search).
 """
 
+import re
 import types
 import unittest
 from unittest import mock
@@ -652,6 +653,57 @@ class HeadingAnchorSlugTest(unittest.TestCase):
         )
         self.assertEqual(_common.heading_anchor_slug("What's New?"), "whats-new")
 
+    def test_symbols_between_words_become_hyphens(self):
+        """見出しの記号 (. ( / など) は削らずハイフンにする。Mintlify の id は
+        `loop.md` を `loop-md` にする (ページ内リンクと突き合わせて確認した形)。"""
+        cases = {
+            "Customize the default prompt with loop.md":
+                "customize-the-default-prompt-with-loop-md",
+            "worktree.baseRef": "worktree-baseref",
+            "claude.ai rejected the session token": "claude-ai-rejected-the-session-token",
+            "/security-review fails without origin/HEAD":
+                "security-review-fails-without-origin-head",
+            "Conflict between `--bg` and `--print`": "conflict-between-bg-and-print",
+            "Invalid `--agents` configuration": "invalid-agents-configuration",
+            "Set up (optional) hooks": "set-up-optional-hooks",
+        }
+        for title, expected in cases.items():
+            with self.subTest(title=title):
+                self.assertEqual(_common.heading_anchor_slug(title), expected)
+
+    def test_apostrophes_are_dropped_not_hyphenated(self):
+        self.assertEqual(_common.heading_anchor_slug("Can't read .mcp.json"), "cant-read-mcp-json")
+        self.assertEqual(_common.heading_anchor_slug("Anthropic’s marketplaces"),
+                         "anthropics-marketplaces")
+
+    def test_backslash_escaped_underscore_is_the_underscore(self):
+        """Markdown の `\\_` は `_` として表示される。バックスラッシュ を記号として
+        ハイフンにしない。これは best-effort で、`\\_` を `-` にする id のページもある
+        (その形には寄せていない)。"""
+        self.assertEqual(_common.heading_anchor_slug(r"subagent\_type is required"),
+                         "subagent_type-is-required")
+        self.assertEqual(_common.heading_anchor_slug(r"REVIEW\.md"), "review-md")
+
+    def test_slug_matches_in_page_link_for_symbol_headings(self):
+        """往復: ページ内リンク (#...) に書かれた id を、見出しから作った slug で引き直せる。"""
+        body = [
+            "See [loop](#customize-the-default-prompt-with-loop-md) and "
+            "[base](#worktree-baseref).\n",
+            "\n",
+            "## Customize the default prompt with loop.md\n",
+            "text\n",
+            "## worktree.baseRef\n",
+            "text\n",
+        ]
+        links = set(re.findall(r"\]\(#([^)\s]+)\)", "".join(body)))
+        slugs = {_common.heading_anchor_slug(s["title"]) for s in _common.extract_sections(body)}
+        self.assertEqual(slugs, links)
+
+    def test_devsite_style_keeps_stripping_symbols(self):
+        """devsite の記号の扱いは実測の根拠が無いため変えない (github 系だけ直した)。"""
+        self.assertEqual(_common.heading_anchor_slug("Read loop.md now", style="devsite"),
+                         "read_loopmd_now")
+
     def test_existing_hyphens_are_preserved(self):
         self.assertEqual(
             _common.heading_anchor_slug("Multi-Word-Title"), "multi-word-title"
@@ -743,9 +795,9 @@ class HeadingAnchorSlugDevsiteStyleTest(unittest.TestCase):
         )
 
     def test_words_with_no_separator_are_unaffected(self):
-        # A heading with an internal "/" and no spaces around it collapses
-        # to a single run with nothing to join — same result in both
-        # styles, since there's no whitespace to turn into a separator.
+        # devsite: an internal "/" with no spaces around it is stripped,
+        # leaving one run with nothing to join (the default style turns the
+        # "/" into a hyphen: "ci-cd").
         self.assertEqual(_common.heading_anchor_slug("CI/CD", style="devsite"), "cicd")
 
     def test_slash_surrounded_by_spaces_becomes_single_underscore(self):
@@ -780,7 +832,7 @@ class SectionUrlAnchorTest(unittest.TestCase):
         # from heading_path via rsplit("/", 1) — sidesteps that ambiguity.
         self.assertEqual(
             _common.section_url_anchor("https://example.com/p", "CI/CD"),
-            "  [https://example.com/p#cicd]",
+            "  [https://example.com/p#ci-cd]",
         )
         self.assertEqual(
             _common.section_url_anchor("https://example.com/p", "Read / write data"),
@@ -808,6 +860,72 @@ class SectionUrlAnchorTest(unittest.TestCase):
             ),
             "  [https://firebase.google.com/docs/firestore/manage-data/add-data#set_a_document]",
         )
+
+
+class SnippetBudgetTest(unittest.TestCase):
+    """snippet の文字数の予算を、一致行の前の長い表の行が使い切って一致行が
+    見えなくなっていた。一致行を優先して残し、文脈の行から削る。"""
+
+    LONG_ROW = "| `SOME_VARIABLE` | " + ("long description " * 40) + "|"
+
+    def _snippet(self, body, query, **kw):
+        result = _common.search_content_in_body(body, query, max_snippet_chars=500, **kw)
+        return result["results"][0]["snippet"]
+
+    def test_match_line_after_a_long_table_row_is_visible(self):
+        body = ["## Variables\n", self.LONG_ROW + "\n", "the needleword is here\n", "after\n"]
+        snippet = self._snippet(body, "needleword")
+        self.assertIn("→ the needleword is here", snippet)
+        self.assertNotIn("long description", snippet)
+        self.assertIn("  ...", snippet)
+        self.assertLessEqual(len(snippet), 500 + 20)
+
+    def test_context_that_fits_is_kept_nearest_first(self):
+        body = ["## Variables\n", "far before\n", "near before\n", "needleword\n",
+                "near after\n", self.LONG_ROW + "\n"]
+        snippet = self._snippet(body, "needleword", context_lines=2)
+        self.assertIn("  near before", snippet)
+        self.assertIn("  near after", snippet)
+        self.assertNotIn("long description", snippet)
+
+    def test_context_is_dropped_farthest_first_when_only_some_fits(self):
+        body = ["## S\n", "x" * 200 + "\n", "y" * 200 + "\n", "needleword\n"]
+        result = _common.search_content_in_body(body, "needleword", max_snippet_chars=300,
+                                                context_lines=3)
+        snippet = result["results"][0]["snippet"]
+        self.assertIn("y" * 200, snippet)       # 一致行の隣は残る
+        self.assertNotIn("x" * 200, snippet)    # 遠い方から落ちる
+        self.assertIn("→ needleword", snippet)
+
+    def test_a_snippet_within_the_budget_is_unchanged(self):
+        body = ["## S\n", "before\n", "needleword\n", "after\n"]
+        self.assertEqual(self._snippet(body, "needleword"),
+                         "  ## S\n  before\n→ needleword\n  after")
+
+    def test_hit_lines_over_the_budget_each_keep_a_share(self):
+        """一致行だけで予算を超えるときは、末尾から切ると後ろの一致行が消える。
+        予算を一致行の数で割り、各行をその字数 (80 字未満にはしない) で … 付きに切る。"""
+        body = ["## S\n"] + [f"needleword {i} " + "x" * 600 + "\n" for i in range(3)]
+        snippet = self._snippet(body, "needleword")
+        hit_lines = [ln for ln in snippet.splitlines() if ln.startswith("→ ")]
+        self.assertEqual([ln[:14] for ln in hit_lines],
+                         ["→ needleword 0", "→ needleword 1", "→ needleword 2"])
+        for ln in hit_lines:
+            self.assertEqual(len(ln), 500 // 3 + 1)
+            self.assertTrue(ln.endswith("x…"), ln)
+
+    def test_hit_lines_are_not_cut_below_80_chars(self):
+        body = ["## S\n"] + [f"needleword {i} " + "x" * 300 + "\n" for i in range(3)]
+        result = _common.search_content_in_body(body, "needleword", max_snippet_chars=120)
+        hit_lines = [ln for ln in result["results"][0]["snippet"].splitlines()
+                     if ln.startswith("→ ")]
+        self.assertEqual(len(hit_lines), 3)
+        self.assertEqual({len(ln) for ln in hit_lines}, {81})
+
+    def test_more_hits_note_is_kept(self):
+        body = ["## S\n"] + [f"needleword {i}\n" for i in range(5)]
+        snippet = self._snippet(body, "needleword")
+        self.assertIn("(2 more hits in this section)", snippet)
 
 
 class SearchContentInBodyTest(unittest.TestCase):

@@ -344,7 +344,7 @@ class SearchContentMaxSnippetCharsTest(unittest.TestCase):
             "--cache-dir", self.tmp,
         ])
         self.assertEqual(code, 0, err)
-        self.assertNotIn("chars truncated", out)
+        self.assertNotIn("…", out)
         self.assertIn("end of line", out)
 
     def test_max_snippet_chars_truncates_a_long_snippet(self):
@@ -353,7 +353,8 @@ class SearchContentMaxSnippetCharsTest(unittest.TestCase):
             "--cache-dir", self.tmp, "--max-snippet-chars", "20",
         ])
         self.assertEqual(code, 0, err)
-        self.assertIn("chars truncated", out)
+        # 一致行だけで予算を超えるときは、一致行を (80 字未満には切らずに) … 付きで切る
+        self.assertIn("→ keywordhit " + "x" * 67 + "…", out)
         self.assertNotIn("end of line", out)
 
 
@@ -678,6 +679,71 @@ class SearchRankingTest(unittest.TestCase):
     def test_flag_restores_hit_order(self):
         titles = self._titles("--include-changelog-priority")
         self.assertIn("Changelog", titles[0])
+
+
+class FrontmatterUrlTest(unittest.TestCase):
+    """各ページの frontmatter の `url:` を、sections / content / search /
+    search-content の出力に出す。url が無いページは従来どおり (行を足さない)。"""
+
+    URL = "https://ai-sdk.example/docs/stream-text"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        _write_fixture(
+            self.tmp,
+            "---\n"
+            "title: streamText\n"
+            "description: Stream text generation\n"
+            f'url: "{self.URL}"\n'
+            "docs_index: /llms.txt\n"
+            "---\n\n"
+            "# streamText\n\n"
+            "## Options\n"
+            "Configure the onFinishUnique callback here.\n"
+            "\n"
+            "---\n"
+            "title: generateText\n"
+            "description: Generate text once\n"
+            "---\n\n"
+            "# generateText\n\n"
+            "## Usage\n"
+            "Basic onFinishUnique usage.\n",
+        )
+
+    def _run(self, *argv):
+        code, out, err = _loader.run_cli(
+            parse_ai_sdk, ["parse-ai-sdk.py", *argv, "--cache-dir", self.tmp])
+        self.assertEqual(code, 0, err)
+        return out
+
+    def test_parse_frontmatter_reads_the_quoted_url(self):
+        fm = parse_ai_sdk.parse_frontmatter(
+            ["title: A\n", f'url: "{self.URL}"\n', "docs_index: /llms.txt\n"])
+        self.assertEqual(fm["url"], self.URL)
+        self.assertEqual(parse_ai_sdk.parse_frontmatter(["title: A\n"])["url"], "")
+
+    def test_sections_prints_the_url(self):
+        out = self._run("sections", "0")
+        self.assertIn(f"  URL: {self.URL}\n", out)
+
+    def test_content_prints_the_url_as_source(self):
+        out = self._run("content", "0")
+        self.assertIn(f"# source: {self.URL}\n", out)
+
+    def test_search_and_search_content_print_the_url(self):
+        for sub in ("search", "search-content"):
+            with self.subTest(sub=sub):
+                out = self._run(sub, "onFinishUnique")
+                self.assertEqual(out.count(f"    URL: {self.URL}\n"), 1, out)
+
+    def test_page_without_url_gets_no_url_line(self):
+        out = self._run("sections", "1")
+        self.assertNotIn("URL:", out)
+        out = self._run("content", "1")
+        self.assertNotIn("# source:", out)
+        out = self._run("search-content", "onFinishUnique")
+        self.assertEqual(out.count("URL:"), 1)
 
 
 if __name__ == "__main__":

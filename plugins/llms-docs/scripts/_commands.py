@@ -34,6 +34,9 @@ from _common import (
     print_subsection_hints,
     query_terms,
     retry_option_args,
+    search_in_page_command,
+    search_in_page_keyword,
+    subsection_children,
     truncate_content,
 )
 
@@ -115,7 +118,29 @@ def render_content(page: PageView, args, *, script: str, hint_args: tuple,
 
     hint_suffix = (" " + " ".join(hint_args)) if hint_args else ""
     narrow_hint = f'{script} content {page.idx} "<heading_path>"{hint_suffix}'
-    content = truncate_content(content, args.max_chars, narrow_hint=narrow_hint)
+    # A page or section with no subsections cannot be narrowed by heading: the
+    # truncation notice then points at a search inside the page instead.
+    # A page with no heading at all is childless too; a page whose headings
+    # start below H1 is not (``subsection_children`` takes the shallowest).
+    truncate_kwargs = {}
+    sections = extract_sections(page.body_lines, **page._level_kwargs())
+    found = subsection_children(sections, page.body_lines, resolved_heading_path)
+    if found is None or not found[1]:
+        target = found[2] if found else None
+        title = target["title"] if target else page.title
+        next_command = search_in_page_command(script, page.idx, title, hint_args)
+        if next_command:
+            stand_in = "the section heading" if target else "the page title"
+            truncate_kwargs = {
+                "next_command": next_command,
+                "no_narrow_reason": ("this section has no subsections to narrow to" if target
+                                     else "this page has no headings to narrow to"),
+                "next_note": (f"To find a line inside it, run the command below with "
+                              f"'{search_in_page_keyword(title)}' ({stand_in}, a stand-in) "
+                              f"replaced by the term you are looking for:"),
+            }
+    content = truncate_content(content, args.max_chars, narrow_hint=narrow_hint,
+                               **truncate_kwargs)
 
     print_metadata_header(page.title, heading_path=resolved_heading_path, **page.meta)
 
