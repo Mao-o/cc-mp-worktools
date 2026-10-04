@@ -2,6 +2,18 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.35.3] - 2026-10-04
+
+### 修正: `index_url` の突き合わせで、節アンカーの項目が同じタイトルのページの URL を消していた
+
+- **症状**: Zod の `Codecs` / `Ecosystem` / `Versioning` に URL が付かなかった。`llms.txt` には
+  `https://zod.dev/codecs` などのページ項目があるが、同じタイトルの節項目 (`https://zod.dev/codecs?id=codecs`、
+  `https://zod.dev/?id=ecosystem` など) も候補に数えられ、タイトルが曖昧と見なされていた
+- **修正**: 同じタイトルの候補のうち、`?` も `#` も含まない URL がちょうど 1 つあれば、それをページの URL にする。
+  それ以外は従来どおり (候補が 1 つならその URL、2 つ以上なら付けない)
+- **実測**: `index_url` を持つ 7 source の全ページで修正の前後を比べた。変わったのは Zod の上の 3 ページだけで
+  (URL 付きは 18 中 13 から 16)、Hono / Render / Codex / OpenAI plugins / OpenAI API docs / Factory は 1 ページも変わらない
+
 ## [0.35.2] - 2026-10-04
 
 ### 修正: 閉じ損ねたコードブロックの後ろの H1 ページが、前のページに吸収されていた
