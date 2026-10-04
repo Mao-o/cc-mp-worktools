@@ -2055,14 +2055,21 @@ def retry_for_page_ref(args, hint_args: tuple = ()):
     command = getattr(args, "command", None)
 
     def retry(idx) -> str:
+        # Every positional goes last, after "--": a query or heading that
+        # starts with "-" would otherwise be read as an option. They go
+        # together after one "--" (not the page ref before the options): Python
+        # 3.11's argparse rejects an optional positional after "--" when a
+        # required one precedes the options.
+        options = list(retry_option_args(args, command)) + list(hint_args)
         if command == "search-content":
-            parts = [script, command, shlex.quote(args.query), "--page-ref", str(idx)]
+            parts = [script, command, "--page-ref", str(idx), *options,
+                     "--", shlex.quote(args.query)]
         else:
-            parts = [script, command or "content", str(idx)]
+            parts = [script, command or "content", *options, "--", str(idx)]
             heading = getattr(args, "heading_path", None)
             if heading:
                 parts.append(shlex.quote(heading))
-        return " ".join(parts + list(retry_option_args(args, command)) + list(hint_args))
+        return " ".join(parts)
 
     return retry
 

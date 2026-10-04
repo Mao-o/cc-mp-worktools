@@ -2,7 +2,25 @@
 
 All notable changes to this plugin will be documented here.
 
-## [0.35.0] - 2026-10-04
+## [0.35.1] - 2026-10-04
+
+### 修正: 失敗のあとに出す「別のページで同じ操作をやり直す」コマンドが、`-` で始まる語で実行できなかった
+
+- **症状**: 曖昧な page_ref・見出しが見つからない・AI SDK の URL を page_ref にした失敗などの後に出る、
+  別のページで同じ操作をやり直すコマンドは、`search-content` なら query を `--page-ref` の前に、
+  `content` / `sections` なら page と heading_path をオプションの前に置いていた。query や heading_path が
+  `-x` や `--limit` のように `-` で始まると、そのまま実行しても argparse がオプションとして読み、
+  使い方のエラー (終了コード 2) になった
+- **修正**: 位置引数をすべて `--` の後ろに置く形にした
+  (`search-content --page-ref <番号> <オプション> -- '<query>'`、`content <オプション> -- <番号> '<heading_path>'`、
+  `sections <オプション> -- <番号>`)。page と heading_path を 1 つの `--` の後ろにまとめるのは、
+  Python 3.11 の argparse が「必須の位置引数をオプションより前に置くと、`--` の後ろの任意の位置引数を
+  受け付けない」ため。`--max-chars` / `--limit` などの引き継ぎと `--cache-dir` / `--file` などの corpus オプションは
+  `--` の前に残る。出る行の並びが変わるだけで、行が指すページ・引数・終了コードは同じ
+- **テスト**: 出た行を加工せずに `shlex.split(comments=True)` で分割して実行する往復テストを、6 つの corpus 形
+  (`--cache-dir` と `--file`) × `-x` / `--limit` / `\_` / `the` / `---` / `'` / `-` で足した。
+  行の末尾の語を別の `-` 始まりの語に差し替えた行も実行する。文字列の形を固定していた既存の検査は、
+  新しい並びに合わせた
 
 ### 変更: AI SDK で表示された URL を page_ref に貼った失敗に次の一手を出す / 汎用 loader の URL 行を `URL:` にそろえる / 文書を実装に合わせる
 
