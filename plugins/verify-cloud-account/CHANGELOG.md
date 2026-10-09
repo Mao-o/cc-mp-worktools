@@ -1,5 +1,68 @@
 # Changelog
 
+## 0.19.0
+
+### Changed: 期待値が未登録でも、ディレクトリ単位の公式の固定があれば通す
+
+accounts.local.json に service のキーが無いと、0.18.0 までは一律に deny していた。CLI 自身に
+ディレクトリ単位でアカウントを固定する公式の仕組みがある service は、それで固定されていれば
+照合せずに通す (固定の値が、そのディレクトリで意図したアカウントの宣言になるため)。
+固定されていなければ、固定の方法と期待値の登録の両方を案内して deny する。
+
+- gcloud: `CLOUDSDK_CORE_ACCOUNT` が空でない、または `CLOUDSDK_ACTIVE_CONFIG_NAME` が account を
+  持つ構成を指している (project は問わない)
+- aws: `AWS_PROFILE` が空でない (`AWS_ACCESS_KEY_ID` は固定とみなさない)
+- firebase: そのディレクトリで `firebase use` の切替先が記録されている。commit される
+  `.firebaserc` の `default` だけでは固定とみなさない (チームで共有するファイルで、利用者が
+  選んだ値ではない)。未登録の間は、案内した `firebase use <x>` も止めない
+- gh / kubectl: 固定の公式の仕組みが無いので従来どおり (登録を促す)
+- accounts.local.json がどこにも無い場合も同じ扱い
+- 判定は hook の環境変数 (起動時の値 + settings の `env`) だけで行う。行頭のインライン env
+  (起動時の値と違うもの) や、同じコマンドの前段の `export` / `unset` / 代入 / `source` などで
+  その service のアカウントを決める環境変数を変えた場合は、固定されていないとみなす
+  (その場の 1 語で未登録の deny を抜けられないように)
+- 期待値を登録してある service は、従来どおり照合する
+
+### Added: 起動したリポジトリの外で走るコマンドを止める
+
+hook は Claude Code を起動したときの環境変数と、起動したディレクトリの期待値で照合する。
+ディレクトリ単位で環境変数を切り替えるツールの値は PreToolUse hook に届かないため、別の
+リポジトリで走るコマンド (`cd ../other && gcloud ...`) や、Bash の作業ディレクトリ自体が外に
+ある状態では、意図されたアカウントを照合できず、誤ったアカウントでの書き込みを通しうる。
+
+- 各セグメントが走るディレクトリを、hook input の `cwd` とコマンド中の `cd` / `pushd` から
+  静的に求め (`core/workdir.py`)、起動したリポジトリ (起動ディレクトリを含む git の作業ツリー)
+  の外なら照合せずに deny する (リモート read のみなら警告して通す)
+- 行き先を静的に決められない `cd` (`cd "$D"` / `cd -` / `popd` / glob など) の後は外として扱う
+- deny は、そのリポジトリで Claude Code を起動し直すよう案内する。移動先のパスは文面に出さない
+  (コマンド由来の文字列を deny 理由に入れない)
+
+### Changed: gcloud の値が環境変数で決まっているときは `gcloud config set` を案内しない
+
+`CLOUDSDK_CORE_ACCOUNT` / `CLOUDSDK_CORE_PROJECT` は設定ファイルより優先される (`--configuration`
+を付けても。空文字なら未設定。2026-10-09 実測)。不一致や未設定の deny が `gcloud config set` を
+案内すると、案内どおりに実行しても同じ deny が続いていた。
+
+- 値が環境変数で決まっているときは、その環境変数を設定している場所の直し方と
+  `--account` / `--project` を案内する
+- 環境変数が無く未設定のときは、`--account` / `--project`、ディレクトリごとの固定
+  (`/verify-cloud-account:project-accounts`)、マシン全体の既定 (`gcloud config set`) の順に案内する
+- 不一致の案内 (`切り替え: gcloud config set ...`) には、この実行だけなら `--account` /
+  `--project` を付ける方法も添える
+
+### Changed: gcloud のローカル読取で `CLOUDSDK_CORE_ACCOUNT` / `CLOUDSDK_CORE_PROJECT` を読む
+
+この 2 つがあると、0.18.0 までは検証のたびに `gcloud config get-value` を起動していた
+(1 回 1 秒前後)。gcloud と同じ優先順位 (環境変数 > 設定ファイル、空文字は未設定) で読む。
+ローカル読取で通せるのは従来どおり一致のときだけで、不一致・未設定は CLI で取り直してから
+判断する。ほかの `CLOUDSDK_*` や `GOOGLE_CLOUD_PROJECT` 等があるときは従来どおり CLI に委ねる。
+
+### Added: show に、期待値が未登録の service の固定の状況を出す
+
+`/verify-cloud-account:accounts-show` (builder の `show`) の末尾に、キーの無い service ごとに
+「固定済み (通す) / 未固定 (止める) / 固定の仕組みが無い (止める)」を出す。値は出さない。
+判定は show を実行した環境変数で行う旨も添える (hook は起動時の環境変数で判定する)。
+
 ## 0.18.0
 
 ### Fixed: `.firebaserc` を firebase-tools と違う内容に読んで照合しない
