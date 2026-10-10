@@ -1380,11 +1380,20 @@ def _cmd_show(
         global_path = paths.global_accounts_file()
         # `--path` で無いパスを指しても、プロジェクト側に別の期待値ファイルがあれば hook は
         # そちらを読み、グローバル既定には落ちない (`_hook_reads_instead` が警告する)。
+        # ただし hook がそちらを読むなら、そのファイルが stat できないとき hook は deny する。
+        # 「読みます」と案内して 0 で終わらせず、hook と同じ文面で止める。
+        other = _hook_reads_instead(target, project_dir)
+        if other is not None:
+            hook_target = _resolve_target(project_dir, None, require_new=False)
+            if _report_unstattable(
+                paths.discover_all_accounts_files(str(hook_target.anchor)), stderr
+            ):
+                return 1
         global_in_use = (
             global_path is not None
             and paths.may_hold_accounts(global_path)
             and global_path != target.path
-            and _hook_reads_instead(target, project_dir) is None
+            and other is None
         )
         # グローバル既定が stat できないなら、hook はそれを「ある (が読めない)」として
         # deny する。`--path` で開き直しても読めないので案内せず、hook と同じ文面で止める。
@@ -1904,11 +1913,20 @@ def _cmd_pin_env(
         global_path = paths.global_accounts_file()
         # `--path` で無いパスを指しても、プロジェクト側に別の期待値ファイルがあれば hook は
         # そちらを読み、グローバル既定には落ちない (`_hook_reads_instead` が警告する)。
+        # ただし hook がそちらを読むなら、そのファイルが stat できないとき hook は deny する。
+        # 「読みます」と案内して 0 で終わらせず、hook と同じ文面で止める。
+        other = _hook_reads_instead(target, project_dir)
+        if other is not None:
+            hook_target = _resolve_target(project_dir, None, require_new=False)
+            if _report_unstattable(
+                paths.discover_all_accounts_files(str(hook_target.anchor)), stderr
+            ):
+                return 1
         global_in_use = (
             global_path is not None
             and paths.may_hold_accounts(global_path)
             and global_path != target.path
-            and _hook_reads_instead(target, project_dir) is None
+            and other is None
         )
         # stat できないグローバル既定は、hook が deny する。`--path` での再実行を案内しても
         # 読めないので、hook と同じ文面で止める (show と同じ)。

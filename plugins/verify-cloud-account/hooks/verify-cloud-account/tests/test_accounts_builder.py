@@ -3783,6 +3783,24 @@ class TestUnstattableAccountsPath(BaseBuilder):
                 self.assertNotIn("(global)", out + err)
                 self.assertIn(str(self._new_path()), out + err)  # hook が読む方を案内する
 
+    def test_show_and_pin_env_with_missing_explicit_path_and_unstattable_project_file(self):
+        # 上と同じく hook はプロジェクト側を読むが、そのファイルが stat できないので deny する。
+        # builder も「読みます」と案内して 0 で終わらず、hook と同じ文面で止める
+        # (グローバル既定が stat できてもできなくても同じ)。
+        new = self._unstattable(self._new_path())
+        legacy = self._legacy_path()
+        self.assertFalse(os.path.lexists(legacy))  # 前提: 指定先は無い
+        for global_state in ("absent", "unstattable"):
+            if global_state == "unstattable":
+                self._unstattable(paths.global_accounts_file())
+            with mock.patch.dict(os.environ, {"AWS_PROFILE": "p"}):
+                for argv in (["show"], ["pin-env"]):
+                    with self.subTest(global_state=global_state, argv=argv[0]):
+                        code, out, err = self._run(argv + ["--path", str(legacy)])
+                        self.assertEqual(code, 1, out + err)
+                        self._assert_hook_wording(err, new, "new")
+                        self.assertNotIn("照合せずに通します", out)
+
     def test_init_with_unstattable_global_default_warns_of_shadowing(self):
         # init は止めない (プロジェクト側に作れば hook はそれを読む) が、グローバル既定を
         # 覆い隠すことは言う (`_global_default_note`)。
