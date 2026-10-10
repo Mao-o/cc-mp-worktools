@@ -102,10 +102,15 @@ Python 3.11+。標準ライブラリのみ (外部依存なし)。
   「手で確認してください」の文にする
 - **値そのものを文面に示すときは `core.shell_word.shown()` / `shown_all()` を通す**
   (v0.21.0)。`現在=` / `期待=` / 検出したコマンド自身が指定した値 (`--context` 等) /
-  alias の行き先 / host のどれも、出どころに関わらず同じ。許容形から外れる値は
-  `(表示しない値)` になる。値を f-string に直接入れない (改行で偽の行を差し込める。
-  `REMEDIATION_PATTERNS` の形の値は表示だけで注記の判定に当たる)。契約は
+  alias の行き先 / host のどれも、出どころに関わらず同じ。示すのは許容形 (`WORD`) の値か、
+  空白も `=` も制御文字・書式文字・行区切り / 段落区切りも含まない値 (`can_show`。普通の
+  名前を隠さない)。それ以外は `(表示しない値)` になる。値を f-string に直接入れない (改行で
+  偽の行を差し込める。`REMEDIATION_PATTERNS` の形の値は表示だけで注記の判定に当たる。
+  パターンはどれも空白を要するので、示す値は単独では当たらない)。契約は
   tests/test_shown_values.py が service × 出どころの生成で確かめる
+- **値を置き換えずに出すとき** (検出コマンドの行、CLI の出力の転記、記録のパスなど、空白を
+  含むのが普通の値) は `core.shell_word.escape_controls()` を通し、制御文字をエスケープして
+  1 行に収める (v0.21.0)
 - **例外を raise しない。** CLI 未インストール (`FileNotFoundError`)、実行不能
   (`OSError`)、timeout も文字列で返す。hook プロセスが異常終了すると JSON が
   出ず、公式仕様上は non-blocking error として**無音でコマンドが進む**
@@ -1283,7 +1288,9 @@ verify() は CLI が出した現在値 (前後の空白を除いた値) と期�
   されうる (指定していた project ではなく、アクティブな project で動く) ことを言っていなかった
   (マージ前レビューの指摘)。`firebase use` の語は入れない (切替を案内したことになり、注記の
   判定にも当たる)
-- `--project` の deny の先頭の文には、期待値も示す (`期待=`。`_shown_expected` で許容形の値だけ。
+- `--project` の deny の先頭の文には、期待値も示す (`期待=`。`_shown_expected` で許容形の値だけ
+  (v0.21.0 で core/shell_word.py の `shown` / `shown_all` に統合。以下の `_shown_current` /
+  `_shown_expected` も同じ)。
   dict は「のいずれか」を付け、外れる値があれば `_EXPECTED_NOT_SHOWN` を添える。`--config` 付きの
   コマンドの deny と同じ部品)。0.17.1 は同じコマンドの deny (`--project` の不一致) で期待値を
   示していた。上の「意図した project がアクティブかを確かめてから外す」には期待値が要るので、

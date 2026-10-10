@@ -49,7 +49,7 @@ import shlex
 import time
 from dataclasses import dataclass
 
-from core import budget, cache
+from core import budget, cache, shell_word
 
 ENV_VAR = "VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH"
 # accounts.local.json の予約キー。`$mode` / `$readonly` (builder は書かない手編集キー)
@@ -131,7 +131,8 @@ def _parse_names(raw_names, services, source: str) -> tuple[frozenset[str], str 
     note = None
     if rejected:
         note = (
-            f"{source} の {', '.join(rejected)} は自動切替に対応していません "
+            f"{source} の {', '.join(shell_word.shown(n) for n in rejected)} "
+            "は自動切替に対応していません "
             f"(対応: {', '.join(sorted(supported)) or 'なし'})。"
             "その指定は無効として扱いました。"
         )
@@ -237,11 +238,18 @@ def conflicting_switch(
         if value == want or not 0 <= elapsed < GUARD_SEC * 1_000_000_000:
             continue
         project = rec.get("project")
-        where = f" ({project})" if isinstance(project, str) and project else ""
+        # 記録は共有の状態ファイルから読む値。project (パス) は空白を含むのが普通なので
+        # 置き換えず制御文字だけをエスケープし、target / value は名前として shown を通す
+        # (改行を含む記録で、注記の外に偽の行を差し込めないように。v0.21.0)。
+        where = (
+            f" ({shell_word.escape_controls(project)})"
+            if isinstance(project, str) and project else ""
+        )
+        shown_target, shown_value = shell_word.shown(target), shell_word.shown(value)
         return (
             _NOTE_HEAD
-            + f"{elapsed // 1_000_000_000} 秒前に別の作業{where}が {target} を "
-            f"{value} に自動で切り替えています。並行するセッションが {value} で"
+            + f"{elapsed // 1_000_000_000} 秒前に別の作業{where}が {shown_target} を "
+            f"{shown_value} に自動で切り替えています。並行するセッションが {shown_value} で"
             "作業中の可能性があるため見送りました。切り替える前にユーザーに確認して"
             "ください (切り替えると、そのセッションのコマンドが別アカウントで動きます)。"
         )
@@ -366,6 +374,7 @@ def notice(service, switched) -> str:
     """自動切替したことを伝える文面 (allow 時は additionalContext、deny 時は注記)。"""
     describe = getattr(service, "describe_switch", None)
     body = describe(switched) if callable(describe) else ", ".join(
-        f"{target}: {before} → {after}" for target, before, after in switched
+        f"{shell_word.shown(target)}: {shell_word.shown(before)} → {shell_word.shown(after)}"
+        for target, before, after in switched
     )
     return f"[verify-cloud-account] 自動切替 (auto-switch): {body}"

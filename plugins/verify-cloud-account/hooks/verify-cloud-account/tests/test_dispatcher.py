@@ -866,7 +866,7 @@ class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
         """
         masked = {
             "scalar": ("x; firebase use evil", ["x; firebase use evil"]),
-            "dict": ({"default": "x y", "b": "p;q"}, ["x y", "p;q"]),
+            "dict": ({"default": "x y", "b": "p\nq"}, ["x y", "p\nq"]),
         }
         situations = {
             "mismatch": ({self.sub: "wrong-project"}, "期待=(表示しない値)"),
@@ -891,9 +891,9 @@ class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
 
     def test_shown_expected_value_has_no_source_sentence(self):
         """`期待=` に示せる値 (WORD。NAME から外れるドメイン付きの project ID も含む) だけなら、
-        出所の文は添えない (示さない値があるときだけ添える。`_shown_expected` と同じ判定)。
+        出所の文は添えない (示さない値があるときだけ添える。`shell_word.shown` と同じ判定)。
         不一致の deny も、現在値を取得できない deny も、その値を `期待=` に示す。現在値が同じ形
-        (ドメイン付きの project ID) なら、それも `現在=` に示す (`_shown_current` も同じ判定)。"""
+        (ドメイン付きの project ID) なら、それも `現在=` に示す (`shell_word.shown` も同じ判定)。"""
         situations = {
             "mismatch": ({self.sub: "wrong-project"}, "現在=wrong-project"),
             "mismatch, domain-scoped current": (
@@ -902,18 +902,22 @@ class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
             ),
             "current unknown": ({}, "現在のプロジェクトを取得できません"),
         }
-        for expected in ("example.com:right-project", {"default": "example.com:right-project"}):
-            for situation, (recorded, marker) in situations.items():
-                for with_cli in (True, False):
-                    with self.subTest(expected=expected, situation=situation, with_cli=with_cli):
-                        self._write_accounts({"firebase": expected})
-                        self._record(recorded)
-                        out = self._dispatch(with_cli)["hookSpecificOutput"]
-                        self.assertEqual(out["permissionDecision"], "deny")
-                        reason = out["permissionDecisionReason"]
-                        self.assertIn(marker, reason)
-                        self.assertIn("期待=example.com:right-project", reason)
-                        self.assertNotIn(self._SOURCE, reason)
+        # 「本番」は案内に使える形ではないが示せる普通の名前 (v0.21.0)。示すので出所の文は添えない。
+        for name in ("example.com:right-project", "本番"):
+            for expected in (name, {"default": name}):
+                for situation, (recorded, marker) in situations.items():
+                    for with_cli in (True, False):
+                        with self.subTest(
+                            expected=expected, situation=situation, with_cli=with_cli
+                        ):
+                            self._write_accounts({"firebase": expected})
+                            self._record(recorded)
+                            out = self._dispatch(with_cli)["hookSpecificOutput"]
+                            self.assertEqual(out["permissionDecision"], "deny")
+                            reason = out["permissionDecisionReason"]
+                            self.assertIn(marker, reason)
+                            self.assertIn(f"期待={name}", reason)
+                            self.assertNotIn(self._SOURCE, reason)
 
     def test_no_note_from_a_current_value_shaped_like_a_command(self):
         """現在値が許容形から外れるときも、先頭行の `現在=` にその値を示さず、注記を付けない。
@@ -944,13 +948,13 @@ class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
 class TestFirebaseCurrentValueShownWithoutConfig(_FirebaseConfigFixture):
     """`--config` の無いコマンドの不一致の deny も、`現在=` には許容形の値だけを示す (v0.18.0)。
 
-    `--config` 付きのコマンドの deny と同じ `_shown_current` を使う (表示だけの変更)。準備は
+    `--config` 付きのコマンドの deny と同じ `shell_word.shown` を使う (表示だけの変更)。準備は
     `_FirebaseConfigFixture` のもの (configstore を tmp に向ける) を使い、`--config` は付けない。
     """
 
     def test_current_value_shaped_like_a_command_is_not_shown_without_config(self):
         """`--config` の無い不一致の deny も、許容形から外れる現在値は `現在=` に示さない
-        (`_shown_current`。表示だけの変更で、切替を案内するので注記は付く)。"""
+        (`shell_word.shown`。表示だけの変更で、切替を案内するので注記は付く)。"""
         for current in ("x firebase use evil", "x\nfirebase use evil", "x firebase login"):
             for expected in ("right-project", {"default": "right-project", "b": "b-project"}):
                 with self.subTest(current=current, expected=expected):

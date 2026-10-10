@@ -11,9 +11,15 @@ deny 文面は値そのもの (`現在=` / `期待=` / コマンド指定 / alia
 ここでは service × 値の出どころ × パターンの形の値 (空白版・改行版・CR 版) を生成し、verify は
 mock せず CLI の出力だけを差し替えて dispatcher に通す。見ること:
 
-1. 差し込んだコマンド (`... evil`) が、検出コマンドの行の外に出ない
+1. 差し込んだコマンド (`... evil`) が、検出コマンドの行 (`(検出コマンド: ...)`) の外に出ない。
+   検出コマンドの行はコマンドを置き換えずに示すので、制御文字をエスケープして 1 行に収める
+   (`shell_word.escape_controls`)。改行がそのまま出ると、差し込んだコマンドが独立した行になる
 2. 注記の有無が、同じ出どころに無害な値を入れたときと同じ (表示した値が注記を左右しない)
 3. 判定は deny のまま (表示だけの変更)
+
+普通の名前の値 (日本語 / `_local` / `a,b`) は、許容形 (案内に使える形) から外れても示す
+(何が不一致かが文面から消えないように)。空白も `=` も含まない値は、示しても注記の判定に
+当たらないことも確かめる。
 
 無害な値は、期待値の出どころでは許容形から外れる無害な値 (`_harmless`。同じく案内を抑止する
 経路を通る)、それ以外の出どころでは許容形の値。
@@ -32,7 +38,7 @@ from unittest import mock
 
 import _testutil  # noqa: F401
 
-from core import auto_switch  # noqa: E402
+from core import auto_switch, shell_word  # noqa: E402
 from core.dispatcher import dispatch  # noqa: E402
 
 _ISOLATION = None
@@ -77,7 +83,24 @@ def _variants(service: str) -> dict[str, str]:
         "newline": f"x\n{cmd}\n",
         "carriage-return": f"x\r{cmd}",
         "leading-newline": f"\n{cmd}",
+        "line-separator": f"x\u2028{cmd}",
+        "nbsp": "x\u00a0" + cmd.replace(" ", "\u00a0"),
+        "zero-width": "x\u200b" + cmd.replace(" ", "\u200b"),
     }
+
+
+# 空白も `=` も含まない形にした差し込み (`shell_word.shown` が示す形)。示しても注記の判定に
+# 当たらないこと (REMEDIATION_PATTERNS はどれも空白を要する) を確かめる。
+# 許容形 (WORD) の文字 (`/` など) は使わない: 許容形の値は案内コマンドの引数になり、注記が付くのが正しい。
+_SHOWABLE_SEPARATORS = (",", ";", "|")
+
+# 許容形から外れるが、シェル上は無害な普通の名前 (示す)。
+NORMAL_NAMES = ("本番", "_local", "a,b")
+
+
+def _lines_outside_detected(reason: str) -> list[str]:
+    """検出コマンドの行を除いた行 (改行に加え、CR や U+2028 などの行区切りでも分ける)。"""
+    return [line for line in reason.splitlines() if not line.startswith("(検出コマンド:")]
 
 
 def _gh_status(active: str) -> str:
@@ -150,6 +173,16 @@ class TestShownValueContract(unittest.TestCase):
             ("kubectl", "expected-flag"): lambda v: (
                 {"kubectl": v}, "kubectl --context other-ctx apply -f x.yaml",
                 _out("dev-ctx\n"), None, None),
+            # 切替と書込の連結の deny で、切替の引数 (検出コマンドの行に出す) に値を入れる。
+            ("kubectl", "chain-switch-arg"): lambda v: (
+                {"kubectl": "want-ctx"},
+                f"kubectl config use-context {q(v)} && kubectl apply -f x.yaml",
+                _out("dev-ctx\n"), None, None),
+            # 同じ連結の deny で、書込の引数に値を入れる。
+            ("kubectl", "chain-write-arg"): lambda v: (
+                {"kubectl": "want-ctx"},
+                f"kubectl config use-context other && kubectl apply -f {q(v)}",
+                _out("dev-ctx\n"), None, None),
             ("kubectl", "chain"): lambda v: (
                 {"kubectl": v}, "kubectl config use-context other && kubectl apply -f x.yaml",
                 _out("dev-ctx\n"), None, None),
@@ -186,6 +219,10 @@ class TestShownValueContract(unittest.TestCase):
                 {"firebase": "right-project"}, "firebase deploy --project prod",
                 _out("proj-other\n"), {".firebaserc": json.dumps({"projects": {"prod": v}})},
                 None),
+            # 短いオプションの結合形の deny (検出コマンドの行だけに値が出る)。
+            ("firebase", "combined-short"): lambda v: (
+                {"firebase": "right-project"}, f"firebase deploy -jP {q(v)}",
+                _out("proj-other\n"), None, None),
             ("firebase", "flag"): lambda v: (
                 {"firebase": "right-project"}, f"firebase deploy --project {q(v)}",
                 _out("proj-other\n"), {".firebaserc": rc("proj-x")}, None),
@@ -199,6 +236,10 @@ class TestShownValueContract(unittest.TestCase):
             ("github", "expected-auto-switch"): lambda v: (
                 {"github": v}, "gh pr create", _out(_gh_status("other")), None,
                 {auto_switch.ENV_VAR: "github"}),
+            # `$auto_switch` に書いた、自動切替に対応していない名前 (自動切替の注記に出す)。
+            ("github", "auto-switch-key"): lambda v: (
+                {"github": "me", auto_switch.FILE_KEY: [v]}, "gh pr create",
+                _out(_gh_status("other")), None, None),
             # 連結の deny (切替と書込を同じ行に書いた形) の期待値の表示。dict の値とキー。
             ("github", "chain-dict-value"): lambda v: (
                 {"github": {"github.com": v}},
@@ -219,29 +260,81 @@ class TestShownValueContract(unittest.TestCase):
 
     def _reason(self, build, value):
         accounts, command, run, files, env = build(value)
-        reason = self._run(self._project(), accounts, command, run, files=files, env=env)
-        # コマンド自身が指定した値は検出コマンドの行に出る (利用者の入力そのもの)。そこは除く。
-        return reason.replace(command, "<検出コマンド>")
+        return self._run(self._project(), accounts, command, run, files=files, env=env)
+
+    def _benign(self, source: str) -> str:
+        return "_harmless" if source.startswith(_GUIDED_SOURCES) else "benign-1"
 
     def test_injected_values_stay_inside_the_value_and_do_not_add_the_note(self):
         for (service, source), build in self._scenarios().items():
-            benign_value = "_harmless" if source.startswith(_GUIDED_SOURCES) else "benign-1"
-            benign = self._reason(build, benign_value)
+            benign = self._reason(build, self._benign(source))
             for label, value in _variants(service).items():
                 with self.subTest(service=service, source=source, value=label):
                     reason = self._reason(build, value)
-                    # 差し込んだコマンドの目印が文面のどこにも無い = 値の外に出た行も無い
-                    self.assertNotIn(MARK, reason)
+                    # 差し込んだコマンドの目印が、検出コマンドの行の外のどの行にも無い
+                    # (= 値の外に出た行も、検出コマンドの行から独立した行も無い)
+                    for line in _lines_outside_detected(reason):
+                        self.assertNotIn(MARK, line, reason)
                     self.assertEqual(NOTE in reason, NOTE in benign, reason)
+
+    def test_detected_command_line_escapes_control_characters(self):
+        """検出コマンドの行は、コマンドを置き換えずに制御文字だけをエスケープして示す。"""
+        cases = [
+            (key, build) for key, build in self._scenarios().items()
+            if key[1] in ("flag", "chain-switch-arg", "chain-write-arg", "combined-short")
+        ]
+        self.assertEqual(len(cases), 7)
+        for (service, source), build in cases:
+            value = _variants(service)["newline"]
+            with self.subTest(service=service, source=source):
+                reason = self._reason(build, value)
+                detected = [
+                    line for line in reason.splitlines() if line.startswith("(検出コマンド:")
+                ]
+                self.assertEqual(len(detected), 1, reason)
+                self.assertIn(shell_word.escape_controls(shlex.quote(value)), detected[0])
+
+    def test_values_without_space_or_equals_are_shown_but_do_not_add_the_note(self):
+        """空白も `=` も含まない形の差し込みは示す (`shown` の広い側) が、注記は左右しない。"""
+        shown_somewhere = 0
+        for (service, source), build in self._scenarios().items():
+            benign = self._reason(build, self._benign(source))
+            for sep in _SHOWABLE_SEPARATORS:
+                value = "x" + sep + INJECTED[service].replace(" ", sep)
+                with self.subTest(service=service, source=source, sep=sep):
+                    reason = self._reason(build, value)
+                    self.assertEqual(NOTE in reason, NOTE in benign, reason)
+                    if any(value in line for line in _lines_outside_detected(reason)):
+                        shown_somewhere += 1
+        # 空振りでないこと: 示した値が実際に文面 (検出コマンドの行の外) に出ている
+        self.assertGreater(shown_somewhere, 50)
+
+    def test_normal_names_are_shown(self):
+        """許容形から外れても、普通の名前 (日本語 / `_local` / `a,b`) は示す (何が不一致かを
+        文面に残す)。案内コマンドに入れるかどうか (`shell_word.arg`) とは別の判定。"""
+        skip = {
+            # 値を表示しない deny (照合先を確かめられない / 検出コマンドの行にだけ出る)
+            ("firebase", "combined-short"), ("kubectl", "chain-switch-arg"),
+            ("kubectl", "chain-write-arg"),
+        }
+        for (service, source), build in self._scenarios().items():
+            if (service, source) in skip:
+                continue
+            for value in NORMAL_NAMES:
+                with self.subTest(service=service, source=source, value=value):
+                    reason = self._reason(build, value)
+                    lines = _lines_outside_detected(reason)
+                    self.assertTrue(any(value in line for line in lines), reason)
 
     def test_benign_values_are_still_shown(self):
         """対照: 許容形の値は今までどおり示す (置き換えが全部の値を消していないこと)。"""
         for (service, source), build in self._scenarios().items():
-            if source.startswith(_GUIDED_SOURCES):
+            if source.startswith(_GUIDED_SOURCES) or source == "combined-short":
                 continue
             with self.subTest(service=service, source=source):
                 reason = self._reason(build, "benign-1")
-                self.assertIn("benign-1", reason)
+                lines = _lines_outside_detected(reason)
+                self.assertTrue(any("benign-1" in line for line in lines), reason)
 
 
 if __name__ == "__main__":

@@ -625,7 +625,7 @@ _CONFIG_NOT_FOUND = (
 # 打っても変わらない (その形で案内すると、案内どおりに切り替えても同じ deny を繰り返す)。
 # そのためコマンドの形では案内しない (REMEDIATION_PATTERNS に当たらない文にする)。括弧の中は、
 # そのファイルがプロジェクトのディレクトリにあるときも成り立つ文にする。この deny の先頭行に
-# 示す値 (`現在=` と `期待=`) も許容形のものだけにするので、dispatcher の「単独で実行」の注記は
+# 示す値 (`現在=` と `期待=`) も示せる形のものだけにするので、dispatcher の「単独で実行」の注記は
 # 付かない (`shell_word.shown` / `shell_word.shown_all`)。`--config` のパスが symlink を通るときは、
 # そのディレクトリで切り替えても効かないことがある (firebase-tools は symlink を解かないパスで
 # 探す。README の既知の制限)。
@@ -635,8 +635,9 @@ _SWITCH_IN_CONFIG_DIR = (
     "から親へ探した切替先で動きます)"
 )
 # `--config` 付きのコマンドの deny と、`--project` の行き先を確かめられない deny で、期待値に
-# 許容形から外れる値があるときに添える文 (v0.18.0)。その値は文面に示さない (`期待=` では
-# `shell_word.NOT_SHOWN`。不一致の deny も、現在値を取得できない deny も同じ)。許容形から外れる値はどの
+# 示せない値 (`shell_word.can_show`。0.20.0 までは許容形から外れる値) があるときに添える文
+# (v0.18.0)。その値は文面に示さない (`期待=` では `shell_word.NOT_SHOWN`。不一致の deny も、
+# 現在値を取得できない deny も同じ)。空白や改行を含む値 (示せない値) はどの
 # project とも一致しないので、案内どおりにしても deny は続く。何を直せばよいかが文面から消えない
 # よう、出所だけを言う。理由は言わない (これらの deny は期待値の形に関係なくコマンドの形で案内
 # しないので、`_CHECK_BY_HAND` の言う理由は成り立たない)。REMEDIATION_PATTERNS にも
@@ -649,10 +650,10 @@ _EXPECTED_NOT_SHOWN = (
 def _config_switch_guide(values) -> str:
     """`--config` 付きのコマンドの deny で、切替を案内する文 (コマンドの形をとらない)。
 
-    `values` (期待値。dict なら有効な値の一覧) に許容形から外れる値があれば、出所を言う文
+    `values` (期待値。dict なら有効な値の一覧) に示せない値があれば、出所を言う文
     (`_EXPECTED_NOT_SHOWN`) を添える。
     """
-    if all(shell_word.arg(value) is not None for value in values):
+    if all(shell_word.can_show(value) for value in values):
         return _SWITCH_IN_CONFIG_DIR
     return f"{_SWITCH_IN_CONFIG_DIR}。{_EXPECTED_NOT_SHOWN}"
 
@@ -707,7 +708,7 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
     (CLI 本体の解決規則と同じ: alias にあれば対応 project ID、無ければ値そのもの)。
     `.firebaserc` を firebase-tools と同じ内容に読めると確かめられなければ、行き先を
     確かめられないとして deny する (v0.18.0。fail-closed)。この deny も先頭の文に期待値を
-    示す (`--config` 付きのコマンドの deny と同じく、許容形のものだけを示し、外れる値があれば
+    示す (`--config` 付きのコマンドの deny と同じく、示せる形のものだけを示し、外れる値があれば
     出所を言う文を添える)。
 
     `--config` / `-c` (v0.18.0) は project root (読む `.firebaserc`、configstore の切替先を
@@ -715,7 +716,7 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
     (firebase-tools の detectProjectRoot と同じ)。ファイルが見つからなければ deny する。
     `--config` 付きのコマンドの deny は、切替をコマンドの形で案内せず、そのディレクトリで
     切り替えるよう文で案内する (`_SWITCH_IN_CONFIG_DIR`)。先頭行に示す現在値と期待値も
-    許容形のものだけにし (`shell_word.shown` / `shell_word.shown_all`)、期待値に許容形から外れる値が
+    示せる形のものだけにし (`shell_word.shown` / `shell_word.shown_all`)、期待値に示せない値が
     あれば出所を言う文を添える (`_config_switch_guide`)。CLI から現在値を取れない
     ときのローカル設定の解決は、configstore を root (firebase-tools の projectRoot) からだけ
     探す (`_from_configstore` の exact)。
@@ -749,25 +750,25 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
         # `.firebaserc` は 1 回だけ読み、確かめた内容でそのまま解決する (`_read_firebaserc`)。
         projects = _read_firebaserc(root)
         if projects is None:
-            # 期待値は示す (許容形のものだけ。`--config` 付きのコマンドの deny と同じ部品)。0.17.1 は
+            # 期待値は示す (示せる形のものだけ。`--config` 付きのコマンドの deny と同じ部品)。0.17.1 は
             # 同じコマンドの deny (`--project` の不一致) で期待値を示していた。「意図した project が
             # アクティブかを確かめてから外す」には、どの project かが要る。
             values = valid if isinstance(expected, dict) else [expected]
             either = " のいずれか" if isinstance(expected, dict) else ""
-            tail = "" if all(shell_word.arg(v) is not None for v in values) else f"。{_EXPECTED_NOT_SHOWN}"
+            tail = "" if all(shell_word.can_show(v) for v in values) else f"。{_EXPECTED_NOT_SHOWN}"
             return (
                 f"{_PROJECT_FLAG_UNCONFIRMED_HEAD} (期待={shell_word.shown_all(values)}{either})。"
                 f"{_PROJECT_FLAG_UNCONFIRMED}{tail}"
             )
         resolved = _resolve_alias(projects, override)
-        # コマンド自身が指定した値も、許容形のときだけ示す (core/shell_word.py の shown。値は
+        # コマンド自身が指定した値も、示せる形のときだけ示す (core/shell_word.py の shown。値は
         # 検出コマンドの行に出る)。
         shown = f"--project {shell_word.shown(override)}"
         if resolved != override:
             # 行き先はリポジトリの `.firebaserc` の値。この deny は切替を案内しないので、値が
             # 切替コマンドの形 (`x; firebase use other` / 改行入り) だと、表示だけで dispatcher
-            # の「案内したコマンドは単独で実行」の注記が付く。許容形のときだけ出す。
-            shown += f" (→ {resolved})" if shell_word.arg(resolved) else " (→ 表示しない値)"
+            # の「案内したコマンドは単独で実行」の注記が付く。示せる形 (`can_show`) のときだけ出す。
+            shown += f" (→ {resolved})" if shell_word.can_show(resolved) else " (→ 表示しない値)"
         if isinstance(expected, dict):
             if resolved in valid:
                 return None
@@ -801,7 +802,7 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
             )
         head = "Firebase: 現在のプロジェクトを取得できません。"
         if config_file is not None:
-            # 期待値は示す (許容形のものだけ。不一致の deny と同じ)。0.17.1 は同じコマンドの deny で
+            # 期待値は示す (示せる形のものだけ。不一致の deny と同じ)。0.17.1 は同じコマンドの deny で
             # `firebase use <期待値>` を案内し、どの project に切り替えるかを言っていた。この deny は
             # コマンドの形で案内しないので、示さないとそれが文面から消える。
             values = valid if isinstance(expected, dict) else [expected]

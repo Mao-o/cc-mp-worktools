@@ -313,6 +313,15 @@ class TestSwitchErrorsShowOnlyAllowedValues(BudgetClean):
                 self.assertNotIn("evil", err)
                 self.assertIn("(表示しない値)", err)
 
+    def test_cli_output_is_quoted_without_control_characters(self):
+        """切替の失敗で転記する gh の出力 (1 行目) は、制御文字をエスケープする (v0.21.0)。
+        端末の制御シーケンス (行の消去・カーソル移動) や BEL を deny 文面に残さない。"""
+        raw = "\x1b[2K\x1b[1Aerror: boom\x07 \x9b"
+        with mock.patch("subprocess.run", return_value=_run(stderr=raw, returncode=1)):
+            _done, err = github.apply_switch([("github.com", "work", "Mao-o")])
+        self.assertIn("\\x1b[2K\\x1b[1Aerror: boom\\x07 \\x9b", err)
+        self.assertFalse(any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in err), err)
+
     def test_missing_account_in_plan(self):
         """切替先がログインしていないときの理由 (`<host> の <アカウント>`) も同じ。"""
         status = _status({"github.com": ["work"]}, {"github.com": "work"})

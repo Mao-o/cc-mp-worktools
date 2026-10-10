@@ -231,8 +231,8 @@ class TestOnlyWhereItWouldStop(AutoSwitchBase):
                 self.assertEqual(self.gh.active["github.com"], "work")
 
     def test_short_h_is_not_help_in_gh_auth(self):
-        """`-h` はヘルプとして数えない (gh の `auth` / `api` では `--hostname`、`pr create` では
-        `--head` の短い形で、実際の操作になる)。`-h` 付きのコマンドは従来どおり切り替える。
+        """`-h` はヘルプとして数えない (gh の `auth` 配下では `--hostname` の短い形で、実際の
+        操作になる)。`-h` 付きのコマンドは従来どおり切り替える。
         `--help` の無いコマンドが同じ行にあるときも、そのために切り替える。"""
         for command in (
             "gh api -h github.com -X DELETE repos/o/r",

@@ -70,6 +70,16 @@ HOSTILE = (
     "a=b",
     "ｄｅｖ",
 )
+# HOSTILE のうち、文面に値として示すもの (空白も `=` も制御文字も含まない。v0.21.0 の
+# `shell_word.shown`)。案内コマンドには出さないが、何が不一致かを示すために表示はする。
+HOSTILE_SHOWN = ("it's", '"q"', "a|b", "a&b", "a>b", "a*b", "-P", ".hidden", "~root", "ｄｅｖ")
+
+
+def _displayed(value) -> bool:
+    """value が文面に値として示される想定か (許容形か HOSTILE_SHOWN)。"""
+    return value in PLAIN or value in HOSTILE_SHOWN
+
+
 # 実在する形の名前 (WORD の許容形)。EKS / kubeadm の context 名、メールアドレス、
 # ドメイン付きの project ID を含む。
 PLAIN = (
@@ -156,6 +166,91 @@ class TestArg(unittest.TestCase):
                 self.assertEqual(parts, [value])
 
 
+class TestShown(unittest.TestCase):
+    """文面に値を示す形 (`shown`、v0.21.0)。案内コマンドの許容形 (`arg`) より広い。"""
+
+    def test_normal_names_outside_the_allowed_form_are_shown(self):
+        """シェル上は無害な普通の名前は、案内に使えなくても示す (何が不一致かを残す)。"""
+        for value in ("本番", "開発クラスタ", "_local", "a,b", "proj;x") + HOSTILE_SHOWN:
+            with self.subTest(value=value):
+                self.assertIsNone(shell_word.arg(value))
+                self.assertEqual(shell_word.shown(value), value)
+
+    def test_space_equals_and_invisible_characters_are_not_shown(self):
+        hidden = (
+            "", "a b", "a\tb", "a\u00a0b", "a\u3000b", "a=b", "a\nb", "a\rb", "a\x0bb",
+            "a\x1cb", "a\u2028b", "a\u2029b", "a\x85b", "a\x1bb", "a\x07b", "a\x00b",
+            "a\x7fb", "a\u200bb", "a\u202eb", "a\ufeffb",
+        )
+        for value in hidden:
+            with self.subTest(value=value):
+                self.assertEqual(shell_word.shown(value), shell_word.NOT_SHOWN)
+        for value in (None, 1, ["a"]):
+            with self.subTest(value=value):
+                self.assertEqual(shell_word.shown(value), shell_word.NOT_SHOWN)
+
+    def test_shown_values_cannot_form_a_remediation_pattern(self):
+        """示す値は、単独で REMEDIATION_PATTERNS の形にならない (どのパターンも空白を要する)。
+
+        案内コマンドの形を、空白をほかの文字に置き換えて書いた値を総当たりする。示す値
+        (`can_show`) はどのパターンにも当たらず、空白のままの値は当たる (空振りでない)。
+        """
+        commands = (
+            "kubectl config use-context evil", "gcloud config set project evil",
+            "gcloud config set account evil", "gh auth switch --hostname h --user evil",
+            "gh auth login --hostname h", "firebase use evil", "AWS_PROFILE=evil aws s3 ls",
+        )
+        separators = (" ", "\t", "\u00a0", "\u3000", "\u200b", "\n", ",", ";", "|", "_", "/")
+        patterns = [
+            p for svc in (aws, firebase, gcloud, github, kubectl)
+            for p in getattr(svc, "REMEDIATION_PATTERNS", ())
+        ]
+        self.assertGreaterEqual(len(patterns), 4)
+        matched_with_space = 0
+        shown_count = 0
+        for cmd in commands:
+            if any(re.search(p, cmd) for p in patterns):
+                matched_with_space += 1
+            for sep in separators:
+                value = "x" + sep + cmd.replace(" ", sep)
+                if not shell_word.can_show(value):
+                    continue
+                shown_count += 1
+                with self.subTest(value=value):
+                    self.assertFalse(any(re.search(p, value) for p in patterns), value)
+        self.assertGreaterEqual(matched_with_space, 5)
+        self.assertGreater(shown_count, 20)
+
+
+class TestEscapeControls(unittest.TestCase):
+    """値を置き換えずに 1 行のまま示す形 (`escape_controls`、v0.21.0)。"""
+
+    def test_control_characters_are_escaped(self):
+        cases = {
+            "a\nb": "a\\nb",
+            "a\rb": "a\\x0db",
+            "a\tb": "a\\x09b",
+            "\x1b[2K\x1b[1Aerror\x07": "\\x1b[2K\\x1b[1Aerror\\x07",
+            "a\x00b\x7fc": "a\\x00b\\x7fc",
+            "a\x85b\x9fc": "a\\x85b\\x9fc",
+            "a\u2028b\u2029c": "a\\u2028b\\u2029c",
+        }
+        for raw, want in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(shell_word.escape_controls(raw), want)
+
+    def test_everything_else_is_kept(self):
+        for raw in ("kubectl --context 'a b' apply", "本番 の 開発", "a=b;c|d", "\u00a0\u3000"):
+            with self.subTest(raw=raw):
+                self.assertEqual(shell_word.escape_controls(raw), raw)
+
+    def test_result_is_one_line_without_control_characters(self):
+        raw = "".join(chr(c) for c in range(0x00, 0xA0)) + "\u2028\u2029"
+        out = shell_word.escape_controls(raw)
+        self.assertEqual(len(out.splitlines()), 1)
+        self.assertFalse(any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in out))
+
+
 class TestKubectlGuidance(unittest.TestCase):
     PROJECT_DIR = "/nonexistent-project"
 
@@ -193,9 +288,9 @@ class TestKubectlGuidance(unittest.TestCase):
             with self.subTest(value=value):
                 with _run_returning("dev-ctx\n"):
                     reason = kubectl.verify("want-ctx", self.PROJECT_DIR, context={"context": value})
-                shown = value if value in PLAIN else shell_word.NOT_SHOWN
+                shown = value if _displayed(value) else shell_word.NOT_SHOWN
                 self.assertIn(f"コマンド指定 --context={shown},", reason)
-                if value not in PLAIN:
+                if not _displayed(value):
                     self.assertNotIn(value, reason)
 
     def test_harmless_value_outside_the_form_is_not_said_to_be_shell_syntax(self):
@@ -310,11 +405,11 @@ class TestGithubGuidance(unittest.TestCase):
             reasons["non-string expected"] = github._verify_against(
                 {"github.com": "me"}, {"github.com": "me", value: 1}
             )
-            shown = value if value in PLAIN else "表示しない host"
+            shown = value if _displayed(value) else "表示しない host"
             for case in host_cases:
                 with self.subTest(value=value, case=case):
                     self.assertIn(f"GitHub [{shown}]", reasons[case])
-                    if value not in PLAIN:
+                    if not _displayed(value):
                         self.assertNotIn(f"[{value}]", reasons[case])
 
 
@@ -409,10 +504,10 @@ class TestFirebaseGuidance(unittest.TestCase):
             )
             with _run_returning("proj-other\n"):
                 reason = firebase.verify("proj-dev", str(self.root), context={"project": "prod"})
-            shown = value if value in PLAIN else "表示しない値"
+            shown = value if _displayed(value) else "表示しない値"
             with self.subTest(value=value):
                 self.assertIn(f"コマンド指定 --project prod (→ {shown}),", reason)
-                if value not in PLAIN:
+                if not _displayed(value):
                     self.assertNotIn(f"(→ {value})", reason)
 
 

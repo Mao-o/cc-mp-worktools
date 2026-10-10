@@ -369,12 +369,13 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
         return err
 
     # どの profile で検証したかを文面に出す (既定と `--profile` 指定を区別できるように)。
-    # コマンド自身が指定した値も、許容形のときだけ示す (core/shell_word.py の shown。値は
+    # コマンド自身が指定した値も、示せる形のときだけ示す (core/shell_word.py の shown。値は
     # 検出コマンドの行に出る)。
     scope = f" (--profile {shell_word.shown(profile)})" if profile else ""
 
     if current is None:
-        detail = f" ({hint})" if hint else ""
+        # CLI の stderr の転記。端末の制御シーケンスや BEL を文面に残さない (v0.21.0)。
+        detail = f" ({shell_word.escape_controls(hint)})" if hint else ""
         return (
             f"AWS: 認証情報を取得できません{scope}{detail}。\n"
             + _switch_guidance(expected, env, include_configure=True)
