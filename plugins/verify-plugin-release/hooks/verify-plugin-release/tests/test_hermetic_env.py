@@ -85,6 +85,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -329,12 +330,12 @@ class TestHelpersStopBackgroundMaintenance(unittest.TestCase):
     (`HERMETIC_GIT_ENV` の全項目が helper の git に届いている) で拾える。
 
     見るのは**起動された git の挙動** (maintenance / gc の子が 0 件) で、helper が後から問い合わせた
-    設定値ではない。`make_marketplace` の commit だけが env を持たずに起動されても、問い合わせ
+    設定値ではない。`build_marketplace` の commit だけが env を持たずに起動されても、問い合わせ
     (`_testutil.sh` 経由) は env を足し直すので、値を見るテストでは気付けない。
     """
 
     def _spawned_while_making_a_marketplace(self, *, without_the_global_fixture: bool) -> list[list[str]]:
-        """`make_marketplace` の間に起動された maintenance / gc の argv。
+        """`build_marketplace` の間に起動された maintenance / gc の argv。
 
         `without_the_global_fixture` なら、この呼び出しの間だけ `HERMETIC_GIT_ENV` の
         `GIT_CONFIG_GLOBAL` を空の config file に上書きする: fixture を外して、helper が渡す
@@ -357,7 +358,7 @@ class TestHelpersStopBackgroundMaintenance(unittest.TestCase):
                 os.environ["GIT_TRACE2_EVENT"] = trace
                 assert_the_floor_stops_nothing(self, tmp)
                 with recorded_git_launches() as launches:
-                    _testutil.make_marketplace(Path(tmp) / "repo", ["alpha"])
+                    _testutil.build_marketplace(Path(tmp) / "repo", ["alpha"])
                 events = trace_events(trace)
                 want = dict(_testutil.HERMETIC_GIT_ENV)
         self.assertTrue(
@@ -411,7 +412,7 @@ class TestHelpersStopBackgroundMaintenance(unittest.TestCase):
         self.assertEqual(self._spawned_while_making_a_marketplace(without_the_global_fixture=True), [])
 
     def test_every_git_launched_by_the_helpers_carries_the_env(self):
-        """repo を作る helper (`make_marketplace` / `init_bare_origin`) が起動する git の全部が、
+        """repo を作る helper (`build_marketplace` / `init_bare_origin`) が起動する git の全部が、
         `HERMETIC_GIT_ENV` の全項目を持って起動されること。
 
         trace の床は maintenance を起動する git (commit / fetch / receive-pack) しか見ない。`init` /
@@ -431,11 +432,11 @@ class TestHelpersStopBackgroundMaintenance(unittest.TestCase):
             for key, value in _testutil.HERMETIC_GIT_ENV.items():
                 self.assertNotEqual(floor.get(key), value, f"前提: 床が {key} を当てる側と同じ値で持たない")
             with recorded_git_launches() as launches:
-                _testutil.make_marketplace(Path(tmp) / "repo", ["alpha"])
+                _testutil.build_marketplace(Path(tmp) / "repo", ["alpha"])
                 _testutil.init_bare_origin(Path(tmp))
             want = dict(_testutil.HERMETIC_GIT_ENV)
         subcommands = {argv[1] for argv, _ in launches if len(argv) > 1}
-        self.assertGreaterEqual(len(launches), 13, "前提: make_marketplace の 7 件と init_bare_origin の 6 件を記録できている")
+        self.assertGreaterEqual(len(launches), 13, "前提: build_marketplace の 7 件と init_bare_origin の 6 件を記録できている")
         self.assertLessEqual({"init", "config", "add", "commit"}, subcommands, "前提: 種類も記録できている")
         for argv, env in launches:
             with self.subTest(argv=" ".join(argv[1:4])):
@@ -458,7 +459,7 @@ class TestPlainBareOriginStartsNoMaintenance(unittest.TestCase):
     def test_push_into_a_plain_bare_repo(self):
         with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
             isolate_git_config(tmp)
-            root = _testutil.make_marketplace(Path(tmp) / "repo", ["alpha"])
+            root = _testutil.build_marketplace(Path(tmp) / "repo", ["alpha"])
             plain = Path(tmp) / "plain.git"
             _testutil.sh(Path(tmp), "init", "--bare", "-q", plain.name)
             trace = os.path.join(tmp, "trace2.jsonl")
@@ -785,6 +786,40 @@ class TestTheHookEnvFakeRecordsTheEnvAsPassed(_RunHookEnv, unittest.TestCase):
                 self.assertEqual(self.env_passed_to_the_hook(), passed)
 
 
+class TestHookEnvHidesClaude(unittest.TestCase):
+    """hook プロセスの PATH から claude が外れていること (CI と同じく validate は SKIP になる)。
+
+    手元で claude が見えると、ゲートのたびに `claude plugin validate` の実物が起動して遅くなり、
+    CI とは別の経路 (validate の WARN) を通る。外れても結果は変わらず遅くなるだけなので、
+    他のテストは気付けない。claude と git が同じディレクトリにある環境では外せないので、その場合は見ない。
+    """
+
+    def setUp(self):
+        git = shutil.which("git")
+        self.assertIsNotNone(git, "前提: git が PATH にある")
+        self.git_dir = os.path.dirname(git)
+        if shutil.which("claude", path=self.git_dir):
+            self.skipTest("claude と git が同じディレクトリにあり、PATH から claude だけを外せない")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.fake_dir = tmp.name
+        fake = Path(self.fake_dir, "claude.cmd" if os.name == "nt" else "claude")  # Windows は PATHEXT で探す
+        fake.write_text("@exit /b 0\n" if os.name == "nt" else "#!/bin/sh\nexit 0\n", encoding="utf-8", newline="\n")
+        fake.chmod(0o755)
+        self.path = os.pathsep.join([self.fake_dir, self.git_dir])
+        self.assertIsNotNone(shutil.which("claude", path=self.path), "前提: 偽の claude が PATH から見える")
+
+    def test_the_hook_env_path_has_no_claude_but_keeps_git(self):
+        with mock.patch.dict(os.environ, {"PATH": self.path}):
+            env = _testutil.hook_process_env()
+        self.assertIsNone(shutil.which("claude", path=env["PATH"]))
+        self.assertIsNotNone(shutil.which("git", path=env["PATH"]))
+
+    def test_path_without_claude_drops_only_the_directories_with_claude(self):
+        got = _testutil.path_without_claude(self.path).split(os.pathsep)
+        self.assertEqual(got, [self.git_dir])
+
+
 class TestConstantAlone(_HermeticConfigChecks, unittest.TestCase):
     """`HERMETIC_GIT_ENV` の定数だけで git を起動したとき (helper も基底クラスも通さない)。"""
 
@@ -830,7 +865,7 @@ class TestGateLaunchedGit(_HermeticConfigChecks, HermeticGitTestCase):
         無いと、fetch が失敗する形では、基底クラスが何も張らなくても通る空の床になる。
         """
         self.assert_env_unchanged_since_applied()
-        root = _testutil.make_marketplace(Path(self.tmp) / "work", ["alpha"])
+        root = _testutil.build_marketplace(Path(self.tmp) / "work", ["alpha"])
         origin = _testutil.init_bare_origin(Path(self.tmp))
         _testutil.sh(root, "remote", "add", "origin", str(origin))
         _testutil.sh(root, "push", "-q", "origin", "main")
@@ -936,7 +971,7 @@ class TestOuterRepoEnvAndTheHelpers(_OuterRepoEnvChecks, unittest.TestCase):
     """repo を作る helper (`_testutil.sh`)。"""
 
     def prepare_outer_repo(self) -> None:
-        self.other = _testutil.make_marketplace(Path(self.tmp) / "outer", ["alpha"])
+        self.other = _testutil.build_marketplace(Path(self.tmp) / "outer", ["alpha"])
 
     def launch_and_capture_env(self) -> dict[str, str]:
         with recorded_git_launches() as launches:
@@ -956,7 +991,7 @@ class TestOuterRepoEnvAndTheHelpers(_OuterRepoEnvChecks, unittest.TestCase):
         before = tree_state(self.other)
         work = Path(self.tmp) / "work"
         try:
-            _testutil.make_marketplace(work, ["alpha"])
+            _testutil.build_marketplace(work, ["alpha"])
             _testutil.init_bare_origin(Path(self.tmp))
         except subprocess.CalledProcessError as e:
             self.fail(f"helper の git が失敗した: {' '.join(map(str, e.cmd))}\n{e.stderr}")
@@ -994,7 +1029,7 @@ class TestOuterRepoEnvAndTheHelpers(_OuterRepoEnvChecks, unittest.TestCase):
         )
         work = Path(self.tmp) / "work"
         try:
-            _testutil.make_marketplace(work, ["alpha"])
+            _testutil.build_marketplace(work, ["alpha"])
         except subprocess.CalledProcessError as e:
             self.fail(f"helper の git が失敗した: {' '.join(map(str, e.cmd))}\n{e.stderr}")
         self.assert_env_unchanged_since_applied()

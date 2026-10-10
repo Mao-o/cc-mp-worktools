@@ -1,37 +1,31 @@
-"""config.load と layout (plugin の発見・変更ファイルの振り分け) のテスト。"""
+"""config.parse と layout (plugin の発見・変更ファイルの振り分け) のテスト。"""
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 import _testutil  # noqa: F401
-from _testutil import add_plugin, write, write_json
+from _testutil import add_plugin, write_json
 
 import config
 import layout
 
 
 class ConfigTest(unittest.TestCase):
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name)
+    # hook も手動実行 (check) も、commit 済みの設定の本文を config.parse で読む
+    # (__main__._load_config)。作業ツリーを読む config.load は使われていない
 
-    def tearDown(self):
-        self._tmp.cleanup()
-
-    def test_missing_file_gives_defaults(self):
-        cfg = config.load(self.root)
+    def test_empty_config_gives_defaults(self):
+        cfg = config.parse("{}")
         self.assertFalse(cfg.single_plugin_per_pr)
         self.assertEqual(cfg.timeout_seconds, config.DEFAULT_TIMEOUT)
 
     def test_values(self):
-        write_json(
-            self.root,
-            ".claude/verify-plugin-release.json",
-            {"single_plugin_per_pr": True, "test_command": ["make", "test"], "timeout_seconds": 999},
-        )
-        cfg = config.load(self.root)
+        cfg = config.parse(json.dumps(
+            {"single_plugin_per_pr": True, "test_command": ["make", "test"], "timeout_seconds": 999}
+        ))
         self.assertTrue(cfg.single_plugin_per_pr)
         self.assertEqual(cfg.test_command, ["make", "test"])
         self.assertEqual(cfg.timeout_seconds, config.MAX_TIMEOUT)
@@ -39,9 +33,8 @@ class ConfigTest(unittest.TestCase):
     def test_broken_config_raises(self):
         for body in ("{", "[]", '{"unknown": 1}', '{"fetch": "yes"}', '{"test_command": "make"}'):
             with self.subTest(body=body):
-                write(self.root, ".claude/verify-plugin-release.json", body)
                 with self.assertRaises(config.ConfigError):
-                    config.load(self.root)
+                    config.parse(body)
 
 
 class LayoutTest(unittest.TestCase):

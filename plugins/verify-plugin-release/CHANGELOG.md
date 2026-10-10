@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.2.3
+
+テスト整理 (挙動の変更なし)。テストの実行時間を約 33 秒から約 17 秒に縮めた。hook・`hooks.json`・README の
+挙動は変わらない (patch bump)。
+
+### Changed
+
+- テストが起動するゲートの PATH から claude を外し、手元でも CI と同じく `claude plugin validate` を SKIP にした
+  (`_testutil.path_without_claude`)。これまで手元では PATH 上の claude が見つかり、ゲートのたびに validate の実物を
+  起動していた (1 回約 0.3 秒、suite 全体で 18 回前後)。手元だけ遅く、通る経路も CI と違い (validate の WARN で
+  context を返す経路)、結果が claude CLI の版にも左右された。claude と git が同じディレクトリにある環境では外せず、
+  従来どおりの挙動に留まる。hook プロセスの PATH から claude が外れていることは `test_hermetic_env.py` が見る
+- テストごとの使い捨て repo の作成 (git 7 回、約 0.12 秒) を、plugin の組ごとに 1 度だけ作ってコピーする形にした
+  (`make_marketplace`)。helper が起動する git を数える床は、コピーでは何も起動されず空になるため、毎回 git で作る
+  `build_marketplace` を直接呼ぶ
+- `GateTest` は、`tests[...]` を確かめるテスト以外では plugin の suite を走らせない (`test_command=False`)。
+  `gate._POLL` を縮めて待ちを減らす (job を待たずに止めることを確かめる 2 本)
+- 同じ経路を別のテストが確かめているものを整理した:
+  - 削除: `test_complete_release_is_allowed_silently_or_with_context` (条件を満たした release を止めないことは
+    `test_gate_does_not_trip_over_its_own_bytecode` が確かめる)、`test_failing_suite_fails` (落ちた suite が
+    `tests[<plugin>]` の FAIL になることは `test_parallel_suites_attribute_results_to_their_plugin` ほかが確かめる)
+  - 書き換え: `test_pr_command_in_substitution_is_denied` は repo に触れる前に決まる判定なので、hook の起動をやめて
+    `evaluate` を直接呼ぶ (`UnresolvedCommandTest`)。`ConfigTest` は製品が使っていない `config.load` ではなく
+    `config.parse` を確かめる
+- `test_gate_does_not_trip_over_its_own_bytecode` を強くした。守りは 2 つ (suite に bytecode を書かせない
+  `gate._TEST_ENV`、`gate._is_bytecode` で `git status` から除外) あり、元のテストは両方を壊さないと落ちなかった。
+  既存の `.pyc` を置いて hook を 1 回だけ起動し、(a) 止めない (b) 新しい `.pyc` を作らない を別々に確かめる。
+  テストの実行環境に `PYTHONDONTWRITEBYTECODE` があっても結果が変わらないよう、hook の起動で外す
+
+### Verified
+
+- 変異を入れた scratch コピーで、0.2.2 と今回の木を比べた (HOME は空 / 自動 maintenance を止める設定を持つ の 2 つ)
+  - 床 (`test_hermetic_env.py`): helper の env 渡しを外す・`HERMETIC_GIT_ENV` から COUNT を外す・外側の repo 変数を
+    外さない・repo 作成の `init` / `commit` が env を渡さない・hook の env が `hermetic_env` を通らない・bare repo が
+    設定を書かない、の 7 件は 0.2.2 でも今回でも同じ件数の assertion で落ちる。新しい床も、PATH から claude を外さない
+    変異と `path_without_claude` が何も外さない変異を assertion で検出する
+  - ゲートの変異 15 件を suite 全体に当てた。0.2.2 で落ちた 9 件は今回も落ちる。0.2.2 で生き残った 4 件
+    (suite に bytecode 抑止の環境変数を渡さない 2 形・bytecode を未 commit の変更に数える・条件を満たした
+    release を止める) は今回落ちる。残りの 2 件 (jobs 数の条件・custom の分岐) は、どちらの木でも検出されない
+
 ## 0.2.2
 
 テスト整理 (挙動の変更なし)。0.2.1 で入れた「自動 gc / maintenance が止まっている」ことを見る床が見逃していた

@@ -31,7 +31,8 @@ _PKG = Path(__file__).resolve().parent.parent
 # 起動のたびに env を組む (`hook_process_env`): git の global 設定は `HERMETIC_GIT_ENV` の
 # `GIT_CONFIG_GLOBAL` (tests 配下の fixture。自動 maintenance を止める設定だけを持つ) に、
 # 既定の除外ファイル (`XDG_CONFIG_HOME/git/ignore`) は空の dir に固定し、手元の global gitignore
-# (`__pycache__` 等) に結果が左右されない CI と同じ条件で動かす。env の中身は `test_hermetic_env.py` が見る
+# (`__pycache__` 等) に結果が左右されない CI と同じ条件で動かす。PATH からも claude を外し、
+# CI と同じく `claude plugin validate` は SKIP になる (`_testutil.path_without_claude`)。env の中身は `test_hermetic_env.py` が見る
 
 
 def bash(command: str, cwd: Path) -> dict:
@@ -65,14 +66,6 @@ class MainTest(unittest.TestCase):
         reason = out["hookSpecificOutput"]["permissionDecisionReason"]
         self.assertIn("version[alpha]", reason)
         self.assertIn("changelog[alpha]", reason)
-
-    def test_complete_release_is_allowed_silently_or_with_context(self):
-        write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
-        write(self.root, "plugins/alpha/CHANGELOG.md", "# Changelog\n\n## 0.2.0\n")
-        bump(self.root, "alpha", "0.2.0")
-        commit_all(self.root, "release")
-        out = run_hook(bash("gh pr create -t x -b y", self.root))
-        self.assertNotEqual(self.decision(out), "deny")
 
     def test_draft_and_warn_mode_do_not_block(self):
         write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
@@ -169,35 +162,30 @@ class MainTest(unittest.TestCase):
         self.assertIn("tests[alpha]", out["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_gate_does_not_trip_over_its_own_bytecode(self):
-        # 1 回目の検査でテストを走らせても、2 回目に「未 commit の変更」と判定しない
-        write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
-        write(self.root, "plugins/alpha/CHANGELOG.md", "# Changelog\n\n## 0.2.0\n")
-        bump(self.root, "alpha", "0.2.0")
-        commit_all(self.root, "release")
-        for _ in range(2):
-            self.assertNotEqual(self.decision(run_hook(bash("gh pr create -t x", self.root))), "deny")
+        # 1 回目の検査が走らせたテストの bytecode を、2 回目が「未 commit の変更」と判定して止めていた
+        # (CI で発生)。守りは 2 つあり、片方だけ壊れても気付けるよう別々に確かめる:
+        # (1) 既にある bytecode は未 commit の変更に数えない (2) ゲートはテストに bytecode を書かせない
+        # 条件を満たした release が止められないこと (PASS の経路) もここで確かめる
+        self._release()
+        stray = self.root / "plugins/alpha/hooks/alpha/tests/__pycache__/stale.cpython-0.pyc"
+        stray.parent.mkdir(parents=True)
+        stray.write_bytes(b"")
+        # 実行環境の PYTHONDONTWRITEBYTECODE に頼らず、ゲート自身が抑止していることを見る
+        # (-B は hook 自身の .pyc を plugin のソースに書かせないため)
+        out = run_hook(
+            bash("gh pr create -t x -b y", self.root),
+            python_flags=("-B",),
+            drop=("VERIFY_PLUGIN_RELEASE_MODE", "GH_HOST", "PYTHONDONTWRITEBYTECODE"),
+        )
+        self.assertNotEqual(self.decision(out), "deny")
+        self.assertEqual([p.name for p in stray.parent.iterdir()], [stray.name])
+        self.assertEqual([p for p in self.root.rglob("__pycache__") if p != stray.parent], [])
 
     def _release(self):
         write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
         write(self.root, "plugins/alpha/CHANGELOG.md", "# Changelog\n\n## 0.2.0\n")
         bump(self.root, "alpha", "0.2.0")
         commit_all(self.root, "release")
-
-    def test_pr_command_in_substitution_is_denied(self):
-        self._release()
-        for cmd in (
-            'url="$(gh pr create --title x --body y)"',
-            "url=`gh pr create -t x`",
-            "f() { gh pr create; }; f",
-            "pushd /tmp && gh pr create -t x",
-            "bash -c 'gh pr create -t x'",
-            'sh -lc "cd x && gh pr ready"',
-            "eval 'gh pr new'",
-        ):
-            with self.subTest(cmd=cmd):
-                self.assertEqual(self.decision(run_hook(bash(cmd, self.root))), "deny")
-        # 文中の言及は PR 操作ではない
-        self.assertIsNone(run_hook(bash('git commit -m "run gh pr create later"', self.root)))
 
     def test_gh_repo_selectors_other_than_flag(self):
         self._release()
@@ -269,7 +257,8 @@ class ReadyRefsTest(HermeticGitTestCase):
         commit_all(self.root, "release")
         self.sha = sh(self.root, "rev-parse", "HEAD").strip()
         self.mod = _load_entry()
-        self._env = mock.patch.dict(os.environ, {}, clear=False)
+        # in-process のゲートも CI と同じく claude を見つけない (validate は SKIP)
+        self._env = mock.patch.dict(os.environ, {"PATH": _testutil.path_without_claude()}, clear=False)
         self._env.start()
         os.environ.pop("VERIFY_PLUGIN_RELEASE_MODE", None)
 
@@ -305,6 +294,40 @@ class ReadyRefsTest(HermeticGitTestCase):
 
     def test_unpushed_commit_is_denied(self):
         self.assertEqual(self.decide(("feat", "main", "0" * 40)), "deny")
+
+
+class UnresolvedCommandTest(unittest.TestCase):
+    """PR 操作の位置を特定できないコマンドは repo を見る前に止める (evaluate を in-process で呼ぶ)。
+
+    hook の入出力 (stdin の JSON・deny の出力形式) は MainTest が subprocess で確かめている。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()  # git repo の外。万一ゲートまで進んでも何も検査しない
+        self.mod = _load_entry()
+        self._env = mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": self._tmp.name}, clear=False)
+        self._env.start()
+        os.environ.pop("VERIFY_PLUGIN_RELEASE_MODE", None)
+
+    def tearDown(self):
+        self._env.stop()
+        self._tmp.cleanup()
+
+    def test_pr_command_in_substitution_is_denied(self):
+        for cmd in (
+            'url="$(gh pr create --title x --body y)"',
+            "url=`gh pr create -t x`",
+            "f() { gh pr create; }; f",
+            "pushd /tmp && gh pr create -t x",
+            "bash -c 'gh pr create -t x'",
+            'sh -lc "cd x && gh pr ready"',
+            "eval 'gh pr new'",
+        ):
+            with self.subTest(cmd=cmd):
+                out = self.mod.evaluate(cmd, self._tmp.name)
+                self.assertEqual((out or {}).get("hookSpecificOutput", {}).get("permissionDecision"), "deny")
+        # 文中の言及は PR 操作ではない
+        self.assertIsNone(self.mod.evaluate('git commit -m "run gh pr create later"', self._tmp.name))
 
 
 class ManualCheckTest(unittest.TestCase):
