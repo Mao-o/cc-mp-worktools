@@ -23,7 +23,8 @@ output the same, so this module pins it first:
   migration is allowed to change (listed above ``normalize``) and require
   everything else — page list and order, refs, titles, URLs, descriptions,
   section lists, page bodies, hit blocks, the query in the header, the
-  ``Next:`` commands minus the script name and corpus options — to match
+  ``Next:`` commands minus the script name and the options naming the
+  default corpus or a file (``--source platform`` still counts) — to match
   byte for byte. ``compare`` looks at stdout, and at the first line of the
   normalised stderr when the expected stdout is empty (error paths).
 * ``GENERIC_PARITY_EXPECTED`` lists the cases the generic loader already
@@ -254,14 +255,19 @@ def update_golden() -> None:
 #     ``(source: …)`` / ``Cache:`` lines in the header block (up to the first
 #     blank or ``===`` line; ``sections`` prints its ``URL:`` line before the
 #     generic loader's ``(file: …)``)
-#  2. ``Next:`` lines are kept with the script name replaced by ``<script>``
-#     and the corpus-selecting options (``--source`` / ``--cache-dir`` /
+#  2. ``Next:`` lines are kept with the script name replaced by ``<script>``,
+#     ``--source platform`` / ``--source claude-platform`` written as
+#     ``--source <platform>``, and the options that name the default corpus or
+#     a file (``--source code`` / ``claude-code`` / ``ai-sdk``, ``--cache-dir`` /
 #     ``--file`` / ``--index-file`` / ``--sources-file`` and their value)
-#     removed; the subcommand, page ref, heading and other options still count
+#     removed; a ``--source`` that points elsewhere, the subcommand, page ref,
+#     heading and other options still count
 #  3. the trailing count line ``(N … total …)`` (firebase's paged index
 #     says ``(N of M pages shown, …)``)
-#  4. ``Tip:`` / ``Note:`` lines, except in ``content`` output (first line
-#     ``# doc_title:``), where they are page body and must match
+#  4. hint lines starting with ``Tip:`` / ``Note:`` at column 0 (the old
+#     scripts and the generic loader print every hint unindented), except in
+#     ``content`` output (first line ``# doc_title:``), where they are page
+#     body and must match. Indented ones (page text quoted in a hit) count
 #  5. the unit word ``page`` / ``document`` as a whole word (not inside a
 #     flag name such as ``--page-ref``, an identifier or a path) and the
 #     ``URL:`` / ``url:`` case
@@ -271,8 +277,10 @@ _HEADER_FOLLOW_RE = re.compile(r"^\s*(\((index|file|source): .*\)|Cache: .*)$")
 _HEADER_TAIL_RE = re.compile(r"\s*\((?:[^()]|\([^()]*\))*\)\s*$")
 _NEXT_RE = re.compile(r"^\s*Next: ")
 _NEXT_SCRIPT_RE = re.compile(r"^(\s*Next: )\S+\.py ")
-_NEXT_CORPUS_OPT_RE = re.compile(r" --(?:source|cache-dir|file|index-file|sources-file) \S+")
-_TIP_RE = re.compile(r"^\s*(Tip|Note): ")
+_NEXT_CORPUS_OPT_RE = re.compile(
+    r" --(?:source (?:code|claude-code|ai-sdk)(?!\S)|(?:cache-dir|file|index-file|sources-file) \S+)")
+_NEXT_PLATFORM_RE = re.compile(r" --source (?:claude-)?platform(?!\S)")
+_TIP_RE = re.compile(r"^(Tip|Note): ")
 _COUNT_RE = re.compile(r"^\(\d+ [^()]*\b(?:total|shown)\b[^()]*\)$")
 _URL_LABEL_RE = re.compile(r"^(\s*)(?:URL|url): ")
 _UNIT_RE = re.compile(r"(?<![-\w/<])(?:page|document)(s?)(?![-\w/>])")
@@ -307,6 +315,7 @@ def normalize(text: str) -> list[str]:
     for line in body:
         if _NEXT_RE.match(line):
             line = _NEXT_SCRIPT_RE.sub(r"\1<script> ", line)
+            line = _NEXT_PLATFORM_RE.sub(" --source <platform>", line)
             line = _NEXT_CORPUS_OPT_RE.sub("", line)
         line = _URL_LABEL_RE.sub(r"\1url: ", line)
         out.append(_UNIT_RE.sub(r"<unit>\1", line))
@@ -346,6 +355,8 @@ GENERIC_PROFILES = {
 #     line (``search-content <query>``) the generic loader does not
 #   cd-code-content-missing: ``No page found for slug: …`` vs. the generic
 #     loader's ``No page found for: …``
+# Tip wording (ai-sdk's zero-hit pointer to ``fetch-index --compact``) is
+# tolerated by dropping hint lines; a later migration step decides on it.
 GENERIC_PARITY_EXPECTED: frozenset = frozenset({
     "cd-code-sections-int",
     "cd-plat-content-heading",
@@ -450,36 +461,86 @@ class ComparatorTest(unittest.TestCase):
 
     # The only lines a one-line change may go unnoticed on, written out here
     # rather than taken from ``normalize``: a ``normalize`` that excludes too
-    # much would otherwise vouch for itself. Besides these, line 1 (an index
-    # header) may be skipped.
-    _EXCLUDED_PREFIXES = ("(index: ", "(file: ", "(source: ", "Cache: ", "Tip: ", "Note: ",
-                          *(f"({d}" for d in "0123456789"))
+    # much would otherwise vouch for itself. Line 1 (an index header) may be
+    # skipped too. This list is about the mutations below; the comparator
+    # also, by design, ignores rewrites inside lines it keeps: the trailing
+    # count line, the header's trailing parenthesis, the corpus options of a
+    # ``Next:`` line, the unit word and the case of the ``URL:`` label.
+    _HEADER_PREFIXES = ("(index: ", "(file: ", "(source: ", "Cache: ")  # may be indented
+    _HINT_PREFIXES = ("Tip: ", "Note: ")  # column 0 only
+
+    # mutation kind -> how it rewrites one line (``None``: not applicable).
+    # ``blank`` inserts an empty line before the line instead.
+    _MUTATIONS = {
+        "append": lambda line: line + " [parity-mutation]",
+        "indent": lambda line: " " + line,
+        "swapcase": lambda line: line.swapcase() if re.search(r"[A-Za-z]", line) else None,
+        "widen": lambda line: (re.sub(r"(\S\s)(?=\s*\S)", r"\1 ", line, count=1)
+                               if re.search(r"\S\s+\S", line) else None),
+        "blank": None,
+    }
+
+    def _skip_class(self, i: int, line: str) -> str | None:
+        if i == 0:
+            return "line1-index"
+        for p in self._HINT_PREFIXES:
+            if line.startswith(p):
+                return p[:-2]
+        stripped = line.lstrip()
+        for p in self._HEADER_PREFIXES:
+            if stripped.startswith(p):
+                return p.strip("(: ")
+        if re.match(r"\(\d+ ", stripped):
+            return "count"
+        return None
 
     def test_one_changed_line_is_detected_in_every_case(self):
-        """Negative test: append text to any one line of any golden and the
-        comparator reports it, unless the line is one of the excluded forms
-        above. The number of skipped lines is pinned, so an exclusion that
-        grows (even within those forms) fails here."""
-        tried = skipped = 0
+        """Negative test: change any one line of any golden in one of several
+        ways (append text, indent, swap case, widen a space, insert a blank
+        line before it) and the comparator reports it, unless the line is one
+        of the excluded forms above. The skipped lines are pinned per kind and
+        per form, so an exclusion that grows (even within those forms, or by
+        trading one form for another) fails here."""
+        tried: dict = {kind: 0 for kind in self._MUTATIONS}
+        skipped: dict = {kind: {} for kind in self._MUTATIONS}
         for case_id in CASE_IDS:
             stdout, _ = load_golden(case_id)
             lines = stdout.split("\n")
             kept = normalize(stdout)
-            for i, line in enumerate(lines):
-                mutated = "\n".join(lines[:i] + [line + " [parity-mutation]"] + lines[i + 1:])
-                if normalize(mutated) == kept:
-                    self.assertTrue(i == 0 or line.lstrip().startswith(self._EXCLUDED_PREFIXES),
-                                    f"{case_id}:{i + 1} skipped: {line!r}")
-                    skipped += 1
-                    continue
-                tried += 1
-                self.assertNotEqual(compare(stdout, mutated), [], f"{case_id}:{i + 1}")
-        # 20 = 6 ``… Document Index (…)`` first lines + 9 ``Tip:`` / 1 ``Note:``
-        # hint lines + 1 ``Tip:`` / 1 ``Note:`` page line quoted in a
-        # search-content hit (indented; only ``content`` output keeps them)
-        # + 2 firebase ``Cache:`` lines in the header block.
-        self.assertEqual(skipped, 20)
-        self.assertEqual(tried, 1504)
+            for kind, rewrite in self._MUTATIONS.items():
+                for i, line in enumerate(lines):
+                    if rewrite is None:
+                        new_lines = lines[:i] + [""] + lines[i:]
+                    else:
+                        new = rewrite(line)
+                        if new is None:
+                            continue
+                        self.assertNotEqual(new, line, f"{kind} {case_id}:{i + 1}")
+                        new_lines = lines[:i] + [new] + lines[i + 1:]
+                    mutated = "\n".join(new_lines)
+                    if normalize(mutated) == kept:
+                        cls = self._skip_class(i, line)
+                        self.assertIsNotNone(cls, f"{kind} {case_id}:{i + 1} skipped: {line!r}")
+                        skipped[kind][cls] = skipped[kind].get(cls, 0) + 1
+                        continue
+                    tried[kind] += 1
+                    self.assertNotEqual(compare(stdout, mutated), [], f"{kind} {case_id}:{i + 1}")
+        # line1-index: the 6 ``… Document Index (…)`` first lines; Tip / Note:
+        # the unindented hint lines (the 2 quoted in a firebase hit are
+        # indented and count); Cache: the 2 firebase header lines; count: the
+        # trailing count lines, whose inner spacing is free.
+        # ``(index:`` / ``(file:`` lines survive indenting and widening (their
+        # value is free), so they show up there and not under ``append``.
+        self.assertEqual(skipped, {
+            "append": {"line1-index": 6, "Tip": 9, "Note": 1, "Cache": 2},
+            "indent": {"line1-index": 6, "index": 9, "file": 1, "Cache": 2},
+            "swapcase": {},
+            "widen": {"line1-index": 6, "index": 9, "file": 1, "Cache": 2,
+                      "Tip": 9, "Note": 1, "count": 3},
+            "blank": {},
+        })
+        self.assertEqual(tried, {"append": 1506, "indent": 1506, "swapcase": 907,
+                                 "widen": 865, "blank": 1524})
 
     def test_dropped_and_reordered_lines_are_detected(self):
         stdout, _ = load_golden("cd-code-search-index")
@@ -517,6 +578,11 @@ class ComparatorTest(unittest.TestCase):
             "Next: parse-llms-txt.py content 3 --source claude-code --sources-file /b/s.json\n"
         )
         self.assertEqual(compare(golden, actual), [])
+        # the platform source keeps a canonical marker; both spellings agree
+        self.assertEqual(compare("Next: parse-claude-docs.py content 3 --source platform --cache-dir /a\n",
+                                 "Next: parse-llms-txt.py content 3 --source claude-platform --file /b\n"), [])
+        self.assertEqual(compare("Next: parse-ai-sdk.py content 3 --cache-dir /a\n",
+                                 "Next: parse-llms-txt.py content 3 --source ai-sdk --file /b\n"), [])
 
     def test_file_line_later_in_the_header_block_is_ignored(self):
         """``sections``: the generic loader prints ``(file: …)`` after the
@@ -572,6 +638,26 @@ class ComparatorTest(unittest.TestCase):
             "line starting with Next but not Next:": ("[1] x\n\nNext steps --file a.txt\n",
                                                      "[1] x\n\nNext steps --file b.txt\n"),
             "stderr when stdout is empty": ("", ""),
+            "unit-like word that is not page/document": ("[1] x\n    3 entries shown\n",
+                                                         "[1] x\n    3 sections shown\n"),
+            "word that is not a unit": ("[1] x\n    3 results matched\n", "[1] x\n    3 hits matched\n"),
+            "label other than URL": ("[1] x\n    Title: a\n", "[1] x\n    Source: a\n"),
+            "other label lines": ("[1] x\nWarning: a\n", "[1] x\nWarning: b\n"),
+            "indented Note quoted in a hit dropped": ("[1] x\n        Note: a\n", "[1] x\n"),
+            "indented Tip quoted in a hit rewritten": ("[1] x\n        Tip: a\n", "[1] x\n        Tip: b\n"),
+            "count line wording outside the number": ("[1] x\n(3 pages total)\n", "[1] x\n(3 pages total) x\n"),
+            "Next --source platform dropped": (
+                "[1] x\n\nNext: x.py content 3 --source platform --cache-dir <CACHE_DIR>\n",
+                "[1] x\n\nNext: x.py content 3 --cache-dir <CACHE_DIR>\n"),
+            "Next --source platform turned into code": (
+                "[1] x\n\nNext: x.py content 3 --source platform --cache-dir <CACHE_DIR>\n",
+                "[1] x\n\nNext: x.py content 3 --source code --cache-dir <CACHE_DIR>\n"),
+            "Next --source code turned into platform": (
+                "[1] x\n\nNext: x.py content 3 --source code --cache-dir <CACHE_DIR>\n",
+                "[1] x\n\nNext: x.py content 3 --source platform --cache-dir <CACHE_DIR>\n"),
+            "Next --source with another value": (
+                "[1] x\n\nNext: x.py search q --source both --cache-dir <CACHE_DIR>\n",
+                "[1] x\n\nNext: x.py search q --source bothx --cache-dir <CACHE_DIR>\n"),
         }
         stderr = {"stderr when stdout is empty": ("Error: No page found for slug: a\n",
                                                   "Error: No page found for: a\n")}
