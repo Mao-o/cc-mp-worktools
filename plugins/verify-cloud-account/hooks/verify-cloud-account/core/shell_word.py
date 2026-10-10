@@ -189,6 +189,11 @@ def shown_all(values) -> str:
     return ", ".join(sorted({shown(value) for value in values}))
 
 
+# 旧ファイルの削除の案内で、制御文字を含むパスをコマンドの形にしないときの注記
+# (builder の migrate と hook の deny 文面が同じ文言を使う)。
+NOT_COMMAND_FORM_REMOVE = "(制御文字を含むため、コマンドの形では案内しません。手で削除してください)"
+
+
 def escape_controls(text) -> str:
     """text の制御文字をエスケープした表示形 (値を置き換えずに 1 行のまま示すとき)。
 

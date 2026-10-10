@@ -634,8 +634,7 @@ def _format_conflicts(conflicts: list[tuple[str, Path]]) -> str:
                 lines.append(f"    rm {shlex.quote(text)}")
             else:
                 lines.append(
-                    f"    {shell_word.escape_controls(text)} "
-                    "(制御文字を含むため、コマンドの形では案内しません。手で削除してください)"
+                    f"    {shell_word.escape_controls(text)} {shell_word.NOT_COMMAND_FORM_REMOVE}"
                 )
     return "\n".join(lines)
 

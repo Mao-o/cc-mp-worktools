@@ -351,7 +351,9 @@ def settings_local_target(project_dir: str) -> tuple[Path | None, str]:
         )
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         return None, "git を実行できないため、書き込み先を決められません"
-    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    # git は行を `\n` で区切る。`splitlines()` は U+2028 や `\x1c` などでも割るので、それらを
+    # 含むパスが 2 行に見えて「git リポジトリの外」と誤報告される。
+    lines = [line for line in result.stdout.split("\n") if line.strip()]
     if result.returncode != 0 or len(lines) != 2:
         return None, (
             "git リポジトリの外です。Claude Code はセッションを起動したディレクトリの"

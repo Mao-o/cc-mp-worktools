@@ -611,9 +611,9 @@ def _print_change_line(
 ) -> None:
     display = _format_value_for_display(value, show_values)
     if show_values:
-        print(f"{status}: {key} -> {display}", file=stdout)
+        print(f"{status}: {_p(key)} -> {display}", file=stdout)
     else:
-        print(f"{status}: {key}", file=stdout)
+        print(f"{status}: {_p(key)}", file=stdout)
         print(f"  {display}", file=stdout)
 
 
@@ -744,7 +744,7 @@ def _validate_entry_shape(service, value: Any, *, strict_keys: bool = True) -> s
                 )
             if strict_keys and allowed_keys is not None and k not in allowed_keys:
                 return (
-                    f"{service.ACCOUNT_KEY}: オブジェクトのキー '{k}' は未対応です"
+                    f"{service.ACCOUNT_KEY}: オブジェクトのキー '{_p(k)}' は未対応です"
                     f" (許容: {', '.join(sorted(allowed_keys))})。"
                 )
             if isinstance(v, str):
@@ -763,12 +763,12 @@ def _validate_entry_shape(service, value: Any, *, strict_keys: bool = True) -> s
                 # なるだけの形なので、verify() が形として通すかに関係なく弾く。
                 return (
                     f"{service.ACCOUNT_KEY}: オブジェクトの値に空文字・空白のみの"
-                    f"文字列は使えません (キー '{k}')。"
+                    f"文字列は使えません (キー '{_p(k)}')。"
                 )
             if strict_keys:
                 return (
                     f"{service.ACCOUNT_KEY}: オブジェクトの値は空でない文字列で"
-                    f"ある必要があります (キー '{k}')。"
+                    f"ある必要があります (キー '{_p(k)}')。"
                 )
             # strict_keys=False: 非 str 値をどこまで許すかは service の
             # DICT_VALUE_CHECK 契約に従う。verify() が形を理由に deny する値は
@@ -777,7 +777,7 @@ def _validate_entry_shape(service, value: Any, *, strict_keys: bool = True) -> s
             if _dict_value_shape_denied(service, k, v, allowed_keys=allowed_keys):
                 return (
                     f"{service.ACCOUNT_KEY}: オブジェクトの値は文字列である必要が"
-                    f"あります (キー '{k}', 現在: {type(v).__name__})。"
+                    f"あります (キー '{_p(k)}', 現在: {type(v).__name__})。"
                     " この service の verify() はこの形を検証時に拒否します。"
                 )
         if not strict_keys and good_values == 0:
@@ -1571,7 +1571,7 @@ def _cmd_show(
         else:
             status_marker = "[unknown service]"
 
-        print(f"{key}: {expected_display}  {status_marker}{detail}", file=stdout)
+        print(f"{_p(key)}: {expected_display}  {status_marker}{detail}", file=stdout)
 
     _print_pinning(
         {k for k, v in existing.items() if v not in (None, "")},
@@ -1670,7 +1670,7 @@ def _cmd_migrate(
             new_display = _format_value_for_display(new_val, args.show_values)
             old_display = _format_value_for_display(old_val, args.show_values)
             print(
-                f"  - {key}: new={new_display}, {old_kind}={old_display}",
+                f"  - {_p(key)}: new={new_display}, {old_kind}={old_display}",
                 file=stderr,
             )
         print(
@@ -1764,8 +1764,7 @@ def _cmd_migrate(
                     print(f"  rm {quoted}", file=stdout)
                 else:
                     print(
-                        f"  {_p(path)} "
-                        "(制御文字を含むため、コマンドの形では案内しません。手で削除してください)",
+                        f"  {_p(path)} {shell_word.NOT_COMMAND_FORM_REMOVE}",
                         file=stdout,
                     )
     else:

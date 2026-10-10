@@ -25,7 +25,7 @@ from unittest import mock
 
 import _testutil  # noqa: F401
 
-from core import paths  # noqa: E402
+from core import paths, shell_word  # noqa: E402
 from scripts import accounts_builder as builder  # noqa: E402
 from scripts import pin_env  # noqa: E402
 
@@ -348,6 +348,7 @@ class TestConflictsAndMigrate(_Base):
         self._write(self.project, _DEPRECATED_REL, {"github": "u"})
         out, _err = self._check(["migrate", "--commit"], code=0)
         self.assertIn("手で削除してください", out)
+        self.assertIn(shell_word.NOT_COMMAND_FORM_REMOVE, out)
         for line in out.splitlines():
             self.assertFalse(line.lstrip().startswith("rm "), line)
         self.assertNotIn("rm '", out)
@@ -413,6 +414,96 @@ class TestGlobalDefault(_Base):
         self._global({"aws": {"profile": "p"}})
         _out, err = self._check(["pin-env"], code=1)
         self.assertIn("手で指定してください", err)
+
+
+class TestKeyNames(_Base):
+    """期待値ファイルのキー名もリポジトリ側が決められる。パスと同じくエスケープして 1 行に収める。
+
+    キーは値ではない (値は `--show-values` を待って出す) ので、show / migrate の見出しにそのまま出る。
+    判定 (`--service` との照合など) は生のキーで行い、表示だけを変える。
+    """
+
+    _KFAKE = "FAKE_KEY_LINE_7c1"
+    _KEY = f"zz\n{_KFAKE}\x1b[1m"
+    _KEY_ESCAPED = f"zz\\n{_KFAKE}\\x1b[1m"
+
+    def _assert_key_line(self, text: str, what: str) -> None:
+        for line in text.splitlines():
+            self.assertFalse(
+                line.lstrip().startswith(self._KFAKE),
+                f"{what}: キー名から偽の行が差し込まれた: {line!r}\n---\n{text}",
+            )
+        self.assertIn(self._KEY_ESCAPED, text, what)
+        self.assertNotIn("\x1b[1m", text, what)
+
+    def test_show_escapes_the_key(self):
+        self._write(self.project, _ACCOUNTS_REL, {self._KEY: "x", "github": "u"})
+        _code, out, err = self._run(["show"])
+        self._assert_key_line(out + err, "show")
+        self.assertIn("[unknown service]", out)
+
+    def test_show_still_filters_by_the_raw_service_key(self):
+        # 表示だけを変える: `--service` は生のキーと照合する (エスケープ後の文字列では引けない)。
+        self._write(self.project, _ACCOUNTS_REL, {self._KEY: "x", "github": "u"})
+        _code, out, _err = self._run(["show", "--service", "github"])
+        self.assertNotIn(self._KEY_ESCAPED, out)
+
+    def test_migrate_dry_run_escapes_the_merged_key(self):
+        self._write(self.project, _DEPRECATED_REL, {self._KEY: "x"})
+        code, out, err = self._run(["migrate"])
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("+ merged from deprecated:", out)
+        self._assert_key_line(out + err, "migrate (merged)")
+
+    def test_migrate_with_show_values_escapes_the_key(self):
+        # `--show-values` は 1 行にキーと値を並べる別の分岐を通る。
+        self._write(self.project, _DEPRECATED_REL, {self._KEY: "x"})
+        code, out, err = self._run(["migrate", "--show-values"])
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(" -> ", out)
+        self._assert_key_line(out + err, "migrate (show-values)")
+
+    def test_migrate_escapes_an_unchanged_key(self):
+        self._write(self.project, _ACCOUNTS_REL, {self._KEY: "x"})
+        self._write(self.project, _DEPRECATED_REL, {"github": "u"})
+        code, out, err = self._run(["migrate"])
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("= unchanged:", out)
+        self._assert_key_line(out + err, "migrate (unchanged)")
+
+    def test_migrate_conflict_escapes_the_key(self):
+        self._write(self.project, _ACCOUNTS_REL, {self._KEY: "a"})
+        self._write(self.project, _DEPRECATED_REL, {self._KEY: "b"})
+        code, out, err = self._run(["migrate"])
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("new=", err)
+        self._assert_key_line(out + err, "migrate (conflict)")
+
+    def test_object_value_key_in_a_rejected_shape_is_escaped(self):
+        # 値の中のキー (host / alias 名) も期待値ファイルが決める。形が不正な理由に名前が出る。
+        self._write(self.project, _DEPRECATED_REL, {"github": {self._KEY: ""}})
+        code, out, err = self._run(["migrate"])
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("空文字・空白のみ", err)
+        self._assert_key_line(out + err, "migrate (invalid shape)")
+
+
+    def test_entry_shape_reasons_escape_the_object_key(self):
+        # 値の形の検証 (set --value / migrate の取り込み) が理由文に出すキー名。分岐ごとに 1 件。
+        github = builder._SERVICE_BY_KEY["github"]
+        gcloud = builder._SERVICE_BY_KEY["gcloud"]
+        cases = {
+            "unsupported key (strict)": (gcloud, {self._KEY: "x"}, True, "は未対応です"),
+            "empty value": (github, {self._KEY: ""}, False, "空文字・空白のみ"),
+            "non-string value (strict)": (github, {self._KEY: 1}, True, "空でない文字列で"),
+            "non-string value (lenient)": (github, {self._KEY: 1}, False, "現在: int"),
+        }
+        for label, (svc, value, strict, marker) in cases.items():
+            with self.subTest(case=label):
+                reason = builder._validate_entry_shape(svc, value, strict_keys=strict)
+                self.assertIsNotNone(reason)
+                self.assertIn(marker, reason)
+                self._assert_key_line(reason, label)
 
 
 class TestPathOption(unittest.TestCase):
