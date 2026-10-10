@@ -1,5 +1,134 @@
 # Changelog
 
+## 0.19.1
+
+### Fixed: stat できない accounts.local.json で検証をスキップしない
+
+accounts.local.json の配置パス (旧パスとグローバル既定を含む) の存在確認は、pathlib の
+`Path.is_file()` を使っていた。これは Python 3.13 まで、ENOENT など以外の stat の失敗 (権限の
+無いディレクトリの EACCES・長すぎる名前を指す symlink の ENAMETOOLONG) を例外にするので、例外が
+hook の外まで抜けて「内部エラーのため検証をスキップ」(実行は止めない) になっていた。長すぎる
+名前を指す symlink はリポジトリに置けるので、旧パス (`.claude/accounts.json`) をそれにするだけで、
+同じ階層の新パスに正しいファイルがあっても、どの service のコマンドでも検証を外せた (ふつうの
+ファイルなら複数のパスの競合で deny になる配置)。3.14 からはそのファイルを無いものとして扱い、
+同じ階層のほかの配置パス → 親ディレクトリ → グローバル既定へ黙って探索を進めていた (内部
+バックログ)。
+
+- stat できない配置パスは、ファイルがあるかどうかを確かめられないので「ある (が読めない)」に
+  数える (Python の版に依らない)。読めない期待値ファイルと同じく tier に関係なく deny する。
+  同じ階層にほかの配置パスもあれば、複数のパスの競合と同じく deny する
+- その deny の文面は、確かめられないパスと理由 (権限が無い・名前が長すぎる など) を示し、移行と
+  削除の案内はしない。途中のディレクトリに権限が無いと 3 つの配置パスすべてがこれに当たり、
+  「複数のパスに存在します」と migrate / rm の案内は事実と合わない (案内どおりにしても直らない)
+  ため。パスが 1 つだけなら、従来の「読み込みに失敗しました」の文面のまま
+- 無いとみなすのは、無いと確かめられたとき (ENOENT / ENOTDIR。行き先の無い symlink を含む) と、
+  通常のファイルでないとき (ディレクトリなど) だけ。symlink のループ (ELOOP) は、0.19.0 まで
+  どの版でも無いものとして扱っていたが、確かめられないものとして deny に変わる
+- グローバル既定 (`~/.claude/verify-cloud-account/accounts.local.json`) も同じ。0.19.0 までは
+  stat できないと、Python 3.13 までは検証をスキップし、3.14 からは未設定の扱い (リモート read
+  のみのコマンドは警告で通す) だった
+- 0.19.0 のディレクトリ単位の固定は、期待値が未登録のときの代わりとして働く。3.14 で stat
+  できない配置パスを無いものとして扱うと、固定の環境変数 (`AWS_PROFILE` など) があるだけで、
+  書き込みのコマンドも照合せずに通っていた。stat できない配置パスは、固定があっても deny する
+- 0.19.0 の README の既知の制限 (存在確認で stat できない accounts.local.json) を外した
+
+### Fixed: 成功 cache の型の誤った値と、他のユーザーの dir で検証を省かない
+
+- 成功 cache の entry の timestamp が数値でない (文字列・null・配列など) と TypeError、float に
+  収まらない整数だと OverflowError が hook の外まで抜け、「内部エラーのため検証をスキップ」に
+  なっていた。epoch のファイルの `Infinity` (JSON として読める) も、`int()` の OverflowError で
+  同じだった (内部バックログ)。値が期待した型でない entry は cache miss (通常の照合)、epoch の
+  ファイルは無効化の記録が無いのと同じ (epoch 0) にする
+- 同じ確認で、timestamp が NaN・無限大・未来の時刻の entry (期限が切れない) と、success が
+  `"false"` のような真に数えていた値の entry も cache miss にした。epoch / tombstone は int64 に
+  収まる非負の整数だけを読む (書き戻す `json.dumps` が、桁の多すぎる整数で ValueError を
+  投げうるため)
+- cache の dir (`$TMPDIR/cc-mp-verify-cloud-account`) は、自分の所有で、他のユーザーが書けない
+  (mode の group / other に w が無い) 実ディレクトリ (symlink でない) のときだけ使う。TMPDIR の
+  無い Linux などでは共有の `/tmp` に置かれ、0.19.0 までは別のユーザーが先に作った dir を確かめ
+  ずに使っていたので、置かれた entry で検証を省き (上の型の誤りと組み合わせればスキップ)、置かれた
+  symlink を辿って書きえた (内部バックログ)。作るときは 0700。条件を満たさない dir は直さずに
+  使わず、cache を読まず書かずに毎回検証する。umask 002 の環境で以前の版が作った dir (0775) も
+  これに当たり、消すまで毎回検証する (消せば次の実行で 0700 で作り直される)
+- 旧パスの移行案内を 1 日 1 回に絞る記録も同じ dir に置く。0.19.0 までは共有の `/tmp` の同名
+  dir を確かめずに使い、別のユーザーが置いた記録で案内を止められ、置かれた symlink を辿って空の
+  ファイルを書きえた。dir を使えないときは毎回出す
+- 自動切替の並行セッションのガードの記録も、同じ dir を使えないときと、読めないとき (stat
+  できない・入れ子が深い) は記録が無いのと同じにする (壊れた記録と同じ扱い)。0.19.0 は、Python
+  3.13 までだと stat できない記録で例外になり、それを握った dispatcher が「内部エラーのため自動
+  切替を行わない」(deny のまま) にしていた (3.14 からは記録が無いのと同じに切り替えていた)。
+  検証のスキップにはなっていなかった
+
+### Fixed: builder (show / migrate / pin-env / 書き込み) の表示を hook の deny に揃える
+
+上の修正で、stat できない配置パスを「ある」に数えるようになり、同じ探索を使う builder の振る舞いも
+変わっていた (マージ前レビューの指摘)。新パスに正しいファイル・旧パス (`.claude/accounts.json`) に
+長すぎる名前を指す symlink のとき、show は「複数のパスに存在します … migrate --commit」と hook が
+避けている案内を出し、migrate は Python 3.13 までだと traceback で止まり、3.14 からは stat できない
+旧パスを空として「統合」して書き込んでいた。新パスだけがその symlink のときは、3.14 の show が
+`(empty)` と「照合せずに通します」を出していた (hook はどれも deny)。
+
+- 期待値ファイルの読み込みは、stat できないパスを空として読まず「確かめられません」で止める
+- show / pin-env の複数パスのエラー、migrate、旧パスがあるときの書き込み (init / set / remove /
+  auto-switch) の拒否は、stat できない配置パスがあれば hook と同じ文面 (確かめられないパスと理由)
+  を出し、migrate / rm を案内しない
+- 配置パスとグローバル既定の存在確認で、Python 3.13 までに traceback で止まらない
+- プロジェクト側に何も無く、グローバル既定が stat できないとき、show / pin-env / auto-switch は
+  「`--path <グローバル既定>` を付けて再実行」を案内せず、hook と同じ文面で exit 1 にする (hook は
+  そのファイルを読めない期待値ファイルとして deny し、`--path` で開き直しても読めないため)。show は
+  従来、グローバル既定を読めなければ未登録の一覧を出さずに exit 0 で終えていたが、stat できない
+  場合に限って止める側に揃えた。壊れた JSON など、stat できるが読めない場合は従来どおり exit 0。
+  `--path` が無いパスを指していても、プロジェクト側に別の期待値ファイルがあれば hook はそちらを
+  読むので、show / pin-env はグローバル既定を見ない (stat できなくても止めない)。そのプロジェクト側の
+  ファイルが stat できないときは、hook はそれで deny するので、show / pin-env も hook と同じ文面で
+  exit 1 にする (「そちらを読みます」と案内して exit 0 で終えない)
+- `--path` に symlink のループを渡すと、Python 3.12 までは `Path.resolve()` の RuntimeError で
+  traceback になっていた (3.13 からは投げない)。どの版でも書き込まずに止め、hook は同じ入力を
+  deny する。止まり方は版とループの形で分かれる (Python 3.9.6 / 3.12.13 / 3.13.16 / 3.14.0 で
+  show / pin-env / auto-switch / set / remove / init / migrate を実測):
+  - 3.12 まで: どの形でも「確かめられません」で exit 1
+  - 3.13 から: 自分を指す 1 段のループは「確かめられません」で exit 1。2 段以上のループ
+    (`accounts.local.json` → `loopa` → `loopb` → `loopa`) では `Path.resolve()` がループの途中の
+    パス (`loopa`) を返すので、「--path は dispatcher が読む配置を指してください」で exit 2
+    (案内は事実と合わないが、書き込まない)
+
+### Fixed: pin-env の gcloud の構成
+
+- stat できない構成ファイル (長すぎる名前を指す symlink など) があると、Python 3.13 までは例外が
+  builder の外まで抜けていた。読めない構成と同じく候補にしない (hook の経路ではないので、検証の
+  スキップではない)
+
+### Tests
+
+- stat できない配置パス: 状態ごとの数え方 (通常のファイル・無い・行き先の無い symlink・
+  ディレクトリ・`.claude` がファイル・長すぎる名前を指す symlink・symlink のループ・権限の無い
+  `.claude`)、その階層で探索が止まること、グローバル既定 (`test_paths.py`)。`__main__.main()` を
+  プロセス内で動かし、新パスの隣の旧パス・それだけの旧パス (リモート read のみのコマンド)・祖先の
+  権限の無い `.claude`・グローバル既定で、どれも deny になり warn (スキップ) にならないこと
+  (`TestAccountsFileThatCannotBeStatted`)。`Path.is_file` は 0.18.0 と同じく 3.13 までの挙動に
+  差し替え、本物の挙動も前提として確かめる。stat できない旧パスと固定の環境変数
+  (`AWS_PROFILE`) がそろっても、書き込みのコマンドが deny のままであること
+- 成功 cache: 期待した型でない entry の値 (timestamp・success) と epoch の値 (`test_cache.py`)。
+  timestamp が文字列 / null / 配列の entry で、`__main__` を実プロセスで起こすと通常の照合
+  (deny) になり、正しい entry なら cache hit (allow) のままであること (`test_main.py`)。他の
+  ユーザーが書ける dir (0777 / 0770 / 0703)・所有者が違う dir (所有者は mock)・自分の dir を指す
+  symlink を使わないこと、新しい dir は 0700 であること (`TestCacheDirOwnership`)。移行案内の
+  記録を他のユーザーが書ける dir に置かず、毎回出すこと (`test_dispatcher.py`)
+- 自動切替の記録: stat できない・入れ子が深い記録は無いのと同じで、次の切替の記録で置き換わる
+  (`test_auto_switch.py`)。pin-env: stat できない構成を候補にしない (`test_pin_env.py`)
+- cache の dir を自分で作る既存のテストは 0700 で作る (umask 002 の環境でも同じ結果にするため)
+- builder: 上の 2 つの入力で show / pin-env / migrate (`--commit` 有無) / init / set /
+  auto-switch が hook と同じ文面で止まり、新パスを書き換えないこと。本物の `Path.is_file` と、
+  3.13 までの挙動に差し替えたものの両方で流す (`TestUnstattableAccountsPath`)
+- builder: 新パスだけが stat できないときの auto-switch (`--commit` 有無)、権限の無いディレクトリの
+  下を指す `--path` での show / pin-env、symlink のループを指す `--path` (`Path.resolve()` を
+  3.12 までの挙動に差し替える)、stat できないグローバル既定での show / pin-env / auto-switch と
+  init の警告。`--path` が無いパスを指し、プロジェクト側に新パスがあるときの show / pin-env が、
+  stat できないグローバル既定で止まらないこと、そのプロジェクト側の新パスが stat できなければ hook と
+  同じ文面で止まること。配置パスの存在確認を `Path.is_file()` に戻す変異が、
+  置き換えた箇所ごとに落ちる
+- 1,397 → 1,445 件
+
 ## 0.19.0
 
 ### Changed: 期待値が未登録でも、ディレクトリ単位の公式の固定があれば通す

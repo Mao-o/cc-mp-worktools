@@ -265,6 +265,24 @@ class TestPathMigration(BaseWithTmpProject):
             second = dispatch("gh pr list", str(self.project_dir))
             self.assertIsNone(second)
 
+    def test_deprecation_warn_is_not_recorded_in_a_dir_other_users_can_write(self):
+        """1 日 1 回の記録は、成功 cache と同じく自分の所有で他のユーザーが書けない dir にだけ
+        置く (v0.19.1)。使えない dir では絞れないので毎回出す。旧版は共有の `/tmp` の同名 dir を
+        確かめずに使い、別のユーザーが置いた記録で案内を止められた。"""
+        self._write_deprecated_accounts({"github": "Mao-o"})
+        with self.isolated_cache() as tmpdir, mock.patch(
+            "services.github.verify", return_value=None
+        ):
+            shared = tmpdir / "cc-mp-verify-cloud-account"
+            shared.mkdir()
+            os.chmod(shared, 0o777)
+            for attempt in ("first", "second"):
+                with self.subTest(attempt):
+                    result = dispatch("gh pr list", str(self.project_dir))
+                    self.assertIsNotNone(result)
+                    self.assertIn("migrate", result["hookSpecificOutput"]["additionalContext"])
+            self.assertEqual(list(shared.iterdir()), [])
+
     def test_new_and_deprecated_both_exist_denies(self):
         """新旧両方存在 → fail-closed で deny (D4)。"""
         self._write_accounts({"github": "new-user"})

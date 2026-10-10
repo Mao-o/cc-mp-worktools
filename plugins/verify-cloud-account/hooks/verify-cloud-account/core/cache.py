@@ -11,9 +11,13 @@ hook プロセスの env のうちアカウントを決める変数 (`identity_e
 起動中のセッションに反映されるため、値が変わったら別 entry として再検証する。
 
 キャッシュ無効化:
-- TTL (既定 30 秒) を過ぎた
+- TTL (既定 30 秒) を過ぎた (timestamp が未来の時刻の entry も使わない)
 - accounts.local.json の mtime が変わった
-- キャッシュファイルが存在しない or JSON 破損
+- キャッシュファイルが無い・読めない (JSON 破損・UTF-8 でない・入れ子が深い・stat
+  できない など)・JSON のオブジェクトでない (`read_state`) か、値が期待した型でない
+  (timestamp が数値でない・float に収まらない・NaN や無限大、success が true でない)。
+  epoch ファイルも同じで、無い・読めない・値が int64 に収まる非負の整数でないなら、無効化の
+  記録が無いのと同じ (epoch 0)
 - アカウント状態を変えうるコマンド (`gh auth switch` / `gcloud config set` /
   `firebase use <x>` / `kubectl config use-context` / `aws sso login` 等) を
   dispatcher が検出した時点 (PreToolUse) で `invalidate(service_name)` が service の
@@ -34,6 +38,9 @@ epoch / in-flight 窓: 削除だけだと、切替 hook と並行して走った
 
 保存先: $TMPDIR/cc-mp-verify-cloud-account/<service>-<sha256>.json
 epoch:  $TMPDIR/cc-mp-verify-cloud-account/<service>.epoch
+
+dir は自分の所有で、他のユーザーが書けない実ディレクトリのときだけ使う (`_cache_dir`)。
+使えなければ cache を読まず書かず、毎回検証する。
 """
 from __future__ import annotations
 
@@ -41,6 +48,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import tempfile
 import time
 from pathlib import Path
@@ -52,15 +60,53 @@ IN_FLIGHT_SEC = 60
 
 _SERVICE_TAG_RE = re.compile(r"[^A-Za-z0-9_-]")
 
+# cache dir の mode にこれが立っていたら (group / other が書ける) 使わない。
+_OTHERS_WRITE_BITS = stat.S_IWGRP | stat.S_IWOTH
+# epoch と tombstone は `time.time_ns()` から作る非負の整数。int64 に収まらない値は読めない
+# ものと同じにする (書き戻す `json.dumps` が、桁の多すぎる整数で ValueError を投げうる)。
+_NS_LIMIT = 1 << 63
+
+
+def _is_private_dir(path: Path) -> bool:
+    """`path` が自分の所有で、他のユーザーが書けない実ディレクトリ (symlink でない) か。"""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISDIR(st.st_mode):
+        return False
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is None:
+        # 所有者と mode が POSIX の意味を持たない OS (Windows)。一時ディレクトリはユーザーごと。
+        return True
+    return st.st_uid == geteuid() and not st.st_mode & _OTHERS_WRITE_BITS
+
 
 def _cache_dir() -> Path | None:
+    """cache dir。使えなければ None (cache を使わない = 毎回、通常の照合をする)。
+
+    TMPDIR の無い Linux などでは共有の `/tmp` に置かれ、別のユーザーが先に同じ名前の dir を
+    作れる。そこを使うと、置かれた entry で検証を省いたり、置かれた symlink を辿って書いたり
+    しうる。そのため**自分の所有で、他のユーザーが書けない (mode の group / other に w が
+    無い) 実ディレクトリ (symlink でない)** のときだけ使う。作るときは 0700。満たさない dir は
+    直さずに使わない (中に他のユーザーが置いたファイルが残りうる)。
+    """
     base = os.environ.get("TMPDIR") or tempfile.gettempdir()
     p = Path(base) / "cc-mp-verify-cloud-account"
     try:
-        p.mkdir(parents=True, exist_ok=True)
+        p.mkdir(mode=0o700, parents=True, exist_ok=True)
     except OSError:
         return None
-    return p
+    return p if _is_private_dir(p) else None
+
+
+def state_dir() -> Path | None:
+    """cache dir (`_cache_dir`)。成功 cache 以外の状態を同じ dir に置く呼び出し側の入口。
+
+    None なら状態を読まないし書かない (dispatcher の deprecation 案内は、1 日 1 回に絞れず
+    毎回出す)。
+    """
+    return _cache_dir()
 
 
 def _cache_path(key: str) -> Path | None:
@@ -113,6 +159,25 @@ def write_state(path: Path, text: str) -> None:
     _write_atomic(path, text)
 
 
+def read_state(path: Path | None) -> dict | None:
+    """cache dir のファイル (成功 cache の entry・epoch・`service_state_path()` のファイル) を
+    JSON のオブジェクトとして読む。無い・読めない・オブジェクトでないなら None。
+
+    存在確認は `os.path.isfile`: pathlib の `Path.is_file()` は Python 3.13 まで、ENOENT など
+    以外の OSError (長すぎる名前を指す symlink の ENAMETOOLONG・EACCES) をそのまま投げる。
+    読めないものには、UTF-8 でない (UnicodeDecodeError。ValueError に含まれる)・入れ子が深い
+    (RecursionError) ファイルも含む。どれも捕まえないと dispatch() の外まで抜け、__main__ の
+    最終防波堤が検証をスキップする。中の値の型は呼び出し側が確かめる。
+    """
+    if path is None or not os.path.isfile(path):
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError, RecursionError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def identity_env(service, env) -> dict[str, str]:
     """service の CLI が「どのアカウント / project で動くか」を決める変数を env から抜く。
 
@@ -162,22 +227,25 @@ def _cache_key(
     return f"{_service_tag(service_name)}-{digest}"
 
 
+def _is_ns(value) -> bool:
+    """epoch / tombstone として読める値 (int64 に収まる非負の整数。真偽値は除く) か。"""
+    return type(value) is int and 0 <= value < _NS_LIMIT
+
+
 def _read_epoch(service_name: str) -> tuple[int, int]:
-    """(epoch, tombstone_ns) を返す。epoch ファイルが無い / 読めないなら (0, 0)。"""
-    path = _epoch_path(service_name)
-    # `os.path.isfile` を使う: pathlib の `Path.is_file()` は Python 3.13 まで、ENOENT など以外の
-    # OSError (長すぎる名前を指す symlink の ENAMETOOLONG・EACCES) をそのまま投げる (try の外に
-    # あるので、下の except と同じく dispatch() の外まで抜けて検証をスキップしていた)。
-    if path is None or not os.path.isfile(path):
+    """(epoch, tombstone_ns) を返す。epoch ファイルが無い / 読めないなら (0, 0)。
+
+    値が `_is_ns` に当たらないファイルも読めないのと同じ (無効化の記録なし)。`int()` で
+    変換していた旧実装は、JSON が読める `Infinity` の OverflowError を捕まえず、
+    dispatch() の外まで抜けて __main__ の最終防波堤が検証をスキップしていた。
+    """
+    data = read_state(_epoch_path(service_name))
+    if data is None:
         return 0, 0
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return int(data.get("epoch", 0)), int(data.get("at_ns", 0))
-    # 入れ子の深いファイルの RecursionError も「読めない」と同じ (捕まえないと dispatch() の
-    # 外まで抜け、__main__ の最終防波堤が検証をスキップする)。UTF-8 でないファイルの
-    # UnicodeDecodeError は ValueError に含まれる。
-    except (ValueError, TypeError, AttributeError, OSError, RecursionError):
+    epoch, at_ns = data.get("epoch", 0), data.get("at_ns", 0)
+    if not (_is_ns(epoch) and _is_ns(at_ns)):
         return 0, 0
+    return epoch, at_ns
 
 
 def current_epoch(service_name: str) -> int:
@@ -209,32 +277,39 @@ def get_success(
     含める。差で別エントリになり、profile A の成功が profile B で誤って allow される
     ことを防ぐ。
     entry の epoch が現在の epoch と違えば (書かれた後に切替が検出された) 無視する。
+
+    無い・読めない entry (stat できない・壊れた・オブジェクトでない。`read_state`) と、
+    値が期待した型でない entry は cache miss (検証し直す)。timestamp は float にできる有限の
+    数で、書いてから TTL 以内のときだけ使う: 数値でない値 (文字列・null・配列など) の
+    TypeError と float に収まらない整数の OverflowError は、捕まえないと dispatch() の外まで
+    抜けて __main__ の最終防波堤が検証をスキップする。NaN・無限大・未来の時刻は期限が切れない。
+    success は `true` のときだけ (`"false"` のような文字列は真に数えない)。
     """
-    path = _cache_path(
-        _cache_key(
-            service_name, project_dir, expected, inline_env, context, identity_env
+    data = read_state(
+        _cache_path(
+            _cache_key(
+                service_name, project_dir, expected, inline_env, context, identity_env
+            )
         )
     )
-    # stat できない entry も cache miss (`Path.is_file()` ではなく `os.path.isfile`。`_read_epoch`)。
-    if path is None or not os.path.isfile(path):
-        return False
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    # 読めない entry は cache miss (検証し直す)。JSON の破損に加えて、UTF-8 でない
-    # (UnicodeDecodeError。ValueError に含まれる) / 入れ子が深い (RecursionError) ファイルも
-    # 同じ。捕まえないと dispatch() の外まで抜け、__main__ の最終防波堤が検証をスキップする。
-    except (ValueError, OSError, RecursionError):
-        return False
-    if not isinstance(data, dict):
+    if data is None:
         return False
     if data.get("accounts_mtime") != accounts_mtime:
         return False
-    ts = data.get("timestamp", 0)
-    if time.time() - ts > _CACHE_TTL_SEC:
+    ts = data.get("timestamp")
+    # bool (int の subclass) は 1970 年の時刻 (0 / 1) なので下の TTL の判定でも落ちるが、
+    # timestamp の型として明示的に除外する。
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return False
+    try:
+        age = time.time() - ts
+    except OverflowError:
+        return False
+    if not 0 <= age <= _CACHE_TTL_SEC:
         return False
     if data.get("epoch", 0) != current_epoch(service_name):
         return False
-    return bool(data.get("success"))
+    return data.get("success") is True
 
 
 def set_success(

@@ -284,7 +284,9 @@ commit される `.claude/settings.json` (プロジェクトの共有設定) に
 切り替えずに deny する。deny 文面には「どのプロジェクトが何秒前に切り替えたか」と
 「切り替える前にユーザーに確認する」旨が出る。同じアカウントへの切替 (同じ repo の
 worktree 同士など) では見送らない。記録は
-`$TMPDIR/cc-mp-verify-cloud-account/github.autoswitch.json`。
+`$TMPDIR/cc-mp-verify-cloud-account/github.autoswitch.json`。記録を読めないとき
+(壊れている・stat できない) と、この dir を使えないとき ([成功 cache と同じ条件](#パフォーマンス-短期キャッシュ)) は、
+記録が無いのと同じでガードは働かない。
 
 使う前に:
 
@@ -992,6 +994,14 @@ dispatcher は以下の順に accounts.local.json を探す:
 検証を通すと、どの設定が効いているか不透明になる。
 `/verify-cloud-account:accounts-migrate` で統合するか、不要な方を手動削除する。
 
+**stat できない配置パスは「ある (が読めない)」に数える** (v0.19.1)。途中のディレクトリに
+権限が無い・長すぎる名前を指す symlink・symlink のループなどで、そこにファイルがあるかどうかを
+確かめられないパスは、無いものとして次の配置パス・親ディレクトリ・グローバル既定へ進まず、
+読めない期待値ファイルとして deny する (リモート read のみのコマンドも)。同じ階層の配置パスに
+正しいファイルがあっても、そちらでは照合しない。deny の文面は確かめられないパスと理由を示す。
+無いとみなすのは、無いと確かめられたとき (行き先の無い symlink を含む) と、通常のファイルで
+ない (ディレクトリなど) ときだけ。
+
 ## 親ディレクトリ遡及 (v0.4.0)
 
 cwd 階層に accounts.local.json が無い場合、**親ディレクトリを 1 階層ずつ
@@ -1113,6 +1123,8 @@ root 自身**が、外側に repo が無ければ `$HOME` が境界になる (�
   (無関係な `~/.claude/accounts.json` の継承が v0.12.0 で塞いだ不具合そのもの)
 - 同一階層に複数 tier が同居する競合 (D4) は従来どおり fail-closed で deny し、
   グローバル既定では救済しない
+- stat できないグローバル既定も、プロジェクト側の配置パスと同じく読めない期待値ファイル
+  として deny する (v0.19.1。[3-tier lookup](#配置パスの-3-tier-lookup-v030))
 - **builder はグローバル既定へ落ちない** (`init` / `set` / `remove` / `migrate`)。
   プロジェクト設定を作るつもりの編集が、利用者の全プロジェクトに効くファイルを
   書き換えてしまわないようにするため。グローバル既定は手で作るか `--path` で明示する
@@ -1133,9 +1145,17 @@ PreToolUse は Bash の度に発火するため、`gh pr list && gh pr view && g
 
 - 保存先: `$TMPDIR/cc-mp-verify-cloud-account/<service>-<sha256>.json`
   (epoch は同じディレクトリの `<service>.epoch`)
-- 無効化: TTL 経過 / `accounts.local.json` の mtime 変化 / ファイル破損 /
-  **アカウント状態を変えうるコマンドの検出** (v0.8.0、下記) / entry の epoch が
-  現在と異なる
+- この dir は、**自分の所有で、他のユーザーが書けない** (mode の group / other に w が
+  無い) 実ディレクトリ (symlink でない) のときだけ使う (v0.19.1)。TMPDIR の無い Linux
+  などでは共有の `/tmp` に置かれ、別のユーザーが先に同じ名前の dir を作れるため。作るときは
+  0700。条件を満たさない dir は直さずに使わず、cache を読まず書かずに毎回検証する (umask 002
+  の環境で以前の版が作った dir もこれに当たる。消せば次の実行で 0700 で作り直される)。
+  [自動切替の記録](#自動切替-auto-switch--v0160)と、旧パスの移行案内を 1 日 1 回に絞る記録も
+  同じ dir に置くので、使えなければ記録しない (移行案内は毎回出る)
+- 無効化: TTL 経過 / `accounts.local.json` の mtime 変化 / ファイル破損 (読めない
+  entry や、値が期待した型でない entry も使わない。timestamp が数値でない・未来の時刻の
+  ものなど。v0.19.1) / **アカウント状態を変えうるコマンドの検出** (v0.8.0、下記) /
+  entry の epoch が現在と異なる
 - **失敗 (deny) 状態はキャッシュしない** — 切り替え後は即座に再検証が走る
 - キーには行頭の inline env と context option (`--profile` 等) に加え、**hook
   プロセスの env のうちアカウントを決める変数** (`AWS_*` / `CLOUDSDK_*` /
@@ -1365,12 +1385,6 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   切替先を探すが、そのディレクトリで切り替えると実体のパスで記録されるため。hook も
   firebase-tools と同じ切替先を引く (CLI が無いときのローカル設定の解決も、symlink を解かない
   パスでだけ探す) ので、誤 allow にはならず、同じ deny が続く
-- **存在確認で stat できない accounts.local.json** (長すぎる名前を指す symlink など。リポジトリに
-  置ける) は、Python 3.13 以前では「内部エラーのため検証をスキップ」になる (実行は止めない。
-  v0.18.0 時点。pathlib の `Path.is_file()` が stat の失敗を例外にするため)。旧パスのファイルも
-  同じで、同じ階層のほかの配置パスに正しいファイルがあってもスキップになる。Python 3.14 以降は、
-  そのファイルが無いものとして扱われ、探索が続く (同じ階層のほかの配置パス・親ディレクトリ・
-  グローバル既定で見つかったものと照合し、どこにも無ければ未設定の扱い)
 - **direnv / `.envrc` / `CLAUDE_ENV_FILE` 経由の env は検証 subprocess に届かない**
   (PreToolUse hook には `CLAUDE_ENV_FILE` が渡らない harness 仕様)。回避策は
   [インライン環境変数の伝播](#インライン環境変数の伝播-v070) を参照

@@ -269,9 +269,16 @@ def _resolve_target(
         # 通すので、比較・表示のために同じ正規化を掛ける。揃えないと symlink
         # (macOS の /var → /private/var 等) を挟んだだけで「別ファイル」と
         # 誤判定し、shadowing 警告が誤発火する。
+        # Python 3.12 までの `Path.resolve()` は symlink のループで OSError ではなく
+        # RuntimeError を投げる (3.13 からは投げない)。拾わないと builder が traceback で
+        # 止まるので、どちらも「正規化できない」として扱い、その先の stat で
+        # 「確かめられません」として止める (hook はこのパスを deny する)。
+        # 3.13 からは例外にならず、自分を指す 1 段のループはそのパスのまま (その先の stat で
+        # 止まる)、2 段以上のループはループの途中のパスを返すので、下の配置の検査で exit 2 に
+        # なる。どちらも書き込まない。
         try:
             path = path.resolve()
-        except OSError:
+        except (OSError, RuntimeError):
             path = Path(os.path.normpath(str(path)))
         split = _split_tier_path(path)
         if split is None:
@@ -294,7 +301,7 @@ def _resolve_target(
 
     try:
         project = Path(project_dir).resolve()
-    except OSError:
+    except OSError:  # project_dir は cwd か CLAUDE_PROJECT_DIR で実在する前提 (hook 側と同じ)
         project = Path(project_dir)
     found, resolved_dir = paths.discover_accounts_files_with_ancestors(project_dir)
     if not found:
@@ -380,7 +387,7 @@ def _global_default_note() -> str:
     判定表への影響が大きいので、ここでは警告に留める。
     """
     global_path = paths.global_accounts_file()
-    if global_path is None or not global_path.is_file():
+    if global_path is None or not paths.may_hold_accounts(global_path):
         return ""
     keys = _global_default_keys(global_path)
     if keys:
@@ -435,7 +442,18 @@ def _target_note(
 
 
 def _load_existing(path: Path) -> dict[str, Any]:
-    if not path.is_file():
+    # stat できないパスは、hook と同じく「ある (が読めない)」として止める
+    # (`paths._may_hold_accounts`)。`Path.is_file()` は Python 3.13 までは例外
+    # (traceback)、3.14 からは False で、空 (`{}`) として読むと show は `(empty)` を、
+    # migrate --commit はそれを「統合」した結果を出し、hook の deny と食い違っていた。
+    err = paths.stat_failure(path)
+    if err is not None:
+        raise _BuilderError(
+            f"{path} を確かめられません ({err.strerror or type(err).__name__})。"
+            "途中のディレクトリの権限と symlink の行き先を確認し、"
+            "期待値ファイルでないものは削除してください。"
+        )
+    if not os.path.isfile(path):
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -846,6 +864,20 @@ def _cmd_init(
     return 0
 
 
+def _report_unstattable(found: list[tuple[str, Path]], stderr: IO[str]) -> bool:
+    """stat できない配置パスがあれば、hook の deny と同じ文面を stderr に書いて True を返す。
+
+    hook はそのパスを「ある (が読めない)」に数えて deny し、migrate / rm を案内しない
+    (`paths.describe_unstattable`)。builder が「複数のパスに存在します … migrate --commit」を
+    出すと、案内どおりにしても直らない。
+    """
+    body = paths.describe_unstattable(found)
+    if body is None:
+        return False
+    print(f"error: {body}", file=stderr)
+    return True
+
+
 def _refuse_if_legacy_paths_exist(
     command: str, target: _Target, stderr: IO[str]
 ) -> bool:
@@ -863,6 +895,9 @@ def _refuse_if_legacy_paths_exist(
     legacy_paths = [(kind, path) for kind, path in found if kind != "new"]
     if not legacy_paths:
         return False
+    # stat できない旧パスは migrate で統合できないので、hook と同じ文面で止める。
+    if _report_unstattable(found, stderr):
+        return True
     print(
         "error: 旧パスに accounts.local.json が存在します。"
         f"{command} で新パスを操作すると複数パス conflict で fail-closed deny に"
@@ -1329,7 +1364,7 @@ def _cmd_show(
         return e.exit_code
 
     if target.origin == "explicit":
-        found = [(target.kind, target.path)] if target.path.is_file() else []
+        found = [(target.kind, target.path)] if paths.may_hold_accounts(target.path) else []
     else:
         found = paths.discover_all_accounts_files(str(target.anchor))
 
@@ -1343,11 +1378,28 @@ def _cmd_show(
         # 隠すことになる (show の目的は不一致の原因調査)。突合はそのファイルの
         # 値で行う必要があるので `--path` で開き直す形を案内する。
         global_path = paths.global_accounts_file()
-        if (
+        # `--path` で無いパスを指しても、プロジェクト側に別の期待値ファイルがあれば hook は
+        # そちらを読み、グローバル既定には落ちない (`_hook_reads_instead` が警告する)。
+        # ただし hook がそちらを読むなら、そのファイルが stat できないとき hook は deny する。
+        # 「読みます」と案内して 0 で終わらせず、hook と同じ文面で止める。
+        other = _hook_reads_instead(target, project_dir)
+        if other is not None:
+            hook_target = _resolve_target(project_dir, None, require_new=False)
+            if _report_unstattable(
+                paths.discover_all_accounts_files(str(hook_target.anchor)), stderr
+            ):
+                return 1
+        global_in_use = (
             global_path is not None
-            and global_path.is_file()
+            and paths.may_hold_accounts(global_path)
             and global_path != target.path
-        ):
+            and other is None
+        )
+        # グローバル既定が stat できないなら、hook はそれを「ある (が読めない)」として
+        # deny する。`--path` で開き直しても読めないので案内せず、hook と同じ文面で止める。
+        if global_in_use and _report_unstattable([("global", global_path)], stderr):
+            return 1
+        if global_in_use:
             print(
                 f"グローバル既定 {global_path} が存在します"
                 " (hook はこのファイルで検証します)。",
@@ -1363,9 +1415,10 @@ def _cmd_show(
             file=stdout,
         )
         # hook がグローバル既定で検証する場合は、そのファイルのキーを登録済みとして扱う
-        # (未登録の一覧が hook の判定と食い違わないように)。読めなければ一覧を出さない。
+        # (未登録の一覧が hook の判定と食い違わないように)。読めなければ (壊れた JSON など。
+        # stat できない場合は上で止めている) 一覧を出さない。
         registered: set = set()
-        if global_path is not None and global_path.is_file() and global_path != target.path:
+        if global_in_use:
             try:
                 registered = {
                     k for k, v in _load_existing(global_path).items() if v not in (None, "")
@@ -1378,6 +1431,8 @@ def _cmd_show(
         return 0
 
     if len(found) >= 2:
+        if _report_unstattable(found, stderr):
+            return 1
         print(
             "error: 複数のパスに accounts.local.json が存在します (fail-closed).",
             file=stderr,
@@ -1510,6 +1565,11 @@ def _cmd_migrate(
     if not found:
         print("no accounts.local.json found in any path. nothing to migrate.", file=stdout)
         return 0
+
+    # stat できない配置パスは統合元にできない (中身を読めない)。hook と同じ文面で止め、
+    # migrate / rm の案内はしない (案内どおりにしても直らない)。
+    if _report_unstattable(found, stderr):
+        return 1
 
     if len(found) == 1 and found[0][0] == "new":
         print(f"only new path exists; nothing to migrate:\n  {new_path}", file=stdout)
@@ -1657,15 +1717,28 @@ def _cmd_migrate(
 
 
 def _auto_switch_missing_file_message(target: _Target) -> str:
-    """対象ファイルが無いときの拒否理由 (+ グローバル既定 / env の案内)。"""
+    """対象ファイルが無いときの拒否理由 (+ グローバル既定 / env の案内)。
+
+    グローバル既定が stat できないときは、hook がそれを deny するので、`--path` での
+    再実行を案内せず、hook と同じ文面 (`paths.describe_unstattable`) だけを返す。
+    """
+    global_path = paths.global_accounts_file()
+    global_in_use = (
+        target.origin == "fresh"
+        and global_path is not None
+        and paths.may_hold_accounts(global_path)
+    )
+    if global_in_use:
+        body = paths.describe_unstattable([("global", global_path)])
+        if body is not None:
+            return f"error: {body}"
     lines = [
         f"error: {target.path} がありません。自動切替は期待値のアカウントへ切り替える"
         "機能なので、先に init で github の期待値を設定してください: "
         'python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/'
         'accounts_builder.py" init --service github --dry-run'
     ]
-    global_path = paths.global_accounts_file()
-    if target.origin == "fresh" and global_path is not None and global_path.is_file():
+    if global_in_use:
         lines.append(
             f"hook は現在グローバル既定 {global_path} で検証しています。そのファイルで"
             f"有効にするなら {_path_option(global_path)} を付けて再実行してください。"
@@ -1718,7 +1791,7 @@ def _cmd_auto_switch(
     # `"$auto_switch"` だけのファイルを新しく作らない。作ると、そのファイルが
     # グローバル既定を覆い隠し、期待値を書いていない service がすべて未設定 (deny)
     # になる (`_global_default_note` と同じ shadowing)。
-    if not target.path.is_file():
+    if not paths.may_hold_accounts(target.path):
         print(_auto_switch_missing_file_message(target), file=stderr)
         return 1
 
@@ -1832,18 +1905,39 @@ def _cmd_pin_env(
         return e.exit_code
 
     if target.origin == "explicit":
-        found = [(target.kind, target.path)] if target.path.is_file() else []
+        found = [(target.kind, target.path)] if paths.may_hold_accounts(target.path) else []
     else:
         found = paths.discover_all_accounts_files(str(target.anchor))
     if not found:
         print(_target_note(target, project_dir, warn_shadowing=False), file=stdout)
+        global_path = paths.global_accounts_file()
+        # `--path` で無いパスを指しても、プロジェクト側に別の期待値ファイルがあれば hook は
+        # そちらを読み、グローバル既定には落ちない (`_hook_reads_instead` が警告する)。
+        # ただし hook がそちらを読むなら、そのファイルが stat できないとき hook は deny する。
+        # 「読みます」と案内して 0 で終わらせず、hook と同じ文面で止める。
+        other = _hook_reads_instead(target, project_dir)
+        if other is not None:
+            hook_target = _resolve_target(project_dir, None, require_new=False)
+            if _report_unstattable(
+                paths.discover_all_accounts_files(str(hook_target.anchor)), stderr
+            ):
+                return 1
+        global_in_use = (
+            global_path is not None
+            and paths.may_hold_accounts(global_path)
+            and global_path != target.path
+            and other is None
+        )
+        # stat できないグローバル既定は、hook が deny する。`--path` での再実行を案内しても
+        # 読めないので、hook と同じ文面で止める (show と同じ)。
+        if global_in_use and _report_unstattable([("global", global_path)], stderr):
+            return 1
         print(
             f"error: {target.path} がありません。期待値が無いので、固定する値を"
             "決められません。先に accounts-init で期待値を設定してください。",
             file=stderr,
         )
-        global_path = paths.global_accounts_file()
-        if global_path is not None and global_path.is_file() and global_path != target.path:
+        if global_in_use:
             print(
                 f"グローバル既定 {global_path} で検証しているなら、{_path_option(global_path)}"
                 " を付けて再実行してください。",
@@ -1851,6 +1945,8 @@ def _cmd_pin_env(
             )
         return 1
     if len(found) >= 2:
+        if _report_unstattable(found, stderr):
+            return 1
         print(
             "error: 複数のパスに accounts.local.json が存在します (fail-closed).",
             file=stderr,

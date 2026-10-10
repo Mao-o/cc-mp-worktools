@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -17,6 +18,10 @@ from unittest import mock
 import _testutil  # noqa: F401
 
 from core import paths  # noqa: E402
+
+# root は権限の無いディレクトリも辿れる (EACCES を作れない)。
+_IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
+_LONG = "a" * 300  # 1 要素が 255 バイトを超える → symlink を辿る stat が ENAMETOOLONG
 
 
 class BaseAncestorBoundary(unittest.TestCase):
@@ -628,6 +633,104 @@ class TestAncestorSearchUnchangedBehaviour(BaseAncestorBoundary):
         self.assertIsNone(resolved)
 
 
+class TestPlacementPathThatCannotBeStatted(BaseAncestorBoundary):
+    """stat できない配置パスは「ある (が読めない)」に数える (v0.19.1)。
+
+    pathlib の `Path.is_file()` は Python 3.13 まで、ENOENT など以外の OSError (長すぎる名前を
+    指す symlink の ENAMETOOLONG・EACCES) をそのまま投げ、3.14 からは False (= 無い) にする。
+    旧版は前者で例外が __main__ の最終防波堤まで抜けて検証をスキップし、後者で同じ階層の
+    ほかの配置パス → 親ディレクトリ → グローバル既定へ黙って探索を進めていた。3.14 以降でも
+    3.13 までの失敗を再現するため、`Path.is_file` を差し替える。
+    """
+
+    def setUp(self):
+        super().setUp()
+        patcher = _testutil.patch_is_file_like_py313()
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _call(self, fn, *args):
+        try:
+            return fn(*args)
+        except OSError as e:
+            self.fail(f"{fn.__name__} から {type(e).__name__} が抜けた (hook は検証をスキップする)")
+
+    def _unstattable_legacy(self, project: Path) -> Path:
+        legacy = project / ".claude" / "accounts.json"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(_LONG, legacy)
+        with self.assertRaises(OSError):  # 前提: 3.13 までの失敗を再現できている
+            legacy.is_file()
+        _testutil.assert_real_is_file_on_this_version(self, legacy)
+        return legacy
+
+    def test_counts_next_to_the_new_path(self):
+        """同じ階層の正しいファイルと並べて返す (dispatcher は競合 (D4) として deny)。"""
+        project = self.tmp / "project"
+        new = self._write_new(project)
+        legacy = self._unstattable_legacy(project)
+        self.assertEqual(
+            self._call(paths.discover_all_accounts_files, str(project)),
+            [("new", new), ("legacy", legacy)],
+        )
+
+    def test_only_paths_known_to_be_absent_are_absent(self):
+        """配置パスの状態ごとの数え方 (legacy の位置で見る)。無いと確かめられたもの
+        (ENOENT / ENOTDIR) と通常のファイルでないものだけを無いとし、stat のほかの失敗は
+        あるに数える。"""
+
+        def at_legacy(make):
+            def setup(project: Path) -> Path:
+                (project / ".claude").mkdir(parents=True)
+                path = project / ".claude" / "accounts.json"
+                make(path)
+                return path
+            return setup
+
+        def claude_is_a_file(project: Path) -> Path:
+            project.mkdir(parents=True)
+            (project / ".claude").write_text("", encoding="utf-8")  # 子の stat は ENOTDIR
+            return project / ".claude" / "accounts.json"
+
+        cases = {
+            "regular file": (at_legacy(lambda p: p.write_text("{}", encoding="utf-8")), True),
+            "missing": (at_legacy(lambda p: None), False),
+            "dangling symlink": (at_legacy(lambda p: os.symlink("missing.json", p)), False),
+            "directory": (at_legacy(lambda p: p.mkdir()), False),
+            ".claude is a file": (claude_is_a_file, False),
+            "symlink to a too-long name": (at_legacy(lambda p: os.symlink(_LONG, p)), True),
+            "symlink loop": (at_legacy(lambda p: os.symlink(p.name, p)), True),
+        }
+        for name, (setup, held) in cases.items():
+            with self.subTest(name):
+                project = self.tmp / name.replace(" ", "-")
+                legacy = setup(project)
+                found = self._call(paths.discover_all_accounts_files, str(project))
+                self.assertEqual(("legacy", legacy) in found, held, found)
+
+    @unittest.skipIf(_IS_ROOT, "root は権限の無いディレクトリも辿れる")
+    def test_claude_dir_without_permission_holds_every_path(self):
+        project = self.tmp / "project"
+        self._write_new(project)
+        claude = project / ".claude"
+        os.chmod(claude, 0)
+        self.addCleanup(os.chmod, claude, 0o755)
+        _testutil.assert_real_is_file_on_this_version(self, claude / "accounts.json")
+        found = self._call(paths.discover_all_accounts_files, str(project))
+        self.assertEqual([kind for kind, _path in found], ["new", "deprecated", "legacy"])
+
+    def test_search_stops_at_the_level_that_cannot_be_statted(self):
+        """親の正しいファイルへ黙って進まない。"""
+        parent = self.tmp / "parent"
+        child = parent / "child"
+        self._write_new(parent)
+        legacy = self._unstattable_legacy(child)
+        self.assertEqual(
+            self._call(paths.discover_accounts_files_with_ancestors, str(child)),
+            ([("legacy", legacy)], child),
+        )
+
+
 class TestGlobalDefault(BaseAncestorBoundary):
     """グローバル既定 (`$HOME/.claude/verify-cloud-account/accounts.local.json`)。
 
@@ -660,6 +763,25 @@ class TestGlobalDefault(BaseAncestorBoundary):
         self.assertEqual(conflicts, [])
         self.assertEqual(resolved_dir, expected.parent)
         self.assertEqual(source, paths.SOURCE_GLOBAL)
+
+    def test_global_default_that_cannot_be_statted_is_adopted(self):
+        """stat できないグローバル既定も採用する (dispatcher は読み込みに失敗して deny。v0.19.1)。
+
+        旧版の存在確認 (`Path.is_file()`) は Python 3.13 まで例外を投げ、3.14 からは無いものと
+        して未設定の扱い (リモート read のみのコマンドは警告で通す) にしていた。
+        """
+        global_path = paths.global_accounts_file()
+        global_path.parent.mkdir(parents=True)
+        os.symlink(_LONG, global_path)
+        _testutil.assert_real_is_file_on_this_version(self, global_path)
+        with _testutil.patch_is_file_like_py313():
+            try:
+                result = self._resolve(self.project)
+            except OSError as e:
+                self.fail(f"stat できないグローバル既定で {type(e).__name__} が抜けた")
+        self.assertEqual(
+            result, (global_path, "new", [], global_path.parent, paths.SOURCE_GLOBAL)
+        )
 
     def test_project_file_wins_over_global(self):
         self._write_new(self.home, {"github": "global-user"})

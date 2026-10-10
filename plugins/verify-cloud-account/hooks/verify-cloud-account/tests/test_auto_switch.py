@@ -223,6 +223,45 @@ class TestGuard(_TmpCacheDir):
                 path.write_text(text, encoding="utf-8")
                 self.assertIsNone(auto_switch.conflicting_switch("github", self.STEPS))
 
+    def test_record_that_cannot_be_read_is_no_record(self):
+        """stat できない・入れ子が深い記録も、壊れた記録と同じく無いものとして扱い、次の切替の
+        記録で置き換わる (v0.19.1)。
+
+        旧版は存在確認に `Path.is_file()` を使い、Python 3.13 までは stat できない記録で例外に
+        していた (dispatcher が握って「内部エラー」で自動切替を見送り、3.14 からは記録が無いのと
+        同じに切り替えていた)。入れ子の深い記録の RecursionError も同じ経路だった。3.14 以降でも
+        3.13 までの失敗を再現するため、`Path.is_file` を差し替える。
+        """
+        path = cache.service_state_path("github", ".autoswitch.json")
+        patcher = _testutil.patch_is_file_like_py313()
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        def unstattable():
+            os.symlink("a" * 300, path)  # 1 要素が 255 バイトを超える → stat が ENAMETOOLONG
+            with self.assertRaises(OSError):  # 前提: 3.13 までの失敗を再現できている
+                path.is_file()
+            _testutil.assert_real_is_file_on_this_version(self, path)
+
+        cases = {
+            "cannot be statted": unstattable,
+            "too deep": lambda: path.write_bytes(b"[" * 100000 + b"]" * 100000),
+        }
+        for name, make in cases.items():
+            with self.subTest(name):
+                if os.path.lexists(path):
+                    path.unlink()
+                make()
+                try:
+                    note = auto_switch.conflicting_switch("github", self.STEPS)
+                except (OSError, RecursionError) as e:
+                    self.fail(f"読めない記録で conflicting_switch が {type(e).__name__} を投げた")
+                self.assertIsNone(note)
+                auto_switch.record_switch(
+                    "github", [("github.com", "Mao-o", "work-user")], "/other"
+                )
+                self.assertIsNotNone(auto_switch.conflicting_switch("github", self.STEPS))
+
     def test_record_is_not_removed_by_cache_invalidation(self):
         """記録は成功 cache の破棄 (`invalidate`) で消えてはいけない (切替の直前に呼ぶため)。"""
         auto_switch.record_switch("github", [("github.com", "Mao-o", "work-user")], "/other")

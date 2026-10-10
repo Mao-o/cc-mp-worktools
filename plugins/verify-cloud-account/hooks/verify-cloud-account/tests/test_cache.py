@@ -1,8 +1,10 @@
 """cache.get_success / set_success のラウンドトリップと無効化テスト。"""
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import stat
 import tempfile
 import time
 import unittest
@@ -87,6 +89,41 @@ class TestCache(unittest.TestCase):
                 except (UnicodeDecodeError, RecursionError) as e:
                     self.fail(f"読めない cache entry で get_success が {type(e).__name__} を投げた")
                 self.assertFalse(hit)
+
+    def test_entry_values_of_an_unexpected_type_are_a_miss(self):
+        """値が期待した型でない entry も cache miss (検証し直す。v0.19.1)。
+
+        旧版は timestamp が数値でない値の TypeError と、float に収まらない整数の
+        OverflowError を捕まえず、dispatch() の外まで抜けて __main__ の最終防波堤が検証を
+        スキップしていた。NaN・無限大・未来の時刻は期限が切れず、`"false"` のような success を
+        真に数えていた。
+        """
+        base = Path(self.tmp) / "cc-mp-verify-cloud-account"
+        cases = {
+            "control: as written": ({}, True),
+            "timestamp string": ({"timestamp": "now"}, False),
+            "timestamp null": ({"timestamp": None}, False),
+            "timestamp array": ({"timestamp": [1]}, False),
+            "timestamp object": ({"timestamp": {}}, False),
+            "timestamp true": ({"timestamp": True}, False),
+            "timestamp too large for a float": ({"timestamp": 10 ** 400}, False),
+            "timestamp NaN": ({"timestamp": float("nan")}, False),
+            "timestamp Infinity": ({"timestamp": float("inf")}, False),
+            "timestamp in the future": ({"timestamp": time.time() + 3600}, False),
+            "success string": ({"success": "false"}, False),
+            "success 1": ({"success": 1}, False),
+        }
+        for name, (fields, want) in cases.items():
+            with self.subTest(name):
+                cache.set_success("svc", "/p", "exp", 1.0)
+                (entry,) = base.glob("svc-*.json")
+                data = {**json.loads(entry.read_text(encoding="utf-8")), **fields}
+                entry.write_text(json.dumps(data), encoding="utf-8")
+                try:
+                    hit = cache.get_success("svc", "/p", "exp", 1.0)
+                except (TypeError, OverflowError, ValueError) as e:
+                    self.fail(f"get_success が {type(e).__name__} を投げた")
+                self.assertIs(hit, want)
 
     def test_different_inline_env_miss(self):
         # profile が異なれば別キー → profile A の成功が profile B で誤 allow されない
@@ -215,16 +252,43 @@ class TestCache(unittest.TestCase):
         self.assertTrue(cache.get_success("github", "/p", "exp", 1.0))
 
     def test_corrupt_epoch_file_is_zero_and_recovers(self):
-        self._base().mkdir(exist_ok=True)
+        # 0700: cache dir は他のユーザーが書ける mode なら使われない (umask 002 でも同じ結果に)
+        self._base().mkdir(mode=0o700, exist_ok=True)
         (self._base() / "github.epoch").write_text("not json", encoding="utf-8")
         self.assertEqual(cache.current_epoch("github"), 0)
         cache.invalidate("github")
         self.assertGreater(cache.current_epoch("github"), 0)
 
+    def test_epoch_values_that_are_not_ns_integers_are_zero(self):
+        """epoch / tombstone が int64 に収まる非負の整数でない epoch ファイルも、無効化の記録が
+        無いのと同じ 0 (v0.19.1)。旧版は `int()` で変換し、JSON として読める `Infinity` の
+        OverflowError が dispatch() の外まで抜け、__main__ の最終防波堤が検証をスキップしていた。
+        """
+        self._base().mkdir(mode=0o700, exist_ok=True)
+        epoch_file = self._base() / "github.epoch"
+        cases = {
+            "control: integers": ('{"epoch": 5, "at_ns": 7}', 5),
+            "epoch Infinity": ('{"epoch": Infinity, "at_ns": 0}', 0),
+            "at_ns Infinity": ('{"epoch": 5, "at_ns": Infinity}', 0),
+            "epoch string": ('{"epoch": "5", "at_ns": 0}', 0),
+            "epoch true": ('{"epoch": true, "at_ns": 0}', 0),
+            "epoch float": ('{"epoch": 5.0, "at_ns": 0}', 0),
+            "epoch negative": ('{"epoch": -1, "at_ns": 0}', 0),
+            "epoch beyond int64": ('{"epoch": 9223372036854775808, "at_ns": 0}', 0),
+        }
+        for name, (text, want) in cases.items():
+            with self.subTest(name):
+                epoch_file.write_text(text, encoding="utf-8")
+                try:
+                    epoch = cache.current_epoch("github")
+                except (OverflowError, ValueError, TypeError) as e:
+                    self.fail(f"current_epoch が {type(e).__name__} を投げた")
+                self.assertEqual(epoch, want)
+
     def test_deeply_nested_epoch_file_is_zero_not_an_exception(self):
         """入れ子の深い epoch ファイルも「読めない」と同じ 0 (v0.18.0)。旧版は RecursionError が
         dispatch() の外まで抜け、__main__ の最終防波堤が検証をスキップしていた。"""
-        self._base().mkdir(exist_ok=True)
+        self._base().mkdir(mode=0o700, exist_ok=True)
         (self._base() / "github.epoch").write_bytes(b"[" * 100000 + b"]" * 100000)
         try:
             epoch = cache.current_epoch("github")
@@ -282,6 +346,62 @@ class TestCache(unittest.TestCase):
         cache.set_success("github", "/p", "exp", 1.0)
         cache.invalidate("github")
         self.assertEqual([p.name for p in self._base().glob("*.tmp")], [])
+
+
+@unittest.skipUnless(hasattr(os, "geteuid"), "所有者と mode は POSIX のもの")
+class TestCacheDirOwnership(unittest.TestCase):
+    """cache dir は自分の所有で、他のユーザーが書けない実ディレクトリのときだけ使う (v0.19.1)。
+
+    TMPDIR の無い Linux などでは共有の `/tmp` に置かれ、別のユーザーが先に同じ名前の dir を
+    作れる。旧版は所有者も mode も確かめずに使い、置かれた entry で検証を省きえた。使わない
+    ときは成功 cache も epoch も補助ファイルも読まず書かない (毎回、通常の照合をする)。
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        patcher = mock.patch.dict(os.environ, {"TMPDIR": str(self.tmp)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.base = self.tmp / "cc-mp-verify-cloud-account"
+
+    def _seed(self):
+        """使える dir に正しい entry を書いておく (dir が使われれば hit する)。"""
+        self.assertTrue(cache.set_success("svc", "/p", "exp", 1.0))
+        self.assertTrue(cache.get_success("svc", "/p", "exp", 1.0))
+
+    def _assert_not_used(self):
+        self.assertIsNone(cache.state_dir())
+        self.assertIsNone(cache.service_state_path("svc", ".x.json"))
+        self.assertFalse(cache.get_success("svc", "/p", "exp", 1.0))
+        self.assertFalse(cache.set_success("svc", "/p", "exp", 1.0))
+        self.assertEqual(cache.invalidate("svc"), 0)
+        self.assertFalse(os.path.lexists(self.base / "svc.epoch"))
+
+    def test_new_dir_is_private(self):
+        self._seed()
+        self.assertEqual(stat.S_IMODE(os.lstat(self.base).st_mode), 0o700)
+
+    def test_dir_that_other_users_can_write_is_not_used(self):
+        self._seed()
+        self.addCleanup(os.chmod, self.base, 0o700)
+        for mode in (0o777, 0o770, 0o703):
+            with self.subTest(mode=oct(mode)):
+                os.chmod(self.base, mode)
+                self._assert_not_used()
+
+    def test_dir_owned_by_another_user_is_not_used(self):
+        self._seed()
+        with mock.patch.object(os, "geteuid", return_value=os.geteuid() + 1):
+            self._assert_not_used()
+
+    def test_symlink_to_a_private_dir_is_not_used(self):
+        """自分の dir を指す symlink も使わない (置いた人の選んだ場所に書かされる)。"""
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir(mode=0o700)
+        os.symlink(elsewhere, self.base)
+        self._assert_not_used()
+        self.assertEqual(list(elsewhere.iterdir()), [])
 
 
 class TestContextInCacheKey(unittest.TestCase):
