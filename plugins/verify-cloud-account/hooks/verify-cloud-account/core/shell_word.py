@@ -234,8 +234,11 @@ def json_one_line(value) -> str:
     段落区切り (U+2029)・書式文字 (Cf。双方向制御・ゼロ幅スペース・BMP の外のタグ文字など)・
     孤立サロゲートはそのまま出す。前の 4 つは行を割り、最後の 1 つは UTF-8 で書けない。
     それらを JSON として同じ値に戻る `\\uXXXX` (BMP の外は代理対) にする。日本語などの普通の文字は
-    変えない。`escape_controls` と違い置き換えではなく JSON の文法の内側の表示なので、表示を
-    写して使っても (`set --value` や settings の `env` に貼っても) 元の値になる。
+    変えない。`escape_controls` と違い置き換えではなく JSON の文法の内側の表示なので、JSON として
+    読めば元の値に戻る (settings の `env` に貼る断片はそのまま使える)。ただし、隣り合う孤立サロゲートの
+    高位・低位の組だけは、読み直すと 1 文字に結合する (argv の surrogateescape の低位が、JSON の
+    エスケープの高位の直後に並ぶ経路。builder の `--commit` は UTF-8 で書けない値を断るので、
+    ファイルには書かれない)。
     """
     out = []
     for ch in json.dumps(value, ensure_ascii=False):

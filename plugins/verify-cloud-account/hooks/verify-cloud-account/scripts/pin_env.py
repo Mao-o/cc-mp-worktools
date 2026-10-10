@@ -37,6 +37,9 @@ from services import aws, firebase, gcloud
 PIN_SERVICES = ("aws", "gcloud", "firebase")
 SETTINGS_LOCAL_REL = Path(".claude") / "settings.local.json"
 HIDDEN = "(value hidden. use --show-values to reveal)"
+# 候補が複数で決められないときの env の断片の目印。名前を並べると、区切り文字を含む候補で別の組と
+# 同じ目印になる (`("a / b", "c")` と `("a", "b", "c")`) ため固定の文にする (正典は `候補` の行)。
+_CANDIDATE_PLACEHOLDER = "<上の候補から 1 つ>"
 _GIT_TIMEOUT_SEC = 5
 
 # `firebase use` に渡す alias / project ID の許容形。出したコマンドは skill の手順で
@@ -485,7 +488,7 @@ def render(
                 # 重複も除かずに JSON の形で 1 行ずつ出す。
                 names = ", ".join(shell_word.json_one_line(name) for name in pin.candidates)
                 lines.append(f"  {pin.name}: 候補 {names} (1 つ選ぶ)")
-                snippet.append(_env_member(pin.name, f"<{' / '.join(pin.candidates)} のどれか>"))
+                snippet.append(_env_member(pin.name, _CANDIDATE_PLACEHOLDER))
             else:
                 lines.append(f"  {pin.name}: {shown(pin.value, pin.secret)}")
                 snippet.append(_env_member(pin.name, snippet_value(pin.value, pin.secret)))

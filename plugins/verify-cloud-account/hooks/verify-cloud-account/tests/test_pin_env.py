@@ -846,7 +846,7 @@ class TestRender(unittest.TestCase):
         for secret in ("secret-project", "secret-fb", "secret-session", "secret-file"):
             self.assertNotIn(secret, text)
         self.assertIn(pin_env.HIDDEN, text)
-        self.assertIn('"AWS_PROFILE": "<a / b のどれか>"', text)
+        self.assertIn('"AWS_PROFILE": "<上の候補から 1 つ>"', text)
 
     def test_show_values_reveals(self):
         text = self._render(show_values=True)
@@ -888,7 +888,7 @@ class TestRender(unittest.TestCase):
         plans = [pin_env.Plan("aws", pins=(pin_env.Pin("AWS_PROFILE", None, candidates),))]
         lines = pin_env.render(plans, None, "理由", {}, {}, None, show_values=False)
         self.assertEqual(
-            env_snippet(self, lines), {"AWS_PROFILE": '<a"b / c\nd / e\\f のどれか>'}
+            env_snippet(self, lines), {"AWS_PROFILE": "<上の候補から 1 つ>"}
         )
 
     def test_unshowable_candidates_stay_distinguishable(self):
@@ -901,6 +901,18 @@ class TestRender(unittest.TestCase):
             self.assertIn(name, text)
         self.assertNotIn(shell_word.NOT_SHOWN, text)
         self.assertIn('候補 "my dev", "my prod", "ops=admin" (1 つ選ぶ)', text)
+
+    def test_placeholder_is_a_fixed_sentence_and_the_candidate_lines_tell_sets_apart(self):
+        # 目印に名前を並べると、`("a / b", "c")` と `("a", "b", "c")` が同じ目印になる。
+        # 目印は名前を出さない固定の文で、組の区別は `候補` の行 (クォート付き) が担う。
+        rendered = []
+        for candidates in (("a / b", "c"), ("a", "b", "c")):
+            plans = [pin_env.Plan("aws", pins=(pin_env.Pin("AWS_PROFILE", None, candidates),))]
+            lines = pin_env.render(plans, None, "理由", {}, {}, None, show_values=False)
+            self.assertEqual(env_snippet(self, lines), {"AWS_PROFILE": "<上の候補から 1 つ>"})
+            rendered.append([line for line in lines if "(1 つ選ぶ)" in line])
+        self.assertEqual(rendered[0], ['  AWS_PROFILE: 候補 "a / b", "c" (1 つ選ぶ)'])
+        self.assertEqual(rendered[1], ['  AWS_PROFILE: 候補 "a", "b", "c" (1 つ選ぶ)'])
 
     def test_duplicate_candidates_are_not_merged(self):
         candidates = ("a", "a", "b")
@@ -917,7 +929,7 @@ class TestRender(unittest.TestCase):
         self.assertEqual(text.splitlines(), text.split("\n"))
         for line in text.splitlines():
             self.assertFalse(line.lstrip().startswith("FAKE"), line)
-        self.assertEqual(env_snippet(self, lines), {"AWS_PROFILE": "<" + " / ".join(candidates) + " のどれか>"})
+        self.assertEqual(env_snippet(self, lines), {"AWS_PROFILE": "<上の候補から 1 つ>"})
 
 
 class TestPinEnvCommand(_TmpBase):

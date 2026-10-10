@@ -14,8 +14,8 @@
 - 値の JSON 表示は `core/shell_word.py` の `json_one_line` にまとめた。`json.dumps(ensure_ascii=False)` の
   出力のうち、行を割る文字・孤立サロゲートだけを JSON として同じ値に戻る `\uXXXX` (BMP の外は代理対) に
   する。日本語などの普通の文字と、`json.dumps` が直していた文字の出力は変わらない。置き換えではなく
-  JSON の文法の内側のエスケープなので、表示を写して使っても (`set --value` や settings の `env` に
-  貼っても) 同じ値になる
+  JSON の文法の内側のエスケープなので、JSON として読めば元の値に戻る (settings の `env` に貼る断片は
+  そのまま使える。隣り合う孤立サロゲートの高位・低位の組だけは、読み直すと 1 文字に結合する)
 - builder の値の表示 (`+ add` / `- current` / `= unchanged` / `- remove` / `+ merged from` などの変更の
   差分・`migrate` の値の衝突・`show` の期待値・`$mode` / `$readonly` / `$auto_switch` の値・不一致のときの
   CLI 現在値) は `json_one_line` を通す。置き換える (`shown`) と、差分から何が変わるか分からなくなるため。
@@ -28,11 +28,16 @@
   値の行 (`AWS_PROFILE: ...`) は deny 文面と同じ `shell_word.shown` (外れた値は「(表示しない値)」。
   値そのものは env の断片に出る)
 - `pin-env` の env の断片 (`"NAME": "value"`) は貼り付けて使う値そのものなので置き換えず、`json_one_line` で
-  1 行に収める。候補を選ばせる目印 (`<a / b のどれか>`) は候補を元の形のまま並べる
+  1 行に収める。候補を選ばせる目印は候補の名前を出さない固定の文 (`<上の候補から 1 つ>`。名前を並べると、`("a / b", "c")` と `("a", "b", "c")` が同じ目印になる。正典はクォート付きの `候補` の行)
 - `escape_controls` (パス・キー名・エラー文・検出コマンドの表示。hook の deny 文面も使う) も孤立サロゲートを
   `\udcff` の形にする。UTF-8 で書けない文字を出力に残さない方向の変更で、deny / allow の判定は変えていない
 - skill `project-accounts` の候補の例を新しい形 (`候補 "a", "b"`) に合わせ、値の行に「(表示しない値)」が
-  出たときは推測で埋めずユーザーに名前を確かめてもらう、を足した
+  出たときは固定する値が env の断片 (JSON) の値なので、その値で固定してよいかを `AskUserQuestion` で確かめる、を足した
+- `builder` の `--commit` (`init` / `set` / `remove` / `migrate` / `auto-switch`) は、UTF-8 で書けない値 (孤立サロゲート。
+  argv の不正なバイト列や既存ファイルの `"\udcff"`) を含むとき、書き込まずに exit 1 にする。今までは
+  `write_text` が open で切り詰めた後に encode で失敗し、`accounts.local.json` が 0 バイトになった
+  (既存の内容が全部消える。無関係なキーの `set` / `remove` / `migrate` でも、既存ファイルに `"\udcff"` があれば同じ)。
+  encode を open より前に済ませ、失敗したらファイルに触れない。`.gitignore` への追記も同じ順にした
 - 値の形が不正な理由に出すオブジェクトのキー名は 0.21.2 で通してあるので変更なし
 - deny / allow の判定は変えていない (表示だけ)
 

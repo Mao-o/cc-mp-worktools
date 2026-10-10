@@ -519,11 +519,22 @@ def _load_existing(path: Path) -> dict[str, Any]:
 
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:
+    """data を UTF-8 の JSON で書く。**encode を open (切り詰め) より前に済ませる**。
+
+    孤立サロゲート (argv の不正なバイト列を surrogateescape で受けた値や、既存ファイルの
+    `"\\udcff"`) は UTF-8 で書けない。`write_text` のように open の後で encode すると、
+    ファイルが 0 バイトに切り詰められた後で失敗し、既存の内容が全部消える。
+    """
+    text = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    try:
+        payload = text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise _BuilderError(
+            f"{_p(path)} に UTF-8 で書けない値 (孤立サロゲート) が含まれるため書き込みません。"
+            "値を確かめてください。"
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    path.write_bytes(payload)
 
 
 def _ensure_gitignore_entry(target: _Target, stdout: IO[str]) -> None:
@@ -551,9 +562,10 @@ def _ensure_gitignore_entry(target: _Target, stdout: IO[str]) -> None:
         if not content.endswith("\n"):
             content += "\n"
         content += f"{entry}\n"
-        gitignore.write_text(content, encoding="utf-8")
+        payload = content.encode("utf-8")  # open (切り詰め) より前に encode する
+        gitignore.write_bytes(payload)
         print(f"updated: {_p(gitignore)} ({entry} を追加)", file=stdout)
-    except (OSError, UnicodeDecodeError) as e:
+    except (OSError, UnicodeError) as e:
         print(f"warning: .gitignore の更新に失敗しました: {_p(e)}", file=stdout)
 
 
@@ -601,7 +613,7 @@ def _json_display(value: Any) -> str:
     U+0020 未満の制御文字は直すが、DEL・C1 (`\\x85` など)・行区切り (U+2028)・書式文字 (双方向制御
     など)・孤立サロゲートはそのまま出すので、偽の行を差し込めたり、出力が `UnicodeEncodeError` で
     落ちたりする。値を `shown` で置き換えると変更の差分が読めなくなる (何が変わるか分からない) ため、
-    置き換えずに JSON の中でエスケープする。JSON のまま読み直せる (`set --value` に写しても同じ値)。
+    置き換えずに JSON の中でエスケープする。JSON として読めば元の値に戻る (settings の `env` に貼る断片はそのまま使える)。
     """
     return shell_word.json_one_line(value)
 
@@ -915,7 +927,7 @@ def _cmd_init(
             updated[service_key] = new_entry
         try:
             _write_json(target.path, updated)
-        except OSError as e:
+        except (OSError, _BuilderError) as e:
             print(f"error: 書き込みに失敗しました: {_p(e)}", file=stderr)
             return 1
         print(f"\nwritten: {_p(target.path)}", file=stdout)
@@ -1104,7 +1116,7 @@ def _cmd_set(
         updated[service_key] = new_entry
         try:
             _write_json(target.path, updated)
-        except OSError as e:
+        except (OSError, _BuilderError) as e:
             print(f"error: 書き込みに失敗しました: {_p(e)}", file=stderr)
             return 1
         print(f"\nwritten: {_p(target.path)}", file=stdout)
@@ -1260,7 +1272,7 @@ def _cmd_remove(
             updated[service_key] = remaining
         try:
             _write_json(target.path, updated)
-        except OSError as e:
+        except (OSError, _BuilderError) as e:
             print(f"error: 書き込みに失敗しました: {_p(e)}", file=stderr)
             return 1
         print(f"\nwritten: {_p(target.path)}", file=stdout)
@@ -1750,7 +1762,7 @@ def _cmd_migrate(
     if args.commit:
         try:
             _write_json(new_path, merged)
-        except OSError as e:
+        except (OSError, _BuilderError) as e:
             print(f"error: 書き込みに失敗しました: {_p(e)}", file=stderr)
             return 1
         print(f"\nwritten: {_p(new_path)}", file=stdout)
@@ -1934,7 +1946,7 @@ def _cmd_auto_switch(
             updated[key] = new_value
         try:
             _write_json(target.path, updated)
-        except OSError as e:
+        except (OSError, _BuilderError) as e:
             print(f"error: 書き込みに失敗しました: {_p(e)}", file=stderr)
             return 1
         print(f"\nwritten: {_p(target.path)}", file=stdout)

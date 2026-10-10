@@ -11,9 +11,9 @@ Claude が読むので、値に行を割る文字を入れると、出力の外�
 
 - 変更の差分 (`+ add` / `- current` など)・`show` の期待値と CLI 現在値は、値を置き換えずに JSON の
   `\\uXXXX` で 1 行に収める (`shell_word.json_one_line`。置き換えると何が変わるか分からなくなる。
-  表示を写して `set --value` に使っても同じ値になる)
+  JSON として読めば元の値に戻る)
 - `pin-env` の候補・このセッションと書き込み先の現在値・env の断片も同じ部品を通す。候補は選んでもらう
-  名前そのものなので置き換えない。値の行だけは hook の deny 文面と同じ `shell_word.shown`
+  名前そのものなので置き換えない (断片の目印は名前を出さない固定の文 `<上の候補から 1 つ>`)。値の行だけは hook の deny 文面と同じ `shell_word.shown`
   (示せない値は「(表示しない値)」)
 """
 from __future__ import annotations
@@ -275,11 +275,8 @@ class TestPinEnvRender(unittest.TestCase):
             f'AWS_PROFILE: 候補 "dev", "{_ESCAPED}", "{_ESCAPED}2" (1 つ選ぶ)', text
         )
         self.assertNotIn(shell_word.NOT_SHOWN, text)
-        # 断片の目印 (placeholder) は候補をそのまま並べ、JSON として読める。
-        self.assertEqual(
-            _snippet(self, lines),
-            {"AWS_PROFILE": f"<dev / {_EVIL} / {_EVIL}2 のどれか>"},
-        )
+        # 断片の目印 (placeholder) は候補の名前を出さない固定の文 (候補の行が正典)。
+        self.assertEqual(_snippet(self, lines), {"AWS_PROFILE": "<上の候補から 1 つ>"})
 
     def test_single_value_line_is_shown_and_the_snippet_keeps_the_value(self):
         plans = [pin_env.Plan("aws", pins=(pin_env.Pin("AWS_PROFILE", _EVIL, (_EVIL,)),))]
@@ -368,12 +365,11 @@ class TestPinEnvCommand(_Base):
             self.assertIn(shell_word.json_one_line(profile), out)
         self.assertIn(f'このセッション="cur\\u2028{_FAKE}"', out)
         self.assertNotIn(shell_word.NOT_SHOWN, out)
-        # 断片は、行を割る文字なしで JSON として読める。候補は 2 つとも断片の目印に残る。
+        # 断片は、行を割る文字なしで JSON として読める。候補の名前は目印に出さない (候補の行が正典)。
         header = 'settings.local.json の "env" に足す内容 (既存のキーは残す):'
         body = out.split(header + "\n", 1)[1]
         marker = json.loads("{" + body + "}")["AWS_PROFILE"]
-        for profile in (self.profile_a, self.profile_b):
-            self.assertIn(profile, marker)
+        self.assertEqual(marker, "<上の候補から 1 つ>")
 
 
 class TestLoneSurrogates(_Base):
@@ -449,6 +445,114 @@ class TestLoneSurrogates(_Base):
         )
         self.assertEqual(done.returncode, 0, done.stderr.decode("utf-8", "replace"))
         self.assertIn('$mode: "\\udcff"', done.stdout.decode("utf-8"))
+
+
+class TestCommitWithUnwritableValue(_Base):
+    """UTF-8 で書けない値 (孤立サロゲート) を `--commit` しても、既存ファイルを切り詰めない。
+
+    旧版の `_write_json` は `write_text` で open (切り詰め) の後に encode したため、encode の失敗で
+    `accounts.local.json` が 0 バイトになった。値は argv の不正なバイト列 (surrogateescape) か、
+    既存ファイルの JSON として正しい `"\\udcff"` から入る。書き込み経路ごとに同じ入力を流す。
+    """
+
+    _KEEP = {"github": "keep-me", "aws": "111"}
+    _NO_AWS = {"github": "keep-me"}
+    # 既存ファイルに JSON として正しい孤立サロゲートがある (無関係なキーの操作でも書き戻しで落ちる)。
+    _KEEP_WITH_SURROGATE = {"github": "keep-me", "gcloud": "\udcff"}
+    _CASES = (
+        ("init", ["init", "--service", "aws", "--value", "p\udcffq"], _NO_AWS, None),
+        ("init_unrelated_key", ["init", "--service", "aws", "--value", "111"], _KEEP_WITH_SURROGATE, None),
+        ("set", ["set", "--service", "aws", "--value", "p\udcffq"], _KEEP, None),
+        ("set_unrelated_key", ["set", "--service", "aws", "--value", "111"], _KEEP_WITH_SURROGATE, None),
+        ("set_host", ["set", "--service", "firebase", "--host", "d\udcff", "--value", "proj"], _KEEP, None),
+        ("remove_unrelated_key", ["remove", "--service", "github"], _KEEP_WITH_SURROGATE, None),
+        ("auto_switch_unrelated_key", ["auto-switch", "--enable"], _KEEP_WITH_SURROGATE, None),
+        ("migrate", ["migrate"], _KEEP, {"gcloud": "\udcff"}),
+    )
+
+    def _raw(self, rel: Path) -> bytes:
+        return (self.project / rel).read_bytes()
+
+    def _run_commit(self, argv: list[str]) -> tuple[int, str, str]:
+        # 例外が漏れる退行は、テストが走っていない (ERROR) ではなく検出 (FAIL) として数える。
+        try:
+            return self._run(argv + ["--commit"])
+        except Exception as e:  # noqa: BLE001
+            self.fail(f"{argv}: 例外が漏れた: {type(e).__name__}: {e}")
+
+    def test_commit_refuses_and_keeps_the_existing_file_byte_for_byte(self):
+        for name, argv, existing, deprecated in self._CASES:
+            with self.subTest(name):
+                self._write(_ACCOUNTS_REL, existing)
+                if deprecated is not None:
+                    self._write(_DEPRECATED_REL, deprecated)
+                before = self._raw(_ACCOUNTS_REL)
+                got, out, err = self._run_commit(argv)
+                self.assertEqual(got, 1, f"{argv}\n{out}\n{err}")
+                self.assertIn("UTF-8 で書けない値", err)
+                self.assertEqual(self._raw(_ACCOUNTS_REL), before)
+                self.assertNotIn("written:", out)
+
+    def test_dry_run_still_shows_the_change(self):
+        # 拒否するのは書き込みだけ。dry-run の表示は今まで通り (エスケープして出る)。
+        self._write(_ACCOUNTS_REL, self._KEEP)
+        text = self._run(["set", "--service", "aws", "--value", "p\udcffq", "--show-values"])[1]
+        self.assertIn('+ new: aws -> "p\\udcffq"', text)
+
+    def test_commit_does_not_leave_an_empty_file_when_nothing_existed(self):
+        for name, argv in (
+            ("init", ["init", "--service", "aws", "--value", "p\udcffq"]),
+            ("set", ["set", "--service", "aws", "--value", "p\udcffq"]),
+        ):
+            with self.subTest(name):
+                got, out, err = self._run_commit(argv)
+                self.assertEqual(got, 1, f"{argv}\n{out}\n{err}")
+                self.assertFalse((self.project / _ACCOUNTS_REL).exists())
+
+    def test_normal_commit_still_writes(self):
+        self._write(_ACCOUNTS_REL, self._KEEP)
+        got, out, err = self._run(["set", "--service", "aws", "--value", "222", "--commit"])
+        self.assertEqual(got, 0, f"{out}\n{err}")
+        self.assertEqual(json.loads(self._raw(_ACCOUNTS_REL)), {"github": "keep-me", "aws": "222"})
+
+    def test_gitignore_append_with_an_unwritable_entry_keeps_the_file(self):
+        # .gitignore への追記も、encode を open より前に済ませる (エントリはパスから来る)。
+        gitignore = self.project / ".gitignore"
+        gitignore.write_text("node_modules/\n", encoding="utf-8")
+        target = builder._Target(
+            path=self.project / "d\udcff" / "accounts.local.json",
+            anchor=self.project,
+            kind="new",
+            origin="explicit",
+        )
+        out = io.StringIO()
+        builder._ensure_gitignore_entry(target, out)
+        self.assertEqual(gitignore.read_bytes(), b"node_modules/\n")
+        self.assertIn("warning", out.getvalue())
+
+    def test_real_process_keeps_the_file(self):
+        self._write(_ACCOUNTS_REL, self._KEEP)
+        before = self._raw(_ACCOUNTS_REL)
+        home = self.root / "proc_home"
+        home.mkdir()
+        env = {
+            "PATH": "/usr/bin:/bin",
+            "HOME": str(home),
+            "CLAUDE_PROJECT_DIR": str(self.project),
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        done = subprocess.run(
+            [sys.executable, str(Path(builder.__file__)), "set", "--service", "aws", "--value", b"p\xff q", "--commit"],
+            env=env,
+            cwd=str(self.project),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=60,
+        )
+        self.assertEqual(done.returncode, 1, done.stderr.decode("utf-8", "replace"))
+        self.assertIn("UTF-8 で書けない値", done.stderr.decode("utf-8", "replace"))
+        self.assertEqual(self._raw(_ACCOUNTS_REL), before)
 
 
 if __name__ == "__main__":
