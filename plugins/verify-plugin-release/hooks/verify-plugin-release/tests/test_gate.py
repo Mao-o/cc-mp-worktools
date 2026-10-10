@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import _testutil
 from _testutil import FAILING_TEST, HermeticGitTestCase, add_plugin, bump, commit_all, make_marketplace, sh, write
@@ -38,7 +39,9 @@ class GateTest(HermeticGitTestCase):
         super().setUp()
         self._tmp = tempfile.TemporaryDirectory()
         self.root = make_marketplace(Path(self._tmp.name) / "repo", ["alpha", "beta"])
-        self.cfg = Config(fetch=False)
+        # plugin の suite の実行 (1 回約 0.08 秒) は tests[...] を確かめるテストでだけ行う
+        self.cfg = Config(fetch=False, test_command=False)
+        self.cfg_tests = Config(fetch=False)
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -60,7 +63,7 @@ class GateTest(HermeticGitTestCase):
         self.branch()
         self.change_alpha()
         commit_all(self.root, "alpha")
-        rep = self.gate()
+        rep = self.gate(self.cfg_tests)
         st = statuses(rep)
         self.assertFalse(rep.failed, rep.results)
         self.assertEqual(rep.base, "main")
@@ -120,13 +123,6 @@ class GateTest(HermeticGitTestCase):
         self.assertFalse(rep.failed, rep.results)
         self.assertEqual(st["release[alpha]"], gate.SKIP)
 
-    def test_failing_suite_fails(self):
-        self.branch()
-        self.change_alpha()
-        write(self.root, "plugins/alpha/hooks/alpha/tests/test_x.py", FAILING_TEST)
-        commit_all(self.root, "alpha")
-        self.assertEqual(statuses(self.gate())["tests[alpha]"], gate.FAIL)
-
     def test_parallel_suites_attribute_results_to_their_plugin(self):
         # 2 plugin を同時に変更し、片方だけ落ちる。並列実行でも結果を取り違えない
         self.branch()
@@ -136,7 +132,7 @@ class GateTest(HermeticGitTestCase):
         bump(self.root, "beta", "0.2.0")
         write(self.root, "plugins/beta/CHANGELOG.md", "# Changelog\n\n## 0.2.0\n")
         commit_all(self.root, "alpha ok, beta broken")
-        st = statuses(self.gate())
+        st = statuses(self.gate(self.cfg_tests))
         self.assertEqual(st["tests[alpha]"], gate.PASS)
         self.assertEqual(st["tests[beta]"], gate.FAIL)
 
@@ -150,7 +146,8 @@ class GateTest(HermeticGitTestCase):
         slow = gate._TestPlan(Plugin("slow", "plugins/slow", True), jobs=[([sys.executable, "-c", "import time; time.sleep(30)"], self.root)])
         broken = gate._TestPlan(Plugin("broken", "plugins/broken", True), jobs=[(["definitely-missing-binary-vpr"], self.root)], custom=True)
         started = time.monotonic()
-        with self.assertRaises(OSError):
+        # poll の間隔 (0.5 秒) は待つ時間を足すだけなので縮める。待ってしまう実装なら 30 秒かかる
+        with self.assertRaises(OSError), mock.patch.object(gate, "_POLL", 0.05):
             gate._run_tests(self.root, [slow, broken], Deadline(60), gate.Report())
         self.assertLess(time.monotonic() - started, 10)
 
@@ -170,6 +167,9 @@ class GateTest(HermeticGitTestCase):
         )
         stop = threading.Event()
         t = threading.Thread(target=gate._run_job, args=([sys.executable, "-c", script], self.root, Deadline(60), stop))
+        poll = mock.patch.object(gate, "_POLL", 0.05)
+        poll.start()
+        self.addCleanup(poll.stop)
         t.start()
         for _ in range(100):
             if pidfile.exists() and pidfile.read_text():
@@ -212,7 +212,7 @@ class GateTest(HermeticGitTestCase):
         write(self.root, "plugins/alpha/hooks/alpha/tests/test_x.py", FAILING_TEST)
         commit_all(self.root, "alpha with failing test")
         write(self.root, "plugins/alpha/hooks/alpha/tests/test_x.py", _testutil.PASSING_TEST)
-        rep = self.gate()
+        rep = self.gate(self.cfg_tests)
         self.assertEqual(statuses(rep)["uncommitted"], gate.FAIL)
         self.assertTrue(rep.failed)
 
@@ -230,7 +230,7 @@ class GateTest(HermeticGitTestCase):
         write(self.root, "README.md", "# root\n")
         commit_all(self.root, "alpha + root")
         self.assertNotIn("single-plugin", statuses(self.gate()))
-        st = statuses(self.gate(Config(fetch=False, single_plugin_per_pr=True)))
+        st = statuses(self.gate(Config(fetch=False, test_command=False, single_plugin_per_pr=True)))
         self.assertEqual(st["single-plugin"], gate.FAIL)
 
     def test_new_unlisted_plugin_warns(self):

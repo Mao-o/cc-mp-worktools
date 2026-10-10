@@ -153,13 +153,25 @@ def sh(cwd: Path, *args: str) -> str:
 _HOOK_DROP = ("VERIFY_PLUGIN_RELEASE_MODE", "GH_HOST")
 
 
+def path_without_claude(path: str | None = None) -> str:
+    """`path` (既定は環境の PATH) から claude のあるディレクトリを外した PATH。git も同じ場所にあれば残す。
+
+    CI には claude が無く、ゲートは `claude plugin validate` を SKIP する。手元で実物が見つかると、ゲートのたびに
+    validate を起動し (1 回約 0.3 秒)、結果も CLI の版に左右される。テストが起動するゲートの PATH はこれにして、
+    手元でも CI と同じ経路を通す。
+    """
+    dirs = (os.environ.get("PATH", "") if path is None else path).split(os.pathsep)
+    return os.pathsep.join(d for d in dirs if not shutil.which("claude", path=d) or shutil.which("git", path=d))
+
+
 def hook_process_env(drop: Iterable[str] = _HOOK_DROP, extra: Mapping[str, str] | None = None) -> dict[str, str]:
     """hook を subprocess で起動するときの env。ゲートが起動する git はこれを継ぐ (`runner.run` は env を渡さない)。
 
-    `os.environ` から `drop` を外し、`hermetic_env` を通してから、最後に `extra` を足す。
+    `os.environ` から `drop` を外し、`hermetic_env` を通し、PATH から claude を外してから、最後に `extra` を足す。
     """
     dropped = set(drop)
     env = hermetic_env({k: v for k, v in os.environ.items() if k not in dropped})
+    env["PATH"] = path_without_claude(env.get("PATH", ""))
     env.update(extra or {})
     return env
 
@@ -171,6 +183,7 @@ def launch_hook(
     text: bool = True,
     drop: Iterable[str] = _HOOK_DROP,
     env_extra: Mapping[str, str] | None = None,
+    python_flags: Iterable[str] = (),
 ) -> subprocess.CompletedProcess:
     """hook (`__main__.py`) を subprocess で起動する。テストが hook を起動する経路はここだけにする。
 
@@ -179,13 +192,19 @@ def launch_hook(
     kwargs: dict[str, object] = {"capture_output": True, "env": hook_process_env(drop, env_extra), "timeout": 120}
     if text:
         kwargs.update(text=True, encoding="utf-8")
-    return subprocess.run([sys.executable, str(_PKG_DIR), *args], input=input, **kwargs)
+    return subprocess.run([sys.executable, *python_flags, str(_PKG_DIR), *args], input=input, **kwargs)
 
 
-def run_hook(payload: dict | str, env_extra: Mapping[str, str] | None = None) -> dict | None:
+def run_hook(
+    payload: dict | str,
+    env_extra: Mapping[str, str] | None = None,
+    *,
+    python_flags: Iterable[str] = (),
+    drop: Iterable[str] = _HOOK_DROP,
+) -> dict | None:
     """PreToolUse の入力 (dict か、そのままの文字列) を hook に渡し、出力の JSON を返す (出力なしは None)。"""
     data = payload if isinstance(payload, str) else json.dumps(payload)
-    r = launch_hook(input=data, env_extra=env_extra)
+    r = launch_hook(input=data, env_extra=env_extra, python_flags=python_flags, drop=drop)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout) if r.stdout.strip() else None
 
@@ -222,8 +241,27 @@ def add_plugin(root: Path, name: str, version: str | None = "0.1.0", tests: str 
         write(root, f"plugins/{name}/hooks/{name}/tests/test_x.py", tests)
 
 
+_TEMPLATES: dict[tuple[str, ...], Path] = {}
+
+
 def make_marketplace(root: Path, plugins: list[str]) -> Path:
-    """main に 1 commit ある marketplace repo を作る。"""
+    """main に 1 commit ある marketplace repo を作る。
+
+    git の初期化と初回 commit (subprocess 7 回、約 0.12 秒) はどのテストでも同じなので、plugin の組ごとに
+    1 度だけ `build_marketplace` で作り、以降はディレクトリごとコピーする (約 0.01 秒)。helper が起動する
+    git を見る床 (`test_hermetic_env.py`) はコピーでは何も起動されないので、`build_marketplace` を直接呼ぶ。
+    """
+    key = tuple(plugins)
+    if key not in _TEMPLATES:
+        base = Path(tempfile.mkdtemp(prefix="vpr-tpl-"))
+        atexit.register(shutil.rmtree, base, ignore_errors=True)
+        _TEMPLATES[key] = build_marketplace(base / "repo", plugins)
+    shutil.copytree(_TEMPLATES[key], root, dirs_exist_ok=True)
+    return root
+
+
+def build_marketplace(root: Path, plugins: list[str]) -> Path:
+    """`make_marketplace` の template を作る。毎回 git で作り直す (コピーしない)。"""
     root.mkdir(parents=True, exist_ok=True)
     sh(root, "init", "-q", "-b", "main")
     sh(root, "config", "user.name", "Test")
