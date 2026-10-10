@@ -256,32 +256,6 @@ def _notes_only(notes: list[str]) -> dict | None:
     return output.warn(text)
 
 
-# accounts.local.json の入れ子の深さの上限 (v0.18.0)。正規の形は 2 段 (トップレベルの
-# オブジェクト → service のオブジェクト / 配列) までなので十分に大きく、Python の再帰の上限
-# (既定 1,000) より十分に小さい。これより深いファイルは不正な JSON と同じに扱う: `json.loads`
-# が通る深さでも、後段 (成功 cache の key を作る `json.dumps` など) が同じ深さを辿り、少し
-# 深いだけのファイルで RecursionError になって __main__ の最終防波堤 (検証のスキップ) まで
-# 抜ける (Python 3.9 で実測。境目は Python の版と呼び出しの深さで変わる)。
-_MAX_ACCOUNTS_DEPTH = 32
-
-
-def _nested_deeper_than(value, limit: int) -> bool:
-    """value の入れ子 (dict / list) が limit 段より深ければ True (再帰しないで数える)。"""
-    stack = [(value, 1)]
-    while stack:
-        current, depth = stack.pop()
-        if isinstance(current, dict):
-            children = current.values()
-        elif isinstance(current, list):
-            children = current
-        else:
-            continue
-        if depth > limit:
-            return True
-        stack.extend((child, depth + 1) for child in children)
-    return False
-
-
 def _unreadable_accounts(accounts_path: Path, why: str) -> str:
     """読めない期待値ファイル (UTF-8 でない / 桁の多すぎる整数 / 入れ子が深すぎる) の deny 本文。
 
@@ -981,11 +955,11 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
             f"{shell_word.escape_controls(e)}",
             mode_notes,
         )
-    if _nested_deeper_than(accounts, _MAX_ACCOUNTS_DEPTH):
+    if paths.nested_deeper_than(accounts, paths.MAX_ACCOUNTS_DEPTH):
         return _decide(
             pre_file_mode,
             _unreadable_accounts(
-                accounts_path, f"入れ子が {_MAX_ACCOUNTS_DEPTH} 段より深い"
+                accounts_path, f"入れ子が {paths.MAX_ACCOUNTS_DEPTH} 段より深い"
             ),
             mode_notes,
         )

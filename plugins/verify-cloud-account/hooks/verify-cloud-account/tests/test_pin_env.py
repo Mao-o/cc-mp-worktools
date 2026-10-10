@@ -12,6 +12,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -758,12 +759,15 @@ class TestSettingsEnv(_TmpBase):
             "not UTF-8": b'{"env": {"AWS_PROFILE": "\xff"}}',
             "too deep": b'{"env": {}, "pad": ' + b"[" * 100000 + b"]" * 100000 + b"}",
         }
+        # 整数の桁数に上限のある Python (3.11+) でだけ ValueError になる
+        if 0 < getattr(sys, "get_int_max_str_digits", lambda: 0)() < 5000:
+            cases["too many digits"] = b'{"env": {"AWS_PROFILE": ' + b"1" * 5000 + b"}}"
         for name, data in cases.items():
             with self.subTest(name):
                 path.write_bytes(data)
                 try:
                     env, problem = pin_env.settings_env(path)
-                except (UnicodeDecodeError, RecursionError) as e:
+                except (ValueError, RecursionError) as e:
                     self.fail(f"settings_env が例外を投げた: {e!r}")
                 self.assertEqual(env, {})
                 self.assertIn("JSON として読めません", problem or "")

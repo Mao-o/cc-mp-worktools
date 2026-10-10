@@ -1456,12 +1456,12 @@ verify() は CLI が出した現在値 (前後の空白を除いた値) と期�
   ValueError、上限の無い 3.9.6 では読める (実測)。マージ前レビューの指摘)。UnicodeDecodeError も
   ValueError の子なので名指しをやめた。JSONDecodeError (これも子) は先に捕まえるので、不正な
   JSON の文面は変わらない。e2e のテストの 5,000 桁の case は、上限のある Python でだけ流す
-- 入れ子の上限 (`_MAX_ACCOUNTS_DEPTH = 32`) も置いた。`json.loads` が通る深さでも、後段
+- 入れ子の上限 (`core/paths.py` の `MAX_ACCOUNTS_DEPTH = 32`。builder も共有する) も置いた。`json.loads` が通る深さでも、後段
   (成功 cache のキーを作る `json.dumps` など) が同じ深さを辿って RecursionError になる窓が
   ある (Python 3.9 では、`json.loads` は通り `json.dumps` が落ちる深さが 985 段前後にあった。
   境目は Python の版と呼び出しの深さで変わる)。後段の例外を一つずつ捕まえるより、読んだ
   直後に深さで弾く。正規の形は 2 段なので 32 段で足りる。数え方は再帰しない
-  (`_nested_deeper_than`)
+  (`nested_deeper_than`)
 - 成功 cache の entry (`get_success`) は UTF-8 でない・入れ子が深いファイルを、epoch
   (`_read_epoch`) は入れ子が深いファイルを、読めないもの (cache miss / epoch 0) として扱う
   (epoch の UTF-8 でないファイルは、前から ValueError として捕まえていた)。どちらも

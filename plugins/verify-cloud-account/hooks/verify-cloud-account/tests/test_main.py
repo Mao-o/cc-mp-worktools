@@ -476,6 +476,30 @@ class TestMainInternalErrorFailOpen(unittest.TestCase):
         self.assertIn("内部エラーのため検証をスキップしました", stderr.getvalue())
         self.assertIn("RuntimeError", stderr.getvalue())
 
+    def test_exception_text_is_escaped_in_the_fail_open_notice(self):
+        """最終防波堤の文面に入る例外の文字列 (パスを含む OSError など) は制御文字をエスケープする。
+        改行入りのパスで、文面の外に偽の行を差し込めない。"""
+        module = _load_entry_module()
+        payload = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr create"},
+            "cwd": "/tmp",
+        }
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        evil = OSError("cannot read /x/evil\nFAKE_LINE_9f3\x1b[31m")
+        with mock.patch.object(module, "dispatch", side_effect=evil):
+            with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), \
+                 mock.patch.object(sys, "stdout", stdout), \
+                 mock.patch.object(sys, "stderr", stderr):
+                module.main()
+        text = json.loads(stdout.getvalue())["hookSpecificOutput"]["additionalContext"]
+        for shown in (text, stderr.getvalue()):
+            self.assertIn("evil\\nFAKE_LINE_9f3\\x1b[31m", shown)
+            self.assertNotIn("\nFAKE_LINE_9f3", shown)
+            self.assertNotIn("\x1b", shown)
+
     def test_recovery_path_stderr_failure_still_emits_stdout_json(self):
         """マージ前レビューの指摘: 回復経路 (fail-open) 自身の stderr 書き込みが
         失敗 (OSError/BrokenPipeError) しても、stdout への判定 JSON 出力は

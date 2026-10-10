@@ -7,7 +7,7 @@ PreToolUse:Bash に 1 エントリだけ登録し、内部でサービスを振�
 import json
 import sys
 
-from core import output
+from core import output, shell_word
 from core.dispatcher import dispatch
 
 
@@ -32,7 +32,7 @@ def main() -> None:
         # 同じ理由を出す (`claude --verbose` 以外の確認手段が無かったため)。
         msg = (
             "[verify-cloud-account] 内部エラーのため検証をスキップしました: "
-            f"{type(e).__name__}: {e}"
+            f"{type(e).__name__}: {shell_word.escape_controls(str(e))}"
         )
         result = output.warn(msg)
         try:

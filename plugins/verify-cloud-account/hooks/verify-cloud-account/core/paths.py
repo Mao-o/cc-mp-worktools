@@ -709,3 +709,29 @@ def resolve_accounts_file_for_verification(
     if global_path is not None and _may_hold_accounts(global_path):
         return global_path, "new", [], global_path.parent, SOURCE_GLOBAL
     return None, None, [], None, None
+
+
+# accounts.local.json の入れ子の深さの上限 (v0.18.0。dispatcher と builder が共有する)。正規の形は 2 段 (トップレベルの
+# オブジェクト → service のオブジェクト / 配列) までなので十分に大きく、Python の再帰の上限
+# (既定 1,000) より十分に小さい。これより深いファイルは不正な JSON と同じに扱う: `json.loads`
+# が通る深さでも、後段 (成功 cache の key を作る `json.dumps` など) が同じ深さを辿り、少し
+# 深いだけのファイルで RecursionError になって __main__ の最終防波堤 (検証のスキップ) まで
+# 抜ける (Python 3.9 で実測。境目は Python の版と呼び出しの深さで変わる)。
+MAX_ACCOUNTS_DEPTH = 32
+
+
+def nested_deeper_than(value, limit: int) -> bool:
+    """value の入れ子 (dict / list) が limit 段より深ければ True (再帰しないで数える)。"""
+    stack = [(value, 1)]
+    while stack:
+        current, depth = stack.pop()
+        if isinstance(current, dict):
+            children = current.values()
+        elif isinstance(current, list):
+            children = current
+        else:
+            continue
+        if depth > limit:
+            return True
+        stack.extend((child, depth + 1) for child in children)
+    return False

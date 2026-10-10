@@ -358,7 +358,8 @@ def _global_default_keys(global_path: Path) -> list[str]:
         # ValueError は不正な JSON・UTF-8 でない (UnicodeDecodeError)・桁の多すぎる整数、
         # RecursionError は入れ子が深すぎるファイル。hook は同じ扱いで deny する。
         return []
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or paths.nested_deeper_than(data, paths.MAX_ACCOUNTS_DEPTH):
+        # hook は deny する深さのファイルも、読めないものとして扱う
         return []
     return sorted(str(key) for key in data)
 
@@ -478,6 +479,12 @@ def _load_existing(path: Path) -> dict[str, Any]:
         raise _BuilderError(
             f"{path} は JSON オブジェクト ({{...}}) である必要があります。"
         )
+    if paths.nested_deeper_than(data, paths.MAX_ACCOUNTS_DEPTH):
+        # hook は deny する深さ。通すと、書き戻す json.dumps が Python 3.12 で RecursionError になる。
+        raise _BuilderError(
+            f"既存 {path} を読めません (入れ子が {paths.MAX_ACCOUNTS_DEPTH} 段より深い)。"
+            "入れ子が深すぎないかを確認し、手動で修正してから再実行してください。"
+        )
     return data
 
 
@@ -516,7 +523,7 @@ def _ensure_gitignore_entry(target: _Target, stdout: IO[str]) -> None:
         content += f"{entry}\n"
         gitignore.write_text(content, encoding="utf-8")
         print(f"updated: {gitignore} ({entry} を追加)", file=stdout)
-    except OSError as e:
+    except (OSError, UnicodeDecodeError) as e:
         print(f"warning: .gitignore の更新に失敗しました: {e}", file=stdout)
 
 
@@ -593,7 +600,8 @@ def _parse_value(raw: str) -> Any:
     """
     try:
         parsed = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
+    except (ValueError, RecursionError):
+        # JSONDecodeError は ValueError の子。深すぎる入れ子は RecursionError。
         return raw
     if isinstance(parsed, dict):
         return parsed

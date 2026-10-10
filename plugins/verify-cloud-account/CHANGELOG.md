@@ -36,6 +36,17 @@ hook は 0.18.0 で、期待値ファイルの UnicodeDecodeError / RecursionErr
   読めないファイルとして報告する (hook と同じ分類)。`.gitignore` と `CLAUDE.md` の有無の確認は
   best-effort のまま、stat できない名前で例外にしない (Python 3.13 までの `Path.exists()` は
   ENAMETOOLONG などを投げる)
+- hook が deny する深さ (入れ子が 32 段より深い) のファイルを、builder も同じ文面
+  (`既存 <path> を読めません (入れ子が 32 段より深い)`) で止める。通すと Python 3.12 では、読めた
+  あとの書き戻し (`json.dumps`) が RecursionError の traceback になっていた。深さの上限と数え方は
+  `core/paths.py` に移し、hook と builder が同じものを使う (グローバル既定の読み込みも同じ基準)
+- `init` / `set` / `migrate` の `--commit` が `.gitignore` にエントリを足すとき、`.gitignore` の中身が
+  UTF-8 でなくても traceback にならない (書き込みのあとに UnicodeDecodeError で終わっていた)。
+  `.gitignore` は書き換えず、既存の warning の行を出して exit 0 で続ける
+- `--value` に深すぎる入れ子の JSON が来ても (`[` を 10 万個並べるなど)、RecursionError にならず
+  文字列のまま扱う
+- hook の最終防波堤 (「内部エラーのため検証をスキップしました」) に入る例外の文字列も
+  `escape_controls` に通す。パスを含む OSError が抜けたとき、改行入りのパスで偽の行を差し込めた
 - hook の判定は変えていない
 
 ### Tests
@@ -45,8 +56,12 @@ hook は 0.18.0 で、期待値ファイルの UnicodeDecodeError / RecursionErr
   rm の案内の分岐 (制御文字ありはコマンドにしない / 空白だけのパスは従来どおり quote つき)
 - builder の読み込み (`TestUnreadableExistingFile`): サブコマンド × (UTF-8 でない / 入れ子が深い)、
   migrate の読めない旧パス / 新パス、グローバル既定、`.gitignore` / `CLAUDE.md` の stat できない名前。
-  `settings_env` の単体 (UTF-8 でない / 入れ子が深い / stat できないパス)
-- 1,492 → 1,515 件
+  `settings_env` の単体 (UTF-8 でない / 入れ子が深い / 桁の多すぎる整数 / stat できないパス)。
+  桁の多すぎる整数の case は、整数の桁数に上限のある Python (3.11+) でだけ流す
+- builder: hook が deny する深さ (パース後に 32 段超) のファイルを全サブコマンドで、3000 段の入れ子 (Python 3.12 で書き戻しが落ちていた形) の拒否、UTF-8 でない
+  `.gitignore` (init / set / migrate の `--commit`)、深すぎる `--value`。最終防波堤の文面の
+  エスケープ (`tests/test_main.py`)
+- 1,492 → 1,520 件
 
 ## 0.21.0
 

@@ -22,6 +22,7 @@ import json
 import os
 import shlex
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -298,7 +299,15 @@ class TestUnreadableExistingFile(BaseBuilder):
             ('{"github": "right-user", "pad": ' + _DEEP + "}").encode(),
             "RecursionError",
         ),
+        # どの Python でも json.loads は通るが、hook は deny する深さ
+        "parsed, but deeper than the limit": (
+            ('{"github": "right-user", "pad": ' + "[" * 40 + "]" * 40 + "}").encode(),
+            "入れ子が 32 段より深い",
+        ),
     }
+    # 整数の桁数に上限のある Python (3.11+) でだけ、桁の多すぎる整数が ValueError になる
+    if 0 < getattr(sys, "get_int_max_str_digits", lambda: 0)() < 5000:
+        _CASES["too many digits"] = (b'{"github": ' + b"1" * 5000 + b"}", "ValueError")
     _ARGVS = {
         "init": ["init", "--service", "aws", "--value", "111", "--commit"],
         "set": ["set", "--service", "github", "--value", "x", "--commit"],
@@ -317,7 +326,7 @@ class TestUnreadableExistingFile(BaseBuilder):
         # 修正前は例外が main() の外まで抜けた。テストの ERROR ではなく検出 (FAIL) として数える。
         try:
             return self._run(argv)
-        except (UnicodeDecodeError, RecursionError) as e:
+        except (ValueError, RecursionError) as e:
             self.fail(f"builder {argv[0]} が traceback で止まった: {e!r}")
 
     def test_every_subcommand_ends_with_the_same_error_as_malformed_json(self):
@@ -334,6 +343,70 @@ class TestUnreadableExistingFile(BaseBuilder):
                     self.assertIn(str(self._new_path()), err)
                     self.assertIn(f"読めません ({reason})", err)
                     self.assertNotIn("Traceback", err)
+
+    def test_thousands_of_levels_deep_file_is_refused_not_rewritten(self):
+        """3000 段の入れ子。Python 3.12 では json.loads が通り、書き戻す json.dumps が
+        RecursionError になっていた (traceback)。上限の低い Python ではパースの時点で落ちる。
+        どちらでも exit 1 の「読めません」で止まり、ファイルは壊さない。"""
+        data = ('{"github": "u", "pad": ' + "[" * 3000 + "]" * 3000 + "}").encode()
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_bytes(data)
+        for argv in (
+            ["set", "--service", "aws", "--value", "111", "--commit"],
+            ["show"],
+        ):
+            with self.subTest(argv=argv[0]):
+                code, _out, err = self._run_checked(argv)
+                self.assertEqual(code, 1, err)
+                self.assertIn("読めません", err)
+                self.assertEqual(self._new_path().read_bytes(), data)
+
+    def test_non_utf8_gitignore_does_not_end_in_a_traceback(self):
+        """.gitignore の中身が UTF-8 でないとき、init / set --commit は期待値ファイルを書いたあと
+        warning を出して exit 0 で終わる (旧版は UnicodeDecodeError の traceback)。
+        .gitignore は書き換えない。"""
+        raw = b"node_modules\n\xff\xfe\n"
+        gitignore = self.project_dir / ".gitignore"
+        for cmd, argv in {
+            "init": ["init", "--service", "github", "--value", "x", "--commit"],
+            "set": ["set", "--service", "github", "--value", "y", "--commit"],
+        }.items():
+            with self.subTest(command=cmd):
+                if cmd == "set":
+                    self.assertTrue(self._new_path().is_file())
+                else:
+                    shutil.rmtree(self.claude_dir, ignore_errors=True)
+                    self.claude_dir.mkdir()
+                gitignore.write_bytes(raw)
+                code, out, err = self._run_checked(argv)
+                self.assertEqual(code, 0, err)
+                self.assertIn("warning: .gitignore の更新に失敗しました", out)
+                self.assertEqual(gitignore.read_bytes(), raw)
+                self.assertTrue(self._new_path().is_file())
+
+    def test_migrate_commit_with_a_non_utf8_gitignore(self):
+        gitignore = self.project_dir / ".gitignore"
+        raw = b"\xff\xfe\n"
+        gitignore.write_bytes(raw)
+        self._deprecated_path().write_text('{"github": "u"}', encoding="utf-8")
+        code, out, err = self._run_checked(["migrate", "--commit"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("warning: .gitignore の更新に失敗しました", out)
+        self.assertEqual(gitignore.read_bytes(), raw)
+
+    def test_a_value_nested_too_deeply_is_kept_as_a_string(self):
+        """`--value` に深すぎる入れ子の JSON が来ても、文字列のまま扱う (旧版は RecursionError)。"""
+        raw = "[" * 100000
+        try:
+            parsed = builder._parse_value(raw)
+        except RecursionError as e:
+            self.fail(f"_parse_value が RecursionError を漏らした: {e!r}")
+        self.assertEqual(parsed, raw)
+        try:
+            code, _out, err = self._run(["set", "--service", "github", "--value", raw, "--dry-run"])
+        except RecursionError as e:
+            self.fail(f"set --dry-run が traceback で止まった: {e!r}")
+        self.assertEqual(code, 0, err)
 
     def _malformed_exit(self, argv) -> int:
         """同じ argv を不正な JSON (`{not json`) に流したときの exit code (比較の基準)。"""
@@ -373,7 +446,7 @@ class TestUnreadableExistingFile(BaseBuilder):
                     try:
                         keys = builder._global_default_keys(global_dir / "accounts.local.json")
                         note = builder._global_default_note()
-                    except (UnicodeDecodeError, RecursionError) as e:
+                    except (ValueError, RecursionError) as e:
                         self.fail(f"グローバル既定の読み込みで例外が漏れた: {e!r}")
                 self.assertEqual(keys, [])
                 self.assertIn("その内容", note)
