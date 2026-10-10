@@ -296,6 +296,8 @@ class _InitRepoFloor(unittest.TestCase):
         `floor_only=True` なら `init_repo` を呼ばず、床の env をそのまま渡す git (`git --version`) を spy に
         通し、spy が捕まえた env を `self.floor_env` に残して返す (床の自己確認用。当てる側の前提を通らずに、
         床だけを見る)。spy を通すのは、spy (記録の道具) が値を足す退行も自己確認に見せるため。
+        プローブは `init_repo` の起動と同じ形 (`cwd` あり、`check=True`、`capture_output=True`) にする。
+        argv などに条件づけた退行は、固定の argv のプローブでは原理的に残る。
         """
         passed: list[tuple[str, dict]] = []
         real_run = subprocess.run
@@ -311,7 +313,9 @@ class _InitRepoFloor(unittest.TestCase):
                 if floor_only:
                     # 床の自己確認: init_repo の代わりに、床の env をそのまま渡す git を spy に通し、spy が
                     # 捕まえた env を見る (spy や、init_repo の直前までの床が足した値も見る)
-                    subprocess.run(["git", "--version"], env=dict(os.environ), capture_output=True, check=True)
+                    subprocess.run(
+                        ["git", "--version"], cwd=self.home, env=dict(os.environ), capture_output=True, check=True
+                    )
                     self.floor_env = passed[-1][1]
                     return []
                 _testutil.init_repo(os.path.join(self.home, "repo"))
@@ -496,19 +500,32 @@ class TestTheGitLaunchRecorder(unittest.TestCase):
     env が `HERMETIC_GIT_ENV` を持つことを見る。記録器が記録に値を足す (`{**env, **HERMETIC_GIT_ENV}` など) と、
     `init_repo` を迂回した git (env を渡さない、または `HERMETIC_GIT_ENV` を持たない env を渡す) も床を通る。
     `HERMETIC_GIT_ENV` を持たない既知の env で git を起動し、記録が完全一致することで見る。env を省略した
-    起動では、そのとき継いだ `os.environ` と一致すること。
+    起動では、そのとき継いだ `os.environ` と一致すること。既知の env には `OUTER_LEAKS` も入れる
+    (記録から外側の漏れを落とす退行も見るため)。
+
+    起動は helper と同じ形 (`cwd` あり、`check=True`、`capture_output=True`) にする。ただし、argv などに
+    条件づけた退行 (特定のサブコマンドや引数のときだけ値を足す・落とす) は、固定の argv のプローブでは
+    原理的に残る。
     """
 
     def test_the_recorder_records_the_env_it_was_given(self):
+        # 既知の env には `OUTER_LEAKS` も入れる (記録から外側の漏れを落とす退行も見るため。値を足す退行だけ
+        # だと、落とす退行は記録と床の両方で見逃される)。起動は helper と同じ形 (`cwd` あり、`check=True`)
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
         with mock.patch.dict(os.environ):
             for name in _testutil.HERMETIC_GIT_ENV:
                 os.environ.pop(name, None)
+            os.environ.update({name: f"outer-{name}" for name in OUTER_LEAKS})
             given = {k: v for k, v in os.environ.items() if k not in _testutil.HERMETIC_GIT_ENV}
             with record_git_launches() as launches:
-                passed = subprocess.run(["git", "--version"], env=given, capture_output=True)
-                inherited_run = subprocess.run(["git", "--version"], capture_output=True)
+                passed = subprocess.run(
+                    ["git", "--version"], cwd=home.name, env=given, capture_output=True, check=True
+                )
+                inherited_run = subprocess.run(["git", "--version"], cwd=home.name, capture_output=True, check=True)
             inherited = dict(os.environ)
         self.assertEqual((passed.returncode, inherited_run.returncode), (0, 0), "前提: git が起動できる")
+        self.assertTrue(all(n in given for n in OUTER_LEAKS), "前提: 既知の env が OUTER_LEAKS を持つ")
         self.assertEqual(launches, [(["git", "--version"], given), (["git", "--version"], inherited)])
 
 

@@ -395,7 +395,8 @@ class _HelperFloor(unittest.TestCase):
 
         `floor_only=True` なら helper を呼ばず、床の env をそのまま渡す git (`git --version`) を spy に通し、
         spy が捕まえた env (trace の指定を除く) を `self.floor_env` に残して返す (床の自己確認用。helper の
-        前提を通らずに、床だけを見る)。spy を通すのは、spy (記録の道具) が値を足す退行も自己確認に見せる
+        前提を通らずに、床だけを見る)。プローブは helper の起動と同じ形 (`cwd` あり、`check=True`、
+        `capture_output=True`) にする。argv などに条件づけた退行は、固定の argv のプローブでは原理的に残る。spy を通すのは、spy (記録の道具) が値を足す退行も自己確認に見せる
         ため: spy を通さずに `os.environ` を写すと、spy だけが足した止める側の値を自己確認が見ない。
         """
         passed: list[dict] = []
@@ -421,7 +422,9 @@ class _HelperFloor(unittest.TestCase):
                 if floor_only:
                     # 床の自己確認: helper の代わりに、床の env をそのまま渡す git を spy に通し、spy が
                     # 捕まえた env (trace の指定を除く) を見る (spy や、helper の直前までの床が足した値も見る)
-                    subprocess.run(["git", "--version"], env=dict(os.environ), capture_output=True, check=True)
+                    subprocess.run(
+                        ["git", "--version"], cwd=tmp, env=dict(os.environ), capture_output=True, check=True
+                    )
                     self.floor_env = {k: v for k, v in passed[-1].items() if k != "GIT_TRACE2_EVENT"}
                     return []
                 os.makedirs(_testutil._TEMPLATE_DIR)
@@ -842,19 +845,32 @@ class TestTheGitLaunchRecorder(unittest.TestCase):
     `HERMETIC_GIT_ENV` を持つことを見る。記録器が記録に値を足す (`{**env, **HERMETIC_GIT_ENV}` など) と、
     helper を迂回した git (env を渡さない、または `HERMETIC_GIT_ENV` を持たない env を渡す) も床を通る。
     `HERMETIC_GIT_ENV` を持たない既知の env で git を起動し、記録が完全一致することで見る。env を省略した
-    起動では、そのとき継いだ `os.environ` と一致すること。
+    起動では、そのとき継いだ `os.environ` と一致すること。既知の env には `OUTER_LEAKS` も入れる
+    (記録から外側の漏れを落とす退行も見るため)。
+
+    起動は helper と同じ形 (`cwd` あり、`check=True`、`capture_output=True`) にする。ただし、argv などに
+    条件づけた退行 (特定のサブコマンドや引数のときだけ値を足す・落とす) は、固定の argv のプローブでは
+    原理的に残る。
     """
 
     def test_the_recorder_records_the_env_it_was_given(self):
+        # 既知の env には `OUTER_LEAKS` も入れる (記録から外側の漏れを落とす退行も見るため。値を足す退行だけ
+        # だと、落とす退行は記録と床の両方で見逃される)。起動は helper と同じ形 (`cwd` あり、`check=True`)
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
         with mock.patch.dict(os.environ):
             for name in _testutil.HERMETIC_GIT_ENV:
                 os.environ.pop(name, None)
+            os.environ.update({name: f"outer-{name}" for name in OUTER_LEAKS})
             given = {k: v for k, v in os.environ.items() if k not in _testutil.HERMETIC_GIT_ENV}
             with record_git_launches() as launches:
-                passed = subprocess.run(["git", "--version"], env=given, capture_output=True)
-                inherited_run = subprocess.run(["git", "--version"], capture_output=True)
+                passed = subprocess.run(
+                    ["git", "--version"], cwd=home.name, env=given, capture_output=True, check=True
+                )
+                inherited_run = subprocess.run(["git", "--version"], cwd=home.name, capture_output=True, check=True)
             inherited = dict(os.environ)
         self.assertEqual((passed.returncode, inherited_run.returncode), (0, 0), "前提: git が起動できる")
+        self.assertTrue(all(n in given for n in OUTER_LEAKS), "前提: 既知の env が OUTER_LEAKS を持つ")
         self.assertEqual(launches, [(["git", "--version"], given), (["git", "--version"], inherited)])
 
 
@@ -877,10 +893,15 @@ SCAN_SAMPLE = textwrap.dedent(
     mock.call(["git", "status"])
     subprocess.run(("git", "status"), env=dict(os.environ))
     subprocess.check_call(("bash", "-c", "true"))
+    class Sample:
+        def method(self):
+            with ctx:
+                subprocess.run(["git", "log"], cwd=repo)
+    subprocess.run(**opts)
     """
 )
-SCAN_SAMPLE_LAUNCHES = [2, 3, 5, 6, 7, 8, 9, 10, 11, 14]
-SCAN_SAMPLE_OFFENDERS = [2, 3, 5, 6, 7, 8, 9, 14]
+SCAN_SAMPLE_LAUNCHES = [2, 3, 5, 6, 7, 8, 9, 10, 11, 14, 19, 20]
+SCAN_SAMPLE_OFFENDERS = [2, 3, 5, 6, 7, 8, 9, 14, 19, 20]
 
 
 class TestNoTestLaunchesGitWithoutTheHermeticEnv(unittest.TestCase):
@@ -943,7 +964,9 @@ class TestNoTestLaunchesGitWithoutTheHermeticEnv(unittest.TestCase):
                 continue
             argv = [k.value for k in node.keywords if k.arg == "args"]
             first = node.args[0] if node.args else (argv[0] if argv else None)
-            if first is None or cls._is_another_program(first):
+            if first is None and not any(k.arg is None for k in node.keywords):
+                continue
+            if first is not None and cls._is_another_program(first):
                 continue
             where = (node.lineno, f"{label}:{node.lineno}")
             launches.append(where)
@@ -954,7 +977,7 @@ class TestNoTestLaunchesGitWithoutTheHermeticEnv(unittest.TestCase):
 
     def test_the_scan_sees_every_shape(self):
         """走査が拾う形の見本 (`SCAN_SAMPLE`): list / tuple のリテラル、変数の argv、`*` 展開、式、受け手が
-        subprocess の `call`、`args=` を拾い、`env=hermetic_env(...)` を渡すものは通し、git ではないと読める
+        subprocess の `call`、`args=`、class / 関数 / with の中の起動、`**` 展開だけの起動を拾い、`env=hermetic_env(...)` を渡すものは通し、git ではないと読める
         起動と `mock.call` は数えない。"""
         launches, offenders = self.scan(SCAN_SAMPLE, "sample")
         self.assertEqual(launches, [f"sample:{n}" for n in SCAN_SAMPLE_LAUNCHES])
@@ -971,9 +994,12 @@ class TestNoTestLaunchesGitWithoutTheHermeticEnv(unittest.TestCase):
                 found, bad = self.scan(f.read(), name)
             launches.extend(found)
             offenders.extend(bad)
-        # 前提: helper (`_testutil.git`) の起動を拾えている (走査が空になっていない)
-        self.assertTrue(
-            any(where.startswith("_testutil.py:") for where in launches), f"前提: git の起動を拾えている ({launches})"
+        # 前提: helper (`_testutil.git`) と、class の中のテスト本体 (`test_commit_flow.py`) の起動を拾えている
+        # (走査が空、または class の配下を落としていない)
+        self.assertLessEqual(
+            {"_testutil.py", "test_commit_flow.py"},
+            {where.split(":")[0] for where in launches},
+            f"前提: git の起動を拾えている ({launches})",
         )
         self.assertEqual(offenders, [], "env=hermetic_env(...) を渡していない git の起動がある")
 
