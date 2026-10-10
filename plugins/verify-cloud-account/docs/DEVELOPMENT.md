@@ -789,7 +789,8 @@ write 自体が通らないため、別アカウントでの書き込みには�
 落ちない (書込先がグローバルに化けるのを防ぐため意図的)。設計としてはこのままで、
 **食い違いを黙らせない**方向で閉じた — 新規作成になるときは shadowing 警告を出し
 (`_global_default_note()`)、`show` は「プロジェクトに無い」ときグローバル既定の
-存在と「hook はこのファイルで検証します」を出す。キー単位マージにする案は判定表
+存在と「hook はこのファイルで検証します」を出す (グローバル既定が stat できなければ、hook と
+同じ文面で止める。v0.19.1)。キー単位マージにする案は判定表
 (どのキーが未設定か) への影響が大きいので採らない。
 
 **D23: ローカルを読む機能はテストの隔離を必ず伴う**
@@ -1512,7 +1513,16 @@ ENOENT / ENOTDIR / EBADF / ELOOP 以外の stat の失敗を例外にし、例�
   とき show が「複数のパスに存在します … migrate --commit」と案内し、migrate は 3.13 までは
   traceback、3.14 からは旧パスを `{}` として「統合」して書き込んでいた。新パスだけが stat できない
   symlink のときは、3.14 の show が `(empty)` と「照合せずに通します」を出していた (hook はどれも
-  deny)。builder の残りの try の外の述語 (`.gitignore` / CLAUDE.md の `exists()`) と
+  deny)。プロジェクト側に何も無くグローバル既定が stat できないときは、show / pin-env /
+  auto-switch (`_auto_switch_missing_file_message`) が `--path <グローバル既定>` での再実行を案内せず、
+  `describe_unstattable([("global", <パス>)])` を出して exit 1 にする。hook が deny するので builder も
+  止める側に倒した。show の「グローバル既定を読めなければ未登録の一覧を出さずに exit 0」は、
+  stat できるが読めない場合 (壊れた JSON など) にだけ残る。init / set は止めない (プロジェクト側に
+  作れば hook はそちらを読む) が、`_global_default_note` の shadowing 警告は出す。`--path` の
+  正規化 (`_resolve_target` の `path.resolve()`) は、Python 3.12 までの symlink のループの
+  RuntimeError も OSError と同じく拾い、正規化しないまま先へ進めて stat で止める
+  (`path.parent.resolve() / path.name` にする案は、正しいファイルを指す symlink の扱いが変わるので
+  採らない)。builder の残りの try の外の述語 (`.gitignore` / CLAUDE.md の `exists()`) と
   `scripts/pin_env.py` の `settings_env` は配置パスと関係しないので、この変更では触っていない
 - 確認 (builder): 上の 2 つの入力で show / migrate / migrate --commit と hook を実プロセスで
   Python 3.9.6 と 3.14.0 に流し、hook がどれも deny、builder がどれも exit 1 で traceback を

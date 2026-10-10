@@ -3617,10 +3617,11 @@ class TestUnstattableAccountsPath(BaseBuilder):
     def _run(self, argv: list[str]) -> tuple[int, str, str]:
         # 修正前は 3.13 までの `Path.is_file()` の OSError が main() の外まで抜けていた
         # (traceback)。テストの ERROR ではなく、検出 (assertion の失敗) として扱う。
+        # Python 3.12 までの `Path.resolve()` が symlink のループで投げる RuntimeError も同じ。
         try:
             return super()._run(argv)
-        except OSError as e:
-            self.fail(f"builder {argv[0]} が OSError で止まった (traceback): {e!r}")
+        except (OSError, RuntimeError) as e:
+            self.fail(f"builder {argv[0]} が例外で止まった (traceback): {e!r}")
 
     def _write_new(self, data: dict) -> str:
         self.new_dir.mkdir(parents=True, exist_ok=True)
@@ -3700,6 +3701,80 @@ class TestUnstattableAccountsPath(BaseBuilder):
         self.assertEqual(code, 1, out + err)
         self.assertIn(f"{new} を確かめられません", err)
         self.assertTrue(os.path.islink(new))  # 置き換えて書いていない
+
+    def test_auto_switch_with_only_an_unstattable_new_path(self):
+        # 「ありません (先に init)」ではなく、確かめられないことを言って止める。
+        new = self._unstattable(self._new_path())
+        for argv in (["auto-switch", "--enable", "--dry-run"], ["auto-switch", "--enable", "--commit"]):
+            with self.subTest(argv=argv[-1]):
+                code, out, err = self._run(argv)
+                self.assertEqual(code, 1, out + err)
+                self.assertIn(f"{new} を確かめられません", err)
+                self.assertNotIn("がありません", err)
+                self.assertTrue(os.path.islink(new))  # 置き換えて書いていない
+
+    # --- `--path` が stat できない / 正規化できない ---
+
+    def test_explicit_path_symlink_loop(self):
+        # Python 3.12 までの `Path.resolve()` は、symlink のループで RuntimeError を投げる
+        # (3.13 からは投げない)。どの版でもその経路を通すため、resolve を差し替える。
+        new = self._new_path()
+        new.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(new.name, new)  # 自分を指すループ
+        with mock.patch.object(Path, "resolve", side_effect=RuntimeError("Symlink loop")):
+            for argv in (
+                ["show"],
+                ["pin-env"],
+                ["init", "--service", "aws", "--value", "111", "--dry-run"],
+                ["auto-switch", "--enable", "--dry-run"],
+            ):
+                with self.subTest(argv=argv[0]):
+                    code, out, err = self._run(argv + ["--path", str(new)])
+                    self.assertEqual(code, 1, out + err)
+                    self.assertIn("を確かめられません", err)
+        self.assertTrue(os.path.islink(new))
+
+    def test_show_and_pin_env_with_explicit_path_under_unreadable_dir(self):
+        # 親ディレクトリに入れない (EACCES)。symlink では `resolve()` が先に走るので、`--path` を
+        # そのまま stat する経路はこの形で通す。
+        self._write_new({"github": "right-user"})
+        self.new_dir.chmod(0)
+        self.addCleanup(self.new_dir.chmod, 0o755)
+        new = self._new_path()
+        self.assertIsNotNone(paths.stat_failure(new))  # 前提: stat できない
+        for argv in (["show"], ["pin-env"]):
+            with self.subTest(argv=argv[0]):
+                code, out, err = self._run(argv + ["--path", str(new)])
+                self.assertEqual(code, 1, out + err)
+                self.assertIn(f"{new} を確かめられません", err)
+                self.assertNotIn("no accounts.local.json found", out)
+                self.assertNotIn("がありません", err)
+
+    # --- プロジェクト側に何も無く、グローバル既定が stat できない ---
+
+    def test_show_pin_env_and_auto_switch_with_unstattable_global_default(self):
+        # hook はグローバル既定を「ある (が読めない)」として deny する。builder も `--path` での
+        # 再実行を案内せず、hook と同じ文面で止める。
+        global_path = paths.global_accounts_file()
+        self.assertIsNotNone(global_path)
+        self._unstattable(global_path)
+        for argv in (["show"], ["pin-env"], ["auto-switch", "--enable", "--dry-run"]):
+            with self.subTest(argv=argv[0]):
+                code, out, err = self._run(argv)
+                self.assertEqual(code, 1, out + err)
+                self._assert_hook_wording(err, global_path, "global")
+                self.assertNotIn("--path", out + err)
+                self.assertNotIn("照合せずに通します", out)
+        self.assertFalse(self._new_path().exists())
+
+    def test_init_with_unstattable_global_default_warns_of_shadowing(self):
+        # init は止めない (プロジェクト側に作れば hook はそれを読む) が、グローバル既定を
+        # 覆い隠すことは言う (`_global_default_note`)。
+        global_path = paths.global_accounts_file()
+        self._unstattable(global_path)
+        code, out, err = self._run(["init", "--service", "aws", "--value", "111", "--dry-run"])
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f"hook は現在グローバル既定 {global_path} で検証しています", out)
 
 
 class TestUnstattableAccountsPathPy313(TestUnstattableAccountsPath):

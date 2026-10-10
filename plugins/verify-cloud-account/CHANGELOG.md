@@ -73,6 +73,14 @@ hook の外まで抜けて「内部エラーのため検証をスキップ」(�
   auto-switch) の拒否は、stat できない配置パスがあれば hook と同じ文面 (確かめられないパスと理由)
   を出し、migrate / rm を案内しない
 - 配置パスとグローバル既定の存在確認で、Python 3.13 までに traceback で止まらない
+- プロジェクト側に何も無く、グローバル既定が stat できないとき、show / pin-env / auto-switch は
+  「`--path <グローバル既定>` を付けて再実行」を案内せず、hook と同じ文面で exit 1 にする (hook は
+  そのファイルを読めない期待値ファイルとして deny し、`--path` で開き直しても読めないため)。show は
+  従来、グローバル既定を読めなければ未登録の一覧を出さずに exit 0 で終えていたが、stat できない
+  場合に限って止める側に揃えた。壊れた JSON など、stat できるが読めない場合は従来どおり exit 0
+- `--path` に symlink のループを渡すと、Python 3.12 までは `Path.resolve()` の RuntimeError で
+  traceback になっていた (3.13 からは投げない)。どの版でも「確かめられません」で exit 1 にする
+  (hook は同じ入力を deny する)
 
 ### Fixed: pin-env の gcloud の構成
 
@@ -102,7 +110,11 @@ hook の外まで抜けて「内部エラーのため検証をスキップ」(�
 - builder: 上の 2 つの入力で show / pin-env / migrate (`--commit` 有無) / init / set /
   auto-switch が hook と同じ文面で止まり、新パスを書き換えないこと。本物の `Path.is_file` と、
   3.13 までの挙動に差し替えたものの両方で流す (`TestUnstattableAccountsPath`)
-- 1,397 → 1,431 件
+- builder: 新パスだけが stat できないときの auto-switch (`--commit` 有無)、権限の無いディレクトリの
+  下を指す `--path` での show / pin-env、symlink のループを指す `--path` (`Path.resolve()` を
+  3.12 までの挙動に差し替える)、stat できないグローバル既定での show / pin-env / auto-switch と
+  init の警告。配置パスの存在確認を `Path.is_file()` に戻す変異が、置き換えた箇所ごとに落ちる
+- 1,397 → 1,441 件
 
 ## 0.19.0
 

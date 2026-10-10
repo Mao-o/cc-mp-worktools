@@ -269,9 +269,13 @@ def _resolve_target(
         # 通すので、比較・表示のために同じ正規化を掛ける。揃えないと symlink
         # (macOS の /var → /private/var 等) を挟んだだけで「別ファイル」と
         # 誤判定し、shadowing 警告が誤発火する。
+        # Python 3.12 までの `Path.resolve()` は symlink のループで OSError ではなく
+        # RuntimeError を投げる (3.13 からは投げない)。拾わないと builder が traceback で
+        # 止まるので、どちらも「正規化できない」として扱い、その先の stat で
+        # 「確かめられません」として止める (hook はこのパスを deny する)。
         try:
             path = path.resolve()
-        except OSError:
+        except (OSError, RuntimeError):
             path = Path(os.path.normpath(str(path)))
         split = _split_tier_path(path)
         if split is None:
@@ -294,7 +298,7 @@ def _resolve_target(
 
     try:
         project = Path(project_dir).resolve()
-    except OSError:
+    except (OSError, RuntimeError):  # RuntimeError: 3.12 までの symlink ループ (上と同じ)
         project = Path(project_dir)
     found, resolved_dir = paths.discover_accounts_files_with_ancestors(project_dir)
     if not found:
@@ -1371,11 +1375,16 @@ def _cmd_show(
         # 隠すことになる (show の目的は不一致の原因調査)。突合はそのファイルの
         # 値で行う必要があるので `--path` で開き直す形を案内する。
         global_path = paths.global_accounts_file()
-        if (
+        global_in_use = (
             global_path is not None
             and paths.may_hold_accounts(global_path)
             and global_path != target.path
-        ):
+        )
+        # グローバル既定が stat できないなら、hook はそれを「ある (が読めない)」として
+        # deny する。`--path` で開き直しても読めないので案内せず、hook と同じ文面で止める。
+        if global_in_use and _report_unstattable([("global", global_path)], stderr):
+            return 1
+        if global_in_use:
             print(
                 f"グローバル既定 {global_path} が存在します"
                 " (hook はこのファイルで検証します)。",
@@ -1391,9 +1400,10 @@ def _cmd_show(
             file=stdout,
         )
         # hook がグローバル既定で検証する場合は、そのファイルのキーを登録済みとして扱う
-        # (未登録の一覧が hook の判定と食い違わないように)。読めなければ一覧を出さない。
+        # (未登録の一覧が hook の判定と食い違わないように)。読めなければ (壊れた JSON など。
+        # stat できない場合は上で止めている) 一覧を出さない。
         registered: set = set()
-        if global_path is not None and paths.may_hold_accounts(global_path) and global_path != target.path:
+        if global_in_use:
             try:
                 registered = {
                     k for k, v in _load_existing(global_path).items() if v not in (None, "")
@@ -1692,15 +1702,28 @@ def _cmd_migrate(
 
 
 def _auto_switch_missing_file_message(target: _Target) -> str:
-    """対象ファイルが無いときの拒否理由 (+ グローバル既定 / env の案内)。"""
+    """対象ファイルが無いときの拒否理由 (+ グローバル既定 / env の案内)。
+
+    グローバル既定が stat できないときは、hook がそれを deny するので、`--path` での
+    再実行を案内せず、hook と同じ文面 (`paths.describe_unstattable`) だけを返す。
+    """
+    global_path = paths.global_accounts_file()
+    global_in_use = (
+        target.origin == "fresh"
+        and global_path is not None
+        and paths.may_hold_accounts(global_path)
+    )
+    if global_in_use:
+        body = paths.describe_unstattable([("global", global_path)])
+        if body is not None:
+            return f"error: {body}"
     lines = [
         f"error: {target.path} がありません。自動切替は期待値のアカウントへ切り替える"
         "機能なので、先に init で github の期待値を設定してください: "
         'python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/'
         'accounts_builder.py" init --service github --dry-run'
     ]
-    global_path = paths.global_accounts_file()
-    if target.origin == "fresh" and global_path is not None and paths.may_hold_accounts(global_path):
+    if global_in_use:
         lines.append(
             f"hook は現在グローバル既定 {global_path} で検証しています。そのファイルで"
             f"有効にするなら {_path_option(global_path)} を付けて再実行してください。"
@@ -1872,13 +1895,22 @@ def _cmd_pin_env(
         found = paths.discover_all_accounts_files(str(target.anchor))
     if not found:
         print(_target_note(target, project_dir, warn_shadowing=False), file=stdout)
+        global_path = paths.global_accounts_file()
+        global_in_use = (
+            global_path is not None
+            and paths.may_hold_accounts(global_path)
+            and global_path != target.path
+        )
+        # stat できないグローバル既定は、hook が deny する。`--path` での再実行を案内しても
+        # 読めないので、hook と同じ文面で止める (show と同じ)。
+        if global_in_use and _report_unstattable([("global", global_path)], stderr):
+            return 1
         print(
             f"error: {target.path} がありません。期待値が無いので、固定する値を"
             "決められません。先に accounts-init で期待値を設定してください。",
             file=stderr,
         )
-        global_path = paths.global_accounts_file()
-        if global_path is not None and paths.may_hold_accounts(global_path) and global_path != target.path:
+        if global_in_use:
             print(
                 f"グローバル既定 {global_path} で検証しているなら、{_path_option(global_path)}"
                 " を付けて再実行してください。",
