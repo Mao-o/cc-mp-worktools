@@ -594,9 +594,20 @@ def _ensure_project_claude_md(target: _Target, stdout: IO[str]) -> None:
     print(f"created: {_p(md_path)}", file=stdout)
 
 
+def _json_display(value: Any) -> str:
+    """期待値・CLI 現在値の表示形 (JSON。制御文字をエスケープして 1 行に収める)。
+
+    値は accounts.local.json・CLI の出力から来て、リポジトリ側が決められる。`json.dumps` は
+    U+0020 未満の制御文字は直すが、DEL・C1 (`\\x85`・`\\x9b` など)・行区切り (U+2028)・
+    書式文字 (双方向制御など) はそのまま出すので、偽の行を差し込める。値を `shown` で置き換えると
+    変更の差分が読めなくなる (何が変わるか分からない) ため、置き換えずにエスケープする。
+    """
+    return _p(json.dumps(value, ensure_ascii=False))
+
+
 def _format_value_for_display(value: Any, show_values: bool) -> str:
     if show_values:
-        return json.dumps(value, ensure_ascii=False)
+        return _json_display(value)
     if isinstance(value, dict):
         return f"<dict with {len(value)} key(s)> {_VALUE_HIDDEN_MARK}"
     return _VALUE_HIDDEN_MARK
@@ -610,6 +621,9 @@ def _print_change_line(
     stdout: IO[str],
 ) -> None:
     display = _format_value_for_display(value, show_values)
+    # status は固定の見出し (+ 値の形が不正な理由。キー名は `_validate_entry_shape` で通している)。
+    # 見出しも通して、この関数に渡る文字列がどれも 1 行に収まるようにする。
+    status = _p(status)
     if show_values:
         print(f"{status}: {_p(key)} -> {display}", file=stdout)
     else:
@@ -1175,7 +1189,7 @@ def _cmd_remove(
         if args.host not in existing_value:
             print(_target_note(target, project_dir), file=stdout)
             print(
-                f"{service_key} に host/alias '{args.host}' は存在しません。"
+                f"{service_key} に host/alias '{_p(args.host)}' は存在しません。"
                 "何もしません。",
                 file=stdout,
             )
@@ -1519,7 +1533,7 @@ def _cmd_show(
         if key == mode.MODE_KEY:
             valid = isinstance(expected, str) and expected.strip().lower() in mode.VALID_MODES
             marker = "[mode]" if valid else "[mode: 不正な値 — enforce として扱われます]"
-            print(f"{key}: {json.dumps(expected, ensure_ascii=False)}  {marker}", file=stdout)
+            print(f"{key}: {_json_display(expected)}  {marker}", file=stdout)
             continue
         # `"$readonly"` も同じ扱い (service ではない予約キー / 値は機密でない)。
         # 有効/無効の判定は **dispatcher と同じ関数** (`tiers.policy_from_accounts`)
@@ -1533,7 +1547,7 @@ def _cmd_show(
                 if valid
                 else f"[readonly policy: 不正な値 — {tiers.POLICY_DENY} として扱われます]"
             )
-            print(f"{key}: {json.dumps(expected, ensure_ascii=False)}  {marker}", file=stdout)
+            print(f"{key}: {_json_display(expected)}  {marker}", file=stdout)
             continue
         # `"$auto_switch"` も同じ扱い。有効な service の判定は dispatcher と同じ関数
         # (`auto_switch.from_accounts`) に委ねる。env (`VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH`)
@@ -1546,7 +1560,7 @@ def _cmd_show(
                 marker = f"[auto-switch: {', '.join(sorted(enabled))}]"
             else:
                 marker = "[auto-switch: 無効]"
-            print(f"{key}: {json.dumps(expected, ensure_ascii=False)}  {marker}", file=stdout)
+            print(f"{key}: {_json_display(expected)}  {marker}", file=stdout)
             continue
         svc = _SERVICE_BY_KEY.get(key)
 
@@ -1567,7 +1581,7 @@ def _cmd_show(
             else:
                 status_marker = "[mismatch]"
                 if args.show_values:
-                    detail = f" current={json.dumps(current, ensure_ascii=False)}"
+                    detail = f" current={_json_display(current)}"
         else:
             status_marker = "[unknown service]"
 

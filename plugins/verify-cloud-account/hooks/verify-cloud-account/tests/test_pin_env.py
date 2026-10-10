@@ -886,8 +886,10 @@ class TestRender(unittest.TestCase):
         candidates = ('a"b', "c\nd", "e\\f")
         plans = [pin_env.Plan("aws", pins=(pin_env.Pin("AWS_PROFILE", None, candidates),))]
         lines = pin_env.render(plans, None, "理由", {}, {}, None, show_values=False)
+        # 改行を含む候補は目印では示せない値 (`shell_word.shown`。v0.21.3) なので置き換わる。
+        # `"` と `\` を含む候補は示せる値で、JSON の中でエスケープされる。
         self.assertEqual(
-            env_snippet(self, lines), {"AWS_PROFILE": '<a"b / c\nd / e\\f のどれか>'}
+            env_snippet(self, lines), {"AWS_PROFILE": '<(表示しない値) / a"b / e\\f のどれか>'}
         )
 
 

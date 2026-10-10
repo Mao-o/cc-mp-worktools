@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -435,7 +436,29 @@ def _env_member(name: str, value: str) -> str:
     や JSON として読めない形になる。`ensure_ascii=False` なので、普通の値 (日本語の
     案内を含む) の出力は変わらない。
     """
-    return f"{json.dumps(name, ensure_ascii=False)}: {json.dumps(value, ensure_ascii=False)}"
+    return f"{_json_one_line(name)}: {_json_one_line(value)}"
+
+
+def _json_one_line(text: str) -> str:
+    """`json.dumps(ensure_ascii=False)` に、行を割る文字の `\\uXXXX` 化を足したもの。
+
+    `json.dumps` は U+0020 未満の制御文字は直すが、DEL・C1 (`\\x85` など)・行区切り (U+2028) /
+    段落区切り (U+2029)・書式文字 (双方向制御・ゼロ幅スペースなど) はそのまま出す。断片は貼り付けて
+    使う値そのものなので置き換えず (`shown` にすると別の値になる)、JSON として同じ値に戻る
+    `\\uXXXX` (BMP の外は代理対) にして 1 行に収める。日本語などの普通の文字は変えない。
+    """
+    out = []
+    for ch in json.dumps(text, ensure_ascii=False):
+        code = ord(ch)
+        if code == 0x7F or 0x80 <= code <= 0x9F or code in (0x2028, 0x2029) or unicodedata.category(ch) == "Cf":
+            if code > 0xFFFF:
+                code -= 0x10000
+                out.append(f"\\u{0xD800 + (code >> 10):04x}\\u{0xDC00 + (code & 0x3FF):04x}")
+            else:
+                out.append(f"\\u{code:04x}")
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def render(
@@ -451,6 +474,13 @@ def render(
     """提案を人 (と Claude) が読む行にする。値は既定で隠す (D3)。"""
 
     def shown(value: str, secret: bool) -> str:
+        # 値は profile 名・構成名 (CLI の設定)・期待値・env (settings.local.json) から来て、
+        # リポジトリ側が決められる。改行などで偽の行を差し込めないよう、hook の deny 文面と同じ
+        # 部品に通す (示せない値は NOT_SHOWN)。
+        return shell_word.shown(value) if (show_values or not secret) else HIDDEN
+
+    def snippet_value(value: str, secret: bool) -> str:
+        # 断片は貼り付けて使う値そのもの。置き換えずに、行を割る文字だけ `_env_member` が直す。
         return value if (show_values or not secret) else HIDDEN
 
     lines = []
@@ -470,14 +500,12 @@ def render(
             continue
         for pin in plan.pins:
             if pin.value is None:
-                lines.append(f"  {pin.name}: 候補 {', '.join(pin.candidates)} (1 つ選ぶ)")
-                snippet.append(
-                    _env_member(pin.name, f"<{' / '.join(pin.candidates)} のどれか>")
-                )
+                lines.append(f"  {pin.name}: 候補 {shell_word.shown_all(pin.candidates)} (1 つ選ぶ)")
+                names = sorted({shell_word.shown(name) for name in pin.candidates})
+                snippet.append(_env_member(pin.name, f"<{' / '.join(names)} のどれか>"))
             else:
-                value = shown(pin.value, pin.secret)
-                lines.append(f"  {pin.name}: {value}")
-                snippet.append(_env_member(pin.name, value))
+                lines.append(f"  {pin.name}: {shown(pin.value, pin.secret)}")
+                snippet.append(_env_member(pin.name, snippet_value(pin.value, pin.secret)))
             now = session_env.get(pin.name)
             in_file = file_env.get(pin.name)
             lines.append(
