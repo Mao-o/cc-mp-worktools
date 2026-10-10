@@ -517,7 +517,7 @@ class TestPathOption(unittest.TestCase):
                 )
 
     def test_control_paths_are_not_offered_as_a_command(self):
-        for raw in (f"/tmp/{_EVIL}/x.json", "/tmp/a\rb", "/tmp/a\x1b[31mb", "/tmp/a‮b"):
+        for raw in (f"/tmp/{_EVIL}/x.json", "/tmp/a\rb", "/tmp/a\x1b[31mb", "/tmp/a\u202eb"):
             with self.subTest(path=repr(raw)):
                 out = builder._path_option(Path(raw))
                 self.assertNotIn("\n", out)

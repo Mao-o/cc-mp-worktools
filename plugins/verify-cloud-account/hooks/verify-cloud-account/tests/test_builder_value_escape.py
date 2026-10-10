@@ -1,19 +1,20 @@
-"""builder / pin_env が出す値は、制御文字をエスケープして 1 行に収める (v0.21.3)。
+"""builder / pin_env が出す値は、行を割る文字をエスケープして 1 行に収める (v0.21.3)。
 
 0.21.2 でパスとキー名を直したが、値の表示が残っていた。値は accounts.local.json・CLI の出力・
 CLI の設定 (AWS の profile 名など)・env から来て、リポジトリ側が決められる。出力は skill 経由で
 Claude が読むので、値に行を割る文字を入れると、出力の外に偽の行を差し込める。
 
 `json.dumps` は U+0020 未満 (改行を含む) は直すが、DEL・C1 (`\\x85` / `\\x9b`)・行区切り (U+2028)・
-書式文字 (U+202E など) はそのまま出す。fixture はそれらを含む値 (`_EVIL`) を使い、各 case は出力全体で
-(1) 偽の行が行頭に現れない (2) 行を割る文字・ESC が生のまま残らない (3) エスケープした形で示される
-を確かめる。
+書式文字 (U+202E など)・孤立サロゲートはそのまま出す。fixture はそれらを含む値 (`_EVIL`) を使い、各 case は
+出力全体で (1) 偽の行が行頭に現れない (2) 行を割る文字・ESC が生のまま残らない (3) エスケープした形で
+示される を確かめる。
 
-- 変更の差分 (`+ add` / `- current` など)・`show` の期待値と CLI 現在値は、値を置き換えずにエスケープ
-  する (置き換えると何が変わるか分からなくなる)
-- `pin-env` の表示 (候補・値・現在値) は hook の deny 文面と同じ `shell_word.shown` に通す (示せない値は
-  「(表示しない値)」)。env に足す断片は貼り付けて使う値そのものなので、置き換えずに JSON の `\\uXXXX`
-  で 1 行に収め、`json.loads` で元の値に戻ることを確かめる
+- 変更の差分 (`+ add` / `- current` など)・`show` の期待値と CLI 現在値は、値を置き換えずに JSON の
+  `\\uXXXX` で 1 行に収める (`shell_word.json_one_line`。置き換えると何が変わるか分からなくなる。
+  表示を写して `set --value` に使っても同じ値になる)
+- `pin-env` の候補・このセッションと書き込み先の現在値・env の断片も同じ部品を通す。候補は選んでもらう
+  名前そのものなので置き換えない。値の行だけは hook の deny 文面と同じ `shell_word.shown`
+  (示せない値は「(表示しない値)」)
 """
 from __future__ import annotations
 
@@ -21,6 +22,8 @@ import io
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,10 +38,12 @@ from scripts import pin_env  # noqa: E402
 _FAKE = "FAKE_LINE_9f3"
 # 行区切り (U+2028) の後に偽の行、C1 (NEL / CSI)・双方向制御・DEL を含む値。`json.dumps` は
 # これらをそのまま出す (改行は直す)。
-_EVIL = f"v {_FAKE}\x85x\x9b[31m‮\x7f"
-_ESCAPED = f"v\\u2028{_FAKE}\\x85x\\x9b[31m\\u202e\\x7f"
+_EVIL = f"v\u2028{_FAKE}\x85x\x9b[31m\u202e\x7f"
+_ESCAPED = f"v\\u2028{_FAKE}\\u0085x\\u009b[31m\\u202e\\u007f"
+# キー名・host 名・パス・エラー文は `escape_controls` (`builder._p`) を通る。C0 / C1 / DEL は `\\xNN`。
+_ESCAPED_P = f"v\\u2028{_FAKE}\\x85x\\x9b[31m\\u202e\\x7f"
 # 生のまま出力に残ってはいけない文字。
-_RAW_BAD = (" ", " ", "\x85", "\x9b", "‮", "\x7f", "\x1b", "\r")
+_RAW_BAD = ("\u2028", "\u2029", "\x85", "\x9b", "\u202e", "\x7f", "\x1b", "\r")
 _ACCOUNT = "123456789012"
 _ACCOUNTS_REL = Path(".claude") / "verify-cloud-account" / "accounts.local.json"
 _DEPRECATED_REL = Path(".claude") / "accounts.local.json"
@@ -146,9 +151,10 @@ class TestChangeLines(_Base):
     def test_remove_of_a_missing_host_names_it_escaped(self):
         self._write(_ACCOUNTS_REL, {"github": {"github.com": "u"}})
         out, _ = self._check(
-            ["remove", "--service", "github", "--host", _EVIL, "--show-values"]
+            ["remove", "--service", "github", "--host", _EVIL, "--show-values"],
+            escaped=_ESCAPED_P,
         )
-        self.assertIn(f"host/alias '{_ESCAPED}' は存在しません", out)
+        self.assertIn(f"host/alias '{_ESCAPED_P}' は存在しません", out)
 
     def test_value_is_hidden_without_show_values(self):
         out, _ = self._check(["set", "--service", "aws", "--value", _EVIL], escaped=None)
@@ -158,14 +164,16 @@ class TestChangeLines(_Base):
     def test_status_heading_is_escaped_too(self):
         # status は固定の見出しのほか、値の形が不正な理由が入る見出しもある。
         out = io.StringIO()
-        builder._print_change_line(f"- x {_FAKE}", "aws", "v", False, out)
+        builder._print_change_line(f"- x\u2028{_FAKE}", "aws", "v", False, out)
         _assert_one_line(self, out.getvalue(), "status", escaped=f"- x\\u2028{_FAKE}")
 
     def test_shape_reason_names_the_key_escaped(self):
         # 理由に出すオブジェクトのキー (0.21.2 で通した) は、値の表示の変更後も 1 行に収まる。
         value = json.dumps({"project": "p", _EVIL: "x"})
         out, err = self._check(
-            ["set", "--service", "gcloud", "--value", value, "--show-values"], code=1
+            ["set", "--service", "gcloud", "--value", value, "--show-values"],
+            code=1,
+            escaped=_ESCAPED_P,
         )
         self.assertIn("未対応", err)
 
@@ -178,7 +186,9 @@ class TestChangeLines(_Base):
         for label, (value, fragment) in cases.items():
             with self.subTest(label):
                 _out, err = self._check(
-                    ["set", "--service", "github", "--value", json.dumps(value)], code=1
+                    ["set", "--service", "github", "--value", json.dumps(value)],
+                    code=1,
+                    escaped=_ESCAPED_P,
                 )
                 self.assertIn(fragment, err)
 
@@ -186,12 +196,12 @@ class TestChangeLines(_Base):
         # 緩い検証 (strict_keys=False) の「文字列である必要があります」の理由。
         self._write(_DEPRECATED_REL, {"github": {_EVIL: 1}})
         _code, out, err = self._run(["migrate"])
-        _assert_one_line(self, out + err, "migrate reason")
+        _assert_one_line(self, out + err, "migrate reason", escaped=_ESCAPED_P)
         self.assertIn("文字列である必要が", err)
 
     def test_auto_switch_note_about_a_bad_expected_value_names_the_key_escaped(self):
         self._write(_ACCOUNTS_REL, {"github": {_EVIL: ""}})
-        out, _ = self._check(["auto-switch", "--enable"])
+        out, _ = self._check(["auto-switch", "--enable"], escaped=_ESCAPED_P)
         self.assertIn("期待値の形が不正です", out)
 
     def test_migrate_shows_unchanged_merged_and_conflict_values(self):
@@ -255,17 +265,20 @@ class TestPinEnvRender(unittest.TestCase):
             plans, None, "理由", session or {}, file_env or {}, None, show_values=show_values
         )
 
-    def test_candidates_are_shown_through_shown_all(self):
+    def test_candidates_keep_every_name_in_json_form(self):
         candidates = ("dev", _EVIL, f"{_EVIL}2")
         plans = [pin_env.Plan("aws", pins=(pin_env.Pin("AWS_PROFILE", None, candidates),))]
         lines = self._render(plans)
         text = "\n".join(lines)
         _assert_one_line(self, text, "candidates", escaped=None)
-        self.assertIn(f"AWS_PROFILE: 候補 {shell_word.shown_all(candidates)} (1 つ選ぶ)", text)
-        self.assertIn(shell_word.NOT_SHOWN, text)
-        # 断片の目印 (placeholder) も同じ表示形で、JSON として読める。
+        self.assertIn(
+            f'AWS_PROFILE: 候補 "dev", "{_ESCAPED}", "{_ESCAPED}2" (1 つ選ぶ)', text
+        )
+        self.assertNotIn(shell_word.NOT_SHOWN, text)
+        # 断片の目印 (placeholder) は候補をそのまま並べ、JSON として読める。
         self.assertEqual(
-            _snippet(self, lines), {"AWS_PROFILE": f"<{shell_word.NOT_SHOWN} / dev のどれか>"}
+            _snippet(self, lines),
+            {"AWS_PROFILE": f"<dev / {_EVIL} / {_EVIL}2 のどれか>"},
         )
 
     def test_single_value_line_is_shown_and_the_snippet_keeps_the_value(self):
@@ -278,6 +291,13 @@ class TestPinEnvRender(unittest.TestCase):
         self.assertEqual(_snippet(self, lines), {"AWS_PROFILE": _EVIL})
         for escaped in ("\\u2028", "\\u0085", "\\u009b", "\\u202e", "\\u007f"):
             self.assertIn(escaped, text)
+
+    def test_env_member_escapes_the_name_too(self):
+        # 名前は今は固定の定数だが、`json_one_line` を通す形を固定する (将来の可変名で偽の行にしない)。
+        member = pin_env._env_member("K\u2028\udcff", "v\u2028\udcff")
+        _testutil.assert_utf8(self, member)
+        self.assertEqual(len(member.splitlines()), 1)
+        self.assertEqual(json.loads("{" + member + "}"), {"K\u2028\udcff": "v\u2028\udcff"})
 
     def test_snippet_round_trips_characters_outside_the_bmp(self):
         # タグ文字 (U+E0041、書式文字) は代理対の `\\uXXXX` で出る。
@@ -294,7 +314,7 @@ class TestPinEnvRender(unittest.TestCase):
         self.assertIn("  AWS_PROFILE: dev", lines)
         self.assertEqual(pin_env._env_member("K", "日本語 v"), '"K": "日本語 v"')
 
-    def test_current_values_are_shown(self):
+    def test_current_values_keep_the_value_in_json_form(self):
         plans = [pin_env.Plan("aws", pins=(pin_env.Pin("AWS_PROFILE", "dev", ("dev",)),))]
         text = "\n".join(
             self._render(
@@ -305,8 +325,9 @@ class TestPinEnvRender(unittest.TestCase):
         )
         _assert_one_line(self, text, "current", escaped=None)
         self.assertIn(
-            f"このセッション={shell_word.NOT_SHOWN} / 書き込み先={shell_word.NOT_SHOWN}", text
+            f'このセッション="{_ESCAPED}" / 書き込み先="{_ESCAPED}2"', text
         )
+        self.assertNotIn(shell_word.NOT_SHOWN, text)
 
     def test_secret_values_stay_hidden_without_show_values(self):
         plans = [pin_env.Plan("gcloud", pins=(pin_env.Pin("CLOUDSDK_CORE_PROJECT", _EVIL, secret=True),))]
@@ -323,7 +344,7 @@ class TestPinEnvCommand(_Base):
     def setUp(self):
         super().setUp()
         # profile 名に行を割る文字は置けない (config を行で読む) ので、CSI / 双方向制御 / DEL を使う。
-        self.profile_a = f"a\x9b[31m{_FAKE}‮"
+        self.profile_a = f"a\x9b[31m{_FAKE}\u202e"
         self.profile_b = "b\x7f"
         config = self.root / "aws_config"
         config.write_text(
@@ -333,7 +354,7 @@ class TestPinEnvCommand(_Base):
         )
         patcher = mock.patch.dict(
             os.environ,
-            {"AWS_CONFIG_FILE": str(config), "AWS_PROFILE": f"cur {_FAKE}"},
+            {"AWS_CONFIG_FILE": str(config), "AWS_PROFILE": f"cur\u2028{_FAKE}"},
         )
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -343,15 +364,91 @@ class TestPinEnvCommand(_Base):
         code, out, err = self._run(["pin-env", "--service", "aws"])
         self.assertEqual(code, 0, err)
         _assert_one_line(self, out + err, "pin-env", escaped=None)
-        self.assertIn(f"候補 {shell_word.NOT_SHOWN} (1 つ選ぶ)", out)
-        self.assertIn(f"このセッション={shell_word.NOT_SHOWN}", out)
-        # 断片は、行を割る文字なしで JSON として読める。
+        for profile in (self.profile_a, self.profile_b):
+            self.assertIn(shell_word.json_one_line(profile), out)
+        self.assertIn(f'このセッション="cur\\u2028{_FAKE}"', out)
+        self.assertNotIn(shell_word.NOT_SHOWN, out)
+        # 断片は、行を割る文字なしで JSON として読める。候補は 2 つとも断片の目印に残る。
         header = 'settings.local.json の "env" に足す内容 (既存のキーは残す):'
         body = out.split(header + "\n", 1)[1]
-        self.assertEqual(
-            json.loads("{" + body + "}"),
-            {"AWS_PROFILE": f"<{shell_word.NOT_SHOWN} のどれか>"},
+        marker = json.loads("{" + body + "}")["AWS_PROFILE"]
+        for profile in (self.profile_a, self.profile_b):
+            self.assertIn(profile, marker)
+
+
+class TestLoneSurrogates(_Base):
+    """孤立サロゲートを含む値でも、出力は UTF-8 で書ける (旧版は `UnicodeEncodeError` で落ちた)。
+
+    JSON の `"\\udcff"` や argv の不正なバイト列 (surrogateescape) から入りうる。`io.StringIO` は
+    encode しないので、出力を明示的に `.encode("utf-8")` する。
+    """
+
+    def _encodable(self, argv: list[str], *, code: int = 0) -> str:
+        got, out, err = self._run(argv)
+        self.assertEqual(got, code, f"{argv}\n{out}\n{err}")
+        _testutil.assert_utf8(self, out + err)
+        return out + err
+
+    def test_show_of_reserved_key_values_does_not_crash(self):
+        for key in ("$mode", "$readonly", "$auto_switch"):
+            with self.subTest(key=key):
+                self._write(_ACCOUNTS_REL, {key: "\udcff"})
+                text = self._encodable(["show"])
+                self.assertIn(f'{key}: "\\udcff"', text)
+
+    def test_show_of_an_expected_value_and_a_key(self):
+        self._write(_ACCOUNTS_REL, {"aws": "p\udcffq", "k\udcff": 1})
+        with mock.patch("services.aws.get_active_account", return_value="c\udcffd"):
+            text = self._encodable(["show", "--show-values"])
+        self.assertIn('aws: "p\\udcffq"', text)
+        self.assertIn('current="c\\udcffd"', text)
+        self.assertIn("k\\udcff", text)
+
+    def test_set_with_a_lone_surrogate_in_argv_does_not_crash_on_output(self):
+        text = self._encodable(["set", "--service", "aws", "--value", "p\udcffq", "--show-values"])
+        self.assertIn('+ add: aws -> "p\\udcffq"', text)
+
+    def test_pin_env_render_does_not_crash(self):
+        plans = [
+            pin_env.Plan("gcloud", pins=(pin_env.Pin("CLOUDSDK_CORE_PROJECT", "p\udcffq", secret=True),)),
+            pin_env.Plan("aws", pins=(pin_env.Pin("AWS_PROFILE", None, ("a\udcff", "b")),)),
+        ]
+        lines = pin_env.render(
+            plans, None, "理由", {"AWS_PROFILE": "s\udcff"}, {"AWS_PROFILE": "f\udcff"}, None, show_values=True
         )
+        text = "\n".join(lines)
+        _testutil.assert_utf8(self, text)
+        self.assertIn('"CLOUDSDK_CORE_PROJECT": "p\\udcffq"', text)
+        self.assertIn('候補 "a\\udcff", "b"', text)
+        self.assertIn('このセッション="s\\udcff" / 書き込み先="f\\udcff"', text)
+
+    def test_pin_env_command_with_a_lone_surrogate_expected_value(self):
+        self._write(_ACCOUNTS_REL, {"gcloud": "p\udcffq"})
+        text = self._encodable(["pin-env", "--service", "gcloud", "--show-values"])
+        self.assertIn('"CLOUDSDK_CORE_PROJECT": "p\\udcffq"', text)
+
+    def test_real_process_does_not_crash(self):
+        # 実プロセス (stdout は UTF-8 の pipe)。in-process の StringIO では encode されず見落とす。
+        self._write(_ACCOUNTS_REL, {"$mode": "\udcff"})
+        home = self.root / "proc_home"
+        home.mkdir()
+        env = {
+            "PATH": "/usr/bin:/bin",
+            "HOME": str(home),
+            "CLAUDE_PROJECT_DIR": str(self.project),
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        done = subprocess.run(
+            [sys.executable, str(Path(builder.__file__)), "show"],
+            env=env,
+            cwd=str(self.project),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=60,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr.decode("utf-8", "replace"))
+        self.assertIn('$mode: "\\udcff"', done.stdout.decode("utf-8"))
 
 
 if __name__ == "__main__":

@@ -595,14 +595,15 @@ def _ensure_project_claude_md(target: _Target, stdout: IO[str]) -> None:
 
 
 def _json_display(value: Any) -> str:
-    """期待値・CLI 現在値の表示形 (JSON。制御文字をエスケープして 1 行に収める)。
+    """期待値・CLI 現在値の表示形 (JSON。行を割る文字・孤立サロゲートを `\\uXXXX` にして 1 行に収める)。
 
     値は accounts.local.json・CLI の出力から来て、リポジトリ側が決められる。`json.dumps` は
-    U+0020 未満の制御文字は直すが、DEL・C1 (`\\x85`・`\\x9b` など)・行区切り (U+2028)・
-    書式文字 (双方向制御など) はそのまま出すので、偽の行を差し込める。値を `shown` で置き換えると
-    変更の差分が読めなくなる (何が変わるか分からない) ため、置き換えずにエスケープする。
+    U+0020 未満の制御文字は直すが、DEL・C1 (`\\x85` など)・行区切り (U+2028)・書式文字 (双方向制御
+    など)・孤立サロゲートはそのまま出すので、偽の行を差し込めたり、出力が `UnicodeEncodeError` で
+    落ちたりする。値を `shown` で置き換えると変更の差分が読めなくなる (何が変わるか分からない) ため、
+    置き換えずに JSON の中でエスケープする。JSON のまま読み直せる (`set --value` に写しても同じ値)。
     """
-    return _p(json.dumps(value, ensure_ascii=False))
+    return shell_word.json_one_line(value)
 
 
 def _format_value_for_display(value: Any, show_values: bool) -> str:

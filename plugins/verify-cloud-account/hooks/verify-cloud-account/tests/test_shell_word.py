@@ -351,6 +351,64 @@ class TestEscapeControls(unittest.TestCase):
         self.assertFalse(any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in out))
 
 
+class TestEscapeControlsAllCodePoints(unittest.TestCase):
+    """全コードポイント (孤立サロゲートを含む U+0000〜U+10FFFF) で、出力が 1 行・UTF-8 で書ける。"""
+
+    def test_every_code_point_is_one_line_and_encodable(self):
+        bad = []
+        for code in range(sys.maxunicode + 1):
+            out = shell_word.escape_controls(chr(code))
+            try:
+                out.encode("utf-8")
+            except UnicodeEncodeError:
+                bad.append(f"U+{code:04X} not encodable")
+                continue
+            if len(out.splitlines()) != 1:
+                bad.append(f"U+{code:04X} not one line: {out!r}")
+        self.assertEqual(bad[:10], [])
+
+    def test_lone_surrogates_are_escaped(self):
+        self.assertEqual(shell_word.escape_controls("p\udcffq\ud800"), "p\\udcffq\\ud800")
+
+
+class TestJsonOneLine(unittest.TestCase):
+    """JSON の表示形 (`json_one_line`、v0.21.3)。builder の値・pin-env の候補 / 現在値 / 断片が共有する。"""
+
+    def test_every_code_point_is_one_line_round_trips_and_is_encodable(self):
+        bad = []
+        for code in range(sys.maxunicode + 1):
+            value = chr(code)
+            out = shell_word.json_one_line(value)
+            try:
+                out.encode("utf-8")
+            except UnicodeEncodeError:
+                bad.append(f"U+{code:04X} not encodable")
+                continue
+            if len(out.splitlines()) != 1:
+                bad.append(f"U+{code:04X} not one line: {out!r}")
+            elif json.loads(out) != value:
+                bad.append(f"U+{code:04X} does not round-trip: {out!r}")
+        self.assertEqual(bad[:10], [])
+
+    def test_ordinary_text_is_unchanged_json(self):
+        for value in ("dev", "日本語 v", 'a"b\\c', "line\nbreak", {"k": "v", "日本": ["x", 1, None, True]}, 1.5, None):
+            with self.subTest(value=value):
+                self.assertEqual(shell_word.json_one_line(value), json.dumps(value, ensure_ascii=False))
+
+    def test_dict_keys_and_nested_values_round_trip(self):
+        value = {"k\u2028\x85": ["\udcff", {"\U000e0041": "\u202e\x7f"}], "ok": "x"}
+        out = shell_word.json_one_line(value)
+        self.assertEqual(len(out.splitlines()), 1)
+        self.assertEqual(json.loads(out), value)
+        _testutil.assert_utf8(self, out)
+
+    def test_non_bmp_format_character_becomes_a_surrogate_pair(self):
+        self.assertEqual(shell_word.json_one_line("p\U000e0041q"), '"p\\udb40\\udc41q"')
+
+    def test_lone_surrogate_is_escaped_not_dropped(self):
+        self.assertEqual(shell_word.json_one_line("p\udcffq"), '"p\\udcffq"')
+
+
 class TestKubectlGuidance(unittest.TestCase):
     PROJECT_DIR = "/nonexistent-project"
 

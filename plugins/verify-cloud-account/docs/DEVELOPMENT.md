@@ -1632,7 +1632,7 @@ ENOENT / ENOTDIR / EBADF / ELOOP 以外の stat の失敗を例外にし、例�
   `_from_local` が "" を返し、verify() が現在値を取得できないとして deny する。configstore に
   切替先があるとき・値が偽のときも止める (firebase-tools はキーを使わない。保守的な側)
 - 確かめられない形: 読めない / UTF-8 でない / U+FEFF を含む (cjson はすべての U+FEFF を除くので
-  `"﻿firebase"` が `firebase` になる) / cjson のコメント除去が何かを除く / 厳密な JSON として
+  `"\ufefffirebase"` が `firebase` になる) / cjson のコメント除去が何かを除く / 厳密な JSON として
   読めない。空のファイル (0 バイト) は firebase-tools と同じく `{}` (`statSync().size > 0` の
   ときだけ読む)
 - `.firebaserc` のように `//` / `/*` を含むだけで弾くと、hosting の redirects に URL を書いた
