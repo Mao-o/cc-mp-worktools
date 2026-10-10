@@ -324,15 +324,15 @@ PreToolUse は Bash のたびに発火するので、`gh pr list && gh pr view &
   書かない
 - **成功のみ**: 失敗 (文字列返却) は常に再検証する。切り替え直後に使いたいため
 - **無効化**: TTL 超過 / `accounts.local.json` の mtime 変化 / 破損・欠損 (UTF-8 で
-  ない・入れ子が深い entry を含む。v0.18.0) / 値が期待した型でない (v0.19.0。下の項) /
+  ない・入れ子が深い entry を含む。v0.18.0) / 値が期待した型でない (v0.19.1。下の項) /
   アカウント状態を変えうるコマンドの検出 / epoch 不一致
-- **cache dir の JSON は `cache.read_state` で読む** (v0.19.0): 成功 cache の entry・epoch・
+- **cache dir の JSON は `cache.read_state` で読む** (v0.19.1): 成功 cache の entry・epoch・
   自動切替の記録を同じ関数で読む (存在確認は `os.path.isfile`、読めないものは None)。値の型は
   呼び出し側が確かめる: entry の timestamp は float にできる有限の数で、書いてから TTL 以内
   (数値でない値の TypeError・float に収まらない整数の OverflowError を例外にしない。NaN・
   無限大・未来の時刻は期限が切れないので使わない)、success は `true` だけ、epoch / tombstone は
   int64 に収まる非負の整数だけ (`int()` で変換すると `Infinity` で OverflowError)
-- **dir は自分の所有で、他のユーザーが書けない実ディレクトリのときだけ使う** (v0.19.0。
+- **dir は自分の所有で、他のユーザーが書けない実ディレクトリのときだけ使う** (v0.19.1。
   `_cache_dir`)。`os.lstat` で symlink でないことも見る。作るときは 0700。満たさない dir は
   直さずに使わない (中に他のユーザーが置いたファイルが残りうる)。使えないときは成功 cache も
   epoch も補助ファイル (自動切替の記録・移行案内の記録) も読まず書かない。所有者と mode が
@@ -373,7 +373,7 @@ timeout に落ちる。fail-open を塞ぐ目的には締切の伝播で足り�
 
 - **複数 tier が同一階層に同居したら fail-closed で deny** (D4)。どれが正本か
   曖昧なまま検証を通すと、どの設定が効いているか不透明になる
-- **stat できない配置パスは「ある (が読めない)」に数える** (v0.19.0。`_may_hold_accounts`)。
+- **stat できない配置パスは「ある (が読めない)」に数える** (v0.19.1。`_may_hold_accounts`)。
   無いとするのは ENOENT / ENOTDIR と、通常のファイルでないものだけ。読み込みに失敗して読めない
   期待値ファイルとして deny し、同じ階層にほかの配置パスもあれば D4 の分岐で deny する (文面は
   `_format_unstattable`)。グローバル既定も同じ。pathlib の `Path.is_file()` は使わない
@@ -1464,7 +1464,7 @@ verify() は CLI が出した現在値 (前後の空白を除いた値) と期�
   975〜1,000 段、`.firebaserc` は 975〜1,000 段のすべての深さで、warn (検証のスキップ) に
   ならないことを確かめた
 
-### 0.19.0 (stat できない accounts.local.json / 成功 cache の値と dir で検証を飛ばさない)
+### 0.19.1 (stat できない accounts.local.json / 成功 cache の値と dir で検証を飛ばさない)
 
 **stat できない配置パスを、無いものではなく読めない期待値ファイルとして扱う**
 
@@ -1509,7 +1509,7 @@ ENOENT / ENOTDIR / EBADF / ELOOP 以外の stat の失敗を例外にし、例�
   無い `.claude` でリモート read / stat できないグローバル既定でリモート read / symlink のループと
   新パス / 行き先の無い symlink と新パス)。0.18.0 は、3.9.6 で前の 5 形が warn (スキップ)、
   3.14.0 で 1 形目が allow (新パスで照合)・2〜5 形目が未設定の扱い (書込は deny、リモート read は
-  警告で通す)。ループと行き先の無い symlink は両版で allow。0.19.0 は両版で前の 6 形が deny、
+  警告で通す)。ループと行き先の無い symlink は両版で allow。0.19.1 は両版で前の 6 形が deny、
   行き先の無い symlink だけが allow
 
 **成功 cache の値の型と、cache の dir の所有者を確かめる**
@@ -1539,10 +1539,10 @@ ENOENT / ENOTDIR / EBADF / ELOOP 以外の stat の失敗を例外にし、例�
   スキップではなかった。3.14 と揃えて記録が無いのと同じにした (壊れた記録の扱いと同じ)
 - 確認: 実プロセスの hook (3.9.6 / 3.14.0) で、通常の照合なら deny になる状態 (正しい entry
   なら cache hit で allow) を作って entry / epoch を書き換えた。entry の timestamp が文字列・
-  null・配列・float に収まらない整数は、0.18.0 で warn (スキップ)、0.19.0 で通常の照合 (deny)。
+  null・配列・float に収まらない整数は、0.18.0 で warn (スキップ)、0.19.1 で通常の照合 (deny)。
   NaN・未来の時刻・`"false"` の success と、他のユーザーが書ける dir の正しい entry は、0.18.0 で
-  cache hit (allow)、0.19.0 で通常の照合 (deny)。epoch の `Infinity` は、0.18.0 で warn
-  (スキップ)、0.19.0 で epoch 0 (無効化の記録なし) として読み、epoch 0 で書かれたこの entry は
+  cache hit (allow)、0.19.1 で通常の照合 (deny)。epoch の `Infinity` は、0.18.0 で warn
+  (スキップ)、0.19.1 で epoch 0 (無効化の記録なし) として読み、epoch 0 で書かれたこの entry は
   cache hit (allow) のまま
 
 ## 既知の制限

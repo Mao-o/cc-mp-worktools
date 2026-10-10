@@ -267,7 +267,7 @@ class TestPathMigration(BaseWithTmpProject):
 
     def test_deprecation_warn_is_not_recorded_in_a_dir_other_users_can_write(self):
         """1 日 1 回の記録は、成功 cache と同じく自分の所有で他のユーザーが書けない dir にだけ
-        置く (v0.19.0)。使えない dir では絞れないので毎回出す。旧版は共有の `/tmp` の同名 dir を
+        置く (v0.19.1)。使えない dir では絞れないので毎回出す。旧版は共有の `/tmp` の同名 dir を
         確かめずに使い、別のユーザーが置いた記録で案内を止められた。"""
         self._write_deprecated_accounts({"github": "Mao-o"})
         with self.isolated_cache() as tmpdir, mock.patch(

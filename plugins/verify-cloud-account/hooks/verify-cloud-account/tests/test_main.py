@@ -305,7 +305,7 @@ class TestMainEntry(unittest.TestCase):
 
     def test_cache_entry_whose_timestamp_is_not_a_number_is_reverified(self):
         """timestamp が数値でない成功 cache の entry は cache miss として、通常の照合で判定する
-        (v0.19.0)。旧版は TypeError が最終防波堤まで抜け、検証をスキップしていた。
+        (v0.19.1)。旧版は TypeError が最終防波堤まで抜け、検証をスキップしていた。
 
         通常の照合が deny になる状態を作ってから entry を書き換える: 1 回目の allow で entry を
         書いた後、`.firebaserc` で alias の行き先を変える (cache のキーは変わらない)。正しい
@@ -334,7 +334,7 @@ class TestMainEntry(unittest.TestCase):
 
 
 class TestAccountsFileThatCannotBeStatted(unittest.TestCase):
-    """stat できない accounts.local.json で検証をスキップしない (v0.19.0)。
+    """stat できない accounts.local.json で検証をスキップしない (v0.19.1)。
 
     存在確認の pathlib の `Path.is_file()` は Python 3.13 まで、ENOENT など以外の OSError を
     そのまま投げ、例外が最終防波堤まで抜けて「内部エラーのため検証をスキップ」(実行は止めない)
@@ -433,6 +433,16 @@ class TestAccountsFileThatCannotBeStatted(unittest.TestCase):
     def test_global_default(self):
         path = self._unstattable(self.home / self._NEW)
         decision, text = self._main("gh pr list")
+        self.assertEqual(decision, "deny", text)
+        self.assertIn(f"{path} の読み込みに失敗しました", text)
+
+    def test_directory_pin_does_not_stand_in_for_an_unstattable_file(self):
+        """ディレクトリ単位の固定 (v0.19.0) は、期待値が未登録のときの代わり。stat できない
+        配置パスを「無い」(= 未登録) と読むと、固定の環境変数があるだけで書き込みが照合なしに
+        通る。読めない期待値ファイルとして deny のまま。"""
+        path = self._unstattable(self.project / ".claude" / "accounts.json")
+        with mock.patch.dict(os.environ, {"AWS_PROFILE": "pinned-profile"}):
+            decision, text = self._main("aws s3 rm s3://bucket/key")
         self.assertEqual(decision, "deny", text)
         self.assertIn(f"{path} の読み込みに失敗しました", text)
 

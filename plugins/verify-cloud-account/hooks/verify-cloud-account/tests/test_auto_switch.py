@@ -225,7 +225,7 @@ class TestGuard(_TmpCacheDir):
 
     def test_record_that_cannot_be_read_is_no_record(self):
         """stat できない・入れ子が深い記録も、壊れた記録と同じく無いものとして扱い、次の切替の
-        記録で置き換わる (v0.19.0)。
+        記録で置き換わる (v0.19.1)。
 
         旧版は存在確認に `Path.is_file()` を使い、Python 3.13 までは stat できない記録で例外に
         していた (dispatcher が握って「内部エラー」で自動切替を見送り、3.14 からは記録が無いのと

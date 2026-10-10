@@ -91,7 +91,7 @@ class TestCache(unittest.TestCase):
                 self.assertFalse(hit)
 
     def test_entry_values_of_an_unexpected_type_are_a_miss(self):
-        """値が期待した型でない entry も cache miss (検証し直す。v0.19.0)。
+        """値が期待した型でない entry も cache miss (検証し直す。v0.19.1)。
 
         旧版は timestamp が数値でない値の TypeError と、float に収まらない整数の
         OverflowError を捕まえず、dispatch() の外まで抜けて __main__ の最終防波堤が検証を
@@ -261,7 +261,7 @@ class TestCache(unittest.TestCase):
 
     def test_epoch_values_that_are_not_ns_integers_are_zero(self):
         """epoch / tombstone が int64 に収まる非負の整数でない epoch ファイルも、無効化の記録が
-        無いのと同じ 0 (v0.19.0)。旧版は `int()` で変換し、JSON として読める `Infinity` の
+        無いのと同じ 0 (v0.19.1)。旧版は `int()` で変換し、JSON として読める `Infinity` の
         OverflowError が dispatch() の外まで抜け、__main__ の最終防波堤が検証をスキップしていた。
         """
         self._base().mkdir(mode=0o700, exist_ok=True)
@@ -350,7 +350,7 @@ class TestCache(unittest.TestCase):
 
 @unittest.skipUnless(hasattr(os, "geteuid"), "所有者と mode は POSIX のもの")
 class TestCacheDirOwnership(unittest.TestCase):
-    """cache dir は自分の所有で、他のユーザーが書けない実ディレクトリのときだけ使う (v0.19.0)。
+    """cache dir は自分の所有で、他のユーザーが書けない実ディレクトリのときだけ使う (v0.19.1)。
 
     TMPDIR の無い Linux などでは共有の `/tmp` に置かれ、別のユーザーが先に同じ名前の dir を
     作れる。旧版は所有者も mode も確かめずに使い、置かれた entry で検証を省きえた。使わない

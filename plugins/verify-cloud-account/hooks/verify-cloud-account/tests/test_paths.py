@@ -634,7 +634,7 @@ class TestAncestorSearchUnchangedBehaviour(BaseAncestorBoundary):
 
 
 class TestPlacementPathThatCannotBeStatted(BaseAncestorBoundary):
-    """stat できない配置パスは「ある (が読めない)」に数える (v0.19.0)。
+    """stat できない配置パスは「ある (が読めない)」に数える (v0.19.1)。
 
     pathlib の `Path.is_file()` は Python 3.13 まで、ENOENT など以外の OSError (長すぎる名前を
     指す symlink の ENAMETOOLONG・EACCES) をそのまま投げ、3.14 からは False (= 無い) にする。
@@ -765,7 +765,7 @@ class TestGlobalDefault(BaseAncestorBoundary):
         self.assertEqual(source, paths.SOURCE_GLOBAL)
 
     def test_global_default_that_cannot_be_statted_is_adopted(self):
-        """stat できないグローバル既定も採用する (dispatcher は読み込みに失敗して deny。v0.19.0)。
+        """stat できないグローバル既定も採用する (dispatcher は読み込みに失敗して deny。v0.19.1)。
 
         旧版の存在確認 (`Path.is_file()`) は Python 3.13 まで例外を投げ、3.14 からは無いものと
         して未設定の扱い (リモート read のみのコマンドは警告で通す) にしていた。

@@ -157,7 +157,7 @@ class TestPlanGcloud(_TmpBase):
 
     def test_configuration_that_cannot_be_statted_is_skipped(self):
         """stat できない構成ファイル (長すぎる名前を指す symlink など) は、読めない構成と同じく
-        候補にしない (v0.19.0)。旧版は存在確認に `Path.is_file()` を使い、Python 3.13 までは
+        候補にしない (v0.19.1)。旧版は存在確認に `Path.is_file()` を使い、Python 3.13 までは
         例外が pin-env の外まで抜けていた。3.14 以降でも再現するため `Path.is_file` を差し替える。
         """
         env = self._env({"work": "[core]\nproject = p1\n"})
