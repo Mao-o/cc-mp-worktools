@@ -895,10 +895,17 @@ git 2.50 では起きないので、gc 戦略が既定の版 (2.50 など) で�
 `_testutil.git` / `init_repo` を使い、自前の `subprocess` で git を呼ぶなら
 `env=_testutil.hermetic_env(...)` を渡すこと (理由は `_testutil.NO_BACKGROUND_GIT_SETTINGS` のコメント)。
 `hermetic_env` は `os.environ` から外側の漏れ (`_testutil.OUTER_GIT_LEAKS`: `GIT_DIR` など repo の場所を
-変える env、`GIT_CONFIG_PARAMETERS`、旧来の `GIT_CONFIG`) を外し、`HERMETIC_GIT_ENV` を重ねる。残ると、テストは
-OK のまま別の repo に commit が作られる。渡し忘れは `TestNoTestLaunchesGitWithoutTheHermeticEnv` が AST で
-拾い、helper の git の起動が全部 `HERMETIC_GIT_ENV` を持つことは
-`TestEveryGitLaunchOfTheHelpersCarriesTheHermeticEnv` が `subprocess.Popen` の層で記録して見る。
+変える env、`GIT_CONFIG_PARAMETERS`、旧来の `GIT_CONFIG`、`git rev-parse --local-env-vars` が挙げる残り、
+`GIT_TEMPLATE_DIR`) を外し、`HERMETIC_GIT_ENV` を重ねる。残ると、テストは OK のまま別の repo に commit が
+作られ、外側の template の hook がテストの commit のたびに走る。渡し忘れは
+`TestNoTestLaunchesGitWithoutTheHermeticEnv` が AST で拾う。対象は `run` / `Popen` / `check_call` /
+`check_output` と、受け手が `subprocess` の `call` で、第 1 引数が git 以外の list / tuple のリテラルである
+起動だけを除き、argv を変数・`*` 展開・式で組んだ起動にも `env=hermetic_env(...)` を要求する
+(`sh -c "git ..."` のように別のプログラム越しに起動する git は見えない)。拾う形は `SCAN_SAMPLE` で確かめる。
+helper の git の起動が全部 `HERMETIC_GIT_ENV` を持つことは
+`TestEveryGitLaunchOfTheHelpersCarriesTheHermeticEnv` が `subprocess.Popen` の層で記録して見る。記録器
+(`record_git_launches`) が記録に値を足すと、helper を迂回した git もこの床を通るので、記録が渡された env
+そのものであることを `TestTheGitLaunchRecorder` が既知の env で見る。
 **push 先の bare repo には env が届かない**: ローカルの path へ push すると、受け側の `receive-pack` は
 repo 用の env (`GIT_CONFIG_COUNT` など) を外されて起動する。外されない `GIT_CONFIG_GLOBAL` の
 fixture が `receive.autogc=false` を含む 5 設定を持つので、`git init --bare` を直接呼んだ bare repo
@@ -913,8 +920,9 @@ fixture が `receive.autogc=false` を含む 5 設定を持つので、`git init
 黙って通る。この床の env だけでは、どの経路も止める側にならないこと (fixture を指す `GIT_CONFIG_GLOBAL`
 や止める側の `GIT_CONFIG_COUNT` を持たないこと) を `TestTheIsolatedEnvStopsNothing` で見る: 床がそれを
 持つ形に戻ると、helper や定数の当て損ねを床が埋めて黙って通る。この自己確認と `TestTheSystemMarkerIsLive` は
-`isolate_git_config` を直接呼ばず、helper の床 (`_HelperFloor`) を通して、helper を呼ぶ直前の env で見る
-(直接呼ぶと、helper の床の中で `isolate_git_config` の後に足された止める側の値を見ない)。
+`isolate_git_config` を直接呼ばず、helper の床 (`_HelperFloor`) を通し、床の env をそのまま渡す git を
+床の spy に通して、spy が捕まえた env で見る (直接呼ぶと、helper の床の中で `isolate_git_config` の後に
+足された止める側の値も、spy が足した値も見ない)。
 **床の側で `GIT_CONFIG_NOSYSTEM` を立てないこと**: 立てると、helper・基底クラス・定数が
 それを渡し損ねても、床が埋めて通る。system の目印 (`hermetic.system = read`) は
 `GIT_CONFIG_NOSYSTEM` が効いていれば読まれないので、`git config --get hermetic.system` が未設定

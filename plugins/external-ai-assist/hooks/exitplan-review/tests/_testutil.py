@@ -110,7 +110,8 @@ HERMETIC_GIT_ENV = {
 
 # テストが起動する git に、外側の env (開発者の shell、git の hook の中、`git -c` の配下) からそのまま
 # 漏れてはいけないもの (post-implementation-review/tests/_testutil.py の `OUTER_GIT_LEAKS` と同じ一覧と理由):
-# repo の場所を変えるもの、`GIT_CONFIG_PARAMETERS` (`GIT_CONFIG_COUNT` に勝つ)、旧来の `GIT_CONFIG`。
+# repo の場所を変えるもの、`GIT_CONFIG_PARAMETERS` (`GIT_CONFIG_COUNT` に勝つ)、旧来の `GIT_CONFIG`、
+# `git rev-parse --local-env-vars` が挙げる残り、`GIT_TEMPLATE_DIR` (`git init` が外側の hook を写す)。
 # `GIT_CONFIG_COUNT` 系は外さない: `HERMETIC_GIT_ENV` が同じ名前で上書きするので、混ぜる向きを床が見られる。
 OUTER_GIT_LEAKS = (
     "GIT_DIR",
@@ -122,6 +123,13 @@ OUTER_GIT_LEAKS = (
     "GIT_NAMESPACE",
     "GIT_CONFIG_PARAMETERS",
     "GIT_CONFIG",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_TEMPLATE_DIR",
 )
 
 

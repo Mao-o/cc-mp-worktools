@@ -114,6 +114,10 @@ class FakeCliTestCase(HookTestCase):
 class TestReviewerTimeout(FakeCliTestCase):
     _ELAPSED_LIMIT = TIMEOUT + 3 * GRACE + 2.0
 
+    def test_uses_the_short_timeout(self):
+        """timeout の経路を見るクラスは、短い `TIMEOUT` でレビュアーを起動すること (下の 2 件の前提)。"""
+        self.assertEqual((self.cursor.timeout_sec(), self.codex.timeout_sec()), (TIMEOUT,) * 2)
+
     def test_cursor_timeout_returns_none_and_kills_grandchild(self):
         pid_file = self.hanging("cursor")
         started = time.monotonic()
@@ -211,6 +215,13 @@ class TestReviewerArgvAndStdin(FakeCliTestCase):
     def _read_argv(self, argv_file: str) -> list[str]:
         with open(argv_file) as f:
             return f.read().split("\0")[:-1]
+
+    def test_uses_the_long_timeout(self):
+        """timeout の経路を見ないクラスは、長い `NON_TIMEOUT_PATH_TIMEOUT` でレビュアーを起動すること。
+        短い値に戻ると、負荷で bash の起動が遅れたときに結果が `None` になって落ちる (無負荷では通る)。"""
+        self.assertEqual(
+            (self.cursor.timeout_sec(), self.codex.timeout_sec()), (NON_TIMEOUT_PATH_TIMEOUT,) * 2
+        )
 
     def test_cursor_runs_print_mode_read_only_with_plan_in_prompt(self):
         argv_file = os.path.join(self.tmpdir, "cursor.argv")

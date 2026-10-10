@@ -132,6 +132,11 @@ HERMETIC_GIT_ENV = {
 #     (別 repo に commit が 1 件作られ、config に `user.name` が書かれた実例がある)
 #   - `GIT_CONFIG_PARAMETERS` (`git -c` が子に渡す): `GIT_CONFIG_COUNT` に勝つので、止める設定を上書きする
 #   - `GIT_CONFIG` (接尾辞なしの旧来の変数): あると `git config --get` はその file だけを読む
+#   - `git rev-parse --local-env-vars` が挙げる残り (`GIT_IMPLICIT_WORK_TREE` / `GIT_GRAFT_FILE` /
+#     `GIT_NO_REPLACE_OBJECTS` / `GIT_REPLACE_REF_BASE` / `GIT_PREFIX` / `GIT_SHALLOW_FILE`): git が子の git に
+#     repo 用として渡す env で、外側の repo の見え方 (作業ツリーの有無・履歴の置き換え・shallow) を持ち込む
+#   - `GIT_TEMPLATE_DIR`: `git init` が外側の template (hook を含む) を写し、テストの commit で外側の hook が
+#     走る (外側に置いて流すと、テストは OK のまま外側の hook が 426 回走った実例がある)
 # `GIT_CONFIG_COUNT` 系は外さない: `HERMETIC_GIT_ENV` が同じ名前で上書きするので、混ぜる向き (外側より
 # `HERMETIC_GIT_ENV` が勝つ) を床が見られる。
 OUTER_GIT_LEAKS = (
@@ -144,6 +149,13 @@ OUTER_GIT_LEAKS = (
     "GIT_NAMESPACE",
     "GIT_CONFIG_PARAMETERS",
     "GIT_CONFIG",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_TEMPLATE_DIR",
 )
 
 
