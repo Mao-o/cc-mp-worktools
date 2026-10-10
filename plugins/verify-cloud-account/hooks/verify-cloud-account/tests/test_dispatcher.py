@@ -1090,6 +1090,60 @@ class TestSelfRemediationFlow(BaseWithTmpProject):
         mock_verify.assert_not_called()
 
 
+class TestAssignmentOnlySegmentIsNotACommand(BaseWithTmpProject):
+    """値が `/…/<cli>` で終わる代入だけのセグメントを、その CLI のコマンドとして検出しない。
+
+    firebase のキーが無いプロジェクトでは、検出されると「"firebase" キーがありません」で
+    deny になっていた (読み取り専用の grep のために代入しただけのコマンドが止まった)。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._write_accounts({"gcloud": "my-proj"})
+
+    def _dispatch(self, command: str):
+        with mock.patch("subprocess.run") as run:
+            result = dispatch(command, str(self.project_dir))
+        self.assertFalse(run.called, "CLI を起動してはならない")
+        return result
+
+    def test_assignment_only_segments_are_allowed(self):
+        for command in (
+            "FT=/x/node_modules/firebase-tools; echo hi",
+            "FT=/x/node_modules/firebase-tools",
+            "X=1 FT=/x/firebase-tools",
+            "X=/usr/local/bin/gh",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(self._dispatch(command))
+
+    def test_command_substitution_in_an_assignment_value_is_still_detected(self):
+        """値に `$(` / バッククォートを含む代入の中のパス付き CLI は従来どおり deny する。"""
+        for command in (
+            "X=$(/usr/bin/firebase deploy)",
+            "X=`/usr/bin/firebase deploy`",
+        ):
+            with self.subTest(command=command):
+                result = self._dispatch(command)
+                self.assertIsNotNone(result)
+                out = result["hookSpecificOutput"]
+                self.assertEqual(out["permissionDecision"], "deny")
+                self.assertIn('"firebase" キーがありません', out["permissionDecisionReason"])
+
+    def test_commands_after_an_assignment_are_still_detected(self):
+        for command in (
+            "FOO=1 firebase deploy",
+            "FT=/x/firebase-tools; firebase deploy",
+            "FOO=1 /x/node_modules/.bin/firebase deploy",
+        ):
+            with self.subTest(command=command):
+                result = self._dispatch(command)
+                self.assertIsNotNone(result)
+                out = result["hookSpecificOutput"]
+                self.assertEqual(out["permissionDecision"], "deny")
+                self.assertIn('"firebase" キーがありません', out["permissionDecisionReason"])
+
+
 class TestMissingKeyIsFailClosed(BaseWithTmpProject):
     """キー未記載 service は deny (fail-closed) で、文面もそれと一致する。
 
@@ -3201,6 +3255,11 @@ class TestRemediationGuidanceContract(BaseWithTmpProject):
         self.addCleanup(patcher.stop)
         self.home = home
 
+    def _write_firebaserc(self, projects: dict) -> None:
+        (self.project_dir / ".firebaserc").write_text(
+            json.dumps({"projects": projects}), encoding="utf-8"
+        )
+
     def _deny_reason(self, command: str, run_mock) -> str:
         with mock.patch("subprocess.run", side_effect=run_mock):
             result = dispatch(command, str(self.project_dir))
@@ -3292,6 +3351,7 @@ class TestRemediationGuidanceContract(BaseWithTmpProject):
 
     def test_firebase_dict_mismatch_lists_aliases(self):
         self._write_accounts({"firebase": {"default": "proj-dev", "prod": "proj-prod"}})
+        self._write_firebaserc({"default": "proj-dev", "prod": "proj-prod"})
         run = self._const("proj-other\n")
         reason = self._deny_reason("firebase deploy", run)
         cmds = self._assert_guidance_is_allowed(reason, run)
@@ -3309,16 +3369,38 @@ class TestRemediationGuidanceContract(BaseWithTmpProject):
         self.assertIn("firebase login", cmds)
         self.assertIn("firebase use proj-dev", cmds)
 
+    def test_firebase_shadowed_project_id_is_not_guided_and_gets_no_note(self):
+        """期待値 (project ID) と同じ名前の alias が `.firebaserc` で別の project を指すと、
+        `firebase use <期待値>` では期待した project にならない。コマンドを案内しない deny に
+        「案内されたコマンドは単独で実行」の注記を付けない (現在値を取れない deny の
+        `firebase login` の語が REMEDIATION_PATTERNS に当たらないようにしてある)。"""
+        self._write_accounts({"firebase": "fb-prod"})
+        self._write_firebaserc({"fb-prod": "fb-elsewhere", "zz-decoy": "fb-decoy"})
+        with mock.patch("services.firebase.shutil.which", return_value="/usr/bin/firebase"):
+            for label, run in (
+                ("mismatch", self._const("fb-elsewhere\n")),
+                ("unresolved", self._const("", "Error: not logged in\n", 1)),
+            ):
+                with self.subTest(label):
+                    reason = self._deny_reason("firebase deploy", run)
+                    self.assertIn("解決先が期待値と合わないか確かめられない", reason)
+                    self.assertNotIn("firebase use", reason.split("(検出コマンド:")[0])
+                    self.assertNotIn("firebase login", reason.split("(検出コマンド:")[0])
+                    self.assertNotIn("案内された形のまま単独で実行してください", reason)
+
     def test_firebase_dict_unresolved_lists_aliases(self):
         """L2 P2: dict 期待値 + 未解決のときは `firebase use YOUR_PROJECT` (placeholder、
         self-remediation に乗らず loop) ではなく alias ごとの具体コマンドを案内する。"""
-        self._write_accounts({"firebase": {"default": "proj-dev", "prod": "proj-prod"}})
+        # alias に default を置かない (default があると、CLI から現在値を取れなくても
+        # `.firebaserc` から解決でき、deny にならない)
+        self._write_accounts({"firebase": {"dev": "proj-dev", "prod": "proj-prod"}})
+        self._write_firebaserc({"dev": "proj-dev", "prod": "proj-prod"})
         run = self._const("", "Error: not logged in\n", 1)
         with mock.patch("services.firebase.shutil.which", return_value="/usr/bin/firebase"):
             reason = self._deny_reason("firebase deploy", run)
             cmds = self._assert_guidance_is_allowed(reason, run)
         self.assertIn("firebase login", cmds)
-        self.assertIn("firebase use default", cmds)
+        self.assertIn("firebase use dev", cmds)
         self.assertIn("firebase use prod", cmds)
         self.assertNotIn("YOUR_PROJECT", reason)
 

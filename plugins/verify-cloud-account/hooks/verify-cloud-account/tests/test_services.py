@@ -14,6 +14,7 @@ from unittest import mock
 
 import _testutil  # noqa: F401
 
+from core import shell_word  # noqa: E402
 from services import aws, firebase, gcloud, github, kubectl  # noqa: E402
 
 _ISOLATION = None
@@ -378,11 +379,15 @@ class TestFirebase(unittest.TestCase):
         `firebase use <alias>` を案内する (self-remediation で通る形)。"""
         d = tempfile.mkdtemp()
         self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        (Path(d) / ".firebaserc").write_text(
+            json.dumps({"projects": {"dev": "proj-dev", "prod": "proj-prod"}}),
+            encoding="utf-8",
+        )
         with mock.patch("subprocess.run", return_value=_fake_run(returncode=1)):
             with mock.patch("shutil.which", return_value="/usr/local/bin/firebase"):
-                err = firebase.verify({"default": "proj-dev", "prod": "proj-prod"}, d)
+                err = firebase.verify({"dev": "proj-dev", "prod": "proj-prod"}, d)
         self.assertIn("firebase login", err)
-        self.assertIn("firebase use default  # → proj-dev", err)
+        self.assertIn("firebase use dev  # → proj-dev", err)
         self.assertIn("firebase use prod  # → proj-prod", err)
         self.assertNotIn("YOUR_PROJECT", err)
 
@@ -1316,6 +1321,193 @@ class TestFirebaseConfigOption(_FirebasercFixture):
                 self.assertIn("--config のファイルが見つからない", err)
                 self.assertNotIn("firebase use", err)
                 m.assert_not_called()
+
+
+class TestGuidanceReachesTheExpectedProject(_FirebasercFixture):
+    """deny 文面の `firebase use <x>` / `--project <x>` の案内が、`.firebaserc` で期待した project に着く。
+
+    firebase-tools は x を `.firebaserc` の alias として先に解決する。期待値の名前 (project ID や
+    alias) と同じ名前の alias が別の project を指していると、案内どおりにしても期待した project に
+    ならず、同じ deny に戻る (`--project` の案内は自分の deny と矛盾する)。案内するのは、解決先が
+    期待した project の語だけにする (dict の entry は alias → project ID の順に探し、どちらも
+    着かなければ案内しない。scalar は project ID だけ)。
+    """
+
+    _USE_RE = re.compile(r"firebase use ([^\s]+)")
+    # `--project` の案内は 2 つの形 (scalar の「--project X を指定」と dict の行頭の候補行)。
+    # 検出したコマンドの `--project other` と「--project を外すか」は案内ではない。
+    _FLAG_RES = (
+        re.compile(r"--project (\S+) を指定"),
+        re.compile(r"(?m)^  --project (\S+)  #"),
+    )
+    _UNREACHABLE = "解決先が期待値と合わないか確かめられない"
+
+    def _setup_cli(self):
+        which = mock.patch("services.firebase.shutil.which", return_value="/usr/bin/firebase")
+        which.start()
+        self.addCleanup(which.stop)
+
+    def _reasons(self, expected, projects: dict, name: str = "fb") -> dict[str, tuple[str, str]]:
+        """case -> (reason, project_root)。alias が 1 つだと firebase-tools はそれを既定の project に
+        するので (CLI から現在値を取れなくても解決し、deny にならない)、別の alias を足す。"""
+        root = self._project(json.dumps({"projects": {**projects, "zz-decoy": "fb-decoy"}}), name)
+        self._setup_cli()
+        out = {}
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="fb-elsewhere\n")):
+            out["mismatch"] = firebase.verify(expected, root)
+            out["--project"] = firebase.verify(expected, root, context={"project": "other"})
+        with mock.patch("subprocess.run", return_value=_fake_run(returncode=1)):
+            out["unresolved"] = firebase.verify(expected, root)
+        for case, reason in out.items():
+            self.assertIsNotNone(reason, case)
+        return {case: (reason, root) for case, reason in out.items()}
+
+    def _assert_guided_words_reach(self, reasons, expected, projects) -> int:
+        """案内された語が、すべて `.firebaserc` の解決で期待した project に着く (`firebase use` の
+        語は self-remediation としても通る)。案内された語の数を返す。"""
+        valid = [expected] if isinstance(expected, str) else list(expected.values())
+        count = 0
+        for case, (reason, root) in reasons.items():
+            regexes = self._FLAG_RES if case == "--project" else (self._USE_RE,)
+            for word in [w for regex in regexes for w in regex.findall(reason)]:
+                count += 1
+                with self.subTest(case=case, word=word):
+                    self.assertIn(firebase.resolve_target(root, word), valid, reason)
+                    if case != "--project":
+                        self.assertTrue(
+                            firebase.is_self_remediation(f"firebase use {word}", expected), reason
+                        )
+        return count
+
+    def test_shadowed_project_id_is_not_guided(self):
+        """期待値 (project ID) と同じ名前の alias が別の project を指すとき、その名前を案内しない
+        (案内どおりにしても fb-elsewhere に戻り、往復になる。`--project` の案内は自分の deny と
+        矛盾する)。着く語が無いので手で確認させる。"""
+        projects = {"fb-prod": "fb-elsewhere", "b-main": "fb-prod"}
+        reasons = self._reasons("fb-prod", projects)
+        for case, (reason, _root) in reasons.items():
+            with self.subTest(case=case):
+                self.assertNotRegex(reason, r"--project fb-prod を指定")
+                if case == "--project":
+                    # `--project` の値は hook が `.firebaserc` で解決して照合するので、期待した
+                    # project を指す alias なら通る。着く alias を案内する。
+                    self.assertIn("--project b-main を指定してください", reason)
+                    self.assertNotIn(self._UNREACHABLE, reason)
+                else:
+                    # `firebase use` の案内は期待値そのものしか self-remediation に通らないので、
+                    # 影のときは alias も案内せず手で確認させる。
+                    self.assertNotIn("firebase use", reason)
+                    self.assertNotRegex(reason, r"--project b-main")
+                    self.assertNotIn("firebase login", reason)  # 案内するコマンドは無い (dispatcher の注記)
+                    self.assertIn(self._UNREACHABLE, reason)
+        # 案内された語 (`--project b-main` の 1 件) は、解決で期待した project に着く。
+        self.assertEqual(self._assert_guided_words_reach(reasons, "fb-prod", projects), 1)
+
+    def test_shadowed_project_id_with_no_reaching_alias_is_not_guided(self):
+        """影のとき、期待した project を指す alias が無ければ `--project` の案内も出さない。"""
+        projects = {"fb-prod": "fb-elsewhere"}
+        reasons = self._reasons("fb-prod", projects)
+        for case, (reason, _root) in reasons.items():
+            with self.subTest(case=case):
+                self.assertNotRegex(reason, r"--project \S+ を指定")
+                self.assertIn(self._UNREACHABLE, reason)
+        self.assertEqual(self._assert_guided_words_reach(reasons, "fb-prod", projects), 0)
+
+    def test_no_guided_line_names_both_reasons_when_skipped_and_unreachable_are_mixed(self):
+        """案内できる行が 0 件で、許容形で省いた entry と解決先で省いた entry が混在するとき、
+        手で確認させる文は両方の理由を言う (片方だけだと UNSAFE の理由が消える)。"""
+        expected = {"$x": "proj-a", "main": "fb-prod"}
+        projects = {"main": "fb-elsewhere", "fb-prod": "fb-elsewhere"}
+        reasons = self._reasons(expected, projects)
+        for case, (reason, _root) in reasons.items():
+            with self.subTest(case=case):
+                self.assertIn(shell_word.UNSAFE, reason)
+                self.assertIn(self._UNREACHABLE, reason)
+
+    def test_unshadowed_project_id_is_guided_as_before(self):
+        projects = {"unrelated": "fb-other"}
+        reasons = self._reasons("fb-prod", projects)
+        expected_text = {
+            "mismatch": "切り替え: firebase use fb-prod",
+            "unresolved": "firebase login && firebase use fb-prod を実行",
+            "--project": "--project fb-prod を指定してください",
+        }
+        for case, text in expected_text.items():
+            with self.subTest(case=case):
+                self.assertIn(text, reasons[case][0])
+        self.assertEqual(self._assert_guided_words_reach(reasons, "fb-prod", projects), 3)
+
+    def test_dict_alias_pointing_elsewhere_falls_back_to_the_project_id(self):
+        """期待値の alias が `.firebaserc` で別の project を指すとき、その alias は案内せず、
+        期待値の project ID で案内する。alias が着くものはそのまま alias で案内する。"""
+        expected = {"main": "fb-prod", "sub": "fb-sub"}
+        projects = {"main": "fb-elsewhere", "sub": "fb-sub"}
+        reasons = self._reasons(expected, projects)
+        for case, (reason, _root) in reasons.items():
+            command = "--project" if case == "--project" else "firebase use"
+            with self.subTest(case=case):
+                self.assertNotIn(f"{command} main ", reason)
+                self.assertIn(f"  {command} fb-prod  # → fb-prod", reason)
+                self.assertIn(f"  {command} sub  # → fb-sub", reason)
+        self.assertEqual(self._assert_guided_words_reach(reasons, expected, projects), 6)
+
+    def test_dict_alias_missing_from_firebaserc_is_not_guided(self):
+        """`.firebaserc` に無い alias 名は firebase-tools が project ID として扱う。案内しない。"""
+        expected = {"main": "fb-prod"}
+        reasons = self._reasons(expected, {})
+        for case, (reason, _root) in reasons.items():
+            command = "--project" if case == "--project" else "firebase use"
+            with self.subTest(case=case):
+                self.assertNotIn(f"{command} main", reason)
+                self.assertIn(f"  {command} fb-prod  # → fb-prod", reason)
+        self.assertEqual(self._assert_guided_words_reach(reasons, expected, {}), 3)
+
+    def test_dict_entries_falling_back_to_the_same_project_id_are_listed_once(self):
+        expected = {"main": "fb-prod", "sub": "fb-prod"}
+        for case, (reason, _root) in self._reasons(expected, {}).items():
+            command = "--project" if case == "--project" else "firebase use"
+            with self.subTest(case=case):
+                self.assertEqual(reason.count(f"  {command} fb-prod  # → fb-prod"), 1, reason)
+
+    def test_dict_entry_that_cannot_reach_is_left_out_and_says_so(self):
+        """alias も project ID も期待した project に着かない entry は行にしない。ほかの entry の行が
+        あれば、その旨を添える。1 つも無ければ手で確認させる (コマンドの形で案内しない)。"""
+        expected = {"main": "fb-prod", "sub": "fb-sub"}
+        shadowed = {"main": "fb-elsewhere", "fb-prod": "fb-elsewhere", "sub": "fb-sub"}
+        for case, (reason, _root) in self._reasons(expected, shadowed).items():
+            command = "--project" if case == "--project" else "firebase use"
+            with self.subTest(case=case, partial=True):
+                self.assertNotIn("fb-prod  #", reason)
+                self.assertIn(f"  {command} sub  # → fb-sub", reason)
+                self.assertIn("ほかの alias は、.firebaserc の解決先が", reason)
+        hopeless = {"main": "fb-elsewhere", "fb-prod": "fb-elsewhere"}
+        for case, (reason, _root) in self._reasons({"main": "fb-prod"}, hopeless, "fb2").items():
+            with self.subTest(case=case, partial=False):
+                self.assertNotIn("firebase use", reason)
+                self.assertNotRegex(reason, r"--project (main|fb-prod)")
+                self.assertNotIn("firebase login", reason)  # 案内するコマンドは無い (dispatcher の注記)
+                self.assertIn(self._UNREACHABLE, reason)
+
+    def test_firebaserc_that_cannot_be_confirmed_is_not_guided(self):
+        """`.firebaserc` を firebase-tools と同じ内容に読めると確かめられないとき (コメントを含む)
+        は、行き先を言えないので案内しない (pin-env と同じ)。"""
+        root = self._project('{"projects": {"fb-prod": "fb-prod"} // comment\n}')
+        self._setup_cli()
+        for expected in ("fb-prod", {"main": "fb-prod"}):
+            reasons = {}
+            for case, run in (
+                ("mismatch", _fake_run(stdout="fb-elsewhere\n")),
+                ("unresolved", _fake_run(returncode=1)),
+            ):
+                with mock.patch("subprocess.run", return_value=run):
+                    try:
+                        reasons[case] = firebase.verify(expected, root)
+                    except Exception as e:  # 例外の漏れは FAIL として数える
+                        self.fail(f"{case}: {type(e).__name__}: {e}")
+            for case, reason in reasons.items():
+                with self.subTest(expected=expected, case=case):
+                    self.assertNotIn("firebase use", reason)
+                    self.assertIn(self._UNREACHABLE, reason)
 
 
 class TestAws(unittest.TestCase):
@@ -2544,13 +2736,18 @@ class TestContextOptionOverride(unittest.TestCase):
         (案内どおりに直しても通らない)。kubectl / gcloud の文面と方針を揃える。
         """
         expected = {"default": "proj-dev", "prod": "proj-prod"}
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        (Path(d) / ".firebaserc").write_text(
+            json.dumps({"projects": expected}), encoding="utf-8"
+        )
         with mock.patch("subprocess.run", return_value=_fake_run(stdout="proj-dev\n")):
-            err = firebase.verify(expected, "/p", context={"project": "unknown-proj"})
+            err = firebase.verify(expected, d, context={"project": "unknown-proj"})
         self.assertNotIn("firebase use", err)
         self.assertIn("--project prod", err)
         # str 期待値・kubectl・gcloud も同じ「flag を直す」形になっている。
         for other in (
-            firebase.verify("proj-dev", "/p", context={"project": "other"}),
+            firebase.verify("proj-dev", d, context={"project": "other"}),
             kubectl.verify("prod-ctx", "/p", context={"context": "other"}),
             gcloud.verify("my-proj", "/p", context={"project": "other"}),
         ):

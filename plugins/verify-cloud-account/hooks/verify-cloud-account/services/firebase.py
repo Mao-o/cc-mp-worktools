@@ -586,10 +586,26 @@ def suggest_accounts_entry(project_dir: str) -> str | None:
 _CHECK_BY_HAND = (
     f'期待値は{shell_word.UNSAFE}。accounts.local.json の "{ACCOUNT_KEY}" を手で確認してください'
 )
+# `firebase use <x>` / `--project <x>` が期待した project に着く案内を出せないときの文。
+# firebase-tools は x を `.firebaserc` の alias として先に解決するので、期待値の alias や project ID
+# と同じ名前の alias が別の project を指していたり、alias が無かったり、`.firebaserc` を
+# firebase-tools と同じ内容に読めると確かめられなかったりすると、案内どおりにしても期待した
+# project にならず、同じ deny に戻る。コマンドの形では案内しない (REMEDIATION_PATTERNS に
+# 当たらない文にする)。
+_UNREACHABLE_BY_HAND = (
+    ".firebaserc の alias の解決先が期待値と合わないか確かめられないため、期待値の名前を渡す"
+    f'切り替えでは期待した project になりません。.firebaserc と accounts.local.json の "{ACCOUNT_KEY}"'
+    " を手で確認してください"
+)
 # dict 期待値の一部の entry だけを案内行から省いたときに添える行。
 _SKIPPED_LINE = (
     f"  (ほかの alias は、alias か project ID が{shell_word.UNSAFE}。"
     f'accounts.local.json の "{ACCOUNT_KEY}" を手で確認してください)'
+)
+# dict 期待値の一部の entry を、`.firebaserc` の解決先が合わないため案内行から省いたときに添える行。
+_UNREACHABLE_LINE = (
+    "  (ほかの alias は、.firebaserc の解決先が期待した project と合わないか確かめられないため"
+    "案内していません。.firebaserc を手で確認してください)"
 )
 # `--project` の行き先を `.firebaserc` から確かめられないときの deny (v0.18.0)。先頭の文
 # (`_PROJECT_FLAG_UNCONFIRMED_HEAD`) の後ろに期待値 (`期待=`) を示し、続けて
@@ -663,32 +679,114 @@ def _target(value) -> str | None:
     return shell_word.arg(value, shell_word.NAME)
 
 
-def _alias_lines(expected: dict, command: str) -> list[str]:
-    """dict 期待値の案内行 (`<command> <alias>  # → <project>`)。
+def _reaching_word(projects: dict[str, str] | None, name: str, project: str) -> str | None:
+    """`firebase use <name>` / `--project <name>` に入れる語。project に着かなければ None。
+
+    firebase-tools は name を `.firebaserc` の alias として先に解決する (`_resolve_alias`)。
+    解決先が project でない (別の project を指す alias・alias が無く名前が project ID として
+    扱われる)、`.firebaserc` を firebase-tools と同じ内容に読めると確かめられない
+    (`projects` が None)、`firebase use` の許容形から外れる、のどれかなら None (案内しない)。
+    """
+    if projects is None or _resolve_alias(projects, name) != project:
+        return None
+    return _target(name)
+
+
+def _alias_lines(
+    expected: dict, command: str, projects: dict[str, str] | None
+) -> tuple[list[str], bool, bool]:
+    """dict 期待値の案内行 (`<command> <alias>  # → <project>`) と、解決先で省いた行の有無。
 
     command は `firebase use` (切替。各行は self-remediation で通る) か `--project`
-    (flag を直す形)。alias か project が許容形から外れる entry は行にしない。alias は
-    コマンドの引数なので `firebase use` の許容形 (`shell_word.NAME`)。`#` の後ろの project は
-    コメントで、問題になるのは改行 (コメントの外に出てコマンドになる) なので、一般の許容形
-    (`shell_word.WORD`。改行・空白・制御文字・非 ASCII を弾く) に限る — ドメイン付きの
-    project ID (`example.com:my-project`) も行にできる。省いた entry があれば、その旨と
-    手での確認を最後の行に添える。案内できる行が 1 つも無ければ空。
+    (flag を直す形)。`projects` は `.firebaserc` の alias → project ID (`_read_firebaserc`。
+    読めると確かめられなければ None)。案内する語は firebase-tools が期待した project に
+    解決するものだけ: entry ごとに alias を試し、着かなければ期待値の project ID を試し、
+    どちらも着かなければ行にしない (`_reaching_word`)。alias か project が許容形から外れる
+    entry も行にしない。alias はコマンドの引数なので `firebase use` の許容形
+    (`shell_word.NAME`)。`#` の後ろの project はコメントで、問題になるのは改行 (コメントの外に
+    出てコマンドになる) なので、一般の許容形 (`shell_word.WORD`。改行・空白・制御文字・非 ASCII
+    を弾く) に限る — ドメイン付きの project ID (`example.com:my-project`) も行にできる。
+    省いた entry があれば、その旨と手での確認を最後の行に添える (許容形が理由なら
+    `_SKIPPED_LINE`、解決先が理由なら `_UNREACHABLE_LINE`)。案内できる行が 1 つも無ければ空。
+    返す 2 つの bool は、許容形を理由に省いた entry があるか・解決先を理由に省いた entry があるか
+    (行が無いときの文を選ぶ。`_no_line_by_hand`)。
     """
-    lines, skipped = [], False
+    lines, skipped, unreachable = [], False, False
     for alias, project in expected.items():
         if not (isinstance(project, str) and project):
             continue
-        alias_arg, project_arg = _target(alias), shell_word.arg(project)
-        if alias_arg is None or project_arg is None:
+        project_arg = shell_word.arg(project)
+        if project_arg is None or _target(alias) is None:
             skipped = True
             continue
-        lines.append(f"  {command} {alias_arg}  # → {project_arg}")
+        word = _reaching_word(projects, alias, project) or _reaching_word(projects, project, project)
+        if word is None:
+            unreachable = True
+            continue
+        line = f"  {command} {word}  # → {project_arg}"
+        if line not in lines:
+            lines.append(line)
     if lines and skipped:
         lines.append(_SKIPPED_LINE)
-    return lines
+    if lines and unreachable:
+        lines.append(_UNREACHABLE_LINE)
+    return lines, skipped, unreachable
 
 
-def _project_flag_lines(expected: dict) -> list[str]:
+def _no_line_by_hand(skipped: bool, unreachable: bool) -> str:
+    """dict 期待値で案内できる行が 1 つも無いときの、手で確認させる文。
+
+    許容形で省いた entry (`shell_word.UNSAFE` の理由) と解決先で省いた entry が混在するときは、
+    両方の文を連結する (片方だけだと、もう一方の理由が文面から消える)。
+    """
+    if skipped and unreachable:
+        return f"{_CHECK_BY_HAND}。{_UNREACHABLE_BY_HAND}"
+    return _UNREACHABLE_BY_HAND if unreachable else _CHECK_BY_HAND
+
+
+def _login_then(unreachable: bool) -> str:
+    """「ログインしたうえで」の前置き。コマンドの形を案内する deny は `firebase login` と書く。
+
+    案内できるコマンドが無い deny (解決先で省いた) は、`firebase login` の語を書かない:
+    dispatcher は REMEDIATION_PATTERNS (`firebase login\\b`) に当たる文面に「案内されたコマンドは
+    単独で実行」の注記を付けるので、案内していないのに付くことになる。
+    """
+    return "ログインしたうえで、" if unreachable else "firebase login の後、"
+
+
+def _scalar_word(projects: dict[str, str] | None, project: str) -> str | None:
+    """scalar 期待値 (project ID) に切り替わる `firebase use` / `--project` の語。無ければ None。
+
+    project ID そのもの。ただし `.firebaserc` で同じ名前の alias が別の project を指している
+    (影になっている) とき、`.firebaserc` を firebase-tools と同じ内容に読めると確かめられない
+    ときは None。影のときに project を指す別の alias を案内しない: scalar の期待値に対する
+    self-remediation (`is_self_remediation`) は期待値そのものの名前しか通さないので、alias の
+    `firebase use` は検証に回って deny され、案内がまた行き止まりになる (判定は変えない)。
+    """
+    return _reaching_word(projects, project, project)
+
+
+def _scalar_project_flag_word(projects: dict[str, str] | None, project: str) -> str | None:
+    """scalar 期待値に対する `--project` の語。project ID (`_scalar_word`)、影のときは先頭の alias。
+
+    `--project` の値は verify() が `.firebaserc` で解決して照合する (alias を渡しても通る) ので、
+    project ID が影になっているとき (`_scalar_word` が None) は、期待した project を指す alias のうち
+    `_reaching_word` が通る先頭 (名前順。`aliases_for` と同じ並び) を案内する。無ければ None。
+    `firebase use` の案内には使わない (そちらは `is_self_remediation` が期待値そのものしか通さない)。
+    """
+    word = _scalar_word(projects, project)
+    if word is not None or projects is None:
+        return word
+    for alias in sorted(a for a, p in projects.items() if p == project):
+        word = _reaching_word(projects, alias, project)
+        if word is not None:
+            return word
+    return None
+
+
+def _project_flag_lines(
+    expected: dict, projects: dict[str, str] | None
+) -> tuple[list[str], bool, bool]:
     """dict 期待値に対する `--project <alias>` の候補行。
 
     `--project` 指定による不一致では、アクティブ project を切り替える
@@ -697,7 +795,7 @@ def _project_flag_lines(expected: dict) -> list[str]:
     (案内どおりに直しても通らない = remediation loop)。flag 自体を直す形を案内する。
     kubectl の `--context` / gcloud の `--project` 不一致文面と同じ方針。
     """
-    return _alias_lines(expected, "--project")
+    return _alias_lines(expected, "--project", projects)
 
 
 def verify(expected, project_dir: str, env=None, context=None) -> str | None:
@@ -776,9 +874,10 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
                 f"Firebase プロジェクト不一致: コマンド指定 {shown}, "
                 f"期待={shell_word.shown_all(valid)} のいずれか\n"
             )
-            lines = _project_flag_lines(expected)
+            lines, skipped, unreachable = _project_flag_lines(expected, projects)
             if not lines:
-                return f"{head}--project を外してください ({_CHECK_BY_HAND})"
+                by_hand = _no_line_by_hand(skipped, unreachable)
+                return f"{head}--project を外してください ({by_hand})"
             return (
                 f"{head}--project を外すか、以下のいずれかを指定してください:\n"
                 + "\n".join(lines)
@@ -786,9 +885,15 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
         if resolved == expected:
             return None
         head = f"Firebase プロジェクト不一致: コマンド指定 {shown}, 期待={shell_word.shown(expected)}"
-        target = _target(expected)
+        # 期待値の名前は `.firebaserc` の alias として先に解決される。別の project を指す alias と
+        # 同じ名前だと、`--project <期待値>` は期待した project にならない (案内が自分の deny と
+        # 矛盾する)。着く語だけを案内する: 期待値そのもの、影のときは期待した project を指す alias の
+        # うち着く先頭 (`_scalar_project_flag_word`。`--project` の値は上で `.firebaserc` で解決して
+        # 照合するので alias でも通る)。`firebase use` の案内は期待値そのものだけ (`_scalar_word`)。
+        target = _scalar_project_flag_word(projects, expected)
         if target is None:
-            return f"{head} — --project を外してください ({_CHECK_BY_HAND})"
+            by_hand = _CHECK_BY_HAND if _target(expected) is None else _UNREACHABLE_BY_HAND
+            return f"{head} — --project を外してください ({by_hand})"
         return f"{head} — --project を外すか --project {target} を指定してください"
 
     current, err = _resolve(root, env, config_file)
@@ -814,25 +919,29 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
         if isinstance(expected, dict):
             # `firebase use YOUR_PROJECT` のような placeholder は self-remediation に
             # 乗らず同じ deny を繰り返すため、alias ごとの具体コマンドを案内する。
-            lines = _alias_lines(expected, "firebase use")
+            lines, skipped, unreachable = _alias_lines(expected, "firebase use", _read_firebaserc(root))
             if not lines:
                 # 案内できる行が無くても期待値は示す (許容形のものだけ。`--config` 付きのコマンドの
                 # 同じ deny と同じ部品)。この deny の案内は「期待した project に切り替えて」で、どの
-                # project かが要る。出所は `_CHECK_BY_HAND` が言うので `_EXPECTED_NOT_SHOWN` は添えない。
+                # project かが要る。出所は `_CHECK_BY_HAND` / `_UNREACHABLE_BY_HAND` が言うので
+                # `_EXPECTED_NOT_SHOWN` は添えない。
+                by_hand = _no_line_by_hand(skipped, unreachable)
                 return (
                     f"{head}期待={shell_word.shown_all(valid)} のいずれか。"
-                    f"firebase login の後、期待した project に切り替えてください ({_CHECK_BY_HAND})。"
+                    f"{_login_then(unreachable)}期待した project に切り替えてください ({by_hand})。"
                 )
             return (
                 f"{head}firebase login の後、以下のいずれかで切り替えてください:\n"
                 + "\n".join(lines)
             )
-        target = _target(expected)
+        target = _scalar_word(_read_firebaserc(root), expected)
         if target is None:
             # 期待値は示す (dict で案内できる行が無いときと同じ)。
+            by_hand = _CHECK_BY_HAND if _target(expected) is None else _UNREACHABLE_BY_HAND
             return (
                 f"{head}期待={shell_word.shown_all([expected])}。"
-                f"firebase login の後、期待した project に切り替えてください ({_CHECK_BY_HAND})。"
+                f"{_login_then(by_hand is _UNREACHABLE_BY_HAND)}"
+                f"期待した project に切り替えてください ({by_hand})。"
             )
         return f"{head}firebase login && firebase use {target} を実行してください。"
 
@@ -848,9 +957,9 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
             f"Firebase プロジェクト不一致: 現在={shell_word.shown(current)}, "
             f"期待={shell_word.shown_all(valid)} のいずれか\n"
         )
-        lines = _alias_lines(expected, "firebase use")
+        lines, skipped, unreachable = _alias_lines(expected, "firebase use", _read_firebaserc(root))
         if not lines:
-            return f"{head}{_CHECK_BY_HAND}"
+            return f"{head}{_no_line_by_hand(skipped, unreachable)}"
         return f"{head}切り替え:\n" + "\n".join(lines)
 
     if current != expected:
@@ -863,9 +972,10 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
             f"Firebase プロジェクト不一致: 現在={shell_word.shown(current)}, "
             f"期待={shell_word.shown(expected)}"
         )
-        target = _target(expected)
+        target = _scalar_word(_read_firebaserc(root), expected)
         if target is None:
-            return f"{head} — {_CHECK_BY_HAND}"
+            by_hand = _CHECK_BY_HAND if _target(expected) is None else _UNREACHABLE_BY_HAND
+            return f"{head} — {by_hand}"
         return f"{head} — 切り替え: firebase use {target}"
 
     return None

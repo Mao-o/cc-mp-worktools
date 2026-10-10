@@ -1179,9 +1179,10 @@ deny 文面の切替案内と pin-env の `firebase use` は、Claude がその�
   `WORD` を使う (改行・空白・制御文字・非 ASCII は `WORD` でも弾ける。ドメイン付きの
   project ID `example.com:my-project` も行にできる)。AWS の「対応する profile」の一覧も、
   名前が `<profile>` に当てはめて使われるので、コマンドと同じ扱いにする
-- 値の一部でもコマンドの形で案内しなかった deny (`UNSAFE` / 「手で確認してください」の文を
+- 値の一部を許容形から外れるためコマンドの形で案内しなかった deny (`shell_word.UNSAFE` の文を
   含む) には、ほかの entry の切替を案内していても「案内したコマンドは単独で実行」の注記を
-  付けない。`期待=<値>` の表示は `REMEDIATION_PATTERNS` の照合の対象なので、値に
+  付けない (firebase の `.firebaserc` の解決先で省いた deny は `UNSAFE` を含まないので、
+  案内した行があれば注記を付ける)。`期待=<値>` の表示は `REMEDIATION_PATTERNS` の照合の対象なので、値に
   `x; kubectl config use-context other` のような形を書くと、案内していないのに注記が付き、
   文面で唯一コマンドの形をしたその値の実行を促していた。注記の判定から表示を除く案より
   小さい修正を採った代わりに、ある entry は案内し別の entry は抑止した deny (gh の複数
