@@ -23,6 +23,38 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.35.2
+
+**テスト整理 (挙動の変更なし)。外側の env の `GIT_DIR` などがテストの git に漏れ、git の hook から suite を
+流すと外側の repo を書き換えていたのを直し、床の自己確認を足した (patch bump)。** hook・`hooks.json`・
+README の挙動は変わらない。製品コードは変えていない。テスト件数: redact 1,546 → **1,568** /
+check 202 → **220**。
+
+### テスト: 外側の repo / config / template を指す変数をテストの git に届けない
+
+git の hook (pre-commit など) や `git -c` の配下から suite を流すと、外側の env の `GIT_DIR` /
+`GIT_WORK_TREE` / `GIT_INDEX_FILE` / `GIT_COMMON_DIR` / `GIT_OBJECT_DIRECTORY` /
+`GIT_ALTERNATE_OBJECT_DIRECTORIES` / `GIT_NAMESPACE` / `GIT_CONFIG` / `GIT_CONFIG_PARAMETERS` /
+`GIT_TEMPLATE_DIR` が、テストが起動する git にそのまま届いていた。別の repo を `GIT_DIR` に置いて
+流した実測 (修正前): check-sensitive-files は多数のテストが失敗し、外側の repo に commit が作られ
+config が書き換わった。redact-sensitive-reads は外側の repo の config に `user.name` と、反対の値の
+maintenance / gc の設定が書かれた。`GIT_CONFIG_PARAMETERS` は `GIT_CONFIG_COUNT` に勝って maintenance を
+黙って復活させ、`GIT_TEMPLATE_DIR` は template の `hooks/pre-commit` を helper の commit で走らせ、
+`info/exclude` で commit から file を外す。
+
+- `_testutil.OUTER_GIT_LEAK_ENV` (上の 10 個) と `hermetic_env()` を足した。repo を作る helper の `git()` は
+  `hermetic_env()` (外側の変数を外し、`HERMETIC_GIT_ENV` を足す) を渡す
+- `HermeticGitTestCase` が `os.environ` から同じ変数を外す。redact-sensitive-reads にも同じ基底クラスを
+  足し、Stop hook を in-process で動かす `test_e2e.py` の 1 クラスはこれを継承する (以前は env の patch に
+  `HERMETIC_GIT_ENV` を足していただけで、外れても気付けなかった)
+
+### テスト: 床の自己確認 (`tests/test_hermetic_env.py`)
+
+- 床が当てる側の値を持たないことを、床を作る点ごとに確かめる
+- helper が起動する git の全部が env を持つことを全件で確かめる
+- 2 つの docstring を直した
+- `docs/MAINTAINING.md` のテスト実行の節を更新
+
 ## 0.35.1
 
 **テスト整理 (挙動の変更なし)。テストの git が背景へ切り離す自動 maintenance を止め、テストが読む

@@ -270,8 +270,15 @@ plugin root (`plugins/sensitive-files-guardrail`) から実行する。**`cd` �
   env が届かず、この file だけが届く)、`GIT_CONFIG_NOSYSTEM=1`。hook が起動する git
   (`checker._run_git_raw`) にも届くよう、check-sensitive-files で repo を作るテストクラスは
   `_testutil.HermeticGitTestCase` を継承し、redact-sensitive-reads で Stop hook を in-process で
-  動かすクラス (`test_e2e.py`) は env の patch に `HERMETIC_GIT_ENV` を足す。継承と patch は床で
-  検査していない (外れても気付けない) ので、hook を動かすクラスを足すときに揃える。git が
+  動かすクラス (`test_e2e.py`) も同じ基底クラスを継承する。基底クラスの当て方は床が見る。redact の
+  e2e のクラスが基底クラスを使っていることは、床がそのクラスの `setUp` を実際に呼んで見る
+  (hook を動かすクラスを足すときは、その検査の対象に足す)。外側の env に `GIT_DIR` /
+  `GIT_WORK_TREE` / `GIT_INDEX_FILE` / `GIT_COMMON_DIR` / `GIT_OBJECT_DIRECTORY` /
+  `GIT_ALTERNATE_OBJECT_DIRECTORIES` / `GIT_NAMESPACE` / `GIT_CONFIG` / `GIT_CONFIG_PARAMETERS` /
+  `GIT_TEMPLATE_DIR` があると (git の hook や `git -c` の配下から suite を流すと入る)、repo を作る
+  helper が外側の repo に書き込み、外側の template の hook が helper の commit で走る。
+  `_testutil.OUTER_GIT_LEAK_ENV` の変数を、`hermetic_env()` (helper が渡す env) と
+  `HermeticGitTestCase` が外す。git が
   global の config と別に読む既定の除外ファイル (`$XDG_CONFIG_HOME/git/ignore`、未設定なら
   `~/.config/git/ignore`) は `GIT_CONFIG_GLOBAL` では外れないので、hook の
   `ls-files --others --exclude-standard` まで動かすクラスは HOME / XDG_CONFIG_HOME も tmp に
@@ -280,8 +287,14 @@ plugin root (`plugins/sensitive-files-guardrail`) から実行する。**`cd` �
   数える / 設定の出どころ別 / 直接の起動の検出)。床を足す・直すときは次を守る。
   「patch していない」状態を作る `isolate_git_config` は `GIT_CONFIG_NOSYSTEM` を**立てない**
   (立てると、定数・helper・基底クラスが当て損ねても床が埋めて通る)。「0 件」を見る床には、止める
-  設定が無いと起動が見える陽性対照を添える。mutation は空の HOME と `maintenance.auto=false` 等を
-  持つ HOME の両方で流す (床が HOME を差し替え損ねると、開発者の `~/.gitconfig` が問題を隠す)。
+  設定が無いと起動が見える陽性対照を添える。床 (外側の env) は当てる側の値 (`GIT_CONFIG_NOSYSTEM` /
+  fixture を指す `GIT_CONFIG_GLOBAL` / 止める側の `GIT_CONFIG_COUNT`) を持たない。床を作る点
+  (`isolate_git_config` の直後、trace / spy / push の床の区間、mixin の setUp) ごとに、床だけで起動した
+  git に当てる側の値が見えないことを確かめる (`assert_the_floor_stops_nothing` /
+  `test_the_floor_alone_stops_nothing`)。測る道具 (spy) が記録に値を足さないことも確かめる。
+  mutation は空の HOME と `maintenance.auto=false` 等を持つ HOME の両方で流し (床が HOME を差し替え損ねると、
+  開発者の `~/.gitconfig` が問題を隠す)、外側の env に `GIT_DIR` (別の repo) / `GIT_CONFIG_PARAMETERS` /
+  `GIT_TEMPLATE_DIR` を置いた行も流す。
   env を当てる各点 (定数 / helper / 基底クラス / hook の起動) について、`GIT_CONFIG_COUNT` だけ・
   `GIT_CONFIG_NOSYSTEM` 抜き・`GIT_CONFIG_GLOBAL` 抜きの 3 種が assertion (`failures=`) で落ちること
   を確かめる。`errors=` はテストが走っていない状態で、検出ではない
