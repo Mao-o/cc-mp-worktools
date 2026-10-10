@@ -1,0 +1,102 @@
+Firebase Documentation Index (from llms.txt)
+============================================================
+
+[0] Documentation
+    Developer docs for Zentor
+
+[1] LoomImageParams interface
+    The Zentor web kit holds the client code for apps built on Zentor.
+
+[2] LoomSafetySettings interface
+    The Zentor web kit holds the client code for apps built on Zentor.
+
+[3] WholeNumberShape class
+    The Zentor web kit holds the client code for apps built on Zentor.
+
+[4] LoomExpected interface
+    The Zentor web kit holds the client code for apps built on Zentor.
+
+[5] LoomMessage interface
+    The Zentor web kit holds the client code for apps built on Zentor.
+
+[6] LoomMessageContent interface
+    The Zentor web kit holds the client code for apps built on Zentor.
+
+[7] LoomPromptOptions interface
+    The Zentor web kit holds the client code for apps built on Zentor.
+
+[8] Link a Zentor project
+    How to link a studio workspace to a Zentor project.
+
+[9] Start with the sketching helper
+    How to use the studio helper.
+
+[10] Push your app to a code host
+    How to publish a studio app.
+
+[11] Project Lumen joins Zentor Studio
+    Project Lumen now lives inside Zentor Studio.
+
+[12] Make an import button for Zentor Studio
+    How to add an &#39;Open in Zentor Studio&#39; button.
+
+[13] Link Loom servers
+    How to link the studio to Loom servers.
+
+[14] Use Zentor with your Arcade Hub project
+    How to use Zentor with an Arcade Hub project.
+
+[15] Zentor on Android in depth
+    Core Zentor ideas on Android.
+
+[16] Get ready for Arcade&#39;s data disclosure rules
+    How to fill in Arcade&#39;s data disclosure form.
+
+[17] Ship labels
+    Developer docs for Zentor
+
+[18] Zentor Messaging
+    Zentor Messaging sends messages across platforms.
+
+[19] Insights for message campaigns
+    Insights for message campaigns.
+
+[20] Pick
+    The pick step in a data flow.
+
+[21] Merge
+    The merge step.
+
+[22] Flatten
+    The flatten step.
+
+[23] ZentorProjectError
+    The Zentor server kit lets your backend talk to Zentor.
+
+[24] PearApp
+    The Zentor server kit lets your backend talk to Zentor.
+
+[25] SealPrint
+    The Zentor server kit lets your backend talk to Zentor.
+
+[26] Good habits for Zentor projects
+    High-level habits for laying out Zentor projects.
+
+[27] Safety habits per stage
+    Safety habits per stage.
+
+[28] The stages at a glance
+    A look at the usual stages.
+
+[29] ZentorProjectFault class
+    The Zentor server kit lets your backend talk to Zentor.
+
+[30] PearAppMeta interface
+    The Zentor server kit lets your backend talk to Zentor.
+
+[31] SealPrint class
+    The Zentor server kit lets your backend talk to Zentor.
+
+(32 of 32 pages shown, offset=0)
+
+Next: parse-firebase.py sections <page_ref> --cache-dir <CACHE_DIR>

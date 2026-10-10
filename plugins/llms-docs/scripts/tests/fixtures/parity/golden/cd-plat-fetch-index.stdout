@@ -1,0 +1,38 @@
+Claude Developer Platform Document Index (from llms.txt)
+============================================================
+
+[home] Documentation
+
+[3] Folding
+
+[1] Memory spans
+
+[0] Get your access token
+    Get your Vantry access token
+
+[4] Overview
+    Guides to sample tasks
+
+[5] Overview
+    Prompt shaping overview
+
+[6] Glossary
+
+[7] Move between model releases
+    Migration notes
+
+[8] IP addresses
+
+[9] Releases
+
+[10] Fetch Blob
+
+[11] Fetch Blob (Beta)
+
+Releases
+    Variants: Beta [crews/releases], Beta [kits/releases]
+
+(14 pages total, 13 entries shown — 2 pages grouped)
+
+Next: parse-claude-docs.py sections <page_ref> --source platform --cache-dir <CACHE_DIR>
+  (llms-full.txt will be fetched automatically on first use)

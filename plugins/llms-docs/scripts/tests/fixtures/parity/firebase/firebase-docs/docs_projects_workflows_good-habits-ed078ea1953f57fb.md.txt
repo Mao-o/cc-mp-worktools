@@ -1,0 +1,18 @@
+Sunt aute proident occaecat occaecat aliquip mollit mollit sunt veniam nostrud aliqua cupidatat exercitation. Nulla culpa sed deserunt aute labore quis duis irure amet irure nulla dolor commodo.
+
+## How Zentor projects nest
+
+Proident incididunt sit labore fugiat tempor culpa cillum mollit culpa pariatur minim cupidatat laborum. Cillum dolor quis quis nisi anim cupidatat occaecat esse reprehenderit deserunt excepteur ipsum amet.
+
+### Where does a parent project sit?
+
+Cupidatat nostrud excepteur esse consectetur officia minim mollit ipsum officia amet quis occaecat duis. Eiusmod cillum amet occaecat sunt esse excepteur duis pariatur voluptate magna occaecat ipsum velit.
+Note that every app in one project shares its resources.
+
+## App variants and Zentor projects
+
+Aliqua dolor laborum consectetur lorem elit occaecat cillum consectetur ullamco exercitation exercitation occaecat adipiscing. Elit minim aliqua labore excepteur quis incididunt sint cupidatat sed reprehenderit veniam ipsum incididunt.
+
+## Where to go next
+
+* Nostrud tempor laborum enim labore veniam.

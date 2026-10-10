@@ -1,0 +1,88 @@
+Search results for "snapshot restore" (Claude Code)
+============================================================
+
+[4] Restore file edits with snapshotting (index_score: 22)
+    URL: https://code.claude.com/docs/en/kit/file-snapshotting.md
+    (13 body hits, showing 3)
+    Section: Turn snapshots on  (x6)  [https://code.claude.com/docs/en/kit/file-snapshotting#turn-snapshots-on]
+        Each edit made by a tool call records a snapshot. Incididunt dolor irure irure exercitation sed nulla reprehenderit duis dolore amet deserunt mollit veniam. Sit veniam officia labore fugiat deserunt sed nulla magna laborum magna veniam sed ullamco.
+        
+      → ## Turn snapshots on
+        
+          ```python Python theme={null}
+      →   # lorem: enable snapshots
+      →   opts = KitOptions(snapshots=True)
+          await kit.restore_files(turn_id)
+          ```
+        ... (3 more hits in this section)
+
+    Section: Fixing problems/"Snapshot missing for turn" error  (x2)  [https://code.claude.com/docs/en/kit/file-snapshotting#snapshot-missing-for-turn-error]
+        ## Fixing problems
+        
+      → ### "Snapshot missing for turn" error
+        
+      → The restore target has no snapshot. Reprehenderit sed ullamco minim consequat commodo dolor irure proident sunt laboris amet exercitation adipiscing. Anim laborum pariatur nisi aliqua pariatur laborum tempor aute irure velit commodo voluptate tempor.
+        
+        ## Where to go next
+
+    Section: (top)  [before first heading]  (x3)
+      → Source: https://code.claude.com/docs/en/kit/file-snapshotting
+        
+      → Record file edits during kit sessions and put files back to any earlier snapshot
+        
+      → File snapshotting lets a kit session restore the files it edited. Labore nostrud quis sed ipsum laboris magna sunt nisi labore pariatur veniam mollit sint. Amet fugiat cillum occaecat sint tempor fugiat nisi tempor laboris mollit aliqua sed sunt.
+        
+        ## Snapshot basics
+
+    Other sections with hits (not shown):
+      - Recipes/Several restore marks  (x2)
+
+
+[10] Snapshotting (index_score: 17)
+    URL: https://code.claude.com/docs/en/snapshotting.md
+    (9 body hits, showing 3)
+    Section: How snapshots work/Restore and condense  (x4)  [https://code.claude.com/docs/en/snapshotting#restore-and-condense]
+        ...
+        
+      → ### Restore and condense
+        
+      → Type `/restore`, or tap `Esc` three times, to open the restore list.
+        
+        <Note>
+      →   With text in the input box, `Esc` wipes that text and the restore list stays shut.
+        </Note>
+        
+        ... (1 more hits in this section)
+
+    Section: (top)  [before first heading]  (x3)
+      → Source: https://code.claude.com/docs/en/snapshotting
+        
+      → Record, restore, and condense edits and chat to manage session state.
+        
+      → Quillon records its own edits so you can restore a session. Cillum magna duis dolore quis sit excepteur labore esse cupidatat nulla enim minim pariatur. Consequat irure culpa nostrud elit occaecat eiusmod veniam nostrud duis deserunt pariatur duis cupidatat.
+        
+        ## How snapshots work
+
+    Section: Limits/Shell edits are not captured  (x2)  [https://code.claude.com/docs/en/snapshotting#shell-edits-are-not-captured]
+        ### Shell edits are not captured
+        
+      → Snapshotting skips files that shell commands touch, so a restore leaves them as they are:
+        
+        ```bash theme={null}
+        rm lorem.txt
+        mv ipsum.txt dolor.txt
+        cp sit.txt amet.txt
+        ...
+        
+        ## See also
+        
+      → * [Restore file edits with snapshotting](/docs/en/kit/file-snapshotting)
+        
+        ## Related
+
+
+(2 pages from Claude Code)
+
+Next: parse-claude-docs.py content 4 'Turn snapshots on' --cache-dir <CACHE_DIR>
+Next: parse-claude-docs.py content 10 'How snapshots work/Restore and condense' --cache-dir <CACHE_DIR>
+Next: parse-claude-docs.py content 4 'Fixing problems/"Snapshot missing for turn" error' --cache-dir <CACHE_DIR>

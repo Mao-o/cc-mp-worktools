@@ -1,0 +1,17 @@
+Search-content results for "stream" (file: <CACHE_DIR>/ai-sdk-llms-full.txt)
+============================================================
+
+[1] Migrate Loomkit 3.3 to 3.4
+    URL: https://ai-sdk.dev/docs/upgrades/upgrade-3-4
+    (1 hits in this document, showing 1)
+    Section: (top)  [before first heading]  (x1)
+        Nothing breaks in this release.
+        
+      → Partial results now stream to the client. Sint nostrud anim sed officia excepteur esse exercitation ipsum veniam occaecat tempor consequat laboris. Velit tempor magna aliqua eiusmod commodo amet ipsum nulla sit lorem elit nulla duis.
+        
+        ---
+
+
+(1 hits across 1 documents, showing top 1)
+
+Next: parse-ai-sdk.py content 1 '(top)' --cache-dir <CACHE_DIR>

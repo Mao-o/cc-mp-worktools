@@ -1,0 +1,31 @@
+Search-index results for "projects" (Firebase)
+  (index: <CACHE_DIR>/firebase-llms.txt)
+============================================================
+
+[8] Link a Zentor project (score: 7)
+    How to link a studio workspace to a Zentor project.
+    URL: https://firebase.google.com/docs/studio/zentor-projects.md.txt
+
+[11] Project Lumen joins Zentor Studio (score: 7)
+    Project Lumen now lives inside Zentor Studio.
+    URL: https://firebase.google.com/docs/studio/lumen-joins-zentor-studio.md.txt
+
+[14] Use Zentor with your Arcade Hub project (score: 7)
+    How to use Zentor with an Arcade Hub project.
+    URL: https://firebase.google.com/docs/android/integrate-arcade-hub.md.txt
+
+[26] Good habits for Zentor projects (score: 7)
+    High-level habits for laying out Zentor projects.
+    URL: https://firebase.google.com/docs/projects/workflows/good-habits.md.txt
+
+[23] ZentorProjectError (score: 5)
+    The Zentor server kit lets your backend talk to Zentor.
+    URL: https://firebase.google.com/docs/reference/server/java/com/zentor/projects/ZentorProjectError.md.txt
+
+[29] ZentorProjectFault class (score: 5)
+    The Zentor server kit lets your backend talk to Zentor.
+    URL: https://firebase.google.com/docs/reference/server/node/zentor-server.projects.zentorprojectfault.md.txt
+
+(6 results, 32 pages searched)
+
+Next: parse-firebase.py search "<query>" --cache-dir <CACHE_DIR>

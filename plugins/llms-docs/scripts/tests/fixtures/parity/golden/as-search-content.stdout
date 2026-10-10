@@ -1,0 +1,28 @@
+Search-content results for "JSX" (file: <CACHE_DIR>/ai-sdk-llms-full.txt)
+============================================================
+
+[6] TypeScript error "Cannot find module 'LoomJSX'"
+    URL: https://ai-sdk.dev/docs/fixes/typescript-cannot-find-loomjsx
+    (3 hits in this document, showing 2)
+    Section: Solution  (x2)
+        ## Solution
+        
+      → Add the JSX types to your config:
+        
+        ```json
+      → { "compilerOptions": { "types": ["lorem-jsx"] } }
+        ```
+        
+
+    Section: Issue  (x1)
+        ## Issue
+        
+      → The build stops with `Cannot find module 'LoomJSX'`.
+        
+        ## Background
+
+
+(3 hits across 1 documents, showing top 1)
+
+Next: parse-ai-sdk.py content 6 Solution --cache-dir <CACHE_DIR>
+Next: parse-ai-sdk.py content 6 Issue --cache-dir <CACHE_DIR>

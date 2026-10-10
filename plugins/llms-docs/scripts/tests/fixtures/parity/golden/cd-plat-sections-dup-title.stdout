@@ -1,0 +1,10 @@
+Sections in [11] "Fetch Blob"
+  URL: https://platform.claude.com/docs/en/api/beta/blobs/fetch
+============================================================
+[L2] Path fields
+[L2] Header fields
+[L2] Example [code]
+
+(3 sections)
+
+Next: parse-claude-docs.py content 11 "<heading_path>" --source platform --cache-dir <CACHE_DIR>

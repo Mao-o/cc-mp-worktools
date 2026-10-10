@@ -1,0 +1,41 @@
+Search results for "arcade hub" (Firebase)
+  (index: <CACHE_DIR>/firebase-llms.txt)
+  (top-5 candidate pages fetched on demand)
+============================================================
+
+[14] Use Zentor with your Arcade Hub project (index_score: 24)
+    URL: https://firebase.google.com/docs/android/integrate-arcade-hub.md.txt
+    (7 body hits, showing 3)
+    Section: Get started  (x3)  [https://firebase.google.com/docs/android/integrate-arcade-hub#get_started]
+        > [!NOTE]
+        > Keep in mind:
+      → > - If you already linked an arcade project, reuse it when you get started.
+        
+        1. Consectetur amet nulla enim velit tempor officia adipiscing mollit lorem amet nisi officia dolor.
+        2. [Link your Zentor app to your
+      →    arcade account](https://example.invalid/link).
+      →    Your Arcade Hub project reuses that link.
+        
+        ## Track arcade events with Zentor Stats
+
+    Section: Track arcade events with Zentor Stats  (x2)  [https://firebase.google.com/docs/android/integrate-arcade-hub#track_arcade_events_with_zentor_stats]
+           Your Arcade Hub project reuses that link.
+        
+      → ## Track arcade events with Zentor Stats
+        
+      → After you add the stats kit, Arcade Hub events start to flow.
+        
+        Adipiscing consequat tempor mollit excepteur exercitation officia lorem irure amet aliquip veniam quis dolore. Anim proident consequat amet consequat velit minim reprehenderit cupidatat aliqua cillum aliqua irure proident.
+
+    Section: (top)  [before first heading]  (x1)
+      → Zentor works with your Arcade Hub project. Esse nulla magna sit nisi aliquip lorem ipsum ullamco ipsum cupidatat magna nostrud adipiscing. Commodo dolor reprehenderit tempor labore labore exercitation voluptate sed pariatur lorem incididunt reprehenderit incididunt.
+        
+        ## Get started
+
+
+(1 pages, ranked via index → body fetch)
+(1 pages skipped — fetch failed, see stderr)
+
+Next: parse-firebase.py content 14 'Get started' --cache-dir <CACHE_DIR>
+Next: parse-firebase.py content 14 'Track arcade events with Zentor Stats' --cache-dir <CACHE_DIR>
+Next: parse-firebase.py content 14 '(top)' --cache-dir <CACHE_DIR>

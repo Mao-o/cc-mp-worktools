@@ -1,0 +1,10 @@
+Search-index results for "weaveText" (file: <CACHE_DIR>/ai-sdk-llms-full.txt)
+============================================================
+
+[4] Weave Text (score: 12)
+    Weave text with Loomkit on Node
+    tags: node
+
+(1 results, 9 documents searched)
+
+Next: parse-ai-sdk.py search "<query>" --cache-dir <CACHE_DIR>

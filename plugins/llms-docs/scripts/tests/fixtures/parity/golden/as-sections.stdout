@@ -1,0 +1,13 @@
+Sections in [3] "useCompletion"
+  URL: https://ai-sdk.dev/docs/reference/loomkit-ui/completion-helper
+  (file: <CACHE_DIR>/ai-sdk-llms-full.txt)
+============================================================
+  [L2] Install
+  [L2] API Signature
+    [L3] API Signature/Generics
+    [L3] API Signature/Arguments
+    [L3] API Signature/Result
+
+(5 sections)
+
+Next: parse-ai-sdk.py content 3 "<heading_path>" --cache-dir <CACHE_DIR>

@@ -1,0 +1,153 @@
+Search-content results for "hub" (file: <CACHE_DIR>/claude-code-llms-full.txt)
+============================================================
+
+[3] Roll out a hub for your crew
+    URL: https://code.claude.com/docs/en/hub-rollout
+    (17 hits in this page, showing 5)
+    Section: Rollout/Check that the hub reaches the vendor  (x4)  [https://code.claude.com/docs/en/hub-rollout#check-that-the-hub-reaches-the-vendor]
+          <Step title="Check that the hub reaches the vendor">
+        
+      → ### Check that the hub reaches the vendor
+        
+      →     The hub should already answer at its base address.
+        
+            ```bash theme={null}
+      →     curl "$HUB_URL/v1/ping" -H "x-key: <hub-key>"
+            ```
+        
+        ... (1 more hits in this section)
+
+    Section: (top)  [before first heading]  (x3)
+      → Source: https://code.claude.com/docs/en/hub-rollout
+        
+      → Stand up a hub product for Quillon: forward requests, hand out keys, and check the rollout.
+        
+      → This guide rolls a hub out in four steps. Culpa nisi consectetur dolor reprehenderit incididunt sit officia aliquip amet fugiat adipiscing laborum nostrud. Labore sint exercitation eiusmod culpa laboris nisi commodo incididunt occaecat culpa dolor fugiat anim.
+        
+        ## Before you begin
+
+    Section: Before you begin/What the hub needs  (x2)  [https://code.claude.com/docs/en/hub-rollout#what-the-hub-needs]
+        Veniam adipiscing enim nisi commodo deserunt commodo velit aute consectetur dolor sed nisi laboris. Incididunt mollit voluptate reprehenderit magna esse mollit pariatur aliqua cupidatat labore consectetur cillum consequat.
+        
+      → ### What the hub needs
+        
+      → * The hub passes every header Quillon sends.
+        * Nostrud sunt consectetur sunt aliqua minim proident voluptate adipiscing.
+        
+
+    Section: Rollout/Ship the settings/Which settings to ship  (x2)  [https://code.claude.com/docs/en/hub-rollout#which-settings-to-ship]
+        | Setting | Purpose | When |
+        | :- | :- | :- |
+      → | `QUILLON_BASE_URL` | Points requests at the hub | Always |
+      → | `keyHelper` | Signs each request to the hub | Always |
+        
+        #### Ship them as managed settings
+
+    Section: Rollout  (x1)  [https://code.claude.com/docs/en/hub-rollout#rollout]
+        
+        <Steps>
+      →   <Step title="Check that the hub reaches the vendor">
+        
+        ### Check that the hub reaches the vendor
+
+    Other sections with hits (not shown):
+      - Rollout/Hand out keys  (x1)
+      - Rollout/Ship the settings/Ship them as managed settings  (x1)
+      - Rollout/Check the rollout  (x1)
+      - Keep the hub healthy  (x1)
+      - See also  (x1)
+
+
+[2] Route Quillon through a hub
+    URL: https://code.claude.com/docs/en/hubs
+    (9 hits in this page, showing 5)
+    Section: (top)  [before first heading]  (x3)
+      → Source: https://code.claude.com/docs/en/hubs
+        
+      → Send Quillon traffic through a self-hosted hub for shared keys and usage totals.
+        
+      → A hub sits between Quillon and the model vendor. Aliquip veniam pariatur aliqua lorem quis pariatur deserunt tempor nisi proident mollit aliquip adipiscing. Minim esse sit ullamco excepteur reprehenderit eiusmod consequat deserunt eiusmod dolor quis incididunt tempor.
+        
+        ## What a hub does
+
+    Section: What a hub does  (x2)  [https://code.claude.com/docs/en/hubs#what-a-hub-does]
+        ...
+        
+      → ## What a hub does
+        
+      → Each request reaches the hub first. Laboris ipsum anim nulla officia amet cillum eiusmod magna lorem eiusmod laborum lorem cillum. Cupidatat enim magna sunt esse enim adipiscing sint lorem fugiat quis exercitation incididunt excepteur.
+        
+        ## Pick a hub
+
+    Section: Pick a hub/Other hubs  (x2)  [https://code.claude.com/docs/en/hubs#other-hubs]
+        Mollit esse eiusmod eiusmod aliqua sint sed deserunt veniam ipsum consequat ipsum lorem dolore. Sint nisi aliquip aliqua aute ipsum aute commodo amet nulla nulla anim tempor minim.
+        
+      → ### Other hubs
+        
+      → See [Other hubs](/docs/en/hub) and [Roll out a hub for your crew](/docs/en/hub-rollout).
+        
+        ## Where to go next
+
+    Section: Pick a hub  (x1)  [https://code.claude.com/docs/en/hubs#pick-a-hub]
+        Each request reaches the hub first. Laboris ipsum anim nulla officia amet cillum eiusmod magna lorem eiusmod laborum lorem cillum. Cupidatat enim magna sunt esse enim adipiscing sint lorem fugiat quis exercitation incididunt excepteur.
+        
+      → ## Pick a hub
+        
+        ### Managed hub
+
+    Section: Pick a hub/Managed hub  (x1)  [https://code.claude.com/docs/en/hubs#managed-hub]
+        ## Pick a hub
+        
+      → ### Managed hub
+        
+        Mollit esse eiusmod eiusmod aliqua sint sed deserunt veniam ipsum consequat ipsum lorem dolore. Sint nisi aliquip aliqua aute ipsum aute commodo amet nulla nulla anim tempor minim.
+
+
+[8] Other hubs
+    URL: https://code.claude.com/docs/en/hub
+    (8 hits in this page, showing 5)
+    Section: (top)  [before first heading]  (x3)
+      → Source: https://code.claude.com/docs/en/hub
+        
+      → Use a hub your crew already runs with Quillon, and what it has to pass along.
+        
+      → Quillon can use a hub you already operate. Nostrud duis proident excepteur velit culpa voluptate sint sit adipiscing commodo nisi quis incididunt. Labore proident eiusmod culpa ullamco voluptate dolor nostrud sint minim fugiat exercitation irure aliqua.
+        
+        ## What a hub gives you
+
+    Section: Roll out a hub  (x2)  [https://code.claude.com/docs/en/hub#roll-out-a-hub]
+        ...
+        
+      → ## Roll out a hub
+        
+      → To roll out a hub across your crew, follow [Roll out a hub for your crew](/docs/en/hub-rollout).
+        Proident veniam magna voluptate anim occaecat consequat sint incididunt esse tempor duis sunt veniam. Cillum esse reprehenderit excepteur labore dolor anim nostrud mollit nostrud culpa aliquip amet deserunt.
+        
+
+    Section: What a hub gives you  (x1)  [https://code.claude.com/docs/en/hub#what-a-hub-gives-you]
+        Quillon can use a hub you already operate. Nostrud duis proident excepteur velit culpa voluptate sint sit adipiscing commodo nisi quis incididunt. Labore proident eiusmod culpa ullamco voluptate dolor nostrud sint minim fugiat exercitation irure aliqua.
+        
+      → ## What a hub gives you
+        
+        Veniam fugiat sit tempor aute irure amet consequat elit elit sunt commodo quis sint. Nulla ipsum nostrud minim minim minim commodo elit sunt sunt dolor laboris aute sunt.
+
+    Section: Plans and hubs  (x1)  [https://code.claude.com/docs/en/hub#plans-and-hubs]
+        Proident veniam magna voluptate anim occaecat consequat sint incididunt esse tempor duis sunt veniam. Cillum esse reprehenderit excepteur labore dolor anim nostrud mollit nostrud culpa aliquip amet deserunt.
+        
+      → ## Plans and hubs
+        
+        Occaecat lorem laborum sit sunt commodo lorem commodo aliqua tempor ipsum consectetur sunt deserunt. Esse enim enim tempor voluptate excepteur exercitation adipiscing lorem exercitation incididunt consequat amet aliquip.
+
+    Section: See also  (x1)  [https://code.claude.com/docs/en/hub#see-also]
+        ## See also
+        
+      → * [Route Quillon through a hub](/docs/en/hubs)
+        
+        
+
+
+(34 hits across 3 pages, showing top 3)
+
+Next: parse-claude-docs.py content 3 'Rollout/Check that the hub reaches the vendor' --cache-dir <CACHE_DIR>
+Next: parse-claude-docs.py content 2 '(top)' --cache-dir <CACHE_DIR>
+Next: parse-claude-docs.py content 8 '(top)' --cache-dir <CACHE_DIR>

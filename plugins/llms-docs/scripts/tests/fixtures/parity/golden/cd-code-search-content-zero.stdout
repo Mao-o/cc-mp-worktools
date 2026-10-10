@@ -1,0 +1,12 @@
+Search-content results for "zzzparitynohit" (file: <CACHE_DIR>/claude-code-llms-full.txt)
+============================================================
+
+No matching content found.
+
+Tip: try broader keywords or 'search-index' to find relevant pages first
+
+Why nothing matched: 11 pages checked, how many contain each term:
+  "zzzparitynohit": 0 of 11  <- not in this corpus
+None of the terms appears anywhere, so rewording the same idea is unlikely to help; try a different word, 'search-index' (titles / descriptions), or another source.
+Next: parse-claude-docs.py search-index zzzparitynohit --cache-dir <CACHE_DIR>
+Next: parse-claude-docs.py search-content zzzparitynohit --source platform --cache-dir <CACHE_DIR>

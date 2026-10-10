@@ -1,0 +1,13 @@
+Search results for "zzzparitynohit" (Firebase)
+  (index: <CACHE_DIR>/firebase-llms.txt)
+  (top-5 candidate pages fetched on demand)
+============================================================
+
+No matching pages found.
+
+Tip: try broader keywords, or 'search-content "<query>"' (omit --page-ref to scan every page — slow on first run) to search page bodies directly
+
+Why nothing matched: 32 index entries (title/description) checked, how many contain each term:
+  "zzzparitynohit": 0 of 32  <- not in this corpus
+None of the terms appears anywhere, so rewording the same idea is unlikely to help; try a different word, 'search-index' (titles / descriptions), or another source.
+Next: parse-firebase.py search-index zzzparitynohit --cache-dir <CACHE_DIR>

@@ -1,0 +1,12 @@
+Sections in [2] "Route Quillon through a hub"
+  URL: https://code.claude.com/docs/en/hubs
+============================================================
+[L2] What a hub does
+[L2] Pick a hub
+  [L3] Pick a hub/Managed hub
+  [L3] Pick a hub/Other hubs
+[L2] Where to go next
+
+(5 sections)
+
+Next: parse-claude-docs.py content 2 "<heading_path>" --cache-dir <CACHE_DIR>

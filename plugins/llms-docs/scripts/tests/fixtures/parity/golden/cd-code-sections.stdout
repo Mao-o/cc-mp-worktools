@@ -1,0 +1,15 @@
+Sections in [10] "Snapshotting"
+  URL: https://code.claude.com/docs/en/snapshotting
+============================================================
+[L2] How snapshots work
+  [L3] How snapshots work/Automatic capture
+  [L3] How snapshots work/Restore and condense
+    [L4] How snapshots work/Restore and condense/Restore past a wiped chat
+    [L4] How snapshots work/Restore and condense/Steer a condensation
+[L2] Common uses
+[L2] Limits
+  [L3] Limits/Shell edits are not captured [code]
+
+(8 sections)
+
+Next: parse-claude-docs.py content 10 "<heading_path>" --cache-dir <CACHE_DIR>

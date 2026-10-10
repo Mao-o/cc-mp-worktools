@@ -1,0 +1,15 @@
+Search-index results for "workers side" (Claude Code)
+  (index: <CACHE_DIR>/claude-code-llms.txt)
+============================================================
+
+[9] Run workers side by side (score: 22)
+    Compare how Quillon handles several jobs at once: helpers, worker crews, and pipelines.
+    URL: https://code.claude.com/docs/en/workers.md
+
+[6] Quillon Desktop in a sandbox VM (score: 2)
+    Run sessions inside a sandbox VM on the desktop app
+    URL: https://code.claude.com/docs/en/desktop-vm.md
+
+(2 results, 16 pages searched)
+
+Next: parse-claude-docs.py search "<query>" --cache-dir <CACHE_DIR>

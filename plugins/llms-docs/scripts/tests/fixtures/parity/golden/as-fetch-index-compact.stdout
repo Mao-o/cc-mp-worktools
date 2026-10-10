@@ -1,0 +1,12 @@
+AI SDK llms-full.txt Document Index (file: <CACHE_DIR>/ai-sdk-llms-full.txt)
+============================================================
+
+[0] Troubleshooting  [1] Migrate Loomkit 3.3 to 3.4
+[2] Experimental_StdioLoomTransport  [3] useCompletion  [4] Weave Text
+[5] Embed Phrase  [6] TypeScript error "Cannot find module 'LoomJSX'"
+[7] Loom is not assignable to type "LoomModelV1"  [8] Stream Shape
+
+(9 documents total)
+
+Tip: use 'search' to rank docs + drill into bodies in one call
+Next: parse-ai-sdk.py sections <page_ref> --cache-dir <CACHE_DIR>

@@ -1,0 +1,14 @@
+Sections in [14] "Use Zentor with your Arcade Hub project"
+  URL: https://firebase.google.com/docs/android/integrate-arcade-hub.md.txt
+  Cache: <CACHE_DIR>/firebase-docs/docs_android_integrate-arcade-hub-9f8d4d0bd1560c0c.md.txt
+============================================================
+[L2] Get started
+[L2] Track arcade events with Zentor Stats
+[L2] Fixing frequent problems
+  [L3] Fixing frequent problems/Arcade Hub events missing from the dashboard
+  [L3] Fixing frequent problems/The arcade console will not link to Zentor
+  [L3] Fixing frequent problems/The Zentor console will not open from the arcade console
+
+(6 sections)
+
+Next: parse-firebase.py content 14 "<heading_path>" --cache-dir <CACHE_DIR>

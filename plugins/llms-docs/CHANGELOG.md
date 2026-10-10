@@ -2,6 +2,71 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.35.6] - 2026-10-10
+
+### テスト追加: 専用 parser 3 本の出力を固定する parity harness (挙動の変更なし)
+
+テストだけの変更。script・SKILL.md・README の挙動は変わらない (patch bump)。
+
+- **目的**: `parse-claude-docs.py` / `parse-ai-sdk.py` / `parse-firebase.py` を汎用 loader
+  (`parse-llms-txt.py`) に統合していく前に、3 本の出力を golden として記録し、以後の各段階で
+  「出力が変わっていない」を機械的に確かめられるようにする
+- **fixture** (`scripts/tests/fixtures/parity/`): 生成スクリプト `build_fixtures.py` が書く合成の
+  キャッシュディレクトリ。ページの文は lorem 風の埋め草と架空の製品名で作り、upstream の文は入れない
+  (URL のホストだけは、旧 script が固定で持っているため実在のものを使う)。再現しているのは upstream の
+  形で、claude-code (H1 + `Source:`、最後のページは閉じないフェンス、全文に無い index 項目、ページ間の
+  相対・絶対リンク、slug やタイトルが近いページ)、claude-platform (frontmatter、本文の前の前置き、
+  ページ間のナビ見出し、本文のフェンス外の `# 見出し`、同じタイトルの 2 ページ、`(Beta)` の variant 群、
+  index とページでタイトルが違う項目)、ai-sdk (`tags:` のブロックリスト、`\"` を含むタイトル)、
+  firebase (index 32 行と 9 ページのページキャッシュ。キャッシュに無いページの取得はモックで失敗させる)。
+  `content` で出すページには行頭が `Note:` / `Tip:` の本文行と `page` / `document` の語を入れた。
+  再生成の手順はスクリプトの docstring に書いた
+- **golden** (`fixtures/parity/golden/`): 3 本 × 全サブコマンド × 代表クエリ (0 件・ページが見つからない
+  経路を含む) の 52 ケースの stdout と、stderr・終了コード・ネットワーク取得の回数。合成 fixture に
+  旧 script を流して取った。旧 script を流し直してバイト単位で一致することをテストで確かめる
+- **比較器** (`test_migration_parity.py` の `normalize` / `compare`): 統合で変わってよい部分だけを
+  除いて比べる。
+  - 1 行目が `… results for "q" (…)` の形なら末尾の括弧だけを除き、クエリは比べる。
+    `… Document Index (…)` の形の 1 行目は行ごと除く。ヘッダ部の `(index:` / `(file:` / `(source:` /
+    `Cache:` 行も除く
+  - `Next:` 行は落とさず、script 名を `<script>` に置き換え、`--source platform` /
+    `--source claude-platform` を `--source <platform>` にそろえ、既定の corpus を指す `--source`
+    (`code` / `claude-code` / `ai-sdk`) とファイルを指すオプション (`--cache-dir` / `--file` /
+    `--index-file` / `--sources-file` とその値) を除いてから比べる (別の source を指す `--source`・
+    サブコマンド・ページ参照・見出し・ほかのオプションは比べる)
+  - 末尾の件数行を除く
+  - 行頭 (字下げ無し) の `Tip:` / `Note:` 行は除く (旧 script も汎用 loader もヒントは字下げせずに出す)。
+    `content` の出力 (1 行目が `# doc_title:`) ではページ本文なので比べ、hit の文脈に引用された
+    字下げ付きの行も比べる
+  - 単位の語 (`page` / `document`) は独立した語のときだけ揃える (`--page-ref` のようなフラグ名・識別子・
+    パスの中では揃えない)。`URL:` / `url:` の大小を揃える
+  - stdout が空のケース (エラーの経路) では、正規化した stderr の 1 行目も比べる
+- **比較器の負テスト**: 全 golden の全行を 1 行ずつ 5 種類の方法で変える (末尾に文字を足す・字下げする・
+  英字の大小を入れ替える・最初の語間の空白を 1 つ増やす・前に空行を挟む)。比較器が見逃してよい行を、
+  テスト側に直書きした形 (1 行目と `(index:` / `(file:` / `(source:` / `Cache:` / 行頭の `Tip:` /
+  `Note:` / 件数行) に限ったうえで、見逃した行の数を変異の種類 × 形ごとに、検出した行の数を変異の
+  種類ごとに固定した。除外の判定を比較器自身に任せると、除外を広げる誤りを検出できなかったため。
+  「行末に足す」1 種類だけでは、比較の前に揃える方向の変更 (小文字化・前後の空白の除去・空行の除去・
+  空白の圧縮) を見逃したため種類を増やした。単位の語やラベルを広げる・字下げした `Tip:` を除く形に
+  戻す・`--source` を値ごと落とす形に戻すといった変異は、除外の外側を変える直書きのケースで捉える。
+  除外を広げる・元に戻す変異がどれも assertion で落ちることを確かめた
+- ヒントの文面の差 (ai-sdk が 0 件のときに出す `fetch-index --compact` の案内) は、ヒント行を除く
+  ことで許容している。扱いは後続の統合の段階で決める
+- 汎用 loader に仮の profile を与えて同じケースを流し、既に一致しているケースを固定する
+  (統合の各段階で増やしていく)。比較器を厳しくしたのに伴い、次の 2 件を期待集合から外した
+  (理由は `GENERIC_PARITY_EXPECTED` の隣にも書いた):
+  - `cd-code-search-content-zero`: 旧 script は `Next:` 行を 2 行 (`search-index` と `search-content`)
+    出すが、汎用 loader は 1 行
+  - `cd-code-content-missing`: 旧 script のエラーは `No page found for slug: …`、汎用 loader は
+    `No page found for: …`
+- 手元の全キャッシュでの比較は環境変数 `LLMS_DOCS_PARITY_CORPUS=1` のときだけ走るローカル専用の
+  gate にした (CI では skip)。小さな fixture での一致は、ページ数が少ないために偶然そうなる
+  ことがある (十数ページでは一意な slug やタイトルの部分一致が、全コーパスでは曖昧になる) ため。
+  合成 fixture には名前の近いページ・ページ間のリンク・ナビ見出しを入れ、fixture で一致するケースと
+  全キャッシュで一致するケースが同じ 7 件になることを確かめた。期待集合のケースの引数
+  (`ip-addresses` と見出し `Inbound IP addresses`、タイトル `useCompletion`、見出し `API Signature`) は
+  全キャッシュでも解決するよう、fixture 側に同じ名前を置いた
+
 ## [0.35.5] - 2026-10-04
 
 ### 修正: URL の最後の段 (`prune-messages` など) を page_ref に渡すと、次の一手が出なかった

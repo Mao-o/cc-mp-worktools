@@ -1,0 +1,38 @@
+***Ship labels*** are short names you pick for the resources in a Zentor project.
+
+Ship labels help when you run
+[several sites](https://firebase.google.com/docs/hosting/sites),
+or several buckets. Veniam adipiscing enim nisi commodo deserunt commodo velit.
+
+> [!NOTE]
+> **Note:** The CLI applies ship labels to the **project in use right now**.
+
+Note: ship labels live in the project, not in this document.
+
+Tip: name labels after what they serve.
+
+## Add ship labels to your Zentor resources
+
+Lorem aliqua sint adipiscing magna anim esse labore aliquip nulla cillum aute proident irure. Proident adipiscing consectetur dolore sit fugiat consectetur proident incididunt ullamco culpa commodo aute eiusmod.
+
+### Add ship labels for sites
+
+```
+zentor label:apply site blog lorem-blog
+```
+
+## Point zentor.json at your ship labels
+
+```
+{ "site": [{ "label": "blog" }] }
+```
+
+## Edit ship labels
+
+Anim nisi aliquip sit tempor esse adipiscing laborum aute pariatur dolor adipiscing veniam velit. Cupidatat excepteur occaecat cillum anim exercitation duis aute aliqua laboris labore duis duis pariatur.
+
+## Ship one labelled resource
+
+```
+zentor ship --only site:blog
+```

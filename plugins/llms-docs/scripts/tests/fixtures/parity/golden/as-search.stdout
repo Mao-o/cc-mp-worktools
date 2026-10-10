@@ -1,0 +1,26 @@
+Search results for "stream shape" (file: <CACHE_DIR>/ai-sdk-llms-full.txt)
+  (top-5 candidate docs drilled into bodies)
+============================================================
+
+[8] Stream Shape (index_score: 28)
+    URL: https://ai-sdk.dev/recipes/node/stream-shape
+    tags: node, streaming
+    (4 body hits, showing 1)
+    Section: (top)  [before first heading]  (x4)
+        ...
+        
+      → Weaving a big shape can take a while. Duis deserunt irure ipsum deserunt veniam tempor veniam sint adipiscing fugiat elit nisi adipiscing. Nostrud labore officia sed incididunt consectetur reprehenderit anim commodo minim officia amet cillum incididunt.
+        
+      → You can use `weaveText` with `Output.shape` to stream partial shapes.
+        
+        ...
+        
+      → const { partialOutputStream } = weaveText({ output: Output.shape({}) });
+        for await (const part of partialOutputStream) console.log(part);
+        ```
+        ... (1 more hits in this section)
+
+
+(1 documents, ranked via index → body)
+
+Next: parse-ai-sdk.py content 8 '(top)' --cache-dir <CACHE_DIR>

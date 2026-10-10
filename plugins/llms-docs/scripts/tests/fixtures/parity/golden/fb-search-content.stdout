@@ -1,0 +1,54 @@
+Search-content results for "ship labels" (Firebase, 32 pages)
+============================================================
+
+[17] Ship labels
+    URL: https://firebase.google.com/docs/cli/labels.md.txt
+    (9 hits in this page, showing 5)
+    Section: (top)  [before first heading]  (x5)
+      → ***Ship labels*** are short names you pick for the resources in a Zentor project.
+        
+      → Ship labels help when you run
+        [several sites](https://firebase.google.com/docs/hosting/sites),
+        or several buckets. Veniam adipiscing enim nisi commodo deserunt commodo velit.
+        
+        > [!NOTE]
+      → > **Note:** The CLI applies ship labels to the **project in use right now**.
+        
+        Note: ship labels live in the project, not in this document.
+        ... (2 more hits in this section)
+
+    Section: Add ship labels to your Zentor resources  (x1)  [https://firebase.google.com/docs/cli/labels#add_ship_labels_to_your_zentor_resources]
+        Tip: name labels after what they serve.
+        
+      → ## Add ship labels to your Zentor resources
+        
+        Lorem aliqua sint adipiscing magna anim esse labore aliquip nulla cillum aute proident irure. Proident adipiscing consectetur dolore sit fugiat consectetur proident incididunt ullamco culpa commodo aute eiusmod.
+
+    Section: Add ship labels to your Zentor resources/Add ship labels for sites  (x1)  [https://firebase.google.com/docs/cli/labels#add_ship_labels_for_sites]
+        Lorem aliqua sint adipiscing magna anim esse labore aliquip nulla cillum aute proident irure. Proident adipiscing consectetur dolore sit fugiat consectetur proident incididunt ullamco culpa commodo aute eiusmod.
+        
+      → ### Add ship labels for sites
+        
+        ```
+
+    Section: Point zentor.json at your ship labels  (x1)  [https://firebase.google.com/docs/cli/labels#point_zentorjson_at_your_ship_labels]
+        ```
+        
+      → ## Point zentor.json at your ship labels
+        
+        ```
+
+    Section: Edit ship labels  (x1)  [https://firebase.google.com/docs/cli/labels#edit_ship_labels]
+        ```
+        
+      → ## Edit ship labels
+        
+        Anim nisi aliquip sit tempor esse adipiscing laborum aute pariatur dolor adipiscing veniam velit. Cupidatat excepteur occaecat cillum anim exercitation duis aute aliqua laboris labore duis duis pariatur.
+
+
+(9 hits across 1/32 pages, showing top 1)
+(23 pages skipped — fetch failed, see stderr)
+
+Next: parse-firebase.py content 17 '(top)' --cache-dir <CACHE_DIR>
+Next: parse-firebase.py content 17 'Add ship labels to your Zentor resources' --cache-dir <CACHE_DIR>
+Next: parse-firebase.py content 17 'Add ship labels to your Zentor resources/Add ship labels for sites' --cache-dir <CACHE_DIR>

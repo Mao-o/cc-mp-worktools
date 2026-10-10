@@ -1,0 +1,15 @@
+Search-index results for "snapshot" (Claude Code)
+  (index: <CACHE_DIR>/claude-code-llms.txt)
+============================================================
+
+[4] Restore file edits with snapshotting (score: 7)
+    Record file edits during kit sessions and put files back to any earlier snapshot
+    URL: https://code.claude.com/docs/en/kit/file-snapshotting.md
+
+[10] Snapshotting (score: 5)
+    Record, restore, and condense edits and chat to manage session state.
+    URL: https://code.claude.com/docs/en/snapshotting.md
+
+(2 results, 16 pages searched)
+
+Next: parse-claude-docs.py search "<query>" --cache-dir <CACHE_DIR>

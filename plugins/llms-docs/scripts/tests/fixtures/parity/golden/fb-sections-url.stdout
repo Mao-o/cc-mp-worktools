@@ -1,0 +1,13 @@
+Sections in [17] "Ship labels"
+  URL: https://firebase.google.com/docs/cli/labels.md.txt
+  Cache: <CACHE_DIR>/firebase-docs/docs_cli_labels-8bd0535c3c81c284.md.txt
+============================================================
+[L2] Add ship labels to your Zentor resources
+  [L3] Add ship labels to your Zentor resources/Add ship labels for sites [code]
+[L2] Point zentor.json at your ship labels [code]
+[L2] Edit ship labels
+[L2] Ship one labelled resource [code]
+
+(5 sections)
+
+Next: parse-firebase.py content 17 "<heading_path>" --cache-dir <CACHE_DIR>
