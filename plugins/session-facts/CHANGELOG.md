@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.12.2
+
+**テスト整理 (挙動の変更なし)。テストが作る git repo で、背景へ切り離される自動 maintenance を止めた (patch bump)。** 製品コード・`hooks.json`・README の挙動は変わらない。
+
+### 背景
+
+`git commit` は終わりに `git maintenance run --auto --detach` を起動する。git 2.55 は auto maintenance の既定の戦略が geometric で、小さな repo でも loose object が数件あるだけで repack が背景で始まりうる。その repack が `.git/objects/pack` に書いている間に、テストの `TemporaryDirectory` の後始末が走ると `Directory not empty` で落ちうる (object の hash 次第の偶発的な失敗)。この suite で repo を作るテスト (`test_cli` / `test_fs` / `test_git_progress`) は、この失敗の条件を満たしていた。修正前は、テストの git が開発者の `~/.gitconfig` と system の config も読んでいた。この suite での失敗はまだ観測していない (予防)。
+
+### 変更 (テストのみ)
+
+- `tests/_testutil.py`: repo を作る / commit する git は `git()` / `init_repo()` を通し、毎回 `maintenance.auto=false` / `maintenance.autoDetach=false` / `gc.auto=0` / `gc.autoDetach=false` を `GIT_CONFIG_COUNT` で渡す。`GIT_CONFIG_GLOBAL` は `tests/hermetic.gitconfig` (上の 4 設定と `receive.autogc=false` だけ) に向け、`GIT_CONFIG_NOSYSTEM=1` を当てる。`GIT_CONFIG_COUNT` はローカルの push の受け側 (`receive-pack`) に届かないため、global の fixture にも同じ設定を置く
+- 製品コード (`core.git`) が起動する git は env を渡さず継承するので、`_make_repo` を使うテストクラスは新しい基底クラス `HermeticGitTestCase` を継承する
+- 3 つの test module にあった `_git` / `_make_repo` の重複を、`_testutil` の helper に寄せた
+- `tests/test_hermetic_env.py` (新規): 次を床として固定する
+  - 起動された git の挙動 (`GIT_TRACE2_EVENT` の `child_start` で maintenance / gc の起動が 0 件)。陽性対照 (止めない commit では起動が見える) と、前提 (commit / `receive-pack` が trace に載る、上書きが起動の引数の env として helper に届く) を含む
+  - 設定の出どころ別の検査 (env の `GIT_CONFIG_COUNT` が repo 自身の config に勝つ / global は fixture の 5 設定と完全一致 / system の config を読まない)。起動の仕方 (定数だけ・helper・製品コードの git) ごとに流し、外側の env に止めない側の値を置いて、当てる側が勝つことも見る
+  - テストが `subprocess` で git を直接起動していないこと、`_make_repo` を使うクラスが基底クラスを継承していること
+  - 測る道具 (起動を記録する spy、helper が env を引数で渡すこと) の自己確認
+
+### 確認
+
+空の HOME で suite 全体を `GIT_TRACE2_EVENT` 付きで 1 回ずつ流し、maintenance / gc の `child_start` を数えた。修正前は 30 件、修正後は 0 件。
+
 ## 0.12.1
 
 ### Fixed
