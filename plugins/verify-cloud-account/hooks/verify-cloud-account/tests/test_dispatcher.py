@@ -1117,6 +1117,19 @@ class TestAssignmentOnlySegmentIsNotACommand(BaseWithTmpProject):
             with self.subTest(command=command):
                 self.assertIsNone(self._dispatch(command))
 
+    def test_command_substitution_in_an_assignment_value_is_still_detected(self):
+        """値に `$(` / バッククォートを含む代入の中のパス付き CLI は従来どおり deny する。"""
+        for command in (
+            "X=$(/usr/bin/firebase deploy)",
+            "X=`/usr/bin/firebase deploy`",
+        ):
+            with self.subTest(command=command):
+                result = self._dispatch(command)
+                self.assertIsNotNone(result)
+                out = result["hookSpecificOutput"]
+                self.assertEqual(out["permissionDecision"], "deny")
+                self.assertIn('"firebase" キーがありません', out["permissionDecisionReason"])
+
     def test_commands_after_an_assignment_are_still_detected(self):
         for command in (
             "FOO=1 firebase deploy",

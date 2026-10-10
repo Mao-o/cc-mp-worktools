@@ -86,9 +86,11 @@ def _budget_expired_error(account_key: str, *, stops: bool = True) -> str:
 # `firebase use がタイムアウトしました` (診断文) まで拾う。検出コマンド (user 入力) を
 # 合成した後の本文にも掛けない (`--title '切り替え:'` で誤発火する)。契約の維持は
 # tests の TestRemediationGuidanceContract が「案内コマンドを含む deny には必ず注記が
-# 付く」ことで機械的に確認する。例外は値の一部でもコマンドの形で案内しなかった deny
-# (`shell_word.UNSAFE` / 「手で確認してください」の文を含む。ほかの entry の切替を案内して
-# いても付けない。REMEDIATION_NOTE を持つ service は除く。_dispatch_impl の注記の判定を参照)。
+# 付く」ことで機械的に確認する。例外は `shell_word.UNSAFE` の文を含む deny (値の一部を許容形
+# から外れるためコマンドの形で案内しなかった。ほかの entry の切替を案内していても付けない。
+# REMEDIATION_NOTE を持つ service は除く。_dispatch_impl の注記の判定を参照)。firebase の
+# `.firebaserc` の解決先を理由に entry を省いた deny は `UNSAFE` を含まないので、案内した行が
+# あれば注記を付ける。
 def _guides_remediation(err: str, service) -> bool:
     patterns = getattr(service, "REMEDIATION_PATTERNS", ())
     return any(re.search(p, err) for p in patterns)
@@ -1135,8 +1137,10 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
             switch_note = outcome.note or ""
         if err:
             # 注記の要否は verify() の出力だけで決める (検出コマンドを足す前)。
-            # 値の一部でもコマンドの形で案内しなかった deny (shell_word.UNSAFE / 「手で確認
-            # してください」の文を含む) には、ほかの entry の切替を案内していても付けない:
+            # 値の一部を許容形から外れるためコマンドの形で案内しなかった deny (shell_word.UNSAFE
+            # の文を含む) には、ほかの entry の切替を案内していても付けない (firebase の
+            # `.firebaserc` の解決先で省いた deny は UNSAFE を含まないので、案内した行があれば
+            # 付く):
             # 文面の `期待=<値>` の表示に REMEDIATION_PATTERNS の形を書いた値
             # (`x; kubectl config use-context other` 等) が当たり、案内していないのに
             # 「案内したコマンドは案内された形のまま単独で実行」と、その値の実行を促して

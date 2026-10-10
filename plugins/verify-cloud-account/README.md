@@ -636,7 +636,8 @@ QUERY の不一致も止めたい場合は `accounts.local.json` に書く:
   代入だけのセグメント (`FT=/x/node_modules/firebase-tools`) は対象外で、値が CLI 名で終わっても
   その CLI のコマンドとは見ない (v0.21.4。`FOO=1 firebase deploy` のような代入 + コマンドと、
   次のセグメントのコマンドは従来どおり検出する。`FT=... "$FT" deploy` のように値を後でコマンドとして
-  使う形は変数経由の一般則の範囲のまま)
+  使う形は変数経由の一般則の範囲のまま。値に `$(` / バッククォートを含む代入
+  (`X=$(/usr/bin/firebase deploy)`) は従来どおり、置換の中の CLI を検出する)
 - **先頭の環境変数割当**: `FOO=bar gh ...`
 - **透過的 wrapper**: `sudo` / `time` / `nohup` / `command` / `builtin` / `exec` /
   `env [KEY=val...]` (ただし `env -i` / `env --` など option 付きは不透明扱い)
@@ -837,10 +838,12 @@ host 名・profile 名が英数字で始まり、英数字と `.` `_` `-` `:` `/
 **firebase の `firebase use <x>` / `--project <x>` の案内は、`.firebaserc` の解決先も照合する
 (v0.21.4)。** firebase-tools は x を `.firebaserc` の alias として先に解決するので、期待値と同じ
 名前の alias が別の project を指していると、案内どおりにしても期待した project にならない。案内するのは、
-解決先が期待した project の語だけ (dict の期待値は entry ごとに alias → project ID の順。scalar の
-期待値は project ID)。着く語が無いとき (`.firebaserc` を firebase-tools と同じ内容に読めると確かめ
+解決先が期待した project の語だけ (dict は `pin-env` と同じ順 (alias → project ID)。scalar の
+`firebase use` は project ID だけ (`is_self_remediation` が期待値そのものしか通さないため)。scalar の
+`--project` は、project ID が別の project を指す alias に影になっているとき、期待した project を指す
+alias も案内する)。着く語が無いとき (`.firebaserc` を firebase-tools と同じ内容に読めると確かめ
 られない場合を含む) は、コマンドの形で案内せず `.firebaserc` と `accounts.local.json` を手で確認する文に
-する (`pin-env` と同じ規則。deny / allow は変わらない)。
+する (deny / allow は変わらない)。
 
 期待値**以外**への切替は従来どおり通常検証 (実行前の状態) に落ちる。ただし同じ
 コマンド行に**同じ service の書込が連結**されていれば、現在のアカウントに依らず

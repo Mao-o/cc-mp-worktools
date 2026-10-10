@@ -694,7 +694,7 @@ def _reaching_word(projects: dict[str, str] | None, name: str, project: str) -> 
 
 def _alias_lines(
     expected: dict, command: str, projects: dict[str, str] | None
-) -> tuple[list[str], bool]:
+) -> tuple[list[str], bool, bool]:
     """dict 期待値の案内行 (`<command> <alias>  # → <project>`) と、解決先で省いた行の有無。
 
     command は `firebase use` (切替。各行は self-remediation で通る) か `--project`
@@ -708,7 +708,8 @@ def _alias_lines(
     を弾く) に限る — ドメイン付きの project ID (`example.com:my-project`) も行にできる。
     省いた entry があれば、その旨と手での確認を最後の行に添える (許容形が理由なら
     `_SKIPPED_LINE`、解決先が理由なら `_UNREACHABLE_LINE`)。案内できる行が 1 つも無ければ空。
-    返す bool は、解決先を理由に省いた entry があるか (行が無いときの文を選ぶ)。
+    返す 2 つの bool は、許容形を理由に省いた entry があるか・解決先を理由に省いた entry があるか
+    (行が無いときの文を選ぶ。`_no_line_by_hand`)。
     """
     lines, skipped, unreachable = [], False, False
     for alias, project in expected.items():
@@ -729,7 +730,18 @@ def _alias_lines(
         lines.append(_SKIPPED_LINE)
     if lines and unreachable:
         lines.append(_UNREACHABLE_LINE)
-    return lines, unreachable
+    return lines, skipped, unreachable
+
+
+def _no_line_by_hand(skipped: bool, unreachable: bool) -> str:
+    """dict 期待値で案内できる行が 1 つも無いときの、手で確認させる文。
+
+    許容形で省いた entry (`shell_word.UNSAFE` の理由) と解決先で省いた entry が混在するときは、
+    両方の文を連結する (片方だけだと、もう一方の理由が文面から消える)。
+    """
+    if skipped and unreachable:
+        return f"{_CHECK_BY_HAND}。{_UNREACHABLE_BY_HAND}"
+    return _UNREACHABLE_BY_HAND if unreachable else _CHECK_BY_HAND
 
 
 def _login_then(unreachable: bool) -> str:
@@ -754,9 +766,27 @@ def _scalar_word(projects: dict[str, str] | None, project: str) -> str | None:
     return _reaching_word(projects, project, project)
 
 
+def _scalar_project_flag_word(projects: dict[str, str] | None, project: str) -> str | None:
+    """scalar 期待値に対する `--project` の語。project ID (`_scalar_word`)、影のときは先頭の alias。
+
+    `--project` の値は verify() が `.firebaserc` で解決して照合する (alias を渡しても通る) ので、
+    project ID が影になっているとき (`_scalar_word` が None) は、期待した project を指す alias のうち
+    `_reaching_word` が通る先頭 (名前順。`aliases_for` と同じ並び) を案内する。無ければ None。
+    `firebase use` の案内には使わない (そちらは `is_self_remediation` が期待値そのものしか通さない)。
+    """
+    word = _scalar_word(projects, project)
+    if word is not None or projects is None:
+        return word
+    for alias in sorted(a for a, p in projects.items() if p == project):
+        word = _reaching_word(projects, alias, project)
+        if word is not None:
+            return word
+    return None
+
+
 def _project_flag_lines(
     expected: dict, projects: dict[str, str] | None
-) -> tuple[list[str], bool]:
+) -> tuple[list[str], bool, bool]:
     """dict 期待値に対する `--project <alias>` の候補行。
 
     `--project` 指定による不一致では、アクティブ project を切り替える
@@ -844,9 +874,9 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
                 f"Firebase プロジェクト不一致: コマンド指定 {shown}, "
                 f"期待={shell_word.shown_all(valid)} のいずれか\n"
             )
-            lines, unreachable = _project_flag_lines(expected, projects)
+            lines, skipped, unreachable = _project_flag_lines(expected, projects)
             if not lines:
-                by_hand = _UNREACHABLE_BY_HAND if unreachable else _CHECK_BY_HAND
+                by_hand = _no_line_by_hand(skipped, unreachable)
                 return f"{head}--project を外してください ({by_hand})"
             return (
                 f"{head}--project を外すか、以下のいずれかを指定してください:\n"
@@ -857,8 +887,10 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
         head = f"Firebase プロジェクト不一致: コマンド指定 {shown}, 期待={shell_word.shown(expected)}"
         # 期待値の名前は `.firebaserc` の alias として先に解決される。別の project を指す alias と
         # 同じ名前だと、`--project <期待値>` は期待した project にならない (案内が自分の deny と
-        # 矛盾する)。着く語 (期待値そのもの、影のときは期待した project を指す alias) だけを案内する。
-        target = _scalar_word(projects, expected)
+        # 矛盾する)。着く語だけを案内する: 期待値そのもの、影のときは期待した project を指す alias の
+        # うち着く先頭 (`_scalar_project_flag_word`。`--project` の値は上で `.firebaserc` で解決して
+        # 照合するので alias でも通る)。`firebase use` の案内は期待値そのものだけ (`_scalar_word`)。
+        target = _scalar_project_flag_word(projects, expected)
         if target is None:
             by_hand = _CHECK_BY_HAND if _target(expected) is None else _UNREACHABLE_BY_HAND
             return f"{head} — --project を外してください ({by_hand})"
@@ -887,13 +919,13 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
         if isinstance(expected, dict):
             # `firebase use YOUR_PROJECT` のような placeholder は self-remediation に
             # 乗らず同じ deny を繰り返すため、alias ごとの具体コマンドを案内する。
-            lines, unreachable = _alias_lines(expected, "firebase use", _read_firebaserc(root))
+            lines, skipped, unreachable = _alias_lines(expected, "firebase use", _read_firebaserc(root))
             if not lines:
                 # 案内できる行が無くても期待値は示す (許容形のものだけ。`--config` 付きのコマンドの
                 # 同じ deny と同じ部品)。この deny の案内は「期待した project に切り替えて」で、どの
                 # project かが要る。出所は `_CHECK_BY_HAND` / `_UNREACHABLE_BY_HAND` が言うので
                 # `_EXPECTED_NOT_SHOWN` は添えない。
-                by_hand = _UNREACHABLE_BY_HAND if unreachable else _CHECK_BY_HAND
+                by_hand = _no_line_by_hand(skipped, unreachable)
                 return (
                     f"{head}期待={shell_word.shown_all(valid)} のいずれか。"
                     f"{_login_then(unreachable)}期待した project に切り替えてください ({by_hand})。"
@@ -925,9 +957,9 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
             f"Firebase プロジェクト不一致: 現在={shell_word.shown(current)}, "
             f"期待={shell_word.shown_all(valid)} のいずれか\n"
         )
-        lines, unreachable = _alias_lines(expected, "firebase use", _read_firebaserc(root))
+        lines, skipped, unreachable = _alias_lines(expected, "firebase use", _read_firebaserc(root))
         if not lines:
-            return f"{head}{_UNREACHABLE_BY_HAND if unreachable else _CHECK_BY_HAND}"
+            return f"{head}{_no_line_by_hand(skipped, unreachable)}"
         return f"{head}切り替え:\n" + "\n".join(lines)
 
     if current != expected:

@@ -1281,7 +1281,11 @@ def _strip_command_path(cmd: str) -> str:
     # 先に剥がしている) は、コマンドの呼び出しではない。値が `/…/firebase-tools` で終わるだけで
     # basename に揃えると、firebase のコマンドとして検出され誤 deny になる。代入の値は
     # コマンド名として読まない。
-    if _ASSIGNMENT_HEAD_RE.match(tok):
+    # 値に `$(` / バッククォートがある代入は `_parse_leading_env` が剥がさずに止まる。その中の
+    # コマンド置換に書かれたパス付き CLI (`X=$(/usr/bin/firebase deploy)`) は従来どおり
+    # basename 化して検出する (ここで返すと deny が allow に変わる)。
+    am = _ASSIGNMENT_HEAD_RE.match(tok)
+    if am and _scan_value_end(tok, am.end()) is not None:
         return cmd
     name = tok
     if name.startswith("\\") and len(name) > 1:

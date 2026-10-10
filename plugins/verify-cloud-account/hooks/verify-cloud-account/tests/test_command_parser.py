@@ -469,6 +469,17 @@ class TestExtractCandidates(unittest.TestCase):
             with self.subTest(label):
                 self.assertEqual(extract_candidates(command), expected)
 
+    def test_assignment_with_command_substitution_keeps_detecting_the_inner_cli(self):
+        """値に `$(` / バッククォートを含む代入は `_parse_leading_env` が剥がさずに止まるため、
+        置換の中のパス付き CLI は basename 化で検出する (代入として返すと deny が allow に変わる)。"""
+        cases = {
+            "$() の中のパス付き firebase": ("X=$(/usr/bin/firebase deploy)", [("firebase deploy", {})]),
+            "backtick の中のパス付き gh": ("X=`/usr/bin/gh pr create`", [("gh pr create`", {})]),
+        }
+        for label, (command, expected) in cases.items():
+            with self.subTest(label):
+                self.assertEqual(extract_candidates(command), expected)
+
     def test_assignment_followed_by_a_command_is_still_detected(self):
         """代入 + コマンドの形と、代入のセグメントの次のセグメントのコマンドは従来どおり検出する。
         パス付きのコマンド名の basename 化も変えない。"""

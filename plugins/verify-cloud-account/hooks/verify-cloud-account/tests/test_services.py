@@ -14,6 +14,7 @@ from unittest import mock
 
 import _testutil  # noqa: F401
 
+from core import shell_word  # noqa: E402
 from services import aws, firebase, gcloud, github, kubectl  # noqa: E402
 
 _ISOLATION = None
@@ -1386,12 +1387,42 @@ class TestGuidanceReachesTheExpectedProject(_FirebasercFixture):
         reasons = self._reasons("fb-prod", projects)
         for case, (reason, _root) in reasons.items():
             with self.subTest(case=case):
-                self.assertNotIn("firebase use", reason)
                 self.assertNotRegex(reason, r"--project fb-prod を指定")
-                self.assertNotRegex(reason, r"--project b-main")
-                self.assertNotIn("firebase login", reason)  # 案内するコマンドは無い (dispatcher の注記)
+                if case == "--project":
+                    # `--project` の値は hook が `.firebaserc` で解決して照合するので、期待した
+                    # project を指す alias なら通る。着く alias を案内する。
+                    self.assertIn("--project b-main を指定してください", reason)
+                    self.assertNotIn(self._UNREACHABLE, reason)
+                else:
+                    # `firebase use` の案内は期待値そのものしか self-remediation に通らないので、
+                    # 影のときは alias も案内せず手で確認させる。
+                    self.assertNotIn("firebase use", reason)
+                    self.assertNotRegex(reason, r"--project b-main")
+                    self.assertNotIn("firebase login", reason)  # 案内するコマンドは無い (dispatcher の注記)
+                    self.assertIn(self._UNREACHABLE, reason)
+        # 案内された語 (`--project b-main` の 1 件) は、解決で期待した project に着く。
+        self.assertEqual(self._assert_guided_words_reach(reasons, "fb-prod", projects), 1)
+
+    def test_shadowed_project_id_with_no_reaching_alias_is_not_guided(self):
+        """影のとき、期待した project を指す alias が無ければ `--project` の案内も出さない。"""
+        projects = {"fb-prod": "fb-elsewhere"}
+        reasons = self._reasons("fb-prod", projects)
+        for case, (reason, _root) in reasons.items():
+            with self.subTest(case=case):
+                self.assertNotRegex(reason, r"--project \S+ を指定")
                 self.assertIn(self._UNREACHABLE, reason)
         self.assertEqual(self._assert_guided_words_reach(reasons, "fb-prod", projects), 0)
+
+    def test_no_guided_line_names_both_reasons_when_skipped_and_unreachable_are_mixed(self):
+        """案内できる行が 0 件で、許容形で省いた entry と解決先で省いた entry が混在するとき、
+        手で確認させる文は両方の理由を言う (片方だけだと UNSAFE の理由が消える)。"""
+        expected = {"$x": "proj-a", "main": "fb-prod"}
+        projects = {"main": "fb-elsewhere", "fb-prod": "fb-elsewhere"}
+        reasons = self._reasons(expected, projects)
+        for case, (reason, _root) in reasons.items():
+            with self.subTest(case=case):
+                self.assertIn(shell_word.UNSAFE, reason)
+                self.assertIn(self._UNREACHABLE, reason)
 
     def test_unshadowed_project_id_is_guided_as_before(self):
         projects = {"unrelated": "fb-other"}
