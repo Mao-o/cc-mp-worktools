@@ -124,6 +124,47 @@ HERMETIC_GIT_ENV = {
     **git_config_env(NO_BACKGROUND_GIT_SETTINGS),
 }
 
+# テストが起動する git に、外側の env (開発者の shell、git の hook の中、`git -c` の配下) からそのまま
+# 漏れてはいけないもの。`HERMETIC_GIT_ENV` は「足す」側で、こちらは「外す」側:
+#   - repo の場所を変えるもの (`GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` / `GIT_COMMON_DIR` /
+#     `GIT_OBJECT_DIRECTORY` / `GIT_ALTERNATE_OBJECT_DIRECTORIES` / `GIT_NAMESPACE`): 残っていると、
+#     テストが `cwd` に作った repo ではなく外側の repo に対して commit や `config` が走る
+#     (別 repo に commit が 1 件作られ、config に `user.name` が書かれた実例がある)
+#   - `GIT_CONFIG_PARAMETERS` (`git -c` が子に渡す): `GIT_CONFIG_COUNT` に勝つので、止める設定を上書きする
+#   - `GIT_CONFIG` (接尾辞なしの旧来の変数): あると `git config --get` はその file だけを読む
+# `GIT_CONFIG_COUNT` 系は外さない: `HERMETIC_GIT_ENV` が同じ名前で上書きするので、混ぜる向き (外側より
+# `HERMETIC_GIT_ENV` が勝つ) を床が見られる。
+OUTER_GIT_LEAKS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG",
+)
+
+
+def hermetic_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """テストが git に渡す env。`os.environ` から `OUTER_GIT_LEAKS` を外し、`HERMETIC_GIT_ENV` を重ねる。
+
+    git を起動するテストの helper は、必ずこれを `env=` に渡す (`os.environ` を直接渡さない)。
+    `os.environ` を patch せずに作るので、床が見る「helper が git に渡す前の `os.environ`」は変わらない。
+    """
+    env = {k: v for k, v in os.environ.items() if k not in OUTER_GIT_LEAKS}
+    return {**env, **HERMETIC_GIT_ENV, **(extra or {})}
+
+
+def scrub_outer_git_env() -> None:
+    """`OUTER_GIT_LEAKS` を `os.environ` から外す。テストの基底クラスが `mock.patch.dict(os.environ)` を
+    start した後に呼ぶ (stop で元に戻る)。hook (製品コード) の関数は env を渡さず `os.environ` を継承
+    して git を起動するので、helper だけでなく基底クラスでも外す。"""
+    for name in OUTER_GIT_LEAKS:
+        os.environ.pop(name, None)
+
+
 # 開発者 shell の除外設定 (CODE_ONLY=1 等) で `.txt` を使う既存テストが落ちないよう pin する
 NEUTRAL_EXCLUSION_ENV = {
     "EXTERNAL_AI_POST_REVIEW_CODE_ONLY": "0",
@@ -160,9 +201,8 @@ def git(repo: str, *args: str) -> subprocess.CompletedProcess:
     # ここで足していても、テストクラス側の patch は要る: hook の関数は env を渡さず `os.environ` を
     # 継承するので、hook が起動する git に届くのはクラス側の patch だけ (`test_hermetic_env` の
     # `_ProductGitChecks` が見る)。
-    env = {**os.environ, **HERMETIC_GIT_ENV}
     return subprocess.run(
-        ["git", *args], cwd=repo, env=env, capture_output=True, text=True, check=True
+        ["git", *args], cwd=repo, env=hermetic_env(), capture_output=True, text=True, check=True
     )
 
 
@@ -250,6 +290,7 @@ class HookTestCase(unittest.TestCase):
             {"TMPDIR": self.tmpdir, **pinned, **HERMETIC_GIT_ENV, **PINNED_VERSION_ENV},
         )
         self._env.start()
+        scrub_outer_git_env()
         clear_plugin_env(keep=pinned)
 
         self.repo = init_repo(os.path.join(base, "repo"))

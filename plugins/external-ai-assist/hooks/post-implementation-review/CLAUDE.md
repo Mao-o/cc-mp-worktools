@@ -892,8 +892,13 @@ hook のモジュールを外す処理 (`tests/test_posix_guard.py::_purge_hook_
 git 2.50 では起きないので、gc 戦略が既定の版 (2.50 など) で流すだけでは気付けない)。`_testutil.HERMETIC_GIT_ENV` が
 `GIT_CONFIG_COUNT` (env) と `GIT_CONFIG_GLOBAL` (tests 配下の `hermetic.gitconfig`) の 2 本で
 止めていて、`_testutil.git` は毎回これを足す。repo を作るテストは
-`_testutil.git` / `init_repo` を使い、自前の `subprocess` で git を呼ぶなら env に
-`HERMETIC_GIT_ENV` を入れること (理由は `_testutil.NO_BACKGROUND_GIT_SETTINGS` のコメント)。
+`_testutil.git` / `init_repo` を使い、自前の `subprocess` で git を呼ぶなら
+`env=_testutil.hermetic_env(...)` を渡すこと (理由は `_testutil.NO_BACKGROUND_GIT_SETTINGS` のコメント)。
+`hermetic_env` は `os.environ` から外側の漏れ (`_testutil.OUTER_GIT_LEAKS`: `GIT_DIR` など repo の場所を
+変える env、`GIT_CONFIG_PARAMETERS`、旧来の `GIT_CONFIG`) を外し、`HERMETIC_GIT_ENV` を重ねる。残ると、テストは
+OK のまま別の repo に commit が作られる。渡し忘れは `TestNoTestLaunchesGitWithoutTheHermeticEnv` が AST で
+拾い、helper の git の起動が全部 `HERMETIC_GIT_ENV` を持つことは
+`TestEveryGitLaunchOfTheHelpersCarriesTheHermeticEnv` が `subprocess.Popen` の層で記録して見る。
 **push 先の bare repo には env が届かない**: ローカルの path へ push すると、受け側の `receive-pack` は
 repo 用の env (`GIT_CONFIG_COUNT` など) を外されて起動する。外されない `GIT_CONFIG_GLOBAL` の
 fixture が `receive.autogc=false` を含む 5 設定を持つので、`git init --bare` を直接呼んだ bare repo
@@ -925,7 +930,10 @@ fixture が `receive.autogc=false` を含む 5 設定を持つので、`git init
 hook の関数が起動する git の床は `test_hermetic_env._ProductGitChecks` で、基底クラスが張った env のまま
 見る。hook を起動するテストクラス (`HookTestCase`) だけでなく、hook の関数を直接呼ぶテストクラス
 (`GitScanTestCase` / `ReviewSetTestCase`) も同じ定数を当てるので、床は 3 つとも見る (基底クラスごとの
-具体クラス。`HERMETIC_GIT_ENV` を自前で張る基底クラスを足したら、ここにも具体クラスを足す)。この床では:
+具体クラス。`HERMETIC_GIT_ENV` を自前で張る基底クラスを足したら、ここにも具体クラスを足す。足し忘れは
+`TestEveryEnvPatchingBaseClassIsChecked` が AST で突き合わせて落とす。基底クラスは `setUp` で
+`_testutil.scrub_outer_git_env()` も呼ぶ: hook の関数は env を渡さず `os.environ` を継承するので、
+外側の `GIT_DIR` などを基底クラスでも外す)。この床では:
 
 - `GIT_CONFIG_COUNT` は、repo 自身の config に逆の値 (`maintenance.auto=true` / `gc.auto=6700` など) を
   置いてから `--get` で見る。env は repo 自身の config に勝ち、global の fixture は負けるので、止める側の

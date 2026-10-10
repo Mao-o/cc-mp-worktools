@@ -45,6 +45,7 @@ global として fixture を読むこと (`GIT_CONFIG_GLOBAL` が届いている
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import subprocess
@@ -120,19 +121,105 @@ OUTER_NON_STOPPING_ENV = {
 }
 
 
+# 外側の env から、テストが起動する git に漏れてはいけないもの。`_testutil.OUTER_GIT_LEAKS` とは**別に**
+# リテラルで持つ (同じ定数から導くと、`_testutil` から 1 項目消えても期待値ごと消えて通ってしまう)。
+# repo の場所を変えるもの、`GIT_CONFIG_PARAMETERS` (`GIT_CONFIG_COUNT` に勝つ)、旧来の接尾辞なしの
+# `GIT_CONFIG` (あると `git config --get` はその file だけを読み、`--global --list` は rc 129 で落ちる)。
+OUTER_LEAKS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG",
+)
+
+
+def git_env_names_to_drop() -> list[str]:
+    """床が「patch していない」状態を作るとき、`os.environ` から外す名前。`GIT_CONFIG_*` の全部
+    (`GIT_CONFIG_PARAMETERS` を含む) と、接尾辞なしの `GIT_CONFIG`、repo の場所を変えるもの。"""
+    return [n for n in os.environ if n.startswith("GIT_CONFIG_") or n in OUTER_LEAKS]
+
+
 def isolate_git_config(home: str) -> None:
-    """`GIT_CONFIG_*` を外し、global の config も空に、system の config も目印の file に向け、そのうえで
-    外側の「止めない側」の env (`OUTER_NON_STOPPING_ENV`) を置く (「patch していない」状態を作る)。
-    `GIT_CONFIG_NOSYSTEM` は立てない。
+    """`GIT_CONFIG_*` と `GIT_CONFIG` と repo の場所を変える env を外し、global の config も空に、system の
+    config も目印の file に向け、そのうえで外側の「止めない側」の env (`OUTER_NON_STOPPING_ENV`) を置く
+    (「patch していない」状態を作る)。`GIT_CONFIG_NOSYSTEM` は立てない。
 
     外側を全部外しただけだと、helper が env を混ぜる向きを逆にして (`{**HERMETIC_GIT_ENV, **os.environ}`)
     外側の値を勝たせても、床の側に外側の値が無いので気付けない。止めない側の値を置いておけば、helper の
     値が勝っていること (止まっていること) が、向きを逆にした変異で崩れる。
+
+    外側の漏れの種類 (`OUTER_LEAKS`) を helper や基底クラスが外すことは、ここでは置かず、
+    `plant_outer_leaks` を使う別の確認が見る (ここに置くと、これを使う全部の床が外側の repo を指す)。
     """
-    for name in [n for n in os.environ if n.startswith("GIT_CONFIG_")]:
+    for name in git_env_names_to_drop():
         del os.environ[name]
     empty_global_config(home)
     os.environ.update(OUTER_NON_STOPPING_ENV)
+
+
+def make_decoy_repo(parent: str) -> str:
+    """外側の env が指してしまう「別 repo」に見立てた repo (commit 1 件)。helper が外側の repo を触ると
+    config / refs / reflog / index のどれかが変わる。"""
+    decoy = os.path.join(parent, "decoy")
+    os.makedirs(decoy)
+    env = {k: v for k, v in os.environ.items() if k not in OUTER_LEAKS}
+    env.update(_testutil.HERMETIC_GIT_ENV)
+    for args in (
+        ["init", "-q"],
+        ["-c", "user.name=decoy", "-c", "user.email=decoy@example.com", "commit", "--allow-empty", "-qm", "decoy"],
+    ):
+        subprocess.run(["git", *args], cwd=decoy, env=env, capture_output=True, check=True)
+    return decoy
+
+
+def snapshot_repo(repo: str) -> dict[str, object]:
+    """repo の状態の指紋 (config の中身 / refs / reflog / index のバイト列)。外側の env の影響を受けない
+    ように、`OUTER_LEAKS` を外した env で `git` を起動する。"""
+    env = {k: v for k, v in os.environ.items() if k not in OUTER_LEAKS}
+    env.update(_testutil.HERMETIC_GIT_ENV)
+
+    def out(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=repo, env=env, capture_output=True, text=True, check=True
+        ).stdout
+
+    git_dir = os.path.join(repo, ".git")
+    with open(os.path.join(git_dir, "config"), encoding="utf-8") as f:
+        config = f.read()
+    with open(os.path.join(git_dir, "index"), "rb") as f:
+        index = f.read()
+    return {
+        "config": config,
+        "refs": out("for-each-ref"),
+        "reflog": out("reflog", "--all"),
+        "index": index,
+    }
+
+
+def plant_outer_leaks(decoy: str) -> dict[str, str]:
+    """`OUTER_LEAKS` の 9 個すべてを `os.environ` に置く (`mock.patch.dict(os.environ)` の中で呼ぶこと)。
+    repo の場所を変えるものは `decoy` を指し、`GIT_CONFIG_PARAMETERS` は止めない側の値 (`GIT_CONFIG_COUNT`
+    に勝つ)、`GIT_CONFIG` は空の file (あると `git config --get` はその file だけを読む)。置いた dict を返す。"""
+    git_dir = os.path.join(decoy, ".git")
+    planted = {
+        "GIT_DIR": git_dir,
+        "GIT_WORK_TREE": decoy,
+        "GIT_INDEX_FILE": os.path.join(git_dir, "index"),
+        "GIT_COMMON_DIR": git_dir,
+        "GIT_OBJECT_DIRECTORY": os.path.join(git_dir, "objects"),
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES": os.path.join(git_dir, "objects"),
+        "GIT_NAMESPACE": "outer",
+        "GIT_CONFIG_PARAMETERS": "'maintenance.auto=true'",
+        "GIT_CONFIG": os.devnull,
+    }
+    assert set(planted) == set(OUTER_LEAKS)
+    os.environ.update(planted)
+    return planted
 
 
 IGNORED_NAME = "note.hermetic-ignored"
@@ -534,6 +621,248 @@ class TestBareOriginKeepsTheSettingsInItsOwnConfig(unittest.TestCase):
                     self.assertEqual(configured(bare, key, local=True), expected)
 
 
+class TestTheFloorDropsTheOuterLeaks(unittest.TestCase):
+    """床 (`isolate_git_config`) が「patch していない」状態を作るとき、`OUTER_LEAKS` の 9 個を外すこと。
+
+    接尾辞なしの `GIT_CONFIG` は `GIT_CONFIG_*` の前方一致では外れない。外側にあると、`git config --get`
+    がその file だけを読み、止める設定の値を見る床が誤って落ちる (止める側の値を持つ file なら、定数の
+    抜けを埋めうる)。repo の場所を変えるものは、床が直接起動する git を外側の repo に向ける。
+    """
+
+    def test_isolate_git_config_removes_every_outer_leak(self):
+        with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
+            plant_outer_leaks(os.path.join(tmp, "decoy"))
+            isolate_git_config(tmp)
+            remaining = sorted(n for n in OUTER_LEAKS if n in os.environ)
+            non_stopping = {k: os.environ.get(k) for k in OUTER_NON_STOPPING_ENV}
+        self.assertEqual(remaining, [])
+        self.assertEqual(non_stopping, OUTER_NON_STOPPING_ENV)
+
+
+class TestOuterRepoEnvDoesNotReachTheHelpers(unittest.TestCase):
+    """外側の env に `OUTER_LEAKS` があっても、repo を作る・操作する helper は外側の repo を触らず、
+    自分が作った repo に対して動くこと。
+
+    外側 (開発者の shell、git の hook の中、`git -c` の配下) の `GIT_DIR` などは、`HERMETIC_GIT_ENV`
+    を足すだけでは外れない。残ると commit や `config` が外側の repo に対して走り、テストは OK のまま、
+    その repo に commit が 1 件作られ config に `user.name=test` が書かれる (実例)。別 repo の
+    config / refs / reflog / index が変わらないことで固定する。`GIT_CONFIG_PARAMETERS` は
+    `GIT_CONFIG_COUNT` に勝つので、残ると止める設定が `true` に上書きされる (helper が問い合わせる
+    値で見る)。雛形の本物の初期化 (git を 5 回起動する) もこの中で走らせる。
+    """
+
+    def test_helpers_leave_the_outer_repo_alone(self):
+        with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
+            isolate_git_config(tmp)
+            decoy = make_decoy_repo(tmp)
+            before = snapshot_repo(decoy)
+            plant_outer_leaks(decoy)
+            # 漏れた env で git が失敗しても (`check=True`)、テストの error ではなく下の assertion で落とす
+            # (外側の repo が変わったかを先に見る)
+            error: Exception | None = None
+            repo = own_git_dir = commits = maintenance = ""
+            try:
+                with mock.patch.object(_testutil, "_TEMPLATE_REPO", None), mock.patch.object(
+                    _testutil, "_TEMPLATE_DIR", os.path.join(tmp, "template")
+                ):
+                    os.makedirs(_testutil._TEMPLATE_DIR)
+                    repo = _testutil.init_repo(os.path.join(tmp, "repo"))
+                _testutil.write(repo, "second.txt", "x\n")
+                _testutil.git(repo, "add", "-A")
+                _testutil.git(repo, "commit", "-qm", "second")
+                _testutil.init_bare_origin(tmp)
+                own_git_dir = _testutil.git(repo, "rev-parse", "--absolute-git-dir").stdout.strip()
+                commits = _testutil.git(repo, "rev-list", "--count", "HEAD").stdout.strip()
+                maintenance = _testutil.git(repo, "config", "--get", "maintenance.auto").stdout.strip()
+            except subprocess.CalledProcessError as e:
+                error = e
+            after = snapshot_repo(decoy)
+        self.assertEqual(after, before, "外側の repo が変わった (helper の git に GIT_DIR などが漏れている)")
+        self.assertIsNone(error, "外側の env が漏れて、helper の git が失敗した")
+        self.assertEqual(own_git_dir, os.path.join(repo, ".git"))
+        self.assertEqual(commits, "2", "helper が作った repo に commit が入っていない")
+        self.assertEqual(maintenance, "false", "GIT_CONFIG_PARAMETERS / GIT_CONFIG が止める設定に勝っている")
+
+
+class TestEveryGitLaunchOfTheHelpersCarriesTheHermeticEnv(_HelperFloor):
+    """repo を作る helper が起動する git の**すべて**が `HERMETIC_GIT_ENV` を持ち、`OUTER_LEAKS` を持たないこと。
+
+    `TestHelpersStopBackgroundMaintenance` の床は、maintenance の起動 (`commit` が起動する) を見るので、
+    commit 以外の 1 か所 (`config` や `add`、`init_bare_origin` の設定書き込み) だけが helper を迂回しても
+    (env を渡さない `subprocess.run`)、気付かない。迂回した git は開発者の `core.hooksPath` /
+    `init.templateDir` などを読み、外側の `GIT_DIR` に向かう。ここでは**起動された git を全部記録し**
+    (`subprocess.Popen` の層。`run` / `check_*` / `Popen` 直接を同じ場所で捕まえる)、`all` で見る。
+    起動の件数の下限を前提として先に確かめる: 何も記録できていない (または一部しか記録できていない) 状態は
+    `all` が空で通る。`os.system` や `os.posix_spawn` で起動した git はここでは見えない。
+    """
+
+    # 雛形の本物の初期化: init / config user.email / config user.name / add / commit
+    TEMPLATE_BUILD_LAUNCHES = 5
+    # bare repo: init --bare + maintenance.auto / maintenance.autoDetach / gc.auto / gc.autoDetach / receive.autogc
+    BARE_ORIGIN_LAUNCHES = 6
+
+    def _launches(self, build) -> tuple[list[tuple[list[str], dict[str, str]]], Exception | None]:
+        """`build(tmp)` の間に起動された git の (argv, 渡した env) と、git が失敗したときの例外。外側は
+        「patch していない」状態に、`OUTER_LEAKS` を置いた状態で起動する。env を渡さなければ、そのとき継いだ
+        `os.environ` を記録する。迂回した git は漏れた env で失敗しうる (`check=True`) が、テストの error
+        ではなく、記録した起動への assertion で落とすため、例外は返す。"""
+        launches: list[tuple[list[str], dict[str, str]]] = []
+        real_popen = subprocess.Popen
+
+        def spy(*args, **kwargs):
+            argv = list(args[0] if args else kwargs["args"])
+            if argv[:1] == ["git"]:
+                launches.append((argv, dict(kwargs.get("env") or os.environ)))
+            return real_popen(*args, **kwargs)
+
+        with mock.patch.dict(os.environ):
+            isolate_git_config(self.home)
+            decoy = make_decoy_repo(self.home)
+            plant_outer_leaks(decoy)
+            already = {
+                k for k in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "XDG_CONFIG_HOME", "GIT_CONFIG_COUNT")
+                if os.environ.get(k, "<unset>") == _testutil.HERMETIC_GIT_ENV.get(k, "<absent>")
+            }
+            self.assertEqual(
+                already,
+                set(),
+                "前提: helper が git に渡す前の os.environ は、止める側の値をすでに持たない",
+            )
+            error: Exception | None = None
+            with mock.patch.object(subprocess, "Popen", spy):
+                try:
+                    build(self.home)
+                except subprocess.CalledProcessError as e:
+                    error = e
+        return launches, error
+
+    def _assert_all_carry(self, result, minimum: int) -> None:
+        launches, error = result
+        want = dict(_testutil.HERMETIC_GIT_ENV)
+        without_env = [argv for argv, env in launches if not all(env.get(k) == v for k, v in want.items())]
+        with_leaks = [argv for argv, env in launches if any(n in env for n in OUTER_LEAKS)]
+        self.assertEqual(without_env, [], "HERMETIC_GIT_ENV を持たずに起動された git がある")
+        self.assertEqual(with_leaks, [], "OUTER_LEAKS を持ったまま起動された git がある")
+        # 起動の件数の下限 (前提): 何も記録できていないと、上の `all` は空で通る
+        self.assertGreaterEqual(
+            len(launches), minimum, f"前提: helper の git の起動を記録できている ({len(launches)} 件 < {minimum})"
+        )
+        self.assertIsNone(error, "外側の env が漏れて、helper の git が失敗した")
+
+    def test_every_git_the_template_build_launches(self):
+        def build(tmp: str) -> None:
+            with mock.patch.object(_testutil, "_TEMPLATE_REPO", None), mock.patch.object(
+                _testutil, "_TEMPLATE_DIR", os.path.join(tmp, "template")
+            ):
+                os.makedirs(_testutil._TEMPLATE_DIR)
+                _testutil.init_repo(os.path.join(tmp, "repo"))
+
+        self._assert_all_carry(self._launches(build), self.TEMPLATE_BUILD_LAUNCHES)
+
+    def test_every_git_init_bare_origin_launches(self):
+        self._assert_all_carry(
+            self._launches(lambda tmp: _testutil.init_bare_origin(tmp)), self.BARE_ORIGIN_LAUNCHES
+        )
+
+
+class TestNoTestLaunchesGitWithoutTheHermeticEnv(unittest.TestCase):
+    """tests/ の中で `["git", ...]` を直接起動するすべての呼び出し (`subprocess.run` など) が、
+    `env=hermetic_env(...)` を渡していること。
+
+    `TestEveryGitLaunchOfTheHelpersCarriesTheHermeticEnv` は repo を作る helper (`init_repo` /
+    `init_bare_origin`) の起動を実行して見るが、テスト本体が直接起動する git (`test_commit_flow` の
+    revert / merge など) は実行しても見えない。env を渡し忘れると、外側の `GIT_DIR` や開発者の
+    `core.hooksPath` に向かう。AST で全 file を走査する。`test_hermetic_env.py` は、床が「patch していない」
+    状態の env で git を直接起動するので除く。
+    """
+
+    LAUNCHERS = {"run", "Popen", "check_call", "check_output", "call"}
+    EXEMPT = {"test_hermetic_env.py"}
+
+    @staticmethod
+    def _name(node: ast.expr) -> str | None:
+        if isinstance(node, ast.Attribute):
+            return node.attr
+        if isinstance(node, ast.Name):
+            return node.id
+        return None
+
+    def test_every_direct_git_launch_passes_the_hermetic_env(self):
+        tests_dir = os.path.dirname(os.path.abspath(__file__))
+        launches: list[str] = []
+        offenders: list[str] = []
+        for name in sorted(os.listdir(tests_dir)):
+            if not name.endswith(".py") or name in self.EXEMPT:
+                continue
+            with open(os.path.join(tests_dir, name), encoding="utf-8") as f:
+                tree = ast.parse(f.read())
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call) or self._name(node.func) not in self.LAUNCHERS or not node.args:
+                    continue
+                first = node.args[0]
+                if not (
+                    isinstance(first, ast.List)
+                    and first.elts
+                    and isinstance(first.elts[0], ast.Constant)
+                    and first.elts[0].value == "git"
+                ):
+                    continue
+                where = f"{name}:{node.lineno}"
+                launches.append(where)
+                env = [k.value for k in node.keywords if k.arg == "env"]
+                if not (env and isinstance(env[0], ast.Call) and self._name(env[0].func) == "hermetic_env"):
+                    offenders.append(where)
+        self.assertGreaterEqual(len(launches), 3, f"前提: git の直接起動を拾えている ({launches})")
+        self.assertEqual(offenders, [], "env=hermetic_env(...) を渡していない git の直接起動がある")
+
+
+class TestEveryEnvPatchingBaseClassIsChecked(unittest.TestCase):
+    """`setUp` で `HERMETIC_GIT_ENV` を patch するテストの基底クラスは、すべて `_ProductGitChecks` の
+    具体クラスが組んでいること (機械で突き合わせる。`CLAUDE.md` の文書の規律だけだと、基底クラスを
+    足しても床が足されない)。
+
+    tests/ の各 file の AST から、`setUp` が `HERMETIC_GIT_ENV` を参照するクラスを集め、この file の
+    `_ProductGitChecks` の具体クラスが組む基底クラスの集合と一致することを見る。
+    """
+
+    @staticmethod
+    def _parse(path: str) -> ast.Module:
+        with open(path, encoding="utf-8") as f:
+            return ast.parse(f.read())
+
+    def test_the_two_sets_agree(self):
+        tests_dir = os.path.dirname(os.path.abspath(__file__))
+        patching: set[str] = set()
+        for name in sorted(os.listdir(tests_dir)):
+            if not name.endswith(".py"):
+                continue
+            for node in ast.walk(self._parse(os.path.join(tests_dir, name))):
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                for item in node.body:
+                    if isinstance(item, ast.FunctionDef) and item.name == "setUp":
+                        refs = [
+                            n
+                            for n in ast.walk(item)
+                            if (isinstance(n, ast.Name) and n.id == "HERMETIC_GIT_ENV")
+                            or (isinstance(n, ast.Attribute) and n.attr == "HERMETIC_GIT_ENV")
+                        ]
+                        if refs:
+                            patching.add(node.name)
+        checked: set[str] = set()
+        for node in ast.walk(self._parse(os.path.abspath(__file__))):
+            if isinstance(node, ast.ClassDef):
+                bases = [b.id for b in node.bases if isinstance(b, ast.Name)]
+                if "_ProductGitChecks" in bases:
+                    checked.update(b for b in bases if b != "_ProductGitChecks")
+        self.assertGreaterEqual(len(patching), 3, "前提: setUp で HERMETIC_GIT_ENV を patch する基底クラスを拾えている")
+        self.assertEqual(
+            sorted(patching),
+            sorted(checked),
+            "HERMETIC_GIT_ENV を patch する基底クラスと、_ProductGitChecks の具体クラスが組む基底クラスが違う",
+        )
+
+
 class _ProductGitChecks:
     """hook (製品コード) の関数が起動する git にも、同じ設定が届き、global は fixture だけ、system は
     読まないこと。具体クラス (このファイルの末尾の 3 つ) が基底クラスを 1 つずつ組み、その基底クラスが
@@ -582,7 +911,7 @@ class _ProductGitChecks:
         outer = mock.patch.dict(os.environ)
         outer.start()
         self.addCleanup(outer.stop)
-        for name in [n for n in os.environ if n.startswith("GIT_CONFIG_")]:
+        for name in git_env_names_to_drop():
             del os.environ[name]
         # 基底クラスが張る値が、外側の止めない側の値に勝つことも見る (混ぜる向きの逆転を拾う)
         os.environ.update(OUTER_NON_STOPPING_ENV)
@@ -596,6 +925,14 @@ class _ProductGitChecks:
         os.environ["HOME"] = self.planted_xdg_config_home
         # 当てる側が当てる前の env。床が止める側の値を持たないことの確認に使う
         self.floor_env = dict(os.environ)
+        # 外側が repo の場所や config を変える env (`OUTER_LEAKS`) を持っている状態にして、基底クラスに当てさせる。
+        # 床の env (`floor_env`) には入れない: 床だけで止める側にならないことの確認は、これらを持たない env で見る
+        # (`GIT_CONFIG` があると `config --global --list` が落ちる)。別 repo は基底クラスの patch より前に作る
+        decoy_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(decoy_dir.cleanup)
+        self.decoy = make_decoy_repo(decoy_dir.name)
+        self.decoy_before = snapshot_repo(self.decoy)
+        plant_outer_leaks(self.decoy)
         super().setUp()
 
     def _hook_git(self, *args: str) -> tuple[int, str]:
@@ -632,6 +969,22 @@ class _ProductGitChecks:
             global_list, (0, ""), "床の global が空の file でない (何かを読ませているか、global を読めない)"
         )
         self.assertEqual(marker, (0, "read"), "床が system の config を読ませない (GIT_CONFIG_NOSYSTEM)")
+
+    def test_the_base_class_drops_the_outer_git_env(self):
+        """外側に置いた `OUTER_LEAKS` (`setUp` が置いた) が、基底クラスの setUp の後に `os.environ` に
+        残っていないこと。hook の関数は env を渡さず `os.environ` を継承して git を起動するので、
+        ここに残ると hook の git が外側の repo や `GIT_CONFIG_PARAMETERS` を使う。"""
+        remaining = sorted(n for n in OUTER_LEAKS if n in os.environ)
+        self.assertEqual(remaining, [])
+
+    def test_git_launched_by_the_hook_works_on_its_own_repo_and_leaves_the_outer_repo_alone(self):
+        """前提: 外側の repo (`self.decoy`) は `setUp` が `GIT_DIR` などで指している。hook の git が書いた
+        設定は自分の repo に入り、外側の repo は変わらないこと。"""
+        self.assertEqual(self._hook_git("rev-parse", "--absolute-git-dir"), (0, os.path.join(self.repo, ".git")))
+        self.assertEqual(self._hook_git("config", "hermetic.probe", "written-by-the-hook"), (0, ""))
+        own = _testutil.git(self.repo, "config", "--local", "--get", "hermetic.probe").stdout.strip()
+        self.assertEqual(own, "written-by-the-hook")
+        self.assertEqual(snapshot_repo(self.decoy), self.decoy_before)
 
     def test_git_launched_by_the_hook_sees_the_settings(self):
         """4 設定が、基底クラスの `GIT_CONFIG_COUNT` から見えること (repo 自身の config の逆の値に勝つ)。"""

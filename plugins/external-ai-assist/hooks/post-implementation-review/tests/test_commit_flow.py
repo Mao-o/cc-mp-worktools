@@ -1247,7 +1247,7 @@ class TestRevertContinue(CommitFlowTestCase):
             cwd=self.repo,
             capture_output=True,
             text=True,
-            env={**os.environ, **_testutil.HERMETIC_GIT_ENV, "GIT_EDITOR": "true"},
+            env=_testutil.hermetic_env({"GIT_EDITOR": "true"}),
         )
 
     def test_resolution_and_continue_in_the_same_window(self):
@@ -1705,7 +1705,7 @@ class TestConflictedMergeCommit(CommitFlowTestCase):
                 cwd=self.repo,
                 capture_output=True,
                 text=True,
-                env={**os.environ, **_testutil.HERMETIC_GIT_ENV},
+                env=_testutil.hermetic_env(),
             )
             self.assertNotEqual(merged.returncode, 0, "前提: merge が conflict する")
             _testutil.write(self.repo, "shared.py", "base\nresolved\n")

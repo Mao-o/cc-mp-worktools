@@ -5,6 +5,39 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.12.6
+
+**テスト整理 (挙動の変更なし)。テストが起動する git の隔離を固め、`exitplan-review` の fake CLI の stdin テストが負荷で落ちる見込みを消した (patch bump)。** 製品コード・`hooks.json`・README は変えていない。
+
+### 1. 外側の env の `GIT_DIR` などが、テストが起動する git にそのまま漏れていた
+
+`post-implementation-review` の tests で `GIT_DIR=<別 repo>` を置いて流すと、テストは OK のまま、その別 repo に commit が 1 件作られ、config に `user.name=test` が書かれた (修正前の版で再現。`exitplan-review` の `init_repo` も同じ形)。`git -c` の配下や git の hook の中から suite を流すと起きる。helper と基底クラスは `HERMETIC_GIT_ENV` を足すだけで、外側の repo の場所を変える env は外していなかった。
+
+- 外すもの (`OUTER_GIT_LEAKS`): `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` / `GIT_COMMON_DIR` / `GIT_OBJECT_DIRECTORY` / `GIT_ALTERNATE_OBJECT_DIRECTORIES` / `GIT_NAMESPACE`、`GIT_CONFIG_PARAMETERS` (`GIT_CONFIG_COUNT` に勝つ)、旧来の接尾辞なしの `GIT_CONFIG` (あると `git config --get` がその file だけを読む)。`GIT_CONFIG_COUNT` 系は外さない (`HERMETIC_GIT_ENV` が同じ名前で上書きするので、混ぜる向きを床が見られる)
+- 外す場所: git を起動する helper (`git` / `init_repo`。新しい `hermetic_env()` を通す)、テスト本体が直接起動する git (`test_commit_flow` の revert / merge)、env を当てる基底クラス (`post-implementation-review` の `HookTestCase` / `GitScanTestCase` / `ReviewSetTestCase`、`exitplan-review` の `HookTestCase`)。基底クラスでも外すのは、hook の関数が env を渡さず `os.environ` を継承して git を起動するため
+- 床 (`test_hermetic_env`) の「patch していない」状態を作る `isolate_git_config` も、`GIT_CONFIG_*` の前方一致で外れない `GIT_CONFIG` と、repo の場所を変える env を外す
+- 外側に 9 個すべてを置き、別 repo (config / refs / reflog / index) が変わらないこと、渡した path に自分の repo ができることを固定した。helper / 基底クラスごとに、置いた env が `os.environ` から消えていることも見る
+
+### 2. repo を作る helper の git の起動を 1 か所だけ迂回させても、どの床も気付かなかった
+
+maintenance を見る床は `commit` が起動する maintenance しか見ず、起動した git の env を捕まえる前提も「どれか 1 つが持つ」(`any`) だった。`config user.name` や `add`、`init_bare_origin` の設定書き込みだけが helper を迂回しても (env を渡さない `subprocess.run`)、全部 green のままだった。迂回した git は開発者の `core.hooksPath` などを読み、外側の `GIT_DIR` に向かう。
+
+- `post-implementation-review`: helper が起動する git を `subprocess.Popen` の層ですべて記録し (`run` / `check_*` を同じ場所で捕まえる)、**すべて**が `HERMETIC_GIT_ENV` を持ち `OUTER_GIT_LEAKS` を持たないことを `all` で見る。前提として起動の件数の下限 (雛形の初期化 5 回 / `init_bare_origin` 6 回) を先に確かめる。`exitplan-review` の `init_repo` も同じ形 (下限 1 回)
+- tests 直下の `["git", ...]` の直接起動がすべて `env=hermetic_env(...)` を渡していることを、AST で全 file から確かめる構造テストを足した (実行して見る床では、テスト本体が直接起動する git は見えない)
+- `HERMETIC_GIT_ENV` を `setUp` で patch する基底クラスの集合と、`_ProductGitChecks` の具体クラスが組む基底クラスの集合を AST で突き合わせる構造テストを足した (これまでは `CLAUDE.md` の文書の規律だけだった)
+
+### 3. `exitplan-review` の fake CLI の stdin テストが、負荷で偽 CLI の 1 秒の timeout を超えて落ちる見込み
+
+`test_cli_timeout` の `FakeCliTestCase` は、全クラスでレビュアーの timeout を 1 秒に patch していた。timeout の経路を見ない `TestReviewerArgvAndStdin` (argv / stdin / 出力 / 失敗系) も同じ値で、負荷で偽 CLI の bash の起動が 1 秒を超えると `None != 'REVIEW_CLEAN'` で落ちる (並列負荷下で 1 回観測)。timeout を見ないクラスは 60 秒を使う形に分けた (偽 CLI は即座に終わるので待たない)。timeout の経路を見る `TestReviewerTimeout` は今の値のまま。`test_output_is_truncated_to_max_chars` は、レビュアーが `None` を返したとき `len(None)` の error ではなく assertion で落ちるようにした。
+
+### 確認
+
+- 修正前の版の複製に外側の `GIT_DIR` / `GIT_WORK_TREE` を置いて両 suite を流すと、別 repo の config に `user.name=test` が書かれ、`post-implementation-review` は 358 件が error、`exitplan-review` は 2 件が failure。修正後は両 suite が green (474 件 / 96 件) で、別 repo の config / refs / reflog は流す前後で一致した
+- 0.12.5 の床が殺していた変異 (helper が env を渡さない / 混ぜる向きが逆 / commit が helper を迂回 / `GIT_CONFIG_COUNT` 系を渡さない / `GIT_CONFIG_NOSYSTEM` を渡さない) は、修正前の版で全て検出されることを確かめた上で、今回の版でも全て assertion の失敗で検出される (`post-implementation-review` 5 件、`exitplan-review` 4 件)
+- 今回の穴の変異: 修正前の版では `config user.name` だけを迂回しても生き残る。今回の版では、迂回する 1 か所 (`init` / `config` ×2 / `add` / `add` を `check_call` で / `init_bare_origin` の `init --bare` / 設定書き込み) を 1 件ずつ変えた 7 変異が全て新しい床の assertion で落ちる。`commit` の迂回は元の床が拾う
+- 外側の漏れを外さない変異 (`hermetic_env` が外さない、`OUTER_GIT_LEAKS` から 1 項目ずつ外す 9 件、`scrub_outer_git_env` が何もしない、各基底クラスが外さない、`isolate_git_config` が前方一致だけ、直接起動が `hermetic_env` を使わない 2 件、基底クラスの具体クラスを欠く) は、`post-implementation-review` の 30 件中 29 件が assertion の失敗のみで検出され、残り 1 件 (`OUTER_GIT_LEAKS` から `GIT_CONFIG` を外す) は assertion の失敗に加えて、漏れた `GIT_CONFIG` で git が書けず error になる既存テストが混在した。`exitplan-review` は 17 件すべて assertion の失敗のみ
+- timeout の経路を見ない 3 件の修正: `TIMEOUT` を 0.01 秒にしても `TestReviewerArgvAndStdin` は落ちない (修正前の版では 3 件が落ちる)。timeout を見ないクラスの値を極小にすると落ちる。timeout の経路を見る `TestReviewerTimeout` は、timeout 時に process group を止めない変異と、timeout で `None` を返さない変異で落ちる
+
 ## 0.12.5
 
 **テスト整理 (挙動の変更なし)。`_common` と `explore-parallel` の suite の待ちを縮め、並列負荷で probe が timeout する flaky を構造的に消した (patch bump)。** 製品コード・`hooks.json`・README は変えていない。
