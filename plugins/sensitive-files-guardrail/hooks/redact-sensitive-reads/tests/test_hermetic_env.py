@@ -465,7 +465,7 @@ class TestPlainBareOriginStartsNoMaintenance(unittest.TestCase):
 
 
 class TestTheIsolatedEnvStopsNothing(unittest.TestCase):
-    """`isolate_git_config` だけで作った env (当てる側が何も当てていない床) が、止める側の値を持たないこと。
+    """`isolate_git_config` だけで作った env (当てる側が何も当てていない床) が、当てる側の値を持たないこと。
 
     `isolate_git_config` は、上の trace の床 (`TestHelpersStopBackgroundMaintenance` など) が直接使う床で、
     `_HermeticConfigChecks` の床もこの上に作る。ここが当てる側の値 (止める側の `GIT_CONFIG_COUNT`、fixture を
@@ -611,7 +611,7 @@ class TestMeasuringTools(unittest.TestCase):
 
 
 class _HermeticConfigChecks:
-    """git が見る設定を、止める経路ごとに 1 本ずつ確かめる共通の検査。
+    """git が見る設定を、出どころ (env / global の fixture / system) ごとに 1 本ずつ確かめる共通の検査。
 
     起動の仕方 (`launch`) は継承先が決める。テストは `query` を通して問い合わせる。`setUp` は「patch していない」
     状態を先に作ってから (`isolate_git_config`)、外側の env として止めない側の値を置き、その env を

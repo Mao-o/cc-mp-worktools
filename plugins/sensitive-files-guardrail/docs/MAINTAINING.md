@@ -292,9 +292,9 @@ plugin root (`plugins/sensitive-files-guardrail`) から実行する。**`cd` �
   (`isolate_git_config` の直後、trace / spy / push の床の区間、mixin の setUp) ごとに、床だけで起動した
   git に当てる側の値が見えないことを確かめる (`assert_the_floor_stops_nothing` /
   `test_the_floor_alone_stops_nothing`)。測る道具 (spy) が記録に値を足さないことも確かめる。
-  mutation は空の HOME と `maintenance.auto=false` 等を持つ HOME の両方で流し、外側の env に
-  `GIT_DIR` (別の repo) / `GIT_CONFIG_PARAMETERS` / `GIT_TEMPLATE_DIR` を置いた行も流す
-  (床が HOME を差し替え損ねると、開発者の `~/.gitconfig` が問題を隠す)。
+  mutation は空の HOME と `maintenance.auto=false` 等を持つ HOME の両方で流し (床が HOME を差し替え損ねると、
+  開発者の `~/.gitconfig` が問題を隠す)、外側の env に `GIT_DIR` (別の repo) / `GIT_CONFIG_PARAMETERS` /
+  `GIT_TEMPLATE_DIR` を置いた行も流す。
   env を当てる各点 (定数 / helper / 基底クラス / hook の起動) について、`GIT_CONFIG_COUNT` だけ・
   `GIT_CONFIG_NOSYSTEM` 抜き・`GIT_CONFIG_GLOBAL` 抜きの 3 種が assertion (`failures=`) で落ちること
   を確かめる。`errors=` はテストが走っていない状態で、検出ではない

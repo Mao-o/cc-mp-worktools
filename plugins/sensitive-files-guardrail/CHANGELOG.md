@@ -36,7 +36,7 @@ git の hook (pre-commit など) や `git -c` の配下から suite を流すと
 `GIT_WORK_TREE` / `GIT_INDEX_FILE` / `GIT_COMMON_DIR` / `GIT_OBJECT_DIRECTORY` /
 `GIT_ALTERNATE_OBJECT_DIRECTORIES` / `GIT_NAMESPACE` / `GIT_CONFIG` / `GIT_CONFIG_PARAMETERS` /
 `GIT_TEMPLATE_DIR` が、テストが起動する git にそのまま届いていた。別の repo を `GIT_DIR` に置いて
-流した実測 (修正前): check-sensitive-files は 202 件中 98 件が失敗し、外側の repo に commit が作られ
+流した実測 (修正前): check-sensitive-files は多数のテストが失敗し、外側の repo に commit が作られ
 config が書き換わった。redact-sensitive-reads は外側の repo の config に `user.name` と、反対の値の
 maintenance / gc の設定が書かれた。`GIT_CONFIG_PARAMETERS` は `GIT_CONFIG_COUNT` に勝って maintenance を
 黙って復活させ、`GIT_TEMPLATE_DIR` は template の `hooks/pre-commit` を helper の commit で走らせ、
@@ -47,29 +47,12 @@ maintenance / gc の設定が書かれた。`GIT_CONFIG_PARAMETERS` は `GIT_CON
 - `HermeticGitTestCase` が `os.environ` から同じ変数を外す。redact-sensitive-reads にも同じ基底クラスを
   足し、Stop hook を in-process で動かす `test_e2e.py` の 1 クラスはこれを継承する (以前は env の patch に
   `HERMETIC_GIT_ENV` を足していただけで、外れても気付けなかった)
-- 修正後に同じ実測: 両 suite とも全件 green で、外側の repo は 1 file も変わらない
 
 ### テスト: 床の自己確認 (`tests/test_hermetic_env.py`)
 
-- 外側の変数: 外側の repo の中身が前後で一致すること、外側の template が helper の `init` / `commit` に
-  効かないこと、起動した git の env に変数が無いこと (定数・helper・基底クラスごと)。`isolate_git_config`
-  も外側の変数を外し、その自己確認 (`TestTheIsolatedEnvStopsNothing`) を足した
-- helper が起動する git の全部が `HERMETIC_GIT_ENV` を持つこと (spy で全件記録して `all` で見る。件数と
-  種類を前提で確かめる)。従来の `any` による検査は残した。spy が記録に値を足さないこと、helper が env を
-  `os.environ` の patch ではなく起動の引数で渡すことも確かめる (`TestMeasuringTools`)
-- 床が当てる側の値 (`GIT_CONFIG_NOSYSTEM` / fixture を指す `GIT_CONFIG_GLOBAL` / 止める側の
-  `GIT_CONFIG_COUNT`) を持たないこと: `test_the_floor_alone_stops_nothing` (床の env だけで起動した git で
-  見る)、床を作る関数の直後 (`TestTheIsolatedEnvStopsNothing`)、trace / spy / push の床の区間
-  (`assert_the_floor_stops_nothing`)。修正前は、床が NOSYSTEM を立てる形に戻っても、helper の
-  NOSYSTEM 抜けを床が埋めて 15 件 green のままだった
-- 床の setUp で控えた env から問い合わせの時点まで env が変わっていないことを、起動の前後で確かめる
-- 両 suite の module docstring と `_HermeticConfigChecks` の docstring を直した: 止める経路は env の
-  `GIT_CONFIG_COUNT` と global の fixture の 2 本で、同じ値を持つので片方が欠けてももう片方が埋める。
-  system の config は `GIT_CONFIG_NOSYSTEM` で読ませず、止める経路には数えない。床は外側の値を足している
-  (外す・足すの両方) が、当てる側の値は持たない。Apple の git が読む同梱の config は
-  `GIT_CONFIG_NOSYSTEM` でだけ外れ、中身は床の検査に効かない
-- redact-sensitive-reads: Stop hook を動かす e2e のクラスの `setUp` を実際に呼び、env が当たっている
-  ことを見る (`TestHookRunningClassGetsTheHermeticEnv`)
+- 床が当てる側の値を持たないことを、床を作る点ごとに確かめる
+- helper が起動する git の全部が env を持つことを全件で確かめる
+- 2 つの docstring を直した
 - `docs/MAINTAINING.md` のテスト実行の節を更新
 
 ## 0.35.1
