@@ -93,14 +93,11 @@ class ConcurrencyTestCase(HookTestCase):
         走り続ける必要がある。**`exec` しない** (0.10.0 の note と同じ理由: argv を
         保たないと PID 同一性ガードから見て無関係なプロセスになる)。
         """
-        path = os.path.join(self.bin, "cursor")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(
-                "#!/bin/bash\n"
-                f"printf '%s' {json.dumps(output)}\n"
-                "sleep 30 &\nwait\n"
-            )
-        os.chmod(path, 0o755)
+        with open(os.path.join(self.tmpdir, "cursor.out"), "w", encoding="utf-8") as f:
+            f.write(output)
+        self.install(
+            "cursor", "#!/bin/bash\ncat \"$TMPDIR/cursor.out\"\nsleep 30 &\nwait\n"
+        )
 
     def wait_for_output(self, tool_use_id: str, timeout: float = 5.0) -> None:
         """偽 cursor が結果を書き出すまで待つ。
@@ -285,11 +282,12 @@ class TestLiveAnalyzerCount(ConcurrencyTestCase):
         self.assertEqual(self.state.live_analyzer_count(), 1, "死んだ pid を数えている")
 
     def test_ignores_unparsable_and_non_pid_files(self):
-        self.occupy_slot("tu-a")
+        live = self.occupy_slot("tu-a")
         result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-broken")
         pid_file.write_text("not-a-pid")
-        result_file.write_text("結果だけの残骸")
-        (self.state.BASE_DIR / "launch.lock").write_text("")
+        # 拡張子で弾いていることを確かめるため、.pid 以外にも生きている pid を書く
+        result_file.write_text(str(live))
+        (self.state.BASE_DIR / "launch.lock").write_text(str(live))
         self.assertEqual(self.state.live_analyzer_count(), 1)
 
     def test_missing_state_dir_counts_zero(self):
@@ -449,10 +447,7 @@ class TestPreBudget(ConcurrencyTestCase):
         kill されるため、bash の cold start が timeout より遅いと記録が残らない
         (経過時間で主張するテスト専用)。
         """
-        path = os.path.join(self.bin, name)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("#!/bin/bash\n" "sleep 30 &\nwait\n")
-        os.chmod(path, 0o755)
+        self.install(name, _testutil.HANGING_CURSOR)
 
     def responding_candidate(self, name: str = "cursor-agent") -> None:
         """`--version` に即応答する候補 (呼ばれるたびに probe 記録へ 1 行足す)。
@@ -460,14 +455,12 @@ class TestPreBudget(ConcurrencyTestCase):
         probe が応答を待って返る = 記録の書き込みが終わっていることが保証されるので、
         「検出が走ったか」を記録の有無で決定論的に測れる。
         """
-        path = os.path.join(self.bin, name)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(
-                "#!/bin/bash\n"
-                f"echo {name} >> {json.dumps(self.probe_log)}\n"
-                "printf 'cursor-agent 2026.09.01\\n'\n"
-            )
-        os.chmod(path, 0o755)
+        self.install(
+            name,
+            "#!/bin/bash\n"
+            "echo \"$(basename \"$0\")\" >> \"$TMPDIR/probes\"\n"
+            "printf 'cursor-agent 2026.09.01\\n'\n",
+        )
 
     def probes(self) -> list[str]:
         try:

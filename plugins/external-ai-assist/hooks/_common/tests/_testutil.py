@@ -4,9 +4,13 @@
 sys.path に載せて `from _common import ...` を解決する (本番は各 hook の `__main__.py`
 が同じ挿入を行う)。
 """
+import atexit
 import os
 import shlex
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -22,12 +26,55 @@ FENCED_CLEAN_WITH_PREAMBLE = "critical 指摘はない\n\n```\nREVIEW_CLEAN\n```
 FENCED_CLEAN = "```\nREVIEW_CLEAN\n```"
 
 
+# macOS では「新しく書いた実行ファイル」の初回 exec に約 0.26 秒かかる (内容が初見のとき。
+# 同じ内容を別パスに書いても約 0.1 秒)。同じファイルの再 exec・symlink 経由・
+# `bash <新しいファイル>` は 2 ms で済む。偽 CLI をテストごとに書き出して exec すると
+# 1 本ごとにこの遅延を払い、timeout や probe の窓にも乗る (窓の中で trap を張り終えるか
+# どうかが遅延次第になる)。
+#
+# そこで実行ファイルは test プロセスで 1 本だけ作って温めておき (`_launcher`)、各偽 CLI は
+# そこへの symlink にする。本文は symlink の隣の `.<name>.body` に置き、launcher が
+# `source` する (exec ではないので遅延が無い)。`$0` は symlink のパスのままなので、
+# argv・`ps` に出る cmdline・プロセスの親子関係は従来の「本文を直接書いた script」と同じ。
+_LAUNCHER = (
+    "#!/bin/bash\n"
+    '[ -n "$EAA_FAKE_CLI_WARMUP" ] && exit 0\n'
+    '. "${0%/*}/.${0##*/}.body"\n'
+)
+_launcher_path: str | None = None
+
+
+def _launcher() -> str:
+    """温めた launcher のパス (test プロセスごとに 1 本)。"""
+    global _launcher_path
+    if _launcher_path is None:
+        directory = tempfile.mkdtemp(prefix="eaa-fake-cli-")
+        atexit.register(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "launcher")
+        with open(path, "w") as f:
+            f.write(_LAUNCHER)
+        os.chmod(path, 0o755)
+        # 初回 exec の遅さをここで払う (テストの timeout / probe の窓に乗せない)
+        subprocess.run(
+            [path], env={**os.environ, "EAA_FAKE_CLI_WARMUP": "1"},
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=30, check=True,
+        )
+        _launcher_path = path
+    return _launcher_path
+
+
 def write_script(directory: str, name: str, body: str) -> str:
-    """bash script を実行可能ファイルとして書き、そのパスを返す。"""
+    """bash script の偽 CLI を `directory/name` に置き、そのパスを返す。
+
+    実体は温めた launcher への symlink で、本文は `directory/.<name>.body` (上のコメント)。
+    """
+    with open(os.path.join(directory, f".{name}.body"), "w") as f:
+        f.write(body)
     path = os.path.join(directory, name)
-    with open(path, "w") as f:
-        f.write("#!/bin/bash\n" + body)
-    os.chmod(path, 0o755)
+    if os.path.lexists(path):
+        os.unlink(path)
+    os.symlink(_launcher(), path)
     return path
 
 

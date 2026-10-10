@@ -1,16 +1,14 @@
-"""cursor.post() の結果整形 (pid ファイル欠落 / 出力切詰 / timeout kill)。
+"""cursor.post() の結果整形 (pid ファイル欠落 / 出力切詰)。
 
 `test_cursor_launch.py` は「正常系 (pre→post)」を通しで検証する。ここは
 `cursor.post()` を直接呼び、境界ケース (pid ファイルが無い、出力が
-MAX_OUTPUT_BYTES を超える、待機が TIMEOUT_SEC を超える) を単体で固定する。
+MAX_OUTPUT_BYTES を超える) を単体で固定する。待機が TIMEOUT_SEC を超えた経路は
+`test_orphan_gc.TestGroupKill` (孫まで止まること) と `TestPostRetention` が見る。
 """
-import os
-import time
 import unittest
-from unittest import mock
 
 import _testutil  # noqa: F401  (sys.path 整備)
-from _testutil import HookTestCase, explore_payload
+from _testutil import HookTestCase
 
 
 class TestPidFileMissing(HookTestCase):
@@ -37,73 +35,17 @@ class TestPidFileMissing(HookTestCase):
 class TestOutputTruncation(HookTestCase):
     def test_output_over_max_bytes_is_truncated(self):
         result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-huge")
-        result_file.write_bytes(b"x" * (self.cursor.MAX_OUTPUT_BYTES * 2))
+        result_file.write_bytes(b"x" * 16000)
 
         result = self.cursor.post("tu-huge")
 
+        # 既定値は README (`EXTERNAL_AI_EXPLORE_MAX_RESULT_BYTES` = 8000) の契約なので定数を読まない
         body = result[len(self.cursor._CONTEXT_HEADER) :]
         note = self.cursor._TRUNCATION_NOTE.format(
-            limit=self.cursor.MAX_OUTPUT_BYTES, env=self.cursor.ENV_MAX_RESULT_BYTES
+            limit=8000, env=self.cursor.ENV_MAX_RESULT_BYTES
         )
         self.assertTrue(body.endswith(note), "切詰マーカーが付いていない")
-        self.assertEqual(
-            len(body[: -len(note)].rstrip("\n")), self.cursor.MAX_OUTPUT_BYTES
-        )
-
-
-class TestReviewerTimeout(HookTestCase):
-    """post の待機が TIMEOUT_SEC を超えたら SIGTERM して None を返す。"""
-
-    def _write_hanging_cursor(self) -> None:
-        """待ち続ける偽 cursor。**`exec` しない** (0.10.0)。
-
-        `exec sleep 30` はプロセスイメージごと差し替えるので argv が `sleep 30` になり、
-        「起動した analyzer とは無関係なプロセス」と区別が付かなくなる。0.10.0 で
-        signal 前に cmdline を照合する PID 再利用ガードを入れたため、この偽物は
-        (正しく) 停止対象から外れてしまう。実物の cursor はシムでも `exec "$REAL" "$@"`
-        で引数を保つので、argv を保ったまま待つ形が忠実な模倣。
-        """
-        path = os.path.join(self.bin, "cursor")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("#!/bin/bash\nsleep 30 &\nwait\n")
-        os.chmod(path, 0o755)
-
-    def _alive(self, pid: int) -> bool:
-        try:
-            os.kill(pid, 0)
-            return True
-        except (ProcessLookupError, PermissionError):
-            return False
-
-    def test_timeout_kills_process_and_returns_no_result(self):
-        self._write_hanging_cursor()
-
-        with mock.patch.object(self.cursor, "TIMEOUT_SEC", 0.2), mock.patch.object(
-            self.cursor, "POLL_INTERVAL_SEC", 0.05
-        ):
-            self.run_hook("pre", explore_payload("tu-timeout"))
-            _, pid_file = self.state.paths(self.cursor.NAME, "tu-timeout")
-            pid = int(pid_file.read_text().strip())
-            self._children.append(pid)
-
-            output = self.run_hook("post", explore_payload("tu-timeout"))
-
-        self.assertEqual(output, "", "timeout 後は additionalContext を出さない")
-
-        # SIGTERM 送信後、子プロセスは終了するがテストプロセス (親) が reap するまで
-        # zombie のまま残る。zombie は kill(pid, 0) に成功し続けるため、先に reap してから
-        # 生死判定する (exitplan-review/tests/test_cli_timeout.py の assertDead と同じ配慮)。
-        deadline = time.monotonic() + 3
-        while time.monotonic() < deadline:
-            try:
-                reaped, _ = os.waitpid(pid, os.WNOHANG)
-            except ChildProcessError:
-                break
-            if reaped == pid:
-                break
-            time.sleep(0.02)
-        self.assertFalse(self._alive(pid), "timeout 後に cursor プロセスが残っている")
-        self._children.remove(pid)
+        self.assertEqual(len(body[: -len(note)].rstrip("\n")), 8000)
 
 
 if __name__ == "__main__":

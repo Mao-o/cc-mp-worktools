@@ -56,14 +56,18 @@ class TestDuration(SettingsTestCase):
     def test_unset_uses_default(self):
         self.assertEqual(settings.duration(VAR, 300, 600), 300)
 
-    def test_value_within_range(self):
-        self.set("120")
-        self.assertEqual(settings.duration(VAR, 300, 600), 120)
-
-    def test_value_above_ceiling_is_clamped(self):
-        """hooks.json の hook timeout は静的なので、超える値を許すと後始末に到達しない。"""
-        self.set("99999")
-        self.assertEqual(settings.duration(VAR, 300, 600), 600)
+    def test_parsed_values(self):
+        cases = (
+            # (旧テスト名, 値, 期待値)
+            ("value_within_range", "120", 120),
+            # hooks.json の hook timeout は静的なので、超える値を許すと後始末に到達しない
+            ("value_above_ceiling_is_clamped", "99999", 600),
+            ("non_numeric_falls_back", "5 minutes", 300),
+        )
+        for label, value, expected in cases:
+            with self.subTest(label, value=value):
+                self.set(value)
+                self.assertEqual(settings.duration(VAR, 300, 600), expected)
 
     def test_zero_and_negative_fall_back(self):
         """`0` を「無効化」と読ませない (無効化は on/off スイッチの仕事)。"""
@@ -71,10 +75,6 @@ class TestDuration(SettingsTestCase):
             with self.subTest(value=value):
                 self.set(value)
                 self.assertEqual(settings.duration(VAR, 300, 600), 300)
-
-    def test_non_numeric_falls_back(self):
-        self.set("5 minutes")
-        self.assertEqual(settings.duration(VAR, 300, 600), 300)
 
     def test_default_is_returned_unchanged_for_float(self):
         """テストが TIMEOUT_SEC を float に差し替えてもそのまま通ること。"""
@@ -128,18 +128,19 @@ class TestCount(SettingsTestCase):
     def test_unset_uses_default(self):
         self.assertEqual(settings.count(VAR, 2), 2)
 
-    def test_zero_is_kept(self):
-        """`count` の 0 は「無効」として意味を持たせてよい (`EXTERNAL_AI_REVIEW_MAX=0`)。"""
-        self.set("0")
-        self.assertEqual(settings.count(VAR, 2), 0)
-
-    def test_negative_becomes_zero(self):
-        self.set("-3")
-        self.assertEqual(settings.count(VAR, 2), 0)
-
-    def test_non_numeric_falls_back(self):
-        self.set("many")
-        self.assertEqual(settings.count(VAR, 2), 2)
+    def test_parsed_values(self):
+        cases = (
+            # (旧テスト名, 値, 既定値, 期待値)
+            # `count` の 0 は「無効」として意味を持たせてよい (`EXTERNAL_AI_REVIEW_MAX=0`)
+            ("zero_is_kept", "0", 2, 0),
+            ("negative_becomes_zero", "-3", 2, 0),
+            ("non_numeric_falls_back", "many", 2, 2),
+            ("plain_integer_is_unchanged", "2", 5, 2),
+        )
+        for label, value, default, expected in cases:
+            with self.subTest(label, value=value):
+                self.set(value)
+                self.assertEqual(settings.count(VAR, default), expected)
 
     def test_integer_valued_float_spellings_are_accepted(self):
         """判定は「値が整数か」であって「表記が整数か」ではない。
@@ -162,10 +163,6 @@ class TestCount(SettingsTestCase):
             with self.subTest(value=value):
                 self.set(value)
                 self.assertEqual(settings.count(VAR, 2), 2)
-
-    def test_plain_integer_is_unchanged(self):
-        self.set("2")
-        self.assertEqual(settings.count(VAR, 5), 2)
 
 
 class TestNames(SettingsTestCase):
