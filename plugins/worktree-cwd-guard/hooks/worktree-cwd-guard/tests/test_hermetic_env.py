@@ -297,6 +297,9 @@ class TestHelpersStopBackgroundMaintenance(unittest.TestCase):
             home = os.path.join(tmp, "home")
             os.makedirs(home)
             isolate_git_config(home)
+            # 外側の repo / config / template を指す変数。この git は env から外して起動する (外し損ねると、外側の
+            # repo に書き込む)
+            os.environ.update(outer_repo_env(tmp))
             os.environ.update(
                 {
                     "GIT_CONFIG_COUNT": "2",
@@ -316,10 +319,19 @@ class TestHelpersStopBackgroundMaintenance(unittest.TestCase):
                  "commit", "--allow-empty", "-qm", "x"],
             ):
                 try:
-                    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+                    subprocess.run(
+                        ["git", *args],
+                        cwd=repo,
+                        env={k: v for k, v in os.environ.items() if k not in OUTER_REPO_ENV_NAMES},
+                        check=True,
+                        capture_output=True,
+                    )
                 except subprocess.CalledProcessError as e:  # 床に外側の変数が残ると失敗しうる。crash ではなく失敗として出す
                     self.fail(f"陽性対照の git が失敗した: {' '.join(map(str, e.cmd))}\n{e.stderr}")
             events = trace_events(trace)
+            self.assertFalse(
+                os.path.exists(os.path.join(tmp, "outer")), "陽性対照の git が、外側の変数が指す場所に書き込んだ"
+            )
         self.assertIn("commit", command_names(events), "前提: trace が取れている (空の床にしない)")
         self.assertNotEqual(spawned_maintenance(events), [])
 
@@ -367,6 +379,49 @@ class TestHelpersStopBackgroundMaintenance(unittest.TestCase):
         for argv, env in launches:
             with self.subTest(argv=" ".join(argv[1:4])):
                 self.assertEqual({k: env.get(k) for k in want}, want)
+
+
+class TestDeveloperExcludeFileDoesNotReachTheHelpers(unittest.TestCase):
+    """開発者の既定の除外ファイル (`$XDG_CONFIG_HOME/git/ignore`、未設定なら `~/.config/git/ignore`) に `*.md` が
+    あっても、`make_repo` が README を commit できること。
+
+    除外ファイルは `GIT_CONFIG_GLOBAL` では外れない (実測)。helper が `XDG_CONFIG_HOME` を空の dir に向けない
+    と、`add -A` が README を拾わず commit が失敗する。除外ファイルの出どころ (`XDG_CONFIG_HOME` が指す
+    dir / 未設定のときの `HOME` 下の `.config`) ごとに見る。
+    """
+
+    def make_repo_with_exclude(self, *, via_xdg: bool) -> Path:
+        with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
+            isolate_git_config(tmp)
+            home = Path(tmp, "dev-home")
+            ignore = home / (Path("xdg") if via_xdg else Path(".config")) / "git" / "ignore"
+            ignore.parent.mkdir(parents=True)
+            ignore.write_text("*.md\n", encoding="utf-8")
+            os.environ["HOME"] = str(home)
+            if via_xdg:
+                os.environ["XDG_CONFIG_HOME"] = str(home / "xdg")
+            else:
+                del os.environ["XDG_CONFIG_HOME"]
+            reaching = dict(os.environ)
+            probe = Path(tmp, "probe")
+            probe.mkdir()
+            self.assertEqual(git_in(reaching, probe, ["init", "-q"]), (0, ""))
+            (probe / "x.md").write_text("x\n", encoding="utf-8")
+            self.assertEqual(
+                git_in(reaching, probe, ["status", "--porcelain"]),
+                (0, ""),
+                "前提: 除外ファイルが git に届けば、未追跡の .md は status に出ない",
+            )
+            try:
+                main, _, _ = _testutil.make_repo(Path(tmp) / "work")
+            except subprocess.CalledProcessError as e:
+                self.fail(f"helper の git が失敗した: {' '.join(map(str, e.cmd))}\n{e.stderr}")
+            return Path(_testutil.sh(main, "ls-files").split()[0])
+
+    def test_the_readme_is_committed_whichever_file_holds_the_exclude(self):
+        for via_xdg in (True, False):
+            with self.subTest(via_xdg=via_xdg):
+                self.assertEqual(self.make_repo_with_exclude(via_xdg=via_xdg), Path("README.md"))
 
 
 class TestPlainBareOriginStartsNoMaintenance(unittest.TestCase):
@@ -776,7 +831,23 @@ class TestOuterRepoEnvAndTheHelpers(_OuterRepoEnvChecks, unittest.TestCase):
     """repo を作る helper (`_testutil.sh` / `make_repo`)。"""
 
     def prepare_outer_repo(self) -> None:
-        self.other, _, _ = _testutil.make_repo(Path(self.tmp) / "outer")
+        # 外側の変数 (`GIT_DIR` など) が指す場所そのものに repo を作る (`make_repo` は 1 段深い `repo/` に作る)
+        self.other = Path(self.tmp) / "outer"
+        self.other.mkdir()
+        _testutil.sh(self.other, "init", "-q", "-b", "main")
+        (self.other / "f").write_text("x\n", encoding="utf-8")
+        _testutil.sh(self.other, "add", "-A")
+        _testutil.sh(
+            self.other, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "outer"
+        )
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.assertEqual(
+            Path(self.floor_env["GIT_DIR"]),
+            self.other / ".git",
+            "前提: 外側の GIT_DIR が、木を比べる repo を指している",
+        )
 
     def launch_and_capture_env(self) -> dict[str, str]:
         with recorded_git_launches() as launches:

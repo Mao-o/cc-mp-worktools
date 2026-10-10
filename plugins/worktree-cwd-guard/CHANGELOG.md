@@ -3,78 +3,55 @@
 ## 0.1.4
 
 **テスト整理 (挙動の変更なし)。テストが起動する git の隔離を固めた (patch bump)。** repo を作る helper の
-git を 1 つだけ迂回しても気付けなかった穴と、外側の env にある repo / config / template を指す変数が helper と
-基底クラスの git に漏れる穴を塞いだ。hook・`hooks.json`・README の挙動は変わらない。
+git を 1 つだけ迂回しても気付けなかった穴と、外側の env や開発者の設定が helper と基底クラスの git に漏れる穴を
+塞いだ。hook・`hooks.json`・README の挙動は変わらない。
 
 ### テスト: helper が起動する git の全件に env が届くことを見る
 
 0.1.3 の trace の床は、maintenance を起動する git (`commit`) しか見ない。`make_repo` の `worktree add` を
-2 回とも env を渡さない起動にしても、床には差が出ず生き残った (迂回した git は開発者の `core.hooksPath` などを
-読む)。起動した git の `(argv, 実際に渡った env)` を `subprocess.Popen` の spy で全部記録し、全件が
-`HERMETIC_GIT_ENV` の全項目を持つことを `all` で見るテストを足した
-(`test_every_git_launched_by_the_helpers_carries_the_env`)。前提として、起動が 8 件以上 (init / config x3 /
-add / commit / worktree add x2) で、種類も記録できていることを確かめる。既存の `any` の検査は、commit の
-迂回を trace で殺す役としてそのまま残した。
+env なしで起動しても床には差が出なかった。起動した git の `(argv, 実際に渡った env)` を `subprocess.Popen` の
+spy で全部記録し、全件が `HERMETIC_GIT_ENV` の全項目を持つことを見るテストを足した
+(`test_every_git_launched_by_the_helpers_carries_the_env`)。
 
-### テスト: 外側の repo / config / template を指す変数を helper と基底クラスで外す
+### テスト: 外側の repo / config / template を指す変数を外す
 
 `_testutil.OUTER_GIT_LEAK_ENV` (`GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` / `GIT_COMMON_DIR` /
 `GIT_OBJECT_DIRECTORY` / `GIT_ALTERNATE_OBJECT_DIRECTORIES` / `GIT_NAMESPACE` / 旧来の `GIT_CONFIG` /
 `GIT_CONFIG_PARAMETERS` / `GIT_TEMPLATE_DIR`) を足し、`hermetic_env()` (helper `sh()` が使う) と
-`HermeticGitTestCase` が外すようにした。`HERMETIC_GIT_ENV` は外したあとに足すので、定数が勝つ。
+`HermeticGitTestCase` が外すようにした。`HERMETIC_GIT_ENV` は外したあとに足すので、定数が勝つ。外さないと、
+別 repo を指す `GIT_DIR` では helper の `init` / `config` / `commit` がその repo に書き込み、
+`GIT_TEMPLATE_DIR` では template の `pre-commit` や除外ファイルが helper の commit に効く。
 
-実測 (0.1.3 の suite を scratch コピーで流した。HOME は空。git 2.50.1): 外側の env に別 repo を指す
-`GIT_DIR` を置くと 45 件中 30 件が errors で落ち、別 repo に commit が 2 件書き込まれた (helper の `init` /
-`config` / `commit` が漏れる)。除外ファイルと失敗する pre-commit を持つ `GIT_TEMPLATE_DIR` を置くと 31 件が
-errors で落ちた。`GIT_CONFIG_PARAMETERS` (`maintenance.auto=true`) だけでは 0.1.3 の suite は green のまま
-だったが、`GIT_CONFIG_PARAMETERS` は `GIT_CONFIG_COUNT` に勝つ (`COUNT` で false・`PARAMETERS` で true を
-渡すと true が返る) ので、外さないと helper の自動 maintenance の抑止が外側の値に負けうる。旧来の `GIT_CONFIG` が
-あると `git config --global --list` は exit 129 で落ちる。修正後は、3 つすべてを置いても 60 件 green で、
-別 repo は変わらない。
+### テスト: 開発者の既定の除外ファイルを外す
 
-変更したファイル:
+`$XDG_CONFIG_HOME/git/ignore` (未設定なら `~/.config/git/ignore`) は `GIT_CONFIG_GLOBAL` では外れず、
+`*.md` があると `make_repo` の `add -A` が README を拾えず commit が失敗した。`HERMETIC_GIT_ENV` に空の
+`XDG_CONFIG_HOME` を足した。除外ファイルの出どころ (`XDG_CONFIG_HOME` が指す dir / `HOME` 下の `.config`) ごとに
+README が commit されることを見るテストを足した。
 
-- `tests/_testutil.py`: `OUTER_GIT_LEAK_ENV`・`hermetic_env()` の追加、`sh()` が毎回 `hermetic_env()` を使う、
-  `HermeticGitTestCase` が外側の変数を外す
+### テストの追加・変更
+
+- `tests/_testutil.py`: `OUTER_GIT_LEAK_ENV`・`hermetic_env()`、空の `XDG_CONFIG_HOME` (`EMPTY_XDG_CONFIG_HOME`)
 - `tests/test_hermetic_env.py`:
-  - `isolate_git_config` が外側の repo / config / template を指す変数も外し、`home` に空の `.gitconfig` を置く
-    (global の config が無いと `git config --global --list` が exit 128 になり、空の global を見られない)
-  - 外側の変数の一覧は `_testutil` とは別にリテラルで持つ (`OUTER_REPO_ENV_NAMES`)。`_OuterRepoEnvChecks` が
-    起動の仕方 (helper / 基底クラス) ごとに、床に置いた変数が git の env に届かないこと、helper が外側の repo を
-    変えないこと (全 file の中身の前後比較・旧来の `GIT_CONFIG` が指す file が作られないこと)、外側の template の
-    `hooks/pre-commit` が helper の commit で走らないこと、template の除外ファイルが helper の commit に効かない
-    ことを見る。template が `git init` に写ることを前提として先に確かめる
-  - 床が当てる側の値を持たないことの確認を、当てる側を呼ぶ直前にも置いた。`assert_the_floor_stops_nothing`
-    を helper の呼び出しと push の直前で呼ぶ (床の setUp の後、当てる側を呼ぶまでに足した値は、setUp 直後の
-    確認では見えない)。問い合わせの床 (`_HermeticConfigChecks`・`_OuterRepoEnvChecks`) は、当てた直後の env
-    (`applied_env`) から問い合わせの入口までと、起動の中で env が変わっていないことを `query` /
-    `launched_env` の前後で確かめる。継承先がこの 2 つを上書きしていないことも `setUp` で確かめる
-    (上書き用の継承先メソッドは `query` から `launch` に改名)
-  - 床の側の道具が値を足す退行: spy (`recorded_git_launches`) が渡された env をそのまま記録すること
-    (`TestTheSpyRecordsTheEnvAsPassed`)、`isolate_git_config` の直後の env が止める側の値を持たず外側の変数が
-    残っていないこと (`TestTheIsolatedEnvStopsNothing`)
-  - 陽性対照の git が失敗したときは、例外のまま crash させず失敗として報告する
+  - `_OuterRepoEnvChecks` が、起動の仕方 (helper / 基底クラス) ごとに、外側の変数が git の env に届かないこと、
+    helper が外側の repo を変えないこと (外側の変数が指す場所に作った repo の全 file の中身の前後比較。その
+    場所を指していることを前提として確かめる)、外側の template の `pre-commit` が走らず除外ファイルが効かない
+    ことを見る
+  - 床 (`isolate_git_config`) が外側の変数を外すこと、床が当てる側の値を持たないことの確認を当てる側を呼ぶ
+    直前にも置いたこと、床の側の道具 (spy・問い合わせ) が値を足さないことの確認
+  - 陽性対照の git は、外側の変数を置いたうえで env から外して起動する (外し損ねたら、外側に書き込む前に
+    失敗として検出する)。失敗したときは例外のまま crash させず失敗として報告する
 
-テスト件数: 45 → 60 (追加 15・削除 0・統合 0)。
+テスト件数: 45 → 61 (追加 16・削除 0・統合 0)。
 
 確認:
 
-- 変異 46 件を、外側の env に `GIT_DIR` (別 repo)・`GIT_CONFIG_PARAMETERS`・`GIT_TEMPLATE_DIR` を置き、HOME は
-  空 / 自動 maintenance を止める 5 設定を持つ / 既定の除外ファイルを持つ の 3 つで流した。46 件すべてが
-  assertion の失敗 (`failures=`) で落ち、`errors=` は 0 だった (生き残りなし。1 件ずつ decoy の repo を作り直した)。
-  - helper の git の迂回 7 件: `worktree add` の 1 回目だけ・2 回目だけ・2 回とも (`test_every_git_launched_by_the_helpers_carries_the_env`
-    が 3 つの HOME すべてで落ちる)、`init`・`config`・`add`・`commit` のそれぞれ
-  - `sh()` が `hermetic_env()` を使わない・外側の変数を外さない、`hermetic_env()` が外さない・外側の env が定数に
-    勝つ・定数を足さない、`OUTER_GIT_LEAK_ENV` から 10 個の名前をそれぞれ外す、基底クラスが外さない・定数を
-    当てない
-  - 床: `isolate_git_config` が外側の変数を外さない・`GIT_CONFIG_*` を外さない・空の `.gitconfig` を置かない・
-    HOME を向け直さない。wrapper の区間で床に `GIT_CONFIG_NOSYSTEM` / 止める側の `GIT_CONFIG_COUNT` / fixture を指す
-    `GIT_CONFIG_GLOBAL` を足す 5 件 (helper の呼び出しの前・全件 env の検査の前・push の前)
-  - 床の側の道具: spy が定数の値を足す・env なしの起動で空を記録する・渡された env を捨てる、問い合わせの床の
-    控えの取り方 (基底クラスの setUp の前後)、起動の中で env を足す、継承先が `query` / `launched_env` を上書きする、
-    外側の変数を置く順序、外側の repo を作らない、`GIT_TEMPLATE_DIR` を置かない・template を戻さない
-  - HOME ごとに落ちるテストの集合が変わるのは、床が HOME を向け直さない変異だけ (開発者の config を読む
-    ほど、陽性対照が落ちる数が増える。3 つとも assertion で落ちる)
+- 変異 8 件 (`OUTER_GIT_LEAK_ENV` から `GIT_DIR` を外す (前提の行を外した形も)、外側の repo を 1 段深く作る旧形、
+  陽性対照の env の除外を外す (床が外側の変数を外さない形も)、`XDG_CONFIG_HOME` を外す、`worktree add` を env なしで
+  起動する) を、外側の env に `GIT_DIR` (別 repo) を置き、HOME は 空 / 自動 maintenance を止める 5 設定を持つ /
+  既定の除外ファイルを持つ の 3 つで流した。すべてが assertion の失敗で落ち、別 repo は変わらなかった。
+  `worktree add` を env なしで起動する変異は、`test_every_git_launched_by_the_helpers_carries_the_env` が
+  3 つの HOME すべてで落とす
 
 ## 0.1.3
 

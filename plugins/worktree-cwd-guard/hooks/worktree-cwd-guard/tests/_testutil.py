@@ -1,9 +1,12 @@
 """テスト共通: hook ディレクトリを sys.path に通し、main checkout + linked worktree を作る。"""
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -61,19 +64,23 @@ def git_config_env(settings: tuple[tuple[str, str], ...]) -> dict[str, str]:
 # の設定を読ませない。global の代わりに読ませるのは tests 配下の fixture で、自動 maintenance を止める
 # 設定 (`NO_BACKGROUND_GIT_SETTINGS` と `receive.autogc`) だけを持つ。
 #
-# 既定の除外ファイル (`$XDG_CONFIG_HOME/git/ignore`、未設定なら `~/.config/git/ignore`) はこの指定では
-# 外れない。この suite は git の未追跡の一覧・status・diff を読まず、`make_repo` が add するのも README
-# だけなので、HOME / XDG_CONFIG_HOME はテストクラスごとには向けない (向けるのは、「patch していない」
-# 状態を作る `test_hermetic_env.py` の床だけ)。
+# 既定の除外ファイル (`$XDG_CONFIG_HOME/git/ignore`、未設定なら `~/.config/git/ignore`) は
+# `GIT_CONFIG_GLOBAL` では外れない (実測)。テストの commit は `git add -A` なので、開発者の除外ファイルに
+# `*.md` のような pattern があると `make_repo` が README を add できず、commit が失敗する (実測)。
+# そこで `XDG_CONFIG_HOME` を空の dir に向ける (`EMPTY_XDG_CONFIG_HOME`)。空でない `XDG_CONFIG_HOME` が
+# あれば、git は `~/.config` には戻らない (実測)。
 #
 # 止める経路は 2 本あり、どちらも外さない:
 #   - env の `GIT_CONFIG_COUNT`: repo 自身の config より優先される。ただし `receive-pack` には届かない
 #   - global の fixture: `receive-pack` にも届く。ただし repo 自身の config には負ける
 # fixture はテストから `git config --global` で書かないこと (tracked の file が書き換わる)。
 HERMETIC_GIT_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hermetic.gitconfig")
+EMPTY_XDG_CONFIG_HOME = tempfile.mkdtemp(prefix="wcg-xdg-")
+atexit.register(shutil.rmtree, EMPTY_XDG_CONFIG_HOME, ignore_errors=True)
 HERMETIC_GIT_ENV = {
     "GIT_CONFIG_GLOBAL": HERMETIC_GIT_CONFIG,
     "GIT_CONFIG_NOSYSTEM": "1",
+    "XDG_CONFIG_HOME": EMPTY_XDG_CONFIG_HOME,
     **git_config_env(NO_BACKGROUND_GIT_SETTINGS),
 }
 
