@@ -21,7 +21,7 @@ from unittest import mock
 
 import _testutil  # noqa: F401
 
-from core import paths  # noqa: E402
+from core import paths, shell_word  # noqa: E402
 from core.dispatcher import dispatch  # noqa: E402
 
 _FAKE = "FAKE_LINE_9f3"
@@ -140,6 +140,8 @@ class TestPlacementPathsInDeny(_Base):
         # 制御文字を含むパスは、rm のコマンドの形では案内しない (shlex.quote は改行を残す)
         self.assertNotIn("rm ", reason)
         self.assertIn("コマンドの形では案内しません", reason)
+        # builder の migrate と同じ注記 (定数を共有する)
+        self.assertIn(shell_word.NOT_COMMAND_FORM_REMOVE, reason)
         self.assertNotIn(str(legacy), reason)
 
     def test_rm_guidance_is_kept_for_a_plain_path_with_a_space(self):

@@ -154,7 +154,7 @@ _PKG_ROOT = _HERE.parent
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
-from core import auto_switch, mode, paths, tiers  # noqa: E402
+from core import auto_switch, mode, paths, shell_word, tiers  # noqa: E402
 from scripts import pin_env  # noqa: E402
 from services import ALL as SERVICES  # noqa: E402
 
@@ -283,7 +283,7 @@ def _resolve_target(
         split = _split_tier_path(path)
         if split is None:
             raise _BuilderError(
-                f"--path は dispatcher が読む配置を指してください (指定: {path})。"
+                f"--path は dispatcher が読む配置を指してください (指定: {_p(path)})。"
                 "許容する末尾: "
                 + " / ".join(str(rel) for _kind, rel in _PATH_TIERS)
                 + "。これ以外の場所に書いても hook は読み込みません。",
@@ -293,7 +293,7 @@ def _resolve_target(
         if require_new and kind != "new":
             raise _BuilderError(
                 f"--path の書込先は {paths.ACCOUNTS_FILE_NEW} で終わる新パスに"
-                f"してください (指定: {path} は {kind} パス)。"
+                f"してください (指定: {_p(path)} は {kind} パス)。"
                 "旧パスへの新規書込は複数パス conflict の原因になります。",
                 exit_code=2,
             )
@@ -364,13 +364,43 @@ def _global_default_keys(global_path: Path) -> list[str]:
     return sorted(str(key) for key in data)
 
 
+def _p(value) -> str:
+    """出力に出すパス・OS のエラー文の表示形 (制御文字をエスケープして 1 行に収める)。
+
+    builder の出力は skill 経由で Claude が読む。途中のディレクトリ名はリポジトリ側が決められる
+    (改行や端末の制御シーケンスを含む名前を置ける) ので、そのまま出すと偽の行を差し込める。
+    hook の deny 文面と同じ部品 (`shell_word.escape_controls`) を通す (v0.21.2)。
+    """
+    return shell_word.escape_controls(value)
+
+
+def _quoted_for_command(path) -> str | None:
+    """シェルの 1 語としてクォートしたパス。制御文字を含むときは None (コマンドの形にしない)。
+
+    `shlex.quote` は改行などの制御文字をそのまま残す (引用符の中で行が分かれ、偽の行を
+    差し込める)。dispatcher の旧ファイル削除の案内と同じ分岐 (`escape_controls(text) == text`
+    のときだけコマンドの形) に揃える。
+    """
+    text = str(path)
+    if shell_word.escape_controls(text) != text:
+        return None
+    return shlex.quote(text)
+
+
+_NOT_COMMAND_FORM = "(制御文字を含むため、コマンドの形では案内しません。手で指定してください)"
+
+
 def _path_option(path: Path) -> str:
     """案内文に埋め込む `--path <file>`。
 
     Claude はこの断片をそのままコマンドに足すので、シェルの 1 引数になるように
     クォートする (ホームのパスに空白などが含まれていても別の引数に割れない)。
+    パスに制御文字を含むときはコマンドの形にせず、エスケープした表示と手で指定する案内にする。
     """
-    return f"--path {shlex.quote(str(path))}"
+    quoted = _quoted_for_command(path)
+    if quoted is None:
+        return f"--path {_p(path)} {_NOT_COMMAND_FORM}"
+    return f"--path {quoted}"
 
 
 def _global_default_note() -> str:
@@ -394,11 +424,11 @@ def _global_default_note() -> str:
         return ""
     keys = _global_default_keys(global_path)
     if keys:
-        detail = f"その {len(keys)} キー ({', '.join(keys)})"
+        detail = f"その {len(keys)} キー ({', '.join(_p(key) for key in keys)})"
     else:
         detail = "その内容"
     return (
-        f"警告: hook は現在グローバル既定 {global_path} で検証しています。"
+        f"警告: hook は現在グローバル既定 {_p(global_path)} で検証しています。"
         f"このパスにファイルを作ると、{detail} は継承されません "
         "(キー単位のマージはしません = 書かなかった service は未設定 = deny)。\n"
         f"グローバル既定を編集するなら {_path_option(global_path)} を使い、"
@@ -423,25 +453,25 @@ def _target_note(
     読むか」を出す)。
     """
     if target.origin == "ancestor":
-        return f"対象: {target.path} (祖先ディレクトリ {target.anchor} から継承)"
+        return f"対象: {_p(target.path)} (祖先ディレクトリ {_p(target.anchor)} から継承)"
     if target.origin == "explicit":
-        note = f"対象: {target.path} (--path で明示指定)"
+        note = f"対象: {_p(target.path)} (--path で明示指定)"
         other = _hook_reads_instead(target, project_dir)
         if other is not None:
             note += (
-                f"\n警告: hook が現在読むのは {other} です。--path はそれとは別の"
+                f"\n警告: hook が現在読むのは {_p(other)} です。--path はそれとは別の"
                 "ファイルを対象にするため、指定先が cwd に近ければ現在の設定を"
                 "覆い隠し (指定先に記載しない service は未設定 = deny)、遠ければ"
                 "書いても読まれません。"
             )
         return note
     if target.origin == "fresh":
-        note = f"対象: {target.path} (新規作成)"
+        note = f"対象: {_p(target.path)} (新規作成)"
         global_note = _global_default_note() if warn_shadowing else ""
         if global_note:
             note += "\n" + global_note
         return note
-    return f"対象: {target.path}"
+    return f"対象: {_p(target.path)}"
 
 
 def _load_existing(path: Path) -> dict[str, Any]:
@@ -452,7 +482,7 @@ def _load_existing(path: Path) -> dict[str, Any]:
     err = paths.stat_failure(path)
     if err is not None:
         raise _BuilderError(
-            f"{path} を確かめられません ({err.strerror or type(err).__name__})。"
+            f"{_p(path)} を確かめられません ({err.strerror or type(err).__name__})。"
             "途中のディレクトリの権限と symlink の行き先を確認し、"
             "期待値ファイルでないものは削除してください。"
         )
@@ -462,7 +492,7 @@ def _load_existing(path: Path) -> dict[str, Any]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         raise _BuilderError(
-            f"既存 {path} の JSON が不正です: {e.msg} (行 {e.lineno})。"
+            f"既存 {_p(path)} の JSON が不正です: {e.msg} (行 {e.lineno})。"
             "手動で修正してから再実行してください。"
         )
     except (ValueError, RecursionError) as e:
@@ -470,19 +500,19 @@ def _load_existing(path: Path) -> dict[str, Any]:
         # (RecursionError) ファイルも、hook と同じく不正な JSON と同じ扱いにする
         # (捕まえないと traceback で終わる)。
         raise _BuilderError(
-            f"既存 {path} を読めません ({type(e).__name__})。UTF-8 で保存した JSON か、"
+            f"既存 {_p(path)} を読めません ({type(e).__name__})。UTF-8 で保存した JSON か、"
             "入れ子が深すぎないかを確認し、手動で修正してから再実行してください。"
         )
     except OSError as e:
-        raise _BuilderError(f"{path} の読み込みに失敗しました: {e}")
+        raise _BuilderError(f"{_p(path)} の読み込みに失敗しました: {_p(e)}")
     if not isinstance(data, dict):
         raise _BuilderError(
-            f"{path} は JSON オブジェクト ({{...}}) である必要があります。"
+            f"{_p(path)} は JSON オブジェクト ({{...}}) である必要があります。"
         )
     if paths.nested_deeper_than(data, paths.MAX_ACCOUNTS_DEPTH):
         # hook は deny する深さ。通すと、書き戻す json.dumps が Python 3.12 で RecursionError になる。
         raise _BuilderError(
-            f"既存 {path} を読めません (入れ子が {paths.MAX_ACCOUNTS_DEPTH} 段より深い)。"
+            f"既存 {_p(path)} を読めません (入れ子が {paths.MAX_ACCOUNTS_DEPTH} 段より深い)。"
             "入れ子が深すぎないかを確認し、手動で修正してから再実行してください。"
         )
     return data
@@ -522,9 +552,9 @@ def _ensure_gitignore_entry(target: _Target, stdout: IO[str]) -> None:
             content += "\n"
         content += f"{entry}\n"
         gitignore.write_text(content, encoding="utf-8")
-        print(f"updated: {gitignore} ({entry} を追加)", file=stdout)
+        print(f"updated: {_p(gitignore)} ({entry} を追加)", file=stdout)
     except (OSError, UnicodeDecodeError) as e:
-        print(f"warning: .gitignore の更新に失敗しました: {e}", file=stdout)
+        print(f"warning: .gitignore の更新に失敗しました: {_p(e)}", file=stdout)
 
 
 def _ensure_project_claude_md(target: _Target, stdout: IO[str]) -> None:
@@ -545,13 +575,13 @@ def _ensure_project_claude_md(target: _Target, stdout: IO[str]) -> None:
     target_dir = target.path.parent
     md_path = target_dir / _PROJECT_CLAUDE_MD_FILENAME
     if os.path.exists(md_path):
-        print(f"(skipped: {md_path} already exists)", file=stdout)
+        print(f"(skipped: {_p(md_path)} already exists)", file=stdout)
         return
     try:
         content = _PROJECT_CLAUDE_MD_TEMPLATE.read_text(encoding="utf-8")
     except OSError as e:
         print(
-            f"warning: project CLAUDE.md template の読み込みに失敗しました: {e}",
+            f"warning: project CLAUDE.md template の読み込みに失敗しました: {_p(e)}",
             file=stdout,
         )
         return
@@ -559,9 +589,9 @@ def _ensure_project_claude_md(target: _Target, stdout: IO[str]) -> None:
         target_dir.mkdir(parents=True, exist_ok=True)
         md_path.write_text(content, encoding="utf-8")
     except OSError as e:
-        print(f"warning: {md_path} の書き込みに失敗しました: {e}", file=stdout)
+        print(f"warning: {_p(md_path)} の書き込みに失敗しました: {_p(e)}", file=stdout)
         return
-    print(f"created: {md_path}", file=stdout)
+    print(f"created: {_p(md_path)}", file=stdout)
 
 
 def _format_value_for_display(value: Any, show_values: bool) -> str:
@@ -581,9 +611,9 @@ def _print_change_line(
 ) -> None:
     display = _format_value_for_display(value, show_values)
     if show_values:
-        print(f"{status}: {key} -> {display}", file=stdout)
+        print(f"{status}: {_p(key)} -> {display}", file=stdout)
     else:
-        print(f"{status}: {key}", file=stdout)
+        print(f"{status}: {_p(key)}", file=stdout)
         print(f"  {display}", file=stdout)
 
 
@@ -714,7 +744,7 @@ def _validate_entry_shape(service, value: Any, *, strict_keys: bool = True) -> s
                 )
             if strict_keys and allowed_keys is not None and k not in allowed_keys:
                 return (
-                    f"{service.ACCOUNT_KEY}: オブジェクトのキー '{k}' は未対応です"
+                    f"{service.ACCOUNT_KEY}: オブジェクトのキー '{_p(k)}' は未対応です"
                     f" (許容: {', '.join(sorted(allowed_keys))})。"
                 )
             if isinstance(v, str):
@@ -733,12 +763,12 @@ def _validate_entry_shape(service, value: Any, *, strict_keys: bool = True) -> s
                 # なるだけの形なので、verify() が形として通すかに関係なく弾く。
                 return (
                     f"{service.ACCOUNT_KEY}: オブジェクトの値に空文字・空白のみの"
-                    f"文字列は使えません (キー '{k}')。"
+                    f"文字列は使えません (キー '{_p(k)}')。"
                 )
             if strict_keys:
                 return (
                     f"{service.ACCOUNT_KEY}: オブジェクトの値は空でない文字列で"
-                    f"ある必要があります (キー '{k}')。"
+                    f"ある必要があります (キー '{_p(k)}')。"
                 )
             # strict_keys=False: 非 str 値をどこまで許すかは service の
             # DICT_VALUE_CHECK 契約に従う。verify() が形を理由に deny する値は
@@ -747,7 +777,7 @@ def _validate_entry_shape(service, value: Any, *, strict_keys: bool = True) -> s
             if _dict_value_shape_denied(service, k, v, allowed_keys=allowed_keys):
                 return (
                     f"{service.ACCOUNT_KEY}: オブジェクトの値は文字列である必要が"
-                    f"あります (キー '{k}', 現在: {type(v).__name__})。"
+                    f"あります (キー '{_p(k)}', 現在: {type(v).__name__})。"
                     " この service の verify() はこの形を検証時に拒否します。"
                 )
         if not strict_keys and good_values == 0:
@@ -793,14 +823,14 @@ def _cmd_init(
     # なる)。set / remove は継承先を直接編集するのでこの問題が無い (D14)。
     if target.origin == "ancestor":
         print(
-            f"error: accounts.local.json は祖先ディレクトリ {target.anchor} から"
-            f"継承しています ({target.path})。"
+            f"error: accounts.local.json は祖先ディレクトリ {_p(target.anchor)} から"
+            f"継承しています ({_p(target.path)})。"
             "init で cwd 直下に作ると継承中の設定を覆い隠し、"
             "記載していない service が一斉に未設定 (deny) になるため拒否します。",
             file=stderr,
         )
         print(
-            f"継承中の {target.path} を編集するには set / remove を使ってください。"
+            f"継承中の {_p(target.path)} を編集するには set / remove を使ってください。"
             "この階層専用の設定を作る場合は --path で明示してください。",
             file=stderr,
         )
@@ -844,7 +874,7 @@ def _cmd_init(
         action = "skipped"
 
     print(_target_note(target, project_dir), file=stdout)
-    print(f"=== changes to {target.path} ===", file=stdout)
+    print(f"=== changes to {_p(target.path)} ===", file=stdout)
     if action == "add":
         _print_change_line("+ add", service_key, new_entry, args.show_values, stdout)
     elif action == "unchanged":
@@ -871,9 +901,9 @@ def _cmd_init(
         try:
             _write_json(target.path, updated)
         except OSError as e:
-            print(f"error: 書き込みに失敗しました: {e}", file=stderr)
+            print(f"error: 書き込みに失敗しました: {_p(e)}", file=stderr)
             return 1
-        print(f"\nwritten: {target.path}", file=stdout)
+        print(f"\nwritten: {_p(target.path)}", file=stdout)
         _ensure_project_claude_md(target, stdout)
         _ensure_gitignore_entry(target, stdout)
     else:
@@ -923,7 +953,7 @@ def _refuse_if_legacy_paths_exist(
         file=stderr,
     )
     for kind, path in legacy_paths:
-        print(f"  - {path} ({kind})", file=stderr)
+        print(f"  - {_p(path)} ({kind})", file=stderr)
     print(
         f"先に migrate --commit で新パスへ統合してから {command} を実行してください: "
         'python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/'
@@ -1041,7 +1071,7 @@ def _cmd_set(
         action = "update"
 
     print(_target_note(target, project_dir), file=stdout)
-    print(f"=== changes to {target.path} ===", file=stdout)
+    print(f"=== changes to {_p(target.path)} ===", file=stdout)
     if action == "add":
         _print_change_line("+ add", service_key, new_entry, args.show_values, stdout)
     elif action == "unchanged":
@@ -1060,9 +1090,9 @@ def _cmd_set(
         try:
             _write_json(target.path, updated)
         except OSError as e:
-            print(f"error: 書き込みに失敗しました: {e}", file=stderr)
+            print(f"error: 書き込みに失敗しました: {_p(e)}", file=stderr)
             return 1
-        print(f"\nwritten: {target.path}", file=stdout)
+        print(f"\nwritten: {_p(target.path)}", file=stdout)
         _ensure_project_claude_md(target, stdout)
         _ensure_gitignore_entry(target, stdout)
     else:
@@ -1126,7 +1156,7 @@ def _cmd_remove(
     if service_key not in existing:
         print(_target_note(target, project_dir), file=stdout)
         print(
-            f"{service_key} は {target.path} に存在しません。何もしません。",
+            f"{service_key} は {_p(target.path)} に存在しません。何もしません。",
             file=stdout,
         )
         return 0
@@ -1173,7 +1203,7 @@ def _cmd_remove(
         shape_error = None
 
     print(_target_note(target, project_dir), file=stdout)
-    print(f"=== changes to {target.path} ===", file=stdout)
+    print(f"=== changes to {_p(target.path)} ===", file=stdout)
     if args.host is not None and not drop_whole_key:
         _print_change_line(
             "- remove", f"{service_key}[{args.host}]", removed_value,
@@ -1216,9 +1246,9 @@ def _cmd_remove(
         try:
             _write_json(target.path, updated)
         except OSError as e:
-            print(f"error: 書き込みに失敗しました: {e}", file=stderr)
+            print(f"error: 書き込みに失敗しました: {_p(e)}", file=stderr)
             return 1
-        print(f"\nwritten: {target.path}", file=stdout)
+        print(f"\nwritten: {_p(target.path)}", file=stdout)
         _ensure_project_claude_md(target, stdout)
         _ensure_gitignore_entry(target, stdout)
     else:
@@ -1390,7 +1420,7 @@ def _cmd_show(
         print(
             _target_note(target, project_dir, warn_shadowing=False), file=stdout
         )
-        print(f"no accounts.local.json found at {target.path}", file=stdout)
+        print(f"no accounts.local.json found at {_p(target.path)}", file=stdout)
         # 「project に無い」=「検証されていない」ではない。dispatcher はグローバル
         # 既定に落ちるため、それを言わないと show が hook の実際の検証対象を
         # 隠すことになる (show の目的は不一致の原因調査)。突合はそのファイルの
@@ -1419,7 +1449,7 @@ def _cmd_show(
             return 1
         if global_in_use:
             print(
-                f"グローバル既定 {global_path} が存在します"
+                f"グローバル既定 {_p(global_path)} が存在します"
                 " (hook はこのファイルで検証します)。",
                 file=stdout,
             )
@@ -1456,7 +1486,7 @@ def _cmd_show(
             file=stderr,
         )
         for kind, path in found:
-            print(f"  - {path} ({kind})", file=stderr)
+            print(f"  - {_p(path)} ({kind})", file=stderr)
         print(
             "run `accounts_builder.py migrate --commit` to integrate.",
             file=stderr,
@@ -1471,7 +1501,7 @@ def _cmd_show(
         return e.exit_code
 
     print(_target_note(target, project_dir, warn_shadowing=False), file=stdout)
-    print(f"=== {path} ({kind}) ===", file=stdout)
+    print(f"=== {_p(path)} ({kind}) ===", file=stdout)
     services_filter = [args.service] if args.service else None
     if not existing:
         print("(empty)", file=stdout)
@@ -1529,7 +1559,7 @@ def _cmd_show(
                 current = svc.get_active_account(project_dir)
             except Exception as e:  # noqa: BLE001 — CLI 失敗は握り潰す
                 current = None
-                detail = f" (CLI error: {e})"
+                detail = f" (CLI error: {_p(e)})"
             if current is None:
                 status_marker = "[CLI unavailable or not logged in]"
             elif _entries_equal(expected, current, svc):
@@ -1541,7 +1571,7 @@ def _cmd_show(
         else:
             status_marker = "[unknown service]"
 
-        print(f"{key}: {expected_display}  {status_marker}{detail}", file=stdout)
+        print(f"{_p(key)}: {expected_display}  {status_marker}{detail}", file=stdout)
 
     _print_pinning(
         {k for k, v in existing.items() if v not in (None, "")},
@@ -1590,7 +1620,7 @@ def _cmd_migrate(
         return 1
 
     if len(found) == 1 and found[0][0] == "new":
-        print(f"only new path exists; nothing to migrate:\n  {new_path}", file=stdout)
+        print(f"only new path exists; nothing to migrate:\n  {_p(new_path)}", file=stdout)
         return 0
 
     sources: dict[str, dict[str, Any]] = {}
@@ -1640,7 +1670,7 @@ def _cmd_migrate(
             new_display = _format_value_for_display(new_val, args.show_values)
             old_display = _format_value_for_display(old_val, args.show_values)
             print(
-                f"  - {key}: new={new_display}, {old_kind}={old_display}",
+                f"  - {_p(key)}: new={new_display}, {old_kind}={old_display}",
                 file=stderr,
             )
         print(
@@ -1680,7 +1710,7 @@ def _cmd_migrate(
         )
         return 1
 
-    print(f"=== migrate to {new_path} ===", file=stdout)
+    print(f"=== migrate to {_p(new_path)} ===", file=stdout)
     existing_new = sources.get("new", {})
     for key in sorted(merged.keys()):
         in_new = key in existing_new
@@ -1706,9 +1736,9 @@ def _cmd_migrate(
         try:
             _write_json(new_path, merged)
         except OSError as e:
-            print(f"error: 書き込みに失敗しました: {e}", file=stderr)
+            print(f"error: 書き込みに失敗しました: {_p(e)}", file=stderr)
             return 1
-        print(f"\nwritten: {new_path}", file=stdout)
+        print(f"\nwritten: {_p(new_path)}", file=stdout)
         written = _Target(
             path=new_path, anchor=target.anchor, kind="new", origin=target.origin
         )
@@ -1727,7 +1757,16 @@ def _cmd_migrate(
             )
             for _kind, path in retained:
                 # パスはシェルの 1 語にする (途中のディレクトリ名はリポジトリが決められる)。
-                print(f"  rm {shlex.quote(str(path))}", file=stdout)
+                # 制御文字を含むパスは、`shlex.quote` が改行をそのまま残す (偽の行を差し込める)
+                # ので、コマンドの形では案内しない (dispatcher の同じ案内と同じ分岐)。
+                quoted = _quoted_for_command(path)
+                if quoted is not None:
+                    print(f"  rm {quoted}", file=stdout)
+                else:
+                    print(
+                        f"  {_p(path)} {shell_word.NOT_COMMAND_FORM_REMOVE}",
+                        file=stdout,
+                    )
     else:
         print("\n(dry-run; pass --commit to write)", file=stdout)
 
@@ -1751,14 +1790,14 @@ def _auto_switch_missing_file_message(target: _Target) -> str:
         if body is not None:
             return f"error: {body}"
     lines = [
-        f"error: {target.path} がありません。自動切替は期待値のアカウントへ切り替える"
+        f"error: {_p(target.path)} がありません。自動切替は期待値のアカウントへ切り替える"
         "機能なので、先に init で github の期待値を設定してください: "
         'python3 "${CLAUDE_PLUGIN_ROOT}/hooks/verify-cloud-account/scripts/'
         'accounts_builder.py" init --service github --dry-run'
     ]
     if global_in_use:
         lines.append(
-            f"hook は現在グローバル既定 {global_path} で検証しています。そのファイルで"
+            f"hook は現在グローバル既定 {_p(global_path)} で検証しています。そのファイルで"
             f"有効にするなら {_path_option(global_path)} を付けて再実行してください。"
         )
     lines.append(
@@ -1837,7 +1876,7 @@ def _cmd_auto_switch(
         action = "update"
 
     print(_target_note(target, project_dir), file=stdout)
-    print(f"=== changes to {target.path} ===", file=stdout)
+    print(f"=== changes to {_p(target.path)} ===", file=stdout)
     # 予約キーの値は機密ではない (show もそのまま出す) ので、--show-values に関係なく出す。
     if action == "unchanged":
         if key in existing:
@@ -1881,9 +1920,9 @@ def _cmd_auto_switch(
         try:
             _write_json(target.path, updated)
         except OSError as e:
-            print(f"error: 書き込みに失敗しました: {e}", file=stderr)
+            print(f"error: 書き込みに失敗しました: {_p(e)}", file=stderr)
             return 1
-        print(f"\nwritten: {target.path}", file=stdout)
+        print(f"\nwritten: {_p(target.path)}", file=stdout)
         # 「効きます」は本当に効くときだけ言う。期待値が働かない形のときや、環境変数が
         # ファイルの指定を上書きしているときは、上の注意が理由を説明している。
         if new_value is not None and not expected_problem and not env_overrides:
@@ -1951,13 +1990,13 @@ def _cmd_pin_env(
         if global_in_use and _report_unstattable([("global", global_path)], stderr):
             return 1
         print(
-            f"error: {target.path} がありません。期待値が無いので、固定する値を"
+            f"error: {_p(target.path)} がありません。期待値が無いので、固定する値を"
             "決められません。先に accounts-init で期待値を設定してください。",
             file=stderr,
         )
         if global_in_use:
             print(
-                f"グローバル既定 {global_path} で検証しているなら、{_path_option(global_path)}"
+                f"グローバル既定 {_p(global_path)} で検証しているなら、{_path_option(global_path)}"
                 " を付けて再実行してください。",
                 file=stderr,
             )
@@ -1970,7 +2009,7 @@ def _cmd_pin_env(
             file=stderr,
         )
         for kind, path in found:
-            print(f"  - {path} ({kind})", file=stderr)
+            print(f"  - {_p(path)} ({kind})", file=stderr)
         print("run `accounts_builder.py migrate --commit` to integrate.", file=stderr)
         return 1
 

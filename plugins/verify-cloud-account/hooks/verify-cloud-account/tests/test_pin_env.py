@@ -721,6 +721,19 @@ class TestSettingsLocalTarget(_TmpBase):
         self.assertIsNone(path)
         self.assertIn("git リポジトリの外", note)
 
+    def test_path_with_unicode_line_separators_is_not_split_into_extra_lines(self):
+        # `str.splitlines()` は U+2028 や `\x1c` でも行を割る。git の出力はこれらを含むパスを
+        # 1 行で返すので、割ると行数が 2 でなくなり「git リポジトリの外」と誤報告される。
+        for label, name in (("U+2028", "repo\u2028x"), ("0x1c", "repo\x1cx")):
+            with self.subTest(separator=label):
+                repo = _init_repo(self.tmp / name)
+                path, note = pin_env.settings_local_target(str(repo))
+                self.assertIsNotNone(path, note)
+                self.assertEqual(
+                    path.resolve(), (repo / ".claude" / "settings.local.json").resolve()
+                )
+                self.assertNotIn("git リポジトリの外", note)
+
     def test_repository_at_home_is_not_guessed(self):
         repo = _init_repo(self.tmp / "home-repo")
         with mock.patch.object(Path, "home", staticmethod(lambda: repo)):
