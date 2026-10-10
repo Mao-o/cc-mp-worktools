@@ -679,6 +679,12 @@ alias が 1 つならその値 → `default`。`npx firebase ...` のように h
 [pin-env](#プロジェクトごとにアカウントを固定する-公式の方法--v0170) の firebase と同じ)
 は、ローカル設定から解決せず、現在値を取得できないとして deny する (v0.18.0)。alias の
 行き先を firebase-tools と違う project に読んで照合しないため。
+firebase.json (`--config` 付きのコマンドではそのファイル) に旧形式のキー `"firebase"` がある
+とき (値に関わらず) と、そのキーの有無を確かめられないときも同じく deny する (v0.20.0)。
+firebase-tools は configstore の切替先が無いと、`.firebaserc` の alias より先にこのキーの project
+で動く。確かめられないのは、読めない・UTF-8 でない・U+FEFF がある・コメントがある (cjson が
+除く形。URL のような文字列の中の `//` は当たらない)・厳密な JSON として読めない
+(NaN・末尾のカンマ・構文の誤りなど) とき。空のファイルは firebase-tools と同じく `{}` として読む。
 `firebase use` が timeout したときは fallback せず「firebase use がタイムアウト
 しました」で deny する (fail-closed)。
 
@@ -839,9 +845,20 @@ flag** は、その値を検証に反映する。従来は hook の既定コン�
 | Kubernetes | `--context` | 値を期待値と直接照合 |
 | Kubernetes | `--kubeconfig` | 現在値の取得コマンドに引き渡す |
 
-- 記法は `--opt value` / `--opt=value` / 短縮の分離形 (`-P prod`) / 連結形
-  (`-Pprod`) / `-P=prod` を同じ規則で扱う。`--` 以降は後続コマンドの引数なので
-  見ない (`kubectl exec pod -- cmd --context x` の `--context` は採用しない)
+- 記法は `--opt value` / `--opt=value` / 短縮の分離形 (`-P prod`) / 値の連結形
+  (`-Pprod`) を拾う。`-P=prod` は hook では値 `prod` と読むが、firebase-tools (commander) は
+  値を `=prod` と読む (`-c=x` も `=x` というファイル)。実在しない project / ファイルを指す通常の
+  構成ではコマンドが失敗する。`=` で始まる alias やファイルを細工したリポジトリでは、照合先と
+  実行先が食い違いうる ([既知の制限](#既知の制限))。`--` 以降は後続コマンドの
+  引数なので見ない (`kubectl exec pod -- cmd --context x` の `--context` は採用しない)
+- **短いオプションを結合したトークンに、照合先を決める短い option が含まれる形は deny する**
+  (v0.20.0)。Firebase の `-jP prod` / `-iPprod` / `-jc sub/firebase.json` は、firebase-tools
+  (commander) では `-j -P prod` などに分かれる。hook は結合形を展開しない (CLI ごとの展開の規則を
+  再現しない) ので、照合先を確かめられないとして止める。`-P` / `-c` を単独のトークンに分けて
+  書けば照合する。値を取らない文字だけの結合形 (`-ji`) は従来どおり読み飛ばし、`-Pprod` のように
+  先頭の文字が `-P` / `-c` の形は値の連結形として読む。短い形の context option を持つのは
+  Firebase だけ (aws / gcloud / kubectl の context option は long option だけ) なので、ほかの
+  service には当たらない
 - 同じ option が複数あれば**最後が有効** (各 CLI の実装と同じ)
 - サブコマンドの**後ろ**に書かれた形 (`aws s3 ls --profile prod`) も拾う
 - **GCP は key ごとに独立**して上書きする。`gcloud --project ok run deploy` でも
@@ -1290,6 +1307,12 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   綴りの系統 (`gcloud deploy ...` = Cloud Deploy) は read でも QUERY にならず
   WRITE 扱いになる (v0.13.0 までと同じ扱いがこの系統だけ残る = 緩和が届かない
   だけで、新たな deny は生えない)
+- **Firebase の `-P=<値>` / `-c=<値>` は hook と firebase-tools で読み方が違う**。hook は `=` の
+  後ろを値と読み、firebase-tools (commander) は `=` から値と読む。ふつうは firebase-tools 側が
+  実在しない project / ファイルを指して失敗するが、`.firebaserc` に `=` で始まる alias
+  (`{"projects": {"=prod": "other-project"}}` など) や `=` で始まる名前の設定ファイルを置いた
+  リポジトリでは、hook が `prod` で照合して通したコマンドが別の project で動きうる。`-P` / `-c` は
+  `=` を付けずに書く (`-P prod` / `--project=prod`)
 - **未知のオプションは「安全と証明できない」側に倒すので、判定は CLI の
   オプション表に追随しない**。`gh api` は安全なオプションの allow-list で
   読み取りを証明するため、新しいオプションが増えると (実際は読み取りでも)
@@ -1379,6 +1402,12 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   を外すと、コマンドはアクティブな project で動く (指定していた project ではなくなるので、deny が
   示す期待した project がアクティブかを確かめてから外す)。そのうえで hook の PATH から `firebase` を
   使えるようにすると (CLI 自身が `.firebaserc` を読んで答える) 照合できる
+- CLI から現在値を取れないとき (`npx firebase` の構成など)、firebase.json に旧形式のキー
+  `"firebase"` があるか、コメント付きなど厳密な JSON でない firebase.json では、現在値を取得
+  できないとして deny する (v0.20.0。fail-closed)。判定は保守的で、firebase-tools がそのキーを
+  使わない形 (configstore に切替先がある・値が空文字など) も対象になる。旧形式のキーは
+  firebase-tools 自身も非推奨と警告し、`.firebaserc` への移行 (`firebase use --add`) を案内している。
+  hook の PATH から `firebase` を使えるようにすると (CLI 自身が答える) 照合できる
 - Firebase の `--config` / `-c` のパスが symlink を通るとき (symlink を通る絶対パス・symlink の
   ディレクトリを通る相対パス) は、deny の案内どおり `--config` のファイルのあるディレクトリで
   切り替えても効かないことがある (v0.18.0)。firebase-tools はこのパスの symlink を解かずに

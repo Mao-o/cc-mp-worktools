@@ -4174,5 +4174,164 @@ class TestDebugTrace(BaseWithTmpProject):
         self.assertEqual(with_debug, without_debug)
 
 
+class TestFirebaseCombinedShortOptions(BaseWithTmpProject):
+    """短い context option を含む結合形 (`firebase -jP prod deploy`) は deny する (v0.20.0)。
+
+    firebase-tools 15.24.0 (commander 5.1.0) は `-jP prod` を `-j -P prod` に、`-jc x` を
+    `-j -c x` に分ける。旧版はこれらを未知の 1 トークンとして読み飛ばし、アクティブな project
+    (既定の root) で照合して allow していた (内部バックログ)。展開はせず、確かめられない
+    として止める。
+    """
+
+    def setUp(self):
+        super().setUp()
+        (self.project_dir / "firebase.json").write_text("{}", encoding="utf-8")
+        (self.project_dir / ".firebaserc").write_text(
+            json.dumps({"projects": {"prod": "wrong-project"}}), encoding="utf-8"
+        )
+        sub = self.project_dir / "sub"
+        sub.mkdir()
+        (sub / "firebase.json").write_text("{}", encoding="utf-8")
+        self._write_accounts({"firebase": "right-project"})
+
+    def _dispatch(self, command: str):
+        def fake_run(argv, **kwargs):
+            # `firebase use` は root ごとにアクティブな project を答える: sub は wrong-project。
+            in_sub = "--config" in argv or str(kwargs.get("cwd", "")).endswith("/sub")
+            return SimpleNamespace(
+                stdout=("wrong-project" if in_sub else "right-project") + "\n",
+                stderr="", returncode=0,
+            )
+
+        with self.isolated_cache(), mock.patch(
+            "services.firebase.shutil.which", return_value="/usr/bin/firebase"
+        ), mock.patch("subprocess.run", side_effect=fake_run):
+            return dispatch(command, str(self.project_dir))
+
+    @staticmethod
+    def _decision(out):
+        return (out or {}).get("hookSpecificOutput", {}).get("permissionDecision")
+
+    def test_separate_forms_are_denied(self):
+        """対照: 分けて書いた形は従来どおり行き先で照合して deny する。"""
+        for command in ("firebase deploy -P prod", "firebase deploy -c sub/firebase.json"):
+            with self.subTest(command=command):
+                self.assertEqual(self._decision(self._dispatch(command)), "deny")
+
+    def test_combined_forms_with_a_context_option_are_denied(self):
+        for command in (
+            "firebase -jP prod deploy",
+            "firebase deploy -iP prod",
+            "firebase deploy -jPprod",
+            "firebase deploy -jc sub/firebase.json",
+            "firebase -ic sub/firebase.json deploy",
+        ):
+            with self.subTest(command=command):
+                out = self._dispatch(command)
+                self.assertEqual(self._decision(out), "deny", out)
+                reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+                self.assertIn("-c / -P", reason)
+                self.assertIn("結合したトークン", reason)
+                self.assertIn(f"(検出コマンド: {command})", reason)
+                # 切替をコマンドの形で案内しない (dispatcher の「単独で実行」の注記も付かない)
+                self.assertNotIn("firebase use", reason)
+
+    def test_combined_forms_without_a_context_option_are_read_as_before(self):
+        """値を取らない文字だけの結合形 (`-ji`) は従来どおり読み飛ばし、アクティブな project で照合する。"""
+        for command in ("firebase -ji deploy", "firebase deploy -ij --only hosting"):
+            with self.subTest(command=command):
+                self.assertIsNone(self._decision(self._dispatch(command)))
+
+    def test_query_command_with_a_combined_form_is_denied(self):
+        """リモート read のみのコマンドでも、結合形は宣言外の option なので tier が WRITE になり止める。"""
+        out = self._dispatch("firebase -jP prod projects:list")
+        self.assertEqual(self._decision(out), "deny", out)
+        self.assertIn("結合したトークン", json.dumps(out, ensure_ascii=False))
+
+    def test_wording_when_not_stopping(self):
+        """QUERY 扱いで届いたとき (警告) は、止めないことを言い、書き直しを求めない。"""
+        from core.dispatcher import _combined_short_error
+        from services import firebase as fb
+
+        text = _combined_short_error(fb, [("firebase x", "firebase x")], stops=False)
+        self.assertIn("実行は止めません", text)
+        self.assertNotIn("書いてください", text)
+
+    def test_not_cached_as_success(self):
+        """止めた形のあとで、同じ形の照合が成功 cache から通らない。
+
+        1 回目で成功 cache が積まれないこと (`continue` で verify に進まない) と、同じキーの
+        成功 cache があっても結合形の判定が cache より先に止めることの両方を見る。
+        """
+        from core import cache
+        from core.cli_options import COMBINED_SHORT_KEY
+        from services import firebase as fb
+
+        command = "firebase -jP prod deploy"
+        accounts = self.new_dir / "accounts.local.json"
+        with self.isolated_cache(), mock.patch(
+            "services.firebase.shutil.which", return_value="/usr/bin/firebase"
+        ), mock.patch(
+            "subprocess.run",
+            return_value=SimpleNamespace(stdout="right-project\n", stderr="", returncode=0),
+        ):
+            first = dispatch(command, str(self.project_dir))
+            key = (
+                "firebase", str(self.project_dir), "right-project",
+                accounts.stat().st_mtime, {}, {COMBINED_SHORT_KEY: "-jP"},
+            )
+            ident = cache.identity_env(fb, os.environ)
+            # 1 回目は成功を積まない
+            self.assertFalse(cache.get_success(*key, identity_env=ident))
+            self.assertTrue(
+                cache.set_success(
+                    *key, epoch=cache.current_epoch("firebase"), identity_env=ident
+                )
+            )
+            second = dispatch(command, str(self.project_dir))
+        self.assertEqual(self._decision(first), "deny")
+        self.assertEqual(self._decision(second), "deny")
+
+
+class TestFirebaseLegacyProjectKeyWithoutCli(BaseWithTmpProject):
+    """firebase.json の旧形式キー `"firebase"` を、CLI の無い経路で見落とさない (v0.20.0)。
+
+    firebase-tools 15.24.0 の applyRC は configstore の切替先が無いとき、`.firebaserc` の alias
+    より先にこのキー (config.defaults.project) を使う。旧版のローカル解決はこれを見ず、
+    `npx firebase deploy` を `.firebaserc` の default で照合して allow していた (内部バックログ)。
+    """
+
+    def _decision(self, firebase_json: str, firebaserc: dict) -> str | None:
+        (self.project_dir / "firebase.json").write_text(firebase_json, encoding="utf-8")
+        (self.project_dir / ".firebaserc").write_text(json.dumps(firebaserc), encoding="utf-8")
+        self._write_accounts({"firebase": "right-project"})
+        with self.isolated_cache(), mock.patch(
+            "subprocess.run", side_effect=FileNotFoundError("firebase")
+        ):
+            out = dispatch("npx firebase deploy", str(self.project_dir))
+        return (out or {}).get("hookSpecificOutput", {}).get("permissionDecision")
+
+    def test_legacy_key_is_denied(self):
+        self.assertEqual(
+            self._decision(
+                json.dumps({"firebase": "evil-project"}),
+                {"projects": {"default": "right-project"}},
+            ),
+            "deny",
+        )
+
+    def test_without_legacy_key_local_resolution_is_used(self):
+        """対照: 旧形式キーが無い厳密な JSON なら、従来どおりローカル設定 (default) で照合する。"""
+        hosting = json.dumps(
+            {"hosting": {"redirects": [{"source": "/a", "destination": "https://example.com/x"}]}}
+        )
+        self.assertIsNone(
+            self._decision(hosting, {"projects": {"default": "right-project"}})
+        )
+        self.assertEqual(
+            self._decision(hosting, {"projects": {"default": "wrong-project"}}), "deny"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -31,8 +31,16 @@ readonly 判定から外れるため、元の形で判定させる)。
 """
 from __future__ import annotations
 
+import re
 import shlex
 from collections.abc import Collection, Mapping
+
+# `find_context_options` の返り値で「照合先を確かめられない結合形があった」ことを示すキー。
+# 値はそのトークン。論理名 (`"profile"` 等) は `$` で始まらないので衝突しない。
+# dispatcher はこのキーがあれば verify() を呼ばずに止める (`_combined_short_error`)。
+COMBINED_SHORT_KEY = "$combined-short"
+# 結合形の先頭の英字の並び (`-jPprod` の `jPprod`)。
+_SHORT_CLUSTER_RE = re.compile(r"-([A-Za-z]+)")
 
 _TRUE_VALUES = frozenset({"true", "t", "yes", "y", "1"})
 _FALSE_VALUES = frozenset({"false", "f", "no", "n", "0"})
@@ -304,6 +312,16 @@ def find_context_options(
     同名 option が複数あれば最後が有効 (argparse / pflag / commander いずれも
     last-wins)。値が静的に解決できない (`$VAR` 等) 場合はキーごと捨てて既定
     コンテキストでの照合にフォールバックする。
+
+    **短い context option を途中に含む結合形** (`-jP prod` / `-iPprod` / `-jc x`) は
+    展開せず、`COMBINED_SHORT_KEY` にそのトークンを入れて返す (呼び出し側は照合先を
+    確かめられないとして止める)。commander / pflag は `-jP prod` を `-j -P prod` に分けるが、
+    hook がそれを読み飛ばすと既定のコンテキストで照合してしまう。展開の規則 (どの文字が
+    値を取るか・未知の文字で何が起きるか) は CLI ごとに違い、再現の誤りが新しい食い違いを
+    生むので再現しない。対象は「`-` 1 つに続く英字の並びに context option の短い形の文字が
+    あり、それ自体は既知の option として読めないトークン」。先頭の文字が context option なら
+    従来どおり値の連結形 (`-Pprod` は `-P` の値 `prod`。`_option_name_value` が先に読む)。
+    context option の文字を含まない結合形 (`-ji`) も従来どおり読み飛ばす。
     """
     try:
         tokens = shlex.split(candidate)
@@ -311,6 +329,11 @@ def find_context_options(
         return {}
     # context option 自身も「値を取る option」として消費規則に載せる。
     known_with_value = set(with_value) | set(context_options)
+    # context option の短い形の文字 (firebase の `-P` / `-c` なら {"P", "c"})。
+    short_letters = {
+        name[1] for name in context_options
+        if len(name) == 2 and name[0] == "-" and name[1] != "-"
+    }
     found: dict[str, str] = {}
     i = 1
     while i < len(tokens):
@@ -322,6 +345,10 @@ def find_context_options(
             continue
         name, embedded, has_value = _option_name_value(tok, known_with_value)
         if name not in known_with_value:
+            # long option (`--jP`) は `-` の次が英字でないので当たらない。
+            cluster = _SHORT_CLUSTER_RE.match(tok)
+            if cluster and any(ch in short_letters for ch in cluster.group(1)):
+                found[COMBINED_SHORT_KEY] = tok
             # 未知 option は bool 扱いで 1 トークン消費し、走査を続ける。
             continue
         if has_value:

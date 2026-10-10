@@ -1576,6 +1576,62 @@ ENOENT / ENOTDIR / EBADF / ELOOP 以外の stat の失敗を例外にし、例�
   (スキップ)、0.19.1 で epoch 0 (無効化の記録なし) として読み、epoch 0 で書かれたこの entry は
   cache hit (allow) のまま
 
+### 0.20.0 (短い context option の結合形 / firebase.json の旧形式キー)
+
+**結合形は展開せず、確かめられないとして止める**
+
+- `find_context_options` は `-jP prod` を未知の 1 トークンとして読み飛ばし、アクティブな project
+  (既定の root) で照合していた (内部バックログ)。commander 5.1.0 (firebase-tools 15.24.0) は
+  `-jP prod` を `-j -P prod` に、`-jPmy-proj-123` を `-j -P my-proj-123` に分ける (実測)
+- 展開しない理由: 展開の規則 (値を取る文字以降が値・未知の文字で何が起きるか・`=` の扱い) は
+  commander と pflag で違い、再現の誤りが新しい食い違いになる。代わりに「`-` 1 つに続く英字の
+  並びに、context option の短い形の文字があり、既知の option としては読めないトークン」に
+  印 (`COMBINED_SHORT_KEY`) を付け、dispatcher が cache と verify() の前に止める。英字の並び
+  だけを見るのは、値に数字や `-` を含む `-jPmy-proj-123` も拾うため (英字だけのトークンに
+  限ると漏れる)。`-jP=prod` / `-Pj=x` も印を付ける (commander は値を `=prod` / `j=x` と読み
+  コマンドは失敗するので、止めても失うものは無い)
+- 対象の文字は context option の短い形だけ (Firebase の `P` / `c`)。値を取る短い option 全般に
+  広げると kubectl の `-fn <ns>` (`-n` は context option ではない) まで止まる。aws / gcloud /
+  kubectl の context option には短い形が無いので、この規則はほかの service に当たらない
+- tier: 結合形は宣言外の option なので `core/tiers` が WRITE に倒し、QUERY のコマンドでも
+  止まる。文面は QUERY で届いたときの言い方も持つ (警告で書き直しを求めない)
+- 副作用として、unknown option の値に `-` で始まり `P` / `c` を含む英字の語が来る形
+  (`firebase deploy -m "-ice"` のような値) も止まる。既存の走査も同じ形を option と読むので、
+  食い違いの向きを deny に寄せただけ
+
+**firebase.json の旧形式キー `"firebase"` を CLI の無い経路で見る**
+
+- firebase-tools の applyRC は `options.project ?? configstore の切替先` が無いとき
+  `config.defaults.project` (firebase.json の `"firebase"` キー。真の値のときだけ) を使い、
+  それを `.firebaserc` の alias として解決する。`_from_local` はこのキーを見ず、`npx firebase
+  deploy` を `.firebaserc` の default で照合して allow していた (内部バックログ)
+- キーの値は読まない (旧形式の解決規則を再現しない)。キーがある・有無を確かめられないときは
+  `_from_local` が "" を返し、verify() が現在値を取得できないとして deny する。configstore に
+  切替先があるとき・値が偽のときも止める (firebase-tools はキーを使わない。保守的な側)
+- 確かめられない形: 読めない / UTF-8 でない / U+FEFF を含む (cjson はすべての U+FEFF を除くので
+  `"﻿firebase"` が `firebase` になる) / cjson のコメント除去が何かを除く / 厳密な JSON として
+  読めない。空のファイル (0 バイト) は firebase-tools と同じく `{}` (`statSync().size > 0` の
+  ときだけ読む)
+- `.firebaserc` のように `//` / `/*` を含むだけで弾くと、hosting の redirects に URL を書いた
+  ほぼすべての firebase.json が止まる。そこで cjson 0.3.3 の `decomment` を再現し
+  (`_cjson_decomment`)、除去の結果が元と同じかだけを確かめる (除去後の文字列を JSON として
+  読むことはしない)。再現が要るのは、cjson の文字列の追跡が「直前の 1 文字が `\` の `"`」を
+  常にエスケープとみなすため。厳密な JSON `{"a": "\\", "b": "/*", "h": {"c": "*/", "firebase":
+  "evil", "z": "/*"}, "y": "*/"}` は、Python の json ではトップレベルにキーが無いが、cjson は
+  `"\\"` の閉じ引用符を見落として `/*", "h": {"c": "*/` をコメントとして除き、トップレベルに
+  `"firebase": "evil"` が出る (firebase-tools 同梱の cjson で実測)。`//` も `/*` も無ければ
+  除去は恒等なので、比べるのはどちらかがあるときだけ
+- 確認: 合成 25 形 (上の例を含む) と実在のプロジェクトの firebase.json 7 件を、cjson (node) と突き合わせた。hook が
+  通す (解決に進む) 形で cjson がキーを持つものは 0 件。止める側に倒れるのは、コメント付き・
+  先頭の U+FEFF・深い入れ子 (cjson は読める)・UTF-8 でないバイト (cjson は置換文字で読む)・
+  偽の値のキー。実在の 7 件はすべて従来どおり解決に進む
+- builder: `get_active_account` / `suggest_accounts_entry` も `_resolve` → `_from_local` を
+  使うので、CLI が答えられない環境では、旧形式キーのある・確かめられない firebase.json の
+  プロジェクトで現在値を提案しない (`init` の CLI 由来の提案は「現在値を CLI から取得できません
+  でした」で止まり `--value` を求め、`show` は `[CLI unavailable or not logged in]` になる)。
+  旧版は `.firebaserc` から解決した値を出し、firebase-tools と違う project を期待値として
+  書かせうる形だった
+
 ## 既知の制限
 
 利用者から見える制限は README の「既知の制限」が正本。実装者向けに補足すると、

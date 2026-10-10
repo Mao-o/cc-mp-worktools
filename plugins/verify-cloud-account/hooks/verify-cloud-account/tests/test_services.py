@@ -1024,6 +1024,149 @@ class TestLocalResolutionNeedsAConfirmedFirebaserc(_FirebasercFixture):
                 self.assertNotIn("x; firebase use evil", err)
 
 
+# cjson 0.3.3 の文字列の追跡は `"\\"` の閉じ引用符を見落とす。この厳密な JSON は、Python の
+# json ではトップレベルに "firebase" キーが無いが、cjson がコメントとみなして除いた後は
+# トップレベルに "firebase": "evil-project" が出る (firebase-tools 15.24.0 同梱の cjson で実測)。
+_FBJSON_CJSON_LIFTS_KEY = (
+    '{"a": "\\\\", "b": "/*", "h": {"c": "*/", "firebase": "evil-project", "z": "/*"}, "y": "*/"}'
+)
+
+
+class TestLocalResolutionAndFirebaseJsonLegacyKey(_FirebasercFixture):
+    """CLI から現在値を取れないとき、firebase.json の旧形式キー `"firebase"` を見落とさない (v0.20.0)。
+
+    firebase-tools の applyRC は configstore の切替先が無いとき、`.firebaserc` の alias より先に
+    このキーの project で動く。キーがある・その有無を確かめられない firebase.json では、ローカル
+    設定から解決しない (現在値を取得できないとして deny する)。
+    """
+
+    _RC = '{"projects": {"default": "right-project"}}'
+
+    def _verify(self, firebase_json, context=None, name="fb", rc=None):
+        root = self.tmp / name
+        root.mkdir()
+        data = firebase_json.encode("utf-8") if isinstance(firebase_json, str) else firebase_json
+        (root / "firebase.json").write_bytes(data)
+        (root / ".firebaserc").write_text(rc or self._RC, encoding="utf-8")
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError), mock.patch(
+            "services.firebase.shutil.which", return_value="/usr/local/bin/firebase"
+        ):
+            return firebase.verify("right-project", str(root), context=context), root
+
+    def test_legacy_key_or_unconfirmed_file_is_not_resolved(self):
+        cases = {
+            "legacy key": json.dumps({"firebase": "evil-project"}),
+            # firebase-tools は偽の値を使わないが、値は読まずにキーの有無だけで止める
+            "legacy key, empty value": '{"firebase": ""}',
+            "line comment": '{\n  // hosting\n  "hosting": {}\n}',
+            "block comment": '{ /* hosting */ "hosting": {} }',
+            "BOM in a key": '{"\ufefffirebase": "evil-project"}',
+            "cjson lifts a nested key": _FBJSON_CJSON_LIFTS_KEY,
+            "NaN": '{"a": NaN}',
+            "trailing comma": '{"a": 1,}',
+            "not UTF-8": b'{"a": "\xff"}',
+            # json.loads が RecursionError を投げる深さ (取り逃すと例外が hook の外まで抜け、
+            # __main__ の最終防波堤が検証をスキップする)
+            "deep nesting": '{"a": ' + "[" * 100000 + "]" * 100000 + "}",
+        }
+        for i, (name, text) in enumerate(cases.items()):
+            with self.subTest(name):
+                try:
+                    err, _root = self._verify(text, name=f"case{i}")
+                except Exception as e:  # noqa: BLE001
+                    self.fail(f"verify から {type(e).__name__} が抜けた (hook は検証をスキップする)")
+                self.assertIsNotNone(err)
+                self.assertIn("現在のプロジェクトを取得できません", err)
+
+    def test_unreadable_file_is_not_resolved(self):
+        """存在するが読めない firebase.json (権限など) は、有無を確かめられないとして止める。"""
+        _err, root = self._verify("{}", name="unreadable")
+        path = root / "firebase.json"
+        with mock.patch("services.firebase.Path.read_bytes", side_effect=PermissionError):
+            self.assertTrue(firebase._firebase_json_blocks_local(str(path)))
+
+    def test_legacy_key_is_checked_before_the_configstore_switch(self):
+        """configstore の切替先があっても、旧形式キーがあればローカル設定から解決しない。
+
+        firebase-tools は切替先があればそれを優先するが、hook は切替先の有無より先に
+        firebase.json を確かめる保守的な順序にしている (README / DEVELOPMENT.md)。
+        """
+        _err, root = self._verify("{}", name="switched")
+        (root / "firebase.json").write_text(
+            json.dumps({"firebase": "evil-project"}), encoding="utf-8"
+        )
+        self._switch(str(root), "right-project")
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError), mock.patch(
+            "services.firebase.shutil.which", return_value="/usr/local/bin/firebase"
+        ):
+            err = firebase.verify("right-project", str(root))
+        self.assertIsNotNone(err)
+        self.assertIn("現在のプロジェクトを取得できません", err)
+        # 対照: 旧形式キーが無ければ、同じ切替先で解決して通る
+        (root / "firebase.json").write_text("{}", encoding="utf-8")
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError), mock.patch(
+            "services.firebase.shutil.which", return_value="/usr/local/bin/firebase"
+        ):
+            self.assertIsNone(firebase.verify("right-project", str(root)))
+
+    def test_strict_json_without_legacy_key_is_still_resolved(self):
+        """対照: 旧形式キーの無い厳密な JSON は、従来どおり `.firebaserc` の default で解決する。"""
+        cases = {
+            "empty object": "{}",
+            "empty file": "",
+            "URL in a string": json.dumps(
+                {"hosting": {"redirects": [{"source": "/a", "destination": "https://example.com/x"}]}}
+            ),
+            "block comment opener in a string": '{"hosting": {"public": "x/*y"}}',
+            "escaped quote before slashes": '{"a": "say \\"hi\\" //"}',
+            "nested key named firebase": '{"hosting": {"firebase": "x"}}',
+            "top-level array": '["firebase"]',
+        }
+        for i, (name, text) in enumerate(cases.items()):
+            with self.subTest(name):
+                err, root = self._verify(text, name=f"case{i}")
+                self.assertIsNone(err)
+                # 解決した値で照合している (default を別の project にすると不一致になる)
+                (root / ".firebaserc").write_text(
+                    '{"projects": {"default": "wrong-project"}}', encoding="utf-8"
+                )
+                with mock.patch("subprocess.run", side_effect=FileNotFoundError), mock.patch(
+                    "services.firebase.shutil.which", return_value="/usr/local/bin/firebase"
+                ):
+                    err = firebase.verify("right-project", str(root))
+                self.assertIsNotNone(err)
+                self.assertIn("現在=wrong-project", err)
+
+    def test_config_option_reads_the_named_file(self):
+        """`--config` 付きのコマンドは、root の firebase.json ではなく指定したファイルを見る。"""
+        err, root = self._verify("{}", name="cfg")
+        alt = root / "alt.json"
+        alt.write_text(json.dumps({"firebase": "evil-project"}), encoding="utf-8")
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError), mock.patch(
+            "services.firebase.shutil.which", return_value="/usr/local/bin/firebase"
+        ):
+            err = firebase.verify("right-project", str(root), context={"config": "alt.json"})
+        self.assertIsNotNone(err)
+        self.assertIn("現在のプロジェクトを取得できません", err)
+
+        err, root = self._verify(json.dumps({"firebase": "evil-project"}), name="cfg2")
+        (root / "alt.json").write_text("{}", encoding="utf-8")
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError), mock.patch(
+            "services.firebase.shutil.which", return_value="/usr/local/bin/firebase"
+        ):
+            err = firebase.verify("right-project", str(root), context={"config": "alt.json"})
+        self.assertIsNone(err)
+
+    def test_builder_suggestion_is_withheld(self):
+        """builder の現在値 (`get_active_account`) も同じ解決を使い、旧形式キーがあれば提案しない。"""
+        _err, root = self._verify(json.dumps({"firebase": "evil-project"}), name="builder")
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+            self.assertIsNone(firebase.get_active_account(str(root)))
+        (root / "firebase.json").write_text("{}", encoding="utf-8")
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+            self.assertEqual(firebase.get_active_account(str(root)), "right-project")
+
+
 class TestFirebasercThatCannotBeStatted(_FirebasercFixture):
     """stat できない `.firebaserc` (長すぎる名前を指す symlink など) で例外を漏らさない (v0.18.0)。
 
