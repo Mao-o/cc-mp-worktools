@@ -22,6 +22,7 @@ import unittest
 from unittest import mock
 
 import _testutil  # noqa: F401  (hooks/ を sys.path に載せる)
+from _testutil import write_script
 
 from _common import cursorcli
 
@@ -64,24 +65,17 @@ class CursorCliTestCase(unittest.TestCase):
 
         呼ばれるたびに probe ログへ 1 行足すので、probe の回数を数えられる。
         """
-        path = os.path.join(self.bin, name)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(
-                "#!/bin/bash\n"
-                f"echo {name} >> {self.probe_log}\n"
-                f"printf '%s\\n' {version!r}\n"
-                f"exit {exit_code}\n"
-            )
-        os.chmod(path, 0o755)
-        return path
+        return write_script(
+            self.bin,
+            name,
+            f"echo {name} >> {self.probe_log}\n"
+            f"printf '%s\\n' {version!r}\n"
+            f"exit {exit_code}\n",
+        )
 
     def silent_cli(self, name: str):
         """0 で終了するが何も出力しない CLI (応答とみなさない)。"""
-        path = os.path.join(self.bin, name)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("#!/bin/bash\n" f"echo {name} >> {self.probe_log}\n" "exit 0\n")
-        os.chmod(path, 0o755)
-        return path
+        return write_script(self.bin, name, f"echo {name} >> {self.probe_log}\nexit 0\n")
 
     def hanging_cli(self, name: str, *, ignore_term: bool = False):
         """応答しない CLI (`--version` を投げても返ってこない)。
@@ -89,16 +83,13 @@ class CursorCliTestCase(unittest.TestCase):
         `ignore_term=True` は SIGTERM を無視する (SIG_IGN は子にも継承されるので
         `sleep` も無視する) ので、停止には SIGKILL 段が必要になる。
         """
-        path = os.path.join(self.bin, name)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(
-                "#!/bin/bash\n"
-                + ("trap '' TERM\n" if ignore_term else "")
-                + f"echo {name} >> {self.probe_log}\n"
-                + f"{self.sleep} 30 &\nwait\n"
-            )
-        os.chmod(path, 0o755)
-        return path
+        return write_script(
+            self.bin,
+            name,
+            ("trap '' TERM\n" if ignore_term else "")
+            + f"echo {name} >> {self.probe_log}\n"
+            + f"{self.sleep} 30 &\nwait\n",
+        )
 
     def probes(self) -> list[str]:
         try:
@@ -193,7 +184,7 @@ class TestDetectionOrder(CursorCliTestCase):
         """
         self.hanging_cli("cursor-agent")
         self.fake_cli("cursor")
-        with mock.patch.object(cursorcli, "PROBE_TIMEOUT_SEC", 0.5), mock.patch.object(
+        with mock.patch.object(cursorcli, "PROBE_TIMEOUT_SEC", 0.3), mock.patch.object(
             cursorcli, "PROBE_KILL_GRACE_SEC", 0.1
         ):
             started = time.monotonic()
@@ -268,12 +259,11 @@ class TestDetectionOrder(CursorCliTestCase):
     def test_unresponsive_probe_returns_within_the_timeout(self):
         """応答しない候補の probe は timeout で切り上がり、後始末まで含めて短く済む。
 
-        **`PROBE_KILL_GRACE_SEC` を短くしていること自体はここでは決定論的に測れていない**。
-        猶予が効くのは SIGTERM を無視するプロセスが残っている場合だけで、このフィクスチャ
-        (`trap '' TERM` + 背景の sleep) は trap を張る前に probe の timeout が来ると TERM で
-        group ごと死ぬ。猶予を既定 (5 秒) に戻す mutation は、そのタイミング次第で落ちたり
-        落ちなかったりする (実測で両方を観測) ので、空振りとして扱う。
-        `kill_process_group` の TERM→KILL の段自体は `test_subproc.py` が押さえている。
+        猶予が効くのは SIGTERM を無視するプロセスが残っている場合だけ。偽 CLI は温めた
+        launcher 経由で数 ms で起動する (`_testutil.write_script`) ので、probe の timeout
+        より前に `trap '' TERM` を張り終え、停止には必ず SIGKILL 段が要る。猶予を既定
+        (5 秒) に戻す mutation はこれで落ちる。以前は偽 CLI の初回 exec の遅延 (macOS で
+        約 0.26 秒) が timeout に近く、trap 前に TERM が届くと落ちなかった (空振り)。
         """
         self.hanging_cli("cursor-agent", ignore_term=True)
         with mock.patch.object(cursorcli, "PROBE_TIMEOUT_SEC", 0.3), mock.patch.object(

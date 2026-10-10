@@ -21,10 +21,15 @@ from _testutil import ensure_killed, hanging_cli, read_pid, wait_until_dead, wri
 
 from _common import subproc
 
-# 偽 CLI が孫を起動して pid ファイルを書くまでの余裕を見て 1 秒。遅い CI でも
-# timeout 前に pid ファイルが書かれるようにする (経過時間の上限は grace 込みで見る)。
-TIMEOUT = 1.0
-GRACE = 0.5
+# 偽 CLI が孫を起動して pid ファイルを書き、trap を張り終えるまでの余裕。偽 CLI は温めた
+# launcher 経由で数 ms で起動する (`_testutil.write_script`) ので 0.5 秒で足りる。
+# 足りないと pid ファイルが書かれずに落ちるか、trap 前に TERM が届いて SIGKILL 段を
+# 通らないまま緑になる (経過時間の上限は grace 込みで見る)。
+TIMEOUT = 0.5
+# 結果は猶予の長さに依存しない (猶予後も残っていれば SIGKILL するため)。全員 TERM で死ぬ
+# 型が「猶予を待たない」ことの検査 (`TIMEOUT + GRACE` 未満) に、空の判定 (ps 1 回) が
+# 収まる長さは要る。
+GRACE = 0.3
 
 
 class SubprocTestCase(unittest.TestCase):
@@ -57,12 +62,6 @@ class SubprocTestCase(unittest.TestCase):
 
 
 class TestTimeoutKillsProcessGroup(SubprocTestCase):
-    def test_grandchild_holding_stdout_is_killed_and_call_returns_promptly(self):
-        cli, pid_file = self._hanging()
-        elapsed, grandchild = self._run_until_timeout(cli, pid_file)
-        self.assertLess(elapsed, TIMEOUT + 3 * GRACE + 2.0, "timeout 後に孫の EOF を待って止まっている")
-        self.assertTrue(wait_until_dead(grandchild), "stdout を握った孫が取り残されている")
-
     def test_sigterm_ignored_escalates_to_sigkill(self):
         cli, pid_file = self._hanging(ignore_term=True)
         elapsed, grandchild = self._run_until_timeout(cli, pid_file)
@@ -106,11 +105,15 @@ class TestTimeoutKillsProcessGroup(SubprocTestCase):
         self.assertTrue(wait_until_dead(grandchild), "SIGKILL 段で pipe を握らないメンバーが取り残されている")
 
     def test_group_that_exits_on_term_returns_without_waiting_full_grace(self):
-        """全員 TERM で死ぬ通常ケースでは猶予いっぱい待たない (probe で空を検知して即 return)。"""
+        """全員 TERM で死ぬ通常ケースでは猶予いっぱい待たない (probe で空を検知して即 return)。
+
+        stdout を握った孫も止まること (旧 `test_grandchild_holding_stdout_is_killed_and_call_returns_promptly`
+        と同じフィクスチャ・同じ呼び出しで、経過時間の上限がより厳しいので統合した)。
+        """
         cli, pid_file = self._hanging()
         elapsed, grandchild = self._run_until_timeout(cli, pid_file)
         self.assertLess(elapsed, TIMEOUT + GRACE, "グループが空になった後も猶予を待っている")
-        self.assertTrue(wait_until_dead(grandchild))
+        self.assertTrue(wait_until_dead(grandchild), "stdout を握った孫が取り残されている")
 
     def test_timeout_with_stdin_input(self):
         """codex 経路 (input_text あり) でも同じく timeout 直後に返る。"""
@@ -143,7 +146,8 @@ class TestTimeoutKillsProcessGroup(SubprocTestCase):
         self._grandchildren.append(grandchild)
         self.assertEqual(os.getpgid(proc.pid), os.getpgid(0))
 
-        subproc.kill_process_group(proc, grace_sec=GRACE)
+        # 孫が pipe を握るので猶予は 2 回とも満了する。検査は猶予の長さに依存しないので縮める
+        subproc.kill_process_group(proc, grace_sec=0.1)
 
         self.assertIsNotNone(proc.returncode)
         # 孫はこちらの process group に居るので意図的に殺さない (teardown で後始末)
@@ -218,24 +222,29 @@ class TestZombieOnlyGroup(SubprocTestCase):
             if sig != 0:
                 sent_so_far.append(sig)
 
+        grace = 0.2
         with mock.patch.object(subproc, "_group_state", side_effect=state), mock.patch.object(
             os, "killpg", side_effect=fake_killpg
         ):
             started = time.monotonic()
-            subproc.kill_process_group(proc, grace_sec=0.5, own_group=True)
+            subproc.kill_process_group(proc, grace_sec=grace, own_group=True)
             elapsed = time.monotonic() - started
         self.assertEqual(sent_so_far, [signal.SIGTERM, signal.SIGKILL])
-        self.assertGreaterEqual(elapsed, 0.5, "live が残るなら TERM 段は猶予を待つこと")
-        self.assertLess(elapsed, 1.5)
+        self.assertGreaterEqual(elapsed, grace, "live が残るなら TERM 段は猶予を待つこと")
+        self.assertLess(elapsed, grace + 1.0)
 
     def test_unknown_liveness_is_cut_short_after_sigkill(self):
+        # 打ち切りを外すと SIGKILL 段も猶予いっぱい待つので、経過は 2 * grace 以上になる。
+        # 上限 (grace + settle + 0.4) をそれ以下に置けば、打ち切りの有無を決定論的に分けられる
+        grace, settle = 0.5, 0.1
         proc = self._exited_leader()
-        elapsed, sent = self._kill_with_state(proc, 1.0, lambda pgid: "unknown")
+        with mock.patch.object(subproc, "KILL_SETTLE_UNKNOWN_SEC", settle):
+            elapsed, sent = self._kill_with_state(proc, grace, lambda pgid: "unknown")
         self.assertEqual(sent, [signal.SIGTERM, signal.SIGKILL])
-        self.assertGreaterEqual(elapsed, 1.0, "判定不能なら TERM 段は猶予を待つこと")
+        self.assertGreaterEqual(elapsed, grace, "判定不能なら TERM 段は猶予を待つこと")
         self.assertLess(
             elapsed,
-            1.0 + subproc.KILL_SETTLE_UNKNOWN_SEC + 0.5,
+            grace + settle + 0.4,
             "SIGKILL 後は KILL_SETTLE_UNKNOWN_SEC で打ち切ること",
         )
 
@@ -343,10 +352,25 @@ class TestRunCapturedContract(SubprocTestCase):
         self.assertEqual(result.stdout, "plan body\n")
 
     def test_stdin_is_devnull_without_input(self):
-        """hook 自身の stdin (payload の pipe) を子に継承させない。"""
+        """hook 自身の stdin (payload の pipe) を子に継承させない。
+
+        テストを流すプロセスの stdin はたいてい空 (CI やゲートでは /dev/null) なので、
+        そのままでは継承しても `eof` になり区別できない。fd 0 を中身のある pipe に
+        差し替えて、payload の pipe を持つ hook と同じ形にする。
+        """
         cli = write_script(self.dir, "readstdin", "if read -r line; then echo \"got:$line\"; else echo eof; fi\n")
-        result = subproc.run_captured([cli], timeout_sec=5)
-        self.assertEqual(result.stdout.strip(), "eof")
+        read_end, write_end = os.pipe()
+        os.write(write_end, b"payload\n")
+        os.close(write_end)
+        saved_stdin = os.dup(0)
+        try:
+            os.dup2(read_end, 0)
+            result = subproc.run_captured([cli], timeout_sec=5)
+        finally:
+            os.dup2(saved_stdin, 0)
+            os.close(saved_stdin)
+            os.close(read_end)
+        self.assertEqual(result.stdout.strip(), "eof", "hook 自身の stdin が子に渡っている")
 
     def test_missing_binary_is_none(self):
         self.assertIsNone(

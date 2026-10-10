@@ -5,6 +5,23 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.12.5
+
+**テスト整理 (挙動の変更なし)。`_common` と `explore-parallel` の suite の待ちを縮め、並列負荷で probe が timeout する flaky を構造的に消した (patch bump)。** 製品コード・`hooks.json`・README は変えていない。
+
+- 待ちの短縮: 猶予・確認の待ちをテストが検証する境界の直上まで縮め、偽 CLI は温めた launcher への symlink にして、新しく書いたスクリプトの初回 exec の遅さ (macOS) をテストの待ちから外した。後者が、負荷下で probe の 1.5 秒の timeout を超える flaky の原因だった
+- 削除 (`explore-parallel` 7 件・`_common` 1 件): 消すテストが殺していた変異を、削除後の残りのテストが全て殺すことを確かめた上で、同じ義務を見る別テストと重なるものだけを消した。一部は assert を受け皿のテストへ移してから消した
+- 強化: どのテストも殺していなかった変異 (空ガード) を殺すようにした。`explore-parallel` の 3 件と、`_common` の 2 件 (`stdin` が `/dev/null` であること、応答しない probe が timeout 内に返ること)。前提が失効した docstring も直した
+- 統合: `test_settings` の 2 族と `test_sentinel` の 1 族を表駆動 + subTest にまとめた (ケース数は不変。元のテスト名はケースのラベルとして残した)
+- suite: `_common` 170 → 162 件 / 約 33 → 10 秒、`explore-parallel` 88 → 81 件 / 約 38 → 13 秒 (macOS、無負荷。ここだけの計測で CI は未計測)
+- `post-implementation-review` の suite: 各テストの setUp で git を 5 回起動していた初期コミット済み repo の作成 (`init_repo`) を、プロセスで 1 回だけ本物の初期化をして、各テストにはそのコピーを渡す形にした。テスト本体は変えていない。自動 maintenance 対策の床 (`test_hermetic_env`) は、雛形を空にして本物の初期化をその場で走らせる形に直した (コピーでは git が起動されず、床が空になるため)。`init_repo` は雛形の作成を env の patch で包まない (helper の `git()` が毎回 `HERMETIC_GIT_ENV` を足すので冗長で、包むと床が「patch していない」状態で作った env を上書きし、helper の当て損ねが見えなくなる)。床には前提を足した: helper が git に渡す前の `os.environ` は止める側の値を持たない。件数は 462 件のまま、約 93 → 約 59 秒 (macOS、負荷はやや高め)。重複テストの削除・統合は、変異による確認が要るため今回は見送った
+
+### 確認
+
+- 削除・強化・縮めた待ちの境界を突く変異 38 件 (`explore-parallel` 29、`_common` 9) を、使い捨てのコピーで 1 件ずつ流し、36 件は assertion の失敗のみで検出され、残り 2 件 (`explore-parallel` の起動可否の既定値と guard の反転) は assertion の失敗と error (変異で起動できなくなったテスト) が混在した。この 2 件は修正前の版でも同じ分類だった
+- 雛形化した `init_repo` の床: `git()` が env を足さない / 混ぜる向きが逆 / commit が helper を迂回 / `GIT_CONFIG_COUNT` 系を渡さない / `GIT_CONFIG_NOSYSTEM` を渡さない、の 5 変異が `test_hermetic_env` の assertion の失敗で検出された
+- 負荷下の反復: 2 つの `explore-parallel` suite と `_common` suite を同時に 6 回ずつ流して全て green (修正前は並列負荷で失敗が出ていた)
+
 ## 0.12.4
 
 **テスト整理 (挙動の変更なし)。自動 maintenance 対策の床 (0.12.3 で足した `tests/test_hermetic_env.py`) の穴 4 件を直した (patch bump)。** hook・`hooks.json`・README の挙動は変わらない。穴はどれも、修正前に変異か実測で実在を確かめた (最後の「確認」の節)。

@@ -21,6 +21,11 @@ from _testutil import HookTestCase, explore_payload
 
 from _common import subproc  # noqa: E402  (_testutil の sys.path 挿入後に import する)
 
+#: 「signal を送っていない」ことを確かめるまでの待ち (秒)。停止処理は同期なので、送って
+#: いれば呼び出しから戻った時点で signal は届いており、あとは相手が終了するのを待つだけ。
+#: 猶予 (`KILL_GRACE_SEC`) の長さを待つ必要は無い
+_SETTLE_SEC = 0.3
+
 
 def _alive(pid: int) -> bool:
     """pid が「まだ走っている」か。**zombie は死んだ扱い**。
@@ -46,7 +51,7 @@ class OrphanTestCase(HookTestCase):
         super().setUp()
         self._extra_pids: list[int] = []
         self._procs: list[subprocess.Popen] = []
-        self._grace = mock.patch.object(self.cursor, "KILL_GRACE_SEC", 1.0)
+        self._grace = mock.patch.object(self.cursor, "KILL_GRACE_SEC", 0.3)
         self._grace.start()
 
     def tearDown(self) -> None:
@@ -94,24 +99,18 @@ class OrphanTestCase(HookTestCase):
         ガードを外す mutation を素通りさせる (実際に mutation で空振りを観測した)。
         親である test プロセス自身が `poll()` すれば reap して終了を検出できる。
         """
-        deadline = time.monotonic() + 0.5
+        deadline = time.monotonic() + _SETTLE_SEC
         while time.monotonic() < deadline and proc.poll() is None:
             time.sleep(0.05)
         self.assertIsNone(proc.poll(), msg)
 
     def fake_cursor_with_grandchild(self) -> str:
         """孫 `sleep 30` に stdout を継承させたまま待つ偽 cursor。孫 pid の記録先を返す。"""
-        gc_pid_file = os.path.join(self.tmpdir, "cursor-grandchild.pid")
-        path = os.path.join(self.bin, "cursor")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(
-                "#!/bin/bash\n"
-                "sleep 30 &\n"
-                f"echo $! > {gc_pid_file}\n"
-                "wait\n"
-            )
-        os.chmod(path, 0o755)
-        return gc_pid_file
+        self.install(
+            "cursor",
+            "#!/bin/bash\nsleep 30 &\necho $! > \"$TMPDIR/cursor-grandchild.pid\"\nwait\n",
+        )
+        return os.path.join(self.tmpdir, "cursor-grandchild.pid")
 
     def fake_cursor_with_stubborn_grandchild(self) -> str:
         """SIGTERM を**無視する**孫を持つ偽 cursor。孫 pid の記録先を返す。
@@ -123,22 +122,20 @@ class OrphanTestCase(HookTestCase):
         ハンドラ設置前に SIGTERM が届きうるので、既定動作で死んだのか SIGKILL で死んだのか
         区別が付かず、エスカレーションを外す mutation を素通りさせる。
         """
-        gc_pid_file = os.path.join(self.tmpdir, "cursor-stubborn.pid")
         script = (
             "import os, signal, time\n"
             "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-            f"open({gc_pid_file!r}, 'w').write(str(os.getpid()))\n"
+            "open(os.path.join(os.environ['TMPDIR'], 'cursor-stubborn.pid'), 'w')"
+            ".write(str(os.getpid()))\n"
             "time.sleep(30)\n"
         )
-        path = os.path.join(self.bin, "cursor")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(
-                "#!/bin/bash\n"
-                f"{shlex.quote(sys.executable)} -c {shlex.quote(script)} &\n"
-                "wait\n"
-            )
-        os.chmod(path, 0o755)
-        return gc_pid_file
+        self.install(
+            "cursor",
+            "#!/bin/bash\n"
+            f"{shlex.quote(sys.executable)} -c {shlex.quote(script)} &\n"
+            "wait\n",
+        )
+        return os.path.join(self.tmpdir, "cursor-stubborn.pid")
 
     def fake_cursor_that_exits_leaving_a_grandchild(self) -> str:
         """孫 `sleep 30` を残して**自分だけ先に終了する**偽 cursor。孫 pid の記録先を返す。
@@ -147,16 +144,11 @@ class OrphanTestCase(HookTestCase):
         孫が残って走り続ける形。非対話 bash は job control が off なので、背景ジョブは
         リーダーと同じ process group に残る (テスト側で `os.getpgid` を確認している)。
         """
-        gc_pid_file = os.path.join(self.tmpdir, "cursor-leaderless.pid")
-        path = os.path.join(self.bin, "cursor")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(
-                "#!/bin/bash\n"
-                "sleep 30 &\n"
-                f"echo $! > {shlex.quote(gc_pid_file)}\n"
-            )
-        os.chmod(path, 0o755)
-        return gc_pid_file
+        self.install(
+            "cursor",
+            "#!/bin/bash\nsleep 30 &\necho $! > \"$TMPDIR/cursor-leaderless.pid\"\n",
+        )
+        return os.path.join(self.tmpdir, "cursor-leaderless.pid")
 
     def spawn_leaderless_group(self) -> tuple[int, int]:
         """analyzer ではない process group を作り、**リーダーを先に回収**する。
@@ -343,7 +335,7 @@ class TestGroupKill(OrphanTestCase):
             self.cursor, "POLL_INTERVAL_SEC", 0.05
         ):
             self.run_hook("pre", explore_payload("tu-group"))
-            _, pid_file = self.state.paths(self.cursor.NAME, "tu-group")
+            result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-group")
             leader = int(pid_file.read_text().strip())
             self._children.append(leader)
             grandchild = self.read_grandchild(gc_pid_file)
@@ -358,6 +350,10 @@ class TestGroupKill(OrphanTestCase):
             _alive(grandchild),
             "孫プロセスが取り残されている (リーダーだけ SIGTERM している)",
         )
+        # 停止できたら従来どおり掃除する = 未確定の扱いが常時発動していない
+        # (旧 TestPostRetention.test_post_cleans_up_when_the_analyzer_is_stopped)
+        self.assertFalse(pid_file.exists(), "停止できたのに pid ファイルが残っている")
+        self.assertFalse(result_file.exists(), "停止できたのに結果ファイルが残っている")
 
     def test_a_group_that_ignores_sigterm_is_escalated_to_sigkill(self):
         """SIGTERM で止まらない相手には SIGKILL まで上げる (猶予後)。
@@ -395,40 +391,18 @@ class TestPidReuseGuard(OrphanTestCase):
     ほうが、cursor を 1 つ取り残すより重い。
     """
 
-    def test_post_does_not_signal_a_reused_pid(self):
-        victim = self.spawn_unrelated()
-        result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-reuse")
-        pid_file.write_text(str(victim.pid))
-        result_file.write_text("stale")
-
-        with mock.patch.object(self.cursor, "TIMEOUT_SEC", 0.2), mock.patch.object(
-            self.cursor, "POLL_INTERVAL_SEC", 0.05
-        ):
-            self.cursor.post("tu-reuse")
-
-        self.assert_unharmed(victim, "analyzer ではない pid に signal を送っている")
-        # 停止を確認できていないので記録は残る (契約は `TestPostRetention` が固定する)
-        self.assertTrue(pid_file.exists(), "停止未確定なのに pid 記録を消している")
-
     def test_reap_orphan_does_not_signal_a_reused_pid(self):
         victim = self.spawn_unrelated()
         _, pid_file = self.state.paths(self.cursor.NAME, "tu-reuse-gc")
         pid_file.write_text(str(victim.pid))
 
-        self.cursor.reap_orphan(pid_file)
+        outcome = self.cursor.reap_orphan(pid_file)
 
+        # 戻り値でも「送っていない」を報告する (旧 test_terminate_reports_that_it_did_not_signal)
+        self.assertEqual(outcome, self.state.REAP_UNCONFIRMED)
         self.assert_unharmed(
             victim, "GC が analyzer ではない pid に signal を送っている"
         )
-
-    def test_terminate_reports_that_it_did_not_signal(self):
-        victim = self.spawn_unrelated()
-
-        sent = self.cursor.terminate(victim.pid, time.time())
-
-        self.assertFalse(sent, "同一性を確認できない pid で True を返している")
-        self.assert_unharmed(victim, "戻り値は False なのに signal を送っている")
-
 
 class TestStartTimeGuard(OrphanTestCase):
     """署名が一致しても、pid ファイルより後に起動したプロセスには signal を送らない。
@@ -453,7 +427,7 @@ class TestStartTimeGuard(OrphanTestCase):
         sent = self.cursor.terminate(leader, self.cursor._started_at(pid_file))
 
         self.assertFalse(sent, "pid ファイルより後に起動したプロセスに送っている")
-        time.sleep(self.cursor.KILL_GRACE_SEC + 0.3)
+        time.sleep(_SETTLE_SEC)
         self.assertTrue(
             _alive(grandchild), "送らないと報告したのに process group を撃っている"
         )
@@ -478,7 +452,7 @@ class TestStartTimeGuard(OrphanTestCase):
         sent = self.cursor.terminate(leader, self.cursor._started_at(pid_file))
 
         self.assertFalse(sent, "起動時刻が不明なのに signal を送っている")
-        time.sleep(self.cursor.KILL_GRACE_SEC + 0.3)
+        time.sleep(_SETTLE_SEC)
         self.assertTrue(_alive(grandchild), "起動時刻が不明なのに撃っている")
 
 
@@ -517,23 +491,6 @@ class TestPostRetention(OrphanTestCase):
             "post 後の残骸を GC が追えない (記録が失われている)",
         )
 
-    def test_post_cleans_up_when_the_analyzer_is_stopped(self):
-        """正常経路は従来どおり掃除する (未確定の扱いが常時発動していないこと)。"""
-        gc_pid_file = self.fake_cursor_with_grandchild()
-        with mock.patch.object(self.cursor, "TIMEOUT_SEC", 0.2), mock.patch.object(
-            self.cursor, "POLL_INTERVAL_SEC", 0.05
-        ):
-            self.run_hook("pre", explore_payload("tu-post-clean"))
-            result_file, pid_file = self.state.paths(self.cursor.NAME, "tu-post-clean")
-            self._children.append(int(pid_file.read_text().strip()))
-            self.read_grandchild(gc_pid_file)
-
-            self.cursor.post("tu-post-clean")
-
-        self.assertFalse(pid_file.exists(), "停止できたのに pid ファイルが残っている")
-        self.assertFalse(result_file.exists(), "停止できたのに結果ファイルが残っている")
-
-
 class TestLeaderlessGroup(OrphanTestCase):
     """リーダーが先に死んでも、同じ process group に残ったメンバーは停止する。
 
@@ -542,33 +499,6 @@ class TestLeaderlessGroup(OrphanTestCase):
     リーダーだけを見て `REAP_STOPPED` を返すと、GC が pid 記録を消した時点で group を
     撃つ機会が永久に失われる (課金が続く)。
     """
-
-    def test_reap_stops_a_group_whose_leader_already_exited(self):
-        gc_pid_file = self.fake_cursor_that_exits_leaving_a_grandchild()
-        self.run_hook("pre", explore_payload("tu-leaderless"))
-        _, pid_file = self.state.paths(self.cursor.NAME, "tu-leaderless")
-        grandchild = self.read_grandchild(gc_pid_file)
-        leader = self.reap_cursor("tu-leaderless")
-
-        self.assertFalse(_alive(leader), "リーダーがまだ生きている (フィクスチャ不成立)")
-        self.assertTrue(_alive(grandchild), "孫が起動していない (フィクスチャ不成立)")
-        self.assertEqual(
-            os.getpgid(grandchild), leader, "孫がリーダーと同じ process group に居ない"
-        )
-
-        outcome = self.cursor.reap_orphan(pid_file)
-
-        self.assertEqual(
-            outcome,
-            self.state.REAP_SIGNALED,
-            "リーダーが死んでいるだけで停止済みと報告している",
-        )
-        deadline = time.monotonic() + 3
-        while time.monotonic() < deadline and _alive(grandchild):
-            time.sleep(0.05)
-        self.assertFalse(
-            _alive(grandchild), "リーダー亡き後の group が撃たれず走り続けている"
-        )
 
     def test_gc_cleans_up_after_stopping_a_leaderless_group(self):
         """GC 経由でも同じ (停止できたので pid / 結果ファイルを掃除する)。"""
@@ -610,7 +540,7 @@ class TestLeaderlessGroup(OrphanTestCase):
         outcome = self.cursor.reap_orphan(pid_file)
 
         self.assertEqual(outcome, self.state.REAP_UNCONFIRMED)
-        time.sleep(self.cursor.KILL_GRACE_SEC + 0.3)
+        time.sleep(_SETTLE_SEC)
         self.assertFalse(
             _alive(pgid), "リーダーが生きている (フィクスチャ不成立)"
         )
@@ -628,7 +558,7 @@ class TestLeaderlessGroup(OrphanTestCase):
             outcome = self.cursor.reap_orphan(pid_file)
 
         self.assertEqual(outcome, self.state.REAP_UNCONFIRMED)
-        time.sleep(self.cursor.KILL_GRACE_SEC + 0.3)
+        time.sleep(_SETTLE_SEC)
         self.assertTrue(_alive(member), "起動時刻が不明なのに group を撃っている")
 
     def test_reap_reports_stopped_when_the_group_is_gone(self):
@@ -705,7 +635,7 @@ class TestPostLeaderlessGroup(OrphanTestCase):
         ):
             self.cursor.post("tu-post-foreign-group")
 
-        time.sleep(self.cursor.KILL_GRACE_SEC + 0.3)
+        time.sleep(_SETTLE_SEC)
         self.assertTrue(
             _alive(member), "同一性を確認できない group に signal を送っている"
         )
@@ -794,19 +724,6 @@ class TestSignalDelivery(OrphanTestCase):
 
         return mock.patch.object(os, "killpg", side_effect=refuse)
 
-    def test_terminate_reports_false_when_no_signal_can_be_sent(self):
-        leader, grandchild, pid_file = self._launch_analyzer("tu-eperm")
-
-        with self._refuse_real_signals():
-            sent = self.cursor.terminate(leader, self.cursor._started_at(pid_file))
-
-        self.assertFalse(
-            sent, "TERM も KILL も送出できていないのに送ったと報告している"
-        )
-        self.assertTrue(
-            _alive(grandchild), "signal は送れていないのに group が止まっている"
-        )
-
     def test_reap_orphan_is_unconfirmed_when_the_signal_fails(self):
         """GC 側から見ると未確定 = 記録を残して次回に委ねる。"""
         leader, grandchild, pid_file = self._launch_analyzer("tu-eperm-gc")
@@ -870,20 +787,6 @@ class TestKillEscalationFailure(OrphanTestCase):
             return real_killpg(pgid, sig)
 
         return mock.patch.object(os, "killpg", side_effect=selective)
-
-    def test_stop_group_reports_false_when_the_kill_escalation_fails(self):
-        leader, stubborn, _ = self._launch_stubborn_analyzer("tu-kill-fails")
-
-        with self._kill_signal_fails():
-            stopped = self.cursor._stop_group(leader)
-
-        self.assertFalse(
-            stopped,
-            "SIGKILL を送出できず group も生きているのに停止できたと報告している",
-        )
-        self.assertTrue(
-            _alive(stubborn), "SIGKILL は送れていないのに group が止まっている"
-        )
 
     def test_reap_is_unconfirmed_when_the_kill_escalation_fails(self):
         """GC 側から見ると未確定 = pid / 結果ファイルを残して次回に委ねる。"""
@@ -977,12 +880,13 @@ class TestGcOrphans(OrphanTestCase):
     def test_gc_stops_at_the_budget_and_leaves_the_rest_for_next_time(self):
         # 予算 0 なら 1 件も処理せず、予算があれば全件処理する。この対で
         # 予算打ち切りの break が実在することを固定する (main 側レビューの指摘)。
+        # 結果だけの残骸 (pid ファイル無し) で組む: reap_orphan を通らないので、予算 0 で
+        # 掃除が止まるのは GC ループの打ち切りだけによる (pid 付きだと reap_orphan 側の
+        # 予算判定が同じ結果を出し、ループの break を外しても落ちない)
         for i in range(3):
-            r, p = self.state.paths(self.cursor.NAME, f"tu-budget-{i}")
+            r, _ = self.state.paths(self.cursor.NAME, f"tu-budget-{i}")
             r.write_text("x")
-            p.write_text("999999")
             past = time.time() - (self.state.ORPHAN_TTL_SEC + 60)
-            os.utime(p, (past, past))
             os.utime(r, (past, past))
         with mock.patch.object(self.state, "GC_BUDGET_SEC", 0.0):
             self.assertEqual(self.entry.gc_orphans(), 0, "予算 0 でも掃除している")

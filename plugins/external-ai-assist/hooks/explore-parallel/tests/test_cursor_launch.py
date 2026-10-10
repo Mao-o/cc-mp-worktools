@@ -74,7 +74,9 @@ class TestPostInjectsResult(HookTestCase):
 class TestTimeoutBudget(unittest.TestCase):
     """post の待機上限が hooks.json の PostToolUse(Agent) timeout に収まること。
 
-    超えるとハーネスの kill が先に来て、cursor の停止と結果ファイルの掃除に到達しない。
+    post は async hook なので、ハーネスはこの timeout を強制しない (0.10.0。CHANGELOG 参照)。
+    hooks.json の値は「待機はこのくらいで終わる」という意図の記録で、実際の上限は
+    `cursor.TIMEOUT_SEC` が持つ。両者がずれると記録が実態と食い違うので、整合をここで固定する。
     """
 
     def test_post_wait_fits_in_hook_timeout(self):

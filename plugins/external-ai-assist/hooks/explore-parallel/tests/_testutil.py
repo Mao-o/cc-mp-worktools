@@ -7,11 +7,13 @@ PATH 先頭の偽 `cursor` (argv を記録して固定文字列を出力する b
 `state.BASE_DIR` は import 時に TMPDIR から決まるので、`load_entry` はその前に `cursor` /
 `state` を sys.modules から外して読み直す (本番は hook 起動ごとに新プロセスなので同じ条件)。
 """
+import atexit
 import importlib.util
 import io
+import shutil
 import json
 import os
-import shlex
+import subprocess
 import sys
 import tempfile
 import time
@@ -54,8 +56,45 @@ def clear_plugin_env(keep: dict | None = None) -> None:
         if key not in keep:
             del os.environ[key]
 
+# 偽 CLI の本文は test プロセスで 1 回だけ作り、各テストの bin には symlink を置く。
+# macOS では新しく作ったスクリプトの初回 exec に ~0.3 秒かかる (同じファイルの 2 回目以降と
+# symlink 経由は数 ms)。テストごとに変わる値 (argv の記録先・出力) は本文に埋め込まず、
+# テストごとに隔離した $TMPDIR 配下のファイルで受け渡す。
+_SHARED_BIN = tempfile.mkdtemp(prefix="ep-fake-bin-")
+atexit.register(shutil.rmtree, _SHARED_BIN, True)
+_SHARED_SCRIPTS: dict = {}
+
+
+def shared_script(body: str) -> str:
+    path = _SHARED_SCRIPTS.get(body)
+    if path is None:
+        path = os.path.join(_SHARED_BIN, f"s{len(_SHARED_SCRIPTS)}")
+        shebang, rest = body.split("\n", 1)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"{shebang}\n[ -n \"$EP_FAKE_WARMUP\" ] && exit 0\n{rest}")
+        os.chmod(path, 0o755)
+        # 初回 exec の遅さをここで払う (テスト本体の timeout 窓 = probe の 1.5 秒や post の
+        # 待機に乗せない)
+        subprocess.run(
+            [path],
+            env={**os.environ, "EP_FAKE_WARMUP": "1"},
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+        _SHARED_SCRIPTS[body] = path
+    return path
+
+
 # argv は NUL 区切りで記録する (プロンプト本文に改行や `--` が含まれるため)
-_RECORD_ARGV = "for a in \"$@\"; do printf '%s\\0' \"$a\"; done > {argv_file}\n"
+FAKE_CURSOR = (
+    "#!/bin/bash\n"
+    "for a in \"$@\"; do printf '%s\\0' \"$a\"; done > \"$TMPDIR/cursor.argv\"\n"
+    "cat \"$TMPDIR/cursor.out\"\n"
+)
+#: argv を保ったまま待ち続ける偽 cursor (`exec` しない理由は test_result_handling 参照)
+HANGING_CURSOR = "#!/bin/bash\nsleep 30 &\nwait\n"
 
 
 def load_entry():
@@ -113,6 +152,11 @@ class HookTestCase(unittest.TestCase):
         self._patches = [
             mock.patch.object(self.cursor, "TIMEOUT_SEC", 5),
             mock.patch.object(self.cursor, "POLL_INTERVAL_SEC", 0.05),
+            # test プロセスが analyzer リーダーの親なので、TERM で死んだリーダーは誰かが
+            # wait するまで zombie として group に残り、`_stop_group` の猶予を毎回使い切る
+            # (本番は pre の hook プロセスが先に終わり init が回収する)。猶予の長さを見る
+            # テストは自前で上書きする
+            mock.patch.object(self.cursor, "KILL_GRACE_SEC", 0.3),
         ]
         for p in self._patches:
             p.start()
@@ -132,18 +176,20 @@ class HookTestCase(unittest.TestCase):
 
     # -- 偽 cursor ---------------------------------------------------------
 
+    def install(self, name: str, body: str) -> str:
+        """`self.bin/<name>` に共有スクリプト (本文 `body`) への symlink を置く。"""
+        link = os.path.join(self.bin, name)
+        if os.path.lexists(link):
+            os.unlink(link)
+        os.symlink(shared_script(body), link)
+        return link
+
     def fake_cursor(self, output: str = "SEMANTIC-RESULT\n") -> str:
         """PATH 先頭に偽 `cursor` を置き、argv の記録先パスを返す。"""
-        argv_file = os.path.join(self.tmpdir, "cursor.argv")
-        path = os.path.join(self.bin, "cursor")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(
-                "#!/bin/bash\n"
-                + _RECORD_ARGV.format(argv_file=shlex.quote(argv_file))
-                + f"printf '%s' {shlex.quote(output)}\n"
-            )
-        os.chmod(path, 0o755)
-        return argv_file
+        with open(os.path.join(self.tmpdir, "cursor.out"), "w", encoding="utf-8") as f:
+            f.write(output)
+        self.install("cursor", FAKE_CURSOR)
+        return os.path.join(self.tmpdir, "cursor.argv")
 
     def read_argv(self, argv_file: str) -> list[str]:
         with open(argv_file, encoding="utf-8") as f:

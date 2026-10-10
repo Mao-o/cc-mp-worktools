@@ -142,17 +142,19 @@ class TestNoFindingsPreamble(unittest.TestCase):
 
 
 class TestFindingsAreNeverClean(unittest.TestCase):
-    def test_sentinel_followed_by_findings(self):
-        self.assertFalse(is_clean_review("REVIEW_CLEAN\n\n1. **直接影響** — 実は壊れる"))
-        self.assertFalse(is_clean_review("```\nREVIEW_CLEAN\n```\n\n1. **直接影響** — 実は壊れる"))
-
-    def test_findings_only(self):
-        self.assertFalse(is_clean_review("1. **直接影響** — 壊れる"))
-        self.assertFalse(is_clean_review("critical 指摘はない"))  # sentinel 無し
-
-    def test_sentinel_embedded_in_sentence_is_not_clean(self):
-        self.assertFalse(is_clean_review("Result: REVIEW_CLEAN"))
-        self.assertFalse(is_clean_review("REVIEW_CLEAN は返せません。X が壊れます"))
+    def test_findings_are_never_clean(self):
+        cases = (
+            # (旧テスト名, 出力)
+            ("sentinel_followed_by_findings", "REVIEW_CLEAN\n\n1. **直接影響** — 実は壊れる"),
+            ("sentinel_followed_by_findings", "```\nREVIEW_CLEAN\n```\n\n1. **直接影響** — 実は壊れる"),
+            ("findings_only", "1. **直接影響** — 壊れる"),
+            ("findings_only", "critical 指摘はない"),  # sentinel 無し
+            ("sentinel_embedded_in_sentence_is_not_clean", "Result: REVIEW_CLEAN"),
+            ("sentinel_embedded_in_sentence_is_not_clean", "REVIEW_CLEAN は返せません。X が壊れます"),
+        )
+        for label, text in cases:
+            with self.subTest(label, text=text):
+                self.assertFalse(is_clean_review(text))
 
 
 if __name__ == "__main__":
