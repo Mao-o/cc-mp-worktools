@@ -1,0 +1,23 @@
+Search results for "releases" (Claude Code + Claude Developer Platform)
+============================================================
+
+--- Claude Code (--source code) ---
+
+  (no matching pages in Claude Code)
+
+--- Claude Developer Platform (--source platform) ---
+
+[platform] [9] Releases (index_score: 10)
+    URL: https://platform.claude.com/docs/en/api/releases.md
+    (no body hits — index match only)
+
+[platform] [7] Move between model releases (index_score: 5)
+    URL: https://platform.claude.com/docs/en/about/models/migration-notes.md
+    (no body hits — index match only)
+
+(2 pages from Claude Developer Platform)
+
+Note: doc_idx is unique within a source. For follow-up commands, pass the matching --source <code|platform> explicitly.
+
+Next: parse-claude-docs.py content 9 --source platform --cache-dir <CACHE_DIR>
+Next: parse-claude-docs.py content 7 --source platform --cache-dir <CACHE_DIR>

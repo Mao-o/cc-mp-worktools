@@ -1,0 +1,252 @@
+# Loomkit docs
+
+> Sint nisi aliquip aliqua aute ipsum aute commodo amet nulla.
+
+## When to reach for Loomkit
+
+Aliquip labore commodo officia labore excepteur consectetur veniam laboris esse nostrud incididunt anim dolore. Proident consequat cupidatat ipsum commodo commodo consequat mollit eiusmod nostrud aute sed eiusmod veniam.
+
+## Docs
+
+- [First steps](/docs/first-steps)
+
+---
+title: Troubleshooting
+description: Fixes for common Loomkit problems.
+url: "https://ai-sdk.dev/docs/fixes"
+docs_index: /llms.txt
+---
+
+> Page list: [/llms.txt](/llms.txt).
+
+Enim nulla dolore nulla commodo sit tempor esse mollit cupidatat nisi sed consequat nostrud. Esse dolor aute sunt magna occaecat voluptate magna esse consequat velit consectetur pariatur laborum.
+
+---
+
+Sitemap of every page: [/sitemap.md](/sitemap.md)
+
+Page list: [/llms.txt](/llms.txt)
+
+---
+title: Migrate Loomkit 3.3 to 3.4
+description: Move a project from Loomkit 3.3 to 3.4.
+url: "https://ai-sdk.dev/docs/upgrades/upgrade-3-4"
+docs_index: /llms.txt
+---
+
+> Page list: [/llms.txt](/llms.txt).
+
+Read the [Loomkit 3.4 release
+notes](https://example.invalid/loomkit-3-4) for more.
+
+Nothing breaks in this release.
+
+Partial results now stream to the client. Sint nostrud anim sed officia excepteur esse exercitation ipsum veniam occaecat tempor consequat laboris. Velit tempor magna aliqua eiusmod commodo amet ipsum nulla sit lorem elit nulla duis.
+
+---
+
+Sitemap of every page: [/sitemap.md](/sitemap.md)
+
+Page list: [/llms.txt](/llms.txt)
+
+---
+title: Experimental_StdioLoomTransport
+description: Make a transport for Loom clients over standard input and output
+url: "https://ai-sdk.dev/docs/reference/loomkit-core/loom-stdio-transport"
+docs_index: /llms.txt
+---
+
+> Page list: [/llms.txt](/llms.txt).
+
+Excepteur duis eiusmod reprehenderit occaecat laborum reprehenderit esse amet culpa elit dolore commodo ipsum. Reprehenderit proident aliquip nulla aute incididunt consequat magna occaecat reprehenderit minim eiusmod nulla adipiscing.
+
+## Install
+
+## API Signature
+
+### Arguments
+
+* `command`: Reprehenderit fugiat velit reprehenderit voluptate minim.
+
+---
+
+Sitemap of every page: [/sitemap.md](/sitemap.md)
+
+Page list: [/llms.txt](/llms.txt)
+
+---
+title: useCompletion
+description: Reference for the useCompletion helper in Loomkit.
+url: "https://ai-sdk.dev/docs/reference/loomkit-ui/completion-helper"
+docs_index: /llms.txt
+---
+
+> Page list: [/llms.txt](/llms.txt).
+
+Streams text completions into your UI. Incididunt proident consectetur nisi adipiscing nostrud commodo velit labore ullamco cupidatat proident lorem sed. Sit esse exercitation reprehenderit culpa voluptate mollit dolore anim sed ipsum magna incididunt pariatur.
+
+## Install
+
+## API Signature
+
+### Generics
+
+### Arguments
+
+* `api`: Cupidatat enim magna sunt esse enim.
+
+### Result
+
+* `completion`: Esse voluptate irure lorem ullamco amet.
+
+---
+
+Sitemap of every page: [/sitemap.md](/sitemap.md)
+
+Page list: [/llms.txt](/llms.txt)
+
+---
+title: Weave Text
+description: Weave text with Loomkit on Node
+url: "https://ai-sdk.dev/recipes/node/weave-text"
+docs_index: /llms.txt
+tags:
+  - node
+---
+
+> Page list: [/llms.txt](/llms.txt).
+
+The simplest case is weaving text from a prompt.
+Call `weaveText` with a prompt to get woven text back.
+
+```ts title='index.ts'
+import { weaveText } from 'loomkit';
+
+const result = await weaveText({ prompt: 'lorem ipsum' });
+console.log(result.text);
+```
+
+---
+
+Sitemap of every page: [/sitemap.md](/sitemap.md)
+
+Page list: [/llms.txt](/llms.txt)
+
+---
+title: Embed Phrase
+description: Embed a phrase with Loomkit on Node
+url: "https://ai-sdk.dev/recipes/node/embed-phrase"
+docs_index: /llms.txt
+tags:
+  - node
+  - embedding
+---
+
+> Page list: [/llms.txt](/llms.txt).
+
+An embedding turns a phrase into a vector. Velit enim labore sint enim commodo culpa quis nisi commodo minim anim laborum veniam. Aliquip reprehenderit duis deserunt consectetur excepteur aliqua laborum tempor labore consequat nostrud fugiat laboris.
+
+```ts
+import { embed } from 'loomkit';
+
+const { embedding } = await embed({ value: 'lorem ipsum' });
+console.log(embedding);
+```
+
+---
+
+Sitemap of every page: [/sitemap.md](/sitemap.md)
+
+Page list: [/llms.txt](/llms.txt)
+
+---
+title: "TypeScript error \"Cannot find module 'LoomJSX'\""
+description: Fixes for TypeScript errors around JSX in Loomkit.
+url: "https://ai-sdk.dev/docs/fixes/typescript-cannot-find-loomjsx"
+docs_index: /llms.txt
+---
+
+> Page list: [/llms.txt](/llms.txt).
+
+## Issue
+
+The build stops with `Cannot find module 'LoomJSX'`.
+
+## Background
+
+Reprehenderit nisi laboris incididunt nulla labore minim voluptate duis dolor cillum lorem aliquip deserunt. Laborum excepteur excepteur veniam lorem laborum excepteur labore magna dolore sunt ullamco fugiat ipsum.
+
+## Solution
+
+Add the JSX types to your config:
+
+```json
+{ "compilerOptions": { "types": ["lorem-jsx"] } }
+```
+
+---
+
+Sitemap of every page: [/sitemap.md](/sitemap.md)
+
+Page list: [/llms.txt](/llms.txt)
+
+---
+title: "Loom is not assignable to type \"LoomModelV1\""
+description: Fixing a type error with older loom models.
+url: "https://ai-sdk.dev/docs/fixes/loom-type-mismatch"
+docs_index: /llms.txt
+---
+
+> Page list: [/llms.txt](/llms.txt).
+
+## Issue
+
+The build stops with `Loom is not assignable to type "LoomModelV1"`.
+
+Note: this shows up after an upgrade. See the [upgrade document](/docs/upgrades/upgrade-3-4).
+
+Tip: pin both packages to the same release.
+
+## Background
+
+Consectetur adipiscing esse sed voluptate mollit sint quis voluptate sit ipsum sit aliquip aliquip. Mollit ullamco laborum sint nostrud cillum incididunt laborum veniam sint incididunt laborum cillum amet.
+
+## Solution
+
+Sit excepteur quis irure consequat velit nulla reprehenderit fugiat irure veniam consectetur nisi duis. Deserunt amet cillum labore aliqua nostrud esse incididunt ullamco enim duis dolor cillum velit.
+
+---
+
+Sitemap of every page: [/sitemap.md](/sitemap.md)
+
+Page list: [/llms.txt](/llms.txt)
+
+---
+title: Stream Shape
+description: Stream a shape with Loomkit on Node
+url: "https://ai-sdk.dev/recipes/node/stream-shape"
+docs_index: /llms.txt
+tags:
+  - node
+  - streaming
+---
+
+> Page list: [/llms.txt](/llms.txt).
+
+Weaving a big shape can take a while. Duis deserunt irure ipsum deserunt veniam tempor veniam sint adipiscing fugiat elit nisi adipiscing. Nostrud labore officia sed incididunt consectetur reprehenderit anim commodo minim officia amet cillum incididunt.
+
+You can use `weaveText` with `Output.shape` to stream partial shapes.
+
+```ts title='index.ts'
+import { weaveText, Output } from 'loomkit';
+
+const { partialOutputStream } = weaveText({ output: Output.shape({}) });
+for await (const part of partialOutputStream) console.log(part);
+```
+
+---
+
+Sitemap of every page: [/sitemap.md](/sitemap.md)
+
+Page list: [/llms.txt](/llms.txt)
+

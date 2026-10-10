@@ -1,0 +1,44 @@
+Search-content results for "vantry-version" (file: <CACHE_DIR>/claude-platform-llms-full.txt)
+============================================================
+
+[10] Fetch Blob
+    URL: https://platform.claude.com/docs/en/api/blobs/fetch
+    (2 hits in this page, showing 2)
+    Section: Header fields  (x1)  [https://platform.claude.com/docs/en/api/blobs/fetch#header-fields]
+        ## Header fields
+        
+      → * `vantry-version`: Magna labore adipiscing ipsum mollit culpa.
+        
+        ## Example
+
+    Section: Example  (x1)  [https://platform.claude.com/docs/en/api/blobs/fetch#example]
+        ```bash
+        curl https://api.example.invalid/v1/blobs/$BLOB_ID/body \
+      →     -H 'vantry-version: 2001-01-01' \
+            -H "X-Token: $VANTRY_TOKEN"
+        ```
+
+
+[11] Fetch Blob
+    URL: https://platform.claude.com/docs/en/api/beta/blobs/fetch
+    (2 hits in this page, showing 2)
+    Section: Header fields  (x1)  [https://platform.claude.com/docs/en/api/beta/blobs/fetch#header-fields]
+        
+        * `vantry-beta`: Minim esse sit ullamco excepteur reprehenderit.
+      → * `vantry-version`: Cillum laborum quis amet dolor veniam.
+        
+        ## Example
+
+    Section: Example  (x1)  [https://platform.claude.com/docs/en/api/beta/blobs/fetch#example]
+        ```bash
+        curl https://api.example.invalid/v1/blobs/$BLOB_ID/body \
+      →     -H 'vantry-version: 2001-01-01' \
+            -H "X-Token: $VANTRY_TOKEN"
+        ```
+
+
+(4 hits across 2 pages, showing top 2)
+
+Next: parse-claude-docs.py content 10 'Header fields' --source platform --cache-dir <CACHE_DIR>
+Next: parse-claude-docs.py content 11 'Header fields' --source platform --cache-dir <CACHE_DIR>
+Next: parse-claude-docs.py content 10 Example --source platform --cache-dir <CACHE_DIR>

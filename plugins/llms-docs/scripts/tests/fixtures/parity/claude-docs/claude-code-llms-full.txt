@@ -1,0 +1,370 @@
+# Quillon Tag
+Source: https://code.claude.com/docs/en/quillon-tag
+
+Bring Quillon into a shared chat channel and find where its setup lives.
+
+Quillon Tag answers in a team channel under one shared identity. Enim sunt laborum adipiscing excepteur esse veniam dolore cillum adipiscing exercitation culpa amet dolore. Sed eiusmod aliqua dolore dolor officia excepteur sunt exercitation minim reprehenderit cupidatat sint minim.
+
+Note: Quillon Tag is distinct from the earlier [Quillon in Chat Relay](/docs/en/chat-relay), which runs each session under one account. See the next page for that setup.
+
+Tip: tag `@quillon` in a thread to hand it a task.
+
+Magna commodo tempor aute esse quis occaecat lorem excepteur elit pariatur deserunt aute cupidatat. Voluptate cupidatat commodo cillum ullamco reprehenderit incididunt consectetur aliquip sunt mollit sunt sint officia. Read the [relay page](https://code.claude.com/docs/en/chat-relay) or the [vendor notes](https://example.invalid/quillon/tag) for the document history.
+
+
+# Quillon in Chat Relay
+Source: https://code.claude.com/docs/en/chat-relay
+
+Hand tasks over from a chat workspace. The earlier relay stays the setup path on personal plans.
+
+<Warning>
+  Excepteur sed exercitation lorem aute amet dolore labore proident esse consectetur anim aute nostrud. Reprehenderit nisi nulla elit minim enim esse proident aute nostrud magna officia sint anim.
+</Warning>
+
+Nulla minim voluptate ullamco anim sint fugiat laborum deserunt tempor ullamco lorem duis anim. Irure voluptate ullamco aute dolore ipsum elit consectetur velit exercitation voluptate mollit excepteur consequat.
+
+## Typical uses
+
+* **Lorem**: Consectetur pariatur sunt sunt incididunt sed commodo consequat labore esse ipsum commodo velit irure.
+* **Ipsum**: Laboris dolor eiusmod lorem lorem officia deserunt velit anim nostrud incididunt mollit sunt eiusmod.
+
+## Before you begin
+
+| Need | Notes |
+| :- | :- |
+| Plan | Enim sunt laborum adipiscing excepteur esse. |
+| Account | Sed eiusmod aliqua dolore dolor officia. |
+
+## Under the hood
+
+### Intent spotting
+
+Reprehenderit amet cillum voluptate aliquip enim nisi incididunt occaecat cupidatat elit nulla ipsum sint. Laboris nostrud lorem pariatur dolore amet officia occaecat consequat duis minim sed labore sunt.
+
+### Session lifecycle
+
+1. Quis sint deserunt dolor amet culpa adipiscing sit sunt excepteur laborum tempor incididunt lorem.
+2. Incididunt amet dolore sed sunt voluptate consequat eiusmod irure aliquip eiusmod voluptate ullamco amet.
+
+## Fixing problems
+
+### "Quillon is switched off for this seat"
+
+Dolor duis cupidatat exercitation cillum laboris proident mollit dolor officia sed sunt commodo aliquip. Culpa sunt elit sit nisi tempor dolore consequat excepteur voluptate veniam aliqua nulla sit.
+
+### Sessions stay idle
+
+Commodo tempor dolor sunt consectetur sed aliqua eiusmod adipiscing mollit commodo officia commodo sit. Veniam ipsum proident aliquip quis officia fugiat sint proident velit cillum minim nulla voluptate.
+
+## See also
+
+* [Quillon Tag](/docs/en/quillon-tag)
+* [Run workers side by side](/docs/en/workers)
+
+
+# Route Quillon through a hub
+Source: https://code.claude.com/docs/en/hubs
+
+Send Quillon traffic through a self-hosted hub for shared keys and usage totals.
+
+A hub sits between Quillon and the model vendor. Aliquip veniam pariatur aliqua lorem quis pariatur deserunt tempor nisi proident mollit aliquip adipiscing. Minim esse sit ullamco excepteur reprehenderit eiusmod consequat deserunt eiusmod dolor quis incididunt tempor.
+
+## What a hub does
+
+Each request reaches the hub first. Laboris ipsum anim nulla officia amet cillum eiusmod magna lorem eiusmod laborum lorem cillum. Cupidatat enim magna sunt esse enim adipiscing sint lorem fugiat quis exercitation incididunt excepteur.
+
+## Pick a hub
+
+### Managed hub
+
+Mollit esse eiusmod eiusmod aliqua sint sed deserunt veniam ipsum consequat ipsum lorem dolore. Sint nisi aliquip aliqua aute ipsum aute commodo amet nulla nulla anim tempor minim.
+
+### Other hubs
+
+See [Other hubs](/docs/en/hub) and [Roll out a hub for your crew](/docs/en/hub-rollout).
+
+## Where to go next
+
+* Minim mollit elit nisi aliquip irure sit enim.
+
+
+# Roll out a hub for your crew
+Source: https://code.claude.com/docs/en/hub-rollout
+
+Stand up a hub product for Quillon: forward requests, hand out keys, and check the rollout.
+
+This guide rolls a hub out in four steps. Culpa nisi consectetur dolor reprehenderit incididunt sit officia aliquip amet fugiat adipiscing laborum nostrud. Labore sint exercitation eiusmod culpa laboris nisi commodo incididunt occaecat culpa dolor fugiat anim.
+
+## Before you begin
+
+Veniam adipiscing enim nisi commodo deserunt commodo velit aute consectetur dolor sed nisi laboris. Incididunt mollit voluptate reprehenderit magna esse mollit pariatur aliqua cupidatat labore consectetur cillum consequat.
+
+### What the hub needs
+
+* The hub passes every header Quillon sends.
+* Nostrud sunt consectetur sunt aliqua minim proident voluptate adipiscing.
+
+## Rollout
+
+<Steps>
+  <Step title="Check that the hub reaches the vendor">
+
+### Check that the hub reaches the vendor
+
+    The hub should already answer at its base address.
+
+    ```bash theme={null}
+    curl "$HUB_URL/v1/ping" -H "x-key: <hub-key>"
+    ```
+
+    ```powershell theme={null}
+    Invoke-RestMethod "$env:HUB_URL/v1/ping"
+    ```
+  </Step>
+</Steps>
+
+### Hand out keys
+
+Each person gets a hub key. Occaecat mollit labore veniam occaecat minim ullamco voluptate nulla sed nulla labore nisi irure. Esse labore duis aliquip irure amet proident pariatur laboris quis officia eiusmod esse esse.
+
+### Ship the settings
+
+#### Which settings to ship
+
+| Setting | Purpose | When |
+| :- | :- | :- |
+| `QUILLON_BASE_URL` | Points requests at the hub | Always |
+| `keyHelper` | Signs each request to the hub | Always |
+
+#### Ship them as managed settings
+
+```json theme={null}
+{
+  "env": { "QUILLON_BASE_URL": "https://hub.example.invalid" }
+}
+```
+
+### Check the rollout
+
+Ask one person to run a session through the hub. Sint irure laboris sint nulla dolor quis culpa occaecat eiusmod sit magna laboris sed. Voluptate culpa excepteur deserunt aliquip sint aliqua aliquip consequat officia dolore incididunt esse nulla.
+
+## Keep the hub healthy
+
+Excepteur pariatur sed incididunt adipiscing pariatur cupidatat voluptate nostrud fugiat nostrud enim anim incididunt. Adipiscing sit nisi veniam nostrud aliquip labore nulla adipiscing ullamco irure dolore eiusmod aliqua.
+
+## See also
+
+* [Route Quillon through a hub](/docs/en/hubs)
+
+
+# Restore file edits with snapshotting
+Source: https://code.claude.com/docs/en/kit/file-snapshotting
+
+Record file edits during kit sessions and put files back to any earlier snapshot
+
+File snapshotting lets a kit session restore the files it edited. Labore nostrud quis sed ipsum laboris magna sunt nisi labore pariatur veniam mollit sint. Amet fugiat cillum occaecat sint tempor fugiat nisi tempor laboris mollit aliqua sed sunt.
+
+## Snapshot basics
+
+Each edit made by a tool call records a snapshot. Incididunt dolor irure irure exercitation sed nulla reprehenderit duis dolore amet deserunt mollit veniam. Sit veniam officia labore fugiat deserunt sed nulla magna laborum magna veniam sed ullamco.
+
+## Turn snapshots on
+
+  ```python Python theme={null}
+  # lorem: enable snapshots
+  opts = KitOptions(snapshots=True)
+  await kit.restore_files(turn_id)
+  ```
+
+  ```typescript TypeScript theme={null}
+  const opts = { snapshots: true };
+  await kit.restoreFiles(turnId);
+  ```
+
+## Recipes
+
+### Snapshot ahead of bulk edits
+
+Eiusmod incididunt aliqua ipsum minim culpa tempor sunt voluptate sint ullamco anim mollit deserunt. Duis commodo reprehenderit sed consectetur voluptate reprehenderit nisi veniam commodo reprehenderit nostrud elit aliquip.
+
+### Several restore marks
+
+Restore to any earlier snapshot. Esse sunt commodo nisi labore consectetur velit irure fugiat enim excepteur lorem deserunt aliquip. Commodo sed cupidatat irure lorem minim sit fugiat ullamco consequat anim ullamco velit sit.
+
+## Limits
+
+Voluptate commodo nulla officia voluptate occaecat consectetur proident sint minim consectetur dolor ullamco duis. Aliquip cupidatat dolor dolor officia dolor commodo laboris commodo sit aliqua nisi velit voluptate.
+
+## Fixing problems
+
+### "Snapshot missing for turn" error
+
+The restore target has no snapshot. Reprehenderit sed ullamco minim consequat commodo dolor irure proident sunt laboris amet exercitation adipiscing. Anim laborum pariatur nisi aliqua pariatur laborum tempor aute irure velit commodo voluptate tempor.
+
+## Where to go next
+
+* [Snapshotting](/docs/en/snapshotting)
+
+
+# Samples
+Source: https://code.claude.com/docs/en/kit/samples
+
+Find a sample kit project or a walkthrough close to what you want to make.
+
+Amet enim velit excepteur deserunt incididunt aliquip proident deserunt officia sint adipiscing exercitation cillum. Mollit voluptate anim officia incididunt laboris deserunt ullamco velit reprehenderit laborum duis voluptate excepteur.
+
+## Start with a tiny kit
+
+Sit anim sunt incididunt proident deserunt anim aute lorem ullamco elit eiusmod exercitation dolore. Exercitation magna eiusmod minim reprehenderit sed quis eiusmod nulla elit enim consectetur adipiscing cupidatat.
+
+## Browse a showcase app
+
+Consequat voluptate aute velit labore voluptate exercitation cupidatat amet anim nisi incididunt officia cupidatat. Nostrud ullamco culpa sint commodo quis cupidatat ullamco occaecat esse esse sed adipiscing nostrud.
+
+
+# Quillon Desktop in a sandbox VM
+Source: https://code.claude.com/docs/en/desktop-vm
+
+Run sessions inside a sandbox VM on the desktop app
+
+Commodo sint sint amet elit minim sunt aute sed laborum occaecat dolore officia culpa. Veniam amet consectetur incididunt officia consectetur magna eiusmod culpa cillum lorem tempor adipiscing anim.
+
+## Needs
+
+* Proident esse ipsum pariatur reprehenderit pariatur pariatur.
+
+## Open a sandbox session
+
+Anim amet fugiat anim laboris excepteur excepteur duis enim dolor aliquip minim culpa ipsum. Occaecat officia dolor consectetur nulla commodo tempor sed dolor excepteur cillum magna reprehenderit consectetur.
+
+
+# Week 21 · Lorem 18–22, 2001
+Source: https://code.claude.com/docs/en/news/2001-w21
+
+Quick mode on more plans, a usage breakdown, and smaller fixes.
+
+<Update label="Week 21">
+  <div>Sit magna velit lorem velit nulla irure cupidatat fugiat mollit.</div>
+  <div>The add-on pane lists every command, widgets included, before you add it</div>
+
+  ```bash terminal theme={null}
+  quillon addon list
+  ```
+  <div>Officia irure anim elit exercitation nisi lorem ullamco ullamco velit.</div>
+</Update>
+
+
+# Other hubs
+Source: https://code.claude.com/docs/en/hub
+
+Use a hub your crew already runs with Quillon, and what it has to pass along.
+
+Quillon can use a hub you already operate. Nostrud duis proident excepteur velit culpa voluptate sint sit adipiscing commodo nisi quis incididunt. Labore proident eiusmod culpa ullamco voluptate dolor nostrud sint minim fugiat exercitation irure aliqua.
+
+## What a hub gives you
+
+Veniam fugiat sit tempor aute irure amet consequat elit elit sunt commodo quis sint. Nulla ipsum nostrud minim minim minim commodo elit sunt sunt dolor laboris aute sunt.
+
+## Roll out a hub
+
+To roll out a hub across your crew, follow [Roll out a hub for your crew](/docs/en/hub-rollout).
+Proident veniam magna voluptate anim occaecat consequat sint incididunt esse tempor duis sunt veniam. Cillum esse reprehenderit excepteur labore dolor anim nostrud mollit nostrud culpa aliquip amet deserunt.
+
+## Plans and hubs
+
+Occaecat lorem laborum sit sunt commodo lorem commodo aliqua tempor ipsum consectetur sunt deserunt. Esse enim enim tempor voluptate excepteur exercitation adipiscing lorem exercitation incididunt consequat amet aliquip.
+
+## See also
+
+* [Route Quillon through a hub](/docs/en/hubs)
+
+
+# Run workers side by side
+Source: https://code.claude.com/docs/en/workers
+
+Compare how Quillon handles several jobs at once: helpers, worker crews, and pipelines.
+
+Quillon can run workers side by side in a few ways. Sint sed tempor commodo dolore incididunt laboris dolore veniam incididunt quis elit proident laborum. Elit nisi consequat velit consequat nisi sunt quis amet mollit aute aute sit sit.
+
+## Pick a style
+
+| Style | When |
+| :- | :- |
+| Helpers | Dolor deserunt sunt laboris duis ullamco. |
+| Worker crews | Nostrud pariatur eiusmod aute enim eiusmod. |
+
+## Watch running jobs
+
+Tempor adipiscing minim cupidatat nisi veniam aliqua aliquip irure aliqua nostrud magna minim cillum. Aute mollit esse mollit labore consectetur nulla consectetur enim ipsum irure fugiat duis dolore.
+
+## Read on
+
+* [Samples](/docs/en/kit/samples)
+
+
+# Snapshotting
+Source: https://code.claude.com/docs/en/snapshotting
+
+Record, restore, and condense edits and chat to manage session state.
+
+Quillon records its own edits so you can restore a session. Cillum magna duis dolore quis sit excepteur labore esse cupidatat nulla enim minim pariatur. Consequat irure culpa nostrud elit occaecat eiusmod veniam nostrud duis deserunt pariatur duis cupidatat.
+
+## How snapshots work
+
+Esse deserunt magna cillum excepteur excepteur incididunt aliquip pariatur sunt amet veniam enim enim. Ipsum labore irure cupidatat sit commodo voluptate consectetur nisi aute dolore aliqua consequat nostrud.
+
+### Automatic capture
+
+Every prompt takes a snapshot. Elit irure aliquip adipiscing cillum nisi esse incididunt cupidatat nostrud exercitation nostrud enim culpa. Laborum nostrud occaecat dolore laboris incididunt amet minim duis consectetur reprehenderit minim dolor anim. Proident fugiat adipiscing nostrud nulla nisi commodo mollit magna cupidatat occaecat excepteur dolore consequat.
+
+### Restore and condense
+
+Type `/restore`, or tap `Esc` three times, to open the restore list.
+
+<Note>
+  With text in the input box, `Esc` wipes that text and the restore list stays shut.
+</Note>
+
+Pick a snapshot to restore files, chat, or both. Adipiscing pariatur fugiat sit amet eiusmod adipiscing nisi officia deserunt pariatur ullamco cupidatat laboris. Anim dolor ipsum cillum veniam deserunt duis amet voluptate voluptate mollit quis ipsum consequat. Enim veniam minim cupidatat adipiscing eiusmod anim cillum veniam proident elit occaecat labore consectetur.
+
+#### Restore past a wiped chat
+
+If you wiped the chat earlier, the restore list shows one more row at the top.
+
+Amet nostrud exercitation aliquip laborum culpa aute incididunt laborum mollit consectetur nisi occaecat ipsum. Laboris fugiat nulla elit pariatur velit lorem minim fugiat velit aliqua exercitation ipsum irure. Aliqua lorem dolor dolore ipsum nostrud exercitation deserunt ullamco quis nisi proident labore esse.
+
+#### Steer a condensation
+
+A condensation stands in for the turns after the snapshot. Aute dolor voluptate deserunt culpa reprehenderit dolor nisi sit nisi ullamco consequat occaecat amet. Exercitation sunt mollit sit esse veniam laboris sit sint eiusmod voluptate laboris ipsum sed. Dolore sed dolore fugiat ullamco consectetur sunt esse commodo officia cupidatat culpa incididunt labore.
+
+## Common uses
+
+* **Lorem**: Incididunt fugiat tempor elit lorem velit minim dolor cupidatat deserunt dolor laboris cillum officia.
+* **Ipsum**: Aute lorem consequat magna excepteur culpa excepteur elit duis velit incididunt quis nostrud laborum.
+* **Dolor**: Ullamco enim proident deserunt dolor voluptate eiusmod pariatur magna quis exercitation occaecat reprehenderit duis.
+
+## Limits
+
+Anim esse laborum esse aliquip mollit minim ullamco sunt amet occaecat cillum magna veniam. Enim anim aliqua occaecat dolore eiusmod excepteur dolor irure aliqua lorem voluptate aliquip deserunt. Eiusmod magna reprehenderit mollit duis deserunt eiusmod velit enim lorem eiusmod aute fugiat lorem.
+
+### Shell edits are not captured
+
+Snapshotting skips files that shell commands touch, so a restore leaves them as they are:
+
+```bash theme={null}
+rm lorem.txt
+mv ipsum.txt dolor.txt
+cp sit.txt amet.txt
+Ullamco enim cillum adipiscing culpa velit occaecat eiusmod mollit consectetur elit labore magna exercitation. Aliqua voluptate lorem labore eiusmod culpa incididunt sint esse cupidatat minim esse aliquip aliquip. Elit deserunt enim quis mollit voluptate voluptate officia nostrud consequat consequat reprehenderit tempor aute.
+Exercitation anim officia duis occaecat veniam dolore ullamco ipsum voluptate aliquip aliqua dolore laborum. Dolore magna incididunt cillum aute irure esse dolor pariatur veniam esse fugiat laborum sit. Voluptate amet consequat occaecat proident veniam consectetur voluptate nisi amet sunt velit tempor voluptate.
+Nostrud adipiscing adipiscing laborum fugiat sit fugiat eiusmod consectetur sed cupidatat minim excepteur duis. Pariatur ullamco ullamco adipiscing nisi cupidatat adipiscing excepteur cupidatat quis ipsum excepteur laborum voluptate. Irure pariatur pariatur dolore labore sit duis culpa duis consectetur incididunt cillum tempor tempor.
+
+## See also
+
+* [Restore file edits with snapshotting](/docs/en/kit/file-snapshotting)
+
+## Related
+
+Sunt sint cupidatat exercitation consectetur sint velit exercitation eiusmod eiusmod sed quis excepteur adipiscing. Fugiat amet elit duis quis consequat irure ipsum officia officia veniam occaecat anim cillum.
+
+

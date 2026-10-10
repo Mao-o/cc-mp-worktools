@@ -1,0 +1,60 @@
+Search-content results for "restore" (file: <CACHE_DIR>/claude-code-llms-full.txt)
+============================================================
+
+[10] Snapshotting
+    URL: https://code.claude.com/docs/en/snapshotting
+    (10 hits in this page, showing 4)
+    Section: How snapshots work/Restore and condense  (x4)  [https://code.claude.com/docs/en/snapshotting#restore-and-condense]
+        ...
+        
+      → ### Restore and condense
+        
+      → Type `/restore`, or tap `Esc` three times, to open the restore list.
+        
+        <Note>
+      →   With text in the input box, `Esc` wipes that text and the restore list stays shut.
+        </Note>
+        
+        ... (1 more hits in this section)
+
+    Section: How snapshots work/Restore and condense/Restore past a wiped chat  (x2)  [https://code.claude.com/docs/en/snapshotting#restore-past-a-wiped-chat]
+        Pick a snapshot to restore files, chat, or both. Adipiscing pariatur fugiat sit amet eiusmod adipiscing nisi officia deserunt pariatur ullamco cupidatat laboris. Anim dolor ipsum cillum veniam deserunt duis amet voluptate voluptate mollit quis ipsum consequat. Enim veniam minim cupidatat adipiscing eiusmod anim cillum veniam proident elit occaecat labore consectetur.
+        
+      → #### Restore past a wiped chat
+        
+      → If you wiped the chat earlier, the restore list shows one more row at the top.
+        
+        ...
+
+    Section: (top)  [before first heading]  (x2)
+        Source: https://code.claude.com/docs/en/snapshotting
+        
+      → Record, restore, and condense edits and chat to manage session state.
+        
+      → Quillon records its own edits so you can restore a session. Cillum magna duis dolore quis sit excepteur labore esse cupidatat nulla enim minim pariatur. Consequat irure culpa nostrud elit occaecat eiusmod veniam nostrud duis deserunt pariatur duis cupidatat.
+        
+        ## How snapshots work
+
+    Section: Limits/Shell edits are not captured  (x2)  [https://code.claude.com/docs/en/snapshotting#shell-edits-are-not-captured]
+        ### Shell edits are not captured
+        
+      → Snapshotting skips files that shell commands touch, so a restore leaves them as they are:
+        
+        ```bash theme={null}
+        rm lorem.txt
+        mv ipsum.txt dolor.txt
+        cp sit.txt amet.txt
+        ...
+        
+        ## See also
+        
+      → * [Restore file edits with snapshotting](/docs/en/kit/file-snapshotting)
+        
+        ## Related
+
+
+(10 hits across 1 pages, showing top 1)
+
+Next: parse-claude-docs.py content 10 'How snapshots work/Restore and condense' --cache-dir <CACHE_DIR>
+Next: parse-claude-docs.py content 10 'How snapshots work/Restore and condense/Restore past a wiped chat' --cache-dir <CACHE_DIR>
+Next: parse-claude-docs.py content 10 '(top)' --cache-dir <CACHE_DIR>

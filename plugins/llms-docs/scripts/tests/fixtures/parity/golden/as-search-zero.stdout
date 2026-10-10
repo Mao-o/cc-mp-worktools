@@ -1,0 +1,12 @@
+Search results for "zzzparitynohit" (file: <CACHE_DIR>/ai-sdk-llms-full.txt)
+  (top-5 candidate docs drilled into bodies)
+============================================================
+
+No matching documents found.
+
+Tip: try broader keywords, 'search-content' for a full-body scan, or 'fetch-index --compact' to browse
+
+Why nothing matched: 9 documents checked, how many contain each term:
+  "zzzparitynohit": 0 of 9  <- not in this corpus
+None of the terms appears anywhere, so rewording the same idea is unlikely to help; try a different word, 'search-index' (titles / descriptions), or another source.
+Next: parse-ai-sdk.py search-index zzzparitynohit --cache-dir <CACHE_DIR>

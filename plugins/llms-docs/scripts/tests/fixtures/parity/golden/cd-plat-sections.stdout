@@ -1,0 +1,11 @@
+Sections in [0] "Get your Vantry access token"
+  URL: https://platform.claude.com/docs/en/get-access-token
+============================================================
+[L2] Pick a token kind
+[L2] Mint an access token
+[L2] Send your access token [code]
+[L2] Tokens and the admin side
+
+(4 sections)
+
+Next: parse-claude-docs.py content 0 "<heading_path>" --source platform --cache-dir <CACHE_DIR>

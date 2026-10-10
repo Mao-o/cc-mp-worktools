@@ -1,0 +1,22 @@
+Firebase Documentation Index (from llms.txt)
+============================================================
+
+[5] LoomMessage interface
+    The Zentor web kit holds the client code for apps built on Zentor.
+
+[6] LoomMessageContent interface
+    The Zentor web kit holds the client code for apps built on Zentor.
+
+[7] LoomPromptOptions interface
+    The Zentor web kit holds the client code for apps built on Zentor.
+
+[8] Link a Zentor project
+    How to link a studio workspace to a Zentor project.
+
+[9] Start with the sketching helper
+    How to use the studio helper.
+
+(5 of 32 pages shown, offset=5)
+  Next page: --offset 10 --limit 5
+
+Next: parse-firebase.py sections <page_ref> --cache-dir <CACHE_DIR>

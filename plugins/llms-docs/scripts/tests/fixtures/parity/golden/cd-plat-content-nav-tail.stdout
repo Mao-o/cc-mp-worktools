@@ -1,0 +1,29 @@
+# doc_title: Folding overview
+# source: https://platform.claude.com/docs/en/build/folding
+---
+
+--- Top-level sections (2) ---
+  - Pick a folding mode
+  - Folding on request
+
+Next: parse-claude-docs.py content 3 "<heading_path from above>" --source platform --cache-dir <CACHE_DIR>
+
+Folding swaps older turns for a short digest. Ipsum deserunt occaecat ipsum nulla tempor commodo cupidatat excepteur sit ullamco nisi eiusmod duis. Sunt labore adipiscing sed ipsum mollit deserunt mollit aliquip sint voluptate officia nostrud adipiscing.
+
+## Pick a folding mode
+
+| | On request | At a limit |
+| - | - | - |
+| **Who triggers it** | Lorem nisi esse irure laborum. | Proident sint laborum nulla dolore. |
+
+## Folding on request
+
+* [Folding in the background](https://platform.claude.com/docs/en/build/folding-background) → [doc_idx 2]: Fugiat irure aliqua proident ipsum commodo anim amet.
+* [Folding on request](https://platform.claude.com/docs/en/build/folding-on-request): Sit officia reprehenderit aliquip sint pariatur nostrud tempor.
+
+
+--- Top-level sections (2) ---
+  - Pick a folding mode
+  - Folding on request
+
+Next: parse-claude-docs.py content 3 "<heading_path from above>" --source platform --cache-dir <CACHE_DIR>

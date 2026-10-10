@@ -1,0 +1,42 @@
+# doc_title: Glossary
+# source: https://platform.claude.com/docs/en/about/glossary
+---
+
+--- Top-level sections (4) ---
+  - Span
+  - Lag
+  - Warmth
+  - Units
+
+Next: parse-claude-docs.py content 6 "<heading_path from above>" --source platform --cache-dir <CACHE_DIR>
+
+Excepteur anim ullamco culpa excepteur sint dolor excepteur consequat proident proident culpa voluptate incididunt. Reprehenderit sint labore ipsum dolor duis laboris quis dolore duis ipsum cupidatat proident sint.
+
+## Span
+
+Pariatur adipiscing elit enim esse commodo aliquip ipsum adipiscing sunt eiusmod mollit voluptate magna. Irure ullamco laboris laboris ullamco dolore deserunt voluptate proident aute quis culpa proident veniam.
+
+## Lag
+
+Fugiat excepteur veniam excepteur sit incididunt mollit excepteur tempor nostrud commodo laborum reprehenderit proident. Amet amet esse culpa minim anim quis quis deserunt consectetur tempor deserunt cupidatat deserunt.
+
+Note: a term may appear on more than one page of this document.
+
+## Warmth
+
+Tempor ullamco aute cillum anim deserunt exercitation ipsum magna deserunt veniam ipsum reprehenderit exercitation. Dolor labore quis minim pariatur esse cupidatat reprehenderit lorem velit duis anim cupidatat aliquip.
+
+Tip: lower warmth gives steadier output.
+
+## Units
+
+Sed irure magna adipiscing culpa voluptate sunt pariatur veniam mollit cillum sit reprehenderit laborum. Ipsum culpa irure dolore velit quis magna veniam amet esse culpa lorem enim duis.
+
+
+--- Top-level sections (4) ---
+  - Span
+  - Lag
+  - Warmth
+  - Units
+
+Next: parse-claude-docs.py content 6 "<heading_path from above>" --source platform --cache-dir <CACHE_DIR>

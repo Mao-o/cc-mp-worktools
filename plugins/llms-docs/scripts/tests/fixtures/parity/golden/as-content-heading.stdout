@@ -1,0 +1,36 @@
+# doc_title: useCompletion
+# source: https://ai-sdk.dev/docs/reference/loomkit-ui/completion-helper
+# heading_path: API Signature
+---
+
+--- Subsections of 'API Signature' (3) ---
+  - API Signature/Generics
+  - API Signature/Arguments
+  - API Signature/Result
+
+Next: parse-ai-sdk.py content 3 "<heading_path from above>" --cache-dir <CACHE_DIR>
+## API Signature
+
+### Generics
+
+### Arguments
+
+* `api`: Cupidatat enim magna sunt esse enim.
+
+### Result
+
+* `completion`: Esse voluptate irure lorem ullamco amet.
+
+---
+
+Sitemap of every page: [/sitemap.md](/sitemap.md)
+
+Page list: [/llms.txt](/llms.txt)
+
+
+--- Subsections of 'API Signature' (3) ---
+  - API Signature/Generics
+  - API Signature/Arguments
+  - API Signature/Result
+
+Next: parse-ai-sdk.py content 3 "<heading_path from above>" --cache-dir <CACHE_DIR>

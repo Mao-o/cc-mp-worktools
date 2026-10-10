@@ -1,0 +1,20 @@
+Search-index results for "releases" (Claude Developer Platform)
+  (index: <CACHE_DIR>/claude-platform-llms.txt)
+============================================================
+
+[9] Releases (score: 10)
+    URL: https://platform.claude.com/docs/en/api/releases.md
+
+[7] Move between model releases (score: 5)
+    Migration notes
+    URL: https://platform.claude.com/docs/en/about/models/migration-notes.md
+
+[crews/releases] Releases (Beta) (score: 5)
+    URL: https://platform.claude.com/docs/en/api/beta/crews/releases.md
+
+[kits/releases] Releases (Beta) (score: 5)
+    URL: https://platform.claude.com/docs/en/api/beta/kits/releases.md
+
+(4 results, 14 pages searched)
+
+Next: parse-claude-docs.py search "<query>" --source platform --cache-dir <CACHE_DIR>

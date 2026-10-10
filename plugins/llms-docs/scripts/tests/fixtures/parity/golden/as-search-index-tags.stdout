@@ -1,0 +1,10 @@
+Search-index results for "embed" (file: <CACHE_DIR>/ai-sdk-llms-full.txt)
+============================================================
+
+[5] Embed Phrase (score: 11)
+    Embed a phrase with Loomkit on Node
+    tags: node, embedding
+
+(1 results, 9 documents searched)
+
+Next: parse-ai-sdk.py search "<query>" --cache-dir <CACHE_DIR>

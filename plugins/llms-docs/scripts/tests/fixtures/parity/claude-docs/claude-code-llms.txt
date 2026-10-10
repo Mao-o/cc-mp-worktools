@@ -1,0 +1,52 @@
+# Quillon Docs
+
+> Duis eiusmod pariatur fugiat esse irure incididunt culpa voluptate esse aute ullamco nostrud dolor irure aute amet dolore.
+
+## First steps
+
+### First steps
+
+- [Overview](https://code.claude.com/docs/en/overview.md): Quillon is a made-up coding helper that reads, edits, and runs things.
+- [Quickstart](https://code.claude.com/docs/en/quickstart.md): Say hello to Quillon.
+- [Quillon changelog](https://code.claude.com/docs/en/changelog.md): Version-by-version notes for Quillon.
+
+### Places Quillon runs
+
+- [Quillon in Chat Relay](https://code.claude.com/docs/en/chat-relay.md): Hand tasks over from a chat workspace. The earlier relay stays the setup path on personal plans.
+- [Quillon Tag](https://code.claude.com/docs/en/quillon-tag.md): Bring Quillon into a shared chat channel and find where its setup lives.
+
+#### Quillon on the desktop
+
+- [Quillon Desktop in a sandbox VM](https://code.claude.com/docs/en/desktop-vm.md): Run sessions inside a sandbox VM on the desktop app
+
+### Workers
+
+- [Run workers side by side](https://code.claude.com/docs/en/workers.md): Compare how Quillon handles several jobs at once: helpers, worker crews, and pipelines.
+
+### Hubs
+
+- [Route Quillon through a hub](https://code.claude.com/docs/en/hubs.md): Send Quillon traffic through a self-hosted hub for shared keys and usage totals.
+
+#### Other hubs
+
+- [Other hubs](https://code.claude.com/docs/en/hub.md): Use a hub your crew already runs with Quillon, and what it has to pass along.
+- [Roll out a hub for your crew](https://code.claude.com/docs/en/hub-rollout.md): Stand up a hub product for Quillon: forward requests, hand out keys, and check the rollout.
+
+### Sessions
+
+- [Snapshotting](https://code.claude.com/docs/en/snapshotting.md): Record, restore, and condense edits and chat to manage session state.
+
+## Reference
+
+- [Widgets reference](https://code.claude.com/docs/en/widgets.md): Reference for widget events, their settings, and exit codes.
+
+## Kit
+
+- [Samples](https://code.claude.com/docs/en/kit/samples.md): Find a sample kit project or a walkthrough close to what you want to make.
+- [Steer kit sessions with widgets](https://code.claude.com/docs/en/kit/widgets.md): Step into a kit session at fixed points with widgets
+- [Restore file edits with snapshotting](https://code.claude.com/docs/en/kit/file-snapshotting.md): Record file edits during kit sessions and put files back to any earlier snapshot
+
+## News
+
+- [Week 21 · Lorem 18–22, 2001](https://code.claude.com/docs/en/news/2001-w21.md): Quick mode on more plans, a usage breakdown, and smaller fixes.
+

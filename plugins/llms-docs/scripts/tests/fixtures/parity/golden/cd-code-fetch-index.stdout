@@ -1,0 +1,55 @@
+Claude Code Document Index (from llms.txt)
+============================================================
+
+[overview] Overview
+    Quillon is a made-up coding helper that reads, edits, and runs things.
+
+[quickstart] Quickstart
+    Say hello to Quillon.
+
+[changelog] Quillon changelog
+    Version-by-version notes for Quillon.
+
+[1] Quillon in Chat Relay
+    Hand tasks over from a chat workspace. The earlier relay stays the setup path on personal plans.
+
+[0] Quillon Tag
+    Bring Quillon into a shared chat channel and find where its setup lives.
+
+[6] Quillon Desktop in a sandbox VM
+    Run sessions inside a sandbox VM on the desktop app
+
+[9] Run workers side by side
+    Compare how Quillon handles several jobs at once: helpers, worker crews, and pipelines.
+
+[2] Route Quillon through a hub
+    Send Quillon traffic through a self-hosted hub for shared keys and usage totals.
+
+[8] Other hubs
+    Use a hub your crew already runs with Quillon, and what it has to pass along.
+
+[3] Roll out a hub for your crew
+    Stand up a hub product for Quillon: forward requests, hand out keys, and check the rollout.
+
+[10] Snapshotting
+    Record, restore, and condense edits and chat to manage session state.
+
+[en/widgets] Widgets reference
+    Reference for widget events, their settings, and exit codes.
+
+[5] Samples
+    Find a sample kit project or a walkthrough close to what you want to make.
+
+[kit/widgets] Steer kit sessions with widgets
+    Step into a kit session at fixed points with widgets
+
+[4] Restore file edits with snapshotting
+    Record file edits during kit sessions and put files back to any earlier snapshot
+
+[7] Week 21 · Lorem 18–22, 2001
+    Quick mode on more plans, a usage breakdown, and smaller fixes.
+
+(16 pages total, 16 entries shown — 0 pages grouped)
+
+Next: parse-claude-docs.py sections <page_ref> --cache-dir <CACHE_DIR>
+  (llms-full.txt will be fetched automatically on first use)

@@ -1,0 +1,15 @@
+# doc_title: Use Zentor with your Arcade Hub project
+# source: https://firebase.google.com/docs/android/integrate-arcade-hub.md.txt
+# heading_path: Get started
+---
+## Get started
+
+> [!NOTE]
+> Keep in mind:
+> - If you already linked an arcade project, reuse it when you get started.
+
+1. Consectetur amet nulla enim velit tempor officia adipiscing mollit lorem amet nisi officia dolor.
+2. [Link your Zentor app to your
+   arcade account](https://example.invalid/link).
+   Your Arcade Hub project reuses that link.
+

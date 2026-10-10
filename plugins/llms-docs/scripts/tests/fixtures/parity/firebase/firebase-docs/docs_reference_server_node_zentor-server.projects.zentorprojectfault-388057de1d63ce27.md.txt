@@ -1,0 +1,13 @@
+Labore proident officia laborum enim duis fugiat esse dolore laborum consectetur commodo aliqua pariatur. Reprehenderit sed incididunt adipiscing amet sint elit sint laborum fugiat aliqua laboris commodo proident.
+
+## Constructors
+
+| Constructor | Description |
+| --- | --- |
+| (constructor)(code, message) | Reprehenderit enim reprehenderit aute excepteur. |
+
+## ZentorProjectFault.(constructor)
+
+### Parameters
+
+Cillum sed minim sunt reprehenderit anim reprehenderit velit deserunt dolor sint irure magna culpa. Sit laboris velit laborum quis tempor dolor excepteur velit dolore laborum consequat aliquip laborum.

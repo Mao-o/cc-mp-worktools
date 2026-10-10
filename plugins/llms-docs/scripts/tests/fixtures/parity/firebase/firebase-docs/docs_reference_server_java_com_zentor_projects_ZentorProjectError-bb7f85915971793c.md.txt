@@ -1,0 +1,7 @@
+# ZentorProjectError
+
+public class ZentorProjectError
+
+### Inherited members
+
+Nostrud deserunt voluptate veniam culpa sint aliquip fugiat occaecat cupidatat sit dolore enim veniam. Pariatur labore mollit aliquip eiusmod consequat officia cupidatat consequat duis dolore cillum consequat mollit.

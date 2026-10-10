@@ -1,0 +1,38 @@
+AI SDK llms-full.txt Document Index (file: <CACHE_DIR>/ai-sdk-llms-full.txt)
+============================================================
+
+[0] Troubleshooting
+    Fixes for common Loomkit problems.
+
+[1] Migrate Loomkit 3.3 to 3.4
+    Move a project from Loomkit 3.3 to 3.4.
+
+[2] Experimental_StdioLoomTransport
+    Make a transport for Loom clients over standard input and output
+
+[3] useCompletion
+    Reference for the useCompletion helper in Loomkit.
+
+[4] Weave Text
+    Weave text with Loomkit on Node
+    tags: node
+
+[5] Embed Phrase
+    Embed a phrase with Loomkit on Node
+    tags: node, embedding
+
+[6] TypeScript error "Cannot find module 'LoomJSX'"
+    Fixes for TypeScript errors around JSX in Loomkit.
+
+[7] Loom is not assignable to type "LoomModelV1"
+    Fixing a type error with older loom models.
+
+[8] Stream Shape
+    Stream a shape with Loomkit on Node
+    tags: node, streaming
+
+
+(9 documents total)
+
+Tip: use 'search' to rank docs + drill into bodies in one call
+Next: parse-ai-sdk.py sections <page_ref> --cache-dir <CACHE_DIR>

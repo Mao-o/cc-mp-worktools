@@ -1,0 +1,42 @@
+# doc_title: Loom is not assignable to type "LoomModelV1"
+# source: https://ai-sdk.dev/docs/fixes/loom-type-mismatch
+---
+
+--- Top-level sections (3) ---
+  - Issue
+  - Background
+  - Solution
+
+Next: parse-ai-sdk.py content 7 "<heading_path from above>" --cache-dir <CACHE_DIR>
+
+> Page list: [/llms.txt](/llms.txt).
+
+## Issue
+
+The build stops with `Loom is not assignable to type "LoomModelV1"`.
+
+Note: this shows up after an upgrade. See the [upgrade document](/docs/upgrades/upgrade-3-4).
+
+Tip: pin both packages to the same release.
+
+## Background
+
+Consectetur adipiscing esse sed voluptate mollit sint quis voluptate sit ipsum sit aliquip aliquip. Mollit ullamco laborum sint nostrud cillum incididunt laborum veniam sint incididunt laborum cillum amet.
+
+## Solution
+
+Sit excepteur quis irure consequat velit nulla reprehenderit fugiat irure veniam consectetur nisi duis. Deserunt amet cillum labore aliqua nostrud esse incididunt ullamco enim duis dolor cillum velit.
+
+---
+
+Sitemap of every page: [/sitemap.md](/sitemap.md)
+
+Page list: [/llms.txt](/llms.txt)
+
+
+--- Top-level sections (3) ---
+  - Issue
+  - Background
+  - Solution
+
+Next: parse-ai-sdk.py content 7 "<heading_path from above>" --cache-dir <CACHE_DIR>

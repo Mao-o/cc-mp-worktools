@@ -1,0 +1,19 @@
+Search results for "widgets" (Claude Code)
+============================================================
+
+  (no title/description match — showing full-body search results instead)
+
+[7] Week 21 · Lorem 18–22, 2001 [body-only]
+    URL: https://code.claude.com/docs/en/news/2001-w21
+    (1 body hits, showing 1)
+    Section: (top)  [before first heading]  (x1)
+        <Update label="Week 21">
+          <div>Sit magna velit lorem velit nulla irure cupidatat fugiat mollit.</div>
+      →   <div>The add-on pane lists every command, widgets included, before you add it</div>
+        
+          ```bash terminal theme={null}
+
+
+(1 pages from Claude Code)
+
+Next: parse-claude-docs.py content 7 '(top)' --cache-dir <CACHE_DIR>

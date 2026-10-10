@@ -1,0 +1,262 @@
+{
+ "as-content": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "as-content-heading": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "as-content-missing": {
+  "exit": 1,
+  "fetches": 0,
+  "stderr": "Error: No document found for: stream-shape\n  A URL's last segment is not resolved; page_ref takes an integer index or a title substring.\n  A page has a url ending in /stream-shape:\n  [8] Stream Shape\n    parse-ai-sdk.py content --cache-dir <CACHE_DIR> -- 8\n"
+ },
+ "as-fetch-index": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "as-fetch-index-compact": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "as-search": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "as-search-content": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "as-search-content-page": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "as-search-index": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "as-search-index-tags": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "as-search-index-zero": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "as-search-zero": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "as-sections": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "cd-code-content": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "cd-code-content-heading": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "cd-code-content-missing": {
+  "exit": 1,
+  "fetches": 0,
+  "stderr": "Error: No page found for slug: no-such-page-slug\n"
+ },
+ "cd-code-content-unclosed-fence": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "cd-code-fetch-index": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "cd-code-search": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": "WARNING: Claude Code index↔full-text join rate is 69% (11/16). Some index entries cannot be joined to full text.\n"
+ },
+ "cd-code-search-body-only": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": "WARNING: Claude Code index↔full-text join rate is 69% (11/16). Some index entries cannot be joined to full text.\n  (skip: no full-text for https://code.claude.com/docs/en/widgets.md)\n  (skip: no full-text for https://code.claude.com/docs/en/kit/widgets.md)\n"
+ },
+ "cd-code-search-content": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "cd-code-search-content-page": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "cd-code-search-content-zero": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "cd-code-search-index": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "cd-code-search-index-multi": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "cd-code-search-index-zero": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "cd-code-search-zero": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": "WARNING: Claude Code index↔full-text join rate is 69% (11/16). Some index entries cannot be joined to full text.\n"
+ },
+ "cd-code-sections": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "cd-code-sections-int": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "cd-plat-content": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "cd-plat-content-heading": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "cd-plat-content-nav-tail": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "cd-plat-fetch-index": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "cd-plat-search": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": "WARNING: Claude Developer Platform index↔full-text join rate is 79% (11/14). Some index entries cannot be joined to full text.\n"
+ },
+ "cd-plat-search-content": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "cd-plat-search-index": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "cd-plat-search-index-variants": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "cd-plat-sections": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "cd-plat-sections-dup-title": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "cd-search-both": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": "WARNING: Claude Code index↔full-text join rate is 69% (11/16). Some index entries cannot be joined to full text.\nWARNING: Claude Developer Platform index↔full-text join rate is 79% (11/14). Some index entries cannot be joined to full text.\n  (skip: no full-text for https://platform.claude.com/docs/en/api/beta/crews/releases.md)\n  (skip: no full-text for https://platform.claude.com/docs/en/api/beta/kits/releases.md)\n"
+ },
+ "fb-content": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "fb-content-dead": {
+  "exit": 1,
+  "fetches": 1,
+  "stderr": "Error: Failed to fetch https://firebase.google.com/docs/reference/js/zt.loomimageparams.md.txt: parity harness: network disabled\n"
+ },
+ "fb-content-heading": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "fb-fetch-index": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "fb-fetch-index-page": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "fb-search": {
+  "exit": 0,
+  "fetches": 1,
+  "stderr": "(skip: fetch failed https://firebase.google.com/docs/android/arcade-data-disclosure.md.txt: parity harness: network disabled)\n"
+ },
+ "fb-search-content": {
+  "exit": 0,
+  "fetches": 23,
+  "stderr": "WARNING: --page-ref not given. About to fetch and search all 32 pages on demand (may be slow on first run; subsequent runs use cache). Use --page-ref to restrict.\n(skip: fetch failed https://firebase.google.com/docs/reference/js/zt.loomimageparams.md.txt: parity harness: network disabled)\n(skip: fetch failed https://firebase.google.com/docs/reference/js/zt.loomsafetysettings.md.txt: parity harness: network disabled)\n(skip: fetch failed https://firebase.google.com/docs/reference/js/zt.wholenumbershape.md.txt: parity harness: network disabled)\n(skip: fetch failed https://firebase.google.com/docs/reference/js/zt.loomexpected.md.txt: parity harness: network disabled)\n(skip: fetch failed https://firebase.google.com/docs/reference/js/zt.loommessage.md.txt: parity harness: network disabled)\n(skip: fetch failed https://firebase.google.com/docs/reference/js/zt.loommessagecontent.md.txt: parity harness: network disabled)\n(skip: fetch failed https://firebase.google.com/docs/reference/js/zt.loompromptoptions.md.txt: parity harness: network disabled)\n(skip: fetch failed https://firebase.google.com/docs/studio/sketch-helper.md.txt: parity harness: network disabled)\n(skip: fetch failed https://firebase.google.com/docs/studio/code-host.md.txt: parity harness: network disabled)\n(skip: fetch failed https://firebase.google.com/docs/studio/import-button.md.txt: parity harness: network disabled)\n(skip: fetch failed https://firebase.google.com/docs/studio/loom-servers.md.txt: parity harness: network disabled)\n(skip: fetch failed https://firebase.google.com/docs/android/in-depth.md.txt: parity harness: network disabled)\n(skip: fetch failed https://firebase.google.com/docs/android/arcade-data-disclosure.md.txt: parity harness: network disabled)\n(skip: fetch failed https://firebase.google.com/docs/messaging.md.txt: parity harness: network disabled)\n(skip: fetch failed https://firebase.google.com/docs/messaging/insights.md.txt: parity harness: network disabled)\n(skip: fetch failed https://firebase.google.com/docs/datastore/flows/steps/reshape/merge.md.txt: parity harness: network disabled)\n(skip: fetch failed https://firebase.google.com/docs/datastore/flows/steps/reshape/flatten.md.txt: parity harness: network disabled)\n(skip: fetch failed https://firebase.google.com/docs/reference/server/java/com/zentor/projects/PearApp.md.txt: parity harness: network disabled)\n(skip: fetch failed https://firebase.google.com/docs/reference/server/java/com/zentor/projects/SealPrint.md.txt: parity harness: network disabled)\n(skip: fetch failed https://firebase.google.com/docs/projects/workflows/safety-habits.md.txt: parity harness: network disabled)\n(skip: fetch failed https://firebase.google.com/docs/projects/workflows/stages.md.txt: parity harness: network disabled)\n(skip: fetch failed https://firebase.google.com/docs/reference/server/node/zentor-server.projects.pearappmeta.md.txt: parity harness: network disabled)\n(skip: fetch failed https://firebase.google.com/docs/reference/server/node/zentor-server.projects.sealprint.md.txt: parity harness: network disabled)\n"
+ },
+ "fb-search-index": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "fb-search-index-zero": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "fb-search-zero": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "fb-sections": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ },
+ "fb-sections-url": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": ""
+ }
+}

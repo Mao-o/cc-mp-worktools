@@ -1,0 +1,28 @@
+# doc_title: IP addresses
+# source: https://platform.claude.com/docs/en/api/ip-addresses
+# heading_path: Inbound IP addresses
+---
+
+--- Subsections of 'Inbound IP addresses' (2) ---
+  - Inbound IP addresses/Range A
+  - Inbound IP addresses/Range B
+
+Next: parse-claude-docs.py content 8 "<heading_path from above>" --source platform --cache-dir <CACHE_DIR>
+## Inbound IP addresses
+
+Sit cillum voluptate sunt aliquip anim eiusmod nulla velit duis sit pariatur amet pariatur. Deserunt lorem mollit lorem dolore incididunt irure minim quis magna dolore eiusmod occaecat enim.
+
+### Range A
+
+`192.0.2.0/24`
+
+### Range B
+
+`2001:db8::/32`
+
+
+--- Subsections of 'Inbound IP addresses' (2) ---
+  - Inbound IP addresses/Range A
+  - Inbound IP addresses/Range B
+
+Next: parse-claude-docs.py content 8 "<heading_path from above>" --source platform --cache-dir <CACHE_DIR>

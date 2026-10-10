@@ -1,0 +1,35 @@
+Search results for "access token" (Claude Developer Platform)
+============================================================
+
+[0] Get your access token (index_score: 24)
+    URL: https://platform.claude.com/docs/en/get-access-token.md
+    (4 body hits, showing 3)
+    Section: Send your access token  (x2)  [https://platform.claude.com/docs/en/get-access-token#send-your-access-token]
+        2. Laboris nostrud lorem pariatur dolore amet officia occaecat consequat duis minim sed labore sunt.
+        
+      → ## Send your access token
+        
+        ```bash
+      → export VANTRY_TOKEN='<your-token>'
+        ```
+        
+
+    Section: (top)  [before first heading]  (x1)
+        
+      → An access token signs every request. Occaecat irure dolore sint exercitation tempor aute exercitation minim labore proident laboris pariatur pariatur. Eiusmod officia aute ullamco cillum mollit laborum ipsum sit laboris dolor culpa nisi cupidatat.
+        
+        ## Pick a token kind
+
+    Section: Mint an access token  (x1)  [https://platform.claude.com/docs/en/get-access-token#mint-an-access-token]
+        Aliqua labore anim incididunt enim officia ipsum elit exercitation dolore tempor aliquip labore enim. Elit duis magna sunt amet velit ullamco pariatur elit laborum quis deserunt laboris nostrud.
+        
+      → ## Mint an access token
+        
+        1. Reprehenderit amet cillum voluptate aliquip enim nisi incididunt occaecat cupidatat elit nulla ipsum sint.
+
+
+(1 pages from Claude Developer Platform)
+
+Next: parse-claude-docs.py content 0 'Send your access token' --source platform --cache-dir <CACHE_DIR>
+Next: parse-claude-docs.py content 0 '(top)' --source platform --cache-dir <CACHE_DIR>
+Next: parse-claude-docs.py content 0 'Mint an access token' --source platform --cache-dir <CACHE_DIR>

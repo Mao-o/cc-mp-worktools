@@ -1,0 +1,291 @@
+# Vantry Developer Docs - Full Text
+
+This file holds the full rendered text.
+
+## Root URL
+
+Vantry Console (sign-in needed)
+
+https://platform.claude.com
+
+## Languages on the site
+
+- English (en) - 12 pages - /docs - Text below
+- Lorem (lo) - 4 pages - /docs/lo - Site only
+
+---
+
+# English Docs - Full Text
+
+## Start here
+
+---
+title: Get your Vantry access token
+url: https://platform.claude.com/docs/en/get-access-token
+description: Find, mint, and rotate your Vantry access tokens in the console.
+---
+
+An access token signs every request. Occaecat irure dolore sint exercitation tempor aute exercitation minim labore proident laboris pariatur pariatur. Eiusmod officia aute ullamco cillum mollit laborum ipsum sit laboris dolor culpa nisi cupidatat.
+
+## Pick a token kind
+
+Aliqua labore anim incididunt enim officia ipsum elit exercitation dolore tempor aliquip labore enim. Elit duis magna sunt amet velit ullamco pariatur elit laborum quis deserunt laboris nostrud.
+
+## Mint an access token
+
+1. Reprehenderit amet cillum voluptate aliquip enim nisi incididunt occaecat cupidatat elit nulla ipsum sint.
+2. Laboris nostrud lorem pariatur dolore amet officia occaecat consequat duis minim sed labore sunt.
+
+## Send your access token
+
+```bash
+export VANTRY_TOKEN='<your-token>'
+```
+
+## Tokens and the admin side
+
+Fugiat fugiat consectetur consequat consequat consequat quis nostrud velit veniam fugiat voluptate incididunt commodo. Aute lorem exercitation esse aliqua excepteur occaecat laborum quis sit culpa aute mollit irure.
+
+### Building on Vantry
+
+---
+title: Memory spans
+url: https://platform.claude.com/docs/en/build/memory-spans
+description: See how the memory span fills up and how to keep long chats inside it.
+---
+
+Cillum veniam enim anim deserunt labore minim adipiscing fugiat culpa dolor esse nulla amet. Dolor velit voluptate consectetur tempor aliquip dolore nulla ullamco irure labore reprehenderit mollit sed.
+
+## How a span fills
+
+Sed lorem consequat exercitation cupidatat anim sint sunt sint officia quis fugiat fugiat velit. Ipsum cupidatat proident consequat irure tempor tempor laborum commodo reprehenderit aute velit deserunt nulla.
+
+## Span hints
+
+### Hint format
+
+```xml
+<span:lorem>1000</span:lorem>
+```
+
+# lorem: an unfenced sample comment line
+sample_call(lorem=1)
+
+## Trim spans by folding
+
+See [Folding overview](https://platform.claude.com/docs/en/build/folding).
+
+## Where to go next
+
+* Culpa adipiscing magna magna veniam dolor amet pariatur.
+
+---
+title: Folding in the background
+url: https://platform.claude.com/docs/en/build/folding-background
+description: Ask for a fold while the chat goes on, then swap it in once it lands.
+---
+
+Consectetur occaecat laboris magna adipiscing quis cillum proident laboris anim sit sint fugiat sint. Nisi adipiscing excepteur exercitation officia reprehenderit adipiscing anim eiusmod cillum dolore nulla officia veniam.
+
+## Supported setups
+
+Irure nisi esse nulla dolor amet elit consectetur consequat laborum exercitation cupidatat cillum proident. Ullamco magna laborum proident occaecat cupidatat aute fugiat dolore fugiat irure excepteur exercitation deserunt.
+
+## Swapping while the chat goes on
+
+Aute voluptate quis sed ullamco sint reprehenderit proident reprehenderit commodo pariatur culpa tempor exercitation. Deserunt deserunt cillum aliqua fugiat consequat ipsum anim minim labore mollit cupidatat exercitation aliquip. Excepteur labore lorem exercitation nisi excepteur ullamco duis sit mollit elit pariatur voluptate sit.
+
+## Asking for a background fold
+
+Dolor magna irure irure minim aliquip sit consectetur cillum dolor amet ullamco tempor laborum. Culpa irure officia nulla consectetur labore nisi cillum exercitation dolore magna sunt nostrud sit. Pariatur culpa incididunt sunt nostrud nisi officia aliqua elit anim nisi occaecat reprehenderit voluptate.
+
+---
+title: Folding overview
+url: https://platform.claude.com/docs/en/build/folding
+description: What folding does and which page fits your task.
+---
+
+Folding swaps older turns for a short digest. Ipsum deserunt occaecat ipsum nulla tempor commodo cupidatat excepteur sit ullamco nisi eiusmod duis. Sunt labore adipiscing sed ipsum mollit deserunt mollit aliquip sint voluptate officia nostrud adipiscing.
+
+## Pick a folding mode
+
+| | On request | At a limit |
+| - | - | - |
+| **Who triggers it** | Lorem nisi esse irure laborum. | Proident sint laborum nulla dolore. |
+
+## Folding on request
+
+* [Folding in the background](https://platform.claude.com/docs/en/build/folding-background): Fugiat irure aliqua proident ipsum commodo anim amet.
+* [Folding on request](https://platform.claude.com/docs/en/build/folding-on-request): Sit officia reprehenderit aliquip sint pariatur nostrud tempor.
+
+## Good habits
+
+---
+title: Guides to sample tasks
+url: https://platform.claude.com/docs/en/about/task-guides/overview
+description: "Walkthroughs for sample tasks: sorting, help desks, and review queues."
+---
+
+Culpa tempor sunt fugiat dolore dolore magna sit elit tempor elit cillum velit culpa. Pariatur commodo eiusmod proident consequat aliquip cillum esse sunt exercitation enim adipiscing quis laboris.
+
+## Picking a path
+
+Sunt proident amet elit sed anim nulla occaecat incididunt incididunt nisi nulla sed mollit. Incididunt sed nostrud magna deserunt tempor sed nostrud mollit mollit esse esse quis ipsum.
+
+---
+title: Prompt shaping overview
+url: https://platform.claude.com/docs/en/build/prompt-shaping/overview
+description: When shaping a prompt is the right tool.
+---
+
+Minim aliquip aliqua aute sit esse eiusmod dolor aliqua pariatur occaecat excepteur elit commodo. Tempor enim consectetur fugiat cupidatat officia reprehenderit velit ipsum nisi lorem fugiat veniam irure.
+
+## Before you shape
+
+Enim esse lorem ipsum laboris quis elit sint quis excepteur sed occaecat elit amet. Sed anim enim elit incididunt reprehenderit sit nostrud consectetur aliquip veniam pariatur veniam sed.
+
+## Shaping steps
+
+Aliqua enim incididunt laboris veniam amet irure dolor laboris enim aliquip proident elit velit. Velit reprehenderit consequat irure elit enim lorem velit eiusmod ipsum cillum sint minim incididunt.
+
+---
+title: Glossary
+url: https://platform.claude.com/docs/en/about/glossary
+description: Terms used across Vantry. This page is a short list of them.
+---
+
+Excepteur anim ullamco culpa excepteur sint dolor excepteur consequat proident proident culpa voluptate incididunt. Reprehenderit sint labore ipsum dolor duis laboris quis dolore duis ipsum cupidatat proident sint.
+
+## Span
+
+Pariatur adipiscing elit enim esse commodo aliquip ipsum adipiscing sunt eiusmod mollit voluptate magna. Irure ullamco laboris laboris ullamco dolore deserunt voluptate proident aute quis culpa proident veniam.
+
+## Lag
+
+Fugiat excepteur veniam excepteur sit incididunt mollit excepteur tempor nostrud commodo laborum reprehenderit proident. Amet amet esse culpa minim anim quis quis deserunt consectetur tempor deserunt cupidatat deserunt.
+
+Note: a term may appear on more than one page of this document.
+
+## Warmth
+
+Tempor ullamco aute cillum anim deserunt exercitation ipsum magna deserunt veniam ipsum reprehenderit exercitation. Dolor labore quis minim pariatur esse cupidatat reprehenderit lorem velit duis anim cupidatat aliquip.
+
+Tip: lower warmth gives steadier output.
+
+## Units
+
+Sed irure magna adipiscing culpa voluptate sunt pariatur veniam mollit cillum sit reprehenderit laborum. Ipsum culpa irure dolore velit quis magna veniam amet esse culpa lorem enim duis.
+
+## Models & prices
+
+### Models
+
+---
+title: Migration notes
+url: https://platform.claude.com/docs/en/about/models/migration-notes
+description: Notes for moving to newer Vantry models
+---
+
+Velit labore aliquip aute magna minim enim lorem ullamco nisi dolor reprehenderit consectetur dolor. Aliquip duis occaecat cillum duis amet nulla reprehenderit sed tempor incididunt dolor enim adipiscing.
+
+## Asking for help
+
+Reprehenderit culpa fugiat lorem eiusmod dolor dolore pariatur commodo lorem quis velit consectetur reprehenderit. Nisi fugiat commodo elit mollit sint tempor veniam labore incididunt aute amet enim cillum.
+
+---
+title: IP addresses
+url: https://platform.claude.com/docs/en/api/ip-addresses
+description: Vantry answers from fixed address ranges in both directions.
+---
+
+Irure dolor exercitation ullamco aute pariatur fugiat nisi aute ipsum fugiat fugiat amet eiusmod. Mollit veniam nulla aute proident aliquip elit irure aliqua pariatur officia adipiscing aliqua dolore.
+
+## Inbound IP addresses
+
+Sit cillum voluptate sunt aliquip anim eiusmod nulla velit duis sit pariatur amet pariatur. Deserunt lorem mollit lorem dolore incididunt irure minim quis magna dolore eiusmod occaecat enim.
+
+### Range A
+
+`192.0.2.0/24`
+
+### Range B
+
+`2001:db8::/32`
+
+## Outbound ranges
+
+### Range C
+
+`198.51.100.0/24`
+
+### Retired ranges
+
+```text wrap
+203.0.113.0/24
+```
+
+---
+title: Releases
+url: https://platform.claude.com/docs/en/api/releases
+description: "Every request carries a `vantry-version` header. For example: `vantry-version: 2001-01-01`."
+---
+
+Dolor veniam proident enim nostrud cillum voluptate nisi nulla amet nostrud sint irure aliqua. Culpa velit sed ullamco sed deserunt dolor irure laboris aliqua irure incididunt sint culpa.
+
+## Release log
+
+* `2001-01-01`: Incididunt enim sed voluptate elit velit elit nostrud.
+
+### Vantry CLI
+
+---
+title: Fetch Blob
+url: https://platform.claude.com/docs/en/api/blobs/fetch
+---
+
+# Fetch Blob
+
+Aliquip sed excepteur eiusmod cillum consectetur consequat laboris culpa voluptate amet sunt aute deserunt. Minim nisi amet enim laboris minim anim aute reprehenderit veniam magna occaecat sint ipsum.
+
+## Path fields
+
+* `blob_id`: Ullamco mollit occaecat officia eiusmod velit.
+
+## Header fields
+
+* `vantry-version`: Magna labore adipiscing ipsum mollit culpa.
+
+## Example
+
+```bash
+curl https://api.example.invalid/v1/blobs/$BLOB_ID/body \
+    -H 'vantry-version: 2001-01-01' \
+    -H "X-Token: $VANTRY_TOKEN"
+```
+
+---
+title: Fetch Blob
+url: https://platform.claude.com/docs/en/api/beta/blobs/fetch
+---
+
+# Fetch Blob
+
+Deserunt voluptate officia aliquip nostrud incididunt nostrud cillum adipiscing fugiat consectetur lorem sit voluptate. Excepteur deserunt incididunt voluptate esse anim occaecat aliqua proident ullamco aliqua deserunt dolore incididunt.
+
+## Path fields
+
+* `blob_id`: Aliquip veniam pariatur aliqua lorem quis.
+
+## Header fields
+
+* `vantry-beta`: Minim esse sit ullamco excepteur reprehenderit.
+* `vantry-version`: Cillum laborum quis amet dolor veniam.
+
+## Example
+
+```bash
+curl https://api.example.invalid/v1/blobs/$BLOB_ID/body \
+    -H 'vantry-version: 2001-01-01' \
+    -H "X-Token: $VANTRY_TOKEN"
+```
+

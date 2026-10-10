@@ -1,0 +1,49 @@
+# Vantry Developer Docs
+
+This file gives an overview of the Vantry docs.
+
+## Root URL
+
+https://platform.claude.com
+
+## Languages on the site
+
+- English (en) - 12 pages - /docs - Text below
+- Lorem (lo) - 4 pages - /docs/lo - Site only
+
+---
+
+## English
+
+### Start here
+
+- [Documentation](https://platform.claude.com/docs/en/home.md)
+
+### Messages
+
+- [Folding](https://platform.claude.com/docs/en/build/folding.md)
+- [Memory spans](https://platform.claude.com/docs/en/build/memory-spans.md)
+- [Get your access token](https://platform.claude.com/docs/en/get-access-token.md) - Get your Vantry access token
+
+### Good habits
+
+- [Overview](https://platform.claude.com/docs/en/about/task-guides/overview.md) - Guides to sample tasks
+- [Overview](https://platform.claude.com/docs/en/build/prompt-shaping/overview.md) - Prompt shaping overview
+- [Glossary](https://platform.claude.com/docs/en/about/glossary.md)
+
+### Models & prices
+
+- [Move between model releases](https://platform.claude.com/docs/en/about/models/migration-notes.md) - Migration notes
+
+### API reference
+
+- [IP addresses](https://platform.claude.com/docs/en/api/ip-addresses.md)
+- [Releases](https://platform.claude.com/docs/en/api/releases.md)
+
+### API Reference
+
+- [Fetch Blob](https://platform.claude.com/docs/en/api/blobs/fetch.md)
+- [Fetch Blob (Beta)](https://platform.claude.com/docs/en/api/beta/blobs/fetch.md)
+- [Releases (Beta)](https://platform.claude.com/docs/en/api/beta/crews/releases.md)
+- [Releases (Beta)](https://platform.claude.com/docs/en/api/beta/kits/releases.md)
+

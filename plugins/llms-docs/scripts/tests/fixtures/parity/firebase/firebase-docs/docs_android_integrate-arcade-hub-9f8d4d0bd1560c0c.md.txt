@@ -1,0 +1,32 @@
+Zentor works with your Arcade Hub project. Esse nulla magna sit nisi aliquip lorem ipsum ullamco ipsum cupidatat magna nostrud adipiscing. Commodo dolor reprehenderit tempor labore labore exercitation voluptate sed pariatur lorem incididunt reprehenderit incididunt.
+
+## Get started
+
+> [!NOTE]
+> Keep in mind:
+> - If you already linked an arcade project, reuse it when you get started.
+
+1. Consectetur amet nulla enim velit tempor officia adipiscing mollit lorem amet nisi officia dolor.
+2. [Link your Zentor app to your
+   arcade account](https://example.invalid/link).
+   Your Arcade Hub project reuses that link.
+
+## Track arcade events with Zentor Stats
+
+After you add the stats kit, Arcade Hub events start to flow.
+
+Adipiscing consequat tempor mollit excepteur exercitation officia lorem irure amet aliquip veniam quis dolore. Anim proident consequat amet consequat velit minim reprehenderit cupidatat aliqua cillum aliqua irure proident.
+
+## Fixing frequent problems
+
+### Arcade Hub events missing from the dashboard
+
+Consectetur tempor exercitation quis cillum adipiscing veniam dolore eiusmod consectetur proident exercitation quis enim. Laboris aliquip pariatur commodo laboris veniam sint sunt officia cupidatat consequat veniam amet exercitation.
+
+### The arcade console will not link to Zentor
+
+Aute veniam voluptate occaecat amet cupidatat occaecat lorem dolore voluptate esse laboris sunt culpa. Ullamco velit anim mollit veniam sit labore reprehenderit laborum veniam sunt nostrud amet laborum.
+
+### The Zentor console will not open from the arcade console
+
+Duis lorem veniam dolore laborum consequat magna labore minim sed ipsum aliquip sunt laboris. Nostrud enim esse quis pariatur sint cillum proident sit quis tempor ullamco amet duis.

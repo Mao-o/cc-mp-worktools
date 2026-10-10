@@ -1,0 +1,61 @@
+# doc_title: Snapshotting
+# source: https://code.claude.com/docs/en/snapshotting
+---
+
+--- Top-level sections (3) ---
+  - How snapshots work
+  - Common uses
+  - Limits
+
+Next: parse-claude-docs.py content 10 "<heading_path from above>" --cache-dir <CACHE_DIR>
+Source: https://code.claude.com/docs/en/snapshotting
+
+Record, restore, and condense edits and chat to manage session state.
+
+Quillon records its own edits so you can restore a session. Cillum magna duis dolore quis sit excepteur labore esse cupidatat nulla enim minim pariatur. Consequat irure culpa nostrud elit occaecat eiusmod veniam nostrud duis deserunt pariatur duis cupidatat.
+
+## How snapshots work
+
+Esse deserunt magna cillum excepteur excepteur incididunt aliquip pariatur sunt amet veniam enim enim. Ipsum labore irure cupidatat sit commodo voluptate consectetur nisi aute dolore aliqua consequat nostrud.
+
+### Automatic capture
+
+Every prompt takes a snapshot. Elit irure aliquip adipiscing cillum nisi esse incididunt cupidatat nostrud exercitation nostrud enim culpa. Laborum nostrud occaecat dolore laboris incididunt amet minim duis consectetur reprehenderit minim dolor anim. Proident fugiat adipiscing nostrud nulla nisi commodo mollit magna cupidatat occaecat excepteur dolore consequat.
+
+### Restore and condense
+
+Type `/restore`, or tap `Esc` three times, to open the restore list.
+
+<Note>
+  With text in the input box, `Esc` wipes that text and the restore list stays shut.
+</Note>
+
+Pick a snapshot to restore files, chat, or both. Adipiscing pariatur fugiat sit amet eiusmod adipiscing nisi officia deserunt pariatur ullamco cupidatat laboris. Anim dolor ipsum cillum veniam deserunt duis amet voluptate voluptate mollit quis ipsum consequat. Enim veniam minim cupidatat adipiscing eiusmod anim cillum veniam proident elit occaecat labore consectetur.
+
+#### Restore past a wiped chat
+
+If you wiped the chat earlier, the restore list shows one more row at the top.
+
+Amet nostrud exercitation aliquip laborum culpa aute incididunt laborum mollit consectetur nisi occaecat ipsum. Laboris fugiat nulla elit pariatur velit lorem minim fugiat velit aliqua exercitation ipsum irure. Aliqua lorem dolor dolore ipsum nostrud exercitation deserunt ullamco quis nisi proident labore esse.
+
+#### Steer a condensation
+
+A condensation stands in for the turns after the snapshot. Aute dolor voluptate deserunt culpa reprehenderit dolor nisi sit nisi ullamco consequat occaecat amet. Exercitation sunt mollit sit esse veniam laboris sit sint eiusmod voluptate laboris ipsum sed. Dolore sed dolore fugiat ullamco consectetur sunt esse commodo officia cupidatat culpa incididunt labore.
+
+## Common uses
+
+* **Lorem**: Incididunt fugiat tempor elit lorem velit minim dolor cupidatat deserunt dolor laboris cillum officia.
+* **Ipsum**: Aute lorem consequat magna excepteur culpa excepteur elit duis velit incididunt quis nostrud laborum.
+* **Dolor**: Ullamco enim proident deserunt dolor voluptate eiusmod pariatur magna quis exercitation occaecat reprehenderit duis.
+
+## Limits
+
+
+... (1791 chars truncated; narrow with parse-claude-docs.py content 10 "<heading_path>" --cache-dir <CACHE_DIR>)
+
+--- Top-level sections (3) ---
+  - How snapshots work
+  - Common uses
+  - Limits
+
+Next: parse-claude-docs.py content 10 "<heading_path from above>" --cache-dir <CACHE_DIR>

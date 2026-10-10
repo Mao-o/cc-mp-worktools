@@ -1,0 +1,13 @@
+Search-index results for "fetch blob" (Claude Developer Platform)
+  (index: <CACHE_DIR>/claude-platform-llms.txt)
+============================================================
+
+[10] Fetch Blob (score: 20)
+    URL: https://platform.claude.com/docs/en/api/blobs/fetch.md
+
+[11] Fetch Blob (Beta) (score: 20)
+    URL: https://platform.claude.com/docs/en/api/beta/blobs/fetch.md
+
+(2 results, 14 pages searched)
+
+Next: parse-claude-docs.py search "<query>" --source platform --cache-dir <CACHE_DIR>
