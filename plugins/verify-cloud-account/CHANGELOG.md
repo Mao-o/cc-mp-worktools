@@ -1,5 +1,68 @@
 # Changelog
 
+## 0.21.1
+
+### Fixed: deny 文面に出すパスの制御文字をエスケープする
+
+deny 文面に出す起動ディレクトリ由来のパスは、途中のディレクトリ名をリポジトリ側が決められる
+(clone しただけのリポジトリでも、改行や端末の制御シーケンスを含む名前のディレクトリを置ける)。
+0.21.0 で値と検出コマンドの表示は直したが、パスの表示が残っていて、改行入りのパスで deny 文面の
+外に偽の行を差し込めた (内部バックログ)。
+
+- 期待値ファイルのパス (不正な JSON / 読めない / オブジェクトでない / 値の型が不正 / キーが
+  未登録 / 読み込みの失敗の各 deny、グローバル既定を使っている旨の注釈)、親ディレクトリの注釈、
+  起動リポジトリの外で実行される deny の起動リポジトリ、未設定の deny が案内するグローバル既定の
+  パス、配置パスの競合と stat できない配置パスの一覧 (builder の同じ一覧を含む) を、
+  `escape_controls` に通す。読み込みの失敗に添える OS のエラー文もエスケープする
+- 配置パスの競合の deny が案内する旧ファイルの削除 (`rm '<path>'`) は、パスに制御文字を含むときは
+  コマンドの形にせず、エスケープした表示と「手で削除してください」にする (`shlex.quote` は改行を
+  そのまま残すので、引用符の中で行が分かれる)。制御文字を含まないパス (空白を含むものなど) の案内は
+  変わらない
+- deny / allow の判定は変えていない (文面だけ)
+
+### Fixed: builder が UTF-8 でない・入れ子の深いファイルで traceback にならない
+
+hook は 0.18.0 で、期待値ファイルの UnicodeDecodeError / RecursionError を不正な JSON と同じ扱いに
+した。builder の読み込みは揃っておらず、例外が main() の外まで抜けて traceback で終わっていた
+(検証が飛ぶわけではない。内部バックログ)。
+
+- 既存の期待値ファイルの読み込み (`init` / `set` / `remove` / `show` / `auto-switch` /
+  `pin-env` / `migrate`) が、UTF-8 でない・入れ子が深い・桁の多すぎる整数のファイルで、
+  不正な JSON と同じ exit code (1) の `既存 <path> を読めません (<例外の型>)` に終わる
+- グローバル既定の読み込み (`init` / `set` が出す「グローバル既定を覆い隠す」警告のキー一覧) は、
+  同じ理由で読めないとき、一覧を出さずに続ける。`pin-env` が読む `settings.local.json` は、
+  同じ理由で読めないとき、壊れた JSON と同じ報告にする
+- `pin-env` が `settings.local.json` の有無を確かめるとき、stat できないパスを「無い」ではなく
+  読めないファイルとして報告する (hook と同じ分類)。`.gitignore` と `CLAUDE.md` の有無の確認は
+  best-effort のまま、stat できない名前で例外にしない (Python 3.13 までの `Path.exists()` は
+  ENAMETOOLONG などを投げる)
+- hook が deny する深さ (入れ子が 32 段より深い) のファイルを、builder も同じ文面
+  (`既存 <path> を読めません (入れ子が 32 段より深い)`) で止める。通すと Python 3.12 では、読めた
+  あとの書き戻し (`json.dumps`) が RecursionError の traceback になっていた。深さの上限と数え方は
+  `core/paths.py` に移し、hook と builder が同じものを使う (グローバル既定の読み込みも同じ基準)
+- `init` / `set` / `migrate` の `--commit` が `.gitignore` にエントリを足すとき、`.gitignore` の中身が
+  UTF-8 でなくても traceback にならない (書き込みのあとに UnicodeDecodeError で終わっていた)。
+  `.gitignore` は書き換えず、既存の warning の行を出して exit 0 で続ける
+- `--value` に深すぎる入れ子の JSON が来ても (`[` を 10 万個並べるなど)、RecursionError にならず
+  文字列のまま扱う
+- hook の最終防波堤 (「内部エラーのため検証をスキップしました」) に入る例外の文字列も
+  `escape_controls` に通す。パスを含む OSError が抜けたとき、改行入りのパスで偽の行を差し込めた
+- hook の判定は変えていない
+
+### Tests
+
+- deny 文面のパス (`tests/test_deny_path_escape.py`): 改行 + 偽の行 + ESC を含むディレクトリ名で、
+  各 deny の文面に偽の行が行頭に出ないこと、エスケープした形で示されること、ESC が残らないこと、
+  rm の案内の分岐 (制御文字ありはコマンドにしない / 空白だけのパスは従来どおり quote つき)
+- builder の読み込み (`TestUnreadableExistingFile`): サブコマンド × (UTF-8 でない / 入れ子が深い)、
+  migrate の読めない旧パス / 新パス、グローバル既定、`.gitignore` / `CLAUDE.md` の stat できない名前。
+  `settings_env` の単体 (UTF-8 でない / 入れ子が深い / 桁の多すぎる整数 / stat できないパス)。
+  桁の多すぎる整数の case は、整数の桁数に上限のある Python (3.11+) でだけ流す
+- builder: hook が deny する深さ (パース後に 32 段超) のファイルを全サブコマンドで、3000 段の入れ子 (Python 3.12 で書き戻しが落ちていた形) の拒否、UTF-8 でない
+  `.gitignore` (init / set / migrate の `--commit`)、深すぎる `--value`。最終防波堤の文面の
+  エスケープ (`tests/test_main.py`)
+- 1,492 → 1,520 件
+
 ## 0.21.0
 
 ### Changed: deny 文面に示す値は、どの表示も許容形のときだけ示す

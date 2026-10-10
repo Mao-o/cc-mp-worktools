@@ -354,9 +354,12 @@ def _global_default_keys(global_path: Path) -> list[str]:
     """グローバル既定ファイルのトップレベルキー (読めない / 壊れていれば空)。"""
     try:
         data = json.loads(global_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError, RecursionError):
+        # ValueError は不正な JSON・UTF-8 でない (UnicodeDecodeError)・桁の多すぎる整数、
+        # RecursionError は入れ子が深すぎるファイル。hook は同じ扱いで deny する。
         return []
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or paths.nested_deeper_than(data, paths.MAX_ACCOUNTS_DEPTH):
+        # hook は deny する深さのファイルも、読めないものとして扱う
         return []
     return sorted(str(key) for key in data)
 
@@ -462,11 +465,25 @@ def _load_existing(path: Path) -> dict[str, Any]:
             f"既存 {path} の JSON が不正です: {e.msg} (行 {e.lineno})。"
             "手動で修正してから再実行してください。"
         )
+    except (ValueError, RecursionError) as e:
+        # UTF-8 でない (UnicodeDecodeError) / 桁の多すぎる整数 (ValueError) / 入れ子が深すぎる
+        # (RecursionError) ファイルも、hook と同じく不正な JSON と同じ扱いにする
+        # (捕まえないと traceback で終わる)。
+        raise _BuilderError(
+            f"既存 {path} を読めません ({type(e).__name__})。UTF-8 で保存した JSON か、"
+            "入れ子が深すぎないかを確認し、手動で修正してから再実行してください。"
+        )
     except OSError as e:
         raise _BuilderError(f"{path} の読み込みに失敗しました: {e}")
     if not isinstance(data, dict):
         raise _BuilderError(
             f"{path} は JSON オブジェクト ({{...}}) である必要があります。"
+        )
+    if paths.nested_deeper_than(data, paths.MAX_ACCOUNTS_DEPTH):
+        # hook は deny する深さ。通すと、書き戻す json.dumps が Python 3.12 で RecursionError になる。
+        raise _BuilderError(
+            f"既存 {path} を読めません (入れ子が {paths.MAX_ACCOUNTS_DEPTH} 段より深い)。"
+            "入れ子が深すぎないかを確認し、手動で修正してから再実行してください。"
         )
     return data
 
@@ -495,7 +512,7 @@ def _ensure_gitignore_entry(target: _Target, stdout: IO[str]) -> None:
         entry = target.path.relative_to(target.anchor).as_posix()
     except ValueError:
         return
-    if not gitignore.exists():
+    if not os.path.exists(gitignore):
         return
     try:
         content = gitignore.read_text(encoding="utf-8")
@@ -506,7 +523,7 @@ def _ensure_gitignore_entry(target: _Target, stdout: IO[str]) -> None:
         content += f"{entry}\n"
         gitignore.write_text(content, encoding="utf-8")
         print(f"updated: {gitignore} ({entry} を追加)", file=stdout)
-    except OSError as e:
+    except (OSError, UnicodeDecodeError) as e:
         print(f"warning: .gitignore の更新に失敗しました: {e}", file=stdout)
 
 
@@ -527,7 +544,7 @@ def _ensure_project_claude_md(target: _Target, stdout: IO[str]) -> None:
     """
     target_dir = target.path.parent
     md_path = target_dir / _PROJECT_CLAUDE_MD_FILENAME
-    if md_path.exists():
+    if os.path.exists(md_path):
         print(f"(skipped: {md_path} already exists)", file=stdout)
         return
     try:
@@ -583,7 +600,8 @@ def _parse_value(raw: str) -> Any:
     """
     try:
         parsed = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
+    except (ValueError, RecursionError):
+        # JSONDecodeError は ValueError の子。深すぎる入れ子は RecursionError。
         return raw
     if isinstance(parsed, dict):
         return parsed

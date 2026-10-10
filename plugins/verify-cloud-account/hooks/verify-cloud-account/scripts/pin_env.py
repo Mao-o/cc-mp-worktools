@@ -30,7 +30,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from core import shell_word
+from core import paths, shell_word
 from services import aws, firebase, gcloud
 
 # 固定を提案する service (accounts.local.json のキー名)。
@@ -394,11 +394,19 @@ def _same_path(a: Path, b: Path) -> bool:
 
 def settings_env(path: Path | None) -> tuple[dict[str, str], str | None]:
     """書き込み先の settings.local.json の `env` (無ければ空)。読めなければ理由を返す。"""
-    if path is None or not path.is_file():
+    if path is None:
+        return {}, None
+    # stat できないパスは「無い」ではなく読めないファイルとして扱う (hook と同じ分類。
+    # `Path.is_file()` は Python 3.13 までは例外で traceback になる)。
+    if paths.stat_failure(path) is not None:
+        return {}, "状態を確かめられません (手で直してから書き足してください)"
+    if not os.path.isfile(path):
         return {}, None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (ValueError, OSError):
+    except (ValueError, OSError, RecursionError):
+        # ValueError は不正な JSON・UTF-8 でない (UnicodeDecodeError)、RecursionError は
+        # 入れ子が深すぎるファイル。
         return {}, "JSON として読めません (手で直してから書き足してください)"
     if not isinstance(data, dict):
         # `[]` などは JSON として読めても、`env` を足せるオブジェクトが無い。

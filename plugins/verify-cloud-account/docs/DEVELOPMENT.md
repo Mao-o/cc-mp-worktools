@@ -114,7 +114,11 @@ Python 3.11+。標準ライブラリのみ (外部依存なし)。
   tests/test_shown_values.py が service × 出どころの生成で確かめる
 - **値を置き換えずに出すとき** (検出コマンドの行、CLI の出力の転記、記録のパスなど、空白を
   含むのが普通の値) は `core.shell_word.escape_controls()` を通し、制御文字と書式文字
-  (双方向制御の文字など) をエスケープして 1 行に収める (v0.21.0)
+  (双方向制御の文字など) をエスケープして 1 行に収める (v0.21.0)。deny 文面に出すパス
+  (期待値ファイル・親ディレクトリ・起動リポジトリ・グローバル既定・配置パスの一覧。途中の
+  ディレクトリ名はリポジトリ側が決められる) も同じ。rm の案内のように**コマンドの形で**出す
+  パスは、制御文字を含むときはコマンドにせず、エスケープした表示と「手で削除してください」にする
+  (`shlex.quote` は改行を残す)。契約は tests/test_deny_path_escape.py (v0.21.1)
 - **例外を raise しない。** CLI 未インストール (`FileNotFoundError`)、実行不能
   (`OSError`)、timeout も文字列で返す。hook プロセスが異常終了すると JSON が
   出ず、公式仕様上は non-blocking error として**無音でコマンドが進む**
@@ -1452,12 +1456,12 @@ verify() は CLI が出した現在値 (前後の空白を除いた値) と期�
   ValueError、上限の無い 3.9.6 では読める (実測)。マージ前レビューの指摘)。UnicodeDecodeError も
   ValueError の子なので名指しをやめた。JSONDecodeError (これも子) は先に捕まえるので、不正な
   JSON の文面は変わらない。e2e のテストの 5,000 桁の case は、上限のある Python でだけ流す
-- 入れ子の上限 (`_MAX_ACCOUNTS_DEPTH = 32`) も置いた。`json.loads` が通る深さでも、後段
+- 入れ子の上限 (`core/paths.py` の `MAX_ACCOUNTS_DEPTH = 32`。builder も共有する) も置いた。`json.loads` が通る深さでも、後段
   (成功 cache のキーを作る `json.dumps` など) が同じ深さを辿って RecursionError になる窓が
   ある (Python 3.9 では、`json.loads` は通り `json.dumps` が落ちる深さが 985 段前後にあった。
   境目は Python の版と呼び出しの深さで変わる)。後段の例外を一つずつ捕まえるより、読んだ
   直後に深さで弾く。正規の形は 2 段なので 32 段で足りる。数え方は再帰しない
-  (`_nested_deeper_than`)
+  (`nested_deeper_than`)
 - 成功 cache の entry (`get_success`) は UTF-8 でない・入れ子が深いファイルを、epoch
   (`_read_epoch`) は入れ子が深いファイルを、読めないもの (cache miss / epoch 0) として扱う
   (epoch の UTF-8 でないファイルは、前から ValueError として捕まえていた)。どちらも

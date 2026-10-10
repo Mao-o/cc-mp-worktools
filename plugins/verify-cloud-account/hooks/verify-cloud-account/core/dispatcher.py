@@ -205,7 +205,7 @@ def _global_note(accounts_path: Path) -> str:
     """
     return (
         f"プロジェクトに accounts.local.json が無いため、グローバル既定 "
-        f"{accounts_path} を使用しています。"
+        f"{shell_word.escape_controls(accounts_path)} を使用しています。"
     )
 
 
@@ -256,39 +256,13 @@ def _notes_only(notes: list[str]) -> dict | None:
     return output.warn(text)
 
 
-# accounts.local.json の入れ子の深さの上限 (v0.18.0)。正規の形は 2 段 (トップレベルの
-# オブジェクト → service のオブジェクト / 配列) までなので十分に大きく、Python の再帰の上限
-# (既定 1,000) より十分に小さい。これより深いファイルは不正な JSON と同じに扱う: `json.loads`
-# が通る深さでも、後段 (成功 cache の key を作る `json.dumps` など) が同じ深さを辿り、少し
-# 深いだけのファイルで RecursionError になって __main__ の最終防波堤 (検証のスキップ) まで
-# 抜ける (Python 3.9 で実測。境目は Python の版と呼び出しの深さで変わる)。
-_MAX_ACCOUNTS_DEPTH = 32
-
-
-def _nested_deeper_than(value, limit: int) -> bool:
-    """value の入れ子 (dict / list) が limit 段より深ければ True (再帰しないで数える)。"""
-    stack = [(value, 1)]
-    while stack:
-        current, depth = stack.pop()
-        if isinstance(current, dict):
-            children = current.values()
-        elif isinstance(current, list):
-            children = current
-        else:
-            continue
-        if depth > limit:
-            return True
-        stack.extend((child, depth + 1) for child in children)
-    return False
-
-
 def _unreadable_accounts(accounts_path: Path, why: str) -> str:
     """読めない期待値ファイル (UTF-8 でない / 桁の多すぎる整数 / 入れ子が深すぎる) の deny 本文。
 
     判定は不正な JSON と同じ (mode は env だけで決める。`"$mode"` は読めないため)。
     """
     return (
-        f"{accounts_path} を読めません ({why})。UTF-8 で保存した JSON か、"
+        f"{shell_word.escape_controls(accounts_path)} を読めません ({why})。UTF-8 で保存した JSON か、"
         "入れ子が深すぎないかを確認・修正してください。"
     )
 
@@ -309,7 +283,7 @@ def _ancestor_note(project_dir: str, resolved_dir: Path | None) -> str:
     if resolved_dir == project:
         return ""
     return (
-        f"accounts.local.json は親ディレクトリ {resolved_dir} から継承して "
+        f"accounts.local.json は親ディレクトリ {shell_word.escape_controls(resolved_dir)} から継承して "
         "います (worktree 内に同名ファイルは不要)。"
     )
 
@@ -642,7 +616,7 @@ def _format_unstattable(conflicts: list[tuple[str, Path]]) -> str | None:
 def _format_conflicts(conflicts: list[tuple[str, Path]]) -> str:
     lines = ["複数のパスに accounts.local.json が存在します (曖昧さを避けるため検証を停止):"]
     for kind, path in conflicts:
-        lines.append(f"  - {path} ({kind})")
+        lines.append(f"  - {shell_word.escape_controls(path)} ({kind})")
     lines.append("どれか 1 つに統合してください:")
     lines.append("  " + _MIGRATE_HINT)
     # migrate --commit は旧ファイルを残すため、その後の手動削除を案内しないと
@@ -653,7 +627,16 @@ def _format_conflicts(conflicts: list[tuple[str, Path]]) -> str:
         for path in legacy_paths:
             # パスはシェルの 1 語にする。サブディレクトリで作業していると、途中の
             # ディレクトリ名はリポジトリが決められる (`;` や空白を含みうる)。
-            lines.append(f"    rm {shlex.quote(str(path))}")
+            # 制御文字を含むパスは、`shlex.quote` が改行などをそのまま残す (引用符の中で
+            # 行が分かれ、偽の行を差し込める) ので、コマンドの形では案内しない (v0.21.1)。
+            text = str(path)
+            if shell_word.escape_controls(text) == text:
+                lines.append(f"    rm {shlex.quote(text)}")
+            else:
+                lines.append(
+                    f"    {shell_word.escape_controls(text)} "
+                    "(制御文字を含むため、コマンドの形では案内しません。手で削除してください)"
+                )
     return "\n".join(lines)
 
 
@@ -721,7 +704,7 @@ def _combined_short_error(svc, cands, *, stops: bool) -> str:
 # env ツールが切り替えるはずの env も) を hook から照合できない。移動先のパスは
 # 文面に出さない (`cd` の引数はコマンド由来で、改行などで偽の行を差し込めるため)。
 def _outside_error(root: Path | None, *, stops: bool) -> str:
-    where = f" ({root}) " if root is not None else ""
+    where = f" ({shell_word.escape_controls(root)}) " if root is not None else ""
     head = (
         f"起動したリポジトリ{where}の外で実行されるコマンドです。"
         "この hook は、セッションを起動したディレクトリの期待値と環境変数で照合するため、"
@@ -938,7 +921,7 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         global_path = paths.global_accounts_file()
         if global_path is not None:
             msg += (
-                f"\n\n全プロジェクト共通の既定にするには {global_path} を"
+                f"\n\n全プロジェクト共通の既定にするには {shell_word.escape_controls(global_path)} を"
                 "作成してください (プロジェクト側の設定が優先されます)。"
             )
         if outside_problems:
@@ -952,7 +935,7 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
     except json.JSONDecodeError as e:
         return _decide(
             pre_file_mode,
-            f"{accounts_path} の JSON が不正です: {e.msg} (行 {e.lineno})。"
+            f"{shell_word.escape_controls(accounts_path)} の JSON が不正です: {e.msg} (行 {e.lineno})。"
             "内容を確認・修正してください。",
             mode_notes,
         )
@@ -968,14 +951,15 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
     except OSError as e:
         return _decide(
             pre_file_mode,
-            f"{accounts_path} の読み込みに失敗しました: {e}",
+            f"{shell_word.escape_controls(accounts_path)} の読み込みに失敗しました: "
+            f"{shell_word.escape_controls(e)}",
             mode_notes,
         )
-    if _nested_deeper_than(accounts, _MAX_ACCOUNTS_DEPTH):
+    if paths.nested_deeper_than(accounts, paths.MAX_ACCOUNTS_DEPTH):
         return _decide(
             pre_file_mode,
             _unreadable_accounts(
-                accounts_path, f"入れ子が {_MAX_ACCOUNTS_DEPTH} 段より深い"
+                accounts_path, f"入れ子が {paths.MAX_ACCOUNTS_DEPTH} 段より深い"
             ),
             mode_notes,
         )
@@ -983,7 +967,7 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
     if not isinstance(accounts, dict):
         return _decide(
             pre_file_mode,
-            f"{accounts_path} はオブジェクト ({{...}}) である必要があります。",
+            f"{shell_word.escape_controls(accounts_path)} はオブジェクト ({{...}}) である必要があります。",
             mode_notes,
         )
 
@@ -1041,7 +1025,7 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
                 svc, inline_env, cands, env_changes, next(iter(dirs)), trace
             ) or _all_pin_actions(cands, svc):
                 continue
-            problems.append(_unregistered_error(svc, str(accounts_path), stops=stops))
+            problems.append(_unregistered_error(svc, shell_word.escape_controls(accounts_path), stops=stops))
             continue
 
         if not isinstance(entry, (str, dict)):
@@ -1049,7 +1033,7 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
             # 「アカウントが合っていない」ではなく「期待値として読めない物が書かれて
             # いる」状態で、読むだけのコマンドで黙って通すと設定のバグが隠れる。
             errors.append(
-                f'{accounts_path} の "{svc.ACCOUNT_KEY}" 値は文字列または '
+                f'{shell_word.escape_controls(accounts_path)} の "{svc.ACCOUNT_KEY}" 値は文字列または '
                 f'オブジェクトであるべきです (現在: {type(entry).__name__})。'
             )
             continue
