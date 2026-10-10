@@ -256,7 +256,12 @@ class _HelperFloor(unittest.TestCase):
             self.floor_env = {k: v for k, v in os.environ.items() if k != "GIT_TRACE2_EVENT"}
             if floor_only:  # 床の自己確認: helper を呼ばず、ここまでの床だけを見る
                 return []
-            with mock.patch.object(subprocess, "run", side_effect=spy):
+            # init_repo は雛形を 1 回だけ作ってコピーするので、雛形を空にして**本物の初期化**を
+            # この呼び出しの中で走らせる (そうしないと git が起動されず、床が空になる)
+            with mock.patch.object(subprocess, "run", side_effect=spy), mock.patch.object(
+                _testutil, "_TEMPLATE_REPO", None
+            ), mock.patch.object(_testutil, "_TEMPLATE_DIR", os.path.join(tmp, "template")):
+                os.makedirs(_testutil._TEMPLATE_DIR)
                 _testutil.init_repo(os.path.join(tmp, "repo"))
             events = trace_events(trace)
             want = dict(_testutil.HERMETIC_GIT_ENV)

@@ -14,6 +14,7 @@ version 据え置きで main に入った後続 commit はその version の節�
 - 強化: どのテストも殺していなかった変異 (空ガード) を殺すようにした。`explore-parallel` の 3 件と、`_common` の 2 件 (`stdin` が `/dev/null` であること、応答しない probe が timeout 内に返ること)。前提が失効した docstring も直した
 - 統合: `test_settings` の 2 族と `test_sentinel` の 1 族を表駆動 + subTest にまとめた (ケース数は不変。元のテスト名はケースのラベルとして残した)
 - suite: `_common` 170 → 162 件 / 約 33 → 10 秒、`explore-parallel` 88 → 81 件 / 約 38 → 13 秒 (macOS、無負荷。ここだけの計測で CI は未計測)
+- `post-implementation-review` の suite: 各テストの setUp で git を 5 回起動していた初期コミット済み repo の作成 (`init_repo`) を、プロセスで 1 回だけ本物の初期化をして、各テストにはそのコピーを渡す形にした。テスト本体は変えていない。自動 maintenance 対策の床 (`test_hermetic_env`) は、雛形を空にして本物の初期化をその場で走らせる形に直した (コピーでは git が起動されず、床が空になるため)。件数は 462 件のまま、約 93 → 約 59 秒 (macOS、負荷はやや高め。ループのゲートの既定の制限時間 90 秒を超えていたのが収まる)。重複テストの削除・統合は、変異による確認が要るため今回は見送った
 
 ### 確認
 
