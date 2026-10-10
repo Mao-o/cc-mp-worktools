@@ -273,6 +273,9 @@ def _resolve_target(
         # RuntimeError を投げる (3.13 からは投げない)。拾わないと builder が traceback で
         # 止まるので、どちらも「正規化できない」として扱い、その先の stat で
         # 「確かめられません」として止める (hook はこのパスを deny する)。
+        # 3.13 からは例外にならず、自分を指す 1 段のループはそのパスのまま (その先の stat で
+        # 止まる)、2 段以上のループはループの途中のパスを返すので、下の配置の検査で exit 2 に
+        # なる。どちらも書き込まない。
         try:
             path = path.resolve()
         except (OSError, RuntimeError):
@@ -298,7 +301,7 @@ def _resolve_target(
 
     try:
         project = Path(project_dir).resolve()
-    except (OSError, RuntimeError):  # RuntimeError: 3.12 までの symlink ループ (上と同じ)
+    except OSError:  # project_dir は cwd か CLAUDE_PROJECT_DIR で実在する前提 (hook 側と同じ)
         project = Path(project_dir)
     found, resolved_dir = paths.discover_accounts_files_with_ancestors(project_dir)
     if not found:
@@ -1375,10 +1378,13 @@ def _cmd_show(
         # 隠すことになる (show の目的は不一致の原因調査)。突合はそのファイルの
         # 値で行う必要があるので `--path` で開き直す形を案内する。
         global_path = paths.global_accounts_file()
+        # `--path` で無いパスを指しても、プロジェクト側に別の期待値ファイルがあれば hook は
+        # そちらを読み、グローバル既定には落ちない (`_hook_reads_instead` が警告する)。
         global_in_use = (
             global_path is not None
             and paths.may_hold_accounts(global_path)
             and global_path != target.path
+            and _hook_reads_instead(target, project_dir) is None
         )
         # グローバル既定が stat できないなら、hook はそれを「ある (が読めない)」として
         # deny する。`--path` で開き直しても読めないので案内せず、hook と同じ文面で止める。
@@ -1896,10 +1902,13 @@ def _cmd_pin_env(
     if not found:
         print(_target_note(target, project_dir, warn_shadowing=False), file=stdout)
         global_path = paths.global_accounts_file()
+        # `--path` で無いパスを指しても、プロジェクト側に別の期待値ファイルがあれば hook は
+        # そちらを読み、グローバル既定には落ちない (`_hook_reads_instead` が警告する)。
         global_in_use = (
             global_path is not None
             and paths.may_hold_accounts(global_path)
             and global_path != target.path
+            and _hook_reads_instead(target, project_dir) is None
         )
         # stat できないグローバル既定は、hook が deny する。`--path` での再実行を案内しても
         # 読めないので、hook と同じ文面で止める (show と同じ)。

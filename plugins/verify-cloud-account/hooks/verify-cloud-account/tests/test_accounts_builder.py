@@ -3767,6 +3767,22 @@ class TestUnstattableAccountsPath(BaseBuilder):
                 self.assertNotIn("照合せずに通します", out)
         self.assertFalse(self._new_path().exists())
 
+    def test_show_and_pin_env_with_missing_explicit_path_and_project_file(self):
+        # `--path` が無いパス (旧パス) を指しても、プロジェクト側に新パスがあれば hook はそれを
+        # 読み、stat できないグローバル既定では deny しない。builder も「確かめられません」で
+        # 止めない (マージ前レビューの指摘)。
+        self._write_new({"github": "right-user"})
+        global_path = paths.global_accounts_file()
+        self._unstattable(global_path)
+        legacy = self._legacy_path()
+        self.assertFalse(os.path.lexists(legacy))  # 前提: 指定先は無い
+        for argv in (["show"], ["pin-env"]):
+            with self.subTest(argv=argv[0]):
+                code, out, err = self._run(argv + ["--path", str(legacy)])
+                self.assertNotIn("を確かめられません", err)
+                self.assertNotIn("(global)", out + err)
+                self.assertIn(str(self._new_path()), out + err)  # hook が読む方を案内する
+
     def test_init_with_unstattable_global_default_warns_of_shadowing(self):
         # init は止めない (プロジェクト側に作れば hook はそれを読む) が、グローバル既定を
         # 覆い隠すことは言う (`_global_default_note`)。

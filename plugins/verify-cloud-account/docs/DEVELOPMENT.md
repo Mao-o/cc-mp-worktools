@@ -1522,7 +1522,15 @@ ENOENT / ENOTDIR / EBADF / ELOOP 以外の stat の失敗を例外にし、例�
   正規化 (`_resolve_target` の `path.resolve()`) は、Python 3.12 までの symlink のループの
   RuntimeError も OSError と同じく拾い、正規化しないまま先へ進めて stat で止める
   (`path.parent.resolve() / path.name` にする案は、正しいファイルを指す symlink の扱いが変わるので
-  採らない)。builder の残りの try の外の述語 (`.gitignore` / CLAUDE.md の `exists()`) と
+  採らない)。3.13 からは `Path.resolve()` がループで例外を投げず、止まり方がループの形で分かれる
+  (3.9.6 / 3.12.13 / 3.13.16 / 3.14.0 で実測): 自分を指す 1 段のループはそのパスのまま返るので
+  stat で「確かめられません」(exit 1)、2 段以上のループ (`accounts.local.json` → `loopa` →
+  `loopb` → `loopa`) はループの途中のパス (`loopa`) が返るので `_split_tier_path` が None になり、
+  「--path は dispatcher が読む配置を指してください」(exit 2) になる。案内は事実と合わないが
+  書き込まず、hook は deny する。版を問わず同じ文面にする修正は別の課題として内部バックログに
+  送った。`_resolve_target` のプロジェクト側 (`--path` なし) の `resolve()` は OSError だけを拾う
+  (project_dir は cwd か CLAUDE_PROJECT_DIR で実在する前提。hook 側の
+  `paths.discover_accounts_files_with_ancestors` と dispatcher と同じ)。builder の残りの try の外の述語 (`.gitignore` / CLAUDE.md の `exists()`) と
   `scripts/pin_env.py` の `settings_env` は配置パスと関係しないので、この変更では触っていない
 - 確認 (builder): 上の 2 つの入力で show / migrate / migrate --commit と hook を実プロセスで
   Python 3.9.6 と 3.14.0 に流し、hook がどれも deny、builder がどれも exit 1 で traceback を

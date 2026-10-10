@@ -77,10 +77,18 @@ hook の外まで抜けて「内部エラーのため検証をスキップ」(�
   「`--path <グローバル既定>` を付けて再実行」を案内せず、hook と同じ文面で exit 1 にする (hook は
   そのファイルを読めない期待値ファイルとして deny し、`--path` で開き直しても読めないため)。show は
   従来、グローバル既定を読めなければ未登録の一覧を出さずに exit 0 で終えていたが、stat できない
-  場合に限って止める側に揃えた。壊れた JSON など、stat できるが読めない場合は従来どおり exit 0
+  場合に限って止める側に揃えた。壊れた JSON など、stat できるが読めない場合は従来どおり exit 0。
+  `--path` が無いパスを指していても、プロジェクト側に別の期待値ファイルがあれば hook はそちらを
+  読むので、show / pin-env はグローバル既定を見ない (stat できなくても止めない)
 - `--path` に symlink のループを渡すと、Python 3.12 までは `Path.resolve()` の RuntimeError で
-  traceback になっていた (3.13 からは投げない)。どの版でも「確かめられません」で exit 1 にする
-  (hook は同じ入力を deny する)
+  traceback になっていた (3.13 からは投げない)。どの版でも書き込まずに止め、hook は同じ入力を
+  deny する。止まり方は版とループの形で分かれる (Python 3.9.6 / 3.12.13 / 3.13.16 / 3.14.0 で
+  show / pin-env / auto-switch / set / remove / init / migrate を実測):
+  - 3.12 まで: どの形でも「確かめられません」で exit 1
+  - 3.13 から: 自分を指す 1 段のループは「確かめられません」で exit 1。2 段以上のループ
+    (`accounts.local.json` → `loopa` → `loopb` → `loopa`) では `Path.resolve()` がループの途中の
+    パス (`loopa`) を返すので、「--path は dispatcher が読む配置を指してください」で exit 2
+    (案内は事実と合わないが、書き込まない)
 
 ### Fixed: pin-env の gcloud の構成
 
@@ -113,8 +121,10 @@ hook の外まで抜けて「内部エラーのため検証をスキップ」(�
 - builder: 新パスだけが stat できないときの auto-switch (`--commit` 有無)、権限の無いディレクトリの
   下を指す `--path` での show / pin-env、symlink のループを指す `--path` (`Path.resolve()` を
   3.12 までの挙動に差し替える)、stat できないグローバル既定での show / pin-env / auto-switch と
-  init の警告。配置パスの存在確認を `Path.is_file()` に戻す変異が、置き換えた箇所ごとに落ちる
-- 1,397 → 1,441 件
+  init の警告。`--path` が無いパスを指し、プロジェクト側に新パスがあるときの show / pin-env が、
+  stat できないグローバル既定で止まらないこと。配置パスの存在確認を `Path.is_file()` に戻す変異が、
+  置き換えた箇所ごとに落ちる
+- 1,397 → 1,443 件
 
 ## 0.19.0
 
