@@ -59,6 +59,21 @@ hook の外まで抜けて「内部エラーのため検証をスキップ」(�
   切替を行わない」(deny のまま) にしていた (3.14 からは記録が無いのと同じに切り替えていた)。
   検証のスキップにはなっていなかった
 
+### Fixed: builder (show / migrate / pin-env / 書き込み) の表示を hook の deny に揃える
+
+上の修正で、stat できない配置パスを「ある」に数えるようになり、同じ探索を使う builder の振る舞いも
+変わっていた (マージ前レビューの指摘)。新パスに正しいファイル・旧パス (`.claude/accounts.json`) に
+長すぎる名前を指す symlink のとき、show は「複数のパスに存在します … migrate --commit」と hook が
+避けている案内を出し、migrate は Python 3.13 までだと traceback で止まり、3.14 からは stat できない
+旧パスを空として「統合」して書き込んでいた。新パスだけがその symlink のときは、3.14 の show が
+`(empty)` と「照合せずに通します」を出していた (hook はどれも deny)。
+
+- 期待値ファイルの読み込みは、stat できないパスを空として読まず「確かめられません」で止める
+- show / pin-env の複数パスのエラー、migrate、旧パスがあるときの書き込み (init / set / remove /
+  auto-switch) の拒否は、stat できない配置パスがあれば hook と同じ文面 (確かめられないパスと理由)
+  を出し、migrate / rm を案内しない
+- 配置パスとグローバル既定の存在確認で、Python 3.13 までに traceback で止まらない
+
 ### Fixed: pin-env の gcloud の構成
 
 - stat できない構成ファイル (長すぎる名前を指す symlink など) があると、Python 3.13 までは例外が
@@ -84,7 +99,10 @@ hook の外まで抜けて「内部エラーのため検証をスキップ」(�
 - 自動切替の記録: stat できない・入れ子が深い記録は無いのと同じで、次の切替の記録で置き換わる
   (`test_auto_switch.py`)。pin-env: stat できない構成を候補にしない (`test_pin_env.py`)
 - cache の dir を自分で作る既存のテストは 0700 で作る (umask 002 の環境でも同じ結果にするため)
-- 1,397 → 1,417 件
+- builder: 上の 2 つの入力で show / pin-env / migrate (`--commit` 有無) / init / set /
+  auto-switch が hook と同じ文面で止まり、新パスを書き換えないこと。本物の `Path.is_file` と、
+  3.13 までの挙動に差し替えたものの両方で流す (`TestUnstattableAccountsPath`)
+- 1,397 → 1,431 件
 
 ## 0.19.0
 

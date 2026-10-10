@@ -618,25 +618,9 @@ def _format_unstattable(conflicts: list[tuple[str, Path]]) -> str | None:
     (`paths._may_hold_accounts`)。その階層の `.claude` に権限が無いと 3 つの配置パスすべてが
     そうなるので、`_format_conflicts` の「複数のパスに存在します」と migrate / rm の案内は事実と
     合わず、案内どおりにしても直らない。確かめられないパスとその理由だけを示す。
+    文面は builder と共有する (`paths.describe_unstattable`)。
     """
-    failures = []
-    for kind, path in conflicts:
-        err = paths.stat_failure(path)
-        if err is not None:
-            failures.append((kind, path, err))
-    if not failures:
-        return None
-    lines = [
-        "accounts.local.json の配置パスを確かめられません "
-        "(期待値ファイルがあるかどうかが分からないため検証を停止):"
-    ]
-    for kind, path, err in failures:
-        lines.append(f"  - {path} ({kind}): {err.strerror or type(err).__name__}")
-    lines.append(
-        "途中のディレクトリの権限と、symlink の行き先を確認してください。期待値ファイルで"
-        "ないもの (行き先を辿れない symlink など) は削除してください。"
-    )
-    return "\n".join(lines)
+    return paths.describe_unstattable(conflicts)
 
 
 def _format_conflicts(conflicts: list[tuple[str, Path]]) -> str:

@@ -3581,5 +3581,132 @@ class TestAutoSwitchSubcommand(BaseBuilder):
                 self.assertEqual(code, 2)
 
 
+class TestUnstattableAccountsPath(BaseBuilder):
+    """stat できない配置パスで、builder の表示が hook の deny と食い違わない (0.19.1)。
+
+    hook は stat できない配置パス (長すぎる名前を指す symlink など) を「ある (が読めない)」に
+    数えて deny し、migrate / rm を案内しない (`paths.describe_unstattable`)。builder は
+    `discover_all_accounts_files` を hook と共有するので同じパスを数えるが、0.19.1 の修正前は、
+    show / pin-env が「複数のパスに存在します … migrate --commit」を、新パスだけのときは
+    `(empty)` と未登録の固定の一覧を出し、migrate は Python 3.13 までだと `_load_existing` の
+    `Path.is_file()` が traceback になり、3.14 からは stat できない旧パスを `{}` として「統合」して
+    書き込んでいた (マージ前レビューの指摘)。
+
+    このクラスは本物の `Path.is_file` で、`*Py313` のサブクラスは 3.13 までの挙動に差し替えて
+    同じケースを流す (どの版でも両方の経路を通す)。
+    """
+
+    _LONG = "a" * 300  # 1 要素が 255 バイトを超える → symlink を辿る stat が ENAMETOOLONG
+    _EMULATE_PY313 = False
+
+    def setUp(self):
+        super().setUp()
+        isolation = _testutil.start_isolation(Path(self.tmp) / "cliconfig", Path(self.tmp) / "home")
+        self.addCleanup(isolation.stop)
+        if self._EMULATE_PY313:
+            patcher = _testutil.patch_is_file_like_py313()
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _unstattable(self, path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(self._LONG, path)
+        self.assertIsNotNone(paths.stat_failure(path))  # 前提: stat できない
+        return path
+
+    def _run(self, argv: list[str]) -> tuple[int, str, str]:
+        # 修正前は 3.13 までの `Path.is_file()` の OSError が main() の外まで抜けていた
+        # (traceback)。テストの ERROR ではなく、検出 (assertion の失敗) として扱う。
+        try:
+            return super()._run(argv)
+        except OSError as e:
+            self.fail(f"builder {argv[0]} が OSError で止まった (traceback): {e!r}")
+
+    def _write_new(self, data: dict) -> str:
+        self.new_dir.mkdir(parents=True, exist_ok=True)
+        text = json.dumps(data)
+        self._new_path().write_text(text, encoding="utf-8")
+        return text
+
+    def _assert_hook_wording(self, err: str, path: Path, kind: str) -> None:
+        self.assertIn("配置パスを確かめられません", err)
+        self.assertIn(f"{path} ({kind})", err)
+        self.assertNotIn("migrate", err)
+        self.assertNotIn("複数のパスに accounts.local.json が存在します", err)
+
+    # --- 新パスに正しいファイル、旧パス (legacy) が stat できない symlink ---
+
+    def test_show_with_unstattable_legacy_next_to_new(self):
+        self._write_new({"github": "right-user"})
+        legacy = self._unstattable(self._legacy_path())
+        code, out, err = self._run(["show"])
+        self.assertEqual(code, 1, out + err)
+        self._assert_hook_wording(err, legacy, "legacy")
+
+    def test_pin_env_with_unstattable_legacy_next_to_new(self):
+        self._write_new({"aws": {"profile": "p"}})
+        legacy = self._unstattable(self._legacy_path())
+        code, out, err = self._run(["pin-env"])
+        self.assertEqual(code, 1, out + err)
+        self._assert_hook_wording(err, legacy, "legacy")
+
+    def test_migrate_with_unstattable_legacy_next_to_new(self):
+        before = self._write_new({"github": "right-user"})
+        legacy = self._unstattable(self._legacy_path())
+        for argv in (["migrate"], ["migrate", "--commit"]):
+            with self.subTest(argv=argv):
+                code, out, err = self._run(argv)
+                self.assertEqual(code, 1, out + err)
+                self._assert_hook_wording(err, legacy, "legacy")
+                self.assertNotIn("rm ", out)
+                self.assertEqual(self._new_path().read_text(encoding="utf-8"), before)
+
+    def test_writes_refuse_with_unstattable_legacy_next_to_new(self):
+        before = self._write_new({"github": "right-user"})
+        legacy = self._unstattable(self._legacy_path())
+        for argv in (
+            ["init", "--service", "aws", "--value", "111", "--commit"],
+            ["set", "--service", "aws", "--value", "111", "--commit"],
+            ["auto-switch", "--enable", "--commit"],
+        ):
+            with self.subTest(argv=argv[0]):
+                code, out, err = self._run(argv)
+                self.assertEqual(code, 1, out + err)
+                self._assert_hook_wording(err, legacy, "legacy")
+                self.assertEqual(self._new_path().read_text(encoding="utf-8"), before)
+
+    # --- 新パスだけがあり、それが stat できない symlink ---
+
+    def test_show_with_only_an_unstattable_new_path(self):
+        new = self._unstattable(self._new_path())
+        code, out, err = self._run(["show"])
+        self.assertEqual(code, 1, out + err)
+        self.assertIn(f"{new} を確かめられません", err)
+        self.assertNotIn("(empty)", out)
+        self.assertNotIn("照合せずに通します", out)
+
+    def test_migrate_with_only_an_unstattable_new_path(self):
+        new = self._unstattable(self._new_path())
+        for argv in (["migrate"], ["migrate", "--commit"]):
+            with self.subTest(argv=argv):
+                code, out, err = self._run(argv)
+                self.assertEqual(code, 1, out + err)
+                self._assert_hook_wording(err, new, "new")
+                self.assertNotIn("nothing to migrate", out)
+
+    def test_set_with_only_an_unstattable_new_path(self):
+        new = self._unstattable(self._new_path())
+        code, out, err = self._run(["set", "--service", "aws", "--value", "111", "--commit"])
+        self.assertEqual(code, 1, out + err)
+        self.assertIn(f"{new} を確かめられません", err)
+        self.assertTrue(os.path.islink(new))  # 置き換えて書いていない
+
+
+class TestUnstattableAccountsPathPy313(TestUnstattableAccountsPath):
+    """同じケースを、`Path.is_file` を Python 3.13 までの挙動 (OSError を投げる) にして流す。"""
+
+    _EMULATE_PY313 = True
+
+
 if __name__ == "__main__":
     unittest.main()

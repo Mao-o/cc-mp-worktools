@@ -1501,9 +1501,22 @@ ENOENT / ENOTDIR / EBADF / ELOOP 以外の stat の失敗を例外にし、例�
   だけなら、読み込みの失敗の文面 (`… の読み込みに失敗しました: <理由>`) のまま
 - hook の経路のほかの pathlib の述語は try の中にある (`_inspect_dot_git` /
   `_linked_worktree_common` の `.git` の判定、deprecation 案内の記録の `exists()` / `stat()`)。
-  builder (`scripts/accounts_builder.py` の `is_file()` / `exists()`、`scripts/pin_env.py` の
-  `settings_env`) にも try の外の述語が残るが、hook の経路ではない (Python 3.13 までは builder が
-  traceback で止まるだけで、検証には関わらない)。この変更では触っていない
+- builder (`scripts/accounts_builder.py`) は `discover_all_accounts_files` を hook と共有するので、
+  stat できない候補を同じく「ある」に数える。読む側もそれに合わせた: `_load_existing` は
+  `paths.stat_failure` で stat できないパスを先に止め (`… を確かめられません`)、空 (`{}`) として
+  読まない。配置パスの存在確認の `Path.is_file()` は `paths.may_hold_accounts` に置き換えた。
+  show / pin-env の複数パスのエラー、migrate、旧パスがあるときの書き込みの拒否
+  (`_refuse_if_legacy_paths_exist`) は、stat できない候補があれば hook と同じ文面
+  (`paths.describe_unstattable`。dispatcher の `_format_unstattable` もこれを使う) を出し、
+  migrate / rm を案内しない。修正前は、新パスに正しいファイル・旧パスに stat できない symlink の
+  とき show が「複数のパスに存在します … migrate --commit」と案内し、migrate は 3.13 までは
+  traceback、3.14 からは旧パスを `{}` として「統合」して書き込んでいた。新パスだけが stat できない
+  symlink のときは、3.14 の show が `(empty)` と「照合せずに通します」を出していた (hook はどれも
+  deny)。builder の残りの try の外の述語 (`.gitignore` / CLAUDE.md の `exists()`) と
+  `scripts/pin_env.py` の `settings_env` は配置パスと関係しないので、この変更では触っていない
+- 確認 (builder): 上の 2 つの入力で show / migrate / migrate --commit と hook を実プロセスで
+  Python 3.9.6 と 3.14.0 に流し、hook がどれも deny、builder がどれも exit 1 で traceback を
+  出さず、新パスを書き換えないことを見た
 - 確認: 実プロセスの hook を Python 3.9.6 と 3.14.0 で 7 形動かした (旧パスの stat できない
   symlink と新パスの正しいファイル / それだけの旧パスで書込 / 同じくリモート read / 祖先の権限の
   無い `.claude` でリモート read / stat できないグローバル既定でリモート read / symlink のループと

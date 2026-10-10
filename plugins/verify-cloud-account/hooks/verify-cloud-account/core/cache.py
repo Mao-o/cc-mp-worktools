@@ -297,6 +297,8 @@ def get_success(
     if data.get("accounts_mtime") != accounts_mtime:
         return False
     ts = data.get("timestamp")
+    # bool (int の subclass) は 1970 年の時刻 (0 / 1) なので下の TTL の判定でも落ちるが、
+    # timestamp の型として明示的に除外する。
     if isinstance(ts, bool) or not isinstance(ts, (int, float)):
         return False
     try:

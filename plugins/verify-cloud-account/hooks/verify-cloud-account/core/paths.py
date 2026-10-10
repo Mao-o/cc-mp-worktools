@@ -66,6 +66,44 @@ def stat_failure(path: Path) -> OSError | None:
     return None
 
 
+def may_hold_accounts(path: Path) -> bool:
+    """`_may_hold_accounts` の公開名 (builder が `Path.is_file()` の代わりに使う)。
+
+    builder も hook と同じく、stat できない配置パスを「ある (が読めない)」に数える。
+    `Path.is_file()` は Python 3.13 までは例外 (builder が traceback で止まる)、3.14 からは
+    False (hook は deny するのに builder は「無い」と表示する) になる。
+    """
+    return _may_hold_accounts(path)
+
+
+def describe_unstattable(candidates: list[tuple[str, Path]]) -> str | None:
+    """候補に stat できない配置パスがあれば、その説明文を返す (無ければ None)。
+
+    hook の deny (dispatcher の `_format_unstattable`) と builder の show / migrate /
+    pin-env / 旧パスの拒否が同じ文面を出すために、ここに置く。stat できない配置パスは
+    ファイルがあるかどうかを確かめられないので、「複数のパスに存在します」や migrate / rm の
+    案内は事実と合わず、案内どおりにしても直らない。確かめられないパスとその理由だけを示す。
+    """
+    failures = []
+    for kind, path in candidates:
+        err = stat_failure(path)
+        if err is not None:
+            failures.append((kind, path, err))
+    if not failures:
+        return None
+    lines = [
+        "accounts.local.json の配置パスを確かめられません "
+        "(期待値ファイルがあるかどうかが分からないため検証を停止):"
+    ]
+    for kind, path, err in failures:
+        lines.append(f"  - {path} ({kind}): {err.strerror or type(err).__name__}")
+    lines.append(
+        "途中のディレクトリの権限と、symlink の行き先を確認してください。期待値ファイルで"
+        "ないもの (行き先を辿れない symlink など) は削除してください。"
+    )
+    return "\n".join(lines)
+
+
 def accounts_file_new(project_dir: str) -> Path:
     """現行推奨パス (`<project>/.claude/verify-cloud-account/accounts.local.json`) を返す。
 

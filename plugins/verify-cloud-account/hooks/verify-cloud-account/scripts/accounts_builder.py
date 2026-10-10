@@ -380,7 +380,7 @@ def _global_default_note() -> str:
     判定表への影響が大きいので、ここでは警告に留める。
     """
     global_path = paths.global_accounts_file()
-    if global_path is None or not global_path.is_file():
+    if global_path is None or not paths.may_hold_accounts(global_path):
         return ""
     keys = _global_default_keys(global_path)
     if keys:
@@ -435,7 +435,18 @@ def _target_note(
 
 
 def _load_existing(path: Path) -> dict[str, Any]:
-    if not path.is_file():
+    # stat できないパスは、hook と同じく「ある (が読めない)」として止める
+    # (`paths._may_hold_accounts`)。`Path.is_file()` は Python 3.13 までは例外
+    # (traceback)、3.14 からは False で、空 (`{}`) として読むと show は `(empty)` を、
+    # migrate --commit はそれを「統合」した結果を出し、hook の deny と食い違っていた。
+    err = paths.stat_failure(path)
+    if err is not None:
+        raise _BuilderError(
+            f"{path} を確かめられません ({err.strerror or type(err).__name__})。"
+            "途中のディレクトリの権限と symlink の行き先を確認し、"
+            "期待値ファイルでないものは削除してください。"
+        )
+    if not os.path.isfile(path):
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -846,6 +857,20 @@ def _cmd_init(
     return 0
 
 
+def _report_unstattable(found: list[tuple[str, Path]], stderr: IO[str]) -> bool:
+    """stat できない配置パスがあれば、hook の deny と同じ文面を stderr に書いて True を返す。
+
+    hook はそのパスを「ある (が読めない)」に数えて deny し、migrate / rm を案内しない
+    (`paths.describe_unstattable`)。builder が「複数のパスに存在します … migrate --commit」を
+    出すと、案内どおりにしても直らない。
+    """
+    body = paths.describe_unstattable(found)
+    if body is None:
+        return False
+    print(f"error: {body}", file=stderr)
+    return True
+
+
 def _refuse_if_legacy_paths_exist(
     command: str, target: _Target, stderr: IO[str]
 ) -> bool:
@@ -863,6 +888,9 @@ def _refuse_if_legacy_paths_exist(
     legacy_paths = [(kind, path) for kind, path in found if kind != "new"]
     if not legacy_paths:
         return False
+    # stat できない旧パスは migrate で統合できないので、hook と同じ文面で止める。
+    if _report_unstattable(found, stderr):
+        return True
     print(
         "error: 旧パスに accounts.local.json が存在します。"
         f"{command} で新パスを操作すると複数パス conflict で fail-closed deny に"
@@ -1329,7 +1357,7 @@ def _cmd_show(
         return e.exit_code
 
     if target.origin == "explicit":
-        found = [(target.kind, target.path)] if target.path.is_file() else []
+        found = [(target.kind, target.path)] if paths.may_hold_accounts(target.path) else []
     else:
         found = paths.discover_all_accounts_files(str(target.anchor))
 
@@ -1345,7 +1373,7 @@ def _cmd_show(
         global_path = paths.global_accounts_file()
         if (
             global_path is not None
-            and global_path.is_file()
+            and paths.may_hold_accounts(global_path)
             and global_path != target.path
         ):
             print(
@@ -1365,7 +1393,7 @@ def _cmd_show(
         # hook がグローバル既定で検証する場合は、そのファイルのキーを登録済みとして扱う
         # (未登録の一覧が hook の判定と食い違わないように)。読めなければ一覧を出さない。
         registered: set = set()
-        if global_path is not None and global_path.is_file() and global_path != target.path:
+        if global_path is not None and paths.may_hold_accounts(global_path) and global_path != target.path:
             try:
                 registered = {
                     k for k, v in _load_existing(global_path).items() if v not in (None, "")
@@ -1378,6 +1406,8 @@ def _cmd_show(
         return 0
 
     if len(found) >= 2:
+        if _report_unstattable(found, stderr):
+            return 1
         print(
             "error: 複数のパスに accounts.local.json が存在します (fail-closed).",
             file=stderr,
@@ -1510,6 +1540,11 @@ def _cmd_migrate(
     if not found:
         print("no accounts.local.json found in any path. nothing to migrate.", file=stdout)
         return 0
+
+    # stat できない配置パスは統合元にできない (中身を読めない)。hook と同じ文面で止め、
+    # migrate / rm の案内はしない (案内どおりにしても直らない)。
+    if _report_unstattable(found, stderr):
+        return 1
 
     if len(found) == 1 and found[0][0] == "new":
         print(f"only new path exists; nothing to migrate:\n  {new_path}", file=stdout)
@@ -1665,7 +1700,7 @@ def _auto_switch_missing_file_message(target: _Target) -> str:
         'accounts_builder.py" init --service github --dry-run'
     ]
     global_path = paths.global_accounts_file()
-    if target.origin == "fresh" and global_path is not None and global_path.is_file():
+    if target.origin == "fresh" and global_path is not None and paths.may_hold_accounts(global_path):
         lines.append(
             f"hook は現在グローバル既定 {global_path} で検証しています。そのファイルで"
             f"有効にするなら {_path_option(global_path)} を付けて再実行してください。"
@@ -1718,7 +1753,7 @@ def _cmd_auto_switch(
     # `"$auto_switch"` だけのファイルを新しく作らない。作ると、そのファイルが
     # グローバル既定を覆い隠し、期待値を書いていない service がすべて未設定 (deny)
     # になる (`_global_default_note` と同じ shadowing)。
-    if not target.path.is_file():
+    if not paths.may_hold_accounts(target.path):
         print(_auto_switch_missing_file_message(target), file=stderr)
         return 1
 
@@ -1832,7 +1867,7 @@ def _cmd_pin_env(
         return e.exit_code
 
     if target.origin == "explicit":
-        found = [(target.kind, target.path)] if target.path.is_file() else []
+        found = [(target.kind, target.path)] if paths.may_hold_accounts(target.path) else []
     else:
         found = paths.discover_all_accounts_files(str(target.anchor))
     if not found:
@@ -1843,7 +1878,7 @@ def _cmd_pin_env(
             file=stderr,
         )
         global_path = paths.global_accounts_file()
-        if global_path is not None and global_path.is_file() and global_path != target.path:
+        if global_path is not None and paths.may_hold_accounts(global_path) and global_path != target.path:
             print(
                 f"グローバル既定 {global_path} で検証しているなら、{_path_option(global_path)}"
                 " を付けて再実行してください。",
@@ -1851,6 +1886,8 @@ def _cmd_pin_env(
             )
         return 1
     if len(found) >= 2:
+        if _report_unstattable(found, stderr):
+            return 1
         print(
             "error: 複数のパスに accounts.local.json が存在します (fail-closed).",
             file=stderr,
