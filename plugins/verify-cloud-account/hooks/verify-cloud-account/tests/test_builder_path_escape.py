@@ -171,14 +171,14 @@ class TestTargetAndWriteOutput(_Base):
         gitignore = self.project / ".gitignore"
         gitignore.write_text("node_modules\n", encoding="utf-8")
         (self.project / ".claude").mkdir()
-        real_write_text = Path.write_text
+        real_write_bytes = Path.write_bytes
 
-        def write_text(path, *args, **kwargs):
+        def write_bytes(path, *args, **kwargs):
             if path == gitignore.resolve():
                 raise OSError(_OS_MESSAGE)
-            return real_write_text(path, *args, **kwargs)
+            return real_write_bytes(path, *args, **kwargs)
 
-        with mock.patch.object(Path, "write_text", write_text):
+        with mock.patch.object(Path, "write_bytes", write_bytes):
             out, _err = self._check(["init", "--service", "aws", "--value", "111", "--commit"], code=0)
         self.assertIn(".gitignore の更新に失敗しました", out)
         self.assertIn(_OS_ESCAPED, out)
@@ -517,7 +517,7 @@ class TestPathOption(unittest.TestCase):
                 )
 
     def test_control_paths_are_not_offered_as_a_command(self):
-        for raw in (f"/tmp/{_EVIL}/x.json", "/tmp/a\rb", "/tmp/a\x1b[31mb", "/tmp/a‮b"):
+        for raw in (f"/tmp/{_EVIL}/x.json", "/tmp/a\rb", "/tmp/a\x1b[31mb", "/tmp/a\u202eb"):
             with self.subTest(path=repr(raw)):
                 out = builder._path_option(Path(raw))
                 self.assertNotIn("\n", out)

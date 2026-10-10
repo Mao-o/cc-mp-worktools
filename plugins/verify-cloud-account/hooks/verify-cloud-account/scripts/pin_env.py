@@ -37,6 +37,9 @@ from services import aws, firebase, gcloud
 PIN_SERVICES = ("aws", "gcloud", "firebase")
 SETTINGS_LOCAL_REL = Path(".claude") / "settings.local.json"
 HIDDEN = "(value hidden. use --show-values to reveal)"
+# 候補が複数で決められないときの env の断片の目印。名前を並べると、区切り文字を含む候補で別の組と
+# 同じ目印になる (`("a / b", "c")` と `("a", "b", "c")`) ため固定の文にする (正典は `候補` の行)。
+_CANDIDATE_PLACEHOLDER = "<上の候補から 1 つ>"
 _GIT_TIMEOUT_SEC = 5
 
 # `firebase use` に渡す alias / project ID の許容形。出したコマンドは skill の手順で
@@ -435,7 +438,7 @@ def _env_member(name: str, value: str) -> str:
     や JSON として読めない形になる。`ensure_ascii=False` なので、普通の値 (日本語の
     案内を含む) の出力は変わらない。
     """
-    return f"{json.dumps(name, ensure_ascii=False)}: {json.dumps(value, ensure_ascii=False)}"
+    return f"{shell_word.json_one_line(name)}: {shell_word.json_one_line(value)}"
 
 
 def render(
@@ -451,6 +454,17 @@ def render(
     """提案を人 (と Claude) が読む行にする。値は既定で隠す (D3)。"""
 
     def shown(value: str, secret: bool) -> str:
+        # 値は profile 名・構成名 (CLI の設定)・期待値・env (settings.local.json) から来て、
+        # リポジトリ側が決められる。改行などで偽の行を差し込めないよう、hook の deny 文面と同じ
+        # 部品に通す (示せない値は NOT_SHOWN)。
+        return shell_word.shown(value) if (show_values or not secret) else HIDDEN
+
+    def current(value: str, secret: bool) -> str:
+        # 現在値は置き換えずに JSON の形で 1 行に収める (何が入っているかを消さない)。
+        return shell_word.json_one_line(value) if (show_values or not secret) else HIDDEN
+
+    def snippet_value(value: str, secret: bool) -> str:
+        # 断片は貼り付けて使う値そのもの。置き換えずに、行を割る文字だけ `_env_member` が直す。
         return value if (show_values or not secret) else HIDDEN
 
     lines = []
@@ -470,21 +484,21 @@ def render(
             continue
         for pin in plan.pins:
             if pin.value is None:
-                lines.append(f"  {pin.name}: 候補 {', '.join(pin.candidates)} (1 つ選ぶ)")
-                snippet.append(
-                    _env_member(pin.name, f"<{' / '.join(pin.candidates)} のどれか>")
-                )
+                # 候補は選んでもらう名前そのもの。示せない名前も置き換えず (数も区別も消える)、
+                # 重複も除かずに JSON の形で 1 行ずつ出す。
+                names = ", ".join(shell_word.json_one_line(name) for name in pin.candidates)
+                lines.append(f"  {pin.name}: 候補 {names} (1 つ選ぶ)")
+                snippet.append(_env_member(pin.name, _CANDIDATE_PLACEHOLDER))
             else:
-                value = shown(pin.value, pin.secret)
-                lines.append(f"  {pin.name}: {value}")
-                snippet.append(_env_member(pin.name, value))
+                lines.append(f"  {pin.name}: {shown(pin.value, pin.secret)}")
+                snippet.append(_env_member(pin.name, snippet_value(pin.value, pin.secret)))
             now = session_env.get(pin.name)
             in_file = file_env.get(pin.name)
             lines.append(
                 "    現在: このセッション="
-                + (shown(now, pin.secret) if now is not None else "未設定")
+                + (current(now, pin.secret) if now is not None else "未設定")
                 + " / 書き込み先="
-                + (shown(in_file, pin.secret) if in_file is not None else "未設定")
+                + (current(in_file, pin.secret) if in_file is not None else "未設定")
             )
         if plan.command:
             command = plan.command if (show_values or not plan.command_secret) else f"firebase use {HIDDEN}"

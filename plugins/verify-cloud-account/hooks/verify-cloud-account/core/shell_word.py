@@ -47,10 +47,15 @@ service ごとに確かめる)。示す形は案内に使える形 (`WORD`) よ�
 行区切り / 段落区切り・書式文字 (Cf) をエスケープした形 (`\\n` / `\\xNN` / `\\uNNNN` /
 `\\UNNNNNNNN`) にして、値が文面の中で 1 行に収まるようにする (改行で偽の行を差し込めない。
 端末の制御シーケンスも、表示の向きを入れ替える双方向制御の文字も残さない)。
+
+**値を JSON として示すとき** (builder の期待値・CLI 現在値の表示、`pin-env` の候補・現在値・env の断片)
+は `json_one_line` を通す。`json.dumps` の出力のうち行を割る文字・孤立サロゲートだけを JSON の
+`\\uXXXX` にするので、表示を写して使っても元の値に戻る (v0.21.3)。
 """
 from __future__ import annotations
 
 import bisect
+import json
 import re
 import shlex
 import unicodedata
@@ -199,8 +204,9 @@ def escape_controls(text) -> str:
 
     C0 (U+0000〜U+001F)・DEL (U+007F)・C1 (U+0080〜U+009F) と、Unicode の行区切り (U+2028)・
     段落区切り (U+2029)・書式文字 (Cf。双方向制御の U+202A〜U+202E / U+2066〜U+2069 /
-    U+200E / U+200F / U+061C、ゼロ幅スペースなど) を、改行は `\\n`、ほかは `\\xNN` /
-    `\\uNNNN` (BMP の外の書式文字は `\\UNNNNNNNN`) の形にする。それ以外の文字 (空白や日本語)
+    U+200E / U+200F / U+061C、ゼロ幅スペースなど)・孤立サロゲート (U+D800〜U+DFFF。argv や
+    JSON から入りうる。UTF-8 で書けず、出力で `UnicodeEncodeError` になる) を、改行は `\\n`、
+    ほかは `\\xNN` / `\\uNNNN` (BMP の外の書式文字は `\\UNNNNNNNN`) の形にする。それ以外の文字 (空白や日本語)
     はそのまま。str 以外は `str()` を通してから同じ処理をする。
 
     元の値に一意に戻せる表示ではない (文字どおりのバックスラッシュと区別しない。`"a\\nb"` と
@@ -214,8 +220,41 @@ def escape_controls(text) -> str:
             out.append("\\n")
         elif code < 0x20 or 0x7F <= code <= 0x9F:
             out.append(f"\\x{code:02x}")
-        elif code in (0x2028, 0x2029) or unicodedata.category(ch) == "Cf":
+        elif code in (0x2028, 0x2029) or 0xD800 <= code <= 0xDFFF or unicodedata.category(ch) == "Cf":
             out.append(f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def json_one_line(value) -> str:
+    """value の JSON 表示を、必ず 1 行・UTF-8 で書ける形にする (v0.21.3)。`json.dumps(ensure_ascii=False)` の後処理。
+
+    `json.dumps` は U+0020 未満の制御文字は直すが、DEL・C1 (`\\x85` など)・行区切り (U+2028) /
+    段落区切り (U+2029)・書式文字 (Cf。双方向制御・ゼロ幅スペース・BMP の外のタグ文字など)・
+    孤立サロゲートはそのまま出す。前の 4 つは行を割り、最後の 1 つは UTF-8 で書けない。
+    それらを JSON として同じ値に戻る `\\uXXXX` (BMP の外は代理対) にする。日本語などの普通の文字は
+    変えない。`escape_controls` と違い置き換えではなく JSON の文法の内側の表示なので、JSON として
+    読めば元の値に戻る (settings の `env` に貼る断片はそのまま使える)。ただし、隣り合う孤立サロゲートの
+    高位・低位の組だけは、読み直すと 1 文字に結合する (argv の surrogateescape の低位が、JSON の
+    エスケープの高位の直後に並ぶ経路。builder の `--commit` は UTF-8 で書けない値を断るので、
+    ファイルには書かれない)。
+    """
+    out = []
+    for ch in json.dumps(value, ensure_ascii=False):
+        code = ord(ch)
+        if (
+            code == 0x7F
+            or 0x80 <= code <= 0x9F
+            or code in (0x2028, 0x2029)
+            or 0xD800 <= code <= 0xDFFF
+            or unicodedata.category(ch) == "Cf"
+        ):
+            if code > 0xFFFF:
+                code -= 0x10000
+                out.append(f"\\u{0xD800 + (code >> 10):04x}\\u{0xDC00 + (code & 0x3FF):04x}")
+            else:
+                out.append(f"\\u{code:04x}")
         else:
             out.append(ch)
     return "".join(out)

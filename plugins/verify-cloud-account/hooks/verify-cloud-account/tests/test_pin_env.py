@@ -21,6 +21,7 @@ from unittest import mock
 
 import _testutil  # noqa: F401
 
+from core import shell_word  # noqa: E402
 from scripts import accounts_builder as builder  # noqa: E402
 from scripts import pin_env  # noqa: E402
 from services import aws, firebase, gcloud  # noqa: E402
@@ -845,7 +846,7 @@ class TestRender(unittest.TestCase):
         for secret in ("secret-project", "secret-fb", "secret-session", "secret-file"):
             self.assertNotIn(secret, text)
         self.assertIn(pin_env.HIDDEN, text)
-        self.assertIn('"AWS_PROFILE": "<a / b のどれか>"', text)
+        self.assertIn('"AWS_PROFILE": "<上の候補から 1 つ>"', text)
 
     def test_show_values_reveals(self):
         text = self._render(show_values=True)
@@ -858,7 +859,7 @@ class TestRender(unittest.TestCase):
             pin_env.render(plans, None, "理由", {"AWS_PROFILE": "old"}, {}, None, show_values=False)
         )
         self.assertIn('"AWS_PROFILE": "dev"', text)
-        self.assertIn("このセッション=old", text)
+        self.assertIn('このセッション="old"', text)
         self.assertIn("決められません — 理由", text)
 
     def test_env_snippet_stays_one_json_value_per_key(self):
@@ -887,8 +888,48 @@ class TestRender(unittest.TestCase):
         plans = [pin_env.Plan("aws", pins=(pin_env.Pin("AWS_PROFILE", None, candidates),))]
         lines = pin_env.render(plans, None, "理由", {}, {}, None, show_values=False)
         self.assertEqual(
-            env_snippet(self, lines), {"AWS_PROFILE": '<a"b / c\nd / e\\f のどれか>'}
+            env_snippet(self, lines), {"AWS_PROFILE": "<上の候補から 1 つ>"}
         )
+
+    def test_unshowable_candidates_stay_distinguishable(self):
+        # 空白や `=` を含む profile 名は shell_word.shown では示せない。候補は選んでもらう名前
+        # そのものなので、置き換えると数も区別も消える (skill は ~/.aws/config を読まない)。
+        candidates = ("my dev", "my prod", "ops=admin")
+        plans = [pin_env.Plan("aws", pins=(pin_env.Pin("AWS_PROFILE", None, candidates),))]
+        text = "\n".join(pin_env.render(plans, None, "理由", {}, {}, None, show_values=False))
+        for name in candidates:
+            self.assertIn(name, text)
+        self.assertNotIn(shell_word.NOT_SHOWN, text)
+        self.assertIn('候補 "my dev", "my prod", "ops=admin" (1 つ選ぶ)', text)
+
+    def test_placeholder_is_a_fixed_sentence_and_the_candidate_lines_tell_sets_apart(self):
+        # 目印に名前を並べると、`("a / b", "c")` と `("a", "b", "c")` が同じ目印になる。
+        # 目印は名前を出さない固定の文で、組の区別は `候補` の行 (クォート付き) が担う。
+        rendered = []
+        for candidates in (("a / b", "c"), ("a", "b", "c")):
+            plans = [pin_env.Plan("aws", pins=(pin_env.Pin("AWS_PROFILE", None, candidates),))]
+            lines = pin_env.render(plans, None, "理由", {}, {}, None, show_values=False)
+            self.assertEqual(env_snippet(self, lines), {"AWS_PROFILE": "<上の候補から 1 つ>"})
+            rendered.append([line for line in lines if "(1 つ選ぶ)" in line])
+        self.assertEqual(rendered[0], ['  AWS_PROFILE: 候補 "a / b", "c" (1 つ選ぶ)'])
+        self.assertEqual(rendered[1], ['  AWS_PROFILE: 候補 "a", "b", "c" (1 つ選ぶ)'])
+
+    def test_duplicate_candidates_are_not_merged(self):
+        candidates = ("a", "a", "b")
+        plans = [pin_env.Plan("aws", pins=(pin_env.Pin("AWS_PROFILE", None, candidates),))]
+        text = "\n".join(pin_env.render(plans, None, "理由", {}, {}, None, show_values=False))
+        self.assertIn('候補 "a", "a", "b" (1 つ選ぶ)', text)
+
+    def test_candidates_with_line_breaking_characters_render_one_line_each(self):
+        candidates = ("a\nFAKE", "b\u2028FAKE", "c\x85FAKE", "d\x1cFAKE", "e\u202eFAKE", "f\udcffFAKE")
+        plans = [pin_env.Plan("aws", pins=(pin_env.Pin("AWS_PROFILE", None, candidates),))]
+        lines = pin_env.render(plans, None, "理由", {"AWS_PROFILE": "x\u2029y"}, {}, None, show_values=False)
+        text = "\n".join(lines)
+        _testutil.assert_utf8(self, text)
+        self.assertEqual(text.splitlines(), text.split("\n"))
+        for line in text.splitlines():
+            self.assertFalse(line.lstrip().startswith("FAKE"), line)
+        self.assertEqual(env_snippet(self, lines), {"AWS_PROFILE": "<上の候補から 1 つ>"})
 
 
 class TestPinEnvCommand(_TmpBase):
@@ -961,7 +1002,7 @@ class TestPinEnvCommand(_TmpBase):
         )
         code, out, _err = self._run(["pin-env"])
         self.assertEqual(code, 0)
-        self.assertIn("書き込み先=dev", out)
+        self.assertIn('書き込み先="dev"', out)
 
     def test_refuses_without_expected_values(self):
         code, _out, err = self._run(["pin-env"])

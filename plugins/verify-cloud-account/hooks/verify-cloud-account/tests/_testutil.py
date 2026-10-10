@@ -168,3 +168,11 @@ def start_isolation(root: Path, home: Path = ISOLATED_HOME) -> _Isolation:
     for name in _leaky_names(os.environ):
         os.environ.pop(name, None)
     return _Isolation(patchers, home)
+
+
+def assert_utf8(test, text: str) -> None:
+    """text が UTF-8 で書けることを確かめる。書けないときは例外ではなく assertion の失敗にする。"""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError as e:
+        test.fail(f"UTF-8 で書けない文字が残った ({e}): {text!r}")
