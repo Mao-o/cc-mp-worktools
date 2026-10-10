@@ -3,7 +3,7 @@
 ## 0.2.2
 
 テスト整理 (挙動の変更なし)。0.2.1 で入れた「自動 gc / maintenance が止まっている」ことを見る床が見逃していた
-当て損ねの形を塞ぎ、テストの git が開発者の既定の除外ファイルと、外側の repo / config を指す環境変数を
+当て損ねの形を塞ぎ、テストの git が開発者の既定の除外ファイルと、外側の repo / config / template を指す環境変数を
 読まないようにした。hook・`hooks.json`・README の挙動は変わらない (patch bump)。
 
 ### Changed
@@ -39,17 +39,21 @@
     `GIT_ALTERNATE_OBJECT_DIRECTORIES` は repo の位置・index・object の置き場 (alternates を含む) を変え、旧来の `GIT_CONFIG` は
     `git config` の読み書き先をその file にし (`--global --list` は exit 129)、`GIT_CONFIG_PARAMETERS` は
     `GIT_CONFIG_COUNT` に勝つ。`GIT_NAMESPACE` は `symbolic-ref HEAD` では差が出なかった (影響は未確認だが、
-    同じ組の変数として外す)
+    同じ組の変数として外す)。外側の `GIT_TEMPLATE_DIR` も helper の `git init` に届き、template の `hooks/pre-commit` が
+    helper の commit で走り、template の `info/exclude` が除外する file (`*.json` にすると `marketplace.json` /
+    `plugin.json`) が commit から外れる (実測)
 - `tests/_testutil.py` の変更
   - `HERMETIC_GIT_ENV` に `XDG_CONFIG_HOME` (プロセスごとに作る空の dir) を足した。repo を作る helper・ゲートの
     git (基底クラス)・hook プロセスのすべてで、既定の除外ファイルを読ませない。0.2.1 では `test_main.run_hook` と
     床だけが空にしていた
-  - 外側の env にある、git が別の repo や別の config を見てしまう変数 9 個 (`OUTER_GIT_LEAK_ENV`) を、repo を作る
-    helper (`hermetic_env()`) と基底クラスで外す
+  - 外側の env にある、git が別の repo や別の config、別の template を見てしまう変数 10 個 (`OUTER_GIT_LEAK_ENV`。
+    上の 9 個と `GIT_TEMPLATE_DIR`) を、repo を作る helper (`hermetic_env()`) と基底クラスで外す。`GIT_TEMPLATE_DIR`
+    は空の template dir に向けず、外すだけにした (外せば `git init` は既定の template を使う。global の
+    `init.templateDir` は、`GIT_CONFIG_GLOBAL` が指す fixture に無い)
   - hook を subprocess で起動する経路を `launch_hook` (env は `hook_process_env`) の 1 本にした。`test_main` に 3 通り
     あった env の組み立てを寄せ、`run_hook` もここに移した
 - 足した床 (`tests/test_hermetic_env.py`。0.2.1 の 9 件 (`test_hermetic_env` 8 件と `HookLaunchEnvTest` 1 件) から
-  40 件。`HookLaunchEnvTest` は hook プロセスの env を見る床に統合した)
+  43 件。`HookLaunchEnvTest` は hook プロセスの env を見る床に統合した)
   - 起動の仕方 (定数だけ / helper / ゲートの git / hook プロセスの env) ごとに同じ 5 本を流す
     (`_HermeticConfigChecks`)。env を当てる各点の部分適用 (`COUNT` だけ・`NOSYSTEM` 抜き・`GLOBAL` 抜き・
     `COUNT` 抜き・`XDG_CONFIG_HOME` 抜き) と、混ぜる向きの逆転は、どれかがこの 5 本のどれかで落ちる
@@ -70,14 +74,38 @@
     値が見えること) を、他の床と同じ `git_in` で確かめる。床が当てる側の値 (`GIT_CONFIG_NOSYSTEM`、fixture を指す
     `GIT_CONFIG_GLOBAL`、止める側の `GIT_CONFIG_COUNT`、除外ファイルを持たない `XDG_CONFIG_HOME`) を持つと、当てる側が
     同じ値を落としても床が埋めて、検査が黙って通るため
-    - `isolate_git_config` (trace の床と上の床の土台): `TestTheIsolatedEnvStopsNothing`。床を作る前の env に、当てる側と
+    - `isolate_git_config` (床を作る関数の自己確認): `TestTheIsolatedEnvStopsNothing`。床を作る前の env に、当てる側と
       同じ値と、開発者の global の config に見立てた file (外側の `HOME` の `.gitconfig`、`XDG_CONFIG_HOME` の
-      `git/config`) を置いてから呼ぶので、実行者の HOME に左右されない
+      `git/config`) を置いてから呼ぶので、実行者の HOME に左右されない。見るのは床を作った直後だけなので、trace /
+      spy / push の床は、区間ごとに当てる側の直前で見る (次の 3 行)
+    - trace の床 (`_spawned_while_making_a_marketplace`): helper を呼ぶ直前に `assert_the_floor_stops_nothing` (床の
+      env で、`maintenance.auto` が未設定・global が空・system の目印が読める)
+    - spy の床 (`test_every_git_launched_by_the_helpers_carries_the_env`): helper を呼ぶ直前に同じ確認と、床が
+      `HERMETIC_GIT_ENV` のどの key も同じ値で持たないこと (spy の検査は記録した値を key ごとに比べるので、3 つの
+      問い合わせが見ない `XDG_CONFIG_HOME` も key ごとに見る)
+    - push の床 (`test_push_into_a_plain_bare_repo`): push の直前に同じ確認 (この床が守る当てる側は受け側の
+      `receive-pack` なので、repo と bare repo を作る間に足した値も含めて見る)
     - 上の 5 本の床 (起動の仕方ごと): `test_the_floor_alone_stops_nothing`
-    - 外側の repo / config を指す変数の床 (下): `test_the_floor_holds_the_outer_variables` と、置く変数が名前の一覧と
-      同じであること (`test_every_placed_variable_is_in_the_name_list`)
-  - 外側の repo / config を指す変数 9 個が、起動の仕方 (helper / 基底クラス / hook プロセスの env) ごとに git に
-    届かないこと。helper は外側の repo の全 file を書き換えないことも見る
+    - 外側の repo / config / template を指す変数の床 (下): `test_the_floor_holds_the_outer_variables` と、置く変数が
+      名前の一覧と同じであること (`test_every_placed_variable_is_in_the_name_list`)
+    - 上の 2 つ (mixin の setUp) の自己確認は setUp のスナップショット (`self.floor_env`) を見るので、当てた直後の env
+      (`self.applied_env`) から問い合わせの時点まで変わっていないことを、`query` / `launched_env` の中で起動の前後に
+      確かめる (setUp の後段や継承先の setUp、継承先の起動の中身で足した値は、自己確認からは見えず、問い合わせには
+      届くため)。この確認は mixin の `query` / `launched_env` に置き、継承先は起動の中身 (`launch` /
+      `launch_and_capture_env`) だけを実装する。継承先が `query` / `launched_env` を上書きしていないことは mixin の
+      `setUp` で見る。`launched_env` を通らずに helper を直接呼ぶテスト (外側の repo を変えないこと・外側の template が
+      効かないこと) は、先頭で同じ確認を呼ぶ。起動の中で範囲を限って env を変えて戻す形
+      (`mock.patch.dict(os.environ, ...)` など) は、前後の確認では見えない (残り)
+  - 外側の repo / config / template を指す変数 10 個が、起動の仕方 (helper / 基底クラス / hook プロセスの env) ごとに
+    git に届かないこと。前提として、記録した env が床の `HOME` を持つこと (記録が空だと「届かない」が素通りする)。
+    helper は外側の repo の全 file を書き換えないこと、外側の template (`hooks/pre-commit` と `info/exclude`) が
+    helper の `init` / `commit` に効かないことも見る (前提として、その template が届けば `git init` に写ることを
+    先に確かめる)
+  - 床の側の道具: spy (`recorded_git_launches`) が、起動に渡った env をそのまま記録すること (値を足さない・落とさない。
+    env を渡さない起動はその時点の `os.environ`)。spy が記録に当てる側の値を足すと、spy の床が helper の当て損ねを
+    見逃す。hook プロセスの env を捕まえる fake (`env_passed_to_the_hook`) も同じ型なので、渡った env をそのまま返す
+    ことを見る。どちらも、渡す env が当てる側のどの key も同じ値で持たないことを key ごとに前提にする (同じ値で持つ
+    key は、spy / fake がその key を足しても記録が変わらない)
   - 陽性対照: trace の床は、止める設定が無い commit では maintenance の起動が trace に見えること (見えない git の版では
     「0 件」は何も見ていない)
   - helper (`make_marketplace` / `init_bare_origin`) が起動する git の全部が `HERMETIC_GIT_ENV` の全項目を持つこと。
@@ -111,7 +139,33 @@
     - 床の退行 5 件: 床を作る点ごとの床 (`TestTheIsolatedEnvStopsNothing`、各起動の仕方の
       `test_the_floor_alone_stops_nothing`) と、当てる側の値の検査 (`test_system_config_is_not_read` /
       `test_global_is_the_fixture_only` / `test_env_beats_the_repos_own_config`)
-  - suite 全体 (`tests/` の `unittest discover`) は 82 件から 113 件。Python 3.14 では 4 種の HOME (上の 3 種と、
+  - マージ前レビューの指摘で足した確認 (上の 69 件はその前の版で流した)。どれも assertion で落ち、`errors` は 0 件
+    - 床の自己確認の時点 (HOME 3 種で同じ件数): mixin の setUp の後段で床が `GIT_CONFIG_NOSYSTEM` を立てる (MS) は
+      21 件、MS + 基底クラスが `GIT_CONFIG_NOSYSTEM` を当てない は 28 件、`TestGateLaunchedGit` の setUp の後段で
+      `GIT_CONFIG_NOSYSTEM` を立てる (MSG) + 基底クラスが当てない は 7 件、`TestOuterRepoEnvAndTheBaseClass` の setUp の
+      後段で外側の変数を外す (MOB) + 基底クラスが外さない は 1 件、外側の変数の mixin の setUp の後段で外側の変数を
+      外す + 基底クラスが外さない は 3 件が落ちる。MS は修正前の版では suite 全体で生き残った。継承先が `query` /
+      `launched_env` を上書きする形は mixin の setUp の前提で落ちる
+    - wrapper の区間 (HOME 3 種で同じ件数): trace の床の区間で床が止める側の `GIT_CONFIG_COUNT` を持つ は 2 件、spy の床の
+      区間で同じ値を持つ は 1 件、push の床で `isolate_git_config` の直後に `GIT_CONFIG_NOSYSTEM` を立てる / bare repo を
+      作った後・push の前に立てる は各 1 件が落ちる。spy の床の区間で床が `HERMETIC_GIT_ENV` を持つ (W3') + helper の
+      `add -A` が当てる側を渡さない、と、床が空の `XDG_CONFIG_HOME` を持つ (W3-xdg) + `add -A` が `XDG_CONFIG_HOME` を
+      渡さない、は spy の床が落とす。後者は key ごとの確認を外すと生き残る (3 つの問い合わせは `XDG_CONFIG_HOME` を見ない)
+    - spy が env を渡さない起動を空の env として記録する + 基底クラスが外側の変数を外さない は、spy の自己確認を外しても
+      「届かない」の前提 (記録した env が床の `HOME` を持つ) で落ち、その前提も外すと生き残る
+    - spy / hook の env の fake が記録に当てる側の値を足す + 当てる側が値を渡さない は、それぞれの自己確認で落ち、自己確認を
+      外すと生き残る
+    - helper と基底クラスが `GIT_TEMPLATE_DIR` を外さないと、外側の template の pre-commit が helper の commit で走り、
+      pre-commit の検査を外しても `info/exclude` の検査 (`marketplace.json` / `plugin.json` が commit に無い) で落ちる
+    - 起動の中身で env を変える形 (HOME 3 種で同じ件数): `TestOuterRepoEnvAndTheBaseClass` の起動の中で外側の変数を
+      外す + 基底クラスが外さない は 1 件 (起動の後の確認を外すと生き残る)、`TestGateLaunchedGit` の起動の中で
+      `GIT_CONFIG_NOSYSTEM` を立てる + 基底クラスが当てない は 7 件が落ちる。起動の中で `mock.patch.dict` で範囲を
+      限って立てて戻す形は生き残る (上の「残り」)
+    - helper が `GIT_TEMPLATE_DIR` を外さない + `TestOuterRepoEnvAndTheHelpers` の setUp で床から外す は、外側の
+      template のテストを単独で流しても先頭の確認で落ちる (先頭の確認を外すと生き残る)
+    - spy / hook の env の fake に渡す env が、当てる側の 1 key (`GIT_CONFIG_NOSYSTEM`) だけを同じ値で持つ形は、key ごとの
+      前提で落ちる
+  - suite 全体 (`tests/` の `unittest discover`) は 82 件から 116 件。Python 3.14 では 4 種の HOME (上の 3 種と、
     既定の除外ファイルが `.claude/` と `*.py` を除外する HOME) で全件通り、Python 3.11 は空の HOME で全件通る。
     `claude plugin validate` は警告なしで通り、ruff 0.16.8 は plugin 全体で通る
 

@@ -88,10 +88,13 @@ HERMETIC_GIT_ENV = {
     **git_config_env(NO_BACKGROUND_GIT_SETTINGS),
 }
 
-# 外側の env にあると、テストの git が別の repo や別の config を見てしまう変数。git の hook や `git -c`
-# の配下から suite を流すと入る。外さないと、repo を作る helper の `init` / `config` / `commit` が外側の
+# 外側の env にあると、テストの git が別の repo や別の config、別の template を見てしまう変数。git の hook や
+# `git -c` の配下から suite を流すと入る。外さないと、repo を作る helper の `init` / `config` / `commit` が外側の
 # repo に書き込む (`GIT_DIR` など)。`GIT_CONFIG_PARAMETERS` は `GIT_CONFIG_COUNT` に勝ち、旧来の
-# `GIT_CONFIG` があると `git config` の読み書き先がその file になる (どちらも実測)。
+# `GIT_CONFIG` があると `git config` の読み書き先がその file になる。`GIT_TEMPLATE_DIR` は helper の `git init`
+# が写す template を差し替える: template の `hooks/pre-commit` が helper の commit で走り、`info/exclude` が
+# 除外する file は commit から外れる (いずれも実測)。外せば `git init` は既定の template を使う (global の
+# `init.templateDir` は、`GIT_CONFIG_GLOBAL` が指す fixture に無い)。
 # `hermetic_env()` と `HermeticGitTestCase` が外す。
 OUTER_GIT_LEAK_ENV = (
     "GIT_DIR",
@@ -103,6 +106,7 @@ OUTER_GIT_LEAK_ENV = (
     "GIT_NAMESPACE",
     "GIT_CONFIG",
     "GIT_CONFIG_PARAMETERS",
+    "GIT_TEMPLATE_DIR",
 )
 
 
@@ -121,7 +125,7 @@ class HermeticGitTestCase(unittest.TestCase):
     """ゲート (製品コード) を in-process で動かすテストの基底クラス。
 
     `runner.run` は env を渡さず `os.environ` を継ぐので、ゲートが起動する git に設定を届けるには
-    テスト側で `os.environ` に張る。`HERMETIC_GIT_ENV` を当て、外側の repo / config を指す変数
+    テスト側で `os.environ` に張る。`HERMETIC_GIT_ENV` を当て、外側の repo / config / template を指す変数
     (`OUTER_GIT_LEAK_ENV`) を外す (`mock.patch.dict` の中なので、テストが終われば元に戻る)。
     repo を作る `sh` / `init_bare_origin` は自分で env を足すので、この基底クラスに依存しない
     (patch していないクラスが repo を作っても止まる)。ゲートを subprocess で起動する側は、
