@@ -1065,12 +1065,49 @@ class TestLocalResolutionAndFirebaseJsonLegacyKey(_FirebasercFixture):
             "NaN": '{"a": NaN}',
             "trailing comma": '{"a": 1,}',
             "not UTF-8": b'{"a": "\xff"}',
+            # json.loads が RecursionError を投げる深さ (取り逃すと例外が hook の外まで抜け、
+            # __main__ の最終防波堤が検証をスキップする)
+            "deep nesting": '{"a": ' + "[" * 100000 + "]" * 100000 + "}",
         }
         for i, (name, text) in enumerate(cases.items()):
             with self.subTest(name):
-                err, _root = self._verify(text, name=f"case{i}")
+                try:
+                    err, _root = self._verify(text, name=f"case{i}")
+                except Exception as e:  # noqa: BLE001
+                    self.fail(f"verify から {type(e).__name__} が抜けた (hook は検証をスキップする)")
                 self.assertIsNotNone(err)
                 self.assertIn("現在のプロジェクトを取得できません", err)
+
+    def test_unreadable_file_is_not_resolved(self):
+        """存在するが読めない firebase.json (権限など) は、有無を確かめられないとして止める。"""
+        _err, root = self._verify("{}", name="unreadable")
+        path = root / "firebase.json"
+        with mock.patch("services.firebase.Path.read_bytes", side_effect=PermissionError):
+            self.assertTrue(firebase._firebase_json_blocks_local(str(path)))
+
+    def test_legacy_key_is_checked_before_the_configstore_switch(self):
+        """configstore の切替先があっても、旧形式キーがあればローカル設定から解決しない。
+
+        firebase-tools は切替先があればそれを優先するが、hook は切替先の有無より先に
+        firebase.json を確かめる保守的な順序にしている (README / DEVELOPMENT.md)。
+        """
+        _err, root = self._verify("{}", name="switched")
+        (root / "firebase.json").write_text(
+            json.dumps({"firebase": "evil-project"}), encoding="utf-8"
+        )
+        self._switch(str(root), "right-project")
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError), mock.patch(
+            "services.firebase.shutil.which", return_value="/usr/local/bin/firebase"
+        ):
+            err = firebase.verify("right-project", str(root))
+        self.assertIsNotNone(err)
+        self.assertIn("現在のプロジェクトを取得できません", err)
+        # 対照: 旧形式キーが無ければ、同じ切替先で解決して通る
+        (root / "firebase.json").write_text("{}", encoding="utf-8")
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError), mock.patch(
+            "services.firebase.shutil.which", return_value="/usr/local/bin/firebase"
+        ):
+            self.assertIsNone(firebase.verify("right-project", str(root)))
 
     def test_strict_json_without_legacy_key_is_still_resolved(self):
         """対照: 旧形式キーの無い厳密な JSON は、従来どおり `.firebaserc` の default で解決する。"""

@@ -16,7 +16,9 @@ option として読み飛ばし、アクティブな project (既定の root) �
   文字が `-P` / `-c` の形も従来どおり値の連結形として読む
 - 短い形の context option を持つのは firebase だけで、aws / gcloud / kubectl には当たらない
 - README の「`-P=prod` を同じ規則で扱う」を実際の挙動に合わせた。hook は値 `prod` と読むが、
-  firebase-tools は `=prod` と読み (`-c=x` も `=x` というファイル)、コマンドは失敗する
+  firebase-tools は `=prod` と読む (`-c=x` も `=x` というファイル)。通常の構成ではコマンドは
+  失敗するが、`=` で始まる alias やファイルを細工したリポジトリでは照合先と実行先が食い違いうる
+  ので、README の既知の制限に載せた (判定は変えていない)
 
 ### Changed: CLI の無い経路で、firebase.json の旧形式キー `"firebase"` を見落とさない
 
@@ -33,6 +35,17 @@ firebase-tools は configstore の切替先が無いとき、`.firebaserc` の a
   ような文字列の中の `//` は当たらない。空のファイルは firebase-tools と同じく `{}` として読む
 - builder の現在値 (`init` の提案・`show`) も同じ解決を使うので、CLI が答えられない環境では
   これらの firebase.json で現在値を出さない
+
+### Tests
+
+- 結合形の印付け (`TestCombinedShortContextOption`)、dispatcher での deny と文面
+  (`TestFirebaseCombinedShortOptions`)。止めた結合形は、同じキーの成功 cache を積んでおいても
+  cache より先に止まり、1 回目の deny で成功 cache を積まないこと (マージ前レビューの指摘)
+- CLI の無い経路の旧形式キー (`TestFirebaseLegacyProjectKeyWithoutCli` /
+  `TestLocalResolutionAndFirebaseJsonLegacyKey`)。入れ子が深すぎて厳密な JSON として読めない
+  firebase.json・存在するが読めない firebase.json も止めること、configstore の切替先があっても
+  旧形式キーの判定を先に行うこと (マージ前レビューの指摘)
+- 1,445 → 1,462 件
 
 ## 0.19.1
 

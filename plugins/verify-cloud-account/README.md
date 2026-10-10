@@ -847,8 +847,9 @@ flag** は、その値を検証に反映する。従来は hook の既定コン�
 
 - 記法は `--opt value` / `--opt=value` / 短縮の分離形 (`-P prod`) / 値の連結形
   (`-Pprod`) を拾う。`-P=prod` は hook では値 `prod` と読むが、firebase-tools (commander) は
-  値を `=prod` と読む (`-c=x` も `=x` というファイル)。どちらも実在しない project / ファイルを
-  指してコマンドが失敗するので、照合の食い違いで実行が通ることはない。`--` 以降は後続コマンドの
+  値を `=prod` と読む (`-c=x` も `=x` というファイル)。実在しない project / ファイルを指す通常の
+  構成ではコマンドが失敗する。`=` で始まる alias やファイルを細工したリポジトリでは、照合先と
+  実行先が食い違いうる ([既知の制限](#既知の制限))。`--` 以降は後続コマンドの
   引数なので見ない (`kubectl exec pod -- cmd --context x` の `--context` は採用しない)
 - **短いオプションを結合したトークンに、照合先を決める短い option が含まれる形は deny する**
   (v0.20.0)。Firebase の `-jP prod` / `-iPprod` / `-jc sub/firebase.json` は、firebase-tools
@@ -1306,6 +1307,12 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   綴りの系統 (`gcloud deploy ...` = Cloud Deploy) は read でも QUERY にならず
   WRITE 扱いになる (v0.13.0 までと同じ扱いがこの系統だけ残る = 緩和が届かない
   だけで、新たな deny は生えない)
+- **Firebase の `-P=<値>` / `-c=<値>` は hook と firebase-tools で読み方が違う**。hook は `=` の
+  後ろを値と読み、firebase-tools (commander) は `=` から値と読む。ふつうは firebase-tools 側が
+  実在しない project / ファイルを指して失敗するが、`.firebaserc` に `=` で始まる alias
+  (`{"projects": {"=prod": "other-project"}}` など) や `=` で始まる名前の設定ファイルを置いた
+  リポジトリでは、hook が `prod` で照合して通したコマンドが別の project で動きうる。`-P` / `-c` は
+  `=` を付けずに書く (`-P prod` / `--project=prod`)
 - **未知のオプションは「安全と証明できない」側に倒すので、判定は CLI の
   オプション表に追随しない**。`gh api` は安全なオプションの allow-list で
   読み取りを証明するため、新しいオプションが増えると (実際は読み取りでも)

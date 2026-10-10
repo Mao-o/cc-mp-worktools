@@ -4258,15 +4258,37 @@ class TestFirebaseCombinedShortOptions(BaseWithTmpProject):
         self.assertNotIn("書いてください", text)
 
     def test_not_cached_as_success(self):
-        """止めた形のあとで、同じ形の照合が成功 cache から通らない。"""
+        """止めた形のあとで、同じ形の照合が成功 cache から通らない。
+
+        1 回目で成功 cache が積まれないこと (`continue` で verify に進まない) と、同じキーの
+        成功 cache があっても結合形の判定が cache より先に止めることの両方を見る。
+        """
+        from core import cache
+        from core.cli_options import COMBINED_SHORT_KEY
+        from services import firebase as fb
+
+        command = "firebase -jP prod deploy"
+        accounts = self.new_dir / "accounts.local.json"
         with self.isolated_cache(), mock.patch(
             "services.firebase.shutil.which", return_value="/usr/bin/firebase"
         ), mock.patch(
             "subprocess.run",
             return_value=SimpleNamespace(stdout="right-project\n", stderr="", returncode=0),
         ):
-            first = dispatch("firebase -jP prod deploy", str(self.project_dir))
-            second = dispatch("firebase -jP prod deploy", str(self.project_dir))
+            first = dispatch(command, str(self.project_dir))
+            key = (
+                "firebase", str(self.project_dir), "right-project",
+                accounts.stat().st_mtime, {}, {COMBINED_SHORT_KEY: "-jP"},
+            )
+            ident = cache.identity_env(fb, os.environ)
+            # 1 回目は成功を積まない
+            self.assertFalse(cache.get_success(*key, identity_env=ident))
+            self.assertTrue(
+                cache.set_success(
+                    *key, epoch=cache.current_epoch("firebase"), identity_env=ident
+                )
+            )
+            second = dispatch(command, str(self.project_dir))
         self.assertEqual(self._decision(first), "deny")
         self.assertEqual(self._decision(second), "deny")
 
