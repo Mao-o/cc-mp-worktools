@@ -81,7 +81,7 @@ class NoRecentCommitsFlagTest(HermeticGitTestCase):
             self.assertIn("first commit", out)
 
 
-class PurposeFallbackTest(unittest.TestCase):
+class PurposeFallbackTest(HermeticGitTestCase):
     def test_dirname_fallback_omits_purpose_line(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -773,7 +773,7 @@ class MinimalHeaderOutputBudgetTest(unittest.TestCase):
             self.assertIn("--force-walk", out)
 
 
-class XcodeOnlyNonGitStructureTest(unittest.TestCase):
+class XcodeOnlyNonGitStructureTest(HermeticGitTestCase):
     """merge-review finding: adding *.xcodeproj/*.xcworkspace to
     PROJECT_MARKERS lets a non-git Xcode-only root pass the marker gate and
     reach walk_files() directly (a git root's `git ls-files` already keeps
@@ -968,7 +968,7 @@ class ExceptionFallbackBudgetTest(unittest.TestCase):
             self.assertLessEqual(len(buf.getvalue().strip()), 10)
 
 
-class PythonVersionMarkerTest(unittest.TestCase):
+class PythonVersionMarkerTest(HermeticGitTestCase):
     """PR #67 round 6 (Codex P2): ランタイム固定ファイルだけを持つ非 git の
     Python プロジェクトが marker gate で落ち、facts が丸ごと消えていた。
     """
@@ -1026,7 +1026,7 @@ class HomeRuntimePinMarkerTest(unittest.TestCase):
                 self.assertTrue(_has_relevant_project_markers(proj))
 
 
-class NestedWorkspaceMarkerTest(unittest.TestCase):
+class NestedWorkspaceMarkerTest(HermeticGitTestCase):
     """PR #67 (Codex P2): ルート直下にマニフェストを置かないワークスペースを
     「非プロジェクト」と誤判定すると facts が丸ごと消える。gate の目的は
     無関係な巨大ディレクトリの全走査回避なので、深さと件数を限定して探す。
@@ -1144,7 +1144,7 @@ class ZeroBudgetEmitsNothingTest(unittest.TestCase):
             self.assertEqual(buf.getvalue(), "")
 
 
-class NestedDiscoveryBoundsTest(unittest.TestCase):
+class NestedDiscoveryBoundsTest(HermeticGitTestCase):
     """PR #67 (Codex P2): 入れ子マーカー探索の 2 つの穴。
 
     1. clone を 1 つ置いただけのディレクトリが「ワークスペース」と判定される。

@@ -18,10 +18,14 @@
   - 設定の出どころ別の検査 (env の `GIT_CONFIG_COUNT` が repo 自身の config に勝つ / global は fixture の 5 設定と完全一致 / system の config を読まない)。起動の仕方 (定数だけ・helper・製品コードの git) ごとに流し、外側の env に止めない側の値を置いて、当てる側が勝つことも見る
   - テストが `subprocess` で git を直接起動していないこと、`_make_repo` を使うクラスが基底クラスを継承していること
   - 測る道具 (起動を記録する spy、helper が env を引数で渡すこと) の自己確認
+- 外側の env を外す (マージ前レビューの指摘): git の hook の中や `git -c` の配下から suite を流すと、外側の env に `GIT_DIR` / `GIT_WORK_TREE` / `GIT_CONFIG_PARAMETERS` / `GIT_TEMPLATE_DIR` などが入る。そのままだと helper の `init` / `config` / `commit` が外側の repo の config を書き換えて commit も足し、`GIT_CONFIG_PARAMETERS` は `GIT_CONFIG_COUNT` に勝って maintenance が黙って復活し、外側の template の pre-commit が helper の commit で走る
+  - `tests/_testutil.py`: `OUTER_GIT_LEAK_ENV` (`GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` / `GIT_COMMON_DIR` / `GIT_OBJECT_DIRECTORY` / `GIT_ALTERNATE_OBJECT_DIRECTORIES` / `GIT_NAMESPACE` / `GIT_CONFIG` / `GIT_CONFIG_PARAMETERS` / `GIT_TEMPLATE_DIR`) と `hermetic_env()` (これらを外して `HERMETIC_GIT_ENV` を足す) を追加。`git()` は毎回 `hermetic_env()` を渡し、`HermeticGitTestCase` は env を当てたうえでこれらを外す
+  - `tests/test_cli.py`: 非 git の root で製品コードを動かす 5 クラス (外側に `GIT_DIR` があると、製品コードがそちらの repo を読んで落ちていた) も `HermeticGitTestCase` を継承する
+  - `tests/test_hermetic_env.py`: 外側の変数が helper の git と基底クラスの git に届かないこと、外側の repo の中身が前後で一致すること、外側の template が効かないことを床にした。helper が起動する git の全件 (`init` / `config` / `add` / `commit`) が `HERMETIC_GIT_ENV` の全項目を起動の引数として持つことも、起動を記録して見る (`init` だけ env を足さない形は maintenance の起動には差が出ないが、開発者の global の `init.templateDir` を読む)。設定の出どころ別の検査には外側の `GIT_CONFIG_PARAMETERS` を足した (定数だけの起動を除く)。製品コードのもう 1 つの起動経路 (`core.git.git_ls_files`) も、`core.git.run` と並べて env を継承することを見る
 
 ### 確認
 
-空の HOME で suite 全体を `GIT_TRACE2_EVENT` 付きで 1 回ずつ流し、maintenance / gc の `child_start` を数えた。修正前は 30 件、修正後は 0 件。
+空の HOME で suite 全体を `GIT_TRACE2_EVENT` 付きで 1 回ずつ流し、maintenance / gc の `child_start` を数えた。修正前は 30 件、修正後は 0 件。外側の env に `GIT_DIR` (別の repo を指す)・`GIT_CONFIG_PARAMETERS` (`maintenance.auto=true`)・`GIT_TEMPLATE_DIR` (失敗する pre-commit) を 1 つずつ置いて流した結果は、外側の repo の config と commit 数が不変で、suite が全件 OK、maintenance の `child_start` が 0 件。
 
 ## 0.12.1
 

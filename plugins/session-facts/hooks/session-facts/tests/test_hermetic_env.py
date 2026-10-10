@@ -21,6 +21,14 @@
     (env は repo 自身の config より優先される。fixture は負ける)
   - `GIT_CONFIG_GLOBAL`: `git config --global --list` が fixture の 5 設定と完全一致すること
   - `GIT_CONFIG_NOSYSTEM`: system の config の代わりに置いた目印が読まれないこと
+- **外側の repo / config / template を指す変数** (`_OuterRepoEnvChecks`): 外側の env に `GIT_DIR` や
+  `GIT_CONFIG_PARAMETERS`、`GIT_TEMPLATE_DIR` などがあっても (git の hook や `git -c` の配下から suite を
+  流すと入る)、helper の git と基底クラスが起動する git に届かないこと。届くと helper の `init` / `config` /
+  `commit` が外側の repo に書き込み、`GIT_CONFIG_PARAMETERS` は `GIT_CONFIG_COUNT` に勝って maintenance を
+  黙って復活させ、外側の template の pre-commit が helper の commit で走る。外側の repo の中身が前後で
+  一致することと、起動した git の env に変数が無いことで見る。helper が起動する git の**全件**が
+  `HERMETIC_GIT_ENV` の全項目を持つことも、起動を記録して見る (`init` だけ env を足さない形は、
+  maintenance を数える床には差が出ないが、開発者の global の `init.templateDir` などを読む)
 - **直接の起動**: test module が `subprocess` で git を直接起動していないこと。repo を作る git が
   helper を迂回すると、上の床は helper しか見ないので気付けない。走査した module に repo を作る
   module が含まれること (対象 0 件で黙って通らない) と、入れ子の呼び出しも見ることも確かめる
@@ -81,6 +89,57 @@ OPPOSITE = {
 }
 # system の config の代わりに置く目印。`GIT_CONFIG_NOSYSTEM` が効いていなければ読める
 SYSTEM_MARKER = "[hermetic]\n\tsystem = read\n"
+# 外側の env にあると、git が別の repo や別の config、別の template (`git init` が写す hook と除外ファイル) を
+# 見てしまう変数。`_testutil.OUTER_GIT_LEAK_ENV` とは別に、ここにリテラルで持つ (同じ定数から導くと、そちらから
+# 1 つ消えても期待値ごと消えて通る)
+OUTER_REPO_ENV_NAMES = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_TEMPLATE_DIR",
+)
+
+
+def outer_repo_env(directory: str) -> dict[str, str]:
+    """外側の env に置く、`OUTER_REPO_ENV_NAMES` の変数。値は `directory` の中を指す (当てる側が外し損ねても、
+    外側の本物の repo を触らない)。`GIT_CONFIG_PARAMETERS` は maintenance を止めない側の値。
+    `GIT_TEMPLATE_DIR` が指す dir はここでは作らない (中身は、効かないことを見るテストが置く)。"""
+    other = os.path.join(directory, "outer")
+    return {
+        "GIT_DIR": os.path.join(other, ".git"),
+        "GIT_WORK_TREE": other,
+        "GIT_INDEX_FILE": os.path.join(other, ".git", "index"),
+        "GIT_COMMON_DIR": os.path.join(other, ".git"),
+        "GIT_OBJECT_DIRECTORY": os.path.join(other, ".git", "objects"),
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES": os.path.join(other, ".git", "objects"),
+        "GIT_NAMESPACE": "outer",
+        "GIT_CONFIG": os.path.join(other, "legacy.gitconfig"),
+        "GIT_CONFIG_PARAMETERS": "'maintenance.auto'='true'",
+        "GIT_TEMPLATE_DIR": os.path.join(other, "template"),
+    }
+
+
+def tree_state(root: Path) -> dict[str, bytes]:
+    """`root` 以下の全 file の中身 (相対 path -> bytes)。外側の repo が変わっていないことを見るため。"""
+    return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def write_lf(path: Path, text: str) -> None:
+    """改行を変換せずに書く (`Path.write_text` の `newline=` は Python 3.10 以上)。"""
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+
+
+def git_in(env: dict, cwd, args: list) -> tuple:
+    """`env` で git を起動して `(returncode, stdout)`。"""
+    res = subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True, text=True)
+    return res.returncode, res.stdout
 
 
 def empty_file(directory: str) -> str:
@@ -133,7 +192,8 @@ def spawned_maintenance(events: list[dict]) -> list[list[str]]:
 class GitLaunch:
     """spy が捕まえた git の起動 1 件。起動の**時点**の値だけを持つ。"""
 
-    def __init__(self, explicit_env: dict | None, process_env: dict):
+    def __init__(self, explicit_env: dict | None, process_env: dict, argv: list | None = None):
+        self.argv = list(argv or [])  # 起動した argv (`["git", "init", ...]`)
         self.explicit_env = explicit_env  # 起動の引数 `env=` で渡された値 (渡さなければ None)
         self.process_env = process_env  # 起動の時点の `os.environ`
 
@@ -152,7 +212,7 @@ def record_git_launches():
     def spy(argv, *args, **kwargs):
         if list(argv)[:1] == ["git"]:
             env = kwargs.get("env")
-            launches.append(GitLaunch(dict(env) if env is not None else None, dict(os.environ)))
+            launches.append(GitLaunch(dict(env) if env is not None else None, dict(os.environ), list(argv)))
         return real_run(argv, *args, **kwargs)
 
     with mock.patch.object(subprocess, "run", side_effect=spy):
@@ -236,15 +296,51 @@ class TestHelpersStopBackgroundMaintenance(unittest.TestCase):
             os.environ["GIT_TRACE2_EVENT"] = trace
             repo = os.path.join(tmp, "repo")
             os.makedirs(repo)
+            # 外側の repo / config / template を指す変数だけ外す (外側の env に `GIT_DIR` があると、この直接の起動が
+            # 外側の repo に書く)。止める設定は渡したくないので `hermetic_env()` ではなくここで外す
+            env = {k: v for k, v in os.environ.items() if k not in OUTER_REPO_ENV_NAMES}
             for args in (
                 ["init", "-q"],
                 ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false",
                  "commit", "--allow-empty", "-qm", "x"],
             ):
-                subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+                subprocess.run(["git", *args], cwd=repo, env=env, check=True, capture_output=True)
+            self.assertTrue(os.path.isdir(os.path.join(repo, ".git")), "前提: repo が自分の場所に作られている")
             events = trace_events(trace)
         self.assertIn("commit", command_names(events), "前提: trace が取れている (空の床にしない)")
         self.assertNotEqual(spawned_maintenance(events), [])
+
+    def test_every_git_launched_by_the_helpers_carries_the_env(self):
+        """repo を作る helper (`init_repo` / `git`) が起動する git の全部が、`HERMETIC_GIT_ENV` の全項目を
+        起動の引数 (`env=`) で持つこと。
+
+        trace の床は maintenance を起動する git (commit など) しか見ない。`init` / `config` / `add` を 1 つだけ
+        env を渡さずに起動する形は、maintenance の起動を数える床には差が出ないが、開発者の global の
+        `init.templateDir` や `core.hooksPath` を読みうる (`isolate_git_config` の HOME に置くと、`init` の
+        template がコピーされ、`defaultObjectFormat` も効く)。そこで起動を全件記録して、`any` ではなく
+        `all` で見る。前提として、起動の件数と種類 (init / config 3 件 / add / commit の 6 件) を確かめる
+        (記録が空や一部だと、`all` は何も見ていない)。床が当てる側の値を key ごとに持たないことも、
+        helper を呼ぶ前に見る。
+        """
+        with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
+            isolate_git_config(tmp)
+            for key, value in _testutil.HERMETIC_GIT_ENV.items():
+                self.assertNotEqual(os.environ.get(key), value, f"前提: 床が {key} を当てる側と同じ値で持たない")
+            repo = os.path.join(tmp, "repo")
+            os.makedirs(repo)
+            with record_git_launches() as launches:
+                make_repo_with_one_commit(repo)
+            want = dict(_testutil.HERMETIC_GIT_ENV)
+        self.assertEqual(
+            [launch.argv[1] for launch in launches],
+            ["init", "config", "config", "config", "add", "commit"],
+            "前提: init / config x3 / add / commit の 6 件を記録できている",
+        )
+        for launch in launches:
+            with self.subTest(argv=launch.argv[1:3]):
+                self.assertIsNotNone(launch.explicit_env, "env= を起動の引数として渡している")
+                env = launch.explicit_env or {}
+                self.assertEqual({k: env.get(k) for k in want}, want)
 
     def test_repo_made_without_any_env_patch(self):
         self.assertEqual(self._spawned_by_helpers(with_fixture=True), [])
@@ -345,7 +441,13 @@ class _HermeticConfigChecks:
     `maintenance.auto=true`) を置く。当てる側 (定数 / helper / 基底クラス) は外側の env に勝つこと。
     外側の env が空のままだと、helper が外側の env を後から混ぜる向き
     (`{**HERMETIC_GIT_ENV, **os.environ}`) に変わっても、混ぜる値が無いので気付けない。
+
+    外側の env には `GIT_CONFIG_PARAMETERS` (`maintenance.auto=true`) も置く (`git -c` の配下から流すと入る)。
+    これは `GIT_CONFIG_COUNT` に勝つので、`OUTER_GIT_LEAK_ENV` から外れると maintenance が黙って復活する。
+    置かない継承先は `outer_config_parameters = False` にする (理由は `TestConstantAlone`)。
     """
+
+    outer_config_parameters = True
 
     def query(self, args: list[str]) -> tuple[int, str]:
         """継承先が使う起動の仕方で git を起動して `(returncode, stdout)` を返す。cwd は `self.repo`。"""
@@ -367,6 +469,8 @@ class _HermeticConfigChecks:
                 "GIT_CONFIG_VALUE_0": "true",
             }
         )
+        if self.outer_config_parameters:
+            os.environ["GIT_CONFIG_PARAMETERS"] = "'maintenance.auto'='true'"
         super().setUp()
         self.repo = os.path.join(self.tmp, "repo")
         os.makedirs(self.repo)
@@ -416,7 +520,15 @@ class _HermeticConfigChecks:
 
 
 class TestConstantAlone(_HermeticConfigChecks, unittest.TestCase):
-    """`HERMETIC_GIT_ENV` の定数だけで git を起動したとき (helper も基底クラスも通さない)。"""
+    """`HERMETIC_GIT_ENV` の定数だけで git を起動したとき (helper も基底クラスも通さない)。
+
+    外側の env に `GIT_CONFIG_PARAMETERS` を置かない。外側の `GIT_CONFIG_PARAMETERS` は `hermetic_env()` と
+    基底クラスが外す (`OUTER_GIT_LEAK_ENV`) もので、定数だけでは外せない。定数だけの起動に置くと、
+    `GIT_CONFIG_COUNT` に勝って、外す仕組みの無いこの起動が必ず落ちる。外す側の検査は helper と基底クラス
+    の 2 クラスと `_OuterRepoEnvChecks` が持つ。
+    """
+
+    outer_config_parameters = False
 
     def query(self, args: list[str]) -> tuple[int, str]:
         res = subprocess.run(
@@ -453,6 +565,153 @@ class TestProductLaunchedGit(_HermeticConfigChecks, HermeticGitTestCase):
     def query(self, args: list[str]) -> tuple[int, str]:
         res = gitmod.run(["git", *args], Path(self.repo))
         return res.returncode, res.stdout
+
+
+class TestProductLaunchedLsFiles(_HermeticConfigChecks, HermeticGitTestCase):
+    """製品コードのもう 1 つの起動経路 (`core.git.git_ls_files`) が起動する git。`core.git.run` を通らず
+    `subprocess.run` を直接呼ぶので、`run` だけが env を継承していても、こちらが env を絞る形に変わると
+    気付けない。
+
+    `git_ls_files` は引数を取れないので、起動した git の env を記録し、その env で設定を問い合わせる。
+    """
+
+    def query(self, args: list[str]) -> tuple[int, str]:
+        with record_git_launches() as launches:
+            gitmod.git_ls_files(Path(self.repo))
+        self.assertEqual(
+            [launch.argv[1:3] for launch in launches], [["ls-files", "-z"]], "前提: git_ls_files が git を 1 回起動した"
+        )
+        return git_in(launches[0].effective_env, self.repo, args)
+
+
+class _OuterRepoEnvChecks:
+    """外側の env に、repo / config / template を指す変数 (`outer_repo_env`) があっても、起動の仕方ごとに git に
+    届かないこと。
+
+    `setUp` は床 (`isolate_git_config`) を作り、外側の repo を作ってから、その変数を置く。置いた env を
+    `self.floor_env` に控えてから、`super().setUp()` で基底クラスがあれば env を当てさせる (基底クラスは
+    `setUp` で env を張るので、置くのはその前)。床が置いたはずの変数が `self.floor_env` にあることも
+    確かめる (置き損ねた床では、下の検査が何も見ていない)。
+    """
+
+    def launch_and_capture_env(self) -> dict:
+        """継承先が使う起動の仕方で git を起動したとき、その git が持つ env。"""
+        raise NotImplementedError
+
+    def setUp(self) -> None:
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+        isolate_git_config(self.tmp)
+        self.other = os.path.join(self.tmp, "outer")
+        os.makedirs(self.other)
+        # 外側の repo (変数を置く前に作る)。helper (`_testutil.git`) が外し損ねる変異でも、ここで床が crash
+        # しないよう、外側の変数を外した env で作る
+        build_env = {k: v for k, v in os.environ.items() if k not in OUTER_REPO_ENV_NAMES}
+        build_env.update(_testutil.HERMETIC_GIT_ENV)
+        Path(self.other, "seed.txt").write_text("seed\n", encoding="utf-8")
+        for args in (
+            ["init", "-q", "--initial-branch=main"],
+            ["config", "user.name", "t"],
+            ["config", "user.email", "t@t"],
+            ["config", "commit.gpgsign", "false"],
+            ["add", "seed.txt"],
+            ["commit", "-qm", "outer"],
+        ):
+            self.assertEqual(git_in(build_env, self.other, args)[0], 0, f"前提: 外側の repo を作れる: {args}")
+        os.environ.update(outer_repo_env(self.tmp))
+        self.floor_env = dict(os.environ)
+        super().setUp()
+
+    def test_the_floor_holds_the_outer_variables(self):
+        for name in OUTER_REPO_ENV_NAMES:
+            with self.subTest(name=name):
+                self.assertIn(name, self.floor_env, "前提: 床が置いた変数が、当てる側が当てる前の env にある")
+
+    def test_none_of_the_outer_variables_reaches_git(self):
+        env = self.launch_and_capture_env()
+        # 前提: 起動した git の env を記録できている (空の env では、下の「届かない」が素通りする)。床が置いた HOME で見る
+        self.assertEqual(env.get("HOME"), self.floor_env["HOME"], "前提: 起動した git の env を記録できている")
+        for name in OUTER_REPO_ENV_NAMES:
+            with self.subTest(name=name):
+                self.assertNotIn(name, env)
+
+
+class TestOuterRepoEnvAndTheHelpers(_OuterRepoEnvChecks, unittest.TestCase):
+    """repo を作る helper (`_testutil.git` / `init_repo`)。"""
+
+    def launch_and_capture_env(self) -> dict:
+        with record_git_launches() as launches:
+            _testutil.git(["--version"], self.tmp)
+        self.assertEqual(len(launches), 1, "前提: helper が git を 1 回起動している")
+        return launches[0].effective_env
+
+    def test_the_helpers_leave_the_outer_repo_alone(self):
+        """外側に別の repo を指す `GIT_DIR` などがあっても、helper が repo を作る間、その repo を変えないこと。
+
+        外さないと、`init` / `config` / `commit` が外側の repo に書き込む (config に user.name などが入り、
+        commit も増える)。外側の repo の全 file の中身が前後で一致すること、旧来の `GIT_CONFIG` が指す file が
+        作られないこと (`git config` の書き込み先になる) で見る。
+        """
+        before = tree_state(Path(self.other))
+        work = os.path.join(self.tmp, "work")
+        os.makedirs(work)
+        try:
+            make_repo_with_one_commit(work)
+        except subprocess.CalledProcessError as e:
+            self.fail(f"helper の git が失敗した: {' '.join(map(str, e.cmd))}\n{e.stderr!r}")
+        self.assertTrue(os.path.isdir(os.path.join(work, ".git")), "前提: repo が自分の場所に作られている")
+        self.assertEqual(tree_state(Path(self.other)), before)
+        self.assertFalse(os.path.exists(self.floor_env["GIT_CONFIG"]))
+
+    def test_the_outer_template_does_not_reach_the_helpers(self):
+        """外側の `GIT_TEMPLATE_DIR` が指す template が、helper の `init` / `commit` に効かないこと。
+
+        template の `hooks/pre-commit` は失敗し (走れば helper の commit が落ちる)、`info/exclude` は
+        `seed.txt` を除外する (効けば commit から外れる)。前提として、`OUTER_REPO_ENV_NAMES` を外して template
+        だけを戻した env では、この template が `git init` に写ることを確かめる (写らない git の版では、
+        下の「走らない」「外れない」は何も見ていない)。
+        """
+        template = Path(self.floor_env["GIT_TEMPLATE_DIR"])
+        ran = Path(self.tmp, "template-hook-ran")
+        (template / "hooks").mkdir(parents=True)
+        (template / "info").mkdir()
+        hook = template / "hooks" / "pre-commit"
+        write_lf(hook, f"#!/bin/sh\necho ran >> '{ran.as_posix()}'\nexit 1\n")
+        hook.chmod(0o755)
+        write_lf(template / "info" / "exclude", "seed.txt\n")
+        reaching = {k: v for k, v in self.floor_env.items() if k not in OUTER_REPO_ENV_NAMES}
+        reaching["GIT_TEMPLATE_DIR"] = str(template)
+        probe = os.path.join(self.tmp, "probe")
+        self.assertEqual(git_in(reaching, self.tmp, ["init", "-q", probe]), (0, ""))
+        exclude = Path(probe, ".git", "info", "exclude")
+        self.assertEqual(
+            exclude.read_text(encoding="utf-8") if exclude.exists() else None,
+            "seed.txt\n",
+            "前提: 外側の template は、届けば git init に写る",
+        )
+        work = os.path.join(self.tmp, "work")
+        os.makedirs(work)
+        try:
+            make_repo_with_one_commit(work)
+        except subprocess.CalledProcessError as e:
+            self.fail(f"helper の git が失敗した: {' '.join(map(str, e.cmd))}\n{e.stderr!r}")
+        self.assertFalse(ran.exists(), "外側の template の pre-commit が helper の commit で走った")
+        self.assertEqual(_testutil.git(["ls-files"], work).stdout.split(), [b"seed.txt"])
+
+
+class TestOuterRepoEnvAndTheBaseClass(_OuterRepoEnvChecks, HermeticGitTestCase):
+    """製品コードを in-process で動かすテストの基底クラス (`HermeticGitTestCase`)。製品コードの git は env を
+    渡さず `os.environ` を継承するので、基底クラスが外さないと外側の変数が届く。"""
+
+    def launch_and_capture_env(self) -> dict:
+        with record_git_launches() as launches:
+            gitmod.run(["git", "--version"], Path(self.tmp))
+        self.assertEqual(len(launches), 1, "前提: 製品コードの git を 1 回起動できた")
+        return launches[0].effective_env
 
 
 _SUBPROCESS_LAUNCHERS = frozenset({"run", "Popen", "call", "check_call", "check_output"})
