@@ -78,12 +78,44 @@ HERMETIC_GIT_ENV = {
 }
 
 
+# 外側の env にあると、テストの git が別の repo や別の config、別の template を見てしまう変数。git の hook や
+# `git -c` の配下から suite を流すと入る。外さないと、repo を作る helper の `init` / `config` / `commit` が外側の
+# repo に書き込む (`GIT_DIR` など)。`GIT_CONFIG_PARAMETERS` は `GIT_CONFIG_COUNT` に勝ち、旧来の
+# `GIT_CONFIG` があると `git config` の読み書き先がその file になる。`GIT_TEMPLATE_DIR` は helper の `git init`
+# が写す template を差し替える: template の `hooks/pre-commit` が helper の commit で走り、`info/exclude` が
+# 除外する file は commit から外れる (いずれも実測)。外せば `git init` は既定の template を使う (global の
+# `init.templateDir` は、`GIT_CONFIG_GLOBAL` が指す fixture に無い)。
+# `hermetic_env()` と `HermeticGitTestCase` が外す。
+OUTER_GIT_LEAK_ENV = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_TEMPLATE_DIR",
+)
+
+
+def hermetic_env() -> dict[str, str]:
+    """git を起動するときの env。
+
+    `os.environ` から `OUTER_GIT_LEAK_ENV` を外し、`HERMETIC_GIT_ENV` を足す。`HERMETIC_GIT_ENV` を後から足すので、
+    外側の env に同じ名前の変数があっても定数が勝つ。
+    """
+    env = {k: v for k, v in os.environ.items() if k not in OUTER_GIT_LEAK_ENV}
+    env.update(HERMETIC_GIT_ENV)
+    return env
+
+
 def sh(cwd: Path, *args: str) -> str:
-    # `HERMETIC_GIT_ENV` は毎回足す。テストクラス側の env patch に頼ると、patch していないクラスが
+    # `hermetic_env()` は毎回足す。テストクラス側の env patch に頼ると、patch していないクラスが
     # `make_repo` を呼んだ時点で自動 maintenance が復活する (patch 済みなら同じ値の上書き)。
-    env = {**os.environ, **HERMETIC_GIT_ENV}
     r = subprocess.run(
-        ["git", *args], cwd=str(cwd), env=env, capture_output=True, text=True, encoding="utf-8", check=True
+        ["git", *args], cwd=str(cwd), env=hermetic_env(), capture_output=True, text=True, encoding="utf-8", check=True
     )
     return r.stdout
 
@@ -107,11 +139,11 @@ def make_repo(base: Path) -> tuple[Path, Path, Path]:
 
 
 class HermeticGitTestCase(unittest.TestCase):
-    """テストの間、`HERMETIC_GIT_ENV` を `os.environ` に当てる基底クラス。
+    """テストの間、`HERMETIC_GIT_ENV` を `os.environ` に当て、外側の repo / config / template を指す変数を外す基底クラス。
 
-    repo を作る `sh()` は毎回この env を自分で足すので、repo の作成はこのクラスに頼らない。ここで
-    当てるのは hook (製品コード) が起動する git のため: `family._git` は env を渡さず `os.environ`
-    を継承する。
+    repo を作る `sh()` は毎回 `hermetic_env()` で自分の env を組むので、repo の作成はこのクラスに頼らない。
+    ここで当てるのは hook (製品コード) が起動する git のため: `family._git` は env を渡さず `os.environ`
+    を継承する。外す変数は `OUTER_GIT_LEAK_ENV` (`mock.patch.dict` の中なので、テストが終われば元に戻る)。
     """
 
     def setUp(self) -> None:
@@ -119,3 +151,5 @@ class HermeticGitTestCase(unittest.TestCase):
         patcher = mock.patch.dict(os.environ, HERMETIC_GIT_ENV)
         patcher.start()
         self.addCleanup(patcher.stop)
+        for name in OUTER_GIT_LEAK_ENV:
+            os.environ.pop(name, None)
