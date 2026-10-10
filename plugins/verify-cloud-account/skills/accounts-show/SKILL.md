@@ -24,7 +24,7 @@ allowed-tools:
   - AskUserQuestion
 metadata:
   author: mao
-  version: "0.17.0"
+  version: "0.19.0"
 ---
 
 <!--
@@ -71,6 +71,18 @@ verify-cloud-account の accounts.local.json を builder 経由で参照し、�
    stdout の各行には `<service>: <hidden>  [match]` / `[mismatch]` /
    `[CLI unavailable or not logged in]` などの状態が出る。
    この時点で値そのものは表示されない。
+
+   末尾の `=== 期待値が未登録の service (ディレクトリ単位の固定) ===` には、キーの無い
+   service ごとに、hook がどう扱うかが出る (v0.19.0。値は出ない):
+   - `[未登録 — ディレクトリ単位で固定済み。照合せずに通します]` → 環境変数などの公式の
+     仕組みで固定されているので、書き込みも止まらない
+   - `[未登録・未固定 — 書き込みは止まります]` → 固定するなら
+     `/verify-cloud-account:project-accounts`、照合させるなら期待値を登録する
+   - `[未登録 — 固定の仕組みが無いため、書き込みは止まります]` (gh / kubectl) → 期待値の
+     登録を案内する
+   この判定は show を実行した Bash の環境変数で行う。hook は Claude Code を起動したときの
+   環境変数で判定するので、セッション中に別のリポジトリへ移った後は食い違うことがある
+   (その旨を一言添える)。
 
 2. stdout を読み、以下のいずれかの状態をユーザーに報告:
    - 全 service `[match]` → 「想定通り。変更は不要」と伝えて終了。

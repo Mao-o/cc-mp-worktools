@@ -1277,6 +1277,44 @@ def _migrate_keep_new_without_loss(service, new_val: Any, old_val: Any) -> bool:
     return False
 
 
+def _print_pinning(registered, project_dir: str, services_filter, stdout: IO[str]) -> None:
+    """期待値が未登録の service の、ディレクトリ単位の固定の状況を出す (v0.19.0)。
+
+    hook はキーの無い service でも、公式のディレクトリ単位の固定 (env / firebase use) が
+    効いていれば止めない。値は出さず、固定されているかどうかだけを出す。判定は
+    **builder を実行したプロセスの env** で行う (hook は Claude を起動したときの env で
+    判定するので、セッション中にディレクトリ単位の env が変わると結果が食い違いうる)。
+    """
+    rows = []
+    for svc in SERVICES:
+        key = svc.ACCOUNT_KEY
+        if key in registered or (services_filter and key not in services_filter):
+            continue
+        fn = getattr(svc, "is_pinned", None)
+        if fn is None:
+            rows.append(f"{key}: [未登録 — 固定の仕組みが無いため、書き込みは止まります]")
+            continue
+        try:
+            pinned = bool(fn(dict(os.environ), project_dir))
+        except Exception:  # noqa: BLE001
+            pinned = False
+        if pinned:
+            rows.append(f"{key}: [未登録 — ディレクトリ単位で固定済み。照合せずに通します]")
+        else:
+            rows.append(f"{key}: [未登録・未固定 — 書き込みは止まります]")
+    if not rows:
+        return
+    print("", file=stdout)
+    print("=== 期待値が未登録の service (ディレクトリ単位の固定) ===", file=stdout)
+    for row in rows:
+        print(row, file=stdout)
+    print(
+        "(固定の判定はこの builder を実行した環境変数で行いました。hook は Claude を"
+        "起動したときの環境変数で判定します)",
+        file=stdout,
+    )
+
+
 def _cmd_show(
     args: argparse.Namespace,
     stdout: IO[str],
@@ -1324,6 +1362,19 @@ def _cmd_show(
             "run `accounts_builder.py init --service <name> --commit` to create one.",
             file=stdout,
         )
+        # hook がグローバル既定で検証する場合は、そのファイルのキーを登録済みとして扱う
+        # (未登録の一覧が hook の判定と食い違わないように)。読めなければ一覧を出さない。
+        registered: set = set()
+        if global_path is not None and global_path.is_file() and global_path != target.path:
+            try:
+                registered = {
+                    k for k, v in _load_existing(global_path).items() if v not in (None, "")
+                }
+            except _BuilderError:
+                return 0
+        _print_pinning(
+            registered, project_dir, [args.service] if args.service else None, stdout
+        )
         return 0
 
     if len(found) >= 2:
@@ -1348,11 +1399,11 @@ def _cmd_show(
 
     print(_target_note(target, project_dir, warn_shadowing=False), file=stdout)
     print(f"=== {path} ({kind}) ===", file=stdout)
+    services_filter = [args.service] if args.service else None
     if not existing:
         print("(empty)", file=stdout)
+        _print_pinning({}, project_dir, services_filter, stdout)
         return 0
-
-    services_filter = [args.service] if args.service else None
 
     for key in sorted(existing.keys()):
         if services_filter and key not in services_filter:
@@ -1418,6 +1469,13 @@ def _cmd_show(
             status_marker = "[unknown service]"
 
         print(f"{key}: {expected_display}  {status_marker}{detail}", file=stdout)
+
+    _print_pinning(
+        {k for k, v in existing.items() if v not in (None, "")},
+        project_dir,
+        services_filter,
+        stdout,
+    )
 
     if kind != "new":
         print("", file=stdout)

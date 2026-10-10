@@ -19,6 +19,7 @@ subcommands for progressive (layered) access:
 import argparse
 import os
 import re
+import shlex
 import sys
 import time
 
@@ -37,27 +38,33 @@ from _common import (
     check_join_rate,
     corpus_hint_args,
     die,
+    die_ambiguous_page,
     die_index_out_of_range,
     fetch_url,
-    full_corpus_body_search,
-    is_low_priority,
+    full_corpus_extra_hits,
     load_lines,
-    match_rank,
     next_hint,
     normalize_doc_url,
+    note_other_candidates,
     parse_llms_index,
+    prefer_lang_exact,
+    retry_for_page_ref,
     search_content_in_body,
+    search_content_rank_key,
     search_index_entries,
     search_rank_key,
     section_url_anchor,
 )
 from _commands import (  # noqa: E402
     PageView,
+    hit_candidates,
     print_entry,
     print_page_hits,
     print_search_result,
     render_content,
+    render_next_content,
     render_sections,
+    render_zero_hits,
 )
 
 # ---------------------------------------------------------------------------
@@ -97,9 +104,31 @@ def _source_hint_args(args) -> tuple:
         return ()
     return ("--source", args.source)
 
+
+def _source_args_for(source_key: str) -> tuple:
+    """``--source <key>``, or ``()`` for the default source (as ``_source_hint_args``)."""
+    return () if source_key == DEFAULT_SOURCE else ("--source", source_key)
+
+
+def _alt_source_key(args, source_key: str | None = None):
+    """The other source to run the same query on, or ``None``.
+
+    ``--file`` is a snapshot of one source, so there is no other source to try
+    with it. ``search --source both`` already covers both, so it has none.
+    Returns only the key: each call site builds the option tuple itself
+    (``--source <key>`` plus ``corpus_hint_args``) where the wiring test of
+    ``test_hint_wiring.py`` can see it.
+    """
+    key = source_key or getattr(args, "source", DEFAULT_SOURCE)
+    if getattr(args, "file", None) or key not in SOURCES or getattr(args, "source", None) == "both":
+        return None
+    others = [k for k in SOURCES if k != key]
+    if len(others) != 1:
+        return None
+    return others[0]
+
 # Changelog / release-notes deprioritisation lives in ``_common`` so all
-# three scripts rank identically (``is_low_priority`` / ``search_rank_key``).
-_is_low_priority = is_low_priority
+# scripts rank identically (``search_rank_key`` / ``search_content_rank_key``).
 
 
 # ---------------------------------------------------------------------------
@@ -599,7 +628,7 @@ def _load_full_txt(file_arg: str | None, source_key: str, cache_dir: str,
     return file_arg, load_lines(file_arg)
 
 
-def _resolve_page_ref(docs: list[dict], page_ref: str) -> int:
+def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None) -> int:
     """Resolve a page reference to a doc index.
 
     Tries, in order:
@@ -608,7 +637,11 @@ def _resolve_page_ref(docs: list[dict], page_ref: str) -> int:
       3. URL slug (last path component) matched against ``source_url``
 
     Exits with a helpful error when no candidate is found or when a slug is
-    ambiguous (multiple docs end with the same last path component).
+    ambiguous (multiple docs end with the same last path component). A slug
+    that is exactly ``/<lang>/<slug>`` for one page (``hooks`` -> ``en/hooks``,
+    not ``en/agent-sdk/hooks``) resolves to that page, with a note on the
+    others. *retry* (``idx -> command``) lets the ambiguous error print one
+    runnable command per candidate.
     """
     if page_ref is None or page_ref == "":
         die("page_ref required: integer index, URL slug, or full URL")
@@ -638,8 +671,11 @@ def _resolve_page_ref(docs: list[dict], page_ref: str) -> int:
     if len(candidates) == 1:
         return candidates[0][0]
     if len(candidates) > 1:
-        detail = "\n  ".join(f"[{i}] {url}" for i, url in candidates)
-        die(f"Ambiguous slug '{page_ref}'. Matches:\n  {detail}")
+        preferred = prefer_lang_exact(candidates, page_ref)
+        if len(preferred) == 1:
+            note_other_candidates(page_ref, preferred[0][0], candidates, retry)
+            return preferred[0][0]
+        die_ambiguous_page("slug", page_ref, candidates, retry)
     die(f"No page found for slug: {page_ref}")
 
 
@@ -648,7 +684,8 @@ def _page_view(args) -> tuple[list[dict], PageView]:
     file_path, lines = _load_full_txt(args.file, args.source, args.cache_dir,
                                       max_age=args.max_age)
     docs = _split_documents_checked(lines, file_path)
-    idx = _resolve_page_ref(docs, args.page_ref)
+    idx = _resolve_page_ref(docs, args.page_ref, retry_for_page_ref(
+        args, _source_hint_args(args) + corpus_hint_args(args)))
     doc = docs[idx]
     page = PageView(
         idx=idx,
@@ -818,7 +855,8 @@ def cmd_search_content(args):
         die("query must not be empty")
 
     if args.page_ref is not None:
-        target_docs = [_resolve_page_ref(docs, args.page_ref)]
+        target_docs = [_resolve_page_ref(docs, args.page_ref, retry_for_page_ref(
+            args, _source_hint_args(args) + corpus_hint_args(args)))]
     else:
         target_docs = list(range(len(docs)))
 
@@ -837,22 +875,19 @@ def cmd_search_content(args):
             max_matches_per_doc=args.max_hits,
             min_level=2,
             max_snippet_chars=args.max_snippet_chars,
+            page_title=doc["title"],
         )
         if hits["total_matches"] == 0:
             continue
         total_hits += hits["total_matches"]
         collected.append((idx, doc, hits))
 
-    collected.sort(key=lambda t: (
-        (0 if args.include_changelog_priority else
-         1 if _is_low_priority(t[1]["title"]) else 0),
-        match_rank(t[2]),
-        -t[2]["total_matches"],
-        t[0],
-    ))
+    collected.sort(key=lambda t: search_content_rank_key(
+        t[0], t[1]["title"], t[2],
+        include_changelog_priority=args.include_changelog_priority))
 
     docs_matched = len(collected)
-    printed = collected[: args.limit]
+    printed = collected[: max(args.limit, 0)]
 
     for idx, doc, hits in printed:
         print_page_hits(
@@ -862,15 +897,24 @@ def cmd_search_content(args):
             show_overflow=True,
         )
 
+    hint_args = _source_hint_args(args) + corpus_hint_args(args)
     if total_hits == 0:
         print("No matching content found.")
         print()
         print("Tip: try broader keywords or 'search-index' to find relevant pages first")
-    else:
-        print(f"({total_hits} hits across {docs_matched} pages, showing top {len(printed)})")
+        print()
+        alt = _alt_source_key(args)
+        # search-index has no --file here: with --file, no search-index hint.
+        render_zero_hits(args.query, (d["body_lines"] for d in docs),
+                         subcommand="search-content", hint_args=hint_args,
+                         restricted_to=args.page_ref,
+                         index_hint_args=None if args.file else hint_args,
+                         alt_hint_args=(("--source", alt) + corpus_hint_args(args)) if alt else None)
+        return
+    print(f"({total_hits} hits across {docs_matched} pages, showing top {len(printed)})")
     print()
-    next_hint("content", "<page_ref>", '"<heading_path>"',
-              *(_source_hint_args(args) + corpus_hint_args(args)))
+    render_next_content(hit_candidates([(idx, hits, ()) for idx, _doc, hits in printed]),
+                        hint_args=hint_args, query=args.query)
 
 
 def _search_one_source(args, source_key: str) -> list[dict]:
@@ -919,6 +963,7 @@ def _search_one_source(args, source_key: str) -> list[dict]:
             max_matches_per_doc=args.max_hits,
             min_level=2,
             max_snippet_chars=args.max_snippet_chars,
+            page_title=docs[full_idx]["title"],
         )
         results.append({
             "source_key": source_key,
@@ -938,27 +983,29 @@ def _search_one_source(args, source_key: str) -> list[dict]:
     # a page that legitimately ranked on title/description keeps its row
     # (shown as "index match only") even when its body has no hits — the
     # fallback only adds pages the index ranking missed entirely.
-    if not any(r["body_hits"]["total_matches"] for r in results):
-        already_shown = {r["doc_idx"] for r in results}
-        fallback = full_corpus_body_search(
-            [d["body_lines"] for d in docs], args.query,
-            context_lines=args.context, max_matches_per_doc=args.max_hits,
-            max_snippet_chars=args.max_snippet_chars, min_level=2,
-            limit=args.top_n,
-        )
-        for idx, hits in fallback:
-            if idx in already_shown:
-                continue
-            results.append({
-                "source_key": source_key,
-                "source_label": src["label"],
-                "doc_idx": idx,
-                "title": docs[idx]["title"],
-                "url": docs[idx]["source_url"],
-                "index_score": None,
-                "body_hits": hits,
-                "body_only": True,
-            })
+    #
+    # The search also runs when the candidates have body hits but none has
+    # every keyword in one section (all "[partial match]"): a page that does
+    # is then appended (full_corpus_extra_hits).
+    fallback = full_corpus_extra_hits(
+        results, [d["body_lines"] for d in docs], args.query,
+        context_lines=args.context, max_matches_per_doc=args.max_hits,
+        max_snippet_chars=args.max_snippet_chars, min_level=2,
+        limit=args.top_n,
+        include_changelog_priority=args.include_changelog_priority,
+        titles=[d["title"] for d in docs],
+    )
+    for idx, hits in fallback:
+        results.append({
+            "source_key": source_key,
+            "source_label": src["label"],
+            "doc_idx": idx,
+            "title": docs[idx]["title"],
+            "url": docs[idx]["source_url"],
+            "index_score": None,
+            "body_hits": hits,
+            "body_only": True,
+        })
 
     # Phase 4: rank with the shared key (changelog bucket, body hits, index
     # score, doc_idx) — identical to ai-sdk / firebase.
@@ -1016,8 +1063,18 @@ def cmd_search(args):
     print()
 
     any_results = False
+    ranked = []
+    # The top index candidate (first source listed) keeps a Next: line even
+    # when appended pages rank above it.
+    keep = None
     for src_key in source_keys:
         results = _search_one_source(args, src_key)
+        # Per-page --source only when several sources are listed together
+        # (doc_idx is unique within a source); one source rides on hint_args.
+        extra = _source_args_for(src_key) if len(source_keys) > 1 else ()
+        ranked += [(r["doc_idx"], r["body_hits"], extra) for r in results]
+        if keep is None:
+            keep = next(((r["doc_idx"], extra) for r in results if not r.get("body_only")), None)
         if len(source_keys) > 1:
             print(f"--- {SOURCES[src_key]['label']} (--source {src_key}) ---")
             print()
@@ -1039,20 +1096,32 @@ def cmd_search(args):
         print()
         print("Tip: try broader keywords, switch --source, or run "
               "'search-content \"<query>\"' to search page bodies directly")
+        for src_key in source_keys:
+            _full_path, lines = _load_full_txt(args.file, src_key, args.cache_dir,
+                                               max_age=args.max_age)
+            docs = _split_documents_checked(lines, _full_path)
+            print()
+            if len(source_keys) > 1:
+                print(f"--- {SOURCES[src_key]['label']} (--source {src_key}) ---")
+            hint_args = _source_args_for(src_key) + corpus_hint_args(args)
+            alt = _alt_source_key(args, src_key)
+            render_zero_hits(args.query, (d["body_lines"] for d in docs),
+                             subcommand="search", hint_args=hint_args,
+                             index_hint_args=None if args.file else hint_args,
+                             alt_hint_args=(("--source", alt) + corpus_hint_args(args)) if alt else None)
         return
 
     if len(source_keys) > 1:
         print("Note: doc_idx is unique within a source. For follow-up commands, "
               "pass the matching --source <code|platform> explicitly.")
         print()
-        # ``--source`` is a placeholder here, not the active value: with
-        # ``--source both`` the reader must pick the source matching the
-        # doc_idx they follow. The corpus args still apply to either pick.
-        next_hint("content", "<page_ref>", '"<heading_path>"',
-                  "--source", "<code|platform>", *corpus_hint_args(args))
+        # The Next: lines carry the page's own --source (doc_idx is only
+        # unique within a source); the corpus args apply to either.
+        hint_args = corpus_hint_args(args)
     else:
-        next_hint("content", "<page_ref>", '"<heading_path>"',
-                  *(_source_hint_args(args) + corpus_hint_args(args)))
+        hint_args = _source_hint_args(args) + corpus_hint_args(args)
+    render_next_content(hit_candidates(ranked, keep=keep), hint_args=hint_args,
+                        query=args.query)
 
 
 # ---------------------------------------------------------------------------
@@ -1060,10 +1129,82 @@ def cmd_search(args):
 # ---------------------------------------------------------------------------
 
 def _add_source_arg(parser) -> None:
+    # 'both' is accepted by argparse only so that ``_reject_source_both`` can
+    # answer with runnable commands; ``search`` is the one command that
+    # really handles it (it declares its own --source option).
     parser.add_argument(
-        "--source", choices=list(SOURCES.keys()), default=DEFAULT_SOURCE,
-        help=f"Documentation source (default: {DEFAULT_SOURCE})",
+        "--source", choices=list(SOURCES.keys()) + ["both"], default=DEFAULT_SOURCE,
+        help=f"Documentation source (default: {DEFAULT_SOURCE}; 'both' is only for search)",
     )
+
+
+def _argv_with_source(argv: list, source: str) -> list:
+    """*argv* with the ``--source both`` the caller typed replaced by *source*."""
+    out = []
+    replaced = False
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "--source" and i + 1 < len(argv) and argv[i + 1] == "both":
+            out += [tok, source]
+            i += 2
+            replaced = True
+            continue
+        if tok == "--source=both":
+            replaced = True
+        out.append(f"--source={source}" if tok == "--source=both" else tok)
+        i += 1
+    if not replaced:
+        # argparse accepts an abbreviation (``--sour both``) that is left as
+        # typed above; the option given last wins, so add the real one. It has
+        # to come before a ``--``, after which everything is positional.
+        at = out.index("--") if "--" in out else len(out)
+        out[at:at] = ["--source", source]
+    return out
+
+
+def _reject_source_both(args) -> None:
+    """Exit 2 with runnable commands when a single-source command got ``--source both``.
+
+    Only ``search`` queries both sources at once. The others read one source
+    (``content`` / ``sections`` read one page, whose index is per source), so
+    the answer is the same command once per source, plus ``search`` where the
+    command has a query.
+    """
+    if getattr(args, "source", None) != "both" or args.command == "search":
+        return
+    script = os.path.basename(sys.argv[0])
+    argv = sys.argv[1:]
+    print(f"Error: '{args.command}' reads one source at a time, so --source both "
+          f"is not accepted (choose from {', '.join(SOURCES)})", file=sys.stderr)
+    # ``search --file`` cannot cover both sources, so it is not offered then
+    if hasattr(args, "query") and not getattr(args, "file", None):
+        # a query starting with "-" needs "--" (after which only positionals)
+        q = ["--", args.query] if args.query.startswith("-") else [args.query]
+        opts = ["--source", "both", *corpus_hint_args(args)]
+        both = " ".join([script, "search", *(shlex.quote(t) for t in
+                         (opts + q if q[0] == "--" else q + opts))])
+        print("To search both sources in one go, use search:", file=sys.stderr)
+        print(f"  {both}", file=sys.stderr)
+    print("Or run this command once per source:", file=sys.stderr)
+    # ``--file`` is a snapshot of one source: offering it with the other one
+    # would read the wrong corpus (or be refused), so keep only its own line
+    keys = list(SOURCES)
+    file_val = getattr(args, "file", None)
+    if file_val:
+        guessed = _resolve_source_from_path(file_val)
+        if guessed:
+            keys = [guessed[0]]
+        else:
+            print("Note: --file is a snapshot of one source; keep only the line "
+                  "for the source it was taken from.", file=sys.stderr)
+    for key in keys:
+        line = " ".join([script] + [shlex.quote(t) for t in _argv_with_source(argv, key)])
+        print(f"  {line}", file=sys.stderr)
+    if args.command in ("content", "sections"):
+        print("Note: a page index differs per source; give the page by URL slug "
+              "or look it up again with search --source both.", file=sys.stderr)
+    sys.exit(2)
 
 
 def _add_file_arg(parser) -> None:
@@ -1191,6 +1332,7 @@ def main():
     p_search.set_defaults(func=cmd_search)
 
     args = parser.parse_args()
+    _reject_source_both(args)
     args.func(args)
 
 

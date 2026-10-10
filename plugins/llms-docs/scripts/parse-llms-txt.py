@@ -24,7 +24,10 @@ per-product ``/<product>/llms-full.txt`` files are supported), sites that
 publish one file per page, and joining an ``llms.txt`` index against the full
 text other than by exact title. Only the profile's ``url`` (the
 ``llms-full.txt``) and, when set, its ``index_url`` (the ``llms.txt``, used
-to give URL-less pages a URL by exact title) are fetched.
+to give URL-less pages a URL by exact title) are fetched. A two-level index
+is not a usable ``index_url`` either: its entries that link another
+``llms.txt`` file are skipped, but a page that shares its title with an entry
+for a page of another docs set still gets that entry's URL.
 """
 
 import argparse
@@ -50,23 +53,29 @@ from _common import (  # noqa: E402
     assert_parsed,
     corpus_hint_args,
     die,
+    die_ambiguous_page,
     die_index_out_of_range,
     fetch_url,
-    full_corpus_body_search,
+    full_corpus_extra_hits,
     load_lines,
     next_hint,
     parse_llms_index,
+    retry_for_page_ref,
     search_content_in_body,
+    search_content_rank_key,
     search_index_entries,
     search_rank_key,
 )
 from _commands import (  # noqa: E402
     PageView,
+    hit_candidates,
     print_entry,
     print_page_hits,
     print_search_result,
     render_content,
+    render_next_content,
     render_sections,
+    render_zero_hits,
 )
 
 SCRIPT = "parse-llms-txt.py"
@@ -217,7 +226,7 @@ def _validate_profile(path: str, name: str, raw) -> dict:
         profile["url_base"] = base
     index_url = raw.get("index_url")
     if index_url is not None and (not isinstance(index_url, str) or not re.match(r"^https?://\S+$", index_url)):
-        _bad(path, f"sources.{name}.index_url must be an http(s) URL of the site's llms.txt")
+        _bad(path, f"sources.{name}.index_url must be an http(s) URL of the llms.txt for the same docs as url (not a 2-level index)")
     profile["index_url"] = index_url
     return profile
 
@@ -512,9 +521,12 @@ class _Fence:
 
     Differs from ``FenceTracker`` in the opener, which must be indented 0-3
     spaces and, for backticks, carry no backtick in its info string (inline
-    code), and in having no MDX comment rule (``FenceTracker`` closes on a
-    run followed by ``*/}`` when the ``{/*`` comment opened outside any
-    block, and never opens on one).
+    code), and in having no MDX comment or blockquote rule (``FenceTracker``
+    closes on a run followed by ``*/}`` when the ``{/*`` comment opened
+    outside any block, closes a block opened inside a comment when the
+    comment ends, and reads fences behind ``>`` markers). ``split_line``
+    does not need them: a delimiter inside a fence that never closes before
+    the next delimiter is taken as a boundary anyway.
     """
 
     def __init__(self):
@@ -683,6 +695,22 @@ def _title_key(title: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[`*_]", "", title)).strip().lower()
 
 
+# The last path segment of an llms.txt-family file: llms.txt, llms-full.txt,
+# llms-small.txt, llms-ctx-full.txt. Measured on real indexes: OpenAI's and
+# Cloudflare's root llms.txt link one ``<product>/llms.txt`` per product,
+# Hono's links llms-small.txt, Codex's links llms-full.txt and use-cases/llms.txt.
+_INDEX_FILE_NAME_RE = re.compile(r"^llms(?:-[a-z0-9]+)*\.txt$", re.IGNORECASE)
+
+
+def _is_index_file_url(url: str) -> bool:
+    """True when *url* names an ``llms.txt``-family file (another index, or a
+    full-text export) rather than a page. Query, fragment and a trailing slash
+    are ignored; only the last path segment counts, so ``/docs/llms.txt.md``
+    and a host that happens to be called ``llms.txt`` are not index files."""
+    path = re.sub(r"^https?://[^/]*", "", url.split("#", 1)[0].split("?", 1)[0]).rstrip("/")
+    return bool(_INDEX_FILE_NAME_RE.match(path.rsplit("/", 1)[-1]))
+
+
 def join_index_urls(docs: list[dict], index_lines: list[str]) -> int:
     """Give a URL to each page that has none, from the ``llms.txt`` entry
     with the same title. Only an exact title (ignoring case, spacing and
@@ -691,11 +719,21 @@ def join_index_urls(docs: list[dict], index_lines: list[str]) -> int:
     entries, or one shared by two pages (Zod's site banner and its
     ``packages/zod`` page are both "Zod") is left without a URL, because a
     wrong URL misleads more than a missing one (measured on Hono:
-    word-prefix matching gave 4 wrong URLs in 40). Entries are read with
-    the shared ``parse_llms_index`` (absolute URLs only). Returns the number
-    of pages that got a URL."""
+    word-prefix matching gave 4 wrong URLs in 40). Entries that link a
+    section of a page (a ``?`` or ``#`` in the URL) are not counted as
+    page candidates when exactly one entry of the title has neither; if
+    every candidate has one (or two have none), the title is left as
+    before: one candidate is used, two or more are ambiguous. Entries are read with
+    the shared ``parse_llms_index`` (absolute URLs only). An entry that
+    links another ``llms.txt``-family file is not a page and is skipped
+    before the titles are compared (a 2-level index such as OpenAI's root
+    ``llms.txt`` would otherwise give "Sign in with ChatGPT" the URL of its
+    ``siwc/llms.txt``); it does not make a page's title ambiguous either.
+    Returns the number of pages that got a URL."""
     by_title: dict[str, set] = {}
     for entry in parse_llms_index(index_lines):
+        if _is_index_file_url(entry["url"]):
+            continue
         by_title.setdefault(_title_key(entry["title"]), set()).add(entry["url"])
     pages_per_title: dict[str, int] = {}
     for d in docs:
@@ -707,7 +745,18 @@ def join_index_urls(docs: list[dict], index_lines: list[str]) -> int:
             continue
         key = _title_key(d["title"])
         urls = by_title.get(key, set())
-        if len(urls) == 1 and pages_per_title[key] == 1:
+        if pages_per_title[key] != 1:
+            continue
+        # A section-anchor entry (``<page>?id=<slug>``, ``<page>#<slug>``)
+        # is not a page: when exactly one candidate has neither mark, it is
+        # the page, and the anchors do not make the title ambiguous.
+        # Query URLs that are real pages (Codex's ``?surface=cli``) are
+        # treated the same; a plain entry of the same title wins over them.
+        plain = {u for u in urls if "?" not in u and "#" not in u}
+        if len(plain) == 1:
+            d["url"] = next(iter(plain))
+            joined += 1
+        elif len(urls) == 1:
             d["url"] = next(iter(urls))
             joined += 1
     return joined
@@ -727,7 +776,7 @@ def _source_hint_args(args) -> tuple:
     return tuple(out)
 
 
-def _resolve_page_ref(docs: list[dict], page_ref: str) -> int:
+def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None) -> int:
     """Integer index, else a unique title substring, else a unique URL substring."""
     if not page_ref:
         die("page_ref required: integer index, title substring or URL substring")
@@ -745,8 +794,8 @@ def _resolve_page_ref(docs: list[dict], page_ref: str) -> int:
         if len(found) == 1:
             return found[0][0]
         if len(found) > 1:
-            detail = "\n  ".join(f"[{i}] {d['title']}" + (f" ({d['url']})" if d["url"] else "") for i, d in found[:20])
-            die(f"Ambiguous {field_name} substring '{page_ref}'. Matches:\n  {detail}")
+            rows = [(i, d["title"] + (f" ({d['url']})" if d["url"] else "")) for i, d in found[:20]]
+            die_ambiguous_page(f"{field_name} substring", page_ref, rows, retry)
     die(f"No document found for: {page_ref}")
     return -1
 
@@ -766,7 +815,7 @@ def _headings(body_lines: list[str]) -> list[str]:
 
 
 def _url_line(doc: dict) -> list[str]:
-    return [f"    url: {doc['url']}"] if doc["url"] else []
+    return [f"    URL: {doc['url']}"] if doc["url"] else []
 
 
 # ---------------------------------------------------------------------------
@@ -804,9 +853,14 @@ def cmd_fetch_index(args):
     next_hint("sections", "<page_ref>", *(_source_hint_args(args) + corpus_hint_args(args)))
 
 
+def _page_ref_retry(args):
+    """``idx -> command`` re-running this invocation on page *idx*."""
+    return retry_for_page_ref(args, _source_hint_args(args) + corpus_hint_args(args))
+
+
 def _page_view(args) -> PageView:
     _profile, path, docs = _load_docs(args)
-    idx = _resolve_page_ref(docs, args.page_ref)
+    idx = _resolve_page_ref(docs, args.page_ref, _page_ref_retry(args))
     d = docs[idx]
     header = [f"  URL: {d['url']}"] if d["url"] else []
     header.append(f"  (file: {path})")
@@ -867,7 +921,7 @@ def _body_hits(args, d: dict):
     return search_content_in_body(
         d["body_lines"], args.query, context_lines=args.context,
         max_matches_per_doc=args.max_hits, min_level=d["min_level"] or 2,
-        max_snippet_chars=args.max_snippet_chars,
+        max_snippet_chars=args.max_snippet_chars, page_title=d["title"] or "",
     )
 
 
@@ -875,30 +929,49 @@ def cmd_search_content(args):
     profile, path, docs = _load_docs(args)
     if not args.query.strip():
         die("query must not be empty")
-    targets = [_resolve_page_ref(docs, args.page_ref)] if args.page_ref is not None else range(len(docs))
+    targets = ([_resolve_page_ref(docs, args.page_ref, _page_ref_retry(args))]
+               if args.page_ref is not None else range(len(docs)))
     print(f'Search-content results for "{args.query}" (source: {profile["name"]}, file: {path})')
     print("=" * 60)
     print()
-    total = matched = printed = 0
+    total = 0
+    collected = []
     for idx in targets:
-        d = docs[idx]
-        hits = _body_hits(args, d)
+        hits = _body_hits(args, docs[idx])
         if hits["total_matches"] == 0:
             continue
         total += hits["total_matches"]
-        matched += 1
-        if printed >= args.limit:
-            continue
+        collected.append((idx, hits))
+    # Changelog pages last, then strict-AND before "[partial match]", then
+    # most hits, then doc order; --limit cuts only after ordering (same key in
+    # every script).
+    collected.sort(key=lambda t: search_content_rank_key(
+        t[0], docs[t[0]]["title"], t[1],
+        include_changelog_priority=args.include_changelog_priority))
+    matched = len(collected)
+    printed = 0
+    shown = []
+    for idx, hits in collected[: max(args.limit, 0)]:
+        d = docs[idx]
         printed += 1
+        shown.append((idx, hits, ()))
         print_page_hits(f"[{idx}] {d['title'] or '(untitled)'}", hits, noun="document", extra_lines=_url_line(d))
     if total == 0:
         print("No matching content found.")
         print()
         print("Tip: try broader keywords or 'search-index' to find relevant documents first")
-    else:
-        print(f"({total} hits across {matched} documents, showing top {printed})")
+        print()
+        render_zero_hits(args.query, (d["body_lines"] for d in docs),
+                         subcommand="search-content",
+                         hint_args=_source_hint_args(args) + corpus_hint_args(args),
+                         index_hint_args=_source_hint_args(args) + corpus_hint_args(args),
+                         scope="documents", restricted_to=args.page_ref)
+        return
+    print(f"({total} hits across {matched} documents, showing top {printed})")
     print()
-    next_hint("content", "<page_ref>", '"<heading_path>"', *(_source_hint_args(args) + corpus_hint_args(args)))
+    render_next_content(hit_candidates(shown),
+                        hint_args=_source_hint_args(args) + corpus_hint_args(args),
+                        query=args.query)
 
 
 def cmd_search(args):
@@ -911,31 +984,38 @@ def cmd_search(args):
     print("=" * 60)
     print()
     results = [
-        {"doc_idx": idx, "index_score": score, "body_hits": _body_hits(args, docs[idx]), "body_only": False}
+        {"doc_idx": idx, "index_score": score, "body_hits": _body_hits(args, docs[idx]), "body_only": False,
+         "title": docs[idx]["title"] or "(untitled)"}
         for score, idx, _entry in scored
     ]
-    if not any(r["body_hits"]["total_matches"] for r in results):
-        shown = {r["doc_idx"] for r in results}
-        # full_corpus_body_search takes one min_level for the whole corpus;
-        # every page of a profile shares its split, so the first page's is used.
-        level = (docs[0]["min_level"] or 2) if docs else 2
-        for idx, hits in full_corpus_body_search(
-            [d["body_lines"] for d in docs], args.query, context_lines=args.context,
-            max_matches_per_doc=args.max_hits, max_snippet_chars=args.max_snippet_chars,
-            min_level=level, limit=args.top_n,
-        ):
-            if idx not in shown:
-                results.append({"doc_idx": idx, "index_score": None, "body_hits": hits, "body_only": True})
+    # The full-corpus search also runs when the candidates have body hits but
+    # none has every keyword in one section (full_corpus_extra_hits).
+    # It takes one min_level for the whole corpus; every page of a profile
+    # shares its split, so the first page's is used.
+    level = (docs[0]["min_level"] or 2) if docs else 2
+    for idx, hits in full_corpus_extra_hits(
+        results, [d["body_lines"] for d in docs], args.query, context_lines=args.context,
+        max_matches_per_doc=args.max_hits, max_snippet_chars=args.max_snippet_chars,
+        min_level=level, limit=args.top_n,
+        include_changelog_priority=args.include_changelog_priority,
+        titles=[d["title"] or "" for d in docs],
+    ):
+        results.append({"doc_idx": idx, "index_score": None, "body_hits": hits, "body_only": True,
+                        "title": docs[idx]["title"] or "(untitled)"})
     if not results:
         print("No matching documents found.")
         print()
         print("Tip: try broader keywords or 'search-content' for a full-body scan")
+        print()
+        render_zero_hits(args.query, (d["body_lines"] for d in docs),
+                         subcommand="search",
+                         hint_args=_source_hint_args(args) + corpus_hint_args(args),
+                         index_hint_args=_source_hint_args(args) + corpus_hint_args(args),
+                         scope="documents")
         return
     if all(r["body_only"] for r in results):
         print("  (no title/description match — showing full-body search results instead)")
         print()
-    for r in results:
-        r["title"] = docs[r["doc_idx"]]["title"] or "(untitled)"
     results.sort(key=lambda r: search_rank_key(r, include_changelog_priority=args.include_changelog_priority))
     for r in results:
         tag = " [body-only]" if r["body_only"] else f" (index_score: {r['index_score']})"
@@ -943,7 +1023,13 @@ def cmd_search(args):
                             extra_lines=_url_line(docs[r["doc_idx"]]))
     print(f"({len(results)} documents, ranked via index → body)")
     print()
-    next_hint("content", "<page_ref>", '"<heading_path>"', *(_source_hint_args(args) + corpus_hint_args(args)))
+    # The top index candidate keeps a Next: line even when appended pages
+    # rank above it.
+    keep = next(((r["doc_idx"], ()) for r in results if not r["body_only"]), None)
+    render_next_content(hit_candidates([(r["doc_idx"], r["body_hits"], ()) for r in results],
+                                       keep=keep),
+                        hint_args=_source_hint_args(args) + corpus_hint_args(args),
+                        query=args.query)
 
 
 # ---------------------------------------------------------------------------
@@ -996,6 +1082,7 @@ def main():
     p.add_argument("--context", type=int, default=2, help="Context lines around each hit (default: 2)")
     p.add_argument("--max-hits", type=int, default=5, help="Max hits per document (default: 5)")
     add_max_snippet_chars_arg(p)
+    add_include_changelog_priority_arg(p)
     p.set_defaults(func=cmd_search_content)
 
     p = sub.add_parser("sections", help="List sections in a document")

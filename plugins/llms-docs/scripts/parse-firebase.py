@@ -41,12 +41,14 @@ from _common import (
     assert_parsed,
     corpus_hint_args,
     die,
+    die_ambiguous_page,
     die_index_out_of_range,
     fetch_url,
     load_lines,
     next_hint,
     normalize_doc_url,
     parse_llms_index,
+    retry_for_page_ref,
     search_content_in_body,
     search_index_entries,
     search_rank_key,
@@ -54,11 +56,14 @@ from _common import (
 )
 from _commands import (  # noqa: E402
     PageView,
+    hit_candidates,
     print_entry,
     print_page_hits,
     print_search_result,
     render_content,
+    render_next_content,
     render_sections,
+    render_zero_hits,
 )
 
 PAGE_FETCH_TIMEOUT = 30
@@ -212,7 +217,7 @@ def _devsite_anchor(raw_url: str):
     return lambda title: section_url_anchor(page_url, title, style="devsite")
 
 
-def _resolve_page_ref(entries: list[dict], page_ref: str) -> int:
+def _resolve_page_ref(entries: list[dict], page_ref: str, retry=None) -> int:
     """Resolve a page reference to an entry index.
 
     Tries, in order:
@@ -257,8 +262,7 @@ def _resolve_page_ref(entries: list[dict], page_ref: str) -> int:
     if len(candidates) == 1:
         return candidates[0][0]
     if len(candidates) > 1:
-        detail = "\n  ".join(f"[{i}] {url}" for i, url in candidates)
-        die(f"Ambiguous slug '{page_ref}'. Matches:\n  {detail}")
+        die_ambiguous_page("slug", page_ref, candidates, retry)
     die(f"No page found for slug: {page_ref}")
 
 
@@ -293,7 +297,8 @@ def cmd_fetch_index(args):
 def _page_view(args) -> PageView:
     """Resolve ``args.page_ref`` in the index, fetch that page, describe it."""
     entries = _load_index(args.cache_dir, max_age=args.max_age)
-    idx = _resolve_page_ref(entries, args.page_ref)
+    idx = _resolve_page_ref(entries, args.page_ref,
+                            retry_for_page_ref(args, corpus_hint_args(args)))
     entry = entries[idx]
     page_path = _fetch_page(entry["url"], args.cache_dir, max_age=args.max_age)
     return PageView(
@@ -360,7 +365,8 @@ def cmd_search_content(args):
         die("query must not be empty")
 
     if args.page_ref is not None:
-        target_indexes = [_resolve_page_ref(entries, args.page_ref)]
+        target_indexes = [_resolve_page_ref(entries, args.page_ref,
+                                            retry_for_page_ref(args, corpus_hint_args(args)))]
     else:
         if len(entries) > 30:
             print(
@@ -379,6 +385,8 @@ def cmd_search_content(args):
     docs_matched = 0
     printed_docs = 0
     skipped = []
+    searched_paths = []
+    shown = []
 
     # Fetched and processed one page at a time (not via
     # _fetch_pages_concurrently) so results still stream out as each page
@@ -402,6 +410,7 @@ def cmd_search_content(args):
             print(f"(skip: fetch failed {e.url}: {e.cause})", file=sys.stderr)
             continue
         lines = load_lines(page_path)
+        searched_paths.append(page_path)
 
         hits = search_content_in_body(
             lines, args.query,
@@ -409,6 +418,7 @@ def cmd_search_content(args):
             max_matches_per_doc=args.max_hits,
             min_level=2,
             max_snippet_chars=args.max_snippet_chars,
+            page_title=entry["title"] or "",
         )
 
         if hits["total_matches"] == 0:
@@ -420,11 +430,13 @@ def cmd_search_content(args):
         if printed_docs >= args.limit:
             continue
         printed_docs += 1
+        shown.append((idx, hits, ()))
 
         print_page_hits(f"[{idx}] {entry['title']}", hits,
                         extra_lines=[f"    URL: {entry['url']}"],
                         anchor_for=_devsite_anchor(entry["url"]))
 
+    hint_args = corpus_hint_args(args)
     if total_hits == 0:
         print("No matching content found in the targeted pages.")
         print()
@@ -434,7 +446,16 @@ def cmd_search_content(args):
     if skipped:
         print(f"({len(skipped)} pages skipped — fetch failed, see stderr)")
     print()
-    next_hint("content", "<page_ref>", '"<heading_path>"', *corpus_hint_args(args))
+    if total_hits == 0:
+        # Only the pages that were fetched can be counted (every page is
+        # already in the cache, so this re-reads files, not the network).
+        render_zero_hits(args.query, (load_lines(p) for p in searched_paths),
+                         subcommand="search-content", hint_args=hint_args,
+                         index_hint_args=hint_args,
+                         restricted_to=args.page_ref,
+                         restricted_only=args.page_ref is not None)
+        return
+    render_next_content(hit_candidates(shown), hint_args=hint_args, query=args.query)
 
 
 def cmd_search(args):
@@ -468,6 +489,14 @@ def cmd_search(args):
         print("Tip: try broader keywords, or 'search-content \"<query>\"' "
               "(omit --page-ref to scan every page — slow on first run) to "
               "search page bodies directly")
+        print()
+        # Firebase has no full text to count in: only the index (title and
+        # description) is searched here, so that is what the counts cover.
+        render_zero_hits(args.query,
+                         (f"{e['title']} {e['description']}" for e in entries),
+                         subcommand="search", hint_args=corpus_hint_args(args),
+                         index_hint_args=corpus_hint_args(args),
+                         scope="index entries (title/description)")
         return
 
     page_paths, skipped = _fetch_pages_concurrently(
@@ -488,6 +517,7 @@ def cmd_search(args):
             max_matches_per_doc=args.max_hits,
             min_level=2,
             max_snippet_chars=args.max_snippet_chars,
+            page_title=entry["title"] or "",
         )
         results.append({
             "doc_idx": idx,
@@ -509,7 +539,8 @@ def cmd_search(args):
     if skipped:
         print(f"({len(skipped)} pages skipped — fetch failed, see stderr)")
     print()
-    next_hint("content", "<page_ref>", '"<heading_path>"', *corpus_hint_args(args))
+    render_next_content(hit_candidates([(r["doc_idx"], r["body_hits"], ()) for r in results]),
+                        hint_args=corpus_hint_args(args), query=args.query)
 
 
 # ---------------------------------------------------------------------------

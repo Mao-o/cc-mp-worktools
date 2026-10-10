@@ -440,6 +440,101 @@ class SplitTest(unittest.TestCase):
                          ["Site — full documentation", "Agent approvals", "Config basics"])
 
 
+# Cut down from Zod's llms-full.txt (Migration guide -> Release notes): a
+# code block written inside an MDX comment is closed with two backticks (a
+# typo upstream), and the comment then ends with ``*/}``. MDX never renders
+# the comment, so "# Release notes" is the next page.
+ZOD_MDX_COMMENT_UNCLOSED = """\
+# Migration guide
+
+Some migration text.
+
+{/* ## Changed: `.refine()`
+
+  ```ts
+  const longString = z.string().refine((val) => val.length > 10, {
+  error: (issue) => `${issue.input} is not more than 10 characters`,
+  });
+  ``
+  */}
+
+
+# Release notes
+
+After a year of active development: Zod 4 is now stable!
+
+## Stringbool
+
+```ts
+const strbool = z.stringbool();
+```
+"""
+
+# Cut down from Render's llms-full.txt (Docker on Render -> Deploy a
+# Prebuilt Docker Image): a code block opened inside a blockquote
+# (``>    ```) and closed outside it.
+RENDER_BLOCKQUOTE_FENCE = """\
+# Docker on Render
+
+> *To run multiple commands, provide them to `/bin/sh -c`.*
+>
+>    For example, here's a *Docker Command* for a Django service:
+>
+>    ```
+   /bin/sh -c python manage.py migrate && gunicorn myapp.wsgi:application
+   ```
+>
+>    If your Docker image includes Bash, you can use `/bin/bash -c` instead.
+
+Note that you can't customize the command that Render uses to build your image.
+
+
+# Deploy a Prebuilt Docker Image
+
+You can deploy a prebuilt Docker image to any of the following Render service types.
+
+## Image requirements
+
+The image must be built for linux/amd64.
+"""
+
+
+class SplitH1KeepsPagesAfterBrokenFenceTest(unittest.TestCase):
+    """An H1 page after a code block whose closer is lost (inside an MDX
+    comment) or written outside the blockquote that opened it stays a page
+    of its own instead of being folded into the page before it."""
+
+    def _docs(self, text: str) -> list[dict]:
+        return generic.split_documents(_lines(text), _profile(split="h1"))
+
+    def test_mdx_comment_end_closes_block_opened_inside_it(self):
+        docs = self._docs(ZOD_MDX_COMMENT_UNCLOSED)
+        self.assertEqual([d["title"] for d in docs], ["Migration guide", "Release notes"])
+        # the next page's sections are its own, not the previous page's
+        self.assertEqual([s["title"] for s in _common.extract_sections(docs[1]["body_lines"])],
+                         ["Stringbool"])
+
+    def test_blockquote_fence_does_not_swallow_next_h1(self):
+        docs = self._docs(RENDER_BLOCKQUOTE_FENCE)
+        self.assertEqual([d["title"] for d in docs],
+                         ["Docker on Render", "Deploy a Prebuilt Docker Image"])
+        self.assertEqual([s["title"] for s in _common.extract_sections(docs[1]["body_lines"])],
+                         ["Image requirements"])
+
+    def test_unclosed_quoted_fence_ends_with_the_blockquote(self):
+        """CommonMark: a block opened inside a blockquote ends when the
+        blockquote ends (a truly blank line), closer or not."""
+        cases = {
+            "no closer": "> ```js\n> foo()\n",
+            "no closer, later fence pair": "> ```\n> foo\n\nText\n\n```\nx\n```\n",
+            "prose that looks like a fence": "> ``` starts a code block\n",
+        }
+        for label, middle in cases.items():
+            with self.subTest(label):
+                docs = self._docs("# P1\n" + middle + "\n# P2\nbody\n")
+                self.assertEqual([d["title"] for d in docs], ["P1", "P2"])
+
+
 class ProfileValidationTest(unittest.TestCase):
     def load(self, data) -> tuple[int, str]:
         with tempfile.TemporaryDirectory() as tmp:
@@ -558,11 +653,47 @@ class PresetsTest(unittest.TestCase):
             raw = json.load(f)["sources"]
         presets = generic._read_sources_file(generic.PRESETS_FILE)
         self.assertEqual(set(presets), set(raw))
+        # agent-plugins.org has no llms-full.txt (404): its llms.txt is the
+        # whole text (frontmatter per page, no links), so it is the one preset
+        # that points at an llms.txt
+        whole_text_llms_txt = {"agent-plugins"}
         for name, p in presets.items():
             with self.subTest(name):
                 self.assertTrue(p["url"].startswith("https://"), p["url"])
-                self.assertTrue(p["url"].endswith("/llms-full.txt"), p["url"])
+                tail = "/llms.txt" if name in whole_text_llms_txt else "/llms-full.txt"
+                self.assertTrue(p["url"].endswith(tail), p["url"])
+                if name in whole_text_llms_txt:
+                    # the url already is the llms.txt; an index_url would only
+                    # point at the same file again
+                    self.assertIsNone(p["index_url"])
                 self.assertTrue(p["description"])
+
+    def test_a_preset_index_url_is_the_llms_txt_next_to_its_llms_full_txt(self):
+        # index_url joins page URLs by title, so it must be the llms.txt of the
+        # same docs set as url: not a site root (a 2-level index), not another
+        # host. A site that moves is easy to half-update, and an old host that
+        # redirects hides it.
+        presets = generic._read_sources_file(generic.PRESETS_FILE)
+        with_index = {name: p for name, p in presets.items() if p["index_url"]}
+        self.assertTrue(with_index)
+        for name, p in with_index.items():
+            with self.subTest(name):
+                self.assertTrue(p["index_url"].endswith("/llms.txt"), p["index_url"])
+                self.assertEqual(p["index_url"].rsplit("/", 1)[0], p["url"].rsplit("/", 1)[0])
+
+    def test_browser_rendering_preset_follows_the_product_to_browser_run(self):
+        # The product was renamed and /browser-rendering/llms.txt redirects to
+        # /browser-run/. The old llms-full.txt is still served, but it is an
+        # older snapshot (47 pages, no URL inside the pages), so the preset
+        # (whose name users already use) must read the new location. The new
+        # file carries a URL in every page that has one, so it needs no
+        # index_url (an old one left behind would be a 301 to keep checking).
+        p = generic._read_sources_file(generic.PRESETS_FILE)["cloudflare-browser-rendering"]
+        self.assertEqual(p["url"], "https://developers.cloudflare.com/browser-run/llms-full.txt")
+        self.assertIsNone(p["index_url"])
+        # the current template carries each page's own URL
+        docs = generic.split_documents(_lines(CLOUDFLARE_LIKE), p)
+        self.assertEqual(docs[0]["url"], "https://example.com/product/index.md")
 
     def test_skill_source_table_matches_the_presets(self):
         # researching-library-docs lists the presets by hand (description and
@@ -583,6 +714,29 @@ class PresetsTest(unittest.TestCase):
         presets = set(generic._read_sources_file(generic.PRESETS_FILE))
         self.assertEqual(presets - named, set(), "presets missing from the skill's Step 0 table")
         self.assertEqual(named - presets, set(), "skill names a source that is not a preset")
+
+    def test_readme_host_list_matches_the_presets(self):
+        # The README lists every host the presets fetch from (one per line in
+        # a text block); the root README's Privacy table points at it, so a
+        # preset added or moved without the list misleads whoever decides the
+        # network egress.
+        from urllib.parse import urlsplit
+        readme = Path(generic.PRESETS_FILE).parents[1] / "README.md"
+        text = readme.read_text(encoding="utf-8")
+        m = re.search(r"\*\*取得先のホスト\*\*(?:(?!```).)*```text\n(.*?)```", text, re.S)
+        self.assertIsNotNone(m, "README lost the machine-readable host list")
+        listed = [line.strip() for line in m.group(1).splitlines() if line.strip()]
+        self.assertEqual(len(listed), len(set(listed)), "a host is listed twice")
+        with open(generic.PRESETS_FILE, encoding="utf-8") as f:
+            raw = json.load(f)["sources"]
+        fetched = set()
+        for p in raw.values():
+            for key in ("url", "index_url"):
+                if p.get(key):
+                    fetched.add(urlsplit(p[key]).hostname)
+        self.assertTrue(fetched)
+        self.assertEqual(fetched - set(listed), set(), "hosts the presets fetch from but the README omits")
+        self.assertEqual(set(listed) - fetched, set(), "hosts the README lists but no preset fetches from")
 
     def test_skill_description_stays_under_the_listing_cap(self):
         # Claude Code truncates description + when_to_use at 1,536 characters
@@ -638,6 +792,21 @@ INDEX = """\
 - [Basic Auth](https://example.com/docs/basic-auth)
 """
 
+# a site root whose llms.txt mostly links one llms.txt per product (a 2-level
+# index), plus a learning-track page that is a page after all
+TWO_LEVEL_INDEX = """\
+# Example Developers
+
+> Each product below links to its own llms.txt.
+
+## Documentation sets
+- [Sign in with Example](https://example.com/siwc/llms.txt): Quickstart and integration.
+- [Example API guides](https://example.com/api/llms.txt): Guides and endpoint reference.
+
+## Learning tracks
+- [Model optimization](https://example.com/tracks/model-optimization.md): Fine-tune and optimize models.
+"""
+
 
 class IndexJoinTest(unittest.TestCase):
     """index_url: page URLs from llms.txt by exact title."""
@@ -673,6 +842,157 @@ class IndexJoinTest(unittest.TestCase):
         self.assertEqual(generic.join_index_urls(docs, index), 0)
         self.assertEqual(docs[1]["url"], "")
 
+    # Cut from the real zod llms.txt (2026-10-04): every page entry is followed
+    # by entries for its sections (``?id=<slug>``), and a section can share
+    # a page's title (Codecs, Ecosystem, Versioning).
+    ZOD_INDEX_CUT = (
+        "- [Defining schemas](https://zod.dev/api): Complete API reference\n"
+        "- [Codecs](https://zod.dev/api?id=codecs)\n"
+        "- [Codecs](https://zod.dev/codecs): Bidirectional transformations with encode and decode\n"
+        "- [Inverting codecs](https://zod.dev/codecs?id=inverting-codecs)\n"
+        "- [Codecs](https://zod.dev/codecs?id=codecs)\n"
+        "- [Ecosystem](https://zod.dev/ecosystem): Overview of the Zod ecosystem\n"
+        "- [Ecosystem](https://zod.dev/?id=ecosystem)\n"
+        "- [Versioning](https://zod.dev/v4?id=versioning)\n"
+        "- [Versioning](https://zod.dev/v4/versioning): Versioning strategy\n"
+        "- [Versioning](https://zod.dev/v4/versioning?id=versioning)\n"
+    )
+
+    def join_titles(self, titles: list, index_text: str) -> dict:
+        corpus = "".join(f"# {t}\n\nBody of {t}.\n\n" for t in titles)
+        docs = generic.split_documents(_lines(corpus), _profile(split="h1"))
+        generic.join_index_urls(docs, _lines(index_text))
+        return {d["title"]: d["url"] for d in docs}
+
+    def test_page_entry_wins_over_section_anchor_entries(self):
+        got = self.join_titles(["Defining schemas", "Codecs", "Ecosystem", "Versioning"], self.ZOD_INDEX_CUT)
+        self.assertEqual(got, {
+            "Defining schemas": "https://zod.dev/api",
+            "Codecs": "https://zod.dev/codecs",
+            "Ecosystem": "https://zod.dev/ecosystem",
+            "Versioning": "https://zod.dev/v4/versioning",
+        })
+
+    # (index entries for one title, expected URL). A page entry is a URL with
+    # neither ? nor #: exactly one of them wins over any anchors; none or two
+    # or more keeps the old rule (one candidate: used; several: no guess).
+    SECTION_CASES = {
+        "query anchor only, alone": (["https://e.com/a?id=x"], "https://e.com/a?id=x"),
+        "fragment anchor only, alone": (["https://e.com/a#x"], "https://e.com/a#x"),
+        "two query anchors only": (["https://e.com/a?id=x", "https://e.com/b?id=x"], ""),
+        "query and fragment anchors only": (["https://e.com/a?id=x", "https://e.com/a#x"], ""),
+        "page plus query anchor": (["https://e.com/a", "https://e.com/a?id=x"], "https://e.com/a"),
+        "page plus fragment anchor": (["https://e.com/a#x", "https://e.com/a"], "https://e.com/a"),
+        "page plus bare question mark": (["https://e.com/a", "https://e.com/a?"], "https://e.com/a"),
+        "page plus bare hash": (["https://e.com/a", "https://e.com/a#"], "https://e.com/a"),
+        "two pages": (["https://e.com/a", "https://e.com/b"], ""),
+        "two pages plus anchor": (["https://e.com/a", "https://e.com/b", "https://e.com/a?id=x"], ""),
+    }
+
+    def test_section_anchor_entries_only_when_exactly_one_page_entry(self):
+        for label, (urls, expected) in self.SECTION_CASES.items():
+            with self.subTest(label):
+                index = "".join(f"- [Topic]({u})\n" for u in urls)
+                self.assertEqual(self.join_titles(["Topic"], index)["Topic"], expected)
+
+    def test_anchor_rule_does_not_cross_titles(self):
+        # an anchor entry titled like another page's title does not give that
+        # page a URL, and a page entry of one title does not settle another
+        index = ("- [Alpha](https://e.com/alpha)\n- [Beta](https://e.com/alpha?id=beta)\n"
+                 "- [Beta](https://e.com/beta?id=beta)\n")
+        got = self.join_titles(["Alpha", "Beta"], index)
+        self.assertEqual(got, {"Alpha": "https://e.com/alpha", "Beta": ""})
+
+    def test_page_entry_still_needs_a_single_page_with_that_title(self):
+        docs = generic.split_documents(_lines("# Codecs\n\nx\n\n# Codecs\n\ny\n"), _profile(split="h1"))
+        self.assertEqual(generic.join_index_urls(docs, _lines(self.ZOD_INDEX_CUT)), 0)
+
+    def test_cli_shows_the_page_url_for_a_title_that_has_section_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sources = Path(tmp, "s.json")
+            sources.write_text(json.dumps({"sources": {"site": {
+                "url": "https://example.com/llms-full.txt", "split": "h1",
+                "index_url": "https://example.com/llms.txt"}}}), encoding="utf-8")
+            corpus = Path(tmp, "full.txt")
+            corpus.write_text("# Codecs\n\nBody.\n\n# Ecosystem\n\nBody.\n", encoding="utf-8")
+            index = Path(tmp, "llms.txt")
+            index.write_text(self.ZOD_INDEX_CUT, encoding="utf-8")
+            code, out, err = _loader.run_cli(generic, [
+                "parse-llms-txt.py", "fetch-index", "--source", "site", "--sources-file", str(sources),
+                "--cache-dir", tmp, "--file", str(corpus), "--index-file", str(index)])
+        self.assertEqual(code, 0, err)
+        self.assertIn("    URL: https://zod.dev/codecs\n", out)
+        self.assertIn("    URL: https://zod.dev/ecosystem\n", out)
+        self.assertNotIn("?id=", out)
+
+    # Entries that link an llms.txt-family file (another index, a full-text
+    # export) are not pages: a page of the same title must not get that URL.
+    INDEX_FILES = {
+        "Per-product index": "https://example.com/siwc/llms.txt",
+        "Full-text export": "https://example.com/docs/llms-full.txt",
+        "Small export": "https://example.com/llms-small.txt",
+        "Context export": "https://example.com/llms-ctx-full.txt",
+        "Upper case": "https://example.com/docs/LLMS.TXT",
+        "With query": "https://example.com/docs/llms.txt?lang=en",
+        "With fragment": "https://example.com/docs/llms.txt#top",
+        "Trailing slash": "https://example.com/docs/llms.txt/",
+    }
+    # URLs that only look like an index file are pages and keep joining
+    PAGES_LIKE_INDEX_FILES = {
+        "Markdown twin": "https://example.com/docs/llms.txt.md",
+        "Other file name": "https://example.com/docs/not-llms.txt",
+        "No extension": "https://example.com/docs/llms",
+        "Directory": "https://example.com/llms.txt/intro",
+        "Host only": "https://llms.txt",
+    }
+
+    def join_by_title(self, url_by_title: dict) -> dict:
+        """Join an index of one entry per title against one page per title."""
+        index = _lines("".join(f"- [{title}]({url})\n" for title, url in url_by_title.items()))
+        corpus = "".join(f"# {title}\n\nBody of {title}.\n\n" for title in url_by_title)
+        docs = generic.split_documents(_lines(corpus), _profile(split="h1"))
+        generic.join_index_urls(docs, index)
+        return {d["title"]: d["url"] for d in docs}
+
+    def test_entries_linking_an_llms_txt_file_are_not_pages(self):
+        got = self.join_by_title(self.INDEX_FILES)
+        for title in self.INDEX_FILES:
+            with self.subTest(title):
+                self.assertEqual(got[title], "")
+
+    def test_urls_that_only_look_like_an_index_file_still_join(self):
+        got = self.join_by_title(self.PAGES_LIKE_INDEX_FILES)
+        for title, url in self.PAGES_LIKE_INDEX_FILES.items():
+            with self.subTest(title):
+                self.assertEqual(got[title], url)
+
+    def test_two_level_index_gives_no_llms_txt_url(self):
+        # index_url pointed at a site root whose llms.txt links other llms.txt
+        # files: no page gets one of those URLs. A learning-track entry that
+        # shares a title with a page still joins; that cannot be told apart
+        # from a real match, which is why the README says not to use a
+        # 2-level index as index_url.
+        corpus = "# Sign in with Example\n\nx\n\n# Example API guides\n\nx\n\n# Model optimization\n\nx\n"
+        docs = generic.split_documents(_lines(corpus), _profile(split="h1"))
+        joined = generic.join_index_urls(docs, _lines(TWO_LEVEL_INDEX))
+        self.assertEqual({d["title"]: d["url"] for d in docs}, {
+            "Sign in with Example": "",
+            "Example API guides": "",
+            "Model optimization": "https://example.com/tracks/model-optimization.md",
+        })
+        self.assertEqual(joined, 1)
+
+    def test_an_index_file_entry_does_not_make_a_page_title_ambiguous(self):
+        # the entry for the guide's own llms.txt is not a second candidate for
+        # the page "Guide": the page entry is the only one left
+        index = _lines(
+            "- [Guide](https://example.com/guide/llms.txt): the guide's own index\n"
+            "- [Guide](https://example.com/docs/guide.md): the guide page\n"
+        )
+        docs = generic.split_documents(_lines("# Guide\n\nx\n"), _profile(split="h1"))
+        self.assertEqual(generic.join_index_urls(docs, index), 1)
+        self.assertEqual(docs[0]["url"], "https://example.com/docs/guide.md")
+
     def cli(self, *extra, env=None):
         with tempfile.TemporaryDirectory() as tmp:
             sources = Path(tmp, "s.json")
@@ -692,12 +1012,12 @@ class IndexJoinTest(unittest.TestCase):
         with mock.patch.object(generic, "fetch_url", side_effect=AssertionError("fetched")):
             code, out, err = self.cli("--file", "{corpus}")
         self.assertEqual(code, 0, err)
-        self.assertNotIn("url:", out)
+        self.assertNotIn("URL:", out)
 
     def test_index_file_gives_urls_and_stays_in_the_hint(self):
         code, out, err = self.cli("--file", "{corpus}", "--index-file", "{index}")
         self.assertEqual(code, 0, err)
-        self.assertIn("url: https://example.com/docs/schemas", out)
+        self.assertIn("    URL: https://example.com/docs/schemas", out)
         self.assertIn("--index-file", out.strip().splitlines()[-1])
 
     def test_failed_index_fetch_only_warns(self):
@@ -749,6 +1069,17 @@ class CliTest(unittest.TestCase):
         self.assertIn("--sources-file", hint)
         self.assertIn("--file", hint)
         self.assertIn("URL: https://example.com/docs/install", out)
+
+    def test_every_subcommand_labels_the_page_url_URL(self):
+        # the label is the same everywhere (README / SKILL name it ``URL:``);
+        # fetch-index / search-index / search / search-content / sections
+        for argv in (("fetch-index",), ("search-index", "install"), ("search", "requirements"),
+                     ("search-content", "requirements"), ("sections", "install")):
+            with self.subTest(argv=argv):
+                code, out, err = self.run_cmd(*argv, "--source", "fm", "--file", str(self.fm_file))
+                self.assertEqual(code, 0, err)
+                self.assertRegex(out, r"(?m)^ +URL: https://example\.com/docs/install$")
+                self.assertNotRegex(out, r"(?m)^\s*url:")
 
     def test_pages_without_url_print_no_url_lines(self):
         code, out, _ = self.run_cmd("content", "schemas", "--source", "plain", "--file", str(self.h1_file))

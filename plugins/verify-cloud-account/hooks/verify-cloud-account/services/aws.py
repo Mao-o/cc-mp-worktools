@@ -147,6 +147,24 @@ SETUP_HINT = (
 # SCALAR_EQUIVALENT_DICT_KEY はいずれも宣言しない (builder は dict 自体を弾く)。
 ACCEPTS_DICT = False
 
+# プロジェクトごとの固定 (v0.19.0)。`AWS_PROFILE` を settings の `env` やディレクトリ
+# 単位の env ツールで設定すれば、そのディレクトリでは最初からその profile で動く。
+# 期待値が未登録でも profile がこの形で固定されていれば dispatcher は止めない。
+# 認証情報そのものを env に置く形 (`AWS_ACCESS_KEY_ID`) は固定とみなさない
+# (どのアカウントの鍵かが名前から読めず、置き忘れた鍵でも通ってしまう)。
+PIN_HINT = (
+    "AWS: profile をディレクトリごとに固定するには、環境変数 AWS_PROFILE を "
+    '.claude/settings.local.json の "env" か、ディレクトリ単位で環境変数を切り替える'
+    "ツールで設定してください (/verify-cloud-account:project-accounts)。"
+)
+
+
+def is_pinned(env, project_dir: str) -> bool:
+    """profile が環境変数で固定されているか (期待値が未登録のときの判定)。"""
+    e = os.environ if env is None else env
+    return bool(e.get("AWS_PROFILE", "").strip())
+
+
 _ROLE_ARN_ACCOUNT_RE = re.compile(r"^arn:aws[\w-]*:iam::(\d{12}):")
 
 

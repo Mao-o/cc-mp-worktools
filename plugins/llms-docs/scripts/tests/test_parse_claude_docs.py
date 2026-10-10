@@ -223,7 +223,7 @@ class SectionUrlAnchorSlashInTitleIntegrationTest(unittest.TestCase):
             "--page-ref", "hooks", "--cache-dir", self.tmp,
         ])
         self.assertEqual(code, 0, err)
-        self.assertIn("[https://example.com/hooks#cicd]", out)
+        self.assertIn("[https://example.com/hooks#ci-cd]", out)
         self.assertNotIn("#cd]", out)
 
     def test_search_anchor_uses_full_leaf_title(self):
@@ -232,7 +232,7 @@ class SectionUrlAnchorSlashInTitleIntegrationTest(unittest.TestCase):
             "--cache-dir", self.tmp,
         ])
         self.assertEqual(code, 0, err)
-        self.assertIn("[https://example.com/hooks#cicd]", out)
+        self.assertIn("[https://example.com/hooks#ci-cd]", out)
         self.assertNotIn("#cd]", out)
 
 
@@ -974,14 +974,16 @@ class ContentMaxCharsTruncationTest(unittest.TestCase):
             "0123456789 0123456789 0123456789 0123456789 0123456789\n",
         )
 
-    def test_content_longer_than_max_chars_is_truncated_with_narrow_hint(self):
+    def test_content_longer_than_max_chars_points_at_search_in_page(self):
         code, out, err = _loader.run_cli(parse_claude_docs, [
             "parse-claude-docs.py", "content", "0",
             "--cache-dir", self.tmp, "--max-chars", "20",
         ])
         self.assertEqual(code, 0, err)
         self.assertIn("chars truncated", out)
-        self.assertIn('narrow with parse-claude-docs.py content 0 "<heading_path>"', out)
+        # この page は見出しが無く、見出しでは絞れない: 本文内の検索の案内になる
+        self.assertIn("Next: parse-claude-docs.py search-content --page-ref 0 --context 0 ", out)
+        self.assertIn(" -- hooks\n", out)
         self.assertNotIn("0123456789 0123456789 0123456789 0123456789 0123456789", out)
 
     def test_narrow_hint_retains_both_source_and_file(self):
@@ -1005,8 +1007,8 @@ class ContentMaxCharsTruncationTest(unittest.TestCase):
         mock_urlopen.assert_not_called()
         self.assertEqual(code, 0, err)
         self.assertIn(
-            f'narrow with parse-claude-docs.py content 0 "<heading_path>" '
-            f"--source platform --file {snapshot}", out,
+            f"Next: parse-claude-docs.py search-content --page-ref 0 --context 0 "
+            f"--source platform --file {snapshot} -- doc\n", out,
         )
         self.assertNotIn("--cache-dir", out)  # --file makes it irrelevant
 

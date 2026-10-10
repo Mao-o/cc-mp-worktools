@@ -2912,7 +2912,7 @@ class TestGcloudLocalConfigRead(_LocalConfigBase):
         優先順位をエミュレートしない (取り違えた値で allow するより、CLI を
         呼んで gcloud 自身に決めさせる)。
         """
-        for name in ("CLOUDSDK_CORE_PROJECT", "CLOUDSDK_CORE_ACCOUNT",
+        for name in ("CLOUDSDK_CORE_DISABLE_PROMPTS", "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE",
                      "GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT"):
             with self.subTest(env=name):
                 env = self._env(CLOUDSDK_CONFIG=str(self.cfg_dir), **{name: "x"})
@@ -2921,6 +2921,58 @@ class TestGcloudLocalConfigRead(_LocalConfigBase):
                 ) as run:
                     self.assertIsNone(gcloud.verify("my-proj", "/p", env=env))
                 self.assertTrue(run.called, f"{name} があるのにローカル読取で済ませている")
+
+    def test_core_property_env_overrides_config_file(self):
+        """`CLOUDSDK_CORE_ACCOUNT` / `CLOUDSDK_CORE_PROJECT` は設定ファイルより優先して
+        ローカル読取でもエミュレートする (v0.19.0。gcloud の実測と同じ優先順位)。"""
+        (self.cfg_dir / "configurations" / "config_default").write_text(
+            "[core]\nproject = file-proj\naccount = file@example.com\n",
+            encoding="utf-8",
+        )
+        env = self._env(
+            CLOUDSDK_CONFIG=str(self.cfg_dir),
+            CLOUDSDK_CORE_ACCOUNT="env@example.com",
+            CLOUDSDK_CORE_PROJECT="env-proj",
+        )
+        with mock.patch("subprocess.run") as run:
+            self.assertIsNone(
+                gcloud.verify(
+                    {"project": "env-proj", "account": "env@example.com"}, "/p", env=env
+                )
+            )
+        self.assertFalse(run.called)
+
+    def test_core_property_env_mismatch_rechecks_with_cli(self):
+        """env の値が期待値と違うときは allow せず、CLI で取り直してから決める。
+        案内は env の直し方と --account で、効かない gcloud config set は出さない。"""
+        (self.cfg_dir / "configurations" / "config_default").write_text(
+            "[core]\naccount = want@example.com\n", encoding="utf-8"
+        )
+        env = self._env(
+            CLOUDSDK_CONFIG=str(self.cfg_dir), CLOUDSDK_CORE_ACCOUNT="other@example.com"
+        )
+        with mock.patch(
+            "subprocess.run", return_value=_fake_run(stdout="other@example.com\n")
+        ) as run:
+            err = gcloud.verify({"account": "want@example.com"}, "/p", env=env)
+        self.assertTrue(run.called)
+        self.assertIn("CLOUDSDK_CORE_ACCOUNT", err)
+        self.assertNotIn("gcloud config set", err)
+        self.assertIn("--account want@example.com", err)
+
+    def test_empty_core_property_env_unsets_config_value(self):
+        """空文字の env は設定ファイルの値を打ち消す (gcloud は未設定として扱う)。"""
+        (self.cfg_dir / "configurations" / "config_default").write_text(
+            "[core]\naccount = want@example.com\n", encoding="utf-8"
+        )
+        env = self._env(CLOUDSDK_CONFIG=str(self.cfg_dir), CLOUDSDK_CORE_ACCOUNT="")
+        with mock.patch(
+            "subprocess.run", return_value=_fake_run(stdout="(unset)\n")
+        ) as run:
+            err = gcloud.verify({"account": "want@example.com"}, "/p", env=env)
+        self.assertTrue(run.called)
+        self.assertIn("設定されていません", err)
+        self.assertNotIn("gcloud config set", err)
 
     def test_home_override_falls_back_to_cli(self):
         """`HOME=<other> gcloud ...` では hook 側の設定ファイルで allow しない。

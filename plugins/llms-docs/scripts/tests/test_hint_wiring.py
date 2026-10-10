@@ -57,6 +57,10 @@ REQUIRED_HELPER = "corpus_hint_args"
 COMMANDS_MODULE = "_commands.py"
 RENDER_PREFIX = "render_"
 HINT_PARAM = "hint_args"
+# Other option tuples a renderer forwards into a hint of its own: the
+# ``search-index`` hint and the hint that points at the other source. The
+# caller builds them, so the same obligation applies at the call site.
+EXTRA_HINT_PARAMS = ("index_hint_args", "alt_hint_args")
 
 
 def _called_names(node: ast.AST) -> set:
@@ -111,11 +115,31 @@ def _carries_helper(value: ast.AST, carriers: set) -> bool:
     return isinstance(value, ast.Name) and value.id in carriers
 
 
+def _is_none(value: ast.AST) -> bool:
+    return isinstance(value, ast.Constant) and value.value is None
+
+
+def _branches(value: ast.AST) -> list:
+    """The values *value* can take: both arms of a conditional expression
+    (recursively), else *value* itself."""
+    if isinstance(value, ast.IfExp):
+        return _branches(value.body) + _branches(value.orelse)
+    return [value]
+
+
 def _call_is_wired(call: ast.Call, carriers: set) -> bool:
     if _is_render_call(call):
-        return any(
+        if not any(
             kw.arg == HINT_PARAM and _carries_helper(kw.value, carriers)
             for kw in call.keywords
+        ):
+            return False
+        # An extra option tuple that can be something other than None must
+        # carry the helper in every arm that is not None.
+        return all(
+            _is_none(arm) or _carries_helper(arm, carriers)
+            for kw in call.keywords if kw.arg in EXTRA_HINT_PARAMS
+            for arm in _branches(kw.value)
         )
     for arg in call.args:
         if not isinstance(arg, ast.Starred):
@@ -224,9 +248,14 @@ class NextHintCorpusArgsWiringTest(unittest.TestCase):
                 if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
                     continue
                 if call.func.id == HINT_FUNC:
+                    # ``index_hint_args`` / ``alt_hint_args`` are the same
+                    # obligation for the search-index hint and the hint that
+                    # points at another source: the caller builds them (with
+                    # ``corpus_hint_args``, checked at the call site), the
+                    # renderer forwards them.
                     ok = any(
                         isinstance(a, ast.Starred) and isinstance(a.value, ast.Name)
-                        and a.value.id == HINT_PARAM
+                        and a.value.id in (HINT_PARAM, *EXTRA_HINT_PARAMS)
                         for a in call.args
                     )
                 elif call.func.id == "print_subsection_hints":

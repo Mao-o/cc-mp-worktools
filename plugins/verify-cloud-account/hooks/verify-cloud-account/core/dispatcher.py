@@ -10,7 +10,9 @@ import sys
 import time
 from pathlib import Path
 
-from core import auto_switch, budget, cache, cli_options, mode, output, paths, shell_word, tiers
+from core import (
+    auto_switch, budget, cache, cli_options, mode, output, paths, shell_word, tiers, workdir,
+)
 from core.command_parser import extract_candidates
 from services import ALL as SERVICES
 
@@ -687,6 +689,103 @@ def _auto_switch(
     return outcome
 
 
+# 起動リポジトリの外で走るセグメントの deny (v0.19.0)。hook は**起動したときの env**
+# (+ settings の `env`) と、起動したディレクトリの期待値で検証する。別のリポジトリで
+# 走るコマンドは、そのリポジトリで意図されたアカウント (期待値も、ディレクトリ単位の
+# env ツールが切り替えるはずの env も) を hook から照合できない。移動先のパスは
+# 文面に出さない (`cd` の引数はコマンド由来で、改行などで偽の行を差し込めるため)。
+def _outside_error(root: Path | None, *, stops: bool) -> str:
+    where = f" ({root}) " if root is not None else ""
+    head = (
+        f"起動したリポジトリ{where}の外で実行されるコマンドです。"
+        "この hook は、セッションを起動したディレクトリの期待値と環境変数で照合するため、"
+        "別のリポジトリ (または移動先を読めない cd の後) での実行は照合できません。"
+    )
+    if not stops:
+        return head + " (リモート read のみのコマンドなので実行は止めません)"
+    return (
+        head
+        + "\nそのリポジトリで Claude Code を起動し直して実行してください "
+        "(Subagent に任せても、hook と Bash の環境変数は変わりません)。"
+    )
+
+
+def _target_dirs(cands, seg_dirs: dict) -> set:
+    """target の各セグメントが走るディレクトリ (None = 静的に決められない)。"""
+    dirs: set = set()
+    for orig, _norm in cands:
+        dirs |= seg_dirs.get(orig, {None})
+    return dirs
+
+
+def _touches_identity(svc, names) -> bool:
+    """`names` (環境変数名の集合。ANY_ENV を含みうる) が service の identity env に当たるか。"""
+    if workdir.ANY_ENV in names:
+        return True
+    exact = getattr(svc, "IDENTITY_ENV_VARS", frozenset())
+    prefixes = getattr(svc, "IDENTITY_ENV_PREFIXES", ())
+    return any(n in exact or n.startswith(tuple(prefixes)) for n in names)
+
+
+def _pinned(
+    svc, inline_env: dict, cands, env_changes: dict, directory: str, trace: dict | None
+) -> bool:
+    """期待値の代わりに、公式のディレクトリ単位の固定で決まっているか (v0.19.0)。
+
+    service が `is_pinned` を宣言していなければ False (gh / kubectl は固定の仕組みが
+    無いので登録を促す)。判定は **hook プロセスの env だけ**で行う: コマンド行頭の
+    インライン env (`AWS_PROFILE=x aws ...`) や、同じコマンドの中の `export` /
+    `unset` / 代入 / `source` は、ディレクトリ単位の固定ではなくその実行だけの指定で、
+    これを固定とみなすと未登録の deny を行頭の 1 語で抜けられる (その値でアカウントが
+    決まるのに、何とも照合しない)。identity env をそうして変えている target は固定
+    されていないとみなす。判定の例外も固定されていない側 (= 従来どおり deny) に倒す。
+    """
+    fn = getattr(svc, "is_pinned", None)
+    if fn is None:
+        return False
+    changed: set = set()
+    for orig, _norm in cands:
+        changed |= env_changes.get(orig, {workdir.ANY_ENV})
+    overridden = {
+        k for k, v in (inline_env or {}).items() if os.environ.get(k) != v
+    }
+    if _touches_identity(svc, changed | overridden):
+        pinned = False
+    else:
+        try:
+            pinned = bool(fn(dict(os.environ), directory))
+        except Exception:  # noqa: BLE001
+            pinned = False
+    if trace is not None:
+        trace.setdefault("pinned", {})[_service_name(svc)] = pinned
+    return pinned
+
+
+def _all_pin_actions(cands, svc) -> bool:
+    """target の全セグメントが、未登録時に案内する固定の操作 (`firebase use <x>`) か。
+
+    service が `is_pin_action` を宣言していなければ False。
+    """
+    fn = getattr(svc, "is_pin_action", None)
+    if fn is None:
+        return False
+    return all(fn(norm) for _orig, norm in cands)
+
+
+def _unregistered_error(svc, where: str, *, stops: bool) -> str:
+    """期待値が未登録で、ディレクトリ単位の固定も無いときの文。"""
+    pin_hint = getattr(svc, "PIN_HINT", "")
+    head = f'{where} に "{svc.ACCOUNT_KEY}" キーがありません。' + (
+        "期待値が無いと照合できないため deny します。\n"
+        if stops
+        else "期待値が無いと照合できません (リモート read のみの"
+        "コマンドなので実行は止めません)。\n"
+    )
+    if pin_hint:
+        return head + pin_hint + "\nまたは、期待値を登録して照合させます:\n" + _missing_key_hint(svc.ACCOUNT_KEY)
+    return head + _missing_key_hint(svc.ACCOUNT_KEY)
+
+
 def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
     """`dispatch()` の実処理。`trace` は `VERIFY_CLOUD_ACCOUNT_DEBUG=1` 時のみ
     非 None で、判定表そのものには影響しない (観測専用)。"""
@@ -695,6 +794,11 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         return None
 
     targets, switching, segments = _analyze_command(command, trace)
+    # 各セグメントが走るディレクトリ (Bash の cwd + コマンド中の cd) と起動リポジトリ。
+    # 起動リポジトリの外で走る target は照合せずに止める (`_outside_error`)。
+    launch_root = workdir.launch_root(project_dir)
+    seg_dirs = workdir.segment_dirs(command, cwd or project_dir)
+    env_changes = workdir.segment_env_changes(command)
     # アカウント状態を変えうるコマンド (切替 / ログイン / ログアウト) は、実行前
     # (PreToolUse) の時点で当該 service の成功 cache を全て破棄する。実行後に
     # 破棄する hook は無いので、実行前に消しておくことで実行後の最初の write が
@@ -746,6 +850,38 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         return _decide(pre_file_mode, body, mode_notes)
 
     if accounts_path is None:
+        # 期待値のファイルがどこにも無くても、起動リポジトリの中でディレクトリ単位の
+        # 固定が効いている service は止めない (v0.19.0)。外で走る target は固定の有無を
+        # 判定できない (hook の env は起動ディレクトリのもの) ので止める。
+        outside_problems: list[str] = []
+        remaining = []
+        for t in targets:
+            svc, cands, inline_env, _ctx, tier = t
+            dirs = _target_dirs(cands, seg_dirs)
+            stops_t = tier != tiers.QUERY
+            if not all(workdir.is_inside(d, launch_root) for d in dirs):
+                outside_problems.append(_outside_error(launch_root, stops=stops_t))
+                continue
+            if _pinned(
+                svc, inline_env, cands, env_changes, next(iter(dirs)), trace
+            ) or _all_pin_actions(cands, svc):
+                continue
+            remaining.append(t)
+        if not remaining:
+            if outside_problems:
+                return _decide(
+                    pre_file_mode,
+                    "\n\n".join(dict.fromkeys(outside_problems)),
+                    mode_notes,
+                    query_warn=all(
+                        tier == tiers.QUERY for *_r, tier in targets
+                    ),
+                )
+            return _notes_only(mode_notes)
+        targets = remaining
+        query_only = all(tier == tiers.QUERY for _svc, *_r, tier in targets) and all(
+            "リモート read のみ" in p for p in outside_problems
+        )
         hints = [getattr(svc, "SETUP_HINT", "") for svc, *_rest in targets]
         hint_block = "\n".join(h for h in hints if h)
         # 文面は tier で分ける。QUERY だけのときは allow するので、そこに
@@ -765,6 +901,10 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         )
         if hint_block:
             msg += "\n\n" + hint_block
+        pin_hints = [getattr(svc, "PIN_HINT", "") for svc, *_rest in targets]
+        pin_block = "\n".join(dict.fromkeys(h for h in pin_hints if h))
+        if pin_block:
+            msg += "\n\n期待値を登録する代わりに、ディレクトリごとに固定することもできます:\n" + pin_block
         # グローバル既定 (`$HOME/.claude/verify-cloud-account/accounts.local.json`) を
         # 置けば全プロジェクトの既定として使えることも案内する。user scope で
         # install した直後に「未設定のプロジェクトだけが deny される」状態から
@@ -775,6 +915,8 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
                 f"\n\n全プロジェクト共通の既定にするには {global_path} を"
                 "作成してください (プロジェクト側の設定が優先されます)。"
             )
+        if outside_problems:
+            msg = "\n\n".join(dict.fromkeys(outside_problems)) + "\n\n" + msg
         # 未設定はファイルが**どこにも無い**状態なので、"$readonly" で従来挙動に
         # 戻す余地はない (読むファイルが無い) → 既定 (warn) で判断する。
         return _decide(pre_file_mode, msg, mode_notes, query_warn=query_only)
@@ -861,18 +1003,19 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
             else errors
         )
         stops = problems is errors
+        dirs = _target_dirs(cands, seg_dirs)
+        if not all(workdir.is_inside(d, launch_root) for d in dirs):
+            problems.append(_outside_error(launch_root, stops=stops))
+            continue
         entry = accounts.get(svc.ACCOUNT_KEY)
         if entry is None or entry == "":
-            problems.append(
-                f'{accounts_path} に "{svc.ACCOUNT_KEY}" キーがありません。'
-                + (
-                    "期待値が無いと照合できないため deny します。\n"
-                    if stops
-                    else "期待値が無いと照合できません (リモート read のみの"
-                    "コマンドなので実行は止めません)。\n"
-                )
-                + _missing_key_hint(svc.ACCOUNT_KEY)
-            )
+            # 期待値が未登録でも、公式のディレクトリ単位の固定 (env / firebase use) が
+            # 効いていれば止めない (v0.19.0)。gh / kubectl は固定の仕組みが無いので登録を促す。
+            if _pinned(
+                svc, inline_env, cands, env_changes, next(iter(dirs)), trace
+            ) or _all_pin_actions(cands, svc):
+                continue
+            problems.append(_unregistered_error(svc, str(accounts_path), stops=stops))
             continue
 
         if not isinstance(entry, (str, dict)):

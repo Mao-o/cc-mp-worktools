@@ -36,7 +36,7 @@ paths:
   - "**/hooks.json"
 metadata:
   author: mao
-  version: "3.4.6"
+  version: "3.5.0"
 ---
 
 # Claude ドキュメント Progressive Loader
@@ -53,13 +53,40 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content <doc_idx> "
 ```
 
 迷ったら `search` から始める。両 source 横断は `--source both`、Anthropic API は `--source platform`。詳細は下記「推奨フロー」以降。
+`search` / `search-content` の末尾の `Next:` は上位ヒットの `doc_idx` と heading_path が埋まっている (そのまま実行できる)。
+
+## 調査の進め方 (手数の目安)
+
+- **論点が複数あるとき**は、最初に論点を番号付きで列挙し、1 つずつ順に処理して、論点ごとに結論
+  (または「ドキュメントに記載なし」) を返す。複数の論点を 1 回の `search` に詰めない
+- 1 論点の基本は **`search` 1 回 → `content` 1〜2 回**。`search` の末尾の `Next:` 行は `doc_idx` と見出しが
+  埋まったコマンドなので、見出しを手で写さずそのまま実行する (先頭の `parse-claude-docs.py` は
+  `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py"` に置き換える)
+- 同じ論点で `search` を **3 回外したら**、言い換えを続けない。`search-index` / `sections` で構造から当たるか、
+  「ドキュメントに記載なし」として返す
+- **`--max-chars 0`** は、出力に `... (N chars truncated; ...)` が出て、既定の上限 (24000 字) で
+  切れたと確かめてからだけ使う。`| head` / `| grep` で出力を切らず、`--max-chars` と `sections` で絞る
+  (パイプで切ると末尾の `Next:` が見えなくなる)
+- この Skill の実行中 (fork の中) では、同じ Skill をもう呼ばない (`already executing in this forked
+  context` になる)。続きは同梱のスクリプトを直接実行する
+
+## Skill を呼べない文脈 (subagent など)
+
+general-purpose の subagent など、Skill ツールを使えない文脈では、公式ドキュメントを WebFetch する前に、
+同梱のスクリプトを直接実行する (WebFetch は要約モデル経由で field が抜ける)。
+
+1. パスは `${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py`。`${CLAUDE_PLUGIN_ROOT}` が空の環境では、plugin の展開先 (`~/.claude/plugins/` の下) を探す。
+   ディレクトリを指定して追加した marketplace は展開先へコピーされず、その場で読まれるので、見つからなければ
+   `claude plugin marketplace list` で `Source: Folder (<dir>)` と出る marketplace の `<dir>` の下の
+   `plugins/llms-docs/scripts/parse-claude-docs.py` を探す
+2. `python3 <path> search "<キーワード>"` を実行し、出力末尾の `Next:` の先頭を `python3 <path>` に置き換えて本文を取る
 
 ## ソース
 
 | ソース | `--source` | ドキュメント | 規模 |
 |--------|-----------|-------------|------|
-| Claude Code | `code` (デフォルト) | code.claude.com/docs | ~64p / 1.4MB |
-| Claude Developer Platform | `platform` | platform.claude.com/docs | ~699p / 40MB |
+| Claude Code | `code` (デフォルト) | code.claude.com/docs | ~220p / 8.7MB |
+| Claude Developer Platform | `platform` | platform.claude.com/docs | ~634p / 35.7MB |
 
 スクリプトパス: `${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py`
 
@@ -88,13 +115,13 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" search "<キーワ�
 
 `<キーワード>` は 2〜3 語のスペース区切り（例: `"PostCompact input compact_summary"`）。
 
-出力は `[doc_idx] タイトル` + `URL` + 本文ヒットセクション (heading_path 付きスニペット)。並び順は本文 hits 数 → index score (title/description 一致) の順で、Changelog / Release notes は自動で末尾に deprioritize される (`--include-changelog-priority` で解除)。ai-sdk / firebase の `search` も同じ並び順。表示しきれなかった本文ヒットがある場合は `Other sections with hits (not shown):` として heading_path とヒット数の一覧が末尾に表示される。
+出力は `[doc_idx] タイトル` + `URL` + 本文ヒットセクション (heading_path 付きスニペット)。並び順は全キーワードが揃うか → ページタイトルと見出し (祖先の見出しを含む) が全キーワードを語として含むか (キーワードが 1 語のときはページの順に使わない) → 本文 hits 数 → index score (title/description 一致) の順で (ページ内の節は、見出しが全キーワードを含む節の中で、自分の見出しがあって初めて全語が揃う節を、見出しを受け継ぐだけの子孫より先に出し、その後ヒット数の順)、Changelog / Release notes は自動で末尾に deprioritize される (`--include-changelog-priority` で解除)。ai-sdk / firebase の `search` も同じ並び順 (firebase には下記の `[body-only]` の追加は無い)。index の上位 N 件に本文ヒットが 1 件も無いときは、全文検索のヒットを `--top-n` 件まで (全キーワードが揃うページを先に、部分一致のページも含めて) `[body-only]` として足す。上位 N 件がどれも部分一致 (`[partial match]`) のときは、全文検索で全キーワードが 1 セクションに揃うページを最大 2 件探して `[body-only]` として足す (既存の行は残り、`Next:` には index の最上位候補の行も残る。全キーワードが揃う候補が Changelog / Release notes だけのときも探す。全キーワードが揃う候補があっても、どの候補もページタイトルと見出しに全キーワードを語として含まなければ、含むページを同じく最大 2 件足す。キーワードが 1 語のときは足さない)。足したページは末尾に追記されるのではなく、`search` の並び順の中に入る (本文ヒットのあるページは本文ヒットの無い index の候補より上に並ぶので、1 位になることが多い。その index の候補は `(no body hits — index match only)` で下位に回る)。表示しきれなかった本文ヒットがある場合は `Other sections with hits (not shown):` として heading_path とヒット数の一覧が末尾に表示される。
 
-各 `Section:` 行には `[<URL>#<anchor>]` が付く (末尾見出しタイトルから生成したベストエフォートの GitHub/Mintlify 互換 slug)。引用元を答えるときはこの URL#anchor をそのまま使ってよい — 同名見出しがページ内に複数ある場合の `-1`/`-2` 連番までは再現しない best-effort である点に注意。見出しタイトル自体に `/` を含む場合 (例: `## CI/CD`) も正しく slug 化される。
+各 `Section:` 行には `[<URL>#<anchor>]` が付く (末尾見出しタイトルから生成したベストエフォートの Mintlify 互換 slug)。引用元を答えるときはこの URL#anchor をそのまま使ってよい — 同名見出しがページ内に複数ある場合の `-1`/`-2` 連番までは再現しない best-effort である点に注意。見出しタイトル自体に `/` を含む場合 (例: `## CI/CD`) は `ci-cd` にする (ページによっては `/` を残す id があり、一致しない)。
 
-**anchor の正規化範囲 (これ以外は best-effort)**: slug は見出しのレンダリング後テキストから作る。正規化するのは インライン / 参照形式リンク (`[text](url)` / `[text][ref]`)・画像 (alt を採用)・脚注マーカー・HTML タグ・HTML 実体参照・コードスパン (中身は逐語)・`*` `~` と単語境界の `_` 強調記号。同名見出しの連番、ページ側の独自 ID 指定、上記以外の記法は再現しない。anchor が解決しない場合は URL 本体 (`#` の前) でページを開き、見出しを目視で探す。
+**anchor の正規化範囲 (これ以外は best-effort)**: slug は見出しのレンダリング後テキストから作る。英数字と `_` 以外の記号の連続は 1 つの `-` にする (`loop.md` は `loop-md`、`/security-review` は `security-review`)。アポストロフィは削る (`Can't` は `cant`)。正規化するのは インライン / 参照形式リンク (`[text](url)` / `[text][ref]`)・画像 (alt を採用)・脚注マーカー・HTML タグ・HTML 実体参照・コードスパン (中身は逐語)・`*` `~` と単語境界の `_` 強調記号。同名見出しの連番、ページ側の独自 ID 指定、上記以外の記法は再現しない。anchor が解決しない場合は URL 本体 (`#` の前) でページを開き、見出しを目視で探す。
 
-`--source both` のときは結果に `[code]` / `[platform]` プレフィックスが付き、`doc_idx` は **source 内でユニーク**なので、follow-up の `content` / `sections` 呼び出しには `--source <code|platform>` を明示する。
+`--source both` を受けるのは `search` だけ (`search-content` / `search-index` / `content` / `sections` / `fetch-index` は 1 source ずつ)。`--source both` のときは結果に `[code]` / `[platform]` プレフィックスが付き、`doc_idx` は **source 内でユニーク**なので、follow-up の `content` / `sections` 呼び出しには `--source <code|platform>` を明示する。
 
 ### Step 2: 該当セクションの本文を取得
 
@@ -108,7 +135,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content <doc_idx>
 
 `content` は **サブセクション一覧** (`Subsections of '...'`) と次の `content` 呼び出し例を、本文の**前後両方**（metadata header 直後 と 本文末尾）に自動で出力する。長いページで本文が途中で切り詰められても（ターミナル/ツール側の出力上限）前側のヒントは必ず見える。さらに深掘りする際は `sections` を再度呼ばずに、そのまま次の `content` クエリに heading_path を渡せる。出力に含めたくない場合は `--no-subsection-hints` を付ける。
 
-本文が長い場合は既定で 24000 文字に切り詰められ、`... (N chars truncated; narrow with ...)` を出す。`--max-chars 0` で無制限にできるが、Platform ページ (平均 ~38KB) は Bash tool の出力上限に達しやすいので通常は既定のままにする。
+本文が長い場合は既定で 24000 文字に切り詰められ、`... (N chars truncated; narrow with ...)` を出す。子見出しの無い節や見出しの無いページ (絞る先が無い) では代わりに、仮置きの語 (節の見出しかページタイトル) を名指しする注記と `Next: ... search-content --page-ref N --context 0 -- <仮置きの語>` を出す (語は常に `--` の後ろに置くので、`--resume` のような語に差し替えても打てる)。そのまま実行でき、注記の語を探したい語に差し替えて使う。`--max-chars 0` で無制限にできるが、Platform ページ (平均 ~56KB) は Bash tool の出力上限に達しやすいので通常は既定のままにする。
 
 本文中の Markdown リンク (`[Text](/en/...)` や `[Text](https://code.claude.com/...)`) のうち同 source 内の既知ページを指すものには、自動で `→ [doc_idx N]` のアノテーションが付く。follow-up の `content` で page を切り替える時の手数を減らす。コードフェンス内と Markdown テーブル行は対象外。抑制したい場合は `--no-link-annotations`。
 
@@ -145,7 +172,9 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-claude-docs.py" content <doc_idx>
 | URL slug | `hooks`, `agent-sdk/hooks` | `source_url` の末尾パス成分と一致するページを検索 |
 | 完全 URL | `https://code.claude.com/docs/en/hooks` | `source_url` を正規化して厳密一致 |
 
-slug が複数ページに一致する場合は曖昧エラーで候補リストが表示される。より長い slug (`agent-sdk/hooks`) か完全 URL を渡して曖昧性を解消する。
+slug が複数ページに一致する場合は、`<lang>/<slug>` に完全一致するページが 1 件だけならそれに解決する (`hooks` は
+`en/hooks`。`en/agent-sdk/hooks` は別のページで、stderr の `Note:` に、それを読むコマンド付きで出る)。そうでなければ曖昧エラーになり、
+候補ごとに**そのまま実行できるコマンド**が付く。選んで実行するか、より長い slug (`agent-sdk/hooks`) か完全 URL を渡す。
 
 ### `heading_path` の指定方法
 
@@ -156,6 +185,8 @@ slug が複数ページに一致する場合は曖昧エラーで候補リスト
 - 部分一致（大文字小文字無視）で検索される。完全一致が優先され、部分一致の候補が
   2 件以上ある場合は `Error: ambiguous heading '...'. Matches: ...` で候補一覧を
   示して終了する（曖昧な入力を無言で先頭候補に解決しない）
+- 見出しが無いとき (`Error: heading '...' not found.`) は、近い見出し (末尾の要素の部分一致・大文字小文字と空白の
+  無視・綴りの近さ) が `Closest sections:` に、実行できるコマンド付きで先に出る。全見出しは `Available sections:` に続く
 - `search` / `search-content` が本文中の見出し前ヒットを `Section: (top)` として
   返すことがある。この `(top)` をそのまま `content` の heading_path に渡すと、
   最初の見出しの直前までの本文（プリアンブル）を取得できる
@@ -188,7 +219,10 @@ slug が複数ページに一致する場合は曖昧エラーで候補リスト
 | キャッシュ期限切れ | 7 日超のキャッシュ | 自動 re-fetch (既定 `--max-age 604800`) |
 | ネットワーク失敗 | fetch timeout / connection error | 既存キャッシュがあれば WARNING を出して stale cache のまま継続 (exit 0)。無ければ Error で exit 1。復旧後に最新化したい場合は `--max-age 0` で強制再取得 |
 | キャッシュ破損 | パースエラー / 不正なインデックス | `--max-age 0` で強制再取得 (キャッシュディレクトリは既定 `~/.cache/llms-docs`、`--cache-dir` で確認・変更可) |
-| 結果ゼロ | `No results found` | キーワードを変えて再試行。`--source` を切り替えて code/platform 両方を確認 |
+| 結果ゼロ | `No matching ...` の下に `Why nothing matched:` (語ごとのページ数) | 全語が 0 件なら言い換えを続けず、別の語・`search-index`・別の `--source` に切り替える。一部の語だけ 0 件ならその語を落とす。全語が corpus にあるのに 0 件 (同じセクションに揃わない) なら語を減らす。いずれも続けて出る `Next:` がそのまま実行できる |
+| `--source both` を `search` 以外に付けた | `Error: '<command>' reads one source at a time` (exit 2) | `both` を受けるのは `search` だけ。続けて出る `search ... --source both` か、同じコマンドを `--source code` / `--source platform` で 1 本ずつ打った行をそのまま実行する (`content` / `sections` の page index は source ごとに違う) |
+| 曖昧な page_ref | `Ambiguous slug '...'. Matches:` | 候補ごとに実行できるコマンドが付く。選んでそのまま実行する (`<lang>/<slug>` に完全一致する 1 件があれば自動でそちらに解決) |
+| heading が見つからない | `Error: heading '...' not found.` | `Closest sections:` の候補 (コマンド付き) を先に使う。全見出しは `Available sections:` に続く |
 | Python バージョン不足 | 起動直後に PEP 604 のユニオン型記法が原因の `TypeError: unsupported operand type(s) for ...` | `python3 --version` を確認し 3.11 以上を用意する (`mise use python@3.11` 等)。3.11 未満では動作しない |
 | スクリプトエラー (その他) | Python traceback | 下記 WebFetch フォールバックへ |
 
@@ -196,7 +230,7 @@ slug が複数ページに一致する場合は曖昧エラーで候補リスト
 
 スクリプトで解決できない場合のみ使用する:
 
-1. `search` をキーワードを変えて 2-3 回試す
+1. 同じ論点で `search` を 3 回まで試す (言い換えより `search-index` / `sections` で構造から当たる)。Skill を呼べない文脈ならまず上の「Skill を呼べない文脈」のとおりスクリプトを直接実行する
 2. それでも失敗 → `code.claude.com/docs/en/<slug>` または `platform.claude.com/docs/en/<slug>` を WebFetch で直接取得
 3. WebFetch は要約モデル経由のため field の抜け落ちリスクあり — 取得内容を鵜呑みにしない
 

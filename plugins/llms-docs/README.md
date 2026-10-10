@@ -10,7 +10,7 @@ Claude 公式ドキュメント、AI SDK 公式ドキュメント、Firebase 公
 | `researching-claude-docs` | Claude Code / Claude Developer Platform | `search` (URL-join 統合検索) → `content <page_ref> "<heading_path>"` |
 | `researching-ai-sdk` | Vercel AI SDK (ai-sdk.dev) | `search` (top N 候補 + 本文 hits) → `content <page_ref> "<heading_path>"` |
 | `researching-firebase` | Firebase (firebase.google.com) | `search` (top N on-demand fetch + 本文 hits) → `content <page_ref> "<heading_path>"` |
-| `researching-library-docs` | 同梱 presets のサイト (Next.js / Vite / Vitest / Drizzle / Zod / Hono / Bun / Vercel / Render / MCP / Codex / Ollama / Agent Skills / Cloudflare 製品別) と利用者の `sources.json` のサイト | `search --source <name>` → `content <page_ref> "<heading_path>" --source <name>` |
+| `researching-library-docs` | 同梱 presets のサイト (Next.js / Vite / Vitest / Drizzle / Zod / Hono / Bun / Vercel / Render / MCP / Codex / Ollama / Agent Skills / Agent Plugins / OpenAI Plugins・API docs / ACP / Cline / Factory / Devin / Cloudflare 製品別) と利用者の `sources.json` のサイト | `search --source <name>` → `content <page_ref> "<heading_path>" --source <name>` |
 
 3 script で `search` / `search-index` / `search-content` / `sections` / `content` / `fetch-index` の
 サブコマンド名・引数・`<page_ref>` 形式が統一されている (0.7.0)。
@@ -29,6 +29,49 @@ skill 名に `claude` / `anthropic` を含めないという lint 規約を持�
   フォルダ名 `synced` の 1 件のみで、`claude` / `anthropic` は対象外。
   `claude plugin validate plugins/llms-docs` は warning ゼロで通る (CLI 2.1.276 実測)
 
+## Skill を呼べない文脈 (subagent など) から使う
+
+Skill ツールが使えない文脈 (general-purpose の subagent など) でも、同梱のスクリプトを直接実行すれば
+同じ調査ができる。公式ドキュメントを WebFetch する前に、こちらを使う (WebFetch は要約モデル経由で
+field が抜ける)。
+
+1. スクリプトのパスを決める: `${CLAUDE_PLUGIN_ROOT}/scripts/<script>`。`${CLAUDE_PLUGIN_ROOT}` が空の
+   環境では、plugin の展開先 (`~/.claude/plugins/` の下) を探す。
+   ディレクトリを指定して追加した marketplace は展開先へコピーされず、その場で読まれるので、見つからなければ
+   `claude plugin marketplace list` で `Source: Folder (<dir>)` と出る marketplace の `<dir>` の下の
+   `plugins/llms-docs/scripts/` を探す
+2. `python3 <path> search "<キーワード>"` を実行し、出力末尾の `Next:` の先頭の script 名を
+   `python3 <path>` に置き換えて、本文 (`content`) を取る
+
+| 調べる対象 | script | 備考 |
+|---|---|---|
+| Claude Code / Claude Developer Platform | `parse-claude-docs.py` | `--source platform` / `--source both` |
+| AI SDK | `parse-ai-sdk.py` | |
+| Firebase | `parse-firebase.py` | |
+| 同梱 presets・利用者の `sources.json` のサイト | `parse-llms-txt.py` | 全コマンドに `--source <name>` が必須 |
+
+調査の手数の目安 (1 論点は `search` 1 回 → `content` 1〜2 回、3 回外したら言い換えずに構造から当たる、
+`--max-chars 0` は上限で切れたと確かめてから) は各 skill の「調査の進め方」にある。
+
+### エラー・0 件のあとの出力
+
+4 script とも、失敗や 0 件のあとに「次に打つコマンド」をそのまま出す (エラーと 0 件の exit code は
+変わらない。claude-docs で下の規則により 1 ページに解決した slug は、曖昧エラーではなく本文を返す):
+
+- **曖昧な page_ref**: 候補ごとに実行できるコマンドを付ける。claude-docs は slug が `<lang>/<slug>`
+  に完全一致するページが 1 件だけならそれに解決し、他の候補を stderr の `Note:` で、それを読むコマンド
+  付きで知らせる (`hooks` は `en/hooks`。`en/agent-sdk/hooks` は別のページ)。候補のコマンドは
+  `--max-chars` / `--limit` などの既定以外の値も引き継ぐ
+- **heading が見つからない**: 全見出しの前に `Closest sections:` として近い見出し (最大 5 件) を、
+  実行できるコマンド付きで出す
+- **`search` / `search-content` の `Next:`**: 上位ヒットの `doc_idx` と heading_path を埋めたコマンドを
+  最大 3 行出す (`--source` などは引き継ぐ)。ヒットが無いときはプレースホルダを出さない
+- **同じ heading_path が 1 ページに 2 回以上ある見出し**: コマンドは 1 つ目を読む (2 つ目以降を指す手段は
+  無い)。そうした見出しのコマンドには `# heading appears N times; this reads the first` (shell のコメントなので、行ごと打てる) が付く
+- **0 件**: `Why nothing matched:` に語ごとのページ数を出し、「語が corpus に無い」「語は有るが同じ
+  セクションに揃わない」「`--page-ref` で外した」を区別して、語を減らす / `search-index` / 別 source の
+  コマンドを示す
+
 ## Components
 
 | 種類 | パス |
@@ -42,8 +85,9 @@ skill 名に `claude` / `anthropic` を含めないという lint 規約を持�
 | Script | `scripts/parse-firebase.py` |
 | Script | `scripts/parse-llms-txt.py` (任意サイトの `llms-full.txt`。skill は `researching-library-docs`) |
 | Data | `scripts/presets.json` (`parse-llms-txt.py` の同梱 profile) |
+| Dev tool | `scripts/check-preset-urls.py` (presets の `url` / `index_url` を HEAD で点検する。ネットワークに出るので suite には入れない) |
 | Shared | `scripts/_common.py` (FenceTracker / extract_sections / fetch_url ほか共通ヘルパー) |
-| Shared | `scripts/_commands.py` (`sections` / `content` / 検索結果・index 行の出力テンプレート。各 script は page を `PageView` に詰めて渡す) |
+| Shared | `scripts/_commands.py` (`sections` / `content` / 検索結果・index 行の出力テンプレートと、検索後の `Next:` 行・0 件の診断。各 script は page を `PageView` に詰めて渡す) |
 | Docs | `docs/paths-and-fork-context.md` (`paths` 自動ロードと `context: fork` の実測) |
 | Docs | `docs/generic-llms-txt-source.md` (任意の `llms.txt` サイト対応のコスト見積り) |
 
@@ -142,16 +186,54 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading
 | `nextjs` | Next.js (`/docs/llms-full.txt`) | あり |
 | `vite` / `vitest` | Vite / Vitest | あり (`.md`) |
 | `drizzle` | Drizzle ORM | あり |
-| `zod` | Zod | 一部 (`llms.txt` とタイトルで突き合わせ。17 中 14) |
+| `zod` | Zod | 一部 (`llms.txt` とタイトルで突き合わせ。18 中 16) |
 | `hono` | Hono | 一部 (同上。87 中 21) |
 | `bun` | Bun | あり |
 | `vercel` | Vercel | あり |
-| `render` | Render | 一部 (同上。125 中 121) |
+| `render` | Render | 一部 (同上。126 中 122) |
 | `mcp` | Model Context Protocol | あり |
-| `codex` | OpenAI Codex | 一部 (同上。178 中 175) |
+| `codex` | OpenAI Codex + ChatGPT docs (`learn.chatgpt.com/docs/llms-full.txt`。Codex の CLI / IDE / cloud / SDK に加え、ChatGPT の desktop app / Work / 管理のページを含む) | 一部 (同上。178 中 175) |
 | `ollama` | Ollama | あり |
 | `agentskills` | Agent Skills (`SKILL.md` の仕様) | あり |
-| `cloudflare-<製品>` | Cloudflare の製品別 `/<製品>/llms-full.txt`。製品は `workers` / `d1` / `r2` / `kv` / `durable-objects` / `pages` / `queues` / `workers-ai` / `vectorize` / `hyperdrive` / `agents` / `workflows` / `ai-gateway` / `browser-rendering` / `containers` | あり (`index.md`)。`browser-rendering` だけは旧テンプレートでページ内に URL が無く、`llms.txt` との突き合わせで 47 中 40 |
+| `agent-plugins` | Agent Plugins (Skills と MCP server を束ねる plugin の共通形式。`agent-plugins.org/llms.txt` が全文を含む) | なし (13 ページ) |
+| `openai-plugins` | OpenAI Plugins (ChatGPT / Codex の plugin: MCP server・UI・skills・提出。`developers.openai.com/plugins`) | 一部 (`llms.txt` とタイトルで突き合わせ。31 中 30) |
+| `openai-api-docs` | OpenAI API docs (`developers.openai.com/api/docs`) | 一部 (同上。232 中 220) |
+| `acp` | Agent Client Protocol (ACP) | あり |
+| `cline` | Cline | あり |
+| `factory` | Factory (Droid) | あり (`llms.txt` とタイトルで突き合わせ。104 中 104) |
+| `devin` | Devin | あり |
+| `cloudflare-<製品>` | Cloudflare の製品別 `/<製品>/llms-full.txt`。製品は `workers` / `d1` / `r2` / `kv` / `durable-objects` / `pages` / `queues` / `workers-ai` / `vectorize` / `hyperdrive` / `agents` / `workflows` / `ai-gateway` / `browser-rendering` / `containers` | あり (`index.md`)。`browser-rendering` は製品名が Browser Run に変わり、取得先は `/browser-run/llms-full.txt` (52 ページ中 51 でページ内に URL。URL の無い 1 件は他の製品と同じ API リファレンスのページ)。source 名は変えていない |
+
+**取得先のホスト** (`scripts/presets.json` の `url` / `index_url` から出した一覧。ネットワークの出口を決める根拠にする。
+1 行に 1 ホスト、次のコードブロックはテストが読む):
+
+```text
+agent-plugins.org
+agentclientprotocol.com
+agentskills.io
+bun.com
+developers.cloudflare.com
+developers.openai.com
+docs.cline.bot
+docs.devin.ai
+docs.factory.com
+docs.ollama.com
+hono.dev
+learn.chatgpt.com
+modelcontextprotocol.io
+nextjs.org
+orm.drizzle.team
+render.com
+vercel.com
+vite.dev
+vitest.dev
+zod.dev
+```
+
+preset の追加・移転のたびにこの一覧を presets.json に合わせる (`presets.json` との集合の一致は suite が確かめる。
+ルートの README の Privacy 表はこの一覧を指しており、ホストを列挙していない)。
+専用の 3 skill の取得先 (`code.claude.com` / `platform.claude.com` / `ai-sdk.dev` / `firebase.google.com`) は
+この一覧に含まない。
 
 他の製品や他のサイトは、下の `sources.json` に profile を書けば読める。
 
@@ -191,7 +273,7 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `url_base` | | ページ URL が相対 (`/guide.md`) のときに前に付ける基点 |
 | `drop_lines` | | 本文から除く行の正規表現のリスト (行頭から照合したいときは `^` を付ける)。全ページに付く定型行 (「Skip to content」など) が検索に当たらないようにする。コードブロック内の行は除かない。ページ URL は除く前に読む |
 | `skip_empty` | | `true` で、本文が空 (空行と水平線だけ) のページを捨てる (Hono の `# Start of Hono documentation`、Codex のカテゴリ見出しのような見出しだけの行) |
-| `index_url` | | サイトの `llms.txt`。URL を持たないページに、タイトルが完全に一致する (大文字小文字・空白・`*_` の記号は無視) 項目の URL を付ける。同じタイトルの項目が 2 つ以上あるページ、同じタイトルのページが 2 つ以上あるとき (Zod はサイト冒頭と `packages/zod` のページがどちらも `Zod`)、近いだけのタイトル (`Basic Auth` と `Basic Auth Middleware`) には付けない (誤った URL は URL が無いより悪いため)。`llms.txt` は絶対 URL の項目だけを読む。取得に失敗しても警告だけで本文は読める |
+| `index_url` | | `url` の `llms-full.txt` と同じ範囲の `llms.txt` (他の `llms.txt` へのリンク集になっている 2 段の索引は指さない。下の「対象外」)。URL を持たないページに、タイトルが完全に一致する (大文字小文字・空白・`*_` の記号は無視) 項目の URL を付ける。同じタイトルの項目が 2 つ以上あるページ (ただし `?` か `#` を含む項目 (節への `?id=…` / `#…` など) を除いて、ページの項目がちょうど 1 つならそれを使う。Zod の `Codecs` はこの形)、同じタイトルのページが 2 つ以上あるとき (Zod はサイト冒頭と `packages/zod` のページがどちらも `Zod`)、近いだけのタイトル (`Basic Auth` と `Basic Auth Middleware`) には付けない (誤った URL は URL が無いより悪いため)。`llms.txt` は絶対 URL の項目だけを読み、`llms.txt` や `llms-<名前>.txt` (`llms-full.txt` / `llms-small.txt` など) を指す項目はページではないので除く。取得に失敗しても警告だけで本文は読める |
 | `h1_needs_url` | | `split: h1` で `true` のとき、`page_url` (`line:` / `link:`) の URL が見つからない H1 をページの区切りにせず、前のページの見出しとして残す (ページ本文の中で H1 を使うサイト向け) |
 
 source 名は `^[a-z0-9][a-z0-9-]*$` (キャッシュのファイル名になるため)。未知のキーや不正な値は
@@ -206,14 +288,21 @@ source 名は `^[a-z0-9][a-z0-9-]*$` (キャッシュのファイル名になる
 | frontmatter に相対 `url:` のみ | 上に加えて `frontmatter_key: url` + `url_base` | Vite / Vitest |
 | frontmatter に `title:`、URL は本文のリンク、定型行つき | `split: frontmatter` + `page_url: "link:View as Markdown"` + `drop_lines` | Cloudflare の製品別ファイル |
 | `Source: <url>` 行で区切る | `split: line` + `line_prefix: "Source: "` | Drizzle ORM |
-| H1 で区切り、直後に `Source: <url>` 行 | `split: h1` + `page_url: "line:Source: "` (本文にも H1 があれば `h1_needs_url`) | Agent Skills / Bun / MCP / Ollama |
+| H1 で区切り、直後に `Source: <url>` 行 | `split: h1` + `page_url: "line:Source: "` (本文にも H1 があれば `h1_needs_url`) | Agent Skills / Bun / MCP / Ollama / ACP / Cline / Devin |
 | frontmatter を長い横線で囲む | `split: frontmatter` + `frontmatter_delimiter` | Vercel |
-| H1 で区切り URL なし | `split: h1` (見出しだけのページがあれば `skip_empty`) | Zod / Hono / Render / Codex |
+| H1 で区切り URL なし | `split: h1` (見出しだけのページがあれば `skip_empty`) | Zod / Hono / Render / Codex / OpenAI Plugins・API docs / Factory |
+| frontmatter (`title:` / `description:`) で区切り URL なし | `split: frontmatter` (既定の `frontmatter_key: title`) | Agent Plugins |
 
 対象外: `llms.txt` が別の `llms.txt` へのリンク集になっている 2 段 index (Cloudflare のルート
 `/llms.txt`。製品別の `llms-full.txt` は上のとおり読める)、ページごとに別ファイルで公開する
 サイト、`llms.txt` の index と本文のタイトル以外での突き合わせ (`index_url` は完全一致のタイトルだけ)。URL を持たないページでは `URL:` 行と `# source:` 行を
 出さない。
+
+2 段 index は `index_url` にも書かない。別の `llms.txt` を指す項目は突き合わせから除くので、そのファイルの URL が
+ページに付くことはないが、`url` の `llms-full.txt` に含まれない別の docs のページ (学習トラックなど) の項目が、ページと
+タイトルを共有すると、その項目の URL が付く (OpenAI のルートの `llms.txt` を書いたとき、API ガイドの
+`Model optimization` に学習トラックのページの URL が付いた)。タイトルだけでは区別できないため防げない。`index_url` には、
+`url` の `llms-full.txt` と同じ範囲の `llms.txt` (製品別の `/<製品>/llms.txt` など) を書く。
 
 ## 既知の制約
 
@@ -265,7 +354,7 @@ Firebase 側に `llms-full.txt` が存在しないため、index + per-page on-d
 
 3 script で API を 0.7.0 で揃えた: `search` / `search-index` / `search-content` /
 `sections` / `content` / `fetch-index` の 6 サブコマンドが共通、`<page_ref>` は
-int / URL slug / 完全 URL を受け付ける (ai-sdk のみ URL がないため int / title 部分一致)、
+int / URL slug / 完全 URL を受け付ける (ai-sdk は frontmatter の URL を表示するが page_ref には使えず、int / title 部分一致。表示された URL を貼ると exit 1 になるが、その URL のページを読む実行できる行を続けて出す)、
 `--file` flag は省略時に cache を auto-fetch する。
 
 共通ロジック (code-fence scanner / section & content extraction / llms.txt index parser /
@@ -279,7 +368,28 @@ HTTP fetch / エラーヘルパー / metadata header / Next hint / argparse skel
 `Next:` ヒントの corpus 引数 (`corpus_hint_args(args)`) は呼び出し側で組み立てて
 `hint_args=` で渡す (`_commands` 側では組み立てない。`tests/test_hint_wiring.py` が検査)。
 
+**presets の取得先の点検**: サイトが `llms-full.txt` / `llms.txt` を移す (製品名の変更、docs の
+ホスト移転) と、ローダーは転送に追従するため読めたまま気付かない。`scripts/check-preset-urls.py` を手で
+流すと、同梱 presets の全 URL を HEAD で点検し、3xx は転送先まで辿って、200 以外を一覧する
+(`python3 plugins/llms-docs/scripts/check-preset-urls.py`。200 以外があれば exit 1)。一覧に出た preset は、
+転送先と内容を比べてから直す: 同じ内容なら URL を移す。内容が違うとき (旧い版が残っているだけ、など) は
+ページ数・ページ内の URL・`index_url` の突き合わせを測って、新しい側へ移すかを決める。直したら
+description と、`researching-library-docs` の対応表・この README の presets 表を合わせる。
+ネットワークに出る点検なので CI の suite には入れず、サーベイのときに流す。
+
 `search-content` はセクション単位の AND 検索が既定 — 指定した全キーワードが同じセクション内に
 揃って出現するセクションのみを返す。単純な OR 挙動（どれか 1 つでもマッチすれば hit）ではない。
-ただし完全 AND が 1 件も無い場合（複数キーワード時のみ）、キーワードの半分以上が揃うセクションへ
-自動でフォールバックし、出力に `[partial match]` と一致キーワードを明示する（soft-AND）。
+ただし**ページごとに**、完全 AND のセクションがそのページに 1 件も無い場合（複数キーワード時のみ）、
+そのページではキーワードの半分以上が揃うセクションへ自動でフォールバックし、出力に `[partial match]` と
+一致キーワードを明示する（soft-AND）。コーパス全体の話ではないので、他のページに完全 AND があっても、
+完全 AND の無いページは `[partial match]` として結果に並ぶ（完全 AND のページより後ろ）。
+`the` / `in` / `when` などの機能語は照合に使わず、外した語を出力に `(not searched, too common: ...)` と
+1 行出す (クエリが機能語だけのとき、`DO` のように大文字で書いた略語は外さない)。
+セクションとページは、ページタイトルと見出し (祖先の見出しを含む) が全キーワードを語として含む
+(前後が英数字でない。末尾の s / es は許す) → ヒット数の順に並ぶ。巨大な 1 節 (環境変数の表など) が
+ヒット数だけで上位を占めないようにするため。見出しが全語を含む節の中では、さらに「自分の見出しがあって初めて
+全語が揃う節 (ページタイトルと祖先の見出しだけでは揃わない節)」を、見出しを受け継ぐだけの子孫より先に出し、
+その中と残りはヒット数の順に並べる (節 X の見出しが全語を含むと X の子孫もすべて見出し一致になるが、
+ヒットの多い子孫が X 自身より上に来ないようにするため。ページの順は変わらない。ページタイトルだけで全語が揃うページは、
+どの節も自分の見出しを要しないのでヒット数の順)。キーワードが 1 語のときは、ページの順はヒット数のまま
+(セクションの順にだけ使う)。

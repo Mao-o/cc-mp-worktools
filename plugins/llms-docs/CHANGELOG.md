@@ -2,6 +2,534 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.35.5] - 2026-10-04
+
+### 修正: URL の最後の段 (`prune-messages` など) を page_ref に渡すと、次の一手が出なかった
+
+- **症状**: ページを読みたいエージェントは、URL の最後の段をそのまま page_ref に渡しがちで、
+  `ai-sdk.dev` の `.../prune-messages` なら `content prune-messages` と打つ。タイトルに一致しないので
+  `No document found for: prune-messages` の 1 行だけで終わり、次に何をすればよいかが出なかった
+  (0.35.0 は URL の形の page_ref だけに次の一手を足していた)
+- **修正**: タイトルの部分一致に失敗した page_ref が `a-z0-9-` だけの 1 語 (slug) のときだけ、
+  最後の段がそれと等しい URL (`.md`・クエリ・末尾の `/` を除いて比べる) のページを探す。
+  1 ページなら、そのページを読むコマンド (整数 index。見出し・`--max-chars` などのオプションは引き継ぐ) を出す。
+  2 ページ以上なら全部を並べる。1 つも無ければ slug の語から作った `search` の行を出す
+  (URL の形の失敗と同じ書き方)。終了コードは 1 のまま。タイトルの部分一致が先に効く順序は変えていない。
+  slug の形でない失敗 (空白を含む語、大文字・`_`・`.` を含む語など) の出力は変えていない
+- **実測**: 手元の AI SDK のキャッシュの全 526 ページを、URL の最後の段で 1 件ずつ引き直した。
+  タイトルの部分一致で解決 115 (うち 1 件 `acp` は、同じ最後の段を持つ別ページのほうに解決する)、タイトルが曖昧 50 (従来どおり候補が並ぶ)、
+  失敗して自分のページに届いた 305、最後の段が複数ページで共有され全件が並んだ 55 (全件に自分を含む)、
+  届かなかった 0。slug の形でないもの 1 (`llama-3_1`。`_` を含む)
+
+## [0.35.4] - 2026-10-04
+
+### 修正: `-` で始まる見出しを読むコマンド行が、そのまま実行すると引数エラーになっていた
+
+- **症状**: 見出しが見つからない / 見出しが曖昧なときに出る「この見出しを読むコマンド」
+  (`Closest sections:` や `ambiguous heading` の候補行、`search` / `search-content` の `Next:` 行) は、見出しが `-` で始まると
+  (`--help`、`-x`、`---`、`-` など) オプションと読まれ、出力された行を実行すると argparse に拒否された
+- **修正**: 見出しが `-` で始まるときだけ、オプションを前に置き、位置引数 (ページ参照と見出し) を
+  1 つの `--` の後ろにまとめる。それ以外の見出しは従来と 1 文字も変わらない
+  (手元のキャッシュの全 `#` 行 (コードブロック内を含む) で旧版と新版の出力を比べ、`-` で始まる行だけが
+  変わることを確認)。`search` / `search-content` の `Next:` 行も同じ形にした
+- **制限**: Python 3.11 では、見出しがちょうど `--` のときは届かない (argparse が位置引数の `--` を
+  捨てる。3.12 以降は届く)
+- **対象外**: `content 3 "<heading_path>"` のような、読み手が値を差し替える雛形の行は変えていない。
+  差し替える値は読み手が選ぶもので、雛形の形は条件で変えられない
+
+## [0.35.3] - 2026-10-04
+
+### 修正: `index_url` の突き合わせで、節アンカーの項目が同じタイトルのページの URL を消していた
+
+- **症状**: Zod の `Codecs` / `Ecosystem` / `Versioning` に URL が付かなかった。`llms.txt` には
+  `https://zod.dev/codecs` などのページ項目があるが、同じタイトルの節項目 (`https://zod.dev/codecs?id=codecs`、
+  `https://zod.dev/?id=ecosystem` など) も候補に数えられ、タイトルが曖昧と見なされていた
+- **修正**: 同じタイトルの候補のうち、`?` も `#` も含まない URL がちょうど 1 つあれば、それをページの URL にする。
+  それ以外は従来どおり (候補が 1 つならその URL、2 つ以上なら付けない)
+- **実測**: `index_url` を持つ 7 source の全ページで修正の前後を比べた。変わったのは Zod の上の 3 ページだけで
+  (URL 付きは 18 中 13 から 16)、Hono / Render / Codex / OpenAI plugins / OpenAI API docs / Factory は 1 ページも変わらない
+
+## [0.35.2] - 2026-10-04
+
+### 修正: 閉じ損ねたコードブロックの後ろの H1 ページが、前のページに吸収されていた
+
+- **症状**: H1 で分割する source で、ページが 1 つ丸ごと前のページの節になり、その内容に前のページの
+  URL が付いていた。Zod では `# Release notes` (Zod 4 の新機能の説明) が `Migration guide` に、Render では
+  `# Deploy a Prebuilt Docker Image` が `Docker on Render` に吸収されていた。節の抽出にも同じ状態を
+  使うため、Render の `Deploying on Render` では `Managing deploys` 以下の節も本文扱いになっていた
+- **原因**: 共有のコードブロックの追跡 (`FenceTracker`) が、(1) MDX コメント `{/* ... */}` の中で開いた
+  ブロックを、閉じの記号が書き損じられている (Zod は記号 2 つ) と、コメントが終わっても開いたままにしていた。
+  (2) 引用の中のフェンス (`>    ```) を `>` が付いたままフェンスと見なさず、引用の外に書かれた閉じを
+  開きと取り違えていた
+- **修正**: (1) MDX コメントの中で開いたブロックは、コメントが終わる行 (`*/}` を含み、その前に同じ行の
+  `/*` が無い行) で閉じる。`function f() { /* noop */}` のように同じ行で開いて閉じるコメントはコードの
+  一部なので閉じない。コメントの外で開いたブロックの中の `*/}` は、これまでどおり本文。
+  (2) ブロックの外と、引用の行で開いたブロックの中では、行頭の `>` を外してからフェンスかどうかを判定する。引用なしで開いたブロックの中の
+  `>` 行は本文のまま (引用のコードブロックを見せる Markdown の見本を閉じない)。引用の行で開いたブロックは、
+  `>` の付かない空行 (引用の終わり) でも閉じる (CommonMark と同じ。閉じの無い引用の中のブロックが、
+  後ろのページを隠さない)
+- **実データでの変化**: 手元のキャッシュの全 source (presets 19 件、既存 3 script、Firebase の個別ページ)
+  で修正前後のページの並びと節を比べ、変わったのは Zod (17 → 18 ページ) と Render (125 → 126 ページ) だけ。
+  ページごとの内訳は `docs/generic-llms-txt-source.md` の「2026-10-04 追記 (0.35.2)」。presets 35 件のうち
+  16 件は手元にキャッシュが無く、未計測
+- **テスト**: 実データから切り出した Zod / Render の形で H1 ページが独立すること、コメントの外で開いた
+  ブロックが `*/}` で閉じないこと、引用の中で開いて引用の外 / 中で閉じるブロック (入れ子の引用を含む)、
+  引用なしで開いたブロックの中の `>` 行が何も閉じないこと、同じ行で開いて閉じるコメント (`/* ... */}`) が
+  ブロックを閉じないこと、閉じの無い引用の中のブロックが引用の終わりで閉じることを足した
+
+## [0.35.1] - 2026-10-04
+
+### 修正: 失敗のあとに出す「別のページで同じ操作をやり直す」コマンドが、`-` で始まる語で実行できなかった
+
+- **症状**: 曖昧な page_ref・見出しが見つからない・AI SDK の URL を page_ref にした失敗などの後に出る、
+  別のページで同じ操作をやり直すコマンドは、`search-content` なら query を `--page-ref` の前に、
+  `content` / `sections` なら page と heading_path をオプションの前に置いていた。query や heading_path が
+  `-x` や `--limit` のように `-` で始まると、そのまま実行しても argparse がオプションとして読み、
+  使い方のエラー (終了コード 2) になった
+- **修正**: 位置引数をすべて `--` の後ろに置く形にした
+  (`search-content --page-ref <番号> <オプション> -- '<query>'`、`content <オプション> -- <番号> '<heading_path>'`、
+  `sections <オプション> -- <番号>`)。page と heading_path を 1 つの `--` の後ろにまとめるのは、
+  Python 3.11 の argparse が「必須の位置引数をオプションより前に置くと、`--` の後ろの任意の位置引数を
+  受け付けない」ため。`--max-chars` / `--limit` などの引き継ぎと `--cache-dir` / `--file` などの corpus オプションは
+  `--` の前に残る。出る行の並びが変わるだけで、行が指すページ・引数・終了コードは同じ
+- **テスト**: 出た行を加工せずに `shlex.split(comments=True)` で分割して実行する往復テストを、6 つの corpus 形
+  (`--cache-dir` と `--file`) × `-x` / `--limit` / `\_` / `the` / `---` / `'` / `-` で足した。
+  行の末尾の語を別の `-` 始まりの語に差し替えた行も実行する。文字列の形を固定していた既存の検査は、
+  新しい並びに合わせた
+
+## [0.35.0] - 2026-10-04
+
+### 変更: AI SDK で表示された URL を page_ref に貼った失敗に次の一手を出す / 汎用 loader の URL 行を `URL:` にそろえる / 文書を実装に合わせる
+
+- **AI SDK の page_ref に URL を貼ったとき**: 0.33.0 から各結果に URL が出るが、その URL を `content` /
+  `sections` / `search-content --page-ref` の page_ref に渡すと `No document found` だけで、次の一手が無かった。
+  URL を page_ref として解決しない仕様 (表示は引用元のため) は変えず、URL の形の page_ref が失敗したときに限り、
+  その URL を `url:` に持つページを読むコマンド (整数 index で、元の `heading_path` / `--max-chars` / `--file` /
+  `--cache-dir` を引き継ぐ) を続けて出す。コマンドは加工せずそのまま実行できる。URL は scheme の違い (`http://`・
+  scheme なし)・大文字小文字 (ホストもパスも)・末尾の `/`・`.md`・`#fragment`・`?query` を無視して、完全一致で突き合わせる
+  (`/docs/advanced` が `/docs/advanced/caching` に当たることはない)。持つページが無い URL には、URL の最後の段から
+  作った `search '<語>'` を出す。URL の形でない page_ref の失敗は従来どおり。実 corpus (526 ページ) で、全ページを
+  表示された URL で引き直し、出たコマンドを実行して 526 件とも元のページに届くことを確かめた
+- **汎用 loader (`parse-llms-txt.py`) の URL 行**: `fetch-index` / `search-index` / `search` / `search-content` の
+  ページ URL の行が小文字の `url:` で、`sections` の `URL:` や、ほかの 3 script・README と表記が違っていた。
+  `URL:` にそろえた (行頭の字下げは変えていない)。出力を読む hook やスクリプトは無い
+- **文書を実装に合わせた** (挙動の変更なし):
+  - `[body-only]` の説明に、index の候補に本文ヒットが 1 件も無いとき `--top-n` 件まで足す経路と、足したページが
+    末尾でなく並び順の中に入る (多くは 1 位になる) ことを書いた (claude-docs / ai-sdk / library の SKILL)
+  - 0.34.0 の節の順位 (自分の見出しがあって初めて全語が揃う節を、見出しを受け継ぐだけの子孫より先に出す) を、
+    README と、ai-sdk / firebase / claude-docs の SKILL の並び順の説明に足した
+  - README の soft-AND の説明を、コーパス全体でなくページごとの話に直した
+  - library SKILL の「URL の無い preset」を、`index_url` で突き合わせる 7 つと、URL が全く無い `agent-plugins` に直した
+  - firebase SKILL の page_ref の「ai-sdk と統一 (3 形式)」を、claude-docs と統一に直した (ai-sdk は 2 形式)
+  - claude-docs SKILL の規模を、実測の Claude Code 220 ページ / 8.7MB、Platform 634 ページ / 35.7MB (平均 約 56KB) に直した
+
+## [0.34.0] - 2026-10-04
+
+### 変更: 見出しが全キーワードを含む節を、その見出しを受け継ぐだけの子孫より上に出す / snippet で切った一致行に一致した語を残す
+
+- **節の順位**: 0.32.0 の見出し一致は「ページタイトル + 節の見出し (祖先を含む)」に全キーワードが語として
+  現れるかを見るため、節 X の見出しが全語を含むと X の子孫もすべて見出し一致になり、同じ段の中では
+  ヒット行の数で順が決まって、ヒットの多い子孫が X 自身より上に来ていた
+  (`search "explicit cache breakpoints" --source platform` の 1 本目が孫の節
+  `Explicit cache breakpoints/Structuring your prompt/How automatic prefix checking works`、
+  `search "Run hooks in the background"` の 1 本目がその節の子 `Run tests after file changes`)。
+  見出し一致の中で、自分の見出しがあって初めて全語が揃う節 (タイトルと祖先の見出しだけでは揃わない節) を
+  先に置き、その中と残りはこれまでどおりヒット行の数の順にする。タイトルだけで全語が揃うページは、
+  どの節も自分の見出しを要しないので従来どおりヒット行の数の順。ページの順位 (見出し一致の有無) は変えていない。
+  Claude Code docs / Platform docs / AI SDK / Cloudflare の 76 クエリ (1 語・API 名 1 語・大文字の OR / AND・
+  見出しをそのまま打ったクエリを含む) で 0.33.0 と比べると、`Next:` の行が変わったのは 4 クエリ。
+  期待する節を最後の見出しで照合すると 1 位は 30 本中 16 本から 19 本で、悪化はない。
+  残る 1 件 (`search sandbox`) は、祖先の見出しから語を受け継ぐ節より、自分の見出しに語を持つ節が先に出るようになった変化
+- **snippet の一致行**: 一致行だけで予算 (`--max-snippet-chars`) を超えるとき、0.33.0 は各一致行を
+  一致行の数で割った幅で先頭から切っていたため、一致した語が行の後ろにある長い表の行
+  (コマンド一覧の表の行など) では、`→` の行に語が見えなかった。一致した語がその幅に入らないときは、
+  語の少し前から幅の分を切り出し、切った側に `…` を付ける (`→` の印は残す)。語が幅に入る行は従来どおり先頭から切る。
+  Claude Code docs / Platform docs の 24 クエリ (全ページの全節、11135 節) で、`→` の行に一致した語が
+  1 つも見えない節は 148 件から 0 件
+- **切り詰めの案内の注記**: 仮置きの語を `'...'` で囲むだけだったため、アポストロフィを含む見出し
+  (`Don't ask mode` など) では、注記の語と `Next:` の行の語が文字列として一致しなかった。
+  クォートが要る語は、注記でも `Next:` の行と同じ shell の語 (`'don'"'"'t ask mode'`) で書く。
+  ほかの語の注記は変えていない
+
+## [0.33.0] - 2026-10-04
+
+### 修正: 記号を含む見出しの anchor をページ内リンクに合わせる / snippet で一致行を残す / AI SDK の URL を出す / 子見出しの無い節の案内
+
+実 corpus (Claude Code docs と Platform docs の `llms-full.txt`) で、検索結果の出力を使う側から見て行き止まりになる 3 点を直した。
+
+- **見出しの anchor (`Section:` 行の `URL#anchor`)**: 見出しの記号 (`.` `(` `/` `--` など) を削るだけで
+  ハイフンにしていなかったため、`loop.md` が `loopmd` になり、実際の id (`loop-md`) と食い違った。
+  英数字と `_` 以外の記号の連続を 1 つの `-` にし (`worktree.baseRef` は `worktree-baseref`、
+  `/security-review` は `security-review`)、アポストロフィは削り (`Can't` は `cant`)、`\_` のような
+  バックスラッシュのエスケープは先に外す。ページ内リンク (`](#...)`) と突き合わせられる見出し 2077 件のうち、
+  生成した anchor が一致するのは 1966 件から 2065 件になった。残り 12 件は、`/` はページによってライブの
+  id に残る (http/sse-servers など)、`\_` は `-` になる id もある (errors ページ) ため、規則では寄せていない。
+  Firebase (DevSite) の規則は、実測の根拠が無いので変えていない
+- **snippet の一致行**: 文字数の予算 (`--max-snippet-chars`、既定 500) を、一致行の前の長い表の行が使い切り、
+  一致行 (`→` の行) が `... (N chars truncated)` の向こうに消えていた。予算を超えるときは一致行を先に残し、
+  一致行に近い文脈の行から足し、入らなかった行は `  ...` で示す。予算に収まる snippet は従来と同じ。
+  一致行だけで予算を超えるときは、予算を一致行の数で割り、各一致行をその字数 (80 字未満にはしない) で
+  `…` 付きに切って、全部の一致行を見えるようにする (一致行が多いと合計は予算を超えうる)。
+  Claude Code docs / Platform docs の 22 クエリ (全ページ、5763 セクション) で、一致行が 1 行も見えないセクションは 331 件から 0 件。
+  変わったのは、従来も切り詰められていたセクションだけ。「more hits」の行と `  ...` の行は予算に数えない
+- **子見出しの無い節を `content` で切り詰めたときの案内**: 従来は `narrow with content N "<heading_path>"` と
+  出したが、子見出しが無い節では絞る先が無い (環境変数の表 1 節 148k 字など)。その場合は、本文内を検索する
+  `Next: <script> search-content --page-ref N --context 0 ... -- <節の見出し>` (語は常に `--` の後ろ。`--resume` のような語に差し替えても打てる) を 1 行で出す。その行は加工せずに
+  実行でき、キーワードを差し替えて使う。`--source` / `--file` / `--cache-dir` は従来どおり引き継ぐ。
+  子見出しのある節の案内は変えない。見出しが 1 つも無いページ全体の切り詰めも、同じ理由でこの案内になる
+- **AI SDK**: 各ページの frontmatter の `url:` を、`sections` (`  URL:` 行)、`content` (`# source:` 行)、
+  `search` / `search-content` (`    URL:` 行) に出す。`url:` の無いページは従来どおり行を足さない。
+  page_ref としては解決しない (整数 index とタイトルの部分一致のまま)。SKILL.md の「URL を持たない」の
+  記述を直した。AI SDK の `Section:` 行の `URL#anchor` は、見出し id の規則を確かめていないので付けない
+
+マージ前レビューの指摘を受けて、同じ 0.33.0 の中で次を直した:
+
+- **子見出しの判定**: 直下の子を「1 段深い見出し」ではなく「自分より深い見出しのうち最も浅い段」にした。
+  AI SDK のページは本文に H1 が無く H2 から始まるため、ページ全体を `content` で読むと「子見出しが無い」と
+  誤判定され、見出しで絞れるのに本文内の検索の案内が出ていた (実 corpus の 526 ページ中 524 ページ)。
+  ページ全体を子見出しの無い扱いにするのは、見出しが 1 つも無いページ (29 ページ) だけになった。同じ規則で、
+  AI SDK のページ全体を読んだときのサブセクション一覧 (`Top-level sections`) が出るようになり、
+  段を飛ばした節 (H2 の下に H4 だけ) も H4 を子として一覧に出す
+- **注記が仮置きの語を名指しする**: `To find a line inside it, run the command below with '<語>'
+  (the section heading, a stand-in) replaced by the term you are looking for:` の 1 行を `Next:` の前に出す
+  (ページ全体のときは `the page title`)。何を差し替えればよいかが行から分かる
+- **`-` で始まる語** (`--bg` などの見出し、差し替えた `--resume` など): 語がオプションとして読まれ usage エラーに
+  なっていた。0.30.1 と同じく、オプションを先に置き、語は常に `--` の後ろに置く
+- **エスケープを含む見出し** (`max\_tokens`): 語を作るときにエスケープを外していたため、本文の生の行
+  (`max\_tokens` のまま) と一致せず、案内どおりに打つと何も見つからなかった。エスケープは外さない
+- 往復テストは、案内の行を加工せずに shell の規則で分割して実行する。`-` で始まる見出し・`\_` のエスケープ・
+  機能語だけ (`How to`)・記号だけ (`()`) の見出しを、`--cache-dir` と `--file` の両方で回す
+
+## [0.32.0] - 2026-10-04
+
+### 変更: 節とページの順位に「タイトルと見出しが全キーワードを語として含むか」を入れ、機能語を照合から外す
+
+節の順位がヒット行の数だけで決まっていたため、どのクエリでも全キーワードを含む巨大な 1 節
+(Claude Code docs の環境変数の表「Variables」約 148k 字、コマンド一覧「All commands」など) が 1 位になった。
+見出しをそのまま打った `search "When edits take effect"` でも、その見出しの節
+(settings#when-edits-take-effect) は出ず、`search "Run hooks in the background"` は `in` / `the` が
+タイトルに部分一致した cloud 系のページを返した。
+
+- 節の順位を「全キーワードが揃うか → 見出しが全キーワードを含むか → ヒット行の数 → 位置」にする。
+  「見出しが含む」は、ページタイトルとその節の見出しパス (祖先の見出しを含む) の中に、全キーワードが
+  **語として** 現れること (前後が英数字でない。末尾の s / es の複数形は許す)。`hook` は `Hooks` に一致し、
+  `Webhooks` には一致しない。`env` は `Environment` に、`add` は `Additional` に一致しない。見出しは
+  リンクの URL などを除いた表示上の文字で比べる
+- ページの順位 (`search` / `search-content`) も、そのページで最も当たりの良い節が見出し一致かを
+  ヒット数より先に見る。ただしキーワードが 1 語のときはページの順に使わない (節の順にだけ使う)。
+  1 語の見出し一致は、移行ガイドの「`useCompletion` hook」のような節にもあり、ページの決め手にならない。
+  API 名 1 語の `search` (`streamText` / `generateText` / `useChat` / `convertToModelMessages` /
+  `createUIMessageStream` / `useCompletion`) は、1 本目の `Next:` が 0.31.0 と同じページを指す
+- `the` / `in` / `when` / `how` などの機能語 (小さく固定した一覧) を、index の点数と本文の照合の両方から外す。
+  クエリが機能語だけのときと、`DO` のように大文字で書いた 2 文字以上の語 (略語) は外さない (`AND` / `OR` は大文字でも外す)。外した語は、
+  0 件のときの「Why nothing matched」に加えて、ヒットがあるときも `Next:` の前に
+  `(not searched, too common: ...)` と 1 行出す。同じ語の重複も 1 つにまとめる
+- `search` の全文の追加探索は、全キーワードが揃う候補があっても、どの候補もタイトルと見出しに全キーワードを
+  含まなければ走り、含むページだけを最大 2 件 `[body-only]` で足す。キーワードが 1 語のときは足さない
+  (0.31.0 と同じ)
+- 並べ替えのキーは `_common.py` の `section_rank_key` / `search_content_rank_key` / `search_rank_key` に
+  まとめたまま変えており、4 本の script で共通。各 script はページタイトルを本文の照合に渡す。Firebase は
+  本文の全文探索を持たないため、追加探索の変更は対象外
+- 実 corpus のコピーでの比較 (期待する節を事前に決めた 22 本): 1 本目の `Next:` が期待する節に届いたのは
+  0.31.0 で 4 本、この版で 14 本。再現クエリのうち `When edits take effect` は目的の節が 1 本目、
+  `Run hooks in the background` は目的の節の子 (Run tests after file changes) が 1 本目になる。
+  `hook process inherits environment` と `settings hooks reload session` は 0.31.0 と同じで直らない
+  (目的の節の見出しがクエリの語を含まない)
+- 上位が入れ替わって悪くなったクエリもある。機能語を外すため、コードの語を含むクエリ (`for await textStream`)
+  では `for` が効かなくなり、`for await (... of textStream)` の例がある節が 1 本目から外れる。
+  `useChat transport` では、移行ガイドの「Chat Transport Architecture」節が追記されて Transport のページの
+  `Next:` が 2 本目から 3 本目に下がる
+
+## [0.31.0] - 2026-10-04
+
+### 修正: `search` が、上位 N 件がすべて部分一致のときも全キーワードの揃うページを出す
+
+`search` は index の上位 N 件 (既定 `--top-n 5`) の本文を掘る。上位 N 件がすべて `[partial match]`
+(キーワードの一部しか本文に無い) のとき、全キーワードが同じセクションに揃うページが corpus にあっても出なかった。
+全文検索への切り替えが「どの候補にも本文ヒットが 0 件」のときしか走らなかったため。AI SDK の
+`search "stopWhen stepCountIs"` は Loop Control / Tool Calling の部分一致だけを返し、答えの
+「Migrate AI SDK 6.x to 7.0」(`stepCountIs` -> `isStepCount` の改名) が一度も出なかった。
+`generateObject schema` も同じで、廃止を説明する移行ガイドが出なかった。
+
+- 候補のどれにも全キーワードが揃うセクションが無いときも全文検索を回し、全キーワードの揃うページを
+  `[body-only]` で追記する。既存の行は残り、並びは従来の共通キー (全キーワードが揃う → 部分一致 → …) のまま
+- 候補が部分一致だけのときに足すのは、全キーワードが揃うページだけで、最大 2 件 (`--top-n` が 1 なら 1 件)。
+  他の部分一致のページは、候補が既に見せている種類の行の繰り返しなので足さない (候補に本文ヒットが 1 件も
+  無いときの従来の動き、`--top-n` 件まで足すことは変えない)。追記したページは部分一致の候補より上に並ぶため、
+  `--top-n` 件まで足すと `Next:` 3 行をすべて取り、index が上位に選んだページ (`generateObject schema` の
+  Generate Object / zodSchema) に `Next:` が 1 本も出なかった
+- `Next:` には、index の最上位の候補 (追記したページを除いて最上位の行) を最低 1 本残す
+- 全キーワードが揃う候補が Changelog / Release notes 系 (末尾に回すページ) だけのときは、答えが出ている
+  とは見なさずに全文検索を回す。そのページは末尾に回るため、部分一致の行が 1 位になり答えのページが出なかった。
+  `--include-changelog-priority` を付けたときは従来どおり、そのページを答えと見なす。候補に挙がっている
+  ページは、追記の枠を数える前に除く
+- `parse-claude-docs.py` / `parse-ai-sdk.py` / `parse-llms-txt.py` の 3 本で `_common.py` の
+  `full_corpus_extra_hits` を共有する。Firebase は本文を取得しない設計なので対象外
+- 追記したページにも、そのまま打てる `Next:` が出る (往復テストで 1 行ずつ実行して確かめている)
+
+### 修正: AI SDK と汎用 loader の `search-content` を、全キーワードの揃い方で並べてから `--limit` で切る
+
+AI SDK と `parse-llms-txt.py` の `search-content` は doc 番号順に出して `--limit` で切っていたため、
+番号の若い部分一致のページが、全キーワードの揃うページを押し出した (`generateObject schema` は 10 件すべて
+部分一致で、`Next:` も的外れ)。Claude Code docs の `search-content` と同じ並び (全キーワードが揃う →
+部分一致 → 本文ヒット数 → doc 番号) に揃えてから切る。件数の表示 (`N hits across M documents`) は
+従来どおり全体の数を数える。
+
+- 並べ替えのキーは `_common.py` の `search_content_rank_key` 1 つにまとめ、Claude Code docs と同じく
+  Changelog / Release notes 系を末尾に回す。AI SDK と汎用 loader の `search-content` にも
+  `--include-changelog-priority` を足した
+- `--limit` に負の数を渡すと、末尾から数えて切っていた (`--limit -1` で `showing top 187`)。
+  3 本とも 0 件として扱う
+
+### 修正: AI SDK の frontmatter で、ブロック形式の `tags` とエスケープした引用符の `title` を読む
+
+実 corpus の `tags:` (87 件) はすべて `tags:` の次の行から `  - タグ` を並べるブロック形式で、
+`tags: - api servers - streaming` という 1 本の文字列になっていた。`title: "…\"…\""` も
+エスケープを解かず、`sections 'React error "Maximum update depth exceeded"'` が見つからなかった。
+
+- ブロック形式のリストと、二重引用符の中の `\"` / `\\`、単一引用符の中の `''` を解く (corpus に出る形だけ。
+  YAML 全体は実装しない)。1 行形式 `[a, b]` は従来どおり
+- 読まないキー (例: `sidebar:`) が字下げした子を持つと、その子が直前の `description` などの続きとして
+  吸い込まれていた (旧版から)。読まないキーの行で、直前の値を区切る
+- `references/llms-txt-structure.md` の frontmatter の記述を実態 (ブロック形式、エスケープ) に合わせた
+- 実 corpus のコピーで、`tags` が文字列化された doc は 0 件、エスケープした title の doc (4 件) は実際の title で引ける
+
+## [0.30.1] - 2026-10-04
+
+### 修正: `search` 以外の `parse-claude-docs.py` が `--source both` を受けたとき、次に打てるコマンドを出す
+
+`--source both` を受けるのは `search` だけだが、`search-content` / `search-index` にも同じ感覚で付けると
+`invalid choice: 'both'` の usage エラーだけが出て、次の手が分からなかった (利用記録で、モデルが
+`search-content ... --source both` を打って止まった例がある)。`search-content` / `search-index` /
+`content` / `sections` / `fetch-index` は `--source both` を受け取った上で exit 2 で止め、次を出す:
+
+- 同じコマンド (他のオプションはそのまま) を `--source code` / `--source platform` に差し替えた 2 本
+- クエリを持つコマンド (`search-content` / `search-index`) には、`search "<query>" --source both` も (`--file` 指定時は
+  `search` が単一 source 限定なので出さない)
+- `content` / `sections` には、page index が source ごとに違う旨の注記
+
+`search --source both` で 1 回で済ませる案 (`search-content` / `search-index` が両 source を検索する) は取らなかった:
+`search-content` / `search-index` の出力は `doc_idx` が source 内でしか一意でなく、見出しを source ごとに
+分けて Next: も作り直す必要があり、`search` と役割が重なる。案内で足りる誤りなので、挙動は増やさない。
+出した行は、テストで 1 行ずつそのまま実行して exit 0 になることを確かめている。
+
+マージ前レビューの指摘を受けて、同じ 0.30.1 の中で次を直した:
+
+- `--file` を付けたときは、その snapshot の source の行だけを出す (ファイル名から source を判定できないときは、
+  「snapshot がとれた source の行だけ残す」旨の注記を出す)。以前は同じ `--file` を両 source の行に付けていたため、
+  1 本は exit 1 になるか、別 source の中身を黙って読んでいた
+- 省略形 (`--sour both`) で打たれたときは、行の末尾に `--source <key>` を足す (後に書いたほうが勝つ)。`--` がある
+  ときはその手前に入れる
+- クエリが `-` で始まるときは、案内する `search` の行にオプションを先に置き、`--` を挟んでクエリを最後に置く
+- `--source` の help を「`both` は search だけ」と読める文言にした
+- SKILL.md の「1 source ずつ」の列挙に `fetch-index` を足した
+
+往復テストは、出た行を加工せずに shell の規則で分割して実行する。`--file` あり / なし、`--source=both` の形、
+省略形、`-` で始まるクエリの各軸を 1 件以上回す。
+SKILL.md (researching-claude-docs) は、`both` を受けるのが `search` だけであることと、失敗時の対処の表に行を足した。
+
+## [0.30.0] - 2026-10-04
+
+### 追加: presets に 7 サイト (Agent Plugins / OpenAI Plugins / OpenAI API docs / ACP / Cline / Factory / Devin)
+
+利用記録 (2026-08-27〜10-03) で、`researching-library-docs` を使ったあとに WebFetch へ戻った先を見ると、
+Cursor / Codex の plugin docs が足りていなかった。その系統から足した。
+
+| source 名 | サイト | 形状 | ページ / URL あり |
+|---|---|---|---|
+| `agent-plugins` | `agent-plugins.org/llms.txt` (`llms-full.txt` は無く、`llms.txt` が全文) | frontmatter | 13 / 0 |
+| `openai-plugins` | `developers.openai.com/plugins/llms-full.txt` | H1 + `skip_empty` + `index_url` | 31 / 30 |
+| `openai-api-docs` | `developers.openai.com/api/docs/llms-full.txt` | 同上 | 232 / 220 |
+| `acp` | Agent Client Protocol | H1 + `Source:` 行 | 126 / 126 |
+| `cline` | Cline | 同上 | 113 / 113 |
+| `factory` | Factory (Droid) | H1 + `index_url` | 104 / 104 |
+| `devin` | Devin | H1 + `Source:` 行 | 592 / 592 |
+
+ページ数は、取得した `llms-full.txt` を `--file` で流し、独立に数えた値 (`Source:` 行の数、`title:` 行の数、
+`llms.txt` のタイトル一致) と一致することを確かめた。7 つとも `scripts/check-preset-urls.py` で 200。
+AWS Bedrock は見送った (`llms-full.txt` が無く、ページごとに別ファイルで公開しているため、この loader の
+形状では読めない。`docs.aws.amazon.com/llms-full.txt` は案内ページへのリンク一覧で本文が無い)。
+skill の description と Step 0 の表、README の表と取得先ホストの一覧 (14 → 20 ホスト) を合わせた。
+description + when_to_use の長さを保つため、description の Cloudflare 製品の列挙を「製品別」にまとめ、
+重複していた trigger 語 `Model Context Protocol` を除いた (製品名は trigger に残る)。
+
+### テスト: README の取得先ホスト一覧と presets.json の一致 (挙動の変更なし)
+
+README の取得先ホストの一覧は手で書いており、preset の追加・移転のたびにずれる恐れがあった。一覧を
+コードブロックにして (1 行 1 ホスト)、`presets.json` の `url` / `index_url` のホストの集合と一致することを
+suite で確かめる (ネットワーク不要。一覧からの欠落も、一覧だけにあるホストも検出する)。
+
+## [0.29.1] - 2026-10-04
+
+### 変更: README に同梱 presets の取得先ホストの一覧を置く (挙動の変更なし)
+
+ルートの README の「Privacy & data flow」表が llms-docs の送信先を 4 ホストに限っていたが、同梱 presets は
+他に 14 ホストへ取得に行く。ホストを表に列挙すると preset が増えるたびにずれるため、ルートの表は取得先の
+出どころ (専用 skill の取得先 / presets.json / 利用者の `sources.json`) で書き、ホストの一覧はこの README の
+「同梱 presets」節に置いた (`presets.json` の `url` / `index_url` から出した 14 ホスト)。コードの変更は無い。
+
+## [0.29.0] - 2026-10-04
+
+### 変更: エラーと 0 件のあとに、そのまま打てる次のコマンドを出す (4 script 共通)
+
+過去 5 週間の利用記録 (fork 内の実行 60 本、`parse-*.py` の呼び出し 833 回) を集計すると、1 回の調査は
+呼び出しが中央値 9・最大 64 で、36 本が 6 回を超えていた。エラーや 0 件のあとの立て直しが手数を増やしていた:
+曖昧な slug (6 回)、見出しの推測ミス (4 回)、`search` の `Next:` が `<page_ref> "<heading_path>"` の
+プレースホルダのまま (モデルが見出しを手で写して外す)、0 件 (26 回。語が docs に無いのか、絞り込みで
+外したのかが区別できず、言い換えの再検索が増える)。エラーと 0 件の exit code は変えていない。ただし
+claude-docs で `<lang>/<slug>` に完全一致する 1 件があった slug (`hooks` / `permissions` など) は、従来の
+曖昧エラー (exit 1) ではなく本文を返す (exit 0)。
+
+- **曖昧な page_ref** — 候補ごとに、そのまま実行できる完全なコマンド (`--source` / `--file` /
+  `--cache-dir` などを引き継ぐ) を付ける。`sections` / `content` / `search-content --page-ref` で、元の
+  サブコマンド・見出し・クエリを保つ。claude-docs は、slug が `<lang>/<slug>` に完全一致するページが
+  ちょうど 1 件ならそれに解決し、他の候補を stderr の `Note:` に 1 行で出す (`hooks` は `en/hooks`、
+  `en/agent-sdk/hooks` は別の候補)。`Note:` の末尾には、他の候補の 1 つで同じことをするコマンドを付ける。
+  候補のコマンドは、そのサブコマンドの既定以外の値 (`content` の `--max-chars`、`search-content` の
+  `--limit` / `--context` / `--max-hits` / `--max-snippet-chars` など) も引き継ぐ (既定値は出さない)。言語が複数ある (`en` と `ja`) など 1 件に決まらないときは従来どおり
+  曖昧エラー。Firebase は URL に言語が無く、AI SDK と汎用 loader は URL の slug を使わないため、
+  この解決は入れていない (コマンド付きの候補一覧だけ)
+- **heading not found** — 全見出しの前に `Closest sections:` として近い見出しを最大 5 件、実行できる
+  コマンド付きで出す。末尾の要素を、大文字小文字・空白・記号を無視して比べる (タイトルが一致 →
+  タイトルが含む → パスが含む → 推測のほうが長くタイトルを含む → `difflib` の近さ 0.7 以上)。0.7 は
+  Claude Code の見出し 4374 種で測った: 1 文字の打ち間違いは 3 文字の 2 件を除いて残り、無関係な見出しの
+  組が通るのは 0.6 の 29 / 20000 から 7 / 20000 に減る (0.6 では `nonexistent thing` に
+  `Change a setting` が出た)。全見出しの一覧 (`Available sections:`) は残す。曖昧な見出し
+  (`ambiguous heading`) の候補にもコマンドを付けた。`Closest sections:` の候補のコマンドも `--max-chars` を
+  引き継ぐ
+- **`search` / `search-content` の `Next:`** — 上位ヒットの `doc_idx` と heading_path を埋めたコマンドを
+  最大 3 行出す (各ページの最良のセクションを先に、足りなければ最上位ページの次のセクション)。
+  `--source` などは引き継ぎ、`--source both` では各ヒットの source を付ける。本文ヒットのあるページが
+  あれば、タイトル・説明だけで順位が付いたページは出さない。ヒットが無いときはプレースホルダでなく
+  次の項目の診断を出す
+- **1 ページに同じ heading_path が 2 回以上ある見出し** — どのコマンドも 1 つ目を読み、2 つ目以降には
+  届かない (見出しの指定は heading_path なので、区別する手段が無い)。`Next:` / `Closest sections:` /
+  曖昧な見出しの候補で、そうした見出しのコマンドの後ろに `# heading appears N times; this reads the first` (shell のコメント。行ごと打てる)
+  を付け、同じコマンドは 1 回だけ出す。手元のキャッシュの 30997 見出しのうち 44 (Firebase の 15 ページで
+  42) がこれに当たる
+- **見出しの解決順** — 見出しの指定は、ページ全体で heading_path の完全一致を先に探し、無ければタイトルの
+  完全一致を探す (大文字小文字を無視する段も同じ順)。従来は 1 回の走査で両方を見ていたため、前にある
+  入れ子の見出しのタイトル (`Tools/view/Error handling` の `Error handling`) が、後ろのトップレベルの
+  `## Error handling` より先に当たり、`Next:` などが出した heading_path のコマンドが別のセクションを
+  読んでいた。手元のキャッシュの全見出しを自分の heading_path で引き直すと、別のセクションに解決した
+  ものが 30997 中 4 (Claude Platform 1、AI SDK 3) から 0 になった
+- **0 件** — `Why nothing matched:` に、語ごとにそれを含むページ数を出す。全語が 0 件なら「言い換えより別の
+  語・`search-index`・別 source」、一部だけ 0 件ならその語を落としたクエリ、全語が有るのに揃わないなら
+  最も稀な語 1 つのクエリを `Next:` に出す。`--page-ref` で絞っていたときはそれを注記する。Firebase の
+  `search` は本文を取得しない設計なので、数えるのはタイトル・説明の index、`search-content --page-ref`
+  は取得したそのページだけで、その旨を出す。claude-docs は、もう一方の source で試すコマンドも出す。
+  claude-docs の `search-index` は `--file` を受けないため、`--file` 付きのときは `search-index` の
+  `Next:` を出さない (出すと argparse のエラーになる)
+- 共通部分は `_common.py` (`near_headings` / `prefer_lang_exact` / `die_ambiguous_page` /
+  `retry_for_page_ref`) と `_commands.py` (`render_next_content` / `render_zero_hits` /
+  `hit_candidates`) に置いた。`test_hint_wiring.py` の検査が新しい `render_*` にも当たる。
+  `search-index` の行と別 source を指す行の引数 (`index_hint_args` / `alt_hint_args`) は呼び出し側で
+  組み立て、`None` でない分岐が `corpus_hint_args` を含むことを同じ検査が見る (別 source の行から
+  `corpus_hint_args` を落とす変異は、以前は suite 全体を生き延びていた)
+- テスト: 4 script それぞれで、曖昧な参照 (`content` / `sections` / `search-content`)、見出しの推測ミス、
+  `Next:` の埋まり方 (`search` / `search-content`)、0 件 4 通り (語が無い / 一部が無い / 揃わない /
+  `--page-ref`) と `search` の 0 件を固定し、claude-docs の slug 解決 (完全一致 1 件・長い slug・言語が
+  2 つ)、`near_headings` と `hit_candidates` の単体を足した。修正前の版に流すと 79 件が
+  assertion の失敗で落ちる (ほかに、新しい関数が無いための ERROR が単体のテスト 12 件)。実装の各条件を
+  壊す 47 通りの変異がいずれも assertion の失敗で落ちる
+- テスト (マージ前レビューの指摘への対応): 出力が勧めるコマンド (`Next:` / `Closest sections:` /
+  曖昧なページ・見出しの候補 / `Note:` の末尾) を shell と同じ規則で分割して実際に実行し、exit 0 と、
+  `content` なら名前どおりの heading_path を読むことを確かめる往復のテストを、4 script と `--cache-dir` /
+  `--file` (claude-docs・AI SDK) の両方で足した。見出しの解決順、重複する heading_path の注記、
+  候補が既定以外の値を引き継ぐこと、`--file` の `search-index` 行、`difflib` の閾値を固定した。
+  対応する実装を壊す 17 通りの変異がいずれも assertion の失敗で落ちる
+
+### 変更: SKILL.md 4 本に調査の手数の目安と、Skill を呼べない文脈の手順を書く
+
+1 回の Skill 呼び出しに 3〜5 個の論点を詰めた依頼が大半で、`search` を 8 回以上打った実行が 14 / 60、
+`--max-chars 0` が `content` の約 24% (既定の上限で足りる例が多い)、出力を `| head` / `| grep` で自分で
+切った呼び出しが 210 回、fork の中から同じ Skill を呼び直して `already executing in this forked context` に
+なったのが 2 回、Skill を使うよう指示された subagent が公式ドキュメントを WebFetch したのが 5 件あった。
+
+- **「調査の進め方 (手数の目安)」** — 論点が複数なら最初に列挙して論点ごとに結論を返す。1 論点は
+  `search` 1 回 → `content` 1〜2 回で、`Next:` をそのまま実行する。同じ論点で `search` を 3 回外したら
+  言い換えず `search-index` / `sections` で構造から当たるか「記載なし」として返す。`--max-chars 0` は
+  既定の上限で切れたと確かめてからだけ使い、`| head` / `| grep` で切らない。fork の中から同じ Skill を
+  呼ばない
+- **「Skill を呼べない文脈 (subagent など)」** — WebFetch の前に、`${CLAUDE_PLUGIN_ROOT}/scripts/` の
+  スクリプトを直接実行する (パスの解決と 2 ステップ)。README にも同じ手順と、4 script の対応表を置いた
+- **「失敗時の対処」** — 上の新しい出力 (`Why nothing matched:` / `Ambiguous` / `Closest sections:`) に
+  合わせた。古い `No results found` の記述を直した
+- 4 本の記述をそろえ、差は source ごとの事情 (`--source` が必須、URL の slug の有無) だけにした。
+  SKILL.md の `metadata.version` は claude-docs 3.5.0 / ai-sdk 3.4.0 / firebase 2.2.0 / library-docs 1.1.0
+- テスト: 4 本が同じ規則を持つこと、表が引く出力文言を script がまだ出すことを固定した
+
+### 変更: preset `cloudflare-browser-rendering` の取得先を `/browser-run/` にし、presets の点検スクリプトを追加
+
+Cloudflare の製品名が Browser Run に変わり、`/browser-rendering/llms.txt` は HTTP 301 で
+`/browser-run/llms.txt` へ移っていた。`/browser-rendering/llms-full.txt` は 200 のまま残っているが、
+**内容が移転先と同じではない**: 旧は 422 KB・47 ページで、ページ内に URL を持たない改名前の版。新は
+667 KB・52 ページで、他の Cloudflare 製品と同じテンプレート (51 ページが自分の URL を持つ)。
+`llms.txt` は旧 URL と新 URL でバイト単位で同じ。
+
+- **preset** — `url` を `/browser-run/` にし、description を「Cloudflare Browser Run
+  (formerly Browser Rendering)」にした。source 名は利用者が使っているので変えない。`index_url` は外した:
+  新しい `llms-full.txt` はページの URL を自分で持ち、`llms.txt` で URL が付くページは 0 だった。効かない
+  `index_url` は、取得と点検の対象を 1 つ増やすだけになる (他の Cloudflare 製品も持たない)。README の
+  presets 表と、`researching-library-docs` の「URL の無い source」の一覧、`docs/generic-llms-txt-source.md`
+  (2026-10-04 の実測) を合わせた
+- **点検スクリプト `scripts/check-preset-urls.py`** — 同梱 presets の全 `url` / `index_url` (32 件) を
+  HEAD で点検し、3xx は転送先まで辿って、200 以外を一覧する (200 以外があれば exit 1)。ネットワークに
+  出るので suite には入れず、サーベイのときに手で流す (README の保守メモ)。
+  実行結果は、直す前が 33 件中 1 件 (この index_url が 301)、`/browser-run/` に移した後は 0 件。他の
+  Cloudflare 製品 14 件と、`index_url` を持つ他の presets は、いずれも 200 のままだった。その後この
+  `index_url` を外したので、点検する URL は 32 件
+- テスト: preset の `url` が `/browser-run/` を指し、`index_url` を持たないこと。
+  点検スクリプトは、転送を辿る・転送先が 404 のときは「移動」と報告しない・両方の URL を見る・終了コードを、
+  ネットワークなしで固定した (7 通りの変異がいずれも assertion の失敗で落ちる)
+
+## [0.28.1] - 2026-10-03
+
+### 修正: preset `codex` の取得先を移転先 (`learn.chatgpt.com/docs`) にし、範囲の説明を直す
+
+`developers.openai.com/codex/llms-full.txt` と `/codex/llms.txt` が HTTP 308 で
+`learn.chatgpt.com/docs/llms-full.txt` / `/docs/llms.txt` (別ホスト) へ移った。転送には追従するため読めては
+いたが、取得先を直接指すようにした。ファイルは Codex のページに加えて ChatGPT の製品ページ (desktop app /
+Work / 管理者向けの設定など) も含むようになっており、preset の description が実態と合っていなかった。
+
+- **preset** — `url` / `index_url` を移転先にし、`description` を「OpenAI Codex + ChatGPT docs」に更新した。
+  README の presets 表と、`researching-library-docs` の対応表 (Step 0) の説明も合わせた。skill の
+  description と Triggers は変えていない (自動で起動する対象は従来どおり)
+- **実測** — 移転元から転送で取った内容と、移転先から直接取った内容はバイト単位で同じ。ページ数は 178、
+  URL が付くページは 175 で、移転前 (0.28.0) と同じ。`llms.txt` の死にリンク 2 件と、別のタイトルの項目が
+  同じ URL を指す組 2 つはサイト側の問題で、手を入れていない (`docs/generic-llms-txt-source.md`)
+- **キャッシュ** — 取得先が変わるため、初回はキャッシュのファイル名が変わって再取得する。古い
+  `generic-codex-…` のキャッシュのファイルは残る (消してよい)
+- テスト: preset の `index_url` が `url` の `llms-full.txt` と同じディレクトリの `llms.txt` であることを固定
+  した。移転元が転送している間は片方だけ古くても動くため見落としやすい。`index_url` を移転元・サイトの
+  ルート・`llms-full.txt` にする変異、`url` だけ移転元に残す変異、別の preset (zod) の範囲をずらす変異の
+  5 通りが、いずれも assertion の失敗で落ちる
+
+### 修正: `index_url` の突き合わせで、別の `llms.txt` を指す項目をページとして扱わない (汎用 loader)
+
+他の `llms.txt` へのリンク集になっている 2 段の索引 (OpenAI や Cloudflare のルートの `llms.txt`) を
+`index_url` に書くと、別の `llms.txt` を指す項目がページとタイトルで突き合わされ、そのファイルの URL が
+ページに付いた (Sign in with ChatGPT のページに `siwc/llms.txt`)。README は `index_url` を「サイトの
+`llms.txt`」と案内しており、ルートが 2 段になっているサイトでは利用者がそのまま書きうる形だった。
+
+- **除く項目** — URL の最後の区間が `llms.txt` または `llms-<名前>.txt` (`llms-full.txt` / `llms-small.txt` /
+  `llms-ctx-full.txt` など。大文字小文字・query・fragment・末尾のスラッシュは問わない) の項目を、タイトルを
+  比べる前に捨てる。`llms.txt.md` や `not-llms.txt`、`/llms.txt/intro` は除かない。除いた項目は、同じ
+  タイトルの別の項目との重複にも数えない (ページの項目が 1 つ残れば、そのページに付く)
+- **実測** — 実在の索引 7 件の項目を数えた: OpenAI のルートは 40 件中 12、Cloudflare のルートは 113 件すべて、
+  Hono は 1 件 (`llms-small.txt`)、Codex は 2 件 (`llms-full.txt` と `use-cases/llms.txt`)。`index_url` を
+  持つ presets 5 件 (zod / hono / render / codex / cloudflare-browser-rendering) では、0.28.0 と 0.28.1 で
+  ページごとの URL が変わらない (差の行 0)。専用 3 script の索引 (Claude Code / Claude Platform /
+  Firebase) には該当の項目が無く、この修正は汎用 loader だけに入れた (`docs/generic-llms-txt-source.md`)
+- **防げないもの** — `url` の `llms-full.txt` に含まれない別の docs のページ (OpenAI のルートにある学習
+  トラックなど) の項目が、ページとタイトルを共有すると、その項目の URL が付く。タイトルだけでは本物の一致と
+  区別できないため、README の `index_url` の説明と「対象外」に、2 段の索引を `index_url` に書かないことを
+  追記した (`index_url` の検証エラーの文言も合わせた)
+- `AGENTS.md` のレビュー規則に、別の `llms.txt` を指す項目の URL を付けることを指摘対象に、上の衝突を
+  対象外に加えた
+- テスト: 索引ファイルの項目の形 8 種と、似ているがページの形 5 種 (表駆動)、2 段の索引の見本、索引ファイルの
+  項目がタイトルの重複に数えられないこと。実装の各条件を壊す 10 通りの変異がいずれも assertion の失敗で落ちる
+
 ## [0.28.0] - 2026-10-03
 
 ### profile キー `index_url`: URL の無いページに `llms.txt` から URL を付ける (汎用 loader)
@@ -186,8 +714,9 @@ H1 / frontmatter によるページ分割が誤り続けていた。
 - Claude Code docs の `search-content` (ページを本文ヒット数で並べて `--limit` で切る唯一の script) も
   同じ順に揃えた
 - 実 corpus での比較: Claude Code docs 8 / AI SDK 6 の計 14 クエリのうち 7 件で上位 5 件の順位が
-  変わった。`argument-hint frontmatter` で Skills のページが 1 位に、`stopWhen stepCountIs` で
-  Loop Control が 2 位に上がるなど、いずれも全キーワードが揃うページが上がる変化だった
+  変わった。`argument-hint frontmatter` で Skills のページが 1 位に上がるなど、いずれも全キーワードが
+  揃うページが上がる変化だった (当時は `stopWhen stepCountIs` で Loop Control が 2 位に上がる例も挙げて
+  いたが、現在の corpus では成り立たない。0.31.0 で `search` が全キーワードのページを追記するようになった)
 
 ## [0.25.0] - 2026-09-26
 

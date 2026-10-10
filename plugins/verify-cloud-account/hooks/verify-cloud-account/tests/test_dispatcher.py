@@ -409,11 +409,12 @@ class TestServiceInteractions(BaseWithTmpProject):
 
     def test_cd_chain_decomposes_and_verifies(self):
         self._write_accounts({"github": "Mao-o"})
+        (self.project_dir / "sub").mkdir()
         with mock.patch(
             "services.github.verify", return_value=None
         ) as mock_verify:
             result = dispatch(
-                "cd /tmp && gh pr create", str(self.project_dir)
+                "cd sub && gh pr create", str(self.project_dir)
             )
         self.assertIsNone(result)
         mock_verify.assert_called_once()
@@ -3876,7 +3877,7 @@ class TestVerificationCoverageFloor(BaseWithTmpProject):
         ('for f in *; do gh release upload v1 "$f"; done', "github"),
         # 複合コマンドの各段
         ("gh auth status && gh pr create --fill", "github"),
-        ("cd /tmp; aws s3 rm s3://b/x", "aws"),
+        ("cd sub; aws s3 rm s3://b/x", "aws"),
         ("gh pr list | xargs -I{} gh pr close {}", "github"),
         # heredoc の**外**にある実行コマンド
         ("cat > x.sh <<'EOF'\nnot executed\nEOF\ngh pr create --fill", "github"),

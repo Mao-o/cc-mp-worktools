@@ -75,11 +75,11 @@
       "description": "Model Context Protocol (MCP)"
     },
     "codex": {
-      "url": "https://developers.openai.com/codex/llms-full.txt",
+      "url": "https://learn.chatgpt.com/docs/llms-full.txt",
       "split": "h1",
       "skip_empty": true,
-      "description": "OpenAI Codex (CLI / IDE / cloud / SDK)",
-      "index_url": "https://developers.openai.com/codex/llms.txt"
+      "description": "OpenAI Codex + ChatGPT docs (Codex の CLI / IDE / cloud / SDK、ChatGPT の desktop app / Work / 管理)",
+      "index_url": "https://learn.chatgpt.com/docs/llms.txt"
     },
     "ollama": {
       "url": "https://docs.ollama.com/llms-full.txt",
@@ -87,6 +87,52 @@
       "page_url": "line:Source: ",
       "h1_needs_url": true,
       "description": "Ollama"
+    },
+    "agent-plugins": {
+      "url": "https://agent-plugins.org/llms.txt",
+      "split": "frontmatter",
+      "description": "Agent Plugins (portable plugin format for Skills and MCP servers)"
+    },
+    "openai-plugins": {
+      "url": "https://developers.openai.com/plugins/llms-full.txt",
+      "split": "h1",
+      "skip_empty": true,
+      "description": "OpenAI Plugins (ChatGPT / Codex plugins: MCP server, UI, skills, submission)",
+      "index_url": "https://developers.openai.com/plugins/llms.txt"
+    },
+    "openai-api-docs": {
+      "url": "https://developers.openai.com/api/docs/llms-full.txt",
+      "split": "h1",
+      "skip_empty": true,
+      "description": "OpenAI API docs (developers.openai.com/api/docs)",
+      "index_url": "https://developers.openai.com/api/docs/llms.txt"
+    },
+    "acp": {
+      "url": "https://agentclientprotocol.com/llms-full.txt",
+      "split": "h1",
+      "page_url": "line:Source: ",
+      "h1_needs_url": true,
+      "description": "Agent Client Protocol (ACP)"
+    },
+    "cline": {
+      "url": "https://docs.cline.bot/llms-full.txt",
+      "split": "h1",
+      "page_url": "line:Source: ",
+      "h1_needs_url": true,
+      "description": "Cline"
+    },
+    "factory": {
+      "url": "https://docs.factory.com/llms-full.txt",
+      "split": "h1",
+      "description": "Factory (Droid)",
+      "index_url": "https://docs.factory.com/llms.txt"
+    },
+    "devin": {
+      "url": "https://docs.devin.ai/llms-full.txt",
+      "split": "h1",
+      "page_url": "line:Source: ",
+      "h1_needs_url": true,
+      "description": "Devin"
     },
     "cloudflare-workers": {
       "url": "https://developers.cloudflare.com/workers/llms-full.txt",
@@ -284,7 +330,7 @@
       "description": "Cloudflare AI Gateway"
     },
     "cloudflare-browser-rendering": {
-      "url": "https://developers.cloudflare.com/browser-rendering/llms-full.txt",
+      "url": "https://developers.cloudflare.com/browser-run/llms-full.txt",
       "split": "frontmatter",
       "page_url": "link:View as Markdown",
       "drop_lines": [
@@ -296,8 +342,7 @@
         "^\\[ Edit page \\]\\(",
         "^(Copy page|Explain Code|Terminal window)\\s*$"
       ],
-      "description": "Cloudflare Browser Rendering",
-      "index_url": "https://developers.cloudflare.com/browser-rendering/llms.txt"
+      "description": "Cloudflare Browser Run (formerly Browser Rendering)"
     },
     "cloudflare-containers": {
       "url": "https://developers.cloudflare.com/containers/llms-full.txt",

@@ -30,6 +30,7 @@ Passing ``--file`` is optional — if omitted, the cached copy under
 import argparse
 import os
 import re
+import shlex
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
@@ -45,22 +46,29 @@ from _common import (
     assert_parsed,
     corpus_hint_args,
     die,
+    die_ambiguous_page,
     die_index_out_of_range,
     fetch_url,
-    full_corpus_body_search,
+    full_corpus_extra_hits,
     load_lines,
     next_hint,
+    normalize_doc_url,
+    retry_for_page_ref,
     search_content_in_body,
+    search_content_rank_key,
     search_index_entries,
     search_rank_key,
 )
 from _commands import (  # noqa: E402
     PageView,
+    hit_candidates,
     print_entry,
     print_page_hits,
     print_search_result,
     render_content,
+    render_next_content,
     render_sections,
+    render_zero_hits,
 )
 
 # A document with no frontmatter ``title:`` field almost always means
@@ -180,34 +188,66 @@ def _looks_like_frontmatter_start(lines: list[str], pos: int) -> bool:
 # Frontmatter field extraction
 # ---------------------------------------------------------------------------
 
+def _unquote(value: str) -> str:
+    """Strip one pair of YAML quotes and resolve the escapes inside them.
+
+    Double-quoted: ``\\"`` and ``\\\\`` are resolved. Single-quoted: ``''`` is
+    one quote. Only these are handled, which is what the corpus uses. An
+    unquoted value keeps the old behaviour (stray end quotes are stripped).
+    """
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        return re.sub(r'\\(["\\])', r"\1", value[1:-1])
+    if len(value) >= 2 and value[0] == value[-1] == "'":
+        return value[1:-1].replace("''", "'")
+    return value.strip("'\"")
+
+
 def parse_frontmatter(fm_lines: list[str]) -> dict:
-    """Extract title, description, and tags from frontmatter lines."""
-    result: dict = {"title": "", "description": "", "tags": []}
+    """Extract title, description, url, and tags from frontmatter lines.
+
+    ``url`` is the page's own address (``url: "https://..."``); a page
+    without one keeps ``""``.
+
+    ``tags`` is read from the inline form (``[a, b]`` or ``a, b``) and from the
+    block form (``tags:`` followed by ``- a`` lines), which is the form the
+    published corpus uses.
+    """
+    result: dict = {"title": "", "description": "", "url": "", "tags": []}
     current_key = None
     current_value_lines: list[str] = []
 
     def _flush():
         nonlocal current_key, current_value_lines
         if current_key and current_value_lines:
-            value = " ".join(current_value_lines).strip()
             if current_key == "tags":
-                # Parse [tag1, tag2, ...] or bare comma-separated
-                m = re.match(r"\[(.+)\]", value)
-                inner = m.group(1) if m else value
-                result["tags"] = [t.strip().strip("'\"") for t in inner.split(",") if t.strip()]
+                if all(v.startswith("-") for v in current_value_lines):
+                    items = [_unquote(v[1:]) for v in current_value_lines]
+                    result["tags"] = [t for t in items if t]
+                else:
+                    value = " ".join(current_value_lines).strip()
+                    # Parse [tag1, tag2, ...] or bare comma-separated
+                    m = re.match(r"\[(.+)\]", value)
+                    inner = m.group(1) if m else value
+                    result["tags"] = [t.strip().strip("'\"") for t in inner.split(",") if t.strip()]
             else:
-                result[current_key] = value.strip("'\"")
+                value = " ".join(current_value_lines).strip()
+                result[current_key] = _unquote(value)
         current_key = None
         current_value_lines = []
 
     for line in fm_lines:
-        m = re.match(r"^(title|description|tags)\s*:\s*(.*)", line)
+        m = re.match(r"^(title|description|url|tags)\s*:\s*(.*)", line)
         if m:
             _flush()
             current_key = m.group(1)
             rest = m.group(2).strip()
             if rest and rest != "|" and rest != ">":
                 current_value_lines.append(rest)
+        elif re.match(r"^[\w-]+\s*:", line):
+            # Another top-level key: its indented children must not be read
+            # as the previous value's continuation.
+            _flush()
         elif current_key and line.startswith("  "):
             # Continuation of multi-line value
             current_value_lines.append(line.strip())
@@ -312,16 +352,89 @@ def _warn_if_untitled_ratio_high(docs: list[dict], path: str) -> None:
 # Page reference resolution (int / title substring)
 # ---------------------------------------------------------------------------
 
-def _resolve_page_ref(docs: list[dict], page_ref: str) -> int:
+_URL_LIKE_RE = re.compile(r"^(?:[a-z][a-z0-9+.-]*://|[a-z0-9-]+(?:\.[a-z0-9-]+)+/)", re.I)
+
+
+def _url_key(url: str) -> str:
+    """``normalize_doc_url`` without the scheme, lowercased, so a pasted
+    ``http://`` / scheme-less / trailing-slash form of a page's URL compares equal."""
+    return re.sub(r"^[a-z][a-z0-9+.-]*://", "", normalize_doc_url(url.strip()),
+                  flags=re.I).lower()
+
+
+def _die_url_page_ref(docs: list[dict], page_ref: str, retry, hint_args: tuple) -> None:
+    """Exit 1 for a URL given as page_ref: say it is not resolved, and print the
+    command for the page whose ``url:`` equals it (or a ``search`` on its slug)."""
+    key = _url_key(page_ref)
+    rows = []
+    for i, doc in enumerate(docs):
+        fm = parse_frontmatter(doc["frontmatter_lines"])
+        if key and _url_key(fm.get("url") or "") == key:
+            rows.append((i, (fm.get("title") or "").strip()))
+    lines = [f"No document found for: {page_ref}",
+             "  A URL is printed for citing; page_ref takes an integer index or a title substring."]
+    if rows:
+        lines.append("  A page has this url:" if len(rows) == 1 else "  Pages have this url:")
+        for idx, title in rows:
+            lines.append(f"  [{idx}] {title or '(untitled)'}")
+            cmd = retry(idx) if retry is not None else f"parse-ai-sdk.py content {idx}"
+            lines.append(f"    {cmd}")
+    else:
+        lines.append("  No page has this url.")
+        words = re.findall(r"[A-Za-z0-9]+", normalize_doc_url(page_ref.strip()).rsplit("/", 1)[-1])
+        if words:
+            tail = (" " + " ".join(hint_args)) if hint_args else ""
+            lines.append(f"    {os.path.basename(sys.argv[0])} search "
+                         f"{shlex.quote(' '.join(words))}{tail}")
+    die("\n".join(lines))
+
+
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def _die_slug_page_ref(docs: list[dict], page_ref: str, retry, hint_args: tuple) -> None:
+    """Exit 1 for a slug (the last segment of a page's URL) given as page_ref:
+    say it is not resolved, and print the command for the page(s) whose URL
+    ends in it (or a ``search`` on its words). A title substring never gets
+    here: that match is tried first."""
+    rows = []
+    for i, doc in enumerate(docs):
+        fm = parse_frontmatter(doc["frontmatter_lines"])
+        last = normalize_doc_url((fm.get("url") or "").strip()).rsplit("/", 1)[-1].lower()
+        if last == page_ref:
+            rows.append((i, (fm.get("title") or "").strip()))
+    lines = [f"No document found for: {page_ref}",
+             "  A URL's last segment is not resolved; page_ref takes an integer index or a title substring."]
+    if rows:
+        lines.append(f"  A page has a url ending in /{page_ref}:" if len(rows) == 1
+                     else f"  Pages have urls ending in /{page_ref}:")
+        for idx, title in rows:
+            lines.append(f"  [{idx}] {title or '(untitled)'}")
+            cmd = retry(idx) if retry is not None else f"parse-ai-sdk.py content {idx}"
+            lines.append(f"    {cmd}")
+    else:
+        lines.append(f"  No page has a url ending in /{page_ref}.")
+        words = re.findall(r"[A-Za-z0-9]+", page_ref)
+        if words:
+            tail = (" " + " ".join(hint_args)) if hint_args else ""
+            lines.append(f"    {os.path.basename(sys.argv[0])} search "
+                         f"{shlex.quote(' '.join(words))}{tail}")
+    die("\n".join(lines))
+
+
+def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
+                      hint_args: tuple = ()) -> int:
     """Resolve a page reference to a doc index.
 
     Tries, in order:
       1. integer index into *docs*
       2. title substring (case-insensitive); unique match wins
 
-    AI SDK's llms-full.txt has no Source/URL line in document bodies, so
-    URL / slug matching is not supported here (use the integer index from
-    ``search-index`` / ``search`` instead).
+    URL / slug matching is not supported here even though each page's
+    frontmatter carries a ``url:`` (it is printed for citing, not resolved):
+    use the integer index from ``search-index`` / ``search`` instead.
+    A failure for a URL or for a slug (the last segment of a page's URL)
+    still exits 1, but prints the command for the page that owns it.
     """
     if page_ref is None or page_ref == "":
         die("page_ref required: integer index or title substring")
@@ -345,8 +458,11 @@ def _resolve_page_ref(docs: list[dict], page_ref: str) -> int:
     if len(candidates) == 1:
         return candidates[0][0]
     if len(candidates) > 1:
-        detail = "\n  ".join(f"[{i}] {t}" for i, t in candidates)
-        die(f"Ambiguous title substring '{page_ref}'. Matches:\n  {detail}")
+        die_ambiguous_page("title substring", page_ref, candidates, retry)
+    if _URL_LIKE_RE.match(page_ref.strip()):
+        _die_url_page_ref(docs, page_ref, retry, hint_args)
+    if _SLUG_RE.match(page_ref):
+        _die_slug_page_ref(docs, page_ref, retry, hint_args)
     die(f"No document found for: {page_ref}")
 
 
@@ -394,20 +510,34 @@ def cmd_fetch_index(args):
     next_hint("sections", "<page_ref>", *corpus_hint_args(args))
 
 
+def _url_and_tags_lines(info: dict) -> list[str]:
+    """``    URL: ...`` / ``    tags: ...`` lines under a result heading
+    (*info* is a frontmatter dict or a result row; either may lack a url)."""
+    lines = []
+    if info.get("url"):
+        lines.append(f"    URL: {info['url']}")
+    if info.get("tags"):
+        lines.append(f"    tags: {', '.join(info['tags'])}")
+    return lines
+
+
 def _page_view(args) -> tuple[str, PageView]:
     """Load the corpus and describe ``args.page_ref`` as a ``PageView``."""
     file_path, docs = _load_docs(args.file, args.cache_dir, max_age=args.max_age)
-    idx = _resolve_page_ref(docs, args.page_ref)
+    idx = _resolve_page_ref(docs, args.page_ref,
+                            retry_for_page_ref(args, corpus_hint_args(args)),
+                            corpus_hint_args(args))
     doc = docs[idx]
     fm = parse_frontmatter(doc["frontmatter_lines"])
     page = PageView(
         idx=idx,
         title=fm["title"] or "(untitled)",
         body_lines=doc["body_lines"],
-        header_lines=[f"  (file: {file_path})"],
+        header_lines=([f"  URL: {fm['url']}"] if fm["url"] else [])
+        + [f"  (file: {file_path})"],
         min_level=1,
         protect_tables=False,
-        meta={"tags": fm["tags"] or None},
+        meta={"source": fm["url"] or None, "tags": fm["tags"] or None},
     )
     return file_path, page
 
@@ -482,7 +612,9 @@ def cmd_search_content(args):
         die("query must not be empty")
 
     if args.page_ref is not None:
-        target_docs = [_resolve_page_ref(docs, args.page_ref)]
+        target_docs = [_resolve_page_ref(docs, args.page_ref,
+                                         retry_for_page_ref(args, corpus_hint_args(args)),
+                                         corpus_hint_args(args))]
     else:
         target_docs = list(range(len(docs)))
 
@@ -491,43 +623,60 @@ def cmd_search_content(args):
     print()
 
     total_hits = 0
-    docs_matched = 0
-    printed_docs = 0
+    collected = []
 
     for idx in target_docs:
         doc = docs[idx]
-        fm = parse_frontmatter(doc["frontmatter_lines"])
-        title = fm["title"] or "(untitled)"
-
         hits = search_content_in_body(
             doc["body_lines"], args.query,
             context_lines=args.context,
             max_matches_per_doc=args.max_hits,
             min_level=1,
             max_snippet_chars=args.max_snippet_chars,
+            page_title=parse_frontmatter(doc["frontmatter_lines"])["title"] or "",
         )
 
         if hits["total_matches"] == 0:
             continue
 
         total_hits += hits["total_matches"]
-        docs_matched += 1
+        collected.append((idx, hits))
 
-        if printed_docs >= args.limit:
-            continue
+    # Changelog pages last, then strict-AND pages before "[partial match]"
+    # pages, then most hits, then doc order (same key in every script): cut by
+    # --limit only after ordering, so low-numbered partial pages cannot push
+    # out a page that has every keyword in one section.
+    fms = {idx: parse_frontmatter(docs[idx]["frontmatter_lines"]) for idx, _hits in collected}
+    collected.sort(key=lambda t: search_content_rank_key(
+        t[0], fms[t[0]]["title"], t[1],
+        include_changelog_priority=args.include_changelog_priority))
+    docs_matched = len(collected)
+    printed_docs = 0
+    shown = []
+
+    for idx, hits in collected[: max(args.limit, 0)]:
+        fm = fms[idx]
+        title = fm["title"] or "(untitled)"
         printed_docs += 1
+        shown.append((idx, hits, ()))
 
         print_page_hits(f"[{idx}] {title}", hits, noun="document",
-                        extra_lines=[f"    tags: {', '.join(fm['tags'])}"] if fm["tags"] else [])
+                        extra_lines=_url_and_tags_lines(fm))
 
+    hint_args = corpus_hint_args(args)
     if total_hits == 0:
         print("No matching content found.")
         print()
         print("Tip: try broader keywords or 'search-index' to find relevant documents first")
-    else:
-        print(f"({total_hits} hits across {docs_matched} documents, showing top {printed_docs})")
+        print()
+        render_zero_hits(args.query, (d["body_lines"] for d in docs),
+                         subcommand="search-content", hint_args=hint_args,
+                         index_hint_args=hint_args,
+                         scope="documents", restricted_to=args.page_ref)
+        return
+    print(f"({total_hits} hits across {docs_matched} documents, showing top {printed_docs})")
     print()
-    next_hint("content", "<page_ref>", '"<heading_path>"', *corpus_hint_args(args))
+    render_next_content(hit_candidates(shown), hint_args=hint_args, query=args.query)
 
 
 def cmd_search(args):
@@ -577,11 +726,13 @@ def cmd_search(args):
             max_matches_per_doc=args.max_hits,
             min_level=1,
             max_snippet_chars=args.max_snippet_chars,
+            page_title=fms[idx]["title"] or "",
         )
         results.append({
             "doc_idx": idx,
             "title": fm["title"] or "(untitled)",
             "tags": fm["tags"],
+            "url": fm["url"],
             "index_score": score,
             "body_hits": body_hits,
             "body_only": False,
@@ -595,31 +746,39 @@ def cmd_search(args):
     # that legitimately ranked on title/description/tags keeps its row
     # (shown as "index match only") even when its body has no hits — the
     # fallback only adds docs the index ranking missed entirely.
-    if not any(r["body_hits"]["total_matches"] for r in results):
-        already_shown = {r["doc_idx"] for r in results}
-        fallback = full_corpus_body_search(
-            [d["body_lines"] for d in docs], args.query,
-            context_lines=args.context, max_matches_per_doc=args.max_hits,
-            max_snippet_chars=args.max_snippet_chars, min_level=1,
-            limit=args.top_n,
-        )
-        for idx, hits in fallback:
-            if idx in already_shown:
-                continue
-            results.append({
-                "doc_idx": idx,
-                "title": fms[idx]["title"] or "(untitled)",
-                "tags": fms[idx]["tags"],
-                "index_score": None,
-                "body_hits": hits,
-                "body_only": True,
-            })
+    #
+    # The search also runs when the candidates have body hits but none has
+    # every keyword in one section (all "[partial match]"): a page that does
+    # is then appended (full_corpus_extra_hits).
+    fallback = full_corpus_extra_hits(
+        results, [d["body_lines"] for d in docs], args.query,
+        context_lines=args.context, max_matches_per_doc=args.max_hits,
+        max_snippet_chars=args.max_snippet_chars, min_level=1,
+        limit=args.top_n,
+        include_changelog_priority=args.include_changelog_priority,
+        titles=[fm["title"] or "" for fm in fms],
+    )
+    for idx, hits in fallback:
+        results.append({
+            "doc_idx": idx,
+            "title": fms[idx]["title"] or "(untitled)",
+            "tags": fms[idx]["tags"],
+            "url": fms[idx]["url"],
+            "index_score": None,
+            "body_hits": hits,
+            "body_only": True,
+        })
 
     if not results:
         print("No matching documents found.")
         print()
         print("Tip: try broader keywords, 'search-content' for a full-body "
               "scan, or 'fetch-index --compact' to browse")
+        print()
+        render_zero_hits(args.query, (d["body_lines"] for d in docs),
+                         subcommand="search", hint_args=corpus_hint_args(args),
+                         index_hint_args=corpus_hint_args(args),
+                         scope="documents")
         return
 
     if all(r["body_only"] for r in results):
@@ -633,11 +792,16 @@ def cmd_search(args):
     for r in results:
         score_tag = " [body-only]" if r["body_only"] else f" (index_score: {r['index_score']})"
         print_search_result(f"[{r['doc_idx']}] {r['title']}{score_tag}", r["body_hits"],
-                            extra_lines=[f"    tags: {', '.join(r['tags'])}"] if r["tags"] else [])
+                            extra_lines=_url_and_tags_lines(r))
 
     print(f"({len(results)} documents, ranked via index → body)")
     print()
-    next_hint("content", "<page_ref>", '"<heading_path>"', *corpus_hint_args(args))
+    # The top index candidate keeps a Next: line even when appended pages
+    # rank above it.
+    keep = next(((r["doc_idx"], ()) for r in results if not r["body_only"]), None)
+    render_next_content(hit_candidates([(r["doc_idx"], r["body_hits"], ()) for r in results],
+                                       keep=keep),
+                        hint_args=corpus_hint_args(args), query=args.query)
 
 
 # ---------------------------------------------------------------------------
@@ -707,6 +871,7 @@ def main():
     p_search_body.add_argument("--max-hits", type=int, default=5,
                                help="Max hits to display per document (default: 5)")
     add_max_snippet_chars_arg(p_search_body)
+    add_include_changelog_priority_arg(p_search_body)
     p_search_body.set_defaults(func=cmd_search_content)
 
     # sections

@@ -19,7 +19,9 @@
 ---
 title: Document Title
 description: Short description
-tags: [tag1, tag2, tag3]
+tags:
+  - tag1
+  - tag2
 ---
 # Heading
 
@@ -36,9 +38,10 @@ title: Next Document
 |-----------|-----|:---:|------|
 | `title` | string | ✅ | ドキュメントタイトル |
 | `description` | string | ほぼ | 簡潔な説明文 |
-| `tags` | string[] | 任意 | `[tag1, tag2]` 形式のタグ配列 |
+| `tags` | string[] | 任意 | 実 corpus は `tags:` の次の行から `  - tag` を並べるブロック形式。`[tag1, tag2]` の 1 行形式も読める |
 
-一部のドキュメントには `tags` がない場合がある。
+一部のドキュメントには `tags` がない場合がある。`title` は二重引用符で囲み、中の `"` を `\"` と書くことがある
+(例: `title: "useChat \"An error occurred\""`)。パーサはこの形と、`''` を含む単一引用符の title を読む。
 
 ## 見出し構造
 
