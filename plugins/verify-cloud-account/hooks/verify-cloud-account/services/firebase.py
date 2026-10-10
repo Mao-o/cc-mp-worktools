@@ -36,7 +36,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -626,8 +625,8 @@ _CONFIG_NOT_FOUND = (
 # 打っても変わらない (その形で案内すると、案内どおりに切り替えても同じ deny を繰り返す)。
 # そのためコマンドの形では案内しない (REMEDIATION_PATTERNS に当たらない文にする)。括弧の中は、
 # そのファイルがプロジェクトのディレクトリにあるときも成り立つ文にする。この deny の先頭行に
-# 示す値 (`現在=` と `期待=`) も許容形のものだけにするので、dispatcher の「単独で実行」の注記は
-# 付かない (`_shown_current` / `_shown_expected`)。`--config` のパスが symlink を通るときは、
+# 示す値 (`現在=` と `期待=`) も示せる形のものだけにするので、dispatcher の「単独で実行」の注記は
+# 付かない (`shell_word.shown` / `shell_word.shown_all`)。`--config` のパスが symlink を通るときは、
 # そのディレクトリで切り替えても効かないことがある (firebase-tools は symlink を解かないパスで
 # 探す。README の既知の制限)。
 _SWITCH_IN_CONFIG_DIR = (
@@ -635,11 +634,10 @@ _SWITCH_IN_CONFIG_DIR = (
     " (切替先はディレクトリごとに記録され、--config 付きのコマンドはそのファイルのあるディレクトリ"
     "から親へ探した切替先で動きます)"
 )
-# deny の先頭行で、許容形 (`shell_word.WORD`) から外れる値の代わりに示す文。
-_NOT_SHOWN = "(表示しない値)"
 # `--config` 付きのコマンドの deny と、`--project` の行き先を確かめられない deny で、期待値に
-# 許容形から外れる値があるときに添える文 (v0.18.0)。その値は文面に示さない (`期待=` では
-# `_NOT_SHOWN`。不一致の deny も、現在値を取得できない deny も同じ)。許容形から外れる値はどの
+# 示せない値 (`shell_word.can_show`。0.20.0 までは許容形から外れる値) があるときに添える文
+# (v0.18.0)。その値は文面に示さない (`期待=` では `shell_word.NOT_SHOWN`。不一致の deny も、
+# 現在値を取得できない deny も同じ)。空白や改行を含む値 (示せない値) はどの
 # project とも一致しないので、案内どおりにしても deny は続く。何を直せばよいかが文面から消えない
 # よう、出所だけを言う。理由は言わない (これらの deny は期待値の形に関係なくコマンドの形で案内
 # しないので、`_CHECK_BY_HAND` の言う理由は成り立たない)。REMEDIATION_PATTERNS にも
@@ -652,40 +650,12 @@ _EXPECTED_NOT_SHOWN = (
 def _config_switch_guide(values) -> str:
     """`--config` 付きのコマンドの deny で、切替を案内する文 (コマンドの形をとらない)。
 
-    `values` (期待値。dict なら有効な値の一覧) に許容形から外れる値があれば、出所を言う文
+    `values` (期待値。dict なら有効な値の一覧) に示せない値があれば、出所を言う文
     (`_EXPECTED_NOT_SHOWN`) を添える。
     """
-    if all(shell_word.arg(value) is not None for value in values):
+    if all(shell_word.can_show(value) for value in values):
         return _SWITCH_IN_CONFIG_DIR
     return f"{_SWITCH_IN_CONFIG_DIR}。{_EXPECTED_NOT_SHOWN}"
-
-
-def _shown_current(value: str) -> str:
-    """不一致の deny の先頭行の `現在=` に示す値。許容形から外れる値は示さない。
-
-    CLI が無いとき (npx 等)、現在値はリポジトリの `.firebaserc` から解決され、形を確かめて
-    いない。値が切替コマンドの形 (`x firebase use evil`) だと、示しただけで dispatcher の
-    「単独で実行」の注記の判定に当たり、案内していないコマンドに注記が付く。CLI の答えは
-    空白を含まない単一トークンなので当たらない。
-    """
-    return value if shell_word.arg(value) is not None else _NOT_SHOWN
-
-
-def _shown_expected(values) -> str:
-    """deny の先頭行の `期待=` に示す値 (`, ` 区切り)。許容形から外れる値は示さない。
-
-    使うのは `--config` 付きのコマンドの deny、`--project` の行き先を確かめられない deny と、
-    `--config` の無いコマンドで現在値を取得できない deny のうち切替コマンドを 1 つも案内できない
-    もの。前の 2 つは期待値の形に関係なくコマンドの形で案内しないので、外れる値を示すと、値の形
-    だけで dispatcher の「単独で実行」の注記の判定に当たる (`_shown_current` と同じ理由)。示さない
-    理由の文 (`_CHECK_BY_HAND`) は添えず、出所を言う文 (`_EXPECTED_NOT_SHOWN`) を、`--config` の
-    deny では `_config_switch_guide` が、`--project` の deny では verify() が添える。3 つ目は
-    `_CHECK_BY_HAND` を添える deny で (注記は付かない)、`--config` 付きのコマンドの同じ deny と
-    同じ形で示す。出所はその文が言うので `_EXPECTED_NOT_SHOWN` は添えない。
-    """
-    return ", ".join(
-        sorted({value if shell_word.arg(value) is not None else _NOT_SHOWN for value in values})
-    )
 
 
 def _target(value) -> str | None:
@@ -738,7 +708,7 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
     (CLI 本体の解決規則と同じ: alias にあれば対応 project ID、無ければ値そのもの)。
     `.firebaserc` を firebase-tools と同じ内容に読めると確かめられなければ、行き先を
     確かめられないとして deny する (v0.18.0。fail-closed)。この deny も先頭の文に期待値を
-    示す (`--config` 付きのコマンドの deny と同じく、許容形のものだけを示し、外れる値があれば
+    示す (`--config` 付きのコマンドの deny と同じく、示せる形のものだけを示し、外れる値があれば
     出所を言う文を添える)。
 
     `--config` / `-c` (v0.18.0) は project root (読む `.firebaserc`、configstore の切替先を
@@ -746,7 +716,7 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
     (firebase-tools の detectProjectRoot と同じ)。ファイルが見つからなければ deny する。
     `--config` 付きのコマンドの deny は、切替をコマンドの形で案内せず、そのディレクトリで
     切り替えるよう文で案内する (`_SWITCH_IN_CONFIG_DIR`)。先頭行に示す現在値と期待値も
-    許容形のものだけにし (`_shown_current` / `_shown_expected`)、期待値に許容形から外れる値が
+    示せる形のものだけにし (`shell_word.shown` / `shell_word.shown_all`)、期待値に示せない値が
     あれば出所を言う文を添える (`_config_switch_guide`)。CLI から現在値を取れない
     ときのローカル設定の解決は、configstore を root (firebase-tools の projectRoot) からだけ
     探す (`_from_configstore` の exact)。
@@ -780,30 +750,31 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
         # `.firebaserc` は 1 回だけ読み、確かめた内容でそのまま解決する (`_read_firebaserc`)。
         projects = _read_firebaserc(root)
         if projects is None:
-            # 期待値は示す (許容形のものだけ。`--config` 付きのコマンドの deny と同じ部品)。0.17.1 は
+            # 期待値は示す (示せる形のものだけ。`--config` 付きのコマンドの deny と同じ部品)。0.17.1 は
             # 同じコマンドの deny (`--project` の不一致) で期待値を示していた。「意図した project が
             # アクティブかを確かめてから外す」には、どの project かが要る。
             values = valid if isinstance(expected, dict) else [expected]
             either = " のいずれか" if isinstance(expected, dict) else ""
-            tail = "" if all(shell_word.arg(v) is not None for v in values) else f"。{_EXPECTED_NOT_SHOWN}"
+            tail = "" if all(shell_word.can_show(v) for v in values) else f"。{_EXPECTED_NOT_SHOWN}"
             return (
-                f"{_PROJECT_FLAG_UNCONFIRMED_HEAD} (期待={_shown_expected(values)}{either})。"
+                f"{_PROJECT_FLAG_UNCONFIRMED_HEAD} (期待={shell_word.shown_all(values)}{either})。"
                 f"{_PROJECT_FLAG_UNCONFIRMED}{tail}"
             )
         resolved = _resolve_alias(projects, override)
-        # コマンド自身が指定した値は、検証せず quote だけ通して示す (core/shell_word.py)。
-        shown = f"--project {shlex.quote(override)}"
+        # コマンド自身が指定した値も、示せる形のときだけ示す (core/shell_word.py の shown。値は
+        # 検出コマンドの行に出る)。
+        shown = f"--project {shell_word.shown(override)}"
         if resolved != override:
             # 行き先はリポジトリの `.firebaserc` の値。この deny は切替を案内しないので、値が
             # 切替コマンドの形 (`x; firebase use other` / 改行入り) だと、表示だけで dispatcher
-            # の「案内したコマンドは単独で実行」の注記が付く。許容形のときだけ出す。
-            shown += f" (→ {resolved})" if shell_word.arg(resolved) else " (→ 表示しない値)"
+            # の「案内したコマンドは単独で実行」の注記が付く。示せる形 (`can_show`) のときだけ出す。
+            shown += f" (→ {resolved})" if shell_word.can_show(resolved) else " (→ 表示しない値)"
         if isinstance(expected, dict):
             if resolved in valid:
                 return None
             head = (
                 f"Firebase プロジェクト不一致: コマンド指定 {shown}, "
-                f"期待={', '.join(sorted(set(valid)))} のいずれか\n"
+                f"期待={shell_word.shown_all(valid)} のいずれか\n"
             )
             lines = _project_flag_lines(expected)
             if not lines:
@@ -814,7 +785,7 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
             )
         if resolved == expected:
             return None
-        head = f"Firebase プロジェクト不一致: コマンド指定 {shown}, 期待={expected}"
+        head = f"Firebase プロジェクト不一致: コマンド指定 {shown}, 期待={shell_word.shown(expected)}"
         target = _target(expected)
         if target is None:
             return f"{head} — --project を外してください ({_CHECK_BY_HAND})"
@@ -831,13 +802,13 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
             )
         head = "Firebase: 現在のプロジェクトを取得できません。"
         if config_file is not None:
-            # 期待値は示す (許容形のものだけ。不一致の deny と同じ)。0.17.1 は同じコマンドの deny で
+            # 期待値は示す (示せる形のものだけ。不一致の deny と同じ)。0.17.1 は同じコマンドの deny で
             # `firebase use <期待値>` を案内し、どの project に切り替えるかを言っていた。この deny は
             # コマンドの形で案内しないので、示さないとそれが文面から消える。
             values = valid if isinstance(expected, dict) else [expected]
             either = " のいずれか" if isinstance(expected, dict) else ""
             return (
-                f"{head}期待={_shown_expected(values)}{either}。"
+                f"{head}期待={shell_word.shown_all(values)}{either}。"
                 f"ログインしたうえで、{_config_switch_guide(values)}。"
             )
         if isinstance(expected, dict):
@@ -849,7 +820,7 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
                 # 同じ deny と同じ部品)。この deny の案内は「期待した project に切り替えて」で、どの
                 # project かが要る。出所は `_CHECK_BY_HAND` が言うので `_EXPECTED_NOT_SHOWN` は添えない。
                 return (
-                    f"{head}期待={_shown_expected(valid)} のいずれか。"
+                    f"{head}期待={shell_word.shown_all(valid)} のいずれか。"
                     f"firebase login の後、期待した project に切り替えてください ({_CHECK_BY_HAND})。"
                 )
             return (
@@ -860,7 +831,7 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
         if target is None:
             # 期待値は示す (dict で案内できる行が無いときと同じ)。
             return (
-                f"{head}期待={_shown_expected([expected])}。"
+                f"{head}期待={shell_word.shown_all([expected])}。"
                 f"firebase login の後、期待した project に切り替えてください ({_CHECK_BY_HAND})。"
             )
         return f"{head}firebase login && firebase use {target} を実行してください。"
@@ -870,13 +841,12 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
             return None
         if config_file is not None:
             return (
-                f"Firebase プロジェクト不一致: 現在={_shown_current(current)}, "
-                f"期待={_shown_expected(valid)} のいずれか\n{_config_switch_guide(valid)}"
+                f"Firebase プロジェクト不一致: 現在={shell_word.shown(current)}, "
+                f"期待={shell_word.shown_all(valid)} のいずれか\n{_config_switch_guide(valid)}"
             )
-        expected_display = ", ".join(sorted(set(valid)))
         head = (
-            f"Firebase プロジェクト不一致: 現在={_shown_current(current)}, "
-            f"期待={expected_display} のいずれか\n"
+            f"Firebase プロジェクト不一致: 現在={shell_word.shown(current)}, "
+            f"期待={shell_word.shown_all(valid)} のいずれか\n"
         )
         lines = _alias_lines(expected, "firebase use")
         if not lines:
@@ -886,10 +856,13 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
     if current != expected:
         if config_file is not None:
             return (
-                f"Firebase プロジェクト不一致: 現在={_shown_current(current)}, "
-                f"期待={_shown_expected([expected])} — {_config_switch_guide([expected])}"
+                f"Firebase プロジェクト不一致: 現在={shell_word.shown(current)}, "
+                f"期待={shell_word.shown_all([expected])} — {_config_switch_guide([expected])}"
             )
-        head = f"Firebase プロジェクト不一致: 現在={_shown_current(current)}, 期待={expected}"
+        head = (
+            f"Firebase プロジェクト不一致: 現在={shell_word.shown(current)}, "
+            f"期待={shell_word.shown(expected)}"
+        )
         target = _target(expected)
         if target is None:
             return f"{head} — {_CHECK_BY_HAND}"

@@ -888,6 +888,14 @@ class TestProjectFlagResolvesLikeFirebaseTools(_FirebasercFixture):
                 "(期待=right-project のいずれか)。",
                 False,
             ),
+            # 案内には使えない (許容形から外れる) が示せる普通の名前は示し、出所の文は添えない
+            # (v0.21.0。示さない値があるときだけ添える)。
+            "normal name": ("本番", "(期待=本番)。", False),
+            "dict, normal name": (
+                {"default": "right-project", "local": "_local"},
+                "(期待=_local, right-project のいずれか)。",
+                False,
+            ),
             "masked": ("x; firebase use evil", "(期待=(表示しない値))。", True),
             "dict, partly masked": (
                 {"default": "right-project", "evil": "x; firebase use evil"},
@@ -1384,6 +1392,18 @@ class TestAws(unittest.TestCase):
         self.assertIn("aws sso login --profile <profile>", err)
         self.assertRegex(err, r"(?m)^\s+aws configure\s")
         self.assertNotRegex(err, r"(?m)^\s+export\s")
+
+    def test_no_credentials_hint_has_no_control_characters(self):
+        """転記する aws の stderr の 1 行目は、制御文字をエスケープする (v0.21.0)。"""
+        fake = _fake_run(
+            stdout="", stderr="\x1b[2K\x1b[1AError loading\x07 SSO\x9b Token\n", returncode=255
+        )
+        with mock.patch("subprocess.run", return_value=fake):
+            err = aws.verify("123456789012", "/p", env=self._NO_CONFIG)
+        self.assertIn("(\\x1b[2K\\x1b[1AError loading\\x07 SSO\\x9b Token)", err)
+        self.assertFalse(
+            any(ord(ch) < 0x20 and ch != "\n" or 0x7F <= ord(ch) <= 0x9F for ch in err), err
+        )
 
     def test_no_credentials_guidance_resolves_profile(self):
         with tempfile.TemporaryDirectory() as d:

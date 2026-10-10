@@ -208,6 +208,48 @@ class TestOnlyWhereItWouldStop(AutoSwitchBase):
         self.assertIn(auto_switch.NOTE_SWITCHING_HERE, reason)
         self.assertEqual(self.gh.switches(), [])
 
+    def test_help_commands_are_not_switched(self):
+        """`--help` 付きのコマンド (ヘルプの表示) のために、マシン全体の gh を切り替えない。
+
+        `gh auth git-credential --help` などは READONLY の `gh --help` の形に当たらず、通常の
+        検証に乗る。0.20.0 までは不一致で自動切替が走っていた (内部バックログ)。判定は変えず
+        deny のまま、切り替えなかった理由を添える。"""
+        self._write_accounts({"github": "Mao-o"})
+        for command in (
+            "gh auth git-credential --help",
+            "gh auth --help",
+            "gh pr create --help",
+            "gh pr create --help=true",
+            "gh pr create --help && gh issue create --help",
+        ):
+            with self.subTest(command=command):
+                with self._enabled():
+                    reason = self._deny_reason(self._dispatch(command))
+                self.assertIn(auto_switch.NOTE_HELP, reason)
+                self.assertIn("アカウント不一致", reason)
+                self.assertEqual(self.gh.switches(), [])
+                self.assertEqual(self.gh.active["github.com"], "work")
+
+    def test_short_h_is_not_help_in_gh_auth(self):
+        """`-h` はヘルプとして数えない (gh の `auth` 配下では `--hostname` の短い形で、実際の
+        操作になる)。`-h` 付きのコマンドは従来どおり切り替える。
+        `--help` の無いコマンドが同じ行にあるときも、そのために切り替える。"""
+        for command in (
+            "gh api -h github.com -X DELETE repos/o/r",
+            "gh pr create -h feature",
+            "gh pr create --title 'see --help' --fill",
+            "gh issue create --help && gh pr create",
+        ):
+            with self.subTest(command=command):
+                self.gh = FakeGh({"github.com": ["work", "Mao-o"]}, {"github.com": "work"})
+                self._write_accounts({"github": "Mao-o"})
+                with self._enabled():
+                    self._context(self._dispatch(command))
+                self.assertEqual(
+                    self.gh.switches(),
+                    [["gh", "auth", "switch", "--hostname", "github.com", "--user", "Mao-o"]],
+                )
+
     def test_chained_switch_and_write_is_still_denied_first(self):
         """連結規則の deny は自動切替より前に決まる (切替後の状態は検証できない)。"""
         self._write_accounts({"github": "Mao-o"})

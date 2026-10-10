@@ -17,8 +17,10 @@ import json
 import re
 import shlex
 import shutil
+import sys
 import tempfile
 import unittest
+import unicodedata
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -70,6 +72,36 @@ HOSTILE = (
     "a=b",
     "ｄｅｖ",
 )
+# HOSTILE のうち、文面に値として示すもの (空白も `=` も制御文字も含まない。v0.21.0 の
+# `shell_word.shown`)。案内コマンドには出さないが、何が不一致かを示すために表示はする。
+HOSTILE_SHOWN = ("it's", '"q"', "a|b", "a&b", "a>b", "a*b", "-P", ".hidden", "~root", "ｄｅｖ")
+
+
+def _displayed(value) -> bool:
+    """value が文面に値として示される想定か (許容形か HOSTILE_SHOWN)。"""
+    return value in PLAIN or value in HOSTILE_SHOWN
+
+
+# 既定で無視される文字 (Unicode の DerivedCoreProperties の Default_Ignorable_Code_Point。
+# Unicode 14.0〜17.0 の DerivedCoreProperties.txt と一致) と、空白に見える文字。
+# `shell_word` の定数とは独立に持つ (テストの期待)。
+_INVISIBLE_RANGES = (
+    (0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160),
+    (0x17B4, 0x17B5), (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E),
+    (0x2060, 0x206F), (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF),
+    (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A),
+    (0xE0000, 0xE0FFF),
+    (0x2800, 0x2800), (0x16FE4, 0x16FE4),
+    (0x13441, 0x13442), (0x1D159, 0x1D159), (0xFFFC, 0xFFFC), (0x303F, 0x303F),
+)
+
+
+def _invisible(code: int) -> bool:
+    if unicodedata.category(chr(code)) in ("Cs", "Co", "Cn"):
+        return True
+    return any(lo <= code <= hi for lo, hi in _INVISIBLE_RANGES)
+
+
 # 実在する形の名前 (WORD の許容形)。EKS / kubeadm の context 名、メールアドレス、
 # ドメイン付きの project ID を含む。
 PLAIN = (
@@ -156,6 +188,169 @@ class TestArg(unittest.TestCase):
                 self.assertEqual(parts, [value])
 
 
+class TestShown(unittest.TestCase):
+    """文面に値を示す形 (`shown`、v0.21.0)。案内コマンドの許容形 (`arg`) より広い。"""
+
+    def test_normal_names_outside_the_allowed_form_are_shown(self):
+        """シェル上は無害な普通の名前は、案内に使えなくても示す (何が不一致かを残す)。"""
+        for value in ("本番", "開発クラスタ", "_local", "a,b", "proj;x") + HOSTILE_SHOWN:
+            with self.subTest(value=value):
+                self.assertIsNone(shell_word.arg(value))
+                self.assertEqual(shell_word.shown(value), value)
+
+    def test_space_equals_and_invisible_characters_are_not_shown(self):
+        hidden = (
+            "", "a b", "a\tb", "a\u00a0b", "a\u3000b", "a=b", "a\nb", "a\rb", "a\x0bb",
+            "a\x1cb", "a\u2028b", "a\u2029b", "a\x85b", "a\x1bb", "a\x07b", "a\x00b",
+            "a\x7fb", "a\u200bb", "a\u202eb", "a\ufeffb",
+            # 既定で無視される文字 (Hangul filler・CGJ・異体字セレクタ・モンゴル文字の FVS・
+            # クメール文字の母音の継承記号)、点字の空白、値の先頭の結合文字 (`期待=` の `=` と
+            # 合成されて `≠` に見える)、サロゲート・私用領域・未割り当て
+            "a\u3164b", "a\uffa0b", "a\u115fb", "a\u1160b", "a\u2800b", "a\u034fb",
+            "a\ufe0fb", "a\U000e0100b", "a\u180bb", "a\u17b4b", "\u0338b", "\u20ddb",
+            "\u0903b", "a\ud800b", "a\ue000b", "a\U000f0000b", "a\u0378b",
+            # 空白として描かれる文字 (Default_Ignorable ではない)
+            "a\U00013441b", "a\U00013442b", "a\U0001d159b", "a\ufffcb", "a\u303fb",
+        )
+        for value in hidden:
+            with self.subTest(value=value):
+                self.assertEqual(shell_word.shown(value), shell_word.NOT_SHOWN)
+        for value in (None, 1, ["a"]):
+            with self.subTest(value=value):
+                self.assertEqual(shell_word.shown(value), shell_word.NOT_SHOWN)
+
+    def test_blank_looking_letters_are_not_shown(self):
+        """空白に見える文字 (Lo / So など。Python の版によってはカテゴリで隠れない) は示さない。"""
+        for value in ("a\U00013441b", "a\U00013442b", "a\U0001D159b", "a\uFFFCb", "a\u303Fb",
+                      "x\U00013441kubectl\U00013441config\U00013441use-context\U00013441evil"):
+            with self.subTest(value=value):
+                self.assertEqual(shell_word.shown(value), shell_word.NOT_SHOWN)
+
+    def test_no_unprintable_or_invisible_character_is_shown_between_letters(self):
+        """全コードポイントの生成: 文字の間に挟んで示すものに、印字できない文字・不可視の文字が無い。
+
+        不可視の集合 (`_INVISIBLE_RANGES` など) は実装の定数を使わずに、ここで持つ (実装の範囲を
+        消す変異が、期待の側も一緒に消して生き残らないように)。
+        """
+        leaks = []
+        shown_count = 0
+        for code in range(sys.maxunicode + 1):
+            ch = chr(code)
+            if not shell_word.can_show("a" + ch + "b"):
+                continue
+            shown_count += 1
+            if not ch.isprintable() or _invisible(code):
+                leaks.append(f"U+{code:04X}")
+        self.assertEqual(leaks, [])
+        # 空振りでないこと (普通の文字は示す)
+        self.assertGreater(shown_count, 100000)
+
+    def test_leading_combining_marks_are_not_shown(self):
+        """値の先頭の結合文字 (Mn / Me / Mc) は、前の固定文 (`期待=` の `=` など) と合成される。"""
+        leading = []
+        marks = 0
+        for code in range(sys.maxunicode + 1):
+            ch = chr(code)
+            if unicodedata.category(ch) not in ("Mn", "Me", "Mc"):
+                continue
+            marks += 1
+            if shell_word.can_show(ch + "b"):
+                leading.append(f"U+{code:04X}")
+        self.assertEqual(leading, [])
+        self.assertGreater(marks, 1000)
+
+    def test_combining_marks_inside_a_name_are_shown(self):
+        """NFD の日本語名 (濁点を結合文字で書いた名前) は示す (結合文字を一律には隠さない)。"""
+        for value in ("本番", "がいど", unicodedata.normalize("NFD", "がいど"), "か\u3099",
+                      "cafe\u0301", unicodedata.normalize("NFD", "ポスト本番")):
+            with self.subTest(value=value):
+                self.assertEqual(shell_word.shown(value), value)
+
+    def test_shown_values_cannot_form_a_remediation_pattern(self):
+        """示す値は、単独で REMEDIATION_PATTERNS の形にならない (どのパターンも空白を要する)。
+
+        案内コマンドの形を、空白をほかの文字に置き換えて書いた値を総当たりする。示す値
+        (`can_show`) はどのパターンにも当たらず、空白のままの値は当たる (空振りでない)。
+        """
+        commands = (
+            "kubectl config use-context evil", "gcloud config set project evil",
+            "gcloud config set account evil", "gh auth switch --hostname h --user evil",
+            "gh auth login --hostname h", "firebase use evil", "AWS_PROFILE=evil aws s3 ls",
+        )
+        separators = (" ", "\t", "\u00a0", "\u3000", "\u200b", "\n", ",", ";", "|", "_", "/")
+        patterns = [
+            p for svc in (aws, firebase, gcloud, github, kubectl)
+            for p in getattr(svc, "REMEDIATION_PATTERNS", ())
+        ]
+        self.assertGreaterEqual(len(patterns), 4)
+        matched_with_space = 0
+        shown_count = 0
+        for cmd in commands:
+            if any(re.search(p, cmd) for p in patterns):
+                matched_with_space += 1
+            for sep in separators:
+                value = "x" + sep + cmd.replace(" ", sep)
+                if not shell_word.can_show(value):
+                    continue
+                shown_count += 1
+                with self.subTest(value=value):
+                    self.assertFalse(any(re.search(p, value) for p in patterns), value)
+        self.assertGreaterEqual(matched_with_space, 5)
+        self.assertGreater(shown_count, 20)
+
+
+class TestEscapeControls(unittest.TestCase):
+    """値を置き換えずに 1 行のまま示す形 (`escape_controls`、v0.21.0)。"""
+
+    def test_control_characters_are_escaped(self):
+        cases = {
+            "a\nb": "a\\nb",
+            "a\rb": "a\\x0db",
+            "a\tb": "a\\x09b",
+            "\x1b[2K\x1b[1Aerror\x07": "\\x1b[2K\\x1b[1Aerror\\x07",
+            "a\x00b\x7fc": "a\\x00b\\x7fc",
+            "a\x85b\x9fc": "a\\x85b\\x9fc",
+            "a\u2028b\u2029c": "a\\u2028b\\u2029c",
+        }
+        for raw, want in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(shell_word.escape_controls(raw), want)
+
+    def test_format_characters_are_escaped(self):
+        """書式文字 (Cf。双方向制御・ゼロ幅スペースなど) は `\\uNNNN` (BMP の外は `\\UNNNNNNNN`)。"""
+        cases = {
+            "x\u202eevil": "x\\u202eevil",
+            "a\u202ab\u202cc": "a\\u202ab\\u202cc",
+            "a\u2066b\u2069c": "a\\u2066b\\u2069c",
+            "a\u200eb\u200fc": "a\\u200eb\\u200fc",
+            "a\u061cb": "a\\u061cb",
+            "a\u200bb\ufeffc": "a\\u200bb\\ufeffc",
+            "a\U000e0001b": "a\\U000e0001b",
+        }
+        for raw, want in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(shell_word.escape_controls(raw), want)
+
+    def test_no_format_character_is_kept(self):
+        """全コードポイントの生成: Cf はどれも残らない。"""
+        kept = [
+            f"U+{code:04X}" for code in range(sys.maxunicode + 1)
+            if unicodedata.category(chr(code)) == "Cf" and shell_word.escape_controls(chr(code)) == chr(code)
+        ]
+        self.assertEqual(kept, [])
+
+    def test_everything_else_is_kept(self):
+        for raw in ("kubectl --context 'a b' apply", "本番 の 開発", "a=b;c|d", "\u00a0\u3000"):
+            with self.subTest(raw=raw):
+                self.assertEqual(shell_word.escape_controls(raw), raw)
+
+    def test_result_is_one_line_without_control_characters(self):
+        raw = "".join(chr(c) for c in range(0x00, 0xA0)) + "\u2028\u2029"
+        out = shell_word.escape_controls(raw)
+        self.assertEqual(len(out.splitlines()), 1)
+        self.assertFalse(any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in out))
+
+
 class TestKubectlGuidance(unittest.TestCase):
     PROJECT_DIR = "/nonexistent-project"
 
@@ -186,11 +381,17 @@ class TestKubectlGuidance(unittest.TestCase):
                     self.assertFalse(_flag_with_value("--context", reason), reason)
                     self.assertIn(CHECK_BY_HAND, reason)
 
-    def test_command_override_is_shown_quoted(self):
-        """検出したコマンド自身の `--context` は、検証せず quote して示す。"""
-        with _run_returning("dev-ctx\n"):
-            reason = kubectl.verify("prod-ctx", self.PROJECT_DIR, context={"context": "a; b"})
-        self.assertIn("コマンド指定 --context='a; b',", reason)
+    def test_command_override_is_shown_only_in_the_allowed_form(self):
+        """検出したコマンド自身の `--context` も、許容形のときだけ示す (v0.21.0)。0.20.0 までは
+        quote だけ通して示していたが、quote は改行も空白入りのコマンドの形も残す。"""
+        for value in PLAIN + HOSTILE:
+            with self.subTest(value=value):
+                with _run_returning("dev-ctx\n"):
+                    reason = kubectl.verify("want-ctx", self.PROJECT_DIR, context={"context": value})
+                shown = value if _displayed(value) else shell_word.NOT_SHOWN
+                self.assertIn(f"コマンド指定 --context={shown},", reason)
+                if not _displayed(value):
+                    self.assertNotIn(value, reason)
 
     def test_harmless_value_outside_the_form_is_not_said_to_be_shell_syntax(self):
         """外れた値の文面は「案内に使える形ではない」とだけ言う。シェル上は無害な値も
@@ -304,11 +505,11 @@ class TestGithubGuidance(unittest.TestCase):
             reasons["non-string expected"] = github._verify_against(
                 {"github.com": "me"}, {"github.com": "me", value: 1}
             )
-            shown = value if value in PLAIN else "表示しない host"
+            shown = value if _displayed(value) else "表示しない host"
             for case in host_cases:
                 with self.subTest(value=value, case=case):
                     self.assertIn(f"GitHub [{shown}]", reasons[case])
-                    if value not in PLAIN:
+                    if not _displayed(value):
                         self.assertNotIn(f"[{value}]", reasons[case])
 
 
@@ -383,14 +584,15 @@ class TestFirebaseGuidance(unittest.TestCase):
                 self.assertNotIn("rm -rf", guidance)
                 self.assertIn("ほかの alias は", guidance)
 
-    def test_command_project_is_shown_quoted(self):
-        """検出したコマンド自身の `--project` は、検証せず quote して示す。"""
+    def test_command_project_is_shown_only_in_the_allowed_form(self):
+        """検出したコマンド自身の `--project` も、許容形のときだけ示す (v0.21.0)。"""
         (self.root / ".firebaserc").write_text(
             json.dumps({"projects": {"a b": "proj-x"}}), encoding="utf-8"
         )
         with _run_returning("proj-other\n"):
             reason = firebase.verify("proj-dev", str(self.root), context={"project": "a b"})
-        self.assertIn("コマンド指定 --project 'a b' (→ proj-x),", reason)
+        self.assertIn(f"コマンド指定 --project {shell_word.NOT_SHOWN} (→ proj-x),", reason)
+        self.assertNotIn("a b", reason)
 
     def test_resolved_project_is_displayed_only_in_the_allowed_form(self):
         """`--project <alias>` の行き先 (`.firebaserc` の値) は許容形のときだけ `(→ <project>)`
@@ -402,10 +604,10 @@ class TestFirebaseGuidance(unittest.TestCase):
             )
             with _run_returning("proj-other\n"):
                 reason = firebase.verify("proj-dev", str(self.root), context={"project": "prod"})
-            shown = value if value in PLAIN else "表示しない値"
+            shown = value if _displayed(value) else "表示しない値"
             with self.subTest(value=value):
                 self.assertIn(f"コマンド指定 --project prod (→ {shown}),", reason)
-                if value not in PLAIN:
+                if not _displayed(value):
                     self.assertNotIn(f"(→ {value})", reason)
 
 
@@ -463,12 +665,16 @@ class TestAwsGuidance(unittest.TestCase):
                 self.assertNotIn("pwned", reason)
                 self.assertIn("ほかの profile は", reason)
 
-    def test_command_profile_is_shown_quoted(self):
-        """検出したコマンド自身の `--profile` は、検証せず quote して示す。"""
+    def test_command_profile_is_shown_only_in_the_allowed_form(self):
+        """検出したコマンド自身の `--profile` も、許容形のときだけ示す (v0.21.0)。"""
         self._write_profiles("prod")
-        with _run_returning("111111111111\n"):
-            reason = aws.verify(self.ACCOUNT, str(self.tmp), self.env, context={"profile": "a; b"})
-        self.assertIn("AWS アカウント不一致 (--profile 'a; b'):", reason)
+        for value, shown in (("a; b", shell_word.NOT_SHOWN), ("dev-profile", "dev-profile")):
+            with self.subTest(value=value):
+                with _run_returning("111111111111\n"):
+                    reason = aws.verify(
+                        self.ACCOUNT, str(self.tmp), self.env, context={"profile": value}
+                    )
+                self.assertIn(f"AWS アカウント不一致 (--profile {shown}):", reason)
 
 
 if __name__ == "__main__":

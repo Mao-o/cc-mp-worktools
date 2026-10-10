@@ -45,10 +45,11 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import time
 from dataclasses import dataclass
 
-from core import budget, cache
+from core import budget, cache, shell_word
 
 ENV_VAR = "VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH"
 # accounts.local.json の予約キー。`$mode` / `$readonly` (builder は書かない手編集キー)
@@ -76,10 +77,32 @@ NOTE_SWITCHING_HERE = (
     _NOTE_HEAD + "このコマンド自身がアカウントの状態を変える操作を含むため、"
     "hook からは切り替えません。"
 )
+NOTE_HELP = (
+    _NOTE_HEAD + "--help を含むコマンド (ヘルプの表示) のために、マシン全体に効く切替は"
+    "しません。"
+)
 NOTE_BUDGET = (
     _NOTE_HEAD + "1 コマンド分の検証時間の予算を使い切っていたため、切替を"
     "始めませんでした。"
 )
+
+
+def requests_help(candidate: str) -> bool:
+    """候補コマンドが `--help` (`--help=<値>` を含む) のトークンを持つか。
+
+    `gh auth git-credential --help` のようなヘルプの表示は、READONLY の `gh --help` の形に
+    当たらず通常の検証に乗る (deny / allow の判定は変えない)。ただ、ヘルプを見るために
+    マシン全体に効く切替をするのは釣り合わないので、自動切替の対象から外す (切り替えずに
+    従来どおり deny する。安全側)。**`-h` は数えない** — gh の `auth` 配下では `-h` が
+    `--hostname` の短い形で、`gh auth switch -h <host>` などの実際の操作になる。
+    `--help` が option の値の位置にある形 (`--title --help`) も数える (切り替えないだけで、
+    deny のまま)。クォートが閉じていないなどで shell の規則で分けられないときは空白で分ける。
+    """
+    try:
+        tokens = shlex.split(candidate)
+    except ValueError:
+        tokens = candidate.split()
+    return any(tok == "--help" or tok.startswith("--help=") for tok in tokens)
 
 
 def supports(service) -> bool:
@@ -108,7 +131,8 @@ def _parse_names(raw_names, services, source: str) -> tuple[frozenset[str], str 
     note = None
     if rejected:
         note = (
-            f"{source} の {', '.join(rejected)} は自動切替に対応していません "
+            f"{source} の {', '.join(shell_word.shown(n) for n in rejected)} "
+            "は自動切替に対応していません "
             f"(対応: {', '.join(sorted(supported)) or 'なし'})。"
             "その指定は無効として扱いました。"
         )
@@ -214,11 +238,18 @@ def conflicting_switch(
         if value == want or not 0 <= elapsed < GUARD_SEC * 1_000_000_000:
             continue
         project = rec.get("project")
-        where = f" ({project})" if isinstance(project, str) and project else ""
+        # 記録は共有の状態ファイルから読む値。project (パス) は空白を含むのが普通なので
+        # 置き換えず制御文字だけをエスケープし、target / value は名前として shown を通す
+        # (改行を含む記録で、注記の外に偽の行を差し込めないように。v0.21.0)。
+        where = (
+            f" ({shell_word.escape_controls(project)})"
+            if isinstance(project, str) and project else ""
+        )
+        shown_target, shown_value = shell_word.shown(target), shell_word.shown(value)
         return (
             _NOTE_HEAD
-            + f"{elapsed // 1_000_000_000} 秒前に別の作業{where}が {target} を "
-            f"{value} に自動で切り替えています。並行するセッションが {value} で"
+            + f"{elapsed // 1_000_000_000} 秒前に別の作業{where}が {shown_target} を "
+            f"{shown_value} に自動で切り替えています。並行するセッションが {shown_value} で"
             "作業中の可能性があるため見送りました。切り替える前にユーザーに確認して"
             "ください (切り替えると、そのセッションのコマンドが別アカウントで動きます)。"
         )
@@ -274,13 +305,15 @@ def attempt(
     context=None,
     *,
     switching_here: bool = False,
+    help_only: bool = False,
 ) -> Outcome:
     """期待値へ切り替えて再検証する。呼ぶのは「deny になる不一致」のときだけ。
 
     手順と、各段で止める理由:
 
     1. コマンド自身が状態を変える (`switching_here`) → 切り替えない。明示的に
-       アカウントを操作しているところへ hook が別の切替を重ねない
+       アカウントを操作しているところへ hook が別の切替を重ねない。対象のコマンドが
+       どれも `--help` 付き (`help_only`。`requests_help`) のときも切り替えない (v0.21.0)
     2. **CLI を起動する前ごとに予算を確かめる** (`core/budget.py`)。予算の超過見積りは
        「最後の確認の後に起動する呼び出し数」を前提にしているため
     3. `plan_switch` で全対象の切替先がログイン済みか確かめる。1 つでも切り替えられ
@@ -293,6 +326,8 @@ def attempt(
     """
     if switching_here:
         return Outcome(note=NOTE_SWITCHING_HERE)
+    if help_only:
+        return Outcome(note=NOTE_HELP)
     if budget.expired():
         return Outcome(note=NOTE_BUDGET)
 
@@ -339,6 +374,7 @@ def notice(service, switched) -> str:
     """自動切替したことを伝える文面 (allow 時は additionalContext、deny 時は注記)。"""
     describe = getattr(service, "describe_switch", None)
     body = describe(switched) if callable(describe) else ", ".join(
-        f"{target}: {before} → {after}" for target, before, after in switched
+        f"{shell_word.shown(target)}: {shell_word.shown(before)} → {shell_word.shown(after)}"
+        for target, before, after in switched
     )
     return f"[verify-cloud-account] 自動切替 (auto-switch): {body}"

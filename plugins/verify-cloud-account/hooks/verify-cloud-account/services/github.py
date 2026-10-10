@@ -491,13 +491,14 @@ _CHECK_BY_HAND = (
 
 
 def _host_label(host) -> str:
-    """文面に出す host。案内に使える形でなければ出さない (表示が注記の判定に当たらないように)。
+    """文面に出す host。示せる形 (`shell_word.can_show`) でなければ出さない (表示が注記の判定に
+    当たらないように。0.20.0 までは案内に使える形のときだけ)。
 
     host は accounts.local.json のキーか gh が報告した host。期待値の型の誤りの deny は切替を
     案内しないので、host が切替コマンドの形だと、表示だけで dispatcher の「案内したコマンドは
     単独で実行」の注記が付く。
     """
-    return host if shell_word.arg(host) else "表示しない host"
+    return host if shell_word.can_show(host) else "表示しない host"
 
 
 def _switch_guidance(host: str, user: str) -> str:
@@ -538,7 +539,8 @@ def _verify_against(active: dict[str, str], expected) -> str | None:
                     )
             elif current != want:
                 errors.append(
-                    f"GitHub [{_host_label(host)}] アカウント不一致: 現在={current}, 期待={want}"
+                    f"GitHub [{_host_label(host)}] アカウント不一致: "
+                    f"現在={shell_word.shown(current)}, 期待={shell_word.shown(want)}"
                     + _switch_guidance(host, want)
                 )
         return "\n".join(errors) if errors else None
@@ -555,7 +557,8 @@ def _verify_against(active: dict[str, str], expected) -> str | None:
 
     if current != expected:
         msg = (
-            f"GitHub [{_host_label(host)}] アカウント不一致: 現在={current}, 期待={expected}"
+            f"GitHub [{_host_label(host)}] アカウント不一致: "
+            f"現在={shell_word.shown(current)}, 期待={shell_word.shown(expected)}"
             + _switch_guidance(host, expected)
         )
         if len(active) > 1:
@@ -865,7 +868,7 @@ def plan_switch(expected, project_dir: str, env=None):
         if current == want:
             continue
         if want not in logged_in.get(host, ()):
-            missing.append(f"{host} の {want}")
+            missing.append(f"{shell_word.shown(host)} の {shell_word.shown(want)}")
             continue
         steps.append((host, current, want))
     if missing:
@@ -904,10 +907,11 @@ def apply_switch(steps, env=None):
         except OSError as e:
             return done, f"gh コマンドを実行できません ({e})。"
         except subprocess.TimeoutExpired:
-            return done, f"{host} の切替がタイムアウトしました。"
+            return done, f"{shell_word.shown(host)} の切替がタイムアウトしました。"
         if result.returncode != 0:
-            detail = _first_line(result.stderr or result.stdout)
-            return done, f"{host} の切替に失敗しました ({detail})。"
+            # CLI の出力の転記。端末の制御シーケンスや BEL を文面に残さない (v0.21.0)。
+            detail = shell_word.escape_controls(_first_line(result.stderr or result.stdout))
+            return done, f"{shell_word.shown(host)} の切替に失敗しました ({detail})。"
         done.append((host, current, want))
     return done, None
 
@@ -915,7 +919,9 @@ def apply_switch(steps, env=None):
 def describe_switch(switched) -> str:
     """自動切替したことを伝える本文 (`core/auto_switch.notice` が前置きを付ける)。"""
     changes = ", ".join(
-        f"{host}: {before or '(なし)'} → {after}" for host, before, after in switched
+        f"{shell_word.shown(host)}: {shell_word.shown(before) if before else '(なし)'} → "
+        f"{shell_word.shown(after)}"
+        for host, before, after in switched
     )
     return (
         f"gh のアクティブアカウントを切り替えました ({changes})。gh の設定は"

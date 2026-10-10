@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import re
-import shlex
 import subprocess
 from pathlib import Path
 
@@ -331,7 +330,10 @@ def _flag_mismatch(label: str, flag: str, override: str, expected: str) -> str |
     """
     if override == expected:
         return None
-    head = f"GCP {label}不一致: コマンド指定 {flag}={shlex.quote(override)}, 期待={expected}"
+    head = (
+        f"GCP {label}不一致: コマンド指定 {flag}={shell_word.shown(override)}, "
+        f"期待={shell_word.shown(expected)}"
+    )
     value = shell_word.arg(expected)
     if value is None:
         return f"{head} — {flag} を外してください ({_CHECK_BY_HAND})"
@@ -383,7 +385,10 @@ def _check_key(key: str, label: str, expected: str, get_value, env=None) -> str 
             f"gcloud config set {key} {value} を実行してください。"
         )
     if current != expected:
-        head = f"GCP {label}不一致: 現在={current}, 期待={expected}"
+        head = (
+            f"GCP {label}不一致: 現在={shell_word.shown(current)}, "
+            f"期待={shell_word.shown(expected)}"
+        )
         if from_env:
             return f"{head} — {_env_guidance(env_var, flag, value)}"
         if value is None:
