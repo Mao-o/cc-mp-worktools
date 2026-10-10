@@ -632,7 +632,11 @@ QUERY の不一致も止めたい場合は `accounts.local.json` に書く:
   `)` `;` `}` `&`。`(gh pr create --fill)` や
   `for f in *; do gh release upload ...; done` も検証対象になる
 - **コマンド名のパス / エスケープ** (v0.9.0): `/opt/homebrew/bin/gh` /
-  `./node_modules/.bin/firebase` / `\gh` は basename に正規化して照合する
+  `./node_modules/.bin/firebase` / `\gh` は basename に正規化して照合する。コマンド語の無い
+  代入だけのセグメント (`FT=/x/node_modules/firebase-tools`) は対象外で、値が CLI 名で終わっても
+  その CLI のコマンドとは見ない (v0.21.4。`FOO=1 firebase deploy` のような代入 + コマンドと、
+  次のセグメントのコマンドは従来どおり検出する。`FT=... "$FT" deploy` のように値を後でコマンドとして
+  使う形は変数経由の一般則の範囲のまま)
 - **先頭の環境変数割当**: `FOO=bar gh ...`
 - **透過的 wrapper**: `sudo` / `time` / `nohup` / `command` / `builtin` / `exec` /
   `env [KEY=val...]` (ただし `env -i` / `env --` など option 付きは不透明扱い)
@@ -829,6 +833,14 @@ host 名・profile 名が英数字で始まり、英数字と `.` `_` `-` `:` `/
 `;` / `$()` / 空白 / 改行や先頭の `-` を含む値は、案内どおりに打つと別のコマンドや option
 として走りうるので、コマンドにせず「手で確認してください」と書く (deny / allow は
 変わらない)。
+
+**firebase の `firebase use <x>` / `--project <x>` の案内は、`.firebaserc` の解決先も照合する
+(v0.21.4)。** firebase-tools は x を `.firebaserc` の alias として先に解決するので、期待値と同じ
+名前の alias が別の project を指していると、案内どおりにしても期待した project にならない。案内するのは、
+解決先が期待した project の語だけ (dict の期待値は entry ごとに alias → project ID の順。scalar の
+期待値は project ID)。着く語が無いとき (`.firebaserc` を firebase-tools と同じ内容に読めると確かめ
+られない場合を含む) は、コマンドの形で案内せず `.firebaserc` と `accounts.local.json` を手で確認する文に
+する (`pin-env` と同じ規則。deny / allow は変わらない)。
 
 期待値**以外**への切替は従来どおり通常検証 (実行前の状態) に落ちる。ただし同じ
 コマンド行に**同じ service の書込が連結**されていれば、現在のアカウントに依らず

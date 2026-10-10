@@ -448,6 +448,56 @@ class TestExtractCandidates(unittest.TestCase):
             [("aws s3 ls", {"AWS_PROFILE": "other"})],
         )
 
+    def test_assignment_only_segment_value_is_not_read_as_a_command_name(self):
+        """コマンド語の無い代入だけのセグメントは、値が `/…/<cli>` で終わっても、その CLI の
+        コマンドとして読まない (basename に揃えると firebase / gh として検出され誤 deny になった)。
+        代入の値はコマンド名ではない。セグメントはそのまま (代入のまま) 候補に残る。"""
+        cases = {
+            "代入だけ": ("FT=/x/node_modules/firebase-tools", [("FT=/x/node_modules/firebase-tools", {})]),
+            "代入の後ろに別の文": (
+                "FT=/x/node_modules/firebase-tools; echo hi",
+                [("FT=/x/node_modules/firebase-tools", {}), ("echo hi", {})],
+            ),
+            "代入を 2 つ重ねる": ("X=1 FT=/x/firebase-tools", [("FT=/x/firebase-tools", {"X": "1"})]),
+            "小文字と数字の名前": ("ft_2=/x/firebase-tools", [("ft_2=/x/firebase-tools", {})]),
+            "先頭が _ の名前": ("_ft=/x/firebase-tools", [("_ft=/x/firebase-tools", {})]),
+            "gh の値": ("X=/usr/local/bin/gh", [("X=/usr/local/bin/gh", {})]),
+            "バックスラッシュ始まりの値": ("X=\\/opt/bin/aws", [("X=\\/opt/bin/aws", {})]),
+            "CLI 名だけの値 (従来どおり)": ("FT=firebase-tools", [("FT=firebase-tools", {})]),
+        }
+        for label, (command, expected) in cases.items():
+            with self.subTest(label):
+                self.assertEqual(extract_candidates(command), expected)
+
+    def test_assignment_followed_by_a_command_is_still_detected(self):
+        """代入 + コマンドの形と、代入のセグメントの次のセグメントのコマンドは従来どおり検出する。
+        パス付きのコマンド名の basename 化も変えない。"""
+        cases = {
+            "代入 + コマンド": ("FOO=1 firebase deploy", [("firebase deploy", {"FOO": "1"})]),
+            "代入 + パス付きコマンド": (
+                "FOO=1 /x/node_modules/.bin/firebase deploy",
+                [("firebase deploy", {"FOO": "1"})],
+            ),
+            "2 番目のセグメント": (
+                "FT=/x/firebase-tools; firebase deploy",
+                [("FT=/x/firebase-tools", {}), ("firebase deploy", {})],
+            ),
+            "パス付きコマンドだけ": ("/opt/homebrew/bin/gh pr create", [("gh pr create", {})]),
+            "バックスラッシュ + パス": ("\\/opt/bin/gh pr create", [("gh pr create", {})]),
+        }
+        for label, (command, expected) in cases.items():
+            with self.subTest(label):
+                self.assertEqual(extract_candidates(command), expected)
+
+    def test_assignment_value_used_later_as_the_command_stays_unanalyzed(self):
+        """代入の値を後でコマンドとして使う形 (`"$FT" deploy`) は、この修正で変えない。値を
+        コマンド名として読まないので、変数経由の一般則 (README) の範囲のままで、firebase の
+        コマンドとしては検出されない (allow にもならない = 従来と同じ候補)。"""
+        self.assertEqual(
+            extract_candidates('FT=/x/firebase-tools "$FT" deploy'),
+            [('"$FT" deploy', {"FT": "/x/firebase-tools"})],
+        )
+
 
 class TestSudoEnvScrub(unittest.TestCase):
     """D16 回帰: sudo の env scrub を考慮し pre-sudo env を伝播しない。

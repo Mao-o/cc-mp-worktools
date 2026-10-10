@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.21.4
+
+### Fixed: 代入だけのセグメントを CLI のコマンドとして検出しない
+
+値が `/…/firebase-tools` や `/usr/local/bin/gh` のように CLI 名で終わる、代入だけのセグメント
+(`FT=/x/node_modules/firebase-tools; echo hi`、`FT=/x/firebase-tools` 単独、`X=1 FT=/x/firebase-tools`)
+が、その CLI のコマンドとして検出され、firebase のキーが無いプロジェクトで「"firebase" キーがありません」
+の deny になっていた (npx のキャッシュを grep するための代入だけで止まった。旧版から)。コマンド名の
+ディレクトリ部を落として basename に揃える処理が、`NAME=値` の代入のトークンにも働いていた。
+
+- 代入だけのセグメント (後ろにコマンド語が無いセグメント) は、どの service のコマンドとしても検出しない。
+  代入の値はコマンド名として読まない。セグメントは代入のまま候補に残る
+- 変えないもの: `FOO=1 firebase deploy` (代入 + コマンド) と `FT=/x/firebase-tools; firebase deploy`
+  (次のセグメントのコマンド)、パス付きのコマンド名 (`/opt/homebrew/bin/gh`) の basename 化は従来どおり検出する。
+  代入の値を後でコマンドとして使う形 (`FT=/x/firebase-tools "$FT" deploy`) も従来と同じ候補で、この修正で
+  allow にはならない (変数経由の一般則の範囲)。deny / allow の判定表は変えない (コマンド語が無い場合だけ)
+
+### Fixed: firebase の deny 文面の `firebase use` / `--project` の案内を `.firebaserc` の解決先と照合する
+
+firebase-tools は `firebase use <x>` / `--project <x>` の x を `.firebaserc` の alias として先に解決する。
+`pin-env` は 0.17.1 で、期待した project に解決される語だけを案内するようにしたが、hook の deny 文面の
+案内は `.firebaserc` と照合していなかった。期待値と同じ名前の alias が別の project を指していると、案内
+どおりにしても別の project になり (続く検証で deny されるので保護は働くが)、同じ deny に戻った。
+`--project <期待値>` の案内は「コマンド指定 --project X (→ Y) … --project X を指定してください」と
+自分の deny と矛盾した。
+
+- 案内する語は、`pin-env` と同じ解決 (`firebase.resolve_target` と同じ規則) で、期待した project に着くものだけ。
+  scalar の期待値は project ID そのもの。dict の期待値は entry ごとに alias を試し、着かなければ期待値の
+  project ID を案内する (`.firebaserc` に無い alias 名は firebase-tools が project ID として扱うので、これも
+  project ID の案内になる)。同じ語になる entry は 1 行にまとめる
+- 着く語が無いとき (alias が別の project を指す、`.firebaserc` を firebase-tools と同じ内容に読めると確かめ
+  られない) は、コマンドの形で案内せず、`.firebaserc` と `accounts.local.json` を手で確認する文にする。
+  一部の entry だけ省いたときは、その旨の行を添える。この文は `firebase use <x>` の形も `firebase login` の
+  語も含まないので、「案内された形のまま単独で実行」の注記は付かない (案内したコマンドが無いため)
+- 対象は `firebase use` の案内 (不一致・現在値を取得できない) と `--project` の案内 (不一致)。値の検証と
+  クォートは 0.17.1 の規則のまま。hook の deny / allow の判定は変えない
+- scalar の期待値で project ID が alias に影になっているとき、project を指す別の alias は案内しない
+  (`is_self_remediation` は scalar の期待値そのものの名前しか通さないので、alias の `firebase use` は検証に
+  回って deny され、案内がまた行き止まりになる。判定を変えずに済む側に倒した)
+- 既存の挙動の変化: `.firebaserc` に alias が無い dict の期待値の案内は、`firebase use <alias>` から
+  `firebase use <project ID>` に変わる (alias 名は project ID として扱われ、期待した project にならないため)
+
 ## 0.21.3
 
 ### Fixed: builder と pin-env の出力に出す値の制御文字をエスケープする

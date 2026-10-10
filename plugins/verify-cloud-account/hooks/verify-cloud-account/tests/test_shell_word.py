@@ -580,8 +580,17 @@ class TestFirebaseGuidance(unittest.TestCase):
         which.start()
         self.addCleanup(which.stop)
 
-    def _reasons(self, expected) -> dict[str, str]:
+    def _reasons(self, expected, firebaserc: dict | None = None) -> dict[str, str]:
+        """firebaserc は `.firebaserc` の alias → project ID。案内する語は firebase-tools が期待した
+        project に解決するものだけなので、alias の案内行を見るテストは alias を定義する。"""
         project_dir = str(self.root)
+        rc = self.root / ".firebaserc"
+        rc.unlink(missing_ok=True)
+        if firebaserc is not None:
+            # 別の alias を足す: alias が 1 つだけだと firebase-tools はそれを既定の project に
+            # するので、「現在の project を取得できない」ケースが解決してしまう。
+            decoy = {"zz-decoy": "proj-decoy"}
+            rc.write_text(json.dumps({"projects": {**firebaserc, **decoy}}), encoding="utf-8")
         with _run_returning("proj-other\n"):
             mismatch = firebase.verify(expected, project_dir)
             override = firebase.verify(expected, project_dir, context={"project": "other"})
@@ -592,7 +601,7 @@ class TestFirebaseGuidance(unittest.TestCase):
     def test_plain_values_are_guided_as_one_argument(self):
         for value in PLAIN_NAME:
             scalar = self._reasons(value)
-            alias = self._reasons({value: "proj-a"})
+            alias = self._reasons({value: "proj-a"}, {value: "proj-a"})
             with self.subTest(value=value):
                 self.assertIn(f"切り替え: firebase use {value}", scalar["mismatch"])
                 self.assertIn(f"firebase login && firebase use {value} を実行", scalar["unresolved"])
@@ -617,22 +626,28 @@ class TestFirebaseGuidance(unittest.TestCase):
                     self.assertNotIn("firebase use", reason)
                     self.assertFalse(_flag_with_value("--project", reason), reason)
                     self.assertIn(CHECK_BY_HAND, reason)
+                    # 理由は形 (許容形から外れる) であって、`.firebaserc` の解決先ではない。解決先の文も
+                    # 「手で確認してください」で終わるので、CHECK_BY_HAND だけでは見分けがつかない。
+                    self.assertIn(shell_word.UNSAFE, reason)
+                    self.assertNotIn("解決先が期待値と合わない", reason)
 
     def test_domain_scoped_project_is_guided_after_the_comment_mark(self):
         """`#` の後ろの project はコメントなので WORD で見る。ドメイン付きの project ID でも
         alias の案内行を出す (NAME で見ていたときは案内を一切出さなかった。マージ前
         レビューの指摘)。"""
-        reasons = self._reasons({"default": "example.com:my-project"})
+        reasons = self._reasons(
+            {"main-app": "example.com:my-project"}, {"main-app": "example.com:my-project"}
+        )
         for case in ("mismatch", "unresolved"):
             with self.subTest(case=case):
-                self.assertIn("  firebase use default  # → example.com:my-project", reasons[case])
+                self.assertIn("  firebase use main-app  # → example.com:my-project", reasons[case])
                 self.assertNotIn(CHECK_BY_HAND, reasons[case])
         with self.subTest(case="--project"):
-            self.assertIn("  --project default  # → example.com:my-project", reasons["--project"])
+            self.assertIn("  --project main-app  # → example.com:my-project", reasons["--project"])
 
     def test_dict_keeps_the_plain_entries_and_says_some_were_left_out(self):
         expected = {"$(touch pwned)": "proj-a", "default": "dev\nrm -rf ~", "prod": "proj-prod"}
-        for case, reason in self._reasons(expected).items():
+        for case, reason in self._reasons(expected, {"prod": "proj-prod"}).items():
             command = "--project" if case == "--project" else "firebase use"
             # 期待値の表示 (「期待=... のいずれか」) より後ろが案内
             guidance = reason.split("のいずれか")[-1]

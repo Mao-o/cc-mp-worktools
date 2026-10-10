@@ -1258,6 +1258,9 @@ def _strip_trailing_syntax(cmd: str) -> str:
     return s
 
 
+_ASSIGNMENT_HEAD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
 def _strip_command_path(cmd: str) -> str:
     """コマンド名のディレクトリ部と `\\` エスケープを落として basename に揃える。
 
@@ -1273,6 +1276,12 @@ def _strip_command_path(cmd: str) -> str:
         return cmd
     tok = m.group(1)
     if "'" in tok or '"' in tok:
+        return cmd
+    # `NAME=値` の代入だけのセグメント (後ろにコマンド語が無い。後ろにあれば `_parse_leading_env` が
+    # 先に剥がしている) は、コマンドの呼び出しではない。値が `/…/firebase-tools` で終わるだけで
+    # basename に揃えると、firebase のコマンドとして検出され誤 deny になる。代入の値は
+    # コマンド名として読まない。
+    if _ASSIGNMENT_HEAD_RE.match(tok):
         return cmd
     name = tok
     if name.startswith("\\") and len(name) > 1:
