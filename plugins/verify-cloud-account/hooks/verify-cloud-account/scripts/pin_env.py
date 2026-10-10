@@ -374,9 +374,15 @@ def settings_local_target(project_dir: str) -> tuple[Path | None, str]:
         for path in (root, common, root / ".claude"):
             try:
                 if path.exists() and path.stat().st_uid != os.getuid():
-                    return None, f"{path} の所有者が自分ではないため、書き込み先を決められません"
+                    return None, (
+                        f"{shell_word.escape_controls(path)} の所有者が自分ではないため、"
+                        "書き込み先を決められません"
+                    )
             except OSError:
-                return None, f"{path} の状態を読めないため、書き込み先を決められません"
+                return None, (
+                    f"{shell_word.escape_controls(path)} の状態を読めないため、"
+                    "書き込み先を決められません"
+                )
     note = "リポジトリのルート。commit されない個人設定"
     if not _same_path(git_dir, common):
         note += "。worktree から実行しています — main checkout のこのファイルが全 worktree で使われます"
@@ -447,7 +453,7 @@ def render(
 
     lines = []
     if target is not None:
-        lines.append(f"書き込み先: {target} ({target_note})")
+        lines.append(f"書き込み先: {shell_word.escape_controls(target)} ({target_note})")
     else:
         lines.append(f"書き込み先: 決められません — {target_note}。どのファイルに書くかユーザーに確かめてください")
     if file_problem:
