@@ -7,6 +7,7 @@ import unittest
 import _testutil  # noqa: F401
 
 from core.cli_options import (  # noqa: E402
+    COMBINED_SHORT_KEY,
     find_context_options,
     find_option_names,
     strip_allowed_options,
@@ -288,6 +289,70 @@ class TestContextValueRejection(unittest.TestCase):
                     ),
                     {"profile": value},
                 )
+
+
+class TestCombinedShortContextOption(unittest.TestCase):
+    """短い context option を途中に含む結合形 (`-jP prod`) は展開せず、印を付けて返す (v0.20.0)。
+
+    commander (firebase-tools) は `-jP prod` を `-j -P prod` に分ける。旧版は `-jP` を未知の
+    1 トークンとして読み飛ばし、既定の文脈 (アクティブな project) で照合していた。
+    """
+
+    CTX = {"--project": "project", "-P": "project", "--config": "config", "-c": "config"}
+    WITH_VALUE = frozenset({"--project", "-P", "--account", "--config", "-c", "--token"})
+
+    def _find(self, cmd):
+        return find_context_options(cmd, self.CTX, self.WITH_VALUE)
+
+    def test_cluster_with_a_short_context_option_is_marked(self):
+        for cmd, tok in (
+            ("firebase -jP prod deploy", "-jP"),
+            ("firebase deploy -iP prod", "-iP"),
+            ("firebase deploy -jPprod", "-jPprod"),
+            ("firebase deploy -jPmy-proj-123", "-jPmy-proj-123"),
+            ("firebase deploy -jP=prod", "-jP=prod"),
+            ("firebase deploy -jc sub/firebase.json", "-jc"),
+            ("firebase -ic sub/firebase.json deploy", "-ic"),
+            # 先頭の文字が context option でも、`=` 付きで既知の option として読めない形
+            ("firebase deploy -Pj=x", "-Pj=x"),
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self._find(cmd).get(COMBINED_SHORT_KEY), tok)
+
+    def test_forms_read_as_before_are_not_marked(self):
+        for cmd, expected in (
+            # 値を取らない文字だけの結合形は従来どおり読み飛ばす
+            ("firebase -ji deploy", {}),
+            ("firebase deploy -ji -P prod", {"project": "prod"}),
+            # 先頭の文字が context option: 値の連結形
+            ("firebase deploy -Pprod", {"project": "prod"}),
+            ("firebase deploy -Pjc", {"project": "jc"}),
+            ("firebase deploy -csub/firebase.json", {"config": "sub/firebase.json"}),
+            # 小文字の p は -P ではない
+            ("firebase deploy -jp", {}),
+            # 英字の並びに含まれない (`=` の後ろ / 数字の後ろ)
+            ("firebase deploy -j=P", {}),
+            ("firebase deploy -1P", {}),
+            # long option と `--` 以降は対象外
+            ("firebase deploy --jP", {}),
+            ("firebase emulators:exec -- -jP prod", {}),
+            # 値を取る option の値として消費されるトークン
+            ("firebase deploy --token -jPx", {}),
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self._find(cmd), expected)
+
+    def test_services_without_short_context_options_are_not_marked(self):
+        # kubectl / aws / gcloud の context option には短い形が無い (棚卸し)。値を取る短い
+        # option (kubectl の -n / -s / -v) は context option ではないので、同じ規則は当てない。
+        self.assertEqual(
+            find_context_options(
+                "kubectl logs -fn kube-system pod --context prod",
+                {"--context": "context", "--kubeconfig": "kubeconfig"},
+                frozenset({"--context", "--kubeconfig", "-n", "-s", "-v"}),
+            ),
+            {"context": "prod"},
+        )
 
 
 class TestFindOptionNames(unittest.TestCase):

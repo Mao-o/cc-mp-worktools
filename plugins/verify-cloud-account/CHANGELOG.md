@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.20.0
+
+### Changed: 短いオプションの結合形に `-P` / `-c` が含まれる firebase のコマンドを deny する
+
+`firebase -jP prod deploy` / `firebase deploy -iPprod` / `firebase deploy -jc sub/firebase.json`
+のように、短いオプションを結合したトークンに `-P` / `-c` が含まれる形は、firebase-tools では
+`-j -P prod` などに分かれ、その project / root で動く。0.19.1 までの hook はこのトークンを未知の
+option として読み飛ばし、アクティブな project (既定の root) で照合していたので、別の project
+への deploy を allow しえた (内部バックログ)。
+
+- 結合形は展開せず、照合先を確かめられないとして deny する (CLI の展開の規則を再現しない)。
+  文面は `-P` / `-c` を単独のトークンに分けて書くよう案内する。成功 cache も見ない
+- 値を取らない文字だけの結合形 (`-ji` など) は従来どおり読み飛ばす。`-Pprod` のように先頭の
+  文字が `-P` / `-c` の形も従来どおり値の連結形として読む
+- 短い形の context option を持つのは firebase だけで、aws / gcloud / kubectl には当たらない
+- README の「`-P=prod` を同じ規則で扱う」を実際の挙動に合わせた。hook は値 `prod` と読むが、
+  firebase-tools は `=prod` と読み (`-c=x` も `=x` というファイル)、コマンドは失敗する
+
+### Changed: CLI の無い経路で、firebase.json の旧形式キー `"firebase"` を見落とさない
+
+firebase-tools は configstore の切替先が無いとき、`.firebaserc` の alias より先に firebase.json の
+旧形式キー `"firebase"` の project で動く。hook の PATH に `firebase` が無い構成
+(`npx firebase deploy` など) のローカル設定の解決はこのキーを見ず、`.firebaserc` の default で
+照合して、別の project への deploy を allow しえた (内部バックログ)。
+
+- firebase.json (`--config` 付きのコマンドではそのファイル) にこのキーがあれば、値に関わらず
+  ローカル設定から解決せず、現在値を取得できないとして deny する
+- キーの有無を確かめられない firebase.json も同じく deny する: 読めない・UTF-8 でない・U+FEFF が
+  ある・コメントがある・厳密な JSON として読めない (NaN・末尾のカンマなど)。コメント付きの
+  firebase.json を使い、CLI の無い経路で firebase を使う構成は、この版から deny になる。URL の
+  ような文字列の中の `//` は当たらない。空のファイルは firebase-tools と同じく `{}` として読む
+- builder の現在値 (`init` の提案・`show`) も同じ解決を使うので、CLI が答えられない環境では
+  これらの firebase.json で現在値を出さない
+
 ## 0.19.1
 
 ### Fixed: stat できない accounts.local.json で検証をスキップしない

@@ -424,18 +424,105 @@ def _from_configstore(root: str, env=None, exact: bool = False) -> str:
     return ""
 
 
-def _from_local(root: str, env=None, exact: bool = False) -> str:
+def _cjson_decomment(text: str) -> str:
+    """cjson 0.3.3 の `decomment` と同じ規則でコメントを除いた文字列。
+
+    `_firebase_json_blocks_local` が「cjson の前処理が何も変えないか」を確かめるためだけに
+    使う (除いた結果で JSON を読むことはしない)。cjson の文字列の追跡は、直前の 1 文字が
+    `\\` の `"` を常に「エスケープされた引用符」とみなす (`"x\\\\"` の閉じ引用符を見落とす)。
+    厳密な JSON でもこの食い違いで文字列の外と見なした `//` / `/*` を除くことがあるので、
+    同じ追跡を再現して比べる。
+    """
+    out: list[str] = []
+    in_string = False
+    in_comment: int | bool = False
+    i = 0
+    n = len(text)
+    while i < n:
+        cur = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if not in_comment and cur == '"' and (text[i - 1] if i > 0 else "") != "\\":
+            in_string = not in_string
+        if not in_string:
+            if not in_comment and cur + nxt == "//":
+                i += 1
+                in_comment = 1
+            elif in_comment == 1 and cur == "\n":
+                in_comment = False
+            elif not in_comment and cur + nxt == "/*":
+                i += 1
+                in_comment = 2
+                cur = ""
+            elif in_comment == 2 and cur + nxt == "*/":
+                i += 1
+                in_comment = False
+                cur = ""
+            if in_comment:
+                cur = ""
+        out.append(cur)
+        i += 1
+    return "".join(out)
+
+
+def _firebase_json_blocks_local(path: str) -> bool:
+    """firebase.json (`path`) が、ローカル設定からの解決を止める形か。
+
+    firebase-tools の applyRC は、configstore の切替先が無いとき、`.firebaserc` の alias より
+    先に firebase.json の旧形式キー `"firebase"` (config.defaults.project) を使う。この規則
+    (値を alias として解決するか等) は再現せず、次のどれかなら True (解決しない) を返す:
+
+    - トップレベルのオブジェクトに `"firebase"` キーがある (値に関わらず)
+    - firebase-tools と同じ内容に読めると確かめられない: 読めない・UTF-8 でない・U+FEFF を
+      含む (cjson はすべての U+FEFF を除くので、キーの中の U+FEFF で別のキーに読める)・
+      cjson のコメント除去が何かを除く (コメントがある・cjson の文字列の追跡が外れる)・厳密な
+      JSON として読めない (NaN など JSON に無い値・構文の誤り・深い入れ子)
+
+    ファイルが無い (通常のファイルでない) ときと空 (0 バイト) のときは False: firebase-tools も
+    設定なし・`{}` として読み、旧形式キーは無い。
+    """
+    if not os.path.isfile(path):
+        return False
+    try:
+        raw = Path(path).read_bytes()
+    except OSError:
+        return True
+    if not raw:
+        return False
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    if "\ufeff" in text:
+        return True
+    if ("//" in text or "/*" in text) and _cjson_decomment(text) != text:
+        return True
+    try:
+        data = json.loads(text, parse_constant=_reject_constant)
+    except (ValueError, RecursionError):
+        return True
+    return isinstance(data, dict) and "firebase" in data
+
+
+def _from_local(root: str, env=None, config_file: str | None = None) -> str:
     """CLI が答えられないとき、firebase-tools と同じローカル設定から現在値を解決する。
 
     applyRC と同じ順: configstore の切替先を `.firebaserc` の alias で解決
     (alias に無ければ project ID そのもの) → alias が 1 つならその値 → `default`。
     root は project root (`firebase.json` のある root、無ければ project_dir。`--config` 付きの
-    コマンドではそのファイルのあるディレクトリ)。exact は `_from_configstore` を参照。
+    コマンドではそのファイルのあるディレクトリ)。config_file は `--config` のファイルの絶対パス
+    (`--config` 付きのコマンドのとき。configstore は `_from_configstore` の exact で探す)。
 
     `.firebaserc` を firebase-tools と同じ内容に読めると確かめられなければ "" (解決しない)。
     alias の行き先を取り違えると、firebase-tools と違う project を現在値として照合してしまう。
+    firebase.json (`--config` のファイル、無ければ root の firebase.json) が旧形式キー
+    `"firebase"` を持つか、その有無を確かめられないときも "" (`_firebase_json_blocks_local`。
+    v0.20.0)。firebase-tools は configstore の切替先が無いときそのキーの project で動く。
     呼び出し側は現在値を取得できないとして deny する。
     """
+    exact = config_file is not None
+    config_path = config_file if exact else os.path.join(root, "firebase.json")
+    if _firebase_json_blocks_local(config_path):
+        return ""
     projects = _read_firebaserc(root)
     if projects is None:
         return ""
@@ -459,7 +546,7 @@ def _resolve(root: str, env=None, config: str | None = None) -> tuple[str, str |
         return "", err
     if current:
         return current, None
-    return _from_local(root, env, exact=config is not None), None
+    return _from_local(root, env, config_file=config), None
 
 
 # プロジェクトごとの固定 (v0.19.0)。firebase-tools は `firebase use` の切替先を

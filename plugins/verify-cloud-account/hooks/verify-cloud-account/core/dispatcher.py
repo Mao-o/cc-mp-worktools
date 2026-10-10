@@ -673,6 +673,32 @@ def _auto_switch(
     return outcome
 
 
+def _combined_short_error(svc, cands, *, stops: bool) -> str:
+    """短い context option を含む結合形 (`-jP prod`) で照合先を確かめられないときの文。
+
+    `cli_options.find_context_options` がこの形を見つけると、照合先を読まずに止める
+    (展開の規則を再現しない)。示すのは option の名前だけで、トークン自体は検出コマンドの
+    行に出る。分けて書くよう文で案内し、コマンドの形では案内しない。
+    """
+    names = sorted(
+        (name for name in getattr(svc, "CONTEXT_OPTIONS", {})
+         if len(name) == 2 and name[0] == "-" and name[1] != "-"),
+        key=str.lower,
+    )
+    shown = " / ".join(names)
+    head = (
+        f'"{svc.ACCOUNT_KEY}": 短いオプションを結合したトークン (-jP のような形) に、照合先を'
+        f"決める option ({shown}) が含まれているため、どの照合先で動くかを確かめられません"
+        " (hook は結合形を展開しません)。"
+    )
+    tail = (
+        f"{shown} はほかの文字と結合せず、単独のトークンで書いてください。"
+        if stops
+        else "リモート read のみのコマンドなので実行は止めません。"
+    )
+    return f"{head}\n{tail}\n(検出コマンド: {', '.join(orig for orig, _norm in cands)})"
+
+
 # 起動リポジトリの外で走るセグメントの deny (v0.19.0)。hook は**起動したときの env**
 # (+ settings の `env`) と、起動したディレクトリの期待値で検証する。別のリポジトリで
 # 走るコマンドは、そのリポジトリで意図されたアカウント (期待値も、ディレクトリ単位の
@@ -1029,6 +1055,14 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
             continue
 
         if _all_self_remediation([norm for _orig, norm in cands], svc, entry):
+            continue
+
+        # 短い context option を含む結合形 (`firebase -jP prod deploy`) は照合先を確かめ
+        # られない (cli_options.find_context_options)。既定のコンテキストで照合すると、
+        # 別の照合先で動くコマンドを通しうるので、cache も verify も見ずに止める。
+        # tier の扱いは verify() の不一致と同じ (QUERY は警告)。
+        if cli_options.COMBINED_SHORT_KEY in ctx:
+            problems.append(_combined_short_error(svc, cands, stops=stops))
             continue
 
         svc_name = _service_name(svc)
