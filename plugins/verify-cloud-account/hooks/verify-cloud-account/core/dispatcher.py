@@ -531,7 +531,8 @@ def _expected_display(entry) -> str:
     dict のキーの意味は service ごとに違う (github: host / gcloud:
     project|account / firebase: alias) ので、意味を要約せず書かれたまま見せる。
     値の解釈は service の verify() が持つ規則であって、ここで再現すると
-    2 箇所に規則が生える。str 以外の値は落とす (verify() も使わない)。
+    2 箇所に規則が生える。str 以外の値は落とす (verify() も使わない)。キーと値は
+    許容形のときだけ示す (`shell_word.shown`。改行を含む値で偽の行を差し込めないように)。
 
     **`REMEDIATION_PATTERNS` に一致する形を作らないこと** — この文面は
     `_guides_remediation` を通さない chain error なので、切替コマンドの実形を
@@ -539,9 +540,12 @@ def _expected_display(entry) -> str:
     載せる。
     """
     if isinstance(entry, str):
-        return entry
+        return shell_word.shown(entry)
     if isinstance(entry, dict):
-        pairs = [f"{k}={v}" for k, v in entry.items() if isinstance(v, str) and v]
+        pairs = [
+            f"{shell_word.shown(k)}={shell_word.shown(v)}"
+            for k, v in entry.items() if isinstance(v, str) and v
+        ]
         if pairs:
             return ", ".join(pairs)
     return ""
@@ -643,7 +647,7 @@ def _format_conflicts(conflicts: list[tuple[str, Path]]) -> str:
 
 def _auto_switch(
     svc, entry, project_dir: str, proc_env, ctx, switching_here: bool,
-    trace: dict | None,
+    trace: dict | None, *, help_only: bool = False,
 ) -> auto_switch.Outcome:
     """deny になる不一致を、期待値への自動切替で置き換えられるか試す。
 
@@ -657,7 +661,7 @@ def _auto_switch(
     try:
         outcome = auto_switch.attempt(
             svc, entry, project_dir, env=proc_env, context=ctx,
-            switching_here=switching_here,
+            switching_here=switching_here, help_only=help_only,
         )
     except Exception as e:  # noqa: BLE001
         outcome = auto_switch.Outcome(
@@ -1117,8 +1121,12 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
             and effective_mode == mode.ENFORCE
             and svc.ACCOUNT_KEY in auto_enabled
         ):
+            # この target のコマンドがどれも `--help` 付きなら切り替えない (ヘルプの表示の
+            # ためにマシン全体の切替をしない。deny のまま)。`--help` の無いコマンドが 1 つでも
+            # あれば、そのために従来どおり切り替える。
             outcome = _auto_switch(
-                svc, entry, project_dir, proc_env, ctx, switching_here, trace
+                svc, entry, project_dir, proc_env, ctx, switching_here, trace,
+                help_only=all(auto_switch.requests_help(norm) for _orig, norm in cands),
             )
             if outcome.switched:
                 switch_notices.append(auto_switch.notice(svc, outcome.switched))
@@ -1142,10 +1150,10 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
             # 打つと再び deny されるだけで、安全側)。
             # REMEDIATION_NOTE を持つ service (aws) には当てない: 許容形から外れた profile 名は
             # 文に置き換えたうえで `AWS_PROFILE=<profile>` を必ず案内するので、注記を落とすと
-            # 使い方の説明だけが消える。UNSAFE を含まない deny に出る値の表示 (firebase の
-            # `(→ <alias の行き先>)`・不一致の deny の `現在=`・`--config` 付きのコマンドの deny と
-            # `--project` の行き先を確かめられない deny の `期待=`、gh の `[<host>]`) は、許容形の
-            # ときだけ出す (services 側)。
+            # 使い方の説明だけが消える。deny に出る値の表示 (`現在=` / `期待=` / コマンド指定 /
+            # firebase の `(→ <alias の行き先>)` / gh の `[<host>]` / 自動切替の注記) は、どの
+            # service も許容形のときだけ出す (services 側。core/shell_word.py の shown。v0.21.0
+            # で全部の表示に揃えた)。この UNSAFE の除外は、その二重化として残す。
             if _guides_remediation(err, svc) and (
                 hasattr(svc, "REMEDIATION_NOTE") or shell_word.UNSAFE not in err
             ):

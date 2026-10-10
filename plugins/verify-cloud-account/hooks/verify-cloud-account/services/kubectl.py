@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import re
-import shlex
 import subprocess
 
 from core import budget, cli_options, shell_word
@@ -183,8 +182,8 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
         if override == expected:
             return None
         head = (
-            f"kubectl コンテキスト不一致: コマンド指定 --context={shlex.quote(override)}, "
-            f"期待={expected}"
+            f"kubectl コンテキスト不一致: コマンド指定 --context={shell_word.shown(override)}, "
+            f"期待={shell_word.shown(expected)}"
         )
         if target is None:
             return f"{head} — --context を外してください ({check_by_hand})"
@@ -203,7 +202,10 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
         )
 
     if current != expected:
-        head = f"kubectl コンテキスト不一致: 現在={current}, 期待={expected}"
+        head = (
+            f"kubectl コンテキスト不一致: 現在={shell_word.shown(current)}, "
+            f"期待={shell_word.shown(expected)}"
+        )
         if target is None:
             return f"{head} — {check_by_hand}"
         return f"{head} — 切り替え: kubectl config use-context {target}"

@@ -291,6 +291,37 @@ class TestAttempt(_TmpCacheDir):
         self.assertEqual(out.note, auto_switch.NOTE_SWITCHING_HERE)
         self.assertEqual(svc.calls, [])
 
+    def test_help_only_is_left_alone(self):
+        """`--help` 付きのコマンドだけのときは計画も切替もしない (CLI を起動しない)。"""
+        svc = _fake_service()
+        out = auto_switch.attempt(svc, "Mao-o", "/p", help_only=True)
+        self.assertFalse(out.resolved)
+        self.assertEqual(out.note, auto_switch.NOTE_HELP)
+        self.assertEqual(svc.calls, [])
+
+    def test_requests_help(self):
+        """`--help` / `--help=<値>` のトークンだけを数え、`-h` (gh の auth 配下では
+        `--hostname`) や語の一部は数えない。shell の規則で分けられない行は空白で分ける。"""
+        cases = {
+            "gh auth git-credential --help": True,
+            "gh pr create --help=true": True,
+            "gh pr create --title --help": True,
+            "gh pr create --title 'x' --help": True,
+            "gh pr create --title \"unclosed --help": True,
+            "gh auth switch -h github.com --user me": False,
+            "gh pr create --title 'see --help'": False,
+            "gh pr create --helpful": False,
+            "gh pr create -help": False,
+            "gh pr create": False,
+        }
+        for command, expected in cases.items():
+            with self.subTest(command=command):
+                try:
+                    got = auto_switch.requests_help(command)
+                except ValueError as e:
+                    self.fail(f"分けられない行で例外が漏れた: {e}")
+                self.assertIs(got, expected)
+
     def test_expired_budget_starts_nothing(self):
         svc = _fake_service()
         budget.start(0.0)

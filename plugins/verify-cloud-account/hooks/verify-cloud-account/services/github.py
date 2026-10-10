@@ -538,7 +538,8 @@ def _verify_against(active: dict[str, str], expected) -> str | None:
                     )
             elif current != want:
                 errors.append(
-                    f"GitHub [{_host_label(host)}] アカウント不一致: 現在={current}, 期待={want}"
+                    f"GitHub [{_host_label(host)}] アカウント不一致: "
+                    f"現在={shell_word.shown(current)}, 期待={shell_word.shown(want)}"
                     + _switch_guidance(host, want)
                 )
         return "\n".join(errors) if errors else None
@@ -555,7 +556,8 @@ def _verify_against(active: dict[str, str], expected) -> str | None:
 
     if current != expected:
         msg = (
-            f"GitHub [{_host_label(host)}] アカウント不一致: 現在={current}, 期待={expected}"
+            f"GitHub [{_host_label(host)}] アカウント不一致: "
+            f"現在={shell_word.shown(current)}, 期待={shell_word.shown(expected)}"
             + _switch_guidance(host, expected)
         )
         if len(active) > 1:
@@ -865,7 +867,7 @@ def plan_switch(expected, project_dir: str, env=None):
         if current == want:
             continue
         if want not in logged_in.get(host, ()):
-            missing.append(f"{host} の {want}")
+            missing.append(f"{shell_word.shown(host)} の {shell_word.shown(want)}")
             continue
         steps.append((host, current, want))
     if missing:
@@ -904,10 +906,10 @@ def apply_switch(steps, env=None):
         except OSError as e:
             return done, f"gh コマンドを実行できません ({e})。"
         except subprocess.TimeoutExpired:
-            return done, f"{host} の切替がタイムアウトしました。"
+            return done, f"{shell_word.shown(host)} の切替がタイムアウトしました。"
         if result.returncode != 0:
             detail = _first_line(result.stderr or result.stdout)
-            return done, f"{host} の切替に失敗しました ({detail})。"
+            return done, f"{shell_word.shown(host)} の切替に失敗しました ({detail})。"
         done.append((host, current, want))
     return done, None
 
@@ -915,7 +917,9 @@ def apply_switch(steps, env=None):
 def describe_switch(switched) -> str:
     """自動切替したことを伝える本文 (`core/auto_switch.notice` が前置きを付ける)。"""
     changes = ", ".join(
-        f"{host}: {before or '(なし)'} → {after}" for host, before, after in switched
+        f"{shell_word.shown(host)}: {shell_word.shown(before) if before else '(なし)'} → "
+        f"{shell_word.shown(after)}"
+        for host, before, after in switched
     )
     return (
         f"gh のアクティブアカウントを切り替えました ({changes})。gh の設定は"

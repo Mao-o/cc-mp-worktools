@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import os
 import re
-import shlex
 import subprocess
 from pathlib import Path
 
@@ -370,8 +369,9 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
         return err
 
     # どの profile で検証したかを文面に出す (既定と `--profile` 指定を区別できるように)。
-    # コマンド自身が指定した値は、検証せず quote だけ通して示す (core/shell_word.py)。
-    scope = f" (--profile {shlex.quote(profile)})" if profile else ""
+    # コマンド自身が指定した値も、許容形のときだけ示す (core/shell_word.py の shown。値は
+    # 検出コマンドの行に出る)。
+    scope = f" (--profile {shell_word.shown(profile)})" if profile else ""
 
     if current is None:
         detail = f" ({hint})" if hint else ""
@@ -382,7 +382,8 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
 
     if current != expected:
         return (
-            f"AWS アカウント不一致{scope}: 現在={current}, 期待={expected}\n"
+            f"AWS アカウント不一致{scope}: 現在={shell_word.shown(current)}, "
+            f"期待={shell_word.shown(expected)}\n"
             + _switch_guidance(expected, env, include_configure=False)
         )
 

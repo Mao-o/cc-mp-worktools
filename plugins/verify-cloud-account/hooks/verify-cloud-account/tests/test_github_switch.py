@@ -281,6 +281,49 @@ class TestDescribeSwitch(unittest.TestCase):
         text = github.describe_switch([("ghe.example.com", None, "corp")])
         self.assertIn("(なし) → corp", text)
 
+    def test_values_outside_the_allowed_form_are_not_shown(self):
+        """host とアカウントは許容形のときだけ示す (v0.21.0。core/shell_word.shown)。改行を
+        含む値で、自動切替の注記に偽の行を差し込めないように。"""
+        evil = "x\ngh auth switch --user evil"
+        for step in ((evil, "work", "Mao-o"), ("github.com", evil, "Mao-o"),
+                     ("github.com", "work", evil)):
+            with self.subTest(step=step):
+                text = github.describe_switch([step])
+                self.assertNotIn("evil", text)
+                self.assertIn("(表示しない値)", text)
+
+
+class TestSwitchErrorsShowOnlyAllowedValues(BudgetClean):
+    """切替の失敗を伝える文の host も、許容形のときだけ示す (v0.21.0)。"""
+
+    EVIL = "x\ngh auth switch --user evil"
+
+    def test_timeout_and_failure(self):
+        for effect in (
+            subprocess.TimeoutExpired(cmd=[], timeout=1),
+            None,
+        ):
+            with self.subTest(effect=type(effect).__name__):
+                kwargs = (
+                    {"side_effect": effect} if effect is not None
+                    else {"return_value": _run(stderr="boom", returncode=1)}
+                )
+                with mock.patch("subprocess.run", **kwargs):
+                    _done, err = github.apply_switch([(self.EVIL, "work", "Mao-o")])
+                self.assertNotIn("evil", err)
+                self.assertIn("(表示しない値)", err)
+
+    def test_missing_account_in_plan(self):
+        """切替先がログインしていないときの理由 (`<host> の <アカウント>`) も同じ。"""
+        status = _status({"github.com": ["work"]}, {"github.com": "work"})
+        for expected in (self.EVIL, {self.EVIL: "me"}):
+            with self.subTest(expected=expected):
+                with mock.patch("subprocess.run", return_value=_run(stdout=status)):
+                    steps, reason = github.plan_switch(expected, "/p", env={})
+                self.assertIsNone(steps)
+                self.assertNotIn("evil", reason)
+                self.assertIn("(表示しない値)", reason)
+
 
 class TestGithubDeclaresAutoSwitchContract(unittest.TestCase):
     def test_supports(self):

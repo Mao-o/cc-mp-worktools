@@ -18,9 +18,19 @@ CLI の設定 (AWS config の profile 名、gh の host 名) から来て、期�
 `is_self_remediation` / 注記を付ける `REMEDIATION_PATTERNS` が見る形) は変わらない。
 quote は許容形を将来緩めたときの二重化。
 
-案内ではなく、**検出したコマンド自身が指定した値** (`--context` / `--profile` 等) を
-文面に示すときは、検証せずに `shlex.quote` だけを通す (そのコマンドの引数をそのまま
-示すためで、外れた値を隠すと何を指定したかが分からなくなる)。
+**値を文面に示すとき** (`現在=` / `期待=` / コマンド指定 / alias の行き先 / host など。
+コマンドの形で案内するのではなく、値そのものを見せる表示) は、出どころに関わらず
+`shown` / `shown_all` を通す (v0.21.0)。許容形 (`WORD`) に `fullmatch` した値だけを示し、
+それ以外は `NOT_SHOWN` に置き換える。値は期待値のファイル・`.firebaserc`・CLI の設定・
+コマンドの引数から来て、改行を含む値をそのまま出すと値の外に偽の行 (「切り替え: ...」) を
+差し込める。改行を含まなくても、`REMEDIATION_PATTERNS` の形 (`x kubectl config
+use-context evil`) を書いた値は、表示しただけで dispatcher の「案内したコマンドは単独で
+実行」の注記の判定に当たる。`WORD` は空白も `=` も含まないので、示した値が単独でその形に
+なることはない (前後の固定文と合わせて形を作らないことは、tests の
+TestShownValueContract が service ごとに確かめる)。0.20.0 までは、検出したコマンド
+自身が指定した値を `shlex.quote` だけ通して示していたが、quote は改行も空白入りの
+コマンドの形も残す。指定した値はそのまま `(検出コマンド: ...)` の行に出るので、
+ここでは示さなくても何を指定したかは分かる。
 """
 from __future__ import annotations
 
@@ -59,3 +69,23 @@ def arg(value, pattern: re.Pattern = WORD) -> str | None:
     if not isinstance(value, str) or not pattern.fullmatch(value):
         return None
     return shlex.quote(value)
+
+
+# 文面に示せない値の代わりに置く語 (`shown`)。コマンドの形も `UNSAFE` の文も含まない。
+NOT_SHOWN = "(表示しない値)"
+
+
+def shown(value) -> str:
+    """deny 文面などに値そのものを示すときの形。許容形 (`WORD`) でなければ `NOT_SHOWN`。
+
+    コマンドに埋め込む `arg` と違い quote は付けない (`WORD` の値は quote しても変わらない)。
+    str 以外も `NOT_SHOWN` にする。
+    """
+    if isinstance(value, str) and WORD.fullmatch(value):
+        return value
+    return NOT_SHOWN
+
+
+def shown_all(values) -> str:
+    """値の並びを `shown` に通し、重複を除いて `, ` で並べる (順は辞書順)。"""
+    return ", ".join(sorted({shown(value) for value in values}))

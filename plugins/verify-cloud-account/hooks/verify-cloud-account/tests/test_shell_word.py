@@ -186,11 +186,17 @@ class TestKubectlGuidance(unittest.TestCase):
                     self.assertFalse(_flag_with_value("--context", reason), reason)
                     self.assertIn(CHECK_BY_HAND, reason)
 
-    def test_command_override_is_shown_quoted(self):
-        """検出したコマンド自身の `--context` は、検証せず quote して示す。"""
-        with _run_returning("dev-ctx\n"):
-            reason = kubectl.verify("prod-ctx", self.PROJECT_DIR, context={"context": "a; b"})
-        self.assertIn("コマンド指定 --context='a; b',", reason)
+    def test_command_override_is_shown_only_in_the_allowed_form(self):
+        """検出したコマンド自身の `--context` も、許容形のときだけ示す (v0.21.0)。0.20.0 までは
+        quote だけ通して示していたが、quote は改行も空白入りのコマンドの形も残す。"""
+        for value in PLAIN + HOSTILE:
+            with self.subTest(value=value):
+                with _run_returning("dev-ctx\n"):
+                    reason = kubectl.verify("want-ctx", self.PROJECT_DIR, context={"context": value})
+                shown = value if value in PLAIN else shell_word.NOT_SHOWN
+                self.assertIn(f"コマンド指定 --context={shown},", reason)
+                if value not in PLAIN:
+                    self.assertNotIn(value, reason)
 
     def test_harmless_value_outside_the_form_is_not_said_to_be_shell_syntax(self):
         """外れた値の文面は「案内に使える形ではない」とだけ言う。シェル上は無害な値も
@@ -383,14 +389,15 @@ class TestFirebaseGuidance(unittest.TestCase):
                 self.assertNotIn("rm -rf", guidance)
                 self.assertIn("ほかの alias は", guidance)
 
-    def test_command_project_is_shown_quoted(self):
-        """検出したコマンド自身の `--project` は、検証せず quote して示す。"""
+    def test_command_project_is_shown_only_in_the_allowed_form(self):
+        """検出したコマンド自身の `--project` も、許容形のときだけ示す (v0.21.0)。"""
         (self.root / ".firebaserc").write_text(
             json.dumps({"projects": {"a b": "proj-x"}}), encoding="utf-8"
         )
         with _run_returning("proj-other\n"):
             reason = firebase.verify("proj-dev", str(self.root), context={"project": "a b"})
-        self.assertIn("コマンド指定 --project 'a b' (→ proj-x),", reason)
+        self.assertIn(f"コマンド指定 --project {shell_word.NOT_SHOWN} (→ proj-x),", reason)
+        self.assertNotIn("a b", reason)
 
     def test_resolved_project_is_displayed_only_in_the_allowed_form(self):
         """`--project <alias>` の行き先 (`.firebaserc` の値) は許容形のときだけ `(→ <project>)`
@@ -463,12 +470,16 @@ class TestAwsGuidance(unittest.TestCase):
                 self.assertNotIn("pwned", reason)
                 self.assertIn("ほかの profile は", reason)
 
-    def test_command_profile_is_shown_quoted(self):
-        """検出したコマンド自身の `--profile` は、検証せず quote して示す。"""
+    def test_command_profile_is_shown_only_in_the_allowed_form(self):
+        """検出したコマンド自身の `--profile` も、許容形のときだけ示す (v0.21.0)。"""
         self._write_profiles("prod")
-        with _run_returning("111111111111\n"):
-            reason = aws.verify(self.ACCOUNT, str(self.tmp), self.env, context={"profile": "a; b"})
-        self.assertIn("AWS アカウント不一致 (--profile 'a; b'):", reason)
+        for value, shown in (("a; b", shell_word.NOT_SHOWN), ("dev-profile", "dev-profile")):
+            with self.subTest(value=value):
+                with _run_returning("111111111111\n"):
+                    reason = aws.verify(
+                        self.ACCOUNT, str(self.tmp), self.env, context={"profile": value}
+                    )
+                self.assertIn(f"AWS アカウント不一致 (--profile {shown}):", reason)
 
 
 if __name__ == "__main__":
