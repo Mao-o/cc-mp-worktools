@@ -22,7 +22,13 @@ quote は許容形を将来緩めたときの二重化。
 コマンドの形で案内するのではなく、値そのものを見せる表示) は、出どころに関わらず
 `shown` / `shown_all` を通す (v0.21.0)。示すのは、許容形 (`WORD`) に `fullmatch` する値か、
 空白 (Unicode の空白を含む) も `=` も含まず、Unicode の制御文字 (Cc)・書式文字 (Cf)・行区切り
-(Zl)・段落区切り (Zp) も含まない値 (`can_show`)。それ以外は `NOT_SHOWN` に置き換える。
+(Zl)・段落区切り (Zp)・サロゲート (Cs)・私用領域 (Co)・未割り当て (Cn)、既定で無視される文字
+(Default_Ignorable_Code_Point。Hangul filler・異体字セレクタ・結合書記素接合子など)、空白に
+見える文字 (点字の空白など) も含まず、結合文字 (Mn / Me / Mc) で始まらない値 (`can_show`)。
+それ以外は `NOT_SHOWN` に置き換える。不可視の文字を空白の代わりに使えば、空白を含まない値でも
+文面の上ではコマンドの形 (`xㅤkubectlㅤconfigㅤuse-contextㅤevil`) に見え、先頭の結合文字は
+前の固定文 (`期待=` の `=`) と合成されて別の記号 (`≠`) に見える。値の途中の結合文字は隠さない
+(NFD で書いた日本語の名前の濁点など、普通の名前に現れる)。
 値は期待値のファイル・`.firebaserc`・CLI の設定・コマンドの引数から来て、改行を含む値を
 そのまま出すと値の外に偽の行 (「切り替え: ...」) を差し込める。改行を含まなくても、
 `REMEDIATION_PATTERNS` の形 (`x kubectl config use-context evil`) を書いた値は、表示しただけで
@@ -38,11 +44,13 @@ service ごとに確かめる)。示す形は案内に使える形 (`WORD`) よ�
 **値をそのまま (置き換えずに) 出すとき** (`(検出コマンド: ...)` の行に出すコマンド、CLI の
 エラー出力の転記、並行セッションの記録にあるパスなど。空白や `=` を含むのが普通で、`shown` を
 通すと何も分からなくなる値) は `escape_controls` を通す。C0 / C1 の制御文字・DEL・Unicode の
-行区切り / 段落区切りをエスケープした形 (`\\n` / `\\xNN` / `\\uNNNN`) にして、値が文面の中で
-1 行に収まるようにする (改行で偽の行を差し込めない。端末の制御シーケンスも残さない)。
+行区切り / 段落区切り・書式文字 (Cf) をエスケープした形 (`\\n` / `\\xNN` / `\\uNNNN` /
+`\\UNNNNNNNN`) にして、値が文面の中で 1 行に収まるようにする (改行で偽の行を差し込めない。
+端末の制御シーケンスも、表示の向きを入れ替える双方向制御の文字も残さない)。
 """
 from __future__ import annotations
 
+import bisect
 import re
 import shlex
 import unicodedata
@@ -87,22 +95,72 @@ NOT_SHOWN = "(表示しない値)"
 
 # `shown` が示す形のうち、`WORD` より広い側 (空白と `=` を含まない)。
 _SHOWABLE = re.compile(r"[^\s=]+")
-# 示さない Unicode の一般カテゴリ (制御文字・書式文字・行区切り・段落区切り)。
-_HIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+# 示さない Unicode の一般カテゴリ (制御文字・書式文字・行区切り・段落区切り・サロゲート・
+# 私用領域・未割り当て)。私用領域と未割り当ては、端末やフォントによって何が見えるかが決まらない。
+_HIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Cs", "Co", "Cn"})
+
+# 示さない文字の範囲 (両端を含む)。標準ライブラリには Default_Ignorable_Code_Point の判定が
+# 無いので、範囲を定数で持つ。出典は Unicode の DerivedCoreProperties.txt の
+# Default_Ignorable_Code_Point (Unicode 13.0 の表に、14.0 で足された U+180F を加えたもの)。
+# 既定で無視される文字は表示されないか幅を持たず、空白の代わりに置くと、空白を含まない値が
+# コマンドの形に見える。大半は Cf / Cn (カテゴリでも隠れる。範囲は出典どおりに持つ) だが、
+# Lo (Hangul filler) と Mn (U+034F / U+17B4-17B5 / U+180B-180D・U+180F / 異体字セレクタ) も含む。
+# 「空白に見える」と注記した 2 行は Default_Ignorable ではないが空白に見える文字 (点字の空白
+# U+2800、契丹小字の filler U+16FE4)。bisect で引くので開始の昇順に並べる。
+_INVISIBLE_RANGES = (
+    (0x00AD, 0x00AD),  # SOFT HYPHEN
+    (0x034F, 0x034F),  # COMBINING GRAPHEME JOINER
+    (0x061C, 0x061C),  # ARABIC LETTER MARK
+    (0x115F, 0x1160),  # HANGUL CHOSEONG / JUNGSEONG FILLER
+    (0x17B4, 0x17B5),  # KHMER VOWEL INHERENT AQ / AA
+    (0x180B, 0x180F),  # MONGOLIAN FREE VARIATION SELECTOR 1-4 / VOWEL SEPARATOR
+    (0x200B, 0x200F),  # ZERO WIDTH SPACE .. RIGHT-TO-LEFT MARK
+    (0x202A, 0x202E),  # LEFT-TO-RIGHT EMBEDDING .. RIGHT-TO-LEFT OVERRIDE
+    (0x2060, 0x206F),  # WORD JOINER .. NOMINAL DIGIT SHAPES (未割り当てを含む)
+    (0x2800, 0x2800),  # BRAILLE PATTERN BLANK (空白に見える)
+    (0x3164, 0x3164),  # HANGUL FILLER
+    (0xFE00, 0xFE0F),  # VARIATION SELECTOR 1-16
+    (0xFEFF, 0xFEFF),  # ZERO WIDTH NO-BREAK SPACE
+    (0xFFA0, 0xFFA0),  # HALFWIDTH HANGUL FILLER
+    (0xFFF0, 0xFFF8),  # 未割り当て (Default_Ignorable として予約)
+    (0x16FE4, 0x16FE4),  # KHITAN SMALL SCRIPT FILLER (空白に見える)
+    (0x1BCA0, 0x1BCA3),  # SHORTHAND FORMAT LETTER OVERLAP .. UP STEP
+    (0x1D173, 0x1D17A),  # MUSICAL SYMBOL BEGIN BEAM .. END PHRASE
+    (0xE0000, 0xE0FFF),  # タグ文字・VARIATION SELECTOR 17-256 と、その前後の予約
+)
+_INVISIBLE_STARTS = tuple(lo for lo, _ in _INVISIBLE_RANGES)
+
+# 値の先頭に来ると、前の固定文の文字と合成される結合文字の一般カテゴリ。
+_COMBINING_CATEGORIES = frozenset({"Mn", "Me", "Mc"})
+
+
+def _invisible(code: int) -> bool:
+    """code が `_INVISIBLE_RANGES` のどれかに入るか。"""
+    i = bisect.bisect_right(_INVISIBLE_STARTS, code) - 1
+    return i >= 0 and code <= _INVISIBLE_RANGES[i][1]
 
 
 def can_show(value) -> bool:
     """value を文面にそのまま示してよいか (`shown` の判定)。
 
-    `WORD` に合うか、空白も `=` も含まず、制御文字・書式文字・行区切り・段落区切りも
-    含まない文字列なら真。str 以外は偽。
+    `WORD` に合うか、次のどれも満たす文字列なら真。str 以外は偽。
+
+    - 空白も `=` も含まない
+    - 制御文字・書式文字・行区切り・段落区切り・サロゲート・私用領域・未割り当てを含まない
+    - 既定で無視される文字 (Hangul filler・異体字セレクタなど) と、空白に見える文字
+      (点字の空白など) を含まない (`_INVISIBLE_RANGES`)
+    - 結合文字 (Mn / Me / Mc) で始まらない (途中の結合文字は NFD の濁点などなので示す)
     """
     if not isinstance(value, str):
         return False
     if WORD.fullmatch(value):
         return True
-    return bool(_SHOWABLE.fullmatch(value)) and not any(
-        unicodedata.category(ch) in _HIDDEN_CATEGORIES for ch in value
+    if not _SHOWABLE.fullmatch(value):
+        return False
+    if unicodedata.category(value[0]) in _COMBINING_CATEGORIES:
+        return False
+    return not any(
+        unicodedata.category(ch) in _HIDDEN_CATEGORIES or _invisible(ord(ch)) for ch in value
     )
 
 
@@ -126,8 +184,10 @@ def escape_controls(text) -> str:
     """text の制御文字をエスケープした表示形 (値を置き換えずに 1 行のまま示すとき)。
 
     C0 (U+0000〜U+001F)・DEL (U+007F)・C1 (U+0080〜U+009F) と、Unicode の行区切り (U+2028)・
-    段落区切り (U+2029) を、改行は `\\n`、ほかは `\\xNN` / `\\uNNNN` の形にする。それ以外の
-    文字 (空白や日本語) はそのまま。str 以外は `str()` を通してから同じ処理をする。
+    段落区切り (U+2029)・書式文字 (Cf。双方向制御の U+202A〜U+202E / U+2066〜U+2069 /
+    U+200E / U+200F / U+061C、ゼロ幅スペースなど) を、改行は `\\n`、ほかは `\\xNN` /
+    `\\uNNNN` (BMP の外の書式文字は `\\UNNNNNNNN`) の形にする。それ以外の文字 (空白や日本語)
+    はそのまま。str 以外は `str()` を通してから同じ処理をする。
     """
     text = text if isinstance(text, str) else str(text)
     out = []
@@ -137,8 +197,8 @@ def escape_controls(text) -> str:
             out.append("\\n")
         elif code < 0x20 or 0x7F <= code <= 0x9F:
             out.append(f"\\x{code:02x}")
-        elif code in (0x2028, 0x2029):
-            out.append(f"\\u{code:04x}")
+        elif code in (0x2028, 0x2029) or unicodedata.category(ch) == "Cf":
+            out.append(f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}")
         else:
             out.append(ch)
     return "".join(out)

@@ -86,6 +86,9 @@ def _variants(service: str) -> dict[str, str]:
         "line-separator": f"x\u2028{cmd}",
         "nbsp": "x\u00a0" + cmd.replace(" ", "\u00a0"),
         "zero-width": "x\u200b" + cmd.replace(" ", "\u200b"),
+        "hangul-filler": "x\u3164" + cmd.replace(" ", "\u3164"),
+        "braille-blank": "x\u2800" + cmd.replace(" ", "\u2800"),
+        "grapheme-joiner": "x\u034f" + cmd.replace(" ", "\u034f"),
     }
 
 
