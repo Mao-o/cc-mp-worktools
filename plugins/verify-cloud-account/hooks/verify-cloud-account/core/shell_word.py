@@ -101,12 +101,17 @@ _HIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Cs", "Co", "Cn"})
 
 # 示さない文字の範囲 (両端を含む)。標準ライブラリには Default_Ignorable_Code_Point の判定が
 # 無いので、範囲を定数で持つ。出典は Unicode の DerivedCoreProperties.txt の
-# Default_Ignorable_Code_Point (Unicode 13.0 の表に、14.0 で足された U+180F を加えたもの)。
+# Default_Ignorable_Code_Point (Unicode 14.0〜17.0 の DerivedCoreProperties.txt と一致)。
 # 既定で無視される文字は表示されないか幅を持たず、空白の代わりに置くと、空白を含まない値が
 # コマンドの形に見える。大半は Cf / Cn (カテゴリでも隠れる。範囲は出典どおりに持つ) だが、
 # Lo (Hangul filler) と Mn (U+034F / U+17B4-17B5 / U+180B-180D・U+180F / 異体字セレクタ) も含む。
-# 「空白に見える」と注記した 2 行は Default_Ignorable ではないが空白に見える文字 (点字の空白
-# U+2800、契丹小字の filler U+16FE4)。bisect で引くので開始の昇順に並べる。
+# 「空白に見える」と注記した行は Default_Ignorable ではないが空白に見える文字 (点字の空白
+# U+2800、契丹小字の filler U+16FE4、エジプト聖刻文字の空白 U+13441-13442、音符記号の
+# NULL NOTEHEAD U+1D159、OBJECT REPLACEMENT CHARACTER U+FFFC、IDEOGRAPHIC HALF FILL SPACE
+# U+303F)。隠しても deny / allow は変わらず、表示されないだけなので安全側。
+# 名前で拾うこの禁止リストは閉じない。新しい Unicode の版で空白に見える文字が増えうる
+# (U+13441 は Unicode 15.0 で足された。Python 3.11 以前では未割り当てなのでカテゴリでも隠れる)。
+# bisect で引くので開始の昇順に並べる。
 _INVISIBLE_RANGES = (
     (0x00AD, 0x00AD),  # SOFT HYPHEN
     (0x034F, 0x034F),  # COMBINING GRAPHEME JOINER
@@ -118,13 +123,17 @@ _INVISIBLE_RANGES = (
     (0x202A, 0x202E),  # LEFT-TO-RIGHT EMBEDDING .. RIGHT-TO-LEFT OVERRIDE
     (0x2060, 0x206F),  # WORD JOINER .. NOMINAL DIGIT SHAPES (未割り当てを含む)
     (0x2800, 0x2800),  # BRAILLE PATTERN BLANK (空白に見える)
+    (0x303F, 0x303F),  # IDEOGRAPHIC HALF FILL SPACE (空白に見える)
     (0x3164, 0x3164),  # HANGUL FILLER
     (0xFE00, 0xFE0F),  # VARIATION SELECTOR 1-16
     (0xFEFF, 0xFEFF),  # ZERO WIDTH NO-BREAK SPACE
     (0xFFA0, 0xFFA0),  # HALFWIDTH HANGUL FILLER
     (0xFFF0, 0xFFF8),  # 未割り当て (Default_Ignorable として予約)
+    (0xFFFC, 0xFFFC),  # OBJECT REPLACEMENT CHARACTER (空白に見える)
+    (0x13441, 0x13442),  # EGYPTIAN HIEROGLYPH FULL BLANK / HALF BLANK (空白に見える)
     (0x16FE4, 0x16FE4),  # KHITAN SMALL SCRIPT FILLER (空白に見える)
     (0x1BCA0, 0x1BCA3),  # SHORTHAND FORMAT LETTER OVERLAP .. UP STEP
+    (0x1D159, 0x1D159),  # MUSICAL SYMBOL NULL NOTEHEAD (空白に見える)
     (0x1D173, 0x1D17A),  # MUSICAL SYMBOL BEGIN BEAM .. END PHRASE
     (0xE0000, 0xE0FFF),  # タグ文字・VARIATION SELECTOR 17-256 と、その前後の予約
 )
@@ -188,6 +197,9 @@ def escape_controls(text) -> str:
     U+200E / U+200F / U+061C、ゼロ幅スペースなど) を、改行は `\\n`、ほかは `\\xNN` /
     `\\uNNNN` (BMP の外の書式文字は `\\UNNNNNNNN`) の形にする。それ以外の文字 (空白や日本語)
     はそのまま。str 以外は `str()` を通してから同じ処理をする。
+
+    元の値に一意に戻せる表示ではない (文字どおりのバックスラッシュと区別しない。`"a\\nb"` と
+    改行入りの値は同じ形になる)。目的は 1 行に収めること。
     """
     text = text if isinstance(text, str) else str(text)
     out = []

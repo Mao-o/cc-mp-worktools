@@ -83,7 +83,7 @@ def _displayed(value) -> bool:
 
 
 # 既定で無視される文字 (Unicode の DerivedCoreProperties の Default_Ignorable_Code_Point。
-# Unicode 13.0 の表に、14.0 で足された U+180F を加えたもの) と、空白に見える文字。
+# Unicode 14.0〜17.0 の DerivedCoreProperties.txt と一致) と、空白に見える文字。
 # `shell_word` の定数とは独立に持つ (テストの期待)。
 _INVISIBLE_RANGES = (
     (0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160),
@@ -92,6 +92,7 @@ _INVISIBLE_RANGES = (
     (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A),
     (0xE0000, 0xE0FFF),
     (0x2800, 0x2800), (0x16FE4, 0x16FE4),
+    (0x13441, 0x13442), (0x1D159, 0x1D159), (0xFFFC, 0xFFFC), (0x303F, 0x303F),
 )
 
 
@@ -208,11 +209,20 @@ class TestShown(unittest.TestCase):
             "a\u3164b", "a\uffa0b", "a\u115fb", "a\u1160b", "a\u2800b", "a\u034fb",
             "a\ufe0fb", "a\U000e0100b", "a\u180bb", "a\u17b4b", "\u0338b", "\u20ddb",
             "\u0903b", "a\ud800b", "a\ue000b", "a\U000f0000b", "a\u0378b",
+            # 空白として描かれる文字 (Default_Ignorable ではない)
+            "a\U00013441b", "a\U00013442b", "a\U0001d159b", "a\ufffcb", "a\u303fb",
         )
         for value in hidden:
             with self.subTest(value=value):
                 self.assertEqual(shell_word.shown(value), shell_word.NOT_SHOWN)
         for value in (None, 1, ["a"]):
+            with self.subTest(value=value):
+                self.assertEqual(shell_word.shown(value), shell_word.NOT_SHOWN)
+
+    def test_blank_looking_letters_are_not_shown(self):
+        """空白に見える文字 (Lo / So など。Python の版によってはカテゴリで隠れない) は示さない。"""
+        for value in ("a\U00013441b", "a\U00013442b", "a\U0001D159b", "a\uFFFCb", "a\u303Fb",
+                      "x\U00013441kubectl\U00013441config\U00013441use-context\U00013441evil"):
             with self.subTest(value=value):
                 self.assertEqual(shell_word.shown(value), shell_word.NOT_SHOWN)
 
