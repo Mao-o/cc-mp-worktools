@@ -20,7 +20,7 @@ from pathlib import Path
 from unittest import mock
 
 from _testutil import FIXTURES  # noqa: F401
-from _testutil import HERMETIC_GIT_ENV
+from _testutil import HermeticGitTestCase
 from _testutil import git as _git
 from _testutil import init_repo as _init_repo
 
@@ -723,7 +723,7 @@ def _load_stop_entry():
     return mod
 
 
-class TestE2ERecommendedRemediesPassBashHook(unittest.TestCase):
+class TestE2ERecommendedRemediesPassBashHook(HermeticGitTestCase):
     """両 hook の reason が推奨する次善策コマンドが Bash hook を通過することを
     固定する (0.19.0)。
 
@@ -734,6 +734,9 @@ class TestE2ERecommendedRemediesPassBashHook(unittest.TestCase):
     """
 
     def setUp(self):
+        # Stop hook (check-sensitive-files) が起動する git にも、テストの git と同じ設定を当て、外側の
+        # repo / config / template を指す変数を外す (hook の git は env を渡さず os.environ を継承する)
+        super().setUp()
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
         home = Path(self.tmp) / "home"
@@ -745,9 +748,6 @@ class TestE2ERecommendedRemediesPassBashHook(unittest.TestCase):
                 "HOME": str(home),
                 "USERPROFILE": str(home),
                 "XDG_CONFIG_HOME": str(home / "xdg"),
-                # Stop hook (check-sensitive-files) が起動する git にも、テストの git と同じ設定を当てる
-                # (hook の git は env を渡さず os.environ を継承する)
-                **HERMETIC_GIT_ENV,
             },
         )
         self._env.start()

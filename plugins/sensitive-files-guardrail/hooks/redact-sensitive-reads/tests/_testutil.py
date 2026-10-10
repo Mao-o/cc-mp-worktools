@@ -11,7 +11,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import unittest
 from pathlib import Path
+from unittest import mock
 
 _PKG_DIR = Path(__file__).resolve().parent.parent
 _HOOKS_DIR = _PKG_DIR.parent
@@ -158,8 +160,9 @@ if "SFG_LOG_PATH" not in os.environ:
 #
 # この suite の hook は git を起動しない。ただし `test_e2e.py` の 1 クラス
 # (`TestE2ERecommendedRemediesPassBashHook`) は Stop hook (check-sensitive-files) を in-process で
-# 動かし、その git は `os.environ` を継承するので、そのクラスは env の patch に `HERMETIC_GIT_ENV` を
-# 足している。その patch が外れても気付く床は無い (hook を動かすクラスを足すときに揃える)。
+# 動かし、その git は `os.environ` を継承するので、そのクラスは基底クラス `HermeticGitTestCase` を
+# 継承して env を当てている。継承が外れたら `test_hermetic_env.py` の `TestHookRunningClassGetsTheHermeticEnv`
+# が落ちる (hook を動かすクラスを足すときは、そのクラスも継承させ、その検査の対象に足す)。
 NO_BACKGROUND_GIT_SETTINGS = (
     ("maintenance.auto", "false"),
     ("maintenance.autoDetach", "false"),
@@ -201,18 +204,50 @@ HERMETIC_GIT_ENV = {
     **git_config_env(NO_BACKGROUND_GIT_SETTINGS),
 }
 
+# 外側の env にあると、テストの git が別の repo や別の config、別の template を見てしまう変数。git の hook や
+# `git -c` の配下から suite を流すと入る。外さないと、repo を作る helper の `init` / `config` / `commit` が外側の
+# repo に書き込む (`GIT_DIR` など)。`GIT_CONFIG_PARAMETERS` は `GIT_CONFIG_COUNT` に勝ち、旧来の
+# `GIT_CONFIG` があると `git config` の読み書き先がその file になる。`GIT_TEMPLATE_DIR` は helper の `git init`
+# が写す template を差し替える: template の `hooks/pre-commit` が helper の commit で走り、`info/exclude` が
+# 除外する file は commit から外れる (いずれも実測)。外せば `git init` は既定の template を使う (global の
+# `init.templateDir` は、`GIT_CONFIG_GLOBAL` が指す fixture に無い)。
+# `hermetic_env()` と `HermeticGitTestCase` が外す。
+OUTER_GIT_LEAK_ENV = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_TEMPLATE_DIR",
+)
+
+
+def hermetic_env() -> dict[str, str]:
+    """git を起動するときの env。
+
+    `os.environ` から `OUTER_GIT_LEAK_ENV` を外し、`HERMETIC_GIT_ENV` を足す。`HERMETIC_GIT_ENV` を後から
+    足すので、外側の env に同じ名前の変数があっても定数が勝つ。
+    """
+    env = {k: v for k, v in os.environ.items() if k not in OUTER_GIT_LEAK_ENV}
+    env.update(HERMETIC_GIT_ENV)
+    return env
+
 
 def git(args: list[str], cwd, *, check: bool = True) -> subprocess.CompletedProcess:
-    """テストが起動する git。毎回 `HERMETIC_GIT_ENV` を足す。
+    """テストが起動する git。毎回 `hermetic_env()` (外側の repo / config / template を外し、`HERMETIC_GIT_ENV` を足す) を渡す。
 
-    テストクラス側の env patch に頼ると、patch していないクラスが repo を作った時点で自動
-    maintenance が復活する (patch 済みなら同じ値の上書き)。repo を作る / commit する git は
-    `subprocess.run` を直接書かず、必ずこれを通すこと (直接の起動は `test_hermetic_env.py` が
-    検出する)。出力は bytes。`check=False` は、設定の問い合わせのように非ゼロ終了を assertion で
-    見たいとき用。
+    テストクラス側の env patch (`HermeticGitTestCase`) に頼ると、patch していないクラスが repo を
+    作った時点で自動 maintenance が復活する (patch 済みなら同じ値の上書き)。外側の env に `GIT_DIR` などが
+    あるときも、patch していないクラスの `init` / `config` / `commit` が外側の repo に書き込む。repo を作る /
+    commit する git は `subprocess.run` を直接書かず、必ずこれを通すこと (直接の起動は
+    `test_hermetic_env.py` が検出する)。出力は bytes。`check=False` は、設定の問い合わせのように
+    非ゼロ終了を assertion で見たいとき用。
     """
-    env = {**os.environ, **HERMETIC_GIT_ENV}
-    return subprocess.run(["git", *args], cwd=cwd, env=env, check=check, capture_output=True)
+    return subprocess.run(["git", *args], cwd=cwd, env=hermetic_env(), check=check, capture_output=True)
 
 
 def init_repo(cwd) -> None:
@@ -221,3 +256,21 @@ def init_repo(cwd) -> None:
     git(["config", "user.name", "test"], cwd)
     git(["config", "user.email", "test@example.com"], cwd)
     git(["config", "commit.gpgsign", "false"], cwd)
+
+
+class HermeticGitTestCase(unittest.TestCase):
+    """テストの間、`HERMETIC_GIT_ENV` を `os.environ` に当て、外側の repo / config / template を指す変数
+    (`OUTER_GIT_LEAK_ENV`) を外す基底クラス (`mock.patch.dict` の中なので、テストが終われば元に戻る)。
+
+    repo を作る `git()` は毎回 `hermetic_env()` を自分で使うので、repo の作成はこのクラスに頼らない。ここで
+    当てるのは、`os.environ` を継承して git を起動する側のため: この suite では、`test_e2e.py` の 1 クラスが
+    in-process で動かす Stop hook (check-sensitive-files) の git (hook の git は env を渡さない)。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        patcher = mock.patch.dict(os.environ, HERMETIC_GIT_ENV)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for name in OUTER_GIT_LEAK_ENV:
+            os.environ.pop(name, None)
