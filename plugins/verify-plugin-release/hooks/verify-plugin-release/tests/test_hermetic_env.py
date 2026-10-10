@@ -51,9 +51,11 @@ maintenance が止まっていること。
     `launched_env` の中で起動の前後に確かめる (setUp の後段や継承先の setUp、継承先の起動の中身で足した値は、
     自己確認からは見えず、問い合わせには届くため)。継承先は起動の中身 (`launch` / `launch_and_capture_env`) だけを
     実装する (継承先が `query` / `launched_env` を上書きしていないことは、mixin の `setUp` で見る)。helper を直接
-    呼ぶテスト (`TestOuterRepoEnvAndTheHelpers` の 2 本) は、先頭で同じ確認 (`assert_env_unchanged_since_applied`)
-    を呼ぶ。残り: 起動の中で範囲を限って env を変えて戻す形 (`mock.patch.dict(os.environ, ...)` など) は、前後の
-    確認では見えない
+    呼ぶテスト (`TestOuterRepoEnvAndTheHelpers` の 2 本と `TestGateLaunchedGit` の trace の 1 本) も、同じ確認
+    (`assert_env_unchanged_since_applied`) を呼ぶ (helper の 2 本は前後、trace は前)。継承先がこの確認を上書き
+    していないことも mixin の `setUp` で見る。残り: 起動の中身が当てる側の値を自分で足す形は、前後の確認では見えない。`os.environ` を範囲を限って
+    変えて戻す形 (`mock.patch.dict(os.environ, ...)` など)、git に渡す env に足す形、床の env が指す file の中身
+    (system の目印・空の global など) を書き換える形を含む
 - **床の側の道具**: spy (`recorded_git_launches`) は、起動に渡った env をそのまま記録すること
   (`TestTheSpyRecordsTheEnvAsPassed`)。spy が記録に当てる側の値を足すと、spy の床が helper の当て損ねを見逃す。
   hook プロセスの env を捕まえる fake (`_RunHookEnv.env_passed_to_the_hook`) も同じ型なので、同じことを見る
@@ -624,8 +626,9 @@ class _HermeticConfigChecks:
     自己確認は setUp のスナップショット (`self.floor_env`) を見るので、当てた直後の env (`self.applied_env`) から
     問い合わせの時点まで変わっていないことを、`query` の中で `launch` の前後に確かめる。setUp の後段や継承先の
     setUp、継承先の `launch` の中で足した値は、自己確認からは見えず、問い合わせには届くため。継承先は `launch`
-    だけを実装し、`query` は上書きしない (上書きしていないことは `setUp` で確かめる)。`launch` の中で範囲を
-    限って env を変えて戻す形 (`mock.patch.dict(os.environ, ...)` など) は、前後の確認では見えない (残り)。
+    だけを実装し、`query` と `assert_env_unchanged_since_applied` は上書きしない (上書きしていないことは `setUp` で
+    確かめる)。`launch` の中身が当てる側の値を自分で足す形 (`os.environ` を範囲を限って変えて戻す・git に渡す env
+    に足す・床の env が指す file の中身を書き換える) は、前後の確認では見えない (残り)。
 
     外側の env には、止めない側の値 (`GIT_CONFIG_GLOBAL` = 空の file、`GIT_CONFIG_COUNT` で
     `maintenance.auto=true`、`PROBE` を除外する既定の除外ファイルを持つ `XDG_CONFIG_HOME`) を置く。
@@ -652,6 +655,11 @@ class _HermeticConfigChecks:
     def setUp(self) -> None:
         # 継承先が `query` を上書きすると、上の確認を通らずに問い合わせる (以前の形は継承先が `query` を実装していた)
         self.assertIs(type(self).query, _HermeticConfigChecks.query, "前提: 継承先が query を上書きしていない")
+        self.assertIs(
+            type(self).assert_env_unchanged_since_applied,
+            _HermeticConfigChecks.assert_env_unchanged_since_applied,
+            "前提: 継承先が assert_env_unchanged_since_applied を上書きしていない",
+        )
         patcher = mock.patch.dict(os.environ)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -821,6 +829,7 @@ class TestGateLaunchedGit(_HermeticConfigChecks, HermeticGitTestCase):
         notes に入れて握りつぶし、失敗した fetch は終わりの maintenance の起動まで進まない。前提が
         無いと、fetch が失敗する形では、基底クラスが何も張らなくても通る空の床になる。
         """
+        self.assert_env_unchanged_since_applied()
         root = _testutil.make_marketplace(Path(self.tmp) / "work", ["alpha"])
         origin = _testutil.init_bare_origin(Path(self.tmp))
         _testutil.sh(root, "remote", "add", "origin", str(origin))
@@ -860,8 +869,9 @@ class _OuterRepoEnvChecks:
     継承先の setUp、継承先の起動の中身で外した変数は、自己確認からは見えず、「届かない」を素通りさせるため。
     継承先は起動の中身 (`launch_and_capture_env`) だけを実装し、`launched_env` は上書きしない (上書きしていない
     ことは `setUp` で確かめる)。`launched_env` を通らずに helper を直接呼ぶテストは、先頭で
-    `assert_env_unchanged_since_applied` を呼ぶ。起動の中で範囲を限って env を変えて戻す形は、前後の確認では
-    見えない (残り)。
+    `assert_env_unchanged_since_applied` を前後で呼ぶ (上書きしていないことも `setUp` で確かめる)。起動の中身が
+    当てる側の値を自分で足す形 (範囲を限って env を変えて戻す・git に渡す env に足す) は、前後の確認では見えない
+    (残り)。
     """
 
     def launch_and_capture_env(self) -> dict[str, str]:
@@ -887,6 +897,11 @@ class _OuterRepoEnvChecks:
         # 継承先が `launched_env` を上書きすると、上の確認を通らずに起動する (以前の形は継承先が実装していた)
         self.assertIs(
             type(self).launched_env, _OuterRepoEnvChecks.launched_env, "前提: 継承先が launched_env を上書きしていない"
+        )
+        self.assertIs(
+            type(self).assert_env_unchanged_since_applied,
+            _OuterRepoEnvChecks.assert_env_unchanged_since_applied,
+            "前提: 継承先が assert_env_unchanged_since_applied を上書きしていない",
         )
         patcher = mock.patch.dict(os.environ)
         patcher.start()
@@ -945,6 +960,7 @@ class TestOuterRepoEnvAndTheHelpers(_OuterRepoEnvChecks, unittest.TestCase):
             _testutil.init_bare_origin(Path(self.tmp))
         except subprocess.CalledProcessError as e:
             self.fail(f"helper の git が失敗した: {' '.join(map(str, e.cmd))}\n{e.stderr}")
+        self.assert_env_unchanged_since_applied()
         self.assertTrue((work / ".git").is_dir(), "前提: repo が自分の場所に作られている")
         self.assertEqual(tree_state(self.other), before)
         self.assertFalse(os.path.exists(self.floor_env["GIT_CONFIG"]))
@@ -981,6 +997,7 @@ class TestOuterRepoEnvAndTheHelpers(_OuterRepoEnvChecks, unittest.TestCase):
             _testutil.make_marketplace(work, ["alpha"])
         except subprocess.CalledProcessError as e:
             self.fail(f"helper の git が失敗した: {' '.join(map(str, e.cmd))}\n{e.stderr}")
+        self.assert_env_unchanged_since_applied()
         self.assertFalse(ran.exists(), "外側の template の pre-commit が helper の commit で走った")
         committed = _testutil.sh(work, "ls-files").split()
         for path in (".claude-plugin/marketplace.json", "plugins/alpha/.claude-plugin/plugin.json"):

@@ -93,9 +93,11 @@
       確かめる (setUp の後段や継承先の setUp、継承先の起動の中身で足した値は、自己確認からは見えず、問い合わせには
       届くため)。この確認は mixin の `query` / `launched_env` に置き、継承先は起動の中身 (`launch` /
       `launch_and_capture_env`) だけを実装する。継承先が `query` / `launched_env` を上書きしていないことは mixin の
-      `setUp` で見る。`launched_env` を通らずに helper を直接呼ぶテスト (外側の repo を変えないこと・外側の template が
-      効かないこと) は、先頭で同じ確認を呼ぶ。起動の中で範囲を限って env を変えて戻す形
-      (`mock.patch.dict(os.environ, ...)` など) は、前後の確認では見えない (残り)
+      `setUp` で見る。`query` / `launched_env` を通らずに直接起動するテスト (外側の repo を変えないこと・外側の
+      template が効かないことは前後、ゲートの `fetch` の trace は前) も同じ確認を呼び、継承先がその確認を上書き
+      していないことも `setUp` で見る。起動の中身が当てる側の値を自分で足す形 (`mock.patch.dict(os.environ, ...)`
+      など範囲を限って変えて戻す・git に渡す env に足す・床の env が指す file の中身を書き換える) は、前後の確認
+      では見えない (残り)
   - 外側の repo / config / template を指す変数 10 個が、起動の仕方 (helper / 基底クラス / hook プロセスの env) ごとに
     git に届かないこと。前提として、記録した env が床の `HOME` を持つこと (記録が空だと「届かない」が素通りする)。
     helper は外側の repo の全 file を書き換えないこと、外側の template (`hooks/pre-commit` と `info/exclude`) が
