@@ -354,7 +354,9 @@ def _global_default_keys(global_path: Path) -> list[str]:
     """グローバル既定ファイルのトップレベルキー (読めない / 壊れていれば空)。"""
     try:
         data = json.loads(global_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError, RecursionError):
+        # ValueError は不正な JSON・UTF-8 でない (UnicodeDecodeError)・桁の多すぎる整数、
+        # RecursionError は入れ子が深すぎるファイル。hook は同じ扱いで deny する。
         return []
     if not isinstance(data, dict):
         return []
@@ -462,6 +464,14 @@ def _load_existing(path: Path) -> dict[str, Any]:
             f"既存 {path} の JSON が不正です: {e.msg} (行 {e.lineno})。"
             "手動で修正してから再実行してください。"
         )
+    except (ValueError, RecursionError) as e:
+        # UTF-8 でない (UnicodeDecodeError) / 桁の多すぎる整数 (ValueError) / 入れ子が深すぎる
+        # (RecursionError) ファイルも、hook と同じく不正な JSON と同じ扱いにする
+        # (捕まえないと traceback で終わる)。
+        raise _BuilderError(
+            f"既存 {path} を読めません ({type(e).__name__})。UTF-8 で保存した JSON か、"
+            "入れ子が深すぎないかを確認し、手動で修正してから再実行してください。"
+        )
     except OSError as e:
         raise _BuilderError(f"{path} の読み込みに失敗しました: {e}")
     if not isinstance(data, dict):
@@ -495,7 +505,7 @@ def _ensure_gitignore_entry(target: _Target, stdout: IO[str]) -> None:
         entry = target.path.relative_to(target.anchor).as_posix()
     except ValueError:
         return
-    if not gitignore.exists():
+    if not os.path.exists(gitignore):
         return
     try:
         content = gitignore.read_text(encoding="utf-8")
@@ -527,7 +537,7 @@ def _ensure_project_claude_md(target: _Target, stdout: IO[str]) -> None:
     """
     target_dir = target.path.parent
     md_path = target_dir / _PROJECT_CLAUDE_MD_FILENAME
-    if md_path.exists():
+    if os.path.exists(md_path):
         print(f"(skipped: {md_path} already exists)", file=stdout)
         return
     try:

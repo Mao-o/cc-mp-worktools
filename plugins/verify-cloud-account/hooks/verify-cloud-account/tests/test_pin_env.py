@@ -750,6 +750,41 @@ class TestSettingsEnv(_TmpBase):
         path.write_text(json.dumps({"env": ["x"]}), encoding="utf-8")
         self.assertIn('"env"', pin_env.settings_env(path)[1])
 
+    def test_unreadable_file_is_reported_not_raised(self):
+        """UTF-8 でない・入れ子が深い・桁の多すぎる整数のファイルは、壊れた JSON と同じ報告に
+        する (0.21.1。旧版は RecursionError が pin-env の外まで抜けて traceback だった)。"""
+        path = self.tmp / "s.json"
+        cases = {
+            "not UTF-8": b'{"env": {"AWS_PROFILE": "\xff"}}',
+            "too deep": b'{"env": {}, "pad": ' + b"[" * 100000 + b"]" * 100000 + b"}",
+        }
+        for name, data in cases.items():
+            with self.subTest(name):
+                path.write_bytes(data)
+                try:
+                    env, problem = pin_env.settings_env(path)
+                except (UnicodeDecodeError, RecursionError) as e:
+                    self.fail(f"settings_env が例外を投げた: {e!r}")
+                self.assertEqual(env, {})
+                self.assertIn("JSON として読めません", problem or "")
+
+    def test_unstattable_path_is_reported_not_raised(self):
+        """stat できないパス (長すぎる名前を指す symlink) は、無いものではなく読めないファイル
+        として報告する。`Path.is_file()` は Python 3.13 までは例外 (traceback)、3.14 からは False
+        (「無い」と区別できない) になる。どちらの版の挙動でも同じ結果になる。"""
+        path = self.tmp / "s.json"
+        os.symlink("a" * 300, path)
+        for emulate in (False, True):
+            with self.subTest(emulate_py313_is_file=emulate):
+                patcher = _testutil.patch_is_file_like_py313() if emulate else mock.patch.dict(os.environ)
+                with patcher:
+                    try:
+                        env, problem = pin_env.settings_env(path)
+                    except OSError as e:
+                        self.fail(f"settings_env が例外を投げた: {e!r}")
+                self.assertEqual(env, {})
+                self.assertIn("状態を確かめられません", problem or "")
+
     def test_non_object_top_level_is_reported(self):
         """`[]` などは JSON として読めても、env を足せるオブジェクトが無い (マージ前レビューの指摘)。"""
         path = self.tmp / "s.json"

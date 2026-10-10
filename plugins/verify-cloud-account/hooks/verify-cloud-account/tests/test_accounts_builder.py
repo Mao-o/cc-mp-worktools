@@ -21,6 +21,7 @@ import itertools
 import json
 import os
 import shlex
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -279,6 +280,155 @@ class TestInitMalformedJson(BaseBuilder):
         )
         self.assertEqual(code, 1)
         self.assertIn("オブジェクト", err)
+
+
+class TestUnreadableExistingFile(BaseBuilder):
+    """UTF-8 でない・入れ子が深いファイルで、builder が traceback ではなく利用者向けの
+    エラーで終わる (0.21.1)。
+
+    hook は 0.18.0 で、期待値ファイルの UnicodeDecodeError / RecursionError を不正な JSON と
+    同じ扱い (deny) にした。builder の読み込みは JSONDecodeError しか捕まえず、例外が
+    main() の外まで抜けていた。
+    """
+
+    _DEEP = "[" * 100000 + "]" * 100000
+    _CASES = {
+        "not UTF-8": (b'{"github": "right-user\xff"}', "UnicodeDecodeError"),
+        "too deep to parse": (
+            ('{"github": "right-user", "pad": ' + _DEEP + "}").encode(),
+            "RecursionError",
+        ),
+    }
+    _ARGVS = {
+        "init": ["init", "--service", "aws", "--value", "111", "--commit"],
+        "set": ["set", "--service", "github", "--value", "x", "--commit"],
+        "remove": ["remove", "--service", "github", "--commit"],
+        "show": ["show"],
+        "auto-switch": ["auto-switch", "--enable", "--commit"],
+        "pin-env": ["pin-env"],
+    }
+
+    def setUp(self):
+        super().setUp()
+        isolation = _testutil.start_isolation(Path(self.tmp) / "cliconfig", Path(self.tmp) / "home")
+        self.addCleanup(isolation.stop)
+
+    def _run_checked(self, argv):
+        # 修正前は例外が main() の外まで抜けた。テストの ERROR ではなく検出 (FAIL) として数える。
+        try:
+            return self._run(argv)
+        except (UnicodeDecodeError, RecursionError) as e:
+            self.fail(f"builder {argv[0]} が traceback で止まった: {e!r}")
+
+    def test_every_subcommand_ends_with_the_same_error_as_malformed_json(self):
+        for name, (data, reason) in self._CASES.items():
+            for cmd, argv in self._ARGVS.items():
+                with self.subTest(file=name, command=cmd):
+                    shutil.rmtree(self.claude_dir, ignore_errors=True)
+                    self.new_dir.mkdir(parents=True)
+                    self._new_path().write_bytes(data)
+                    code, _out, err = self._run_checked(argv)
+                    # 不正な JSON と同じ exit code (1) と、パス + 理由の利用者向けの文面
+                    malformed = self._malformed_exit(argv)
+                    self.assertEqual(code, malformed, err)
+                    self.assertIn(str(self._new_path()), err)
+                    self.assertIn(f"読めません ({reason})", err)
+                    self.assertNotIn("Traceback", err)
+
+    def _malformed_exit(self, argv) -> int:
+        """同じ argv を不正な JSON (`{not json`) に流したときの exit code (比較の基準)。"""
+        shutil.rmtree(self.claude_dir, ignore_errors=True)
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text("{not json", encoding="utf-8")
+        code, _out, err = self._run(argv)
+        self.assertIn("JSON が不正です", err)
+        return code
+
+    def test_migrate_reports_an_unreadable_source(self):
+        """migrate は旧パスと新パスが両方あるときだけ読む (新パスだけなら統合するものが無い)。
+        読めないのが旧パスでも新パスでも、同じ利用者向けのエラーで終わる。"""
+        for name, (data, reason) in self._CASES.items():
+            for unreadable, valid in (("legacy", "new"), ("new", "legacy")):
+                with self.subTest(file=name, unreadable=unreadable):
+                    shutil.rmtree(self.claude_dir, ignore_errors=True)
+                    self.new_dir.mkdir(parents=True)
+                    paths_by_kind = {"new": self._new_path(), "legacy": self._legacy_path()}
+                    paths_by_kind[unreadable].write_bytes(data)
+                    paths_by_kind[valid].write_text('{"aws": "111"}', encoding="utf-8")
+                    code, _out, err = self._run_checked(["migrate", "--commit"])
+                    self.assertEqual(code, 1, err)
+                    self.assertIn(str(paths_by_kind[unreadable]), err)
+                    self.assertIn(f"読めません ({reason})", err)
+
+    def test_global_default_note_survives_an_unreadable_global_default(self):
+        """グローバル既定が読めなくても、init が覆い隠す警告のキー一覧を空にして続ける
+        (`_global_default_keys`。hook は deny するが、builder は traceback にしない)。"""
+        home = Path(self.tmp) / "fake_home"
+        global_dir = home / ".claude" / "verify-cloud-account"
+        global_dir.mkdir(parents=True)
+        for name, (data, _reason) in self._CASES.items():
+            with self.subTest(name):
+                (global_dir / "accounts.local.json").write_bytes(data)
+                with mock.patch.object(Path, "home", staticmethod(lambda: home)):
+                    try:
+                        keys = builder._global_default_keys(global_dir / "accounts.local.json")
+                        note = builder._global_default_note()
+                    except (UnicodeDecodeError, RecursionError) as e:
+                        self.fail(f"グローバル既定の読み込みで例外が漏れた: {e!r}")
+                self.assertEqual(keys, [])
+                self.assertIn("その内容", note)
+
+    def test_best_effort_companions_survive_an_unstattable_name(self):
+        """`.gitignore` と `CLAUDE.md` の有無の確認 (best-effort) は、stat できない名前
+        (長すぎる名前を指す symlink) で例外にしない。`Path.exists()` は Python 3.13 までは
+        ENAMETOOLONG を投げ、3.14 からは False を返すので、前者の挙動を差し替えて両方を通す。"""
+        import errno
+
+        real_exists = Path.exists
+
+        def exists_like_py313(path, *args, **kwargs):
+            try:
+                os.stat(path)
+            except OSError as e:
+                if e.errno not in (errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP):
+                    raise
+                return False
+            return real_exists(path, *args, **kwargs)
+
+        self.new_dir.mkdir(parents=True)
+        os.symlink("a" * 300, self.project_dir / ".gitignore")
+        os.symlink("a" * 300, self.new_dir / "CLAUDE.md")
+        for emulate in (False, True):
+            with self.subTest(emulate_py313_exists=emulate):
+                self._new_path().unlink(missing_ok=True)
+                patcher = (
+                    mock.patch.object(Path, "exists", exists_like_py313)
+                    if emulate
+                    else mock.patch.dict(os.environ)
+                )
+                with patcher:
+                    try:
+                        code, _out, err = self._run(
+                            ["init", "--service", "github", "--value", "x", "--commit"]
+                        )
+                    except OSError as e:
+                        self.fail(f"init --commit が例外で止まった (traceback): {e!r}")
+                self.assertEqual(code, 0, err)
+                self.assertTrue(self._new_path().is_file())
+
+    def test_show_with_an_unreadable_global_default_does_not_raise(self):
+        """プロジェクトに何も無く、hook がグローバル既定で検証する状況の show
+        (`_load_existing(global_path)`) も、読めないグローバル既定で traceback にしない。"""
+        home = Path(self.tmp) / "fake_home"
+        global_dir = home / ".claude" / "verify-cloud-account"
+        global_dir.mkdir(parents=True)
+        for name, (data, _reason) in self._CASES.items():
+            with self.subTest(name):
+                (global_dir / "accounts.local.json").write_bytes(data)
+                with mock.patch.object(Path, "home", staticmethod(lambda: home)):
+                    code, _out, err = self._run_checked(["show"])
+                self.assertEqual(code, 0, err)
+                self.assertNotIn("Traceback", err)
 
 
 class TestValueHiding(BaseBuilder):

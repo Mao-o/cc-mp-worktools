@@ -17,6 +17,8 @@ import re
 import stat
 from pathlib import Path
 
+from core import shell_word
+
 ACCOUNTS_FILE_NEW = Path(".claude") / "verify-cloud-account" / "accounts.local.json"
 ACCOUNTS_FILE_DEPRECATED = Path(".claude") / "accounts.local.json"
 ACCOUNTS_FILE_LEGACY = Path(".claude") / "accounts.json"
@@ -96,7 +98,12 @@ def describe_unstattable(candidates: list[tuple[str, Path]]) -> str | None:
         "(期待値ファイルがあるかどうかが分からないため検証を停止):"
     ]
     for kind, path, err in failures:
-        lines.append(f"  - {path} ({kind}): {err.strerror or type(err).__name__}")
+        # パスは途中のディレクトリ名をリポジトリ側が決められる。改行などで偽の行を
+        # 差し込めないように、制御文字をエスケープする (v0.21.1)。
+        lines.append(
+            f"  - {shell_word.escape_controls(path)} ({kind}): "
+            f"{err.strerror or type(err).__name__}"
+        )
     lines.append(
         "途中のディレクトリの権限と、symlink の行き先を確認してください。期待値ファイルで"
         "ないもの (行き先を辿れない symlink など) は削除してください。"
