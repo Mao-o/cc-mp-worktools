@@ -7,7 +7,6 @@ import は post-implementation-review/ 直下を sys.path に載せて解決す�
 from __future__ import annotations
 
 import atexit
-import atexit
 import importlib.util
 import io
 import json
@@ -190,8 +189,7 @@ def init_repo(path: str) -> str:
     """初期コミット済みの git repo を作る。realpath を返す (macOS の /tmp 対策)。"""
     global _TEMPLATE_REPO
     if _TEMPLATE_REPO is None:
-        with mock.patch.dict(os.environ, HERMETIC_GIT_ENV):
-            _build_repo(os.path.join(_TEMPLATE_DIR, "repo"))
+        _build_repo(os.path.join(_TEMPLATE_DIR, "repo"))
         _TEMPLATE_REPO = os.path.join(_TEMPLATE_DIR, "repo")
     shutil.copytree(_TEMPLATE_REPO, path, symlinks=True, dirs_exist_ok=True)
     return os.path.realpath(path)

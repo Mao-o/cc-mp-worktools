@@ -240,11 +240,13 @@ class _HelperFloor(unittest.TestCase):
         なら helper を呼ばずにそこで返す (床の自己確認用。helper の前提を通らずに、床だけを見る)。
         """
         passed: list[dict] = []
+        outer: list[dict] = []
         real_run = subprocess.run
 
         def spy(argv, *args, **kwargs):
             if argv[:1] == ["git"]:
                 passed.append(dict(kwargs.get("env") or os.environ))
+                outer.append(dict(os.environ))
             return real_run(argv, *args, **kwargs)
 
         tmp = self.home
@@ -270,6 +272,12 @@ class _HelperFloor(unittest.TestCase):
             "前提: 上書きした HERMETIC_GIT_ENV が helper の git に届いている",
         )
         self.assertIn("commit", command_names(events), "前提: trace が取れている (空の床にしない)")
+        leaked = [o for o in outer if o.get("GIT_CONFIG_NOSYSTEM")]
+        self.assertEqual(
+            len(leaked),
+            0,
+            f"前提: helper が git に渡す前の os.environ は止める側の値を持たない ({len(leaked)} / {len(outer)} 件が持つ)",
+        )
         return spawned_maintenance(events)
 
 

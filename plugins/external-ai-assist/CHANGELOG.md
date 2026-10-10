@@ -14,11 +14,12 @@ version 据え置きで main に入った後続 commit はその version の節�
 - 強化: どのテストも殺していなかった変異 (空ガード) を殺すようにした。`explore-parallel` の 3 件と、`_common` の 2 件 (`stdin` が `/dev/null` であること、応答しない probe が timeout 内に返ること)。前提が失効した docstring も直した
 - 統合: `test_settings` の 2 族と `test_sentinel` の 1 族を表駆動 + subTest にまとめた (ケース数は不変。元のテスト名はケースのラベルとして残した)
 - suite: `_common` 170 → 162 件 / 約 33 → 10 秒、`explore-parallel` 88 → 81 件 / 約 38 → 13 秒 (macOS、無負荷。ここだけの計測で CI は未計測)
-- `post-implementation-review` の suite: 各テストの setUp で git を 5 回起動していた初期コミット済み repo の作成 (`init_repo`) を、プロセスで 1 回だけ本物の初期化をして、各テストにはそのコピーを渡す形にした。テスト本体は変えていない。自動 maintenance 対策の床 (`test_hermetic_env`) は、雛形を空にして本物の初期化をその場で走らせる形に直した (コピーでは git が起動されず、床が空になるため)。件数は 462 件のまま、約 93 → 約 59 秒 (macOS、負荷はやや高め。ループのゲートの既定の制限時間 90 秒を超えていたのが収まる)。重複テストの削除・統合は、変異による確認が要るため今回は見送った
+- `post-implementation-review` の suite: 各テストの setUp で git を 5 回起動していた初期コミット済み repo の作成 (`init_repo`) を、プロセスで 1 回だけ本物の初期化をして、各テストにはそのコピーを渡す形にした。テスト本体は変えていない。自動 maintenance 対策の床 (`test_hermetic_env`) は、雛形を空にして本物の初期化をその場で走らせる形に直した (コピーでは git が起動されず、床が空になるため)。`init_repo` は雛形の作成を env の patch で包まない (helper の `git()` が毎回 `HERMETIC_GIT_ENV` を足すので冗長で、包むと床が「patch していない」状態で作った env を上書きし、helper の当て損ねが見えなくなる)。床には前提を足した: helper が git に渡す前の `os.environ` は止める側の値を持たない。件数は 462 件のまま、約 93 → 約 59 秒 (macOS、負荷はやや高め)。重複テストの削除・統合は、変異による確認が要るため今回は見送った
 
 ### 確認
 
-- 削除・強化・縮めた待ちの境界を突く変異 38 件 (`explore-parallel` 29、`_common` 9) を、使い捨てのコピーで 1 件ずつ流し、全件が assertion の失敗で検出された。うち 2 件 (`explore-parallel` の起動可否の既定値と guard の反転) は、修正前の版でも同じ分類 (assertion の失敗と、変異で起動できなくなったテストの error の混在) だった
+- 削除・強化・縮めた待ちの境界を突く変異 38 件 (`explore-parallel` 29、`_common` 9) を、使い捨てのコピーで 1 件ずつ流し、36 件は assertion の失敗のみで検出され、残り 2 件 (`explore-parallel` の起動可否の既定値と guard の反転) は assertion の失敗と error (変異で起動できなくなったテスト) が混在した。この 2 件は修正前の版でも同じ分類だった
+- 雛形化した `init_repo` の床: `git()` が env を足さない / 混ぜる向きが逆 / commit が helper を迂回 / `GIT_CONFIG_COUNT` 系を渡さない / `GIT_CONFIG_NOSYSTEM` を渡さない、の 5 変異が `test_hermetic_env` の assertion の失敗で検出された
 - 負荷下の反復: 2 つの `explore-parallel` suite と `_common` suite を同時に 6 回ずつ流して全て green (修正前は並列負荷で失敗が出ていた)
 
 ## 0.12.4
