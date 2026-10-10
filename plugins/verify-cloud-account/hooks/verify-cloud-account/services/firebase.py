@@ -462,6 +462,27 @@ def _resolve(root: str, env=None, config: str | None = None) -> tuple[str, str |
     return _from_local(root, env, exact=config is not None), None
 
 
+# プロジェクトごとの固定 (v0.19.0)。firebase-tools は `firebase use` の切替先を
+# ディレクトリごとに記録する (公式のディレクトリ単位の仕組み)。期待値が未登録でも、その
+# ディレクトリで切替先が記録されていれば dispatcher は止めない。commit される
+# `.firebaserc` の `default` は数えない (チームで共有するファイルで、利用者がその
+# ディレクトリで選んだ値ではない。数えると firebase のほぼ全リポジトリで未登録の
+# deploy が通る)。
+PIN_HINT = (
+    "Firebase: project をディレクトリごとに固定するには、そのディレクトリで "
+    "firebase use <alias または project ID> を 1 回実行してください "
+    "(/verify-cloud-account:project-accounts)。"
+)
+
+
+def is_pinned(env, project_dir: str) -> bool:
+    """そのディレクトリで `firebase use` の切替先が記録されているか (期待値が未登録のときの判定)。
+
+    firebase-tools と同じく project root から親方向に configstore を探す。CLI は呼ばない。
+    """
+    return bool(_from_configstore(_project_root(project_dir), env))
+
+
 def get_active_account(project_dir: str) -> str | None:
     """現在アクティブな Firebase project ID を返す。取得不可 (timeout 含む) なら None。"""
     current, _err = _resolve(_project_root(project_dir))
@@ -831,3 +852,18 @@ def is_self_remediation(candidate: str, expected) -> bool:
             if target in (alias, project):
                 return True
     return False
+
+
+def is_pin_action(candidate: str) -> bool:
+    """期待値が未登録のとき、PIN_HINT が案内する固定の操作 (`firebase use <x>`) なら True。
+
+    未登録の service には照合する期待値が無く、`firebase use <x>` はそのディレクトリの
+    切替先をローカルに記録するだけ (リモートの資源を変えない)。これを止めると、固定を
+    案内した deny が案内どおりの操作を止める (dispatcher のキー欠落の経路で使う)。
+    option の扱いは is_self_remediation と同じ (装飾 option だけを剥がし、`--add` /
+    `--clear` / `--unalias` / `--project` などは False)。
+    """
+    normalized = cli_options.strip_allowed_options(
+        candidate, _DECORATION_FLAGS, _DECORATION_OPTIONS_WITH_VALUE
+    )
+    return normalized is not None and _USE_RE.match(normalized) is not None

@@ -200,9 +200,20 @@ def _get(key: str, env=None, configuration=None) -> tuple[str | None, str | None
 # - 設定ファイルが読めない / INI として解釈できない
 _CONFIG_DIR_ENV_VAR = "CLOUDSDK_CONFIG"
 _ACTIVE_CONFIG_ENV_VAR = "CLOUDSDK_ACTIVE_CONFIG_NAME"
-# ローカル読取を続けてよい `CLOUDSDK_*` (どちらも「どのファイルを読むか」だけを
-# 決める構造的な変数で、値そのものを上書きしない)。
-_LOCAL_SAFE_ENV_VARS = frozenset({_CONFIG_DIR_ENV_VAR, _ACTIVE_CONFIG_ENV_VAR})
+# 値そのものを上書きする env のうち、ローカル読取でエミュレートするもの (v0.19.0)。
+# gcloud はこれらを設定ファイル (`--configuration` で選んだ構成を含む) より優先し、
+# 空文字なら未設定として扱う (2026-10-09 実測)。ディレクトリごとにアカウントを
+# 環境変数で固定する構成ではこれが常に入っているため、エミュレートしないと
+# 毎回 CLI の起動 (1 回 〜1s) に落ちる。
+_CORE_PROPERTY_ENV_VARS = {
+    "project": "CLOUDSDK_CORE_PROJECT",
+    "account": "CLOUDSDK_CORE_ACCOUNT",
+}
+# ローカル読取を続けてよい `CLOUDSDK_*`。前の 2 つは「どのファイルを読むか」だけを
+# 決める構造的な変数で、値そのものを上書きしない。残りは上の対応表でエミュレートする。
+_LOCAL_SAFE_ENV_VARS = frozenset(
+    {_CONFIG_DIR_ENV_VAR, _ACTIVE_CONFIG_ENV_VAR, *_CORE_PROPERTY_ENV_VARS.values()}
+)
 _CLOUDSDK_ENV_PREFIX = "CLOUDSDK_"
 # `CLOUDSDK_*` 以外で project を上書きしうる env。
 _OTHER_OVERRIDE_ENV_VARS = frozenset(
@@ -281,7 +292,10 @@ def _local_core_properties(env=None, configuration=None) -> dict[str, str] | Non
     core = sections.get(_CORE_SECTION, {})
     values = {}
     for key in ("project", "account"):
-        value = core.get(key)
+        if _CORE_PROPERTY_ENV_VARS[key] in e:
+            value = e[_CORE_PROPERTY_ENV_VARS[key]]
+        else:
+            value = core.get(key)
         if isinstance(value, str) and value.strip():
             values[key] = value.strip()
     return values
@@ -324,41 +338,75 @@ def _flag_mismatch(label: str, flag: str, override: str, expected: str) -> str |
     return f"{head} — {flag} を外すか {flag} {value} を指定してください"
 
 
-def _check_key(key: str, label: str, expected: str, get_value) -> str | None:
+def _env_guidance(env_var: str, flag: str, value: str | None) -> str:
+    """値が環境変数で決まっているときの案内。`gcloud config set` は案内しない。
+
+    env は設定ファイルより優先されるため、`gcloud config set` で直しても次の検証で
+    同じ deny になる (案内どおりに打つと止まり続ける)。
+    """
+    head = (
+        f"値は環境変数 {env_var} で決まっています (gcloud の設定ファイルより優先されるため、config set では変わりません)。"
+        f"{env_var} を設定している場所 (.claude/settings.local.json の \"env\" や、"
+        "ディレクトリ単位で環境変数を切り替えるツールの設定) を直すか、"
+    )
+    if value is None:
+        return f"{head}{flag} を付けて実行してください ({_CHECK_BY_HAND})"
+    return f"{head}{flag} {value} を付けて実行してください"
+
+
+def _check_key(key: str, label: str, expected: str, get_value, env=None) -> str | None:
     """`key` (project / account) の現在値を期待値と照合する。
 
-    `get_value` は `(value, error)` を返す getter。切り替えの案内
-    (`gcloud config set <key> <期待値>`) は、期待値が許容形のときだけ出す。
+    `get_value` は `(value, error)` を返す getter。env は検証に使う完全 env
+    (None なら hook プロセスの環境)。値が環境変数で決まっているときは env の直し方と
+    `--<key>` を案内し、そうでなければ `--<key>`・ディレクトリごとの固定・
+    `gcloud config set <key> <期待値>` (マシン全体の既定) を案内する。コマンドの形の
+    案内は期待値が許容形のときだけ出す。
     """
     current, err = get_value(key)
     if err:
         return err
     value = shell_word.arg(expected)
+    flag = f"--{key}"
+    e = os.environ if env is None else env
+    env_var = _CORE_PROPERTY_ENV_VARS[key]
+    from_env = env_var in e
     if current is None:
         head = f"GCP: アクティブ{label}が設定されていません。"
+        if from_env:
+            return f"{head}{_env_guidance(env_var, flag, value)}。"
         if value is None:
             return f"{head}{_CHECK_BY_HAND}。"
-        return f"{head}gcloud config set {key} {value} を実行してください。"
+        return (
+            f"{head}{flag} {value} を付けて実行するか、ディレクトリごとに固定してください "
+            "(/verify-cloud-account:project-accounts)。マシン全体の既定にするなら "
+            f"gcloud config set {key} {value} を実行してください。"
+        )
     if current != expected:
         head = f"GCP {label}不一致: 現在={current}, 期待={expected}"
+        if from_env:
+            return f"{head} — {_env_guidance(env_var, flag, value)}"
         if value is None:
             return f"{head} — {_CHECK_BY_HAND}"
-        return f"{head} — 切り替え: gcloud config set {key} {value}"
+        return (
+            f"{head} — 切り替え: gcloud config set {key} {value} "
+            f"(この実行だけなら {flag} {value} を付ける)"
+        )
     return None
 
 
-def _check_project(expected: str, get_value, override=None) -> str | None:
+def _check_project(expected: str, get_value, override=None, env=None) -> str | None:
     """期待値と現在値を照合する。`get_value` は `(value, error)` を返す getter。"""
     if override is not None:
         return _flag_mismatch("プロジェクト", "--project", override, expected)
-    return _check_key("project", "プロジェクト", expected, get_value)
+    return _check_key("project", "プロジェクト", expected, get_value, env)
 
 
-def _check_account(expected: str, get_value, override=None) -> str | None:
+def _check_account(expected: str, get_value, override=None, env=None) -> str | None:
     """期待値と現在値を照合する。`get_value` は `(value, error)` を返す getter。"""
     if override is not None:
         return _flag_mismatch("アカウント", "--account", override, expected)
-    return _check_key("account", "アカウント", expected, get_value)
+    return _check_key("account", "アカウント", expected, get_value, env)
 
 
 def get_active_account(project_dir: str) -> dict[str, str | None] | None:
@@ -371,6 +419,48 @@ def get_active_account(project_dir: str) -> dict[str, str | None] | None:
     if project is None and account is None:
         return None
     return {"project": project, "account": account}
+
+
+# プロジェクトごとの固定 (v0.19.0)。gcloud はプロパティを環境変数で上書きでき
+# (`CLOUDSDK_CORE_ACCOUNT` は設定ファイルの値より優先される。`--configuration` を
+# 付けても env が勝つ — 2026-10-09 実測)、ディレクトリ単位の env ツールや settings の
+# `env` で書けばそのディレクトリでは最初からそのアカウントで動く。期待値が未登録でも
+# アカウントがこの形で固定されていれば、dispatcher は止めない。project は固定を
+# 求めない (project が要るコマンドは gcloud 自身が未設定をエラーにする)。
+PIN_HINT = (
+    "GCP: アカウントをディレクトリごとに固定するには、環境変数 CLOUDSDK_CORE_ACCOUNT "
+    "(project も固定するなら CLOUDSDK_CORE_PROJECT) を .claude/settings.local.json の "
+    '"env" か、ディレクトリ単位で環境変数を切り替えるツールで設定してください '
+    "(/verify-cloud-account:project-accounts)。"
+)
+
+
+def is_pinned(env, project_dir: str) -> bool:
+    """アカウントが環境変数で固定されているか (期待値が未登録のときの判定)。
+
+    `CLOUDSDK_CORE_ACCOUNT` が空でない、または `CLOUDSDK_ACTIVE_CONFIG_NAME` が
+    account を持つ構成を指している。空文字の `CLOUDSDK_CORE_ACCOUNT` は gcloud が
+    未設定として扱う (実測) ので固定とみなさない。
+    """
+    e = os.environ if env is None else env
+    if e.get("CLOUDSDK_CORE_ACCOUNT", "").strip():
+        return True
+    if "CLOUDSDK_CORE_ACCOUNT" in e:
+        return False  # 空文字が構成の account を打ち消している
+    name = e.get(_ACTIVE_CONFIG_ENV_VAR, "")
+    if not name or not _CONFIG_NAME_RE.match(name) or cli_config.home_overridden(e):
+        return False
+    config_dir = _config_dir(e)
+    if config_dir is None:
+        return False
+    text = cli_config.read_text(
+        config_dir / _CONFIGURATIONS_DIR / f"{_CONFIG_FILE_PREFIX}{name}"
+    )
+    sections = cli_config.parse_ini_sections(text) if text is not None else None
+    if not sections:
+        return False
+    account = sections.get(_CORE_SECTION, {}).get("account")
+    return isinstance(account, str) and bool(account.strip())
 
 
 def pin_fields(expected) -> dict[str, str] | None:
@@ -510,13 +600,13 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
 
     local = _local_core_properties(env, configuration)
     if local is not None:
-        if _verify_against(expected, ctx, _local_value_getter(local)) is None:
+        if _verify_against(expected, ctx, _local_value_getter(local), env) is None:
             return None
 
-    return _verify_against(expected, ctx, _cli_value_getter(env, configuration))
+    return _verify_against(expected, ctx, _cli_value_getter(env, configuration), env)
 
 
-def _verify_against(expected, ctx: dict, get_value) -> str | None:
+def _verify_against(expected, ctx: dict, get_value, env=None) -> str | None:
     """期待値を現在値 getter と照合する (取得元は CLI / ローカル設定のどちらでも同じ)。"""
     project_override = ctx.get("project")
     account_override = ctx.get("account")
@@ -532,7 +622,7 @@ def _verify_against(expected, ctx: dict, get_value) -> str | None:
                     f"(現在: {type(project_want).__name__})。"
                 )
             else:
-                err = _check_project(project_want, get_value, project_override)
+                err = _check_project(project_want, get_value, project_override, env)
                 if err:
                     errors.append(err)
         if account_want:
@@ -542,7 +632,7 @@ def _verify_against(expected, ctx: dict, get_value) -> str | None:
                     f"(現在: {type(account_want).__name__})。"
                 )
             else:
-                err = _check_account(account_want, get_value, account_override)
+                err = _check_account(account_want, get_value, account_override, env)
                 if err:
                     errors.append(err)
         if not errors:
@@ -555,7 +645,7 @@ def _verify_against(expected, ctx: dict, get_value) -> str | None:
         # verify() は先に `_expected_shape_error()` で弾くので通常ここには来ない。
         return _expected_shape_error(expected)
 
-    return _check_project(expected, get_value, project_override)
+    return _check_project(expected, get_value, project_override, env)
 
 
 _CONFIG_SET_RE = re.compile(
