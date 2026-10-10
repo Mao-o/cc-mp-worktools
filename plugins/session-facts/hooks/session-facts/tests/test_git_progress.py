@@ -1,12 +1,12 @@
 """git 進行情報 (#9): core/git.py ヘルパー、collector、header 描画。"""
 from __future__ import annotations
 
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 import _testutil  # noqa: F401  (sys.path 整備)
+from _testutil import HermeticGitTestCase, git as _git, init_repo
 
 from collectors.git_progress import GitProgressCollector
 from core import git as gitmod
@@ -14,16 +14,9 @@ from core.context import AnalysisConfig, RepoContext
 from renderer import render_header
 
 
-def _git(args, cwd):
-    subprocess.run(
-        ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
-        cwd=str(cwd), check=True, capture_output=True,
-    )
-
-
 def _make_repo(tmp) -> Path:
     root = Path(tmp)
-    _git(["init", "-b", "main"], root)
+    init_repo(root)
     (root / "a.txt").write_text("1\n")
     _git(["add", "-A"], root)
     _git(["commit", "-m", "first commit"], root)
@@ -33,7 +26,7 @@ def _make_repo(tmp) -> Path:
     return root
 
 
-class GitHelpersTest(unittest.TestCase):
+class GitHelpersTest(HermeticGitTestCase):
     def test_current_branch(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _make_repo(tmp)

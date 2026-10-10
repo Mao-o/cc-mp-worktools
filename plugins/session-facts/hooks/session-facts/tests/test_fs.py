@@ -20,22 +20,16 @@ from pathlib import Path
 from unittest import mock
 
 import _testutil  # noqa: F401  (sys.path 整備)
+from _testutil import HermeticGitTestCase, git as _git, init_repo
 
 from cli import main
 from core.fs import has_project_markers, walk_files
 from core.git import git_ls_files
 
 
-def _git(args, cwd):
-    subprocess.run(
-        ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
-        cwd=str(cwd), check=True, capture_output=True,
-    )
-
-
 def _make_repo(tmp) -> Path:
     root = Path(tmp)
-    _git(["init", "-b", "main"], root)
+    init_repo(root)
     (root / "a.txt").write_text("1\n")
     _git(["add", "-A"], root)
     _git(["commit", "-m", "first commit"], root)
@@ -81,7 +75,7 @@ class GitLsFilesNonUtf8Test(unittest.TestCase):
         self.assertEqual(files, [])
 
 
-class MainSurvivesHostileEncodingTest(unittest.TestCase):
+class MainSurvivesHostileEncodingTest(HermeticGitTestCase):
     """End-to-end defense in depth: even if a lone surrogate reaches
     ctx.tracked_files (from any source — not just git_ls_files; the non-git
     walk_files() fallback inherits the same surrogateescape behavior from

@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest import mock
 
 import _testutil  # noqa: F401  (sys.path 整備)
+from _testutil import HermeticGitTestCase, git as _git, init_repo
 
 from cli import (
     _enforce_output_budget,
@@ -31,16 +32,9 @@ from cli import (
 from core.context import AnalysisConfig
 
 
-def _git(args, cwd):
-    subprocess.run(
-        ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
-        cwd=str(cwd), check=True, capture_output=True,
-    )
-
-
 def _make_repo(tmp) -> Path:
     root = Path(tmp)
-    _git(["init", "-b", "main"], root)
+    init_repo(root)
     (root / "a.txt").write_text("1\n")
     _git(["add", "-A"], root)
     _git(["commit", "-m", "first commit"], root)
@@ -55,7 +49,7 @@ def _run_cli(argv) -> str:
     return buf.getvalue()
 
 
-class EmitSubagentJsonTest(unittest.TestCase):
+class EmitSubagentJsonTest(HermeticGitTestCase):
     def test_wraps_output_in_hook_specific_output(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _make_repo(tmp)
@@ -72,7 +66,7 @@ class EmitSubagentJsonTest(unittest.TestCase):
             self.assertTrue(out.startswith("## Project Facts"))
 
 
-class NoRecentCommitsFlagTest(unittest.TestCase):
+class NoRecentCommitsFlagTest(HermeticGitTestCase):
     def test_flag_suppresses_recent_commits(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _make_repo(tmp)
@@ -87,7 +81,7 @@ class NoRecentCommitsFlagTest(unittest.TestCase):
             self.assertIn("first commit", out)
 
 
-class PurposeFallbackTest(unittest.TestCase):
+class PurposeFallbackTest(HermeticGitTestCase):
     def test_dirname_fallback_omits_purpose_line(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -111,7 +105,7 @@ class PurposeFallbackTest(unittest.TestCase):
             self.assertIn("- purpose: Does something useful", out)
 
 
-class MoreHintInvokedAsTest(unittest.TestCase):
+class MoreHintInvokedAsTest(HermeticGitTestCase):
     """`- more:` names a directory (real hook invocation is `python3 <dir>`),
     so the printed follow-up command must keep the `python3 ` prefix or it is
     unrunnable as-is ('permission denied': it names a directory, not a
@@ -233,7 +227,7 @@ class MoreHintInvokedAsTest(unittest.TestCase):
         self.assertEqual(cm.exception.code, 0)
 
 
-class HintCommandIsActuallyExecutableTest(unittest.TestCase):
+class HintCommandIsActuallyExecutableTest(HermeticGitTestCase):
     """Runs the printed `- more:` hint as a real subprocess against the
     plugin's own hooks/session-facts directory -- the way an agent copying
     it verbatim would -- rather than only asserting on its string content.
@@ -287,7 +281,7 @@ class HintCommandIsActuallyExecutableTest(unittest.TestCase):
             self.assertIn("- cwd: sub (subdirectory of repo_root)", result.stdout)
 
 
-class ExceptionIsolationTest(unittest.TestCase):
+class ExceptionIsolationTest(HermeticGitTestCase):
     """A detector/collector that raises must not blank out the rest of the
     output (internal backlog: collector/detector 例外が隔離されず出力ゼロ)."""
 
@@ -360,7 +354,7 @@ class ExceptionIsolationTest(unittest.TestCase):
             self.assertIn("[session-facts] WARNING: collector bad_collector failed", err)
 
 
-class SummarizeRepoFailureFallbackTest(unittest.TestCase):
+class SummarizeRepoFailureFallbackTest(HermeticGitTestCase):
     """If summarize_repo() itself raises (any failure not already isolated
     per-detector/collector), main() must still exit 0 with a minimal header
     rather than exit 1 with a traceback and no output at all."""
@@ -551,7 +545,7 @@ class OutputBudgetTest(unittest.TestCase):
         self.assertIn("## Env Keys", result)  # must survive
 
 
-class HugePackageJsonWithinBudgetTest(unittest.TestCase):
+class HugePackageJsonWithinBudgetTest(HermeticGitTestCase):
     """Ticket acceptance case: a package.json with many scripts must still
     produce output within max_output_chars, not an unbounded dump."""
 
@@ -575,7 +569,7 @@ class HugePackageJsonWithinBudgetTest(unittest.TestCase):
             self.assertLessEqual(len(out), 500)
 
 
-class ProjectMarkerGateTest(unittest.TestCase):
+class ProjectMarkerGateTest(HermeticGitTestCase):
     """internal backlog: running from a non-project, non-git directory
     (e.g. $HOME, Desktop) used to unconditionally filesystem-walk and
     produce 100+ lines of noise built from whatever files happen to be
@@ -779,7 +773,7 @@ class MinimalHeaderOutputBudgetTest(unittest.TestCase):
             self.assertIn("--force-walk", out)
 
 
-class XcodeOnlyNonGitStructureTest(unittest.TestCase):
+class XcodeOnlyNonGitStructureTest(HermeticGitTestCase):
     """merge-review finding: adding *.xcodeproj/*.xcworkspace to
     PROJECT_MARKERS lets a non-git Xcode-only root pass the marker gate and
     reach walk_files() directly (a git root's `git ls-files` already keeps
@@ -974,7 +968,7 @@ class ExceptionFallbackBudgetTest(unittest.TestCase):
             self.assertLessEqual(len(buf.getvalue().strip()), 10)
 
 
-class PythonVersionMarkerTest(unittest.TestCase):
+class PythonVersionMarkerTest(HermeticGitTestCase):
     """PR #67 round 6 (Codex P2): ランタイム固定ファイルだけを持つ非 git の
     Python プロジェクトが marker gate で落ち、facts が丸ごと消えていた。
     """
@@ -1032,7 +1026,7 @@ class HomeRuntimePinMarkerTest(unittest.TestCase):
                 self.assertTrue(_has_relevant_project_markers(proj))
 
 
-class NestedWorkspaceMarkerTest(unittest.TestCase):
+class NestedWorkspaceMarkerTest(HermeticGitTestCase):
     """PR #67 (Codex P2): ルート直下にマニフェストを置かないワークスペースを
     「非プロジェクト」と誤判定すると facts が丸ごと消える。gate の目的は
     無関係な巨大ディレクトリの全走査回避なので、深さと件数を限定して探す。
@@ -1150,7 +1144,7 @@ class ZeroBudgetEmitsNothingTest(unittest.TestCase):
             self.assertEqual(buf.getvalue(), "")
 
 
-class NestedDiscoveryBoundsTest(unittest.TestCase):
+class NestedDiscoveryBoundsTest(HermeticGitTestCase):
     """PR #67 (Codex P2): 入れ子マーカー探索の 2 つの穴。
 
     1. clone を 1 つ置いただけのディレクトリが「ワークスペース」と判定される。
