@@ -17,6 +17,7 @@ class GitScanTestCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self._env = mock.patch.dict(os.environ, _testutil.HERMETIC_GIT_ENV)
         self._env.start()
+        _testutil.scrub_outer_git_env()
         self.repo = init_repo(os.path.join(self._tmp.name, "repo"))
 
     def tearDown(self) -> None:

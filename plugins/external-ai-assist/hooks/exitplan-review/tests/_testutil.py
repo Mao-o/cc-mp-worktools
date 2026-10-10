@@ -108,11 +108,51 @@ HERMETIC_GIT_ENV = {
 }
 
 
+# テストが起動する git に、外側の env (開発者の shell、git の hook の中、`git -c` の配下) からそのまま
+# 漏れてはいけないもの (post-implementation-review/tests/_testutil.py の `OUTER_GIT_LEAKS` と同じ一覧と理由):
+# repo の場所を変えるもの、`GIT_CONFIG_PARAMETERS` (`GIT_CONFIG_COUNT` に勝つ)、旧来の `GIT_CONFIG`、
+# `git rev-parse --local-env-vars` が挙げる残り、`GIT_TEMPLATE_DIR` (`git init` が外側の hook を写す)。
+# `GIT_CONFIG_COUNT` 系は外さない: `HERMETIC_GIT_ENV` が同じ名前で上書きするので、混ぜる向きを床が見られる。
+OUTER_GIT_LEAKS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_TEMPLATE_DIR",
+)
+
+
+def hermetic_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """テストが git に渡す env。`os.environ` から `OUTER_GIT_LEAKS` を外し、`HERMETIC_GIT_ENV` を重ねる。
+
+    `os.environ` を patch せずに作るので、床が見る「helper が git に渡す前の `os.environ`」は変わらない。
+    """
+    env = {k: v for k, v in os.environ.items() if k not in OUTER_GIT_LEAKS}
+    return {**env, **HERMETIC_GIT_ENV, **(extra or {})}
+
+
+def scrub_outer_git_env() -> None:
+    """`OUTER_GIT_LEAKS` を `os.environ` から外す。基底クラスが `mock.patch.dict(os.environ)` を start した
+    後に呼ぶ (stop で元に戻る)。hook (製品コード) の `rev-parse` は env を渡さず `os.environ` を継承する。"""
+    for name in OUTER_GIT_LEAKS:
+        os.environ.pop(name, None)
+
+
 def init_repo(path: str) -> str:
     """空の git repo を作る (cursor/codex の起動 cwd 検証用)。realpath を返す。"""
     os.makedirs(path, exist_ok=True)
-    env = {**os.environ, **HERMETIC_GIT_ENV}
-    subprocess.run(["git", "init", "-q"], cwd=path, env=env, check=True)
+    subprocess.run(["git", "init", "-q"], cwd=path, env=hermetic_env(), check=True)
     return os.path.realpath(path)
 
 
@@ -137,6 +177,7 @@ class HookTestCase(unittest.TestCase):
             os.environ, {"TMPDIR": self.tmpdir, **CURSOR_COMMAND_ENV}
         )
         self._env.start()
+        scrub_outer_git_env()
         clear_plugin_env()
 
         self.entry = load_entry()

@@ -17,9 +17,15 @@ from _common import subproc
 import codex
 import cursor
 
-# 偽 CLI が孫を起動して pid ファイルを書くまでの余裕を見て 1 秒 (遅い CI 対策)。
+# 偽 CLI が孫を起動して pid ファイルを書くまでの余裕を見て 1 秒 (遅い CI 対策)。timeout の経路を
+# 見るテスト (`TestReviewerTimeout`) だけがこの値を使う。
 TIMEOUT = 1.0
 GRACE = 0.5
+# timeout の経路を見ないテスト (argv / stdin / 出力 / 失敗系) が使う timeout。偽 CLI は即座に終わるので
+# 待たないが、負荷で bash の起動 (macOS は新しく書いたスクリプトの初回 exec が遅い) が 1 秒を超えても
+# timeout にならないよう、十分大きくする。短い値のままだと、wall-clock の負荷で「レビュー結果が None」
+# になって落ちる (`test_codex_sends_prompt_and_plan_together_on_stdin` が負荷下で一度落ちた)。
+NON_TIMEOUT_PATH_TIMEOUT = 60.0
 
 
 def _write_script(path: str, body: str) -> None:
@@ -29,7 +35,14 @@ def _write_script(path: str, body: str) -> None:
 
 
 class FakeCliTestCase(HookTestCase):
-    """TMPDIR/bin を PATH 先頭に置き、偽の `cursor` / `codex` を差し込む。"""
+    """TMPDIR/bin を PATH 先頭に置き、偽の `cursor` / `codex` を差し込む。
+
+    レビュアーの timeout は `reviewer_timeout` で決める。既定は短い `TIMEOUT` で、timeout の経路を見る
+    クラスだけがこれを使う。timeout を見ないクラスは `NON_TIMEOUT_PATH_TIMEOUT` に上書きし、wall-clock に
+    結果が依存しないようにする。
+    """
+
+    reviewer_timeout = TIMEOUT
 
     def setUp(self) -> None:
         super().setUp()
@@ -38,8 +51,8 @@ class FakeCliTestCase(HookTestCase):
         os.environ["PATH"] = self.bin + os.pathsep + os.environ.get("PATH", "")
         self._extra = [
             mock.patch.object(subproc, "KILL_GRACE_SEC", GRACE),
-            mock.patch.object(self.cursor, "TIMEOUT_SEC", TIMEOUT),
-            mock.patch.object(self.codex, "TIMEOUT_SEC", TIMEOUT),
+            mock.patch.object(self.cursor, "TIMEOUT_SEC", self.reviewer_timeout),
+            mock.patch.object(self.codex, "TIMEOUT_SEC", self.reviewer_timeout),
         ]
         for p in self._extra:
             p.start()
@@ -100,6 +113,10 @@ class FakeCliTestCase(HookTestCase):
 
 class TestReviewerTimeout(FakeCliTestCase):
     _ELAPSED_LIMIT = TIMEOUT + 3 * GRACE + 2.0
+
+    def test_uses_the_short_timeout(self):
+        """timeout の経路を見るクラスは、短い `TIMEOUT` でレビュアーを起動すること (下の 2 件の前提)。"""
+        self.assertEqual((self.cursor.timeout_sec(), self.codex.timeout_sec()), (TIMEOUT,) * 2)
 
     def test_cursor_timeout_returns_none_and_kills_grandchild(self):
         pid_file = self.hanging("cursor")
@@ -189,12 +206,22 @@ class TestTimeoutResolution(unittest.TestCase):
 
 
 class TestReviewerArgvAndStdin(FakeCliTestCase):
+    # timeout の経路は見ない (argv / stdin / 出力 / 失敗系)。結果が wall-clock の負荷に依存しないようにする
+    reviewer_timeout = NON_TIMEOUT_PATH_TIMEOUT
+
     # argv は NUL 区切りで記録する (プロンプト本文に `---` や改行が含まれるため)
     _RECORD_ARGV = "for a in \"$@\"; do printf '%s\\0' \"$a\"; done > {argv_file}\n"
 
     def _read_argv(self, argv_file: str) -> list[str]:
         with open(argv_file) as f:
             return f.read().split("\0")[:-1]
+
+    def test_uses_the_long_timeout(self):
+        """timeout の経路を見ないクラスは、長い `NON_TIMEOUT_PATH_TIMEOUT` でレビュアーを起動すること。
+        短い値に戻ると、負荷で bash の起動が遅れたときに結果が `None` になって落ちる (無負荷では通る)。"""
+        self.assertEqual(
+            (self.cursor.timeout_sec(), self.codex.timeout_sec()), (NON_TIMEOUT_PATH_TIMEOUT,) * 2
+        )
 
     def test_cursor_runs_print_mode_read_only_with_plan_in_prompt(self):
         argv_file = os.path.join(self.tmpdir, "cursor.argv")
@@ -256,6 +283,7 @@ class TestReviewerArgvAndStdin(FakeCliTestCase):
     def test_output_is_truncated_to_max_chars(self):
         self.fake("cursor", "head -c 20000 /dev/zero | tr '\\0' 'x'\n")
         result = self.cursor.review("plan")
+        self.assertIsNotNone(result, "レビュアーが None を返した (timeout か起動失敗)")
         self.assertEqual(len(result), self.cursor.MAX_OUTPUT_BYTES)
 
     def test_missing_cli_is_none(self):
