@@ -149,6 +149,7 @@ class TestOptIn(AutoSwitchBase):
         self.assertIn("自動切替", context)
         self.assertIn("github.com: work → Mao-o", context)
         self.assertIn("全ターミナル・セッション", context, "副作用の範囲を伝えていない")
+        self.assertIn(auto_switch.NOTICE_GUIDANCE, context, "想定どおりの動作だと伝えていない")
 
     def test_file_opt_in(self):
         self._write_accounts({"github": "Mao-o", "$auto_switch": ["github"]})

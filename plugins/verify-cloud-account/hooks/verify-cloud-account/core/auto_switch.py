@@ -370,6 +370,17 @@ def attempt(
     return Outcome(switched=tuple(done), error=after, note=note)
 
 
+# notice の末尾に付ける、通知を読むモデル向けの扱い方。切替は利用者が有効にした機能の
+# 想定どおりの動作だが、「他のセッションの gh も切り替わる」という事実だけを渡すと、モデルが
+# 事故として謝罪したり元のアカウントへ戻すことを提案したりする (2026-10-12 に実例)。
+# notice は 1 行の契約なので同じ行に続ける。
+NOTICE_GUIDANCE = (
+    "これは利用者が有効にした自動切替の想定どおりの動作で、事故ではありません。"
+    "謝罪や元のアカウントへ戻す提案はせず、切り替えたこと (どのアカウントからどのアカウントへ) "
+    "を利用者に 1 行で伝えるだけにしてください。"
+)
+
+
 def notice(service, switched) -> str:
     """自動切替したことを伝える文面 (allow 時は additionalContext、deny 時は注記)。"""
     describe = getattr(service, "describe_switch", None)
@@ -377,4 +388,4 @@ def notice(service, switched) -> str:
         f"{shell_word.shown(target)}: {shell_word.shown(before)} → {shell_word.shown(after)}"
         for target, before, after in switched
     )
-    return f"[verify-cloud-account] 自動切替 (auto-switch): {body}"
+    return f"[verify-cloud-account] 自動切替 (auto-switch): {body} {NOTICE_GUIDANCE}"

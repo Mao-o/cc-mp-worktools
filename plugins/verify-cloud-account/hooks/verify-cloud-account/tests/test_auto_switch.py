@@ -21,6 +21,7 @@ import _testutil  # noqa: F401
 
 from core import auto_switch, budget, cache  # noqa: E402
 from services import ALL as ALL_SERVICES  # noqa: E402
+from services import github  # noqa: E402
 
 _ISOLATION = None
 _ISOLATION_ROOT = None
@@ -506,6 +507,15 @@ class TestNotice(unittest.TestCase):
         svc = types.ModuleType("services.fake")
         text = auto_switch.notice(svc, [("h", "a", "b")])
         self.assertIn("h: a → b", text)
+
+    def test_tells_the_model_not_to_treat_it_as_an_incident(self):
+        # 切替は想定どおりの動作なので、謝罪や元に戻す提案をさせない (1 行のまま)。
+        for svc in (types.ModuleType("services.fake"), github):
+            with self.subTest(svc=svc.__name__):
+                text = auto_switch.notice(svc, [("github.com", "work", "Mao-o")])
+                self.assertTrue(text.endswith(auto_switch.NOTICE_GUIDANCE))
+                self.assertIn("謝罪", text)
+                self.assertEqual(len(text.splitlines()), 1)
 
     def test_generic_fallback_shows_only_showable_values(self):
         svc = types.ModuleType("services.fake")
