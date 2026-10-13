@@ -1,0 +1,4423 @@
+"""dispatcher のフロー全体テスト。各 service の verify() は mock で差し替える。"""
+from __future__ import annotations
+
+import contextlib
+import io
+import json
+import os
+import re
+import shlex
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+import _testutil  # noqa: F401
+
+from core import budget, shell_word  # noqa: E402
+from core.dispatcher import dispatch  # noqa: E402
+from services import ALL as ALL_SERVICES  # noqa: E402
+
+_ISOLATION = None
+_ISOLATION_ROOT = None
+
+
+def setUpModule():
+    """実環境の `$HOME` / CLI 設定 / モード env を読ませない。
+
+    dispatcher は accounts.local.json がプロジェクト側に無いとき `$HOME` の
+    グローバル既定を読み、`verify()` は CLI より先にローカル設定ファイルを読む
+    (v0.13.0)。隔離しないと**開発者が自分用に置いたグローバル既定や
+    `CLOUD_ACCOUNT_GUARD_MODE`** が「未設定なら deny」系テストの結果を変える。
+    """
+    global _ISOLATION, _ISOLATION_ROOT
+    _ISOLATION_ROOT = tempfile.mkdtemp()
+    _ISOLATION = _testutil.start_isolation(Path(_ISOLATION_ROOT))
+
+
+def tearDownModule():
+    if _ISOLATION is not None:
+        _ISOLATION.stop()
+    if _ISOLATION_ROOT is not None:
+        import shutil
+
+        shutil.rmtree(_ISOLATION_ROOT, ignore_errors=True)
+
+
+class BaseWithTmpProject(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(self._cleanup)
+        self.project_dir = Path(self.tmp) / "project"
+        self.project_dir.mkdir()
+        self.claude_dir = self.project_dir / ".claude"
+        self.claude_dir.mkdir()
+        self.new_dir = self.claude_dir / "cloud-account-guard"
+        self.new_dir.mkdir()
+
+        self._cache_tmp = Path(self.tmp) / "cache_tmp"
+        self._cache_tmp.mkdir()
+        self._cache_seq = 0
+
+        self._env_patcher = mock.patch.dict(
+            os.environ,
+            {
+                "CLAUDE_PROJECT_DIR": str(self.project_dir),
+                "TMPDIR": str(self._cache_tmp),
+            },
+        )
+        self._env_patcher.start()
+        self.addCleanup(self._env_patcher.stop)
+
+    def _cleanup(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @contextlib.contextmanager
+    def isolated_cache(self):
+        """まっさらな cache dir でブロックを実行する (subTest 間の状態持ち越し防止)。
+
+        cache dir には service ごとの tombstone (`<service>.epoch` の `at_ns`) が残り、
+        `invalidate()` から `cache.IN_FLIGHT_SEC` (60 秒) の間は成功 cache の publish が
+        抑止される。1 つの test method 内で複数シナリオを回すと、前のシナリオの切替
+        コマンドが立てた tombstone によって **2 件目以降の warm-up が cache を publish
+        できない**。すると最後の write が再検証される理由が「切替で無効化されたから」
+        ではなく「そもそも cache が無いから」になり、無効化機構 (STATE_CHANGING) を
+        壊してもテストが green のままになる (vacuous)。
+
+        本番の挙動には影響しない — 変えるのは `TMPDIR` (どのディレクトリに cache を
+        置くか) だけで、`IN_FLIGHT_SEC` も時刻も production コードも触らない。
+        `TMPDIR` は元々 setUp がテスト用に差し替えている値。
+        """
+        self._cache_seq += 1
+        d = Path(self.tmp) / f"cache_tmp_{self._cache_seq}"
+        d.mkdir()
+        with mock.patch.dict(os.environ, {"TMPDIR": str(d)}):
+            yield d
+
+    def assert_cache_published(self, command, verify_mock, expected_calls=1):
+        """warm-up が成功 cache を **publish した** ことを直接確認する。
+
+        同じコマンドをもう一度通して verify が呼ばれない (cache hit する) ことを見る。
+        publish の有無を推測せず観測することで、後続の再検証が無効化機構によるもの
+        だと言い切れるようにする。
+        """
+        self.assertIsNone(dispatch(command, str(self.project_dir)))
+        self.assertEqual(
+            verify_mock.call_count,
+            expected_calls,
+            f"warm-up が成功 cache を publish していない (cache hit しなかった): {command}",
+        )
+
+    def _write_accounts(self, data: dict):
+        """新パス (`.claude/cloud-account-guard/accounts.local.json`) に書く。"""
+        (self.new_dir / "accounts.local.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+
+    def _write_deprecated_accounts(self, data: dict):
+        """旧 deprecated パス (`.claude/accounts.local.json`) に書く。"""
+        (self.claude_dir / "accounts.local.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+
+    def _write_legacy_accounts(self, data: dict):
+        """legacy パス (`.claude/accounts.json`) に書く。"""
+        (self.claude_dir / "accounts.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+
+
+class TestRouting(BaseWithTmpProject):
+    def test_no_match_returns_none(self):
+        self.assertIsNone(dispatch("git status", str(self.project_dir)))
+
+    def test_readonly_only_returns_none(self):
+        self.assertIsNone(dispatch("gh auth status", str(self.project_dir)))
+
+    def test_all_segments_readonly_returns_none(self):
+        self.assertIsNone(
+            dispatch("gh auth status && gh auth list", str(self.project_dir))
+        )
+
+    def test_match_without_accounts_returns_deny(self):
+        result = dispatch("gh pr create", str(self.project_dir))
+        self.assertIsNotNone(result)
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("accounts.local.json", out["permissionDecisionReason"])
+
+
+class TestAccountsFile(BaseWithTmpProject):
+    def test_malformed_json_returns_deny(self):
+        (self.new_dir / "accounts.local.json").write_text(
+            "{not json", encoding="utf-8"
+        )
+        result = dispatch("gh pr create", str(self.project_dir))
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("JSON", out["permissionDecisionReason"])
+
+    def test_non_object_returns_deny(self):
+        (self.new_dir / "accounts.local.json").write_text(
+            '["a", "b"]', encoding="utf-8"
+        )
+        result = dispatch("gh pr create", str(self.project_dir))
+        self.assertEqual(
+            result["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+
+    def test_nesting_deeper_than_the_limit_is_unreadable(self):
+        """入れ子が 32 段より深い期待値ファイルは、`json.loads` が通っても不正な JSON と同じ
+        (v0.18.0)。後段 (成功 cache の key を作る `json.dumps` など) が同じ深さを辿って
+        RecursionError になり、検証がスキップされる深さが Python の版ごとにあった。"""
+
+        def accounts(lists: int) -> str:
+            # トップレベル (1 段) → "firebase" のオブジェクト (2 段) → 配列を lists 段。
+            return (
+                '{"firebase": {"a": "right-project", "pad": '
+                + "[" * lists + "]" * lists + "}}"
+            )
+
+        for lists, unreadable in ((30, False), (31, True)):
+            with self.subTest(depth=lists + 2):
+                (self.new_dir / "accounts.local.json").write_text(
+                    accounts(lists), encoding="utf-8"
+                )
+                with self.isolated_cache():
+                    result = dispatch("firebase deploy --project prod", str(self.project_dir))
+                reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+                if unreadable:
+                    self.assertIn("を読めません (入れ子が 32 段より深い)", reason)
+                else:
+                    self.assertIn("Firebase プロジェクト不一致", reason)
+
+    def test_missing_key_returns_deny(self):
+        self._write_accounts({"aws": "123456789012"})
+        result = dispatch("gh pr create", str(self.project_dir))
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("github", out["permissionDecisionReason"])
+
+    def test_invalid_value_type_returns_deny(self):
+        self._write_accounts({"github": 12345})
+        result = dispatch("gh pr create", str(self.project_dir))
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("文字列または", out["permissionDecisionReason"])
+
+    def test_legacy_accounts_json_triggers_warn(self):
+        self._write_legacy_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None):
+            result = dispatch("gh pr list", str(self.project_dir))
+        out = result["hookSpecificOutput"]
+        self.assertIn("additionalContext", out)
+        self.assertIn("accounts.local.json", out["additionalContext"])
+
+
+class TestPathMigration(BaseWithTmpProject):
+    """新旧パスの 3-tier lookup / 競合検出のテスト (Phase 2)。"""
+
+    def test_new_path_only_is_used(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None):
+            result = dispatch("gh pr list", str(self.project_dir))
+        self.assertIsNone(result)
+
+    def test_deprecated_path_verifies_with_migration_warn(self):
+        """deprecated パスのみ → 動作するが warn で移行案内。"""
+        self._write_deprecated_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None):
+            result = dispatch("gh pr list", str(self.project_dir))
+        out = result["hookSpecificOutput"]
+        self.assertIn("additionalContext", out)
+        self.assertIn(".claude/cloud-account-guard/accounts.local.json", out["additionalContext"])
+        self.assertIn("migrate", out["additionalContext"])
+
+    def test_deprecated_path_with_verify_failure_includes_migration_note(self):
+        """deprecated パスで verify 失敗時は deny reason に migration 案内付加。"""
+        self._write_deprecated_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value="GitHub 不一致"):
+            result = dispatch("gh pr create", str(self.project_dir))
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        reason = out["permissionDecisionReason"]
+        self.assertIn("GitHub 不一致", reason)
+        self.assertIn("migrate", reason)
+
+    def test_deprecation_warn_suppressed_on_second_call_within_ttl(self):
+        """内部バックログ: `_should_emit_deprecation_warn` (1 日 1 回制限) の直接
+        テストが無かった空白を埋める。TMPDIR を専用ディレクトリに差し替えて
+        (= `isolated_cache`) 他テストのフラグファイルと混線しないようにした上で、
+        同一プロジェクトへの 2 回目の dispatch は warn を出さない (= None) ことを
+        固定する (alert fatigue 防止)。"""
+        self._write_deprecated_accounts({"github": "Mao-o"})
+        with self.isolated_cache(), mock.patch(
+            "services.github.verify", return_value=None
+        ):
+            first = dispatch("gh pr list", str(self.project_dir))
+            self.assertIsNotNone(first)
+            self.assertIn("additionalContext", first["hookSpecificOutput"])
+
+            # 2 回目 (同じ TMPDIR = 同じフラグファイル) は 1 日以内なので抑制され、
+            # additionalContext を持つ結果を返さない (= None)。
+            second = dispatch("gh pr list", str(self.project_dir))
+            self.assertIsNone(second)
+
+    def test_deprecation_warn_is_not_recorded_in_a_dir_other_users_can_write(self):
+        """1 日 1 回の記録は、成功 cache と同じく自分の所有で他のユーザーが書けない dir にだけ
+        置く (v0.19.1)。使えない dir では絞れないので毎回出す。旧版は共有の `/tmp` の同名 dir を
+        確かめずに使い、別のユーザーが置いた記録で案内を止められた。"""
+        self._write_deprecated_accounts({"github": "Mao-o"})
+        with self.isolated_cache() as tmpdir, mock.patch(
+            "services.github.verify", return_value=None
+        ):
+            shared = tmpdir / "cc-mp-cloud-account-guard"
+            shared.mkdir()
+            os.chmod(shared, 0o777)
+            for attempt in ("first", "second"):
+                with self.subTest(attempt):
+                    result = dispatch("gh pr list", str(self.project_dir))
+                    self.assertIsNotNone(result)
+                    self.assertIn("migrate", result["hookSpecificOutput"]["additionalContext"])
+            self.assertEqual(list(shared.iterdir()), [])
+
+    def test_new_and_deprecated_both_exist_denies(self):
+        """新旧両方存在 → fail-closed で deny (D4)。"""
+        self._write_accounts({"github": "new-user"})
+        self._write_deprecated_accounts({"github": "deprecated-user"})
+        result = dispatch("gh pr list", str(self.project_dir))
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        reason = out["permissionDecisionReason"]
+        self.assertIn("複数のパス", reason)
+        self.assertIn("(new)", reason)
+        self.assertIn("(deprecated)", reason)
+        self.assertIn("migrate", reason)
+
+    def test_new_and_legacy_both_exist_denies(self):
+        """新 + legacy 両方存在も deny (D4)。"""
+        self._write_accounts({"github": "A"})
+        self._write_legacy_accounts({"github": "B"})
+        result = dispatch("gh pr list", str(self.project_dir))
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("複数のパス", out["permissionDecisionReason"])
+
+    def test_conflict_reason_includes_cleanup_hint(self):
+        """R4 (P2): conflict 時の deny reason に migrate 後の手動 rm 案内を含む.
+
+        migrate --commit は旧ファイルを残すため、cleanup 案内が無いと
+        remediation loop になる。conflict reason に旧ファイルのパスと
+        rm コマンドを明示する。"""
+        self._write_accounts({"github": "A"})
+        self._write_deprecated_accounts({"github": "B"})
+        result = dispatch("gh pr list", str(self.project_dir))
+        out = result["hookSpecificOutput"]
+        reason = out["permissionDecisionReason"]
+        self.assertIn("migrate", reason)
+        self.assertIn("rm ", reason)
+        # 旧ファイルのパスが reason に明示される
+        self.assertIn(".claude/accounts.local.json", reason)
+
+    def test_cleanup_hint_keeps_the_path_one_shell_word(self):
+        """`rm <path>` の path はシェルの 1 語にする。サブディレクトリで作業していると、
+        途中のディレクトリ名はリポジトリが決められる (マージ前レビューの指摘)。"""
+        project = Path(self.tmp) / "pkg; touch PWNED"
+        (project / ".claude" / "cloud-account-guard").mkdir(parents=True)
+        (project / ".claude" / "cloud-account-guard" / "accounts.local.json").write_text(
+            json.dumps({"github": "A"}), encoding="utf-8"
+        )
+        (project / ".claude" / "accounts.json").write_text(
+            json.dumps({"github": "B"}), encoding="utf-8"
+        )
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(project)}):
+            result = dispatch("gh pr list", str(project))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        rm_lines = [s.strip() for s in reason.splitlines() if s.strip().startswith("rm ")]
+        self.assertEqual(len(rm_lines), 1, reason)
+        words = shlex.split(rm_lines[0])
+        self.assertEqual(len(words), 2, words)
+        self.assertTrue(words[1].endswith("pkg; touch PWNED/.claude/accounts.json"), words)
+
+    def test_deprecated_and_legacy_both_exist_denies(self):
+        """deprecated + legacy 両方存在も deny (D4)。"""
+        self._write_deprecated_accounts({"github": "A"})
+        self._write_legacy_accounts({"github": "B"})
+        result = dispatch("gh pr list", str(self.project_dir))
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("複数のパス", out["permissionDecisionReason"])
+
+
+class TestServiceInteractions(BaseWithTmpProject):
+    def test_verify_success_returns_none(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None):
+            result = dispatch("gh pr list", str(self.project_dir))
+        self.assertIsNone(result)
+
+    def test_verify_failure_returns_deny(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch(
+            "services.github.verify",
+            return_value="GitHub アカウント不一致: 現在=x, 期待=y",
+        ):
+            result = dispatch("gh pr create", str(self.project_dir))
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("不一致", out["permissionDecisionReason"])
+
+    def test_multiple_services_all_pass(self):
+        self._write_accounts({"github": "Mao-o", "gcloud": "my-proj"})
+        with mock.patch("services.github.verify", return_value=None), \
+             mock.patch("services.gcloud.verify", return_value=None):
+            result = dispatch(
+                "gh pr list && gcloud run deploy", str(self.project_dir)
+            )
+        self.assertIsNone(result)
+
+    def test_multiple_services_one_fails(self):
+        self._write_accounts({"github": "Mao-o", "gcloud": "my-proj"})
+        with mock.patch("services.github.verify", return_value=None), \
+             mock.patch("services.gcloud.verify", return_value="GCP不一致"):
+            result = dispatch(
+                "gh pr list && gcloud run deploy", str(self.project_dir)
+            )
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("GCP不一致", out["permissionDecisionReason"])
+
+    def test_wrapper_decomposes_and_verifies(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch(
+            "services.github.verify", return_value=None
+        ) as mock_verify:
+            result = dispatch("sudo gh pr list", str(self.project_dir))
+        self.assertIsNone(result)
+        mock_verify.assert_called_once()
+
+    def test_env_prefix_decomposes_and_verifies(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch(
+            "services.github.verify", return_value=None
+        ) as mock_verify:
+            result = dispatch("FOO=bar gh pr list", str(self.project_dir))
+        self.assertIsNone(result)
+        mock_verify.assert_called_once()
+
+    def test_cd_chain_decomposes_and_verifies(self):
+        self._write_accounts({"github": "Mao-o"})
+        (self.project_dir / "sub").mkdir()
+        with mock.patch(
+            "services.github.verify", return_value=None
+        ) as mock_verify:
+            result = dispatch(
+                "cd sub && gh pr create", str(self.project_dir)
+            )
+        self.assertIsNone(result)
+        mock_verify.assert_called_once()
+
+    def test_same_service_deduplicated(self):
+        """同じサービスが複数セグメントで出ても verify は 1 回のみ。"""
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch(
+            "services.github.verify", return_value=None
+        ) as mock_verify:
+            result = dispatch(
+                "gh pr list && gh pr view 123", str(self.project_dir)
+            )
+        self.assertIsNone(result)
+        self.assertEqual(mock_verify.call_count, 1)
+
+    def test_readonly_then_mutating_verifies(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch(
+            "services.github.verify", return_value=None
+        ) as mock_verify:
+            result = dispatch(
+                "gh auth status && gh pr list", str(self.project_dir)
+            )
+        self.assertIsNone(result)
+        mock_verify.assert_called_once()
+
+    def test_npx_firebase_verifies(self):
+        self._write_accounts({"firebase": "my-project"})
+        with mock.patch(
+            "services.firebase.verify", return_value=None
+        ) as mock_verify:
+            result = dispatch(
+                "npx firebase deploy", str(self.project_dir)
+            )
+        self.assertIsNone(result)
+        mock_verify.assert_called_once()
+
+
+class TestFirebaseResolutionOrderE2E(BaseWithTmpProject):
+    """内部バックログ: firebase.verify を mock せず subprocess だけ差し替え、
+    `.firebaserc` の default と `firebase use` の切替先が食い違うときの決定を
+    dispatcher 経由で固定する。"""
+
+    def setUp(self):
+        super().setUp()
+        # configstore を実環境から読まないよう XDG_CONFIG_HOME を tmp 配下へ。
+        self._xdg = Path(self.tmp) / "xdg"
+        self._xdg.mkdir()
+        patcher = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self._xdg)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _write_firebaserc(self):
+        (self.project_dir / ".firebaserc").write_text(
+            json.dumps({"projects": {"default": "proj-dev", "prod": "proj-prod"}}),
+            encoding="utf-8",
+        )
+
+    def _write_configstore(self, alias_or_project: str):
+        store = self._xdg / "configstore" / "firebase-tools.json"
+        store.parent.mkdir(parents=True, exist_ok=True)
+        store.write_text(
+            json.dumps(
+                {"activeProjects": {os.path.abspath(self.project_dir): alias_or_project}}
+            ),
+            encoding="utf-8",
+        )
+
+    def _run_with_cli_output(self, stdout: str):
+        fake = SimpleNamespace(stdout=stdout, stderr="", returncode=0)
+        with mock.patch("subprocess.run", return_value=fake):
+            return dispatch("firebase deploy", str(self.project_dir))
+
+    def test_npx_without_global_cli_denies_switched_project(self):
+        """`npx firebase deploy` で hook の PATH に firebase が無くても、configstore の
+        `firebase use prod` 切替を読んで .firebaserc の default (期待値) では allow しない。"""
+        self._write_accounts({"firebase": "proj-dev"})
+        self._write_firebaserc()
+        self._write_configstore("prod")
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+            result = dispatch("npx firebase deploy", str(self.project_dir))
+        self.assertIsNotNone(result)
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("現在=proj-prod", out["permissionDecisionReason"])
+
+    def test_switched_project_denies_despite_firebaserc_default(self):
+        """期待=default (proj-dev) のまま `firebase use prod` 済みなら deploy を deny
+        (旧実装は .firebaserc の default で照合し allow = false-allow)。"""
+        self._write_accounts({"firebase": "proj-dev"})
+        self._write_firebaserc()
+        result = self._run_with_cli_output("proj-prod\n")
+        self.assertIsNotNone(result)
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("現在=proj-prod", out["permissionDecisionReason"])
+
+    def test_switched_project_allows_when_it_matches_expected(self):
+        """期待=proj-prod で `firebase use prod` 済みなら allow
+        (旧実装は .firebaserc の default=proj-dev で照合し永久 deny)。"""
+        self._write_accounts({"firebase": "proj-prod"})
+        self._write_firebaserc()
+        self.assertIsNone(self._run_with_cli_output("proj-prod\n"))
+
+    def test_firebase_login_allowed_when_cli_auth_fails_and_configstore_switched(self):
+        """未ログイン (`firebase use` が requireAuth で非ゼロ終了) + configstore が期待外
+        に切替済みでも、`firebase login` 系は検証せず allow する。login が deny されると
+        案内される `firebase use <期待>` も認証必須で失敗し、Claude 内で回復不能になる。
+        同じ状態の `firebase deploy` は configstore の切替先で deny される。"""
+        self._write_accounts({"firebase": "proj-dev"})
+        self._write_firebaserc()
+        self._write_configstore("prod")
+        fake = SimpleNamespace(stdout="", stderr="Error: not logged in\n", returncode=1)
+        # `login:ci` はここに置かない — CI 用 refresh token を stdout に出すため
+        # DISCLOSING (検証対象) に移した (test_disclosing_options_revoke_readonly)。
+        for cmd in ("firebase login", "firebase login --no-localhost", "firebase logout"):
+            with self.subTest(cmd=cmd):
+                with mock.patch("subprocess.run", return_value=fake) as run:
+                    self.assertIsNone(dispatch(cmd, str(self.project_dir)))
+                run.assert_not_called()
+        with mock.patch("subprocess.run", return_value=fake):
+            result = dispatch("firebase deploy", str(self.project_dir))
+        self.assertIsNotNone(result)
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("現在=proj-prod", out["permissionDecisionReason"])
+
+
+_DEEP_PAD = "[" * 100000 + "]" * 100000
+
+
+class TestDeepFirebasercDoesNotSkipVerification(BaseWithTmpProject):
+    """深い入れ子の `.firebaserc` で hook の検証が飛ばない (v0.18.0)。
+
+    旧版は `.firebaserc` の読み込みの RecursionError を捕まえず、dispatch() の外まで抜けて
+    __main__ の最終防波堤が「内部エラーのため検証をスキップ」(実行は止めない) にしていた。
+    firebase-tools (V8 の JSON.parse) は同じファイルを読んで alias を解決する。RecursionError を
+    alias 0 件に倒すだけでは、期待値と同名の alias の影で allow になる (下の 2 件目)。判定だけで
+    なく理由も見る: 1 件目は alias 0 件に倒しても (prod を値そのものとして照合して) deny になる。
+    """
+
+    def _decision(self, command: str, projects: dict) -> tuple[str | None, str]:
+        """(判定, 理由)。"""
+        (self.project_dir / "firebase.json").write_text("{}", encoding="utf-8")
+        body = json.dumps({"projects": projects})[:-1] + ', "pad": ' + _DEEP_PAD + "}"
+        (self.project_dir / ".firebaserc").write_text(body, encoding="utf-8")
+        self._write_accounts({"firebase": "right-project"})
+        fake = SimpleNamespace(stdout="", stderr="", returncode=1)
+        with self.isolated_cache(), mock.patch("subprocess.run", return_value=fake):
+            try:
+                result = dispatch(command, str(self.project_dir))
+            except RecursionError:
+                self.fail(
+                    "深い入れ子の .firebaserc で dispatch() が RecursionError を投げた"
+                    " (__main__ は warn を返し、検証なしでコマンドが進む)"
+                )
+        out = (result or {}).get("hookSpecificOutput", {})
+        return out.get("permissionDecision"), out.get("permissionDecisionReason", "")
+
+    def test_mismatched_alias_is_still_denied(self):
+        """`--project prod` (→ wrong-project) は、行き先を確かめられないとして deny。"""
+        decision, reason = self._decision(
+            "firebase deploy --project prod", {"prod": "wrong-project"}
+        )
+        self.assertEqual(decision, "deny", reason)
+        self.assertIn("--project の行き先を確かめられません", reason)
+
+    def test_alias_shadowing_the_expected_id_is_not_allowed(self):
+        """firebase-tools は alias を先に解決する: `--project right-project` は wrong-project に行く。
+
+        RecursionError を `{}` (alias 0 件) に倒すだけの修正では allow になる (fail-closed にする)。
+        """
+        decision, reason = self._decision(
+            "firebase deploy --project right-project", {"right-project": "wrong-project"}
+        )
+        self.assertEqual(decision, "deny", reason)
+        self.assertIn("--project の行き先を確かめられません", reason)
+
+    def test_current_project_is_not_resolved_from_it(self):
+        """CLI から現在値を取れないとき (`firebase use` が非ゼロ終了)、ローカル設定の解決にも
+        使わない (default -> right-project と読んで allow しない)。"""
+        with mock.patch("services.firebase.shutil.which", return_value="/usr/bin/firebase"):
+            decision, reason = self._decision("firebase deploy", {"default": "right-project"})
+        self.assertEqual(decision, "deny", reason)
+        self.assertIn("現在のプロジェクトを取得できません", reason)
+
+
+class TestFirebaseConfigOptionRouting(BaseWithTmpProject):
+    """`firebase ... --config <path>` / `-c <path>` を照合先を変える option として拾う (v0.18.0)。
+
+    firebase-tools はそのファイルのあるディレクトリの `.firebaserc` で `--project` を解決する。
+    旧版は `--config` を見ず、プロジェクトのディレクトリの `.firebaserc` で照合して allow していた。
+    """
+
+    def setUp(self):
+        super().setUp()
+        (self.project_dir / "firebase.json").write_text("{}", encoding="utf-8")
+        (self.project_dir / ".firebaserc").write_text(
+            json.dumps({"projects": {"prod": "right-project"}}), encoding="utf-8"
+        )
+        sub = self.project_dir / "sub"
+        sub.mkdir()
+        (sub / "firebase.json").write_text("{}", encoding="utf-8")
+        (sub / ".firebaserc").write_text(
+            json.dumps({"projects": {"prod": "wrong-project"}}), encoding="utf-8"
+        )
+        self._write_accounts({"firebase": "right-project"})
+
+    def _dispatch(self, command: str):
+        with self.isolated_cache(), mock.patch("subprocess.run") as run:
+            result = dispatch(command, str(self.project_dir))
+        run.assert_not_called()
+        return result
+
+    def test_every_option_form_moves_the_project_root(self):
+        self.assertIsNone(self._dispatch("firebase deploy --project prod"))
+        for command in (
+            "firebase deploy --project prod -c sub/firebase.json",
+            "firebase deploy --project prod --config sub/firebase.json",
+            "firebase deploy --project prod --config=sub/firebase.json",
+            "firebase deploy --project prod -csub/firebase.json",
+            "firebase -c sub/firebase.json deploy -P prod",
+            "npx firebase-tools --config sub/firebase.json deploy --project=prod",
+        ):
+            with self.subTest(command=command):
+                result = self._dispatch(command)
+                self.assertIsNotNone(result)
+                out = result["hookSpecificOutput"]
+                self.assertEqual(out["permissionDecision"], "deny")
+                self.assertIn("wrong-project", out["permissionDecisionReason"])
+
+    def test_new_denials_do_not_carry_the_standalone_note(self):
+        """`--config` のファイルが無い deny と、`.firebaserc` を確かめられない deny は、
+        切替コマンドを案内しない (「案内したコマンドは単独で実行」の注記を付けない)。"""
+        (self.project_dir / ".firebaserc").write_text(
+            '{"projects": {"prod": "right-project"}} // note', encoding="utf-8"
+        )
+        for command, marker in (
+            ("firebase deploy -c sub/missing.json", "--config のファイルが見つからない"),
+            ("firebase deploy --project prod", "--project の行き先を確かめられません"),
+        ):
+            with self.subTest(command=command):
+                reason = self._dispatch(command)["hookSpecificOutput"][
+                    "permissionDecisionReason"
+                ]
+                self.assertIn(marker, reason)
+                self.assertNotIn("案内された形のまま単独で実行してください", reason)
+                self.assertNotIn(shell_word.UNSAFE, reason)
+
+
+class _FirebaseConfigFixture(BaseWithTmpProject):
+    """`--config` 付きのコマンドを dispatcher に通す準備 (v0.18.0)。
+
+    プロジェクトのディレクトリと sub/ に firebase.json を置き、configstore を tmp に向ける。
+    `_record` は `firebase use` の切替先を記録し、`_fake_cli` は非 TTY の `firebase use` の
+    代わりに configstore を読む。
+    """
+
+    _COMMAND = "firebase deploy -c sub/firebase.json"
+    _NOTE = "案内された形のまま単独で実行してください"
+    _GUIDE = "--config のファイルのあるディレクトリで"
+    # 期待値に許容形から外れる値があるときだけ添える、出所の文
+    _SOURCE = '表示していない期待値があります (accounts.local.json の "firebase" を確認してください)'
+
+    def setUp(self):
+        super().setUp()
+        (self.project_dir / "firebase.json").write_text("{}", encoding="utf-8")
+        self.sub = self.project_dir / "sub"
+        self.sub.mkdir()
+        (self.sub / "firebase.json").write_text("{}", encoding="utf-8")
+        xdg = Path(self.tmp) / "xdg"
+        self._store = xdg / "configstore" / "firebase-tools.json"
+        patcher = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(xdg)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _record(self, active: dict) -> None:
+        """`firebase use` の切替先を記録する (configstore の activeProjects。キーは実体のパス)。"""
+        self._store.parent.mkdir(parents=True, exist_ok=True)
+        self._store.write_text(
+            json.dumps({"activeProjects": {os.path.realpath(d): p for d, p in active.items()}}),
+            encoding="utf-8",
+        )
+
+    def _fake_cli(self, argv, **kwargs):
+        """非 TTY の `firebase use` の代わり: cwd (`--config` のファイルのあるディレクトリ) から
+        親方向に切替先を探し、あれば 1 行で出す。無ければ非ゼロ終了。cwd の実体のパスで探すので、
+        symlink を通る `--config` (firebase-tools は symlink を解かないパスで探す) には使わない。"""
+        active = {}
+        if self._store.exists():
+            active = json.loads(self._store.read_text(encoding="utf-8"))["activeProjects"]
+        cur = os.path.realpath(kwargs["cwd"])
+        while True:
+            if cur in active:
+                return SimpleNamespace(stdout=active[cur] + "\n", stderr="", returncode=0)
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                return SimpleNamespace(stdout="", stderr="", returncode=1)
+            cur = parent
+
+    def _dispatch(self, with_cli: bool, command: str | None = None):
+        run = self._fake_cli if with_cli else FileNotFoundError("firebase")
+        with self.isolated_cache(), mock.patch("subprocess.run", side_effect=run), mock.patch(
+            "services.firebase.shutil.which", return_value="/usr/bin/firebase"
+        ):
+            return dispatch(command or self._COMMAND, str(self.project_dir))
+
+
+class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
+    """`--config` 付きのコマンドの deny は、切替をコマンドの形で案内しない (v0.18.0)。
+
+    firebase-tools は `firebase use` の切替先を project root ごとに記録し、`--config` 付きの
+    コマンドはそのファイルのあるディレクトリから親方向に探した切替先で動く。そのディレクトリが
+    プロジェクトのディレクトリと別で、そこに切替先が記録されていると、案内していた
+    `firebase use <期待値>` (プロジェクトのディレクトリのキーに書く) では変わらず、案内どおりに
+    しても同じ deny を繰り返していた (マージ前レビューの指摘)。往復で確かめる: deny の理由に
+    切替コマンドも単独実行の注記も無い → そのディレクトリで切り替える (その形は hook を通る。
+    切り替えた結果は configstore のそのディレクトリの実体のパスのキーを書き換えて再現する) →
+    同じコマンドが通る。CLI がある (configstore を読む firebase-tools の代わり) / 無い (ローカル
+    設定の解決) の両方。末尾に `-c` を付けた切替 (`firebase use <x> -c <path>`) は
+    self-remediation に当たらず通常検証に落ちる (このクラスでは扱わない)。
+    """
+
+    def test_switching_in_the_config_directory_lets_the_command_through(self):
+        switched = {self.project_dir: "right-project", self.sub: "wrong-project"}
+        cases = {
+            # プロジェクトのディレクトリは期待値で、sub には自分の (期待値と違う) 切替先がある
+            "scalar": ("right-project", switched, "現在=wrong-project"),
+            "dict": (
+                {"default": "right-project", "staging": "staging-project"},
+                switched,
+                "現在=wrong-project",
+            ),
+            # どこにも切替先が無い。期待値は示す (0.17.1 の案内 `firebase use <期待値>` も名前を
+            # 出していた)。末尾の「。」まで見て、「のいずれか」が dict にだけ付くことも確かめる
+            "nothing recorded": (
+                "right-project",
+                {},
+                "現在のプロジェクトを取得できません。期待=right-project。",
+            ),
+            "dict, nothing recorded": (
+                {"default": "right-project", "staging": "staging-project"},
+                {},
+                "現在のプロジェクトを取得できません。期待=right-project, staging-project のいずれか。",
+            ),
+            # 空文字・null の entry は期待値に数えない (`期待=` に示さず、出所の文も添えない)
+            "dict with ignored entries": (
+                {"default": "right-project", "staging": "staging-project", "old": "", "tbd": None},
+                switched,
+                "期待=right-project, staging-project のいずれか\n",
+            ),
+            "dict with ignored entries, nothing recorded": (
+                {"default": "right-project", "staging": "staging-project", "old": "", "tbd": None},
+                {},
+                "現在のプロジェクトを取得できません。期待=right-project, staging-project のいずれか。",
+            ),
+        }
+        for with_cli in (True, False):
+            for name, (expected, recorded, marker) in cases.items():
+                with self.subTest(name, with_cli=with_cli):
+                    self._write_accounts({"firebase": expected})
+                    self._record(recorded)
+                    result = self._dispatch(with_cli)
+                    self.assertIsNotNone(result)
+                    out = result["hookSpecificOutput"]
+                    self.assertEqual(out["permissionDecision"], "deny")
+                    reason = out["permissionDecisionReason"]
+                    self.assertIn(marker, reason)
+                    self.assertIn(self._GUIDE, reason)
+                    self.assertNotIn(self._SOURCE, reason)  # 期待値はすべて許容形
+                    self.assertNotIn("firebase use", reason)
+                    self.assertNotIn("firebase login", reason)
+                    self.assertNotIn(self._NOTE, reason)
+                    # 案内どおり sub のディレクトリで切り替える: hook は期待値への切替として通し、
+                    # firebase-tools は sub の実体のパスのキーに書く (configstore を書き換えて再現)
+                    with mock.patch("subprocess.run") as run:
+                        self.assertIsNone(
+                            dispatch("cd sub && firebase use right-project", str(self.project_dir))
+                        )
+                    run.assert_not_called()
+                    self._record({**recorded, self.sub: "right-project"})
+                    self.assertIsNone(self._dispatch(with_cli))
+
+    def test_config_file_in_the_project_directory(self):
+        """`-c` のファイルがプロジェクトのディレクトリにある形 (設定ファイルを root に並べる) でも、
+        deny の文は成り立ち、案内どおりにそのディレクトリ (= プロジェクトのディレクトリ) で切り
+        替えると通る。旧文面の括弧「(そのディレクトリに切替先が記録されていると、) プロジェクトの
+        ディレクトリで切り替えても変わりません」は、この形では成り立たなかった (マージ前レビューの
+        指摘)。"""
+        (self.project_dir / "firebase.prod.json").write_text("{}", encoding="utf-8")
+        command = "firebase deploy -c firebase.prod.json"
+        self._write_accounts({"firebase": "right-project"})
+        for with_cli in (True, False):
+            with self.subTest(with_cli=with_cli):
+                self._record({self.project_dir: "wrong-project"})
+                out = self._dispatch(with_cli, command)["hookSpecificOutput"]
+                self.assertEqual(out["permissionDecision"], "deny")
+                reason = out["permissionDecisionReason"]
+                self.assertIn(self._GUIDE, reason)
+                claims = "プロジェクトのディレクトリで切り替えても変わりません" in reason
+                with mock.patch("subprocess.run") as run:
+                    self.assertIsNone(dispatch("firebase use right-project", str(self.project_dir)))
+                run.assert_not_called()
+                self._record({self.project_dir: "right-project"})  # firebase use が書くキー
+                passes = self._dispatch(with_cli, command) is None
+                self.assertTrue(passes)
+                self.assertFalse(
+                    claims and passes,
+                    "deny は「プロジェクトのディレクトリで切り替えても変わらない」と言うが、切り替えると通る",
+                )
+
+    def test_no_note_when_an_expected_value_is_not_in_the_allowed_shape(self):
+        """期待値が許容形から外れるときは、先頭行の `期待=` にその値を示さず (`(表示しない値)`)、
+        注記を付けない。
+
+        値をそのまま示すと、切替コマンドの形の値が注記の判定に当たる (コマンドで案内する deny の
+        `test_no_note_when_the_value_was_not_guided` と同じ契約)。この deny は期待値の形に関係なく
+        コマンドの形で案内しないので、示さない理由の文 (`_CHECK_BY_HAND`。UNSAFE の文) は添えない
+        (添える理由が成り立たない。マージ前レビューの指摘)。示さない値が 1 つでもあれば出所の文を
+        添える (`test_masked_expected_value_points_to_the_file`)。
+        """
+        self._record({self.sub: "wrong-project"})
+        for expected in (
+            "x; firebase use evil",
+            {"default": "right-project", "evil": "x; firebase use evil"},
+        ):
+            for with_cli in (True, False):
+                with self.subTest(expected=expected, with_cli=with_cli):
+                    self._write_accounts({"firebase": expected})
+                    out = self._dispatch(with_cli)["hookSpecificOutput"]
+                    self.assertEqual(out["permissionDecision"], "deny")
+                    reason = out["permissionDecisionReason"]
+                    self.assertIn(self._GUIDE, reason)
+                    self.assertIn("(表示しない値)", reason)
+                    self.assertIn(self._SOURCE, reason)
+                    self.assertNotIn("x; firebase use evil", reason)
+                    self.assertNotIn(shell_word.UNSAFE, reason)
+                    self.assertNotIn(self._NOTE, reason)
+
+    def test_masked_expected_value_points_to_the_file(self):
+        """期待値に許容形から外れる値があるときは、出所の文 (accounts.local.json の "firebase") を
+        添える。不一致の deny (scalar / dict) と、現在値を取得できない deny の両方。
+
+        その値は文面に示さない (`期待=(表示しない値)`。不一致の deny も、現在値を取得できない deny
+        も) が、許容形から外れる値はどの project とも一致しないので、案内どおりに切り替えても deny は
+        続く。出所が無いと、何を直せばよいかが文面から消える (マージ前レビューの指摘)。
+        出所の文は REMEDIATION_PATTERNS にも UNSAFE の文にも当たらないので、注記は付かない。
+        """
+        masked = {
+            "scalar": ("x; firebase use evil", ["x; firebase use evil"]),
+            "dict": ({"default": "x y", "b": "p\nq"}, ["x y", "p\nq"]),
+        }
+        situations = {
+            "mismatch": ({self.sub: "wrong-project"}, "期待=(表示しない値)"),
+            "current unknown": ({}, "現在のプロジェクトを取得できません。期待=(表示しない値)"),
+        }
+        for name, (expected, raw_values) in masked.items():
+            for situation, (recorded, marker) in situations.items():
+                for with_cli in (True, False):
+                    with self.subTest(name, situation=situation, with_cli=with_cli):
+                        self._write_accounts({"firebase": expected})
+                        self._record(recorded)
+                        out = self._dispatch(with_cli)["hookSpecificOutput"]
+                        self.assertEqual(out["permissionDecision"], "deny")
+                        reason = out["permissionDecisionReason"]
+                        self.assertIn(marker, reason)
+                        self.assertIn(self._GUIDE, reason)
+                        self.assertIn(self._SOURCE, reason)
+                        for raw in raw_values:
+                            self.assertNotIn(raw, reason)
+                        self.assertNotIn(shell_word.UNSAFE, reason)
+                        self.assertNotIn(self._NOTE, reason)
+
+    def test_shown_expected_value_has_no_source_sentence(self):
+        """`期待=` に示せる値 (WORD。NAME から外れるドメイン付きの project ID も含む) だけなら、
+        出所の文は添えない (示さない値があるときだけ添える。`shell_word.shown` と同じ判定)。
+        不一致の deny も、現在値を取得できない deny も、その値を `期待=` に示す。現在値が同じ形
+        (ドメイン付きの project ID) なら、それも `現在=` に示す (`shell_word.shown` も同じ判定)。"""
+        situations = {
+            "mismatch": ({self.sub: "wrong-project"}, "現在=wrong-project"),
+            "mismatch, domain-scoped current": (
+                {self.sub: "example.com:wrong-project"},
+                "現在=example.com:wrong-project",
+            ),
+            "current unknown": ({}, "現在のプロジェクトを取得できません"),
+        }
+        # 「本番」は案内に使える形ではないが示せる普通の名前 (v0.21.0)。示すので出所の文は添えない。
+        for name in ("example.com:right-project", "本番"):
+            for expected in (name, {"default": name}):
+                for situation, (recorded, marker) in situations.items():
+                    for with_cli in (True, False):
+                        with self.subTest(
+                            expected=expected, situation=situation, with_cli=with_cli
+                        ):
+                            self._write_accounts({"firebase": expected})
+                            self._record(recorded)
+                            out = self._dispatch(with_cli)["hookSpecificOutput"]
+                            self.assertEqual(out["permissionDecision"], "deny")
+                            reason = out["permissionDecisionReason"]
+                            self.assertIn(marker, reason)
+                            self.assertIn(f"期待={name}", reason)
+                            self.assertNotIn(self._SOURCE, reason)
+
+    def test_no_note_from_a_current_value_shaped_like_a_command(self):
+        """現在値が許容形から外れるときも、先頭行の `現在=` にその値を示さず、注記を付けない。
+
+        CLI が無いとき (npx 等)、現在値はリポジトリの `.firebaserc` から解決され、形を確かめて
+        いない。値が切替コマンドの形だと、示しただけで注記の判定に当たり、案内していない
+        コマンド (`.firebaserc` が書いたもの) に「単独で実行」の注記が付いていた (マージ前
+        レビューの指摘)。
+        """
+        for current in ("x firebase use evil", "x\nfirebase use evil", "x firebase login"):
+            for expected in ("right-project", {"default": "right-project", "b": "b-project"}):
+                with self.subTest(current=current, expected=expected):
+                    (self.sub / ".firebaserc").write_text(
+                        json.dumps({"projects": {"default": current}}), encoding="utf-8"
+                    )
+                    self._write_accounts({"firebase": expected})
+                    self._record({})
+                    out = self._dispatch(with_cli=False)["hookSpecificOutput"]
+                    self.assertEqual(out["permissionDecision"], "deny")
+                    reason = out["permissionDecisionReason"]
+                    self.assertIn(self._GUIDE, reason)
+                    self.assertIn("現在=(表示しない値)", reason)
+                    self.assertNotIn(self._SOURCE, reason)  # 出所の文は期待値のときだけ
+                    self.assertNotIn(current, reason)
+                    self.assertNotIn(self._NOTE, reason)
+
+
+class TestFirebaseCurrentValueShownWithoutConfig(_FirebaseConfigFixture):
+    """`--config` の無いコマンドの不一致の deny も、`現在=` には許容形の値だけを示す (v0.18.0)。
+
+    `--config` 付きのコマンドの deny と同じ `shell_word.shown` を使う (表示だけの変更)。準備は
+    `_FirebaseConfigFixture` のもの (configstore を tmp に向ける) を使い、`--config` は付けない。
+    """
+
+    def test_current_value_shaped_like_a_command_is_not_shown_without_config(self):
+        """`--config` の無い不一致の deny も、許容形から外れる現在値は `現在=` に示さない
+        (`shell_word.shown`。表示だけの変更で、切替を案内するので注記は付く)。"""
+        for current in ("x firebase use evil", "x\nfirebase use evil", "x firebase login"):
+            for expected in ("right-project", {"default": "right-project", "b": "b-project"}):
+                with self.subTest(current=current, expected=expected):
+                    (self.project_dir / ".firebaserc").write_text(
+                        json.dumps({"projects": {"default": current}}), encoding="utf-8"
+                    )
+                    self._write_accounts({"firebase": expected})
+                    self._record({})
+                    out = self._dispatch(False, "firebase deploy")["hookSpecificOutput"]
+                    self.assertEqual(out["permissionDecision"], "deny")
+                    reason = out["permissionDecisionReason"]
+                    self.assertIn("現在=(表示しない値)", reason)
+                    self.assertNotIn(current, reason)
+
+
+class TestFirebaseConfigThroughASymlinkWithoutCli(_FirebaseConfigFixture):
+    """CLI が無いとき (npx 等)、symlink を通る `--config` で firebase-tools と同じ切替先を引く。
+
+    firebase-tools 15.24.0 の detectProjectRoot は `path.resolve(cwd, config)` (字句的で、symlink を
+    解かない) の dirname を projectRoot にし、configstore はそのパスの親方向だけを探す。次の 2 形は
+    projectRoot が symlink を通るパスになり、`firebase use` が実体のパスで書いたキーを見ずに
+    `.firebaserc` の default (wrong-project) で動く (node で applyRC を実測)。hook のローカル設定の
+    解決は実体のパスでも探していたので、実体のパスのキー (right-project) を見つけて allow していた
+    (マージ前レビューの指摘)。CLI がある経路は、CLI に同じ `--config` を渡すので一致する。
+      A: 絶対パスの `--config` が symlink を通る (macOS の /tmp・/var も symlink)
+      B: 相対の `--config` が symlink のディレクトリを通る (`linkdir/firebase.json`)
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.link = Path(self.tmp) / "link"
+        os.symlink(self.project_dir, self.link)
+        patcher = mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(self.link)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        rc = json.dumps({"projects": {"default": "wrong-project"}})
+        (self.sub / ".firebaserc").write_text(rc, encoding="utf-8")
+        self.elsewhere = Path(self.tmp) / "elsewhere"
+        self.elsewhere.mkdir()
+        (self.elsewhere / "firebase.json").write_text("{}", encoding="utf-8")
+        (self.elsewhere / ".firebaserc").write_text(rc, encoding="utf-8")
+        os.symlink(self.elsewhere, self.project_dir / "linkdir")
+
+    def test_resolves_like_firebase_tools(self):
+        self._write_accounts({"firebase": "right-project"})
+        # 案内 (「--config のファイルのあるディレクトリで切り替えて」) どおり、そのディレクトリに
+        # cd して切り替えると、firebase-tools は実体のパスのキーに書く
+        self._record({self.sub: "right-project", self.elsewhere: "right-project"})
+        for name, command in {
+            "A abs path through a symlink": f"firebase deploy --config {self.link}/sub/firebase.json",
+            "B rel path through a symlinked dir": "firebase deploy --config linkdir/firebase.json",
+        }.items():
+            with self.subTest(name):
+                result = self._dispatch(with_cli=False, command=command)
+                self.assertIsNotNone(
+                    result, "firebase-tools は .firebaserc の default (wrong-project) で動くのに allow"
+                )
+                reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+                self.assertIn("現在=wrong-project", reason)
+
+
+class TestSelfRemediationFlow(BaseWithTmpProject):
+    """deny が案内する切替コマンド (self-remediation) は検証なしで許可される。"""
+
+    def test_switch_to_expected_account_allowed_without_verify(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify") as mock_verify:
+            result = dispatch(
+                "gh auth switch --hostname github.com --user Mao-o",
+                str(self.project_dir),
+            )
+        self.assertIsNone(result)
+        mock_verify.assert_not_called()
+
+    def test_switch_to_other_account_verifies_normally(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch(
+            "services.github.verify", return_value="不一致"
+        ) as mock_verify:
+            result = dispatch(
+                "gh auth switch --user someone-else", str(self.project_dir)
+            )
+        self.assertIsNotNone(result)
+        mock_verify.assert_called_once()
+
+    def test_switch_combined_with_write_verifies_normally(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch(
+            "services.github.verify", return_value="不一致"
+        ) as mock_verify:
+            result = dispatch(
+                "gh auth switch --user Mao-o && gh pr create",
+                str(self.project_dir),
+            )
+        self.assertIsNotNone(result)
+        mock_verify.assert_called_once()
+
+    def test_readonly_plus_remediation_allowed(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify") as mock_verify:
+            result = dispatch(
+                "gh auth status && gh auth switch -u Mao-o",
+                str(self.project_dir),
+            )
+        self.assertIsNone(result)
+        mock_verify.assert_not_called()
+
+    def test_remediation_skip_does_not_write_success_cache(self):
+        """remediation skip は成功 cache を作らない (直後の write は再検証される)。"""
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify") as mock_verify:
+            dispatch("gh auth switch -u Mao-o", str(self.project_dir))
+            mock_verify.return_value = "不一致"
+            result = dispatch("gh pr create", str(self.project_dir))
+        self.assertIsNotNone(result)
+        mock_verify.assert_called_once()
+
+    def test_missing_key_still_denies_for_remediation_command(self):
+        """期待値が未設定なら切替コマンドも従来どおり設定誘導の deny。"""
+        self._write_accounts({"gcloud": "my-proj"})
+        result = dispatch(
+            "gh auth switch --user Mao-o", str(self.project_dir)
+        )
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn('"github" キーがありません', out["permissionDecisionReason"])
+
+    def test_firebase_use_alias_allowed(self):
+        self._write_accounts({"firebase": {"default": "proj-dev", "prod": "proj-prod"}})
+        with mock.patch("services.firebase.verify") as mock_verify:
+            result = dispatch("firebase use prod", str(self.project_dir))
+        self.assertIsNone(result)
+        mock_verify.assert_not_called()
+
+
+class TestAssignmentOnlySegmentIsNotACommand(BaseWithTmpProject):
+    """値が `/…/<cli>` で終わる代入だけのセグメントを、その CLI のコマンドとして検出しない。
+
+    firebase のキーが無いプロジェクトでは、検出されると「"firebase" キーがありません」で
+    deny になっていた (読み取り専用の grep のために代入しただけのコマンドが止まった)。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._write_accounts({"gcloud": "my-proj"})
+
+    def _dispatch(self, command: str):
+        with mock.patch("subprocess.run") as run:
+            result = dispatch(command, str(self.project_dir))
+        self.assertFalse(run.called, "CLI を起動してはならない")
+        return result
+
+    def test_assignment_only_segments_are_allowed(self):
+        for command in (
+            "FT=/x/node_modules/firebase-tools; echo hi",
+            "FT=/x/node_modules/firebase-tools",
+            "X=1 FT=/x/firebase-tools",
+            "X=/usr/local/bin/gh",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(self._dispatch(command))
+
+    def test_command_substitution_in_an_assignment_value_is_still_detected(self):
+        """値に `$(` / バッククォートを含む代入の中のパス付き CLI は従来どおり deny する。"""
+        for command in (
+            "X=$(/usr/bin/firebase deploy)",
+            "X=`/usr/bin/firebase deploy`",
+        ):
+            with self.subTest(command=command):
+                result = self._dispatch(command)
+                self.assertIsNotNone(result)
+                out = result["hookSpecificOutput"]
+                self.assertEqual(out["permissionDecision"], "deny")
+                self.assertIn('"firebase" キーがありません', out["permissionDecisionReason"])
+
+    def test_commands_after_an_assignment_are_still_detected(self):
+        for command in (
+            "FOO=1 firebase deploy",
+            "FT=/x/firebase-tools; firebase deploy",
+            "FOO=1 /x/node_modules/.bin/firebase deploy",
+        ):
+            with self.subTest(command=command):
+                result = self._dispatch(command)
+                self.assertIsNotNone(result)
+                out = result["hookSpecificOutput"]
+                self.assertEqual(out["permissionDecision"], "deny")
+                self.assertIn('"firebase" キーがありません', out["permissionDecisionReason"])
+
+
+class TestMissingKeyIsFailClosed(BaseWithTmpProject):
+    """キー未記載 service は deny (fail-closed) で、文面もそれと一致する。
+
+    内部バックログ: 実装は「キーが無ければ deny」なのに、README と未設定 deny の
+    文面が「未記載のサービスは検証対象外 (= allow)」と逆を約束していた。実装
+    (deny) を正とし、文面を実装に合わせたうえでキー追加の具体コマンドを案内する。
+    """
+
+    def _deny_reason(self, command: str) -> str:
+        result = dispatch(command, str(self.project_dir))
+        self.assertIsNotNone(result, f"{command} は deny されるべき")
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        return out["permissionDecisionReason"]
+
+    def test_missing_key_denies_without_invoking_cli(self):
+        """記載済み service だけのファイルでも、未記載 service は CLI を呼ばず deny。"""
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch("subprocess.run") as run:
+            reason = self._deny_reason("gh pr create")
+        self.assertFalse(run.called, "未記載 service で CLI を起動してはならない")
+        self.assertIn('"github" キーがありません', reason)
+
+    def test_missing_key_deny_guides_builder_set(self):
+        """キー追加の具体コマンド (builder の set) を案内する。
+
+        `init` ではなく `set` — キー未記載 deny は accounts.local.json が
+        **見つかっている** ときにしか出ず、そのファイルが親からの継承だと
+        `init` は exit 2 で拒否される (builder `_cmd_init`)。
+        """
+        self._write_accounts({"aws": "123456789012"})
+        reason = self._deny_reason("gh pr create")
+        # 空白を含む plugin root でも分割されないよう、パスはクォートして案内する
+        self.assertIn('/scripts/accounts_builder.py" set --service github', reason)
+        self.assertIn('python3 "${CLAUDE_PLUGIN_ROOT}/', reason)
+        self.assertIn("--from-cli", reason)
+        self.assertNotIn('accounts_builder.py" init --service', reason)
+
+    def test_missing_key_deny_does_not_hand_over_a_one_shot_commit(self):
+        """`--from-cli --commit` の一発コマンドを案内しない。
+
+        `--from-cli` は「今ログインしているアカウント」を期待値として提案する。
+        間違ったアカウントに入ったまま commit すると、この plugin が防ぐはずの
+        状態をそのまま正解として焼き付けてしまう。deny を消したい相手に一発で
+        通る形を渡すと必ずそう使われるので、dry-run + 確認の 2 段で案内する。
+        """
+        self._write_accounts({"aws": "123456789012"})
+        reason = self._deny_reason("gh pr create")
+        self.assertIn("--from-cli --dry-run", reason)
+        self.assertNotIn("--from-cli --commit", reason)
+        self.assertIn("確認してから", reason)
+
+    def test_missing_key_deny_does_not_promise_allow(self):
+        """「検証対象外」= allow の約束を deny 文面に残さない。"""
+        self._write_accounts({"aws": "123456789012"})
+        self.assertNotIn("検証対象外", self._deny_reason("gh pr create"))
+
+    def test_unset_accounts_deny_does_not_promise_allow(self):
+        """accounts.local.json 自体が無い場合の deny 文面も同様。"""
+        reason = self._deny_reason("gh pr create")
+        self.assertNotIn("検証対象外", reason)
+        self.assertIn("キーは全て必要です", reason)
+
+    def test_readme_does_not_promise_allow_for_missing_key(self):
+        """README がキー未記載を allow と約束していないこと (docs / 実装の整合)。
+
+        この乖離こそが起票理由なので、文面側も機械で固定する。
+        """
+        readme = Path(__file__).resolve().parents[3] / "README.md"
+        self.assertTrue(readme.is_file(), f"README.md が見つからない: {readme}")
+        text = readme.read_text(encoding="utf-8")
+        self.assertNotIn("未記載のサービスコマンドは検証対象外", text)
+        self.assertIn("使う service のキーは全て書く必要がある", text)
+
+
+class TestBudgetExhaustionIsFailClosed(BaseWithTmpProject):
+    """hook の実時間予算を使い切った service は CLI を呼ばず deny に集約する。
+
+    内部バックログ: 複合コマンド (`gh ... && aws ... && gcloud ...`) は service
+    ごとに直列で verify するため、subprocess timeout の合計が hook timeout を
+    超えうる。hook が timeout すると出力が破棄されて tool call がそのまま進む
+    (公式仕様上の fail-open) ので、CLI 未検出・CLI timeout を deny に倒している
+    判定表に穴が空く。予算切れも deny に倒して塞ぐ。
+
+    実時間は測らない (flaky になるうえ「その回はたまたま間に合った」以上のことを
+    言わない)。予算計算の単体固定は `tests/test_budget.py`、ここでは dispatcher
+    がその計算をどう使うか (配線) を固定する。
+    """
+
+    def setUp(self):
+        super().setUp()
+        budget.clear()
+        self.addCleanup(budget.clear)
+
+    def _deny_reason(self, result) -> str:
+        self.assertIsNotNone(result, "予算切れは deny されるべき")
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        return out["permissionDecisionReason"]
+
+    def test_expired_budget_denies_without_invoking_verify(self):
+        self._write_accounts({"github": "expected-user"})
+        with mock.patch.object(budget, "TOTAL_BUDGET_SECONDS", 0.0), \
+             mock.patch("services.github.verify") as mock_verify:
+            reason = self._deny_reason(
+                dispatch("gh pr create", str(self.project_dir))
+            )
+        mock_verify.assert_not_called()
+        self.assertIn('"github"', reason)
+        self.assertIn("予算", reason)
+
+    def test_dispatch_arms_the_budget_for_verify(self):
+        """verify() は予算が張られた状態で呼ばれる (= subprocess timeout が縮む)。
+
+        配線が無いと `budget.remaining()` は None のままで、各 service は
+        フルの timeout を使い続ける。
+        """
+        self._write_accounts({"github": "expected-user"})
+        seen: list[float | None] = []
+
+        def _record(*_args, **_kwargs):
+            seen.append(budget.remaining())
+            return None
+
+        with mock.patch("services.github.verify", side_effect=_record):
+            dispatch("gh pr create", str(self.project_dir))
+        self.assertEqual(len(seen), 1)
+        self.assertIsNotNone(seen[0], "dispatch が予算を張っていない")
+        self.assertLessEqual(seen[0], budget.TOTAL_BUDGET_SECONDS)
+
+    def test_budget_is_released_after_dispatch(self):
+        """予算を解除しないと builder / 後続 dispatch の timeout が黙って縮む。"""
+        self._write_accounts({"github": "expected-user"})
+        with mock.patch("services.github.verify", return_value=None):
+            dispatch("gh pr create", str(self.project_dir))
+        self.assertIsNone(budget.remaining())
+
+    def test_budget_is_released_even_when_dispatch_raises(self):
+        self._write_accounts({"github": "expected-user"})
+        with mock.patch("services.github.verify", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                dispatch("gh pr create", str(self.project_dir))
+        self.assertIsNone(budget.remaining())
+
+    def test_only_the_service_that_ran_out_is_denied(self):
+        """先に検証できた service の結果は残し、予算切れの service だけ deny。
+
+        `expired()` を service ごとに評価する配線を固定する (最初の 1 回だけ
+        見て全体を打ち切る実装だと、検証できたはずの service まで巻き込む)。
+        """
+        self._write_accounts({"github": "expected-user", "gcloud": "my-proj"})
+        with mock.patch.object(budget, "expired", side_effect=[False, True]), \
+             mock.patch("services.github.verify", return_value=None) as gh_verify, \
+             mock.patch("services.gcloud.verify") as gcloud_verify:
+            reason = self._deny_reason(
+                dispatch(
+                    "gh pr create && gcloud run deploy", str(self.project_dir)
+                )
+            )
+        gh_verify.assert_called_once()
+        gcloud_verify.assert_not_called()
+        self.assertIn('"gcloud"', reason)
+        self.assertNotIn('"github"', reason)
+
+    def test_self_remediation_is_not_denied_by_expired_budget(self):
+        """CLI を起動しない経路 (自己修復の切替) は予算切れでも通す。
+
+        予算切れの判定を CLI 起動の直前より手前に置くと、時間を使わない
+        allow まで巻き込んで remediation loop になる。
+        """
+        self._write_accounts({"github": "expected-user"})
+        with mock.patch.object(budget, "TOTAL_BUDGET_SECONDS", 0.0), \
+             mock.patch("services.github.verify") as mock_verify:
+            result = dispatch(
+                "gh auth switch --user expected-user", str(self.project_dir)
+            )
+        self.assertIsNone(result)
+        mock_verify.assert_not_called()
+
+    def test_missing_key_takes_precedence_over_expired_budget(self):
+        """キー未記載は CLI を呼ばずに判定できるので、予算に関係なく従来の文面。"""
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch.object(budget, "TOTAL_BUDGET_SECONDS", 0.0):
+            reason = self._deny_reason(
+                dispatch("gh pr create", str(self.project_dir))
+            )
+        self.assertIn('"github" キーがありません', reason)
+        self.assertNotIn("予算", reason)
+
+
+class TestVerificationMode(BaseWithTmpProject):
+    """escape hatch (`CLOUD_ACCOUNT_GUARD_MODE` / `"$mode"`) — v0.13.0。
+
+    **判定表は変えない**: 何を問題とみなすかは mode に依らず同じで、変わるのは
+    「deny で止めるか / 通知だけか / 検証そのものをしないか」だけ。既定
+    (env も `"$mode"` も無い) は従来どおり enforce。
+    """
+
+    MISMATCH = "GitHub アカウント不一致: 現在=x, 期待=Mao-o"
+
+    def _with_mode(self, value: str | None):
+        env = {} if value is None else {"CLOUD_ACCOUNT_GUARD_MODE": value}
+        return mock.patch.dict(os.environ, env)
+
+    def _dispatch_mismatch(self):
+        with mock.patch("services.github.verify", return_value=self.MISMATCH):
+            return dispatch("gh pr create", str(self.project_dir))
+
+    def test_default_is_enforce(self):
+        """env / "$mode" 無しでは従来どおり deny。"""
+        self._write_accounts({"github": "Mao-o"})
+        out = self._dispatch_mismatch()["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_deny_reason_carries_mode_hint(self):
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._dispatch_mismatch()["hookSpecificOutput"][
+            "permissionDecisionReason"
+        ]
+        self.assertIn("CLOUD_ACCOUNT_GUARD_MODE=warn", reason)
+        self.assertIn('"$mode"', reason)
+
+    def test_env_warn_converts_deny_into_context(self):
+        self._write_accounts({"github": "Mao-o"})
+        with self._with_mode("warn"):
+            out = self._dispatch_mismatch()["hookSpecificOutput"]
+        self.assertNotIn("permissionDecision", out)
+        self.assertIn("不一致", out["additionalContext"])
+        self.assertIn("warn モード", out["additionalContext"])
+
+    def test_env_off_skips_verification_entirely(self):
+        self._write_accounts({"github": "Mao-o"})
+        with self._with_mode("off"):
+            with mock.patch("services.github.verify") as verify:
+                self.assertIsNone(dispatch("gh pr list", str(self.project_dir)))
+        self.assertFalse(verify.called, "off なのに verify() を呼んでいる")
+
+    def test_env_off_also_skips_unconfigured_deny(self):
+        """accounts.local.json が無くても off なら通す (install 直後の出口)。"""
+        with self._with_mode("off"):
+            self.assertIsNone(dispatch("gh pr list", str(self.project_dir)))
+
+    def test_env_off_still_invalidates_cache_on_switch(self):
+        """off の間に実行された切替も cache を捨てる (enforce に戻した直後に
+        古い成功で通らないようにするため)。"""
+        with self._with_mode("off"):
+            with mock.patch("core.cache.invalidate") as invalidate:
+                dispatch("gh auth switch --user other", str(self.project_dir))
+        self.assertTrue(invalidate.called)
+
+    def test_file_mode_warn(self):
+        self._write_accounts({"github": "Mao-o", "$mode": "warn"})
+        out = self._dispatch_mismatch()["hookSpecificOutput"]
+        self.assertNotIn("permissionDecision", out)
+        self.assertIn("不一致", out["additionalContext"])
+
+    def test_file_mode_off(self):
+        self._write_accounts({"github": "Mao-o", "$mode": "off"})
+        with mock.patch("services.github.verify") as verify:
+            self.assertIsNone(dispatch("gh pr list", str(self.project_dir)))
+        self.assertFalse(verify.called)
+
+    def test_env_enforce_overrides_file_mode_off(self):
+        """env が勝つ (プロジェクト設定より「今のセッションの指示」を優先)。"""
+        self._write_accounts({"github": "Mao-o", "$mode": "off"})
+        with self._with_mode("enforce"):
+            out = self._dispatch_mismatch()["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_invalid_env_value_denies_with_note(self):
+        """不正値は enforce に倒し、理由を文面に残す (黙って無視しない)。"""
+        self._write_accounts({"github": "Mao-o"})
+        with self._with_mode("yes"):
+            out = self._dispatch_mismatch()["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("不正な値", out["permissionDecisionReason"])
+
+    def test_invalid_file_mode_denies_with_note(self):
+        self._write_accounts({"github": "Mao-o", "$mode": "sometimes"})
+        out = self._dispatch_mismatch()["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn('"$mode"', out["permissionDecisionReason"])
+
+    def test_invalid_env_value_is_reported_even_when_file_mode_is_off(self):
+        """`off` で抜けるときも env の綴り間違いは通知する。
+
+        `CLOUD_ACCOUNT_GUARD_MODE=of` (typo) + `"$mode": "off"` は結果としては
+        利用者の意図どおり通るが、note を捨てると「env で off にできている」と
+        誤解したまま env が直らない (マージ前レビューの指摘)。deny は作らず
+        `additionalContext` だけを返す。
+        """
+        self._write_accounts({"github": "Mao-o", "$mode": "off"})
+        with self._with_mode("of"):
+            with mock.patch("services.github.verify") as verify:
+                out = dispatch("gh pr list", str(self.project_dir))
+        self.assertFalse(verify.called, "off なのに verify() を呼んでいる")
+        self.assertIsNotNone(out, "env の不正値が黙って捨てられている")
+        out = out["hookSpecificOutput"]
+        self.assertNotIn("permissionDecision", out)
+        self.assertIn("不正な値", out["additionalContext"])
+
+    def test_file_mode_off_without_env_note_stays_silent(self):
+        """negative control: 通知すべき note が無ければ何も返さない (従来どおり)。"""
+        self._write_accounts({"github": "Mao-o", "$mode": "off"})
+        self.assertIsNone(dispatch("gh pr list", str(self.project_dir)))
+
+    def test_mode_key_is_not_verified_as_a_service(self):
+        """`"$mode"` は service キーとして扱わない (未記載 deny を誘発しない)。"""
+        self._write_accounts({"github": "Mao-o", "$mode": "enforce"})
+        with mock.patch("services.github.verify", return_value=None) as verify:
+            self.assertIsNone(dispatch("gh pr list", str(self.project_dir)))
+        self.assertTrue(verify.called)
+
+    def test_warn_mode_keeps_unconfigured_message(self):
+        with self._with_mode("warn"):
+            out = dispatch("gh pr list", str(self.project_dir))[
+                "hookSpecificOutput"
+            ]
+        self.assertNotIn("permissionDecision", out)
+        self.assertIn("未設定", out["additionalContext"])
+
+
+class TestReadOnlyTierIsWarnOnly(BaseWithTmpProject):
+    """QUERY tier (リモート read) は不一致でも止めず警告だけ返す — v0.14.0。
+
+    **判定表を緩めるのはこの 1 箇所だけ**なので、緩める側 (QUERY が warn になること)
+    と緩めない側 (WRITE / DISCLOSING / 設定が壊れている系は deny のまま) の両方を
+    固定する。片方だけだと、`query_warn` を常に True にする / 常に False にする
+    どちらの壊し方も検出できない。
+    """
+
+    MISMATCH = "GitHub [github.com] アカウント不一致: 現在=other, 期待=Mao-o"
+
+    def _out(self, command, verify_result=None):
+        with mock.patch("services.github.verify", return_value=verify_result) as v:
+            result = dispatch(command, str(self.project_dir))
+        self.verify_mock = v
+        return result
+
+    def test_query_mismatch_allows_with_warning(self):
+        self._write_accounts({"github": "Mao-o"})
+        out = self._out("gh pr list", self.MISMATCH)["hookSpecificOutput"]
+        self.assertNotIn("permissionDecision", out, "リモート read を deny している")
+        self.assertIn("現在=other", out["additionalContext"])
+        self.assertIn("期待=Mao-o", out["additionalContext"])
+
+    def test_query_warning_explains_the_escape_hatch_back_to_deny(self):
+        self._write_accounts({"github": "Mao-o"})
+        context = self._out("gh pr list", self.MISMATCH)["hookSpecificOutput"][
+            "additionalContext"
+        ]
+        self.assertIn('"$readonly"', context)
+        self.assertIn("書込系コマンドは deny", context)
+
+    def test_write_mismatch_still_denies(self):
+        self._write_accounts({"github": "Mao-o"})
+        out = self._out("gh pr create", self.MISMATCH)["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_disclosing_options_revoke_readonly(self):
+        """開示 option / 形が付くと READONLY を取り消して deny 側に回る。"""
+        self._write_accounts(
+            {
+                "github": "Mao-o",
+                "kubectl": "ctx",
+                "aws": "123456789012",
+                "firebase": "proj-dev",
+            }
+        )
+        rows = [
+            ("github", "gh auth status --show-token"),
+            ("github", "gh auth status -t"),
+            ("github", "gh auth token"),
+            ("kubectl", "kubectl config view --raw"),
+            ("kubectl", "kubectl cluster-info dump"),
+            ("aws", "aws configure get aws_secret_access_key"),
+            ("aws", "aws configure export-credentials --profile prod"),
+            ("firebase", "firebase login:ci"),
+        ]
+        for key, command in rows:
+            with self.subTest(command=command), self.isolated_cache():
+                with mock.patch(f"services.{key}.verify", return_value="不一致") as v:
+                    result = dispatch(command, str(self.project_dir))
+                self.assertTrue(v.called, "開示形が検証されていない (素通し)")
+                self.assertEqual(
+                    result["hookSpecificOutput"]["permissionDecision"],
+                    "deny",
+                    "開示形の不一致は止める",
+                )
+
+    def test_disclosing_allows_when_account_matches(self):
+        """一致していれば通る (= remediation loop にならない)。"""
+        self._write_accounts({"github": "Mao-o"})
+        self.assertIsNone(self._out("gh auth status --show-token", None))
+
+    def test_unaudited_option_runs_verify_but_only_warns(self):
+        """宣言外の option が付いた READONLY 形は QUERY に降格する (deny しない)。"""
+        self._write_accounts({"github": "Mao-o"})
+        out = self._out("gh auth status --json", self.MISMATCH)["hookSpecificOutput"]
+        self.assertTrue(self.verify_mock.called, "降格したのに検証していない")
+        self.assertNotIn("permissionDecision", out)
+
+    def test_query_mismatch_is_not_cached(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=self.MISMATCH) as v:
+            dispatch("gh pr list", str(self.project_dir))
+            dispatch("gh pr list", str(self.project_dir))
+        self.assertEqual(v.call_count, 2, "不一致 (警告) を cache している")
+
+    def test_query_success_is_cached(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            self.assert_cache_published("gh pr list", v)
+
+    def test_unconfigured_project_warns_for_query(self):
+        """未設定でもリモート read は止めない (install 直後の離脱要因を消す)。"""
+        out = self._out("gh pr list", None)["hookSpecificOutput"]
+        self.assertNotIn("permissionDecision", out)
+        self.assertIn("accounts.local.json", out["additionalContext"])
+        # 止めていないのに「このコマンドも deny されます」と書くと文面が結果と
+        # 矛盾する (キー欠落の経路と同じ分岐。片方だけ deny 文面を流用していた)。
+        # header の「書込系コマンドは deny されます」は将来の write の話なので別。
+        self.assertNotIn(
+            "キーの無い service のコマンドも deny されます", out["additionalContext"]
+        )
+        self.assertIn("実行は止めません", out["additionalContext"])
+
+    def test_unconfigured_write_keeps_the_deny_wording(self):
+        """WRITE では従来どおり deny 文面のまま (分岐が空でないことの対)。"""
+        out = self._out("gh pr create", None)["hookSpecificOutput"]
+        self.assertIn(
+            "キーの無い service のコマンドも deny されます",
+            out["permissionDecisionReason"],
+        )
+
+    def test_unconfigured_project_still_denies_write(self):
+        out = self._out("gh pr create", None)["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_unconfigured_project_denies_a_chain_that_contains_a_write(self):
+        """未設定の判定は**ファイルを読む前**に確定するので、そこでも tier を見る。
+
+        この経路は per-target のループより手前で return するため、
+        `test_chained_query_and_write_denies` (accounts あり) では踏めない。
+        同一 service の混在 (1 target に畳まれて WRITE になる) と、別 service の
+        混在 (target が 2 つ) の両方を見る — 後者だけが「全 target が QUERY か」
+        (`all`) と「どれか QUERY か」(`any`) を区別できる。
+        """
+        for command in (
+            "gh pr list && gh pr create",
+            "gh pr list && gcloud run deploy svc",
+        ):
+            with self.subTest(command=command):
+                result = dispatch(command, str(self.project_dir))
+                # warn 出力は `permissionDecision` を持たないので、添字で直接読むと
+                # 「警告で通った」が KeyError (error) になり、失敗理由が
+                # assert の不一致として読めない。先に deny 形であることを確かめる。
+                out = result["hookSpecificOutput"]
+                self.assertIsNotNone(out.get("permissionDecision"), "deny していない")
+                self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_missing_key_warns_for_query(self):
+        self._write_accounts({"aws": "123456789012"})
+        out = self._out("gh pr list", None)["hookSpecificOutput"]
+        self.assertNotIn("permissionDecision", out)
+        self.assertIn('"github" キーがありません', out["additionalContext"])
+        # 止めていないのに「deny します」と書くと文面が結果と矛盾する。
+        self.assertNotIn("deny します", out["additionalContext"])
+        self.assertIn("実行は止めません", out["additionalContext"])
+
+    def test_broken_config_still_denies_for_query(self):
+        """**設定が壊れている / 曖昧な**ときは tier に関係なく deny のまま。
+
+        「アカウントが合っていない」のではなく「どの設定が効くか決まらない」状態で、
+        読むだけでも判定の土台が無い。引数なしの状態確認コマンドは READONLY なので
+        デッドロックにもならない。
+        """
+        cases = {
+            "malformed": lambda: (self.new_dir / "accounts.local.json").write_text(
+                "{not json", encoding="utf-8"
+            ),
+            "non_object": lambda: (self.new_dir / "accounts.local.json").write_text(
+                '["a"]', encoding="utf-8"
+            ),
+            "invalid_value_type": lambda: self._write_accounts({"github": 12345}),
+            "path_conflict": lambda: (
+                self._write_accounts({"github": "new"}),
+                self._write_deprecated_accounts({"github": "old"}),
+            ),
+        }
+        for name, setup in cases.items():
+            with self.subTest(case=name):
+                for path in (
+                    self.new_dir / "accounts.local.json",
+                    self.claude_dir / "accounts.local.json",
+                ):
+                    if path.exists():
+                        path.unlink()
+                setup()
+                result = dispatch("gh pr list", str(self.project_dir))
+                self.assertEqual(
+                    result["hookSpecificOutput"]["permissionDecision"], "deny", name
+                )
+
+    def test_chained_query_and_write_denies(self):
+        """同じ service に QUERY と WRITE が混ざったら厳しい側 (deny)。"""
+        self._write_accounts({"github": "Mao-o"})
+        out = self._out("gh pr list && gh pr create", self.MISMATCH)[
+            "hookSpecificOutput"
+        ]
+        # warn 出力にはこのキーが無い。添字で直接読むと「警告で通った」が
+        # KeyError (error) になり失敗理由が読み取れないため、先に形を確かめる。
+        self.assertIsNotNone(out.get("permissionDecision"), "deny していない")
+        self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_query_service_does_not_soften_another_services_write(self):
+        self._write_accounts({"github": "Mao-o", "gcloud": "my-proj"})
+        with mock.patch("services.github.verify", return_value=self.MISMATCH), \
+             mock.patch("services.gcloud.verify", return_value="GCP 不一致"):
+            out = dispatch(
+                "gh pr list && gcloud run deploy svc", str(self.project_dir)
+            )["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        reason = out["permissionDecisionReason"]
+        self.assertIn("GCP 不一致", reason)
+        self.assertNotIn(
+            "現在=other",
+            reason,
+            "止めていない QUERY の不一致を deny の理由に混ぜている",
+        )
+
+    def test_readonly_policy_deny_restores_the_old_behaviour(self):
+        self._write_accounts({"github": "Mao-o", "$readonly": "deny"})
+        out = self._out("gh pr list", self.MISMATCH)["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_readonly_policy_warn_is_the_default_value(self):
+        self._write_accounts({"github": "Mao-o", "$readonly": "warn"})
+        out = self._out("gh pr list", self.MISMATCH)["hookSpecificOutput"]
+        self.assertNotIn("permissionDecision", out)
+
+    def test_invalid_readonly_policy_denies_with_note(self):
+        self._write_accounts({"github": "Mao-o", "$readonly": "yes"})
+        out = self._out("gh pr list", self.MISMATCH)["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn('"$readonly"', out["permissionDecisionReason"])
+
+    def test_readonly_key_is_not_verified_as_a_service(self):
+        self._write_accounts({"github": "Mao-o", "$readonly": "warn"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            self.assertIsNone(dispatch("gh pr create", str(self.project_dir)))
+        self.assertEqual(v.call_args[0][0], "Mao-o")
+
+    def test_warn_mode_header_wins_over_query_header(self):
+        """mode=warn は全 tier を warn にするので、前置きを二重にしない。"""
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch.dict(os.environ, {"CLOUD_ACCOUNT_GUARD_MODE": "warn"}):
+            context = self._out("gh pr list", self.MISMATCH)["hookSpecificOutput"][
+                "additionalContext"
+            ]
+        self.assertIn("warn モード", context)
+        self.assertNotIn("リモート read のみ", context)
+
+    def test_off_mode_skips_query_verification(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch.dict(os.environ, {"CLOUD_ACCOUNT_GUARD_MODE": "off"}):
+            with mock.patch("services.github.verify") as v:
+                self.assertIsNone(dispatch("gh pr list", str(self.project_dir)))
+        self.assertFalse(v.called)
+
+    def test_expired_budget_warns_instead_of_denying_for_query(self):
+        """QUERY は不一致でも通すので、検証しきれなかったことを理由に止めない。"""
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("core.budget.expired", return_value=True):
+            with mock.patch("services.github.verify") as v:
+                out = dispatch("gh pr list", str(self.project_dir))[
+                    "hookSpecificOutput"
+                ]
+        self.assertFalse(v.called)
+        self.assertNotIn("permissionDecision", out)
+        self.assertIn("予算", out["additionalContext"])
+        self.assertNotIn("deny します", out["additionalContext"])
+
+    def test_expired_budget_still_denies_write(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("core.budget.expired", return_value=True):
+            out = dispatch("gh pr create", str(self.project_dir))[
+                "hookSpecificOutput"
+            ]
+        self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_query_commands_are_verified_at_all(self):
+        """空振り防止: QUERY を「検証しない」にしてしまうと警告も出ない。"""
+        self._write_accounts({"github": "Mao-o", "aws": "123456789012"})
+        rows = [("github", "gh pr list"), ("aws", "aws sso list-accounts -t x")]
+        for key, command in rows:
+            with self.subTest(command=command), self.isolated_cache():
+                with mock.patch(f"services.{key}.verify", return_value=None) as v:
+                    self.assertIsNone(dispatch(command, str(self.project_dir)))
+                self.assertTrue(v.called, "QUERY が検証されていない")
+
+
+class TestGlobalDefaultAccounts(BaseWithTmpProject):
+    """グローバル既定 (`$HOME/.claude/cloud-account-guard/accounts.local.json`)。"""
+
+    def setUp(self):
+        super().setUp()
+        self.home = Path(self.tmp) / "fake_home"
+        self.global_dir = self.home / ".claude" / "cloud-account-guard"
+        self.global_dir.mkdir(parents=True)
+        patcher = mock.patch.object(
+            Path, "home", staticmethod(lambda: self.home)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _write_global(self, data: dict):
+        (self.global_dir / "accounts.local.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+
+    def test_global_default_is_used_when_project_has_nothing(self):
+        self._write_global({"github": "global-user"})
+        with mock.patch("services.github.verify", return_value=None) as verify:
+            self.assertIsNone(dispatch("gh pr list", str(self.project_dir)))
+        self.assertTrue(verify.called)
+        self.assertEqual(verify.call_args[0][0], "global-user")
+
+    def test_global_default_deny_names_the_file(self):
+        self._write_global({"github": "global-user"})
+        with mock.patch("services.github.verify", return_value="不一致"):
+            result = dispatch("gh pr create", str(self.project_dir))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("グローバル既定", reason)
+        self.assertIn(str(self.global_dir / "accounts.local.json"), reason)
+
+    def test_project_file_takes_priority(self):
+        self._write_global({"github": "global-user"})
+        self._write_accounts({"github": "project-user"})
+        with mock.patch("services.github.verify", return_value=None) as verify:
+            self.assertIsNone(dispatch("gh pr list", str(self.project_dir)))
+        self.assertEqual(verify.call_args[0][0], "project-user")
+
+    def test_global_mode_off_applies_to_projects_without_own_config(self):
+        """グローバル既定の `"$mode"` は accounts.local.json を持たない側に効く。"""
+        self._write_global({"$mode": "off"})
+        with mock.patch("services.github.verify") as verify:
+            self.assertIsNone(dispatch("gh pr list", str(self.project_dir)))
+        self.assertFalse(verify.called)
+
+    def test_global_mode_off_does_not_apply_to_project_with_own_config(self):
+        """自前の accounts.local.json があるプロジェクトは global を一切読まない。
+
+        「グローバル既定に書けば全プロジェクトの既定になる」という書き方は
+        **設定済みで deny が出ている人には効かない**ので過大主張になる
+        (マージ前レビューの指摘)。docs の文面と実装を一致させたことを固定する。
+        """
+        self._write_global({"$mode": "off"})
+        self._write_accounts({"github": "project-user"})
+        with mock.patch("services.github.verify", return_value="不一致") as verify:
+            result = dispatch("gh pr create", str(self.project_dir))
+        self.assertTrue(verify.called, "global の off がプロジェクト側に漏れている")
+        self.assertEqual(
+            result["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+
+    def test_unconfigured_deny_mentions_the_global_path(self):
+        reason = dispatch("gh pr create", str(self.project_dir))[
+            "hookSpecificOutput"
+        ]["permissionDecisionReason"]
+        self.assertIn(str(self.global_dir / "accounts.local.json"), reason)
+
+
+class TestAncestorLookup(unittest.TestCase):
+    """親ディレクトリ遡及による accounts.local.json 発見 (worktree 対応)。
+
+    レイアウトイメージ:
+        tmp/parent_repo/                                ← 親 repo (本体)
+        tmp/parent_repo/.claude/cloud-account-guard/accounts.local.json
+        tmp/parent_repo/worktree-branch/                ← cwd (worktree)
+        tmp/parent_repo/worktree-branch/.claude/...     ← (任意で配置)
+    """
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+
+        # 親 repo
+        self.parent_dir = Path(self.tmp) / "parent_repo"
+        self.parent_dir.mkdir()
+        self.parent_claude = self.parent_dir / ".claude"
+        self.parent_claude.mkdir()
+        self.parent_new_dir = self.parent_claude / "cloud-account-guard"
+        self.parent_new_dir.mkdir()
+
+        # worktree (cwd)
+        self.worktree_dir = self.parent_dir / "worktree-branch"
+        self.worktree_dir.mkdir()
+
+        self._cache_tmp = Path(self.tmp) / "cache_tmp"
+        self._cache_tmp.mkdir()
+
+        self._env_patcher = mock.patch.dict(
+            os.environ,
+            {
+                "CLAUDE_PROJECT_DIR": str(self.worktree_dir),
+                "TMPDIR": str(self._cache_tmp),
+            },
+        )
+        self._env_patcher.start()
+        self.addCleanup(self._env_patcher.stop)
+
+    def _write_parent_new(self, data: dict):
+        (self.parent_new_dir / "accounts.local.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+
+    def _write_parent_deprecated(self, data: dict):
+        (self.parent_claude / "accounts.local.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+
+    def _write_worktree_new(self, data: dict):
+        wt_dir = self.worktree_dir / ".claude" / "cloud-account-guard"
+        wt_dir.mkdir(parents=True, exist_ok=True)
+        (wt_dir / "accounts.local.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+
+    def test_ancestor_new_path_verifies_silently(self):
+        """worktree に accounts なし → 親の新パスを採用し verify 成功 → silent。"""
+        self._write_parent_new({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            result = dispatch("gh pr list", str(self.worktree_dir))
+        self.assertIsNone(result)
+        v.assert_called_once()
+
+    def test_ancestor_new_path_verify_failure_includes_ancestor_note(self):
+        """親採用で verify 失敗時、deny reason に親の絶対パスが含まれる。"""
+        self._write_parent_new({"github": "Mao-o"})
+        with mock.patch(
+            "services.github.verify", return_value="GitHub 不一致"
+        ):
+            result = dispatch("gh pr create", str(self.worktree_dir))
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        reason = out["permissionDecisionReason"]
+        self.assertIn("GitHub 不一致", reason)
+        # 親遡及採用の注釈 (親 repo の絶対パス) が含まれる
+        self.assertIn(str(self.parent_dir), reason)
+        self.assertIn("親ディレクトリ", reason)
+
+    def test_worktree_takes_priority_over_ancestor(self):
+        """worktree 自身に accounts があれば親は見ない (cwd 優先)。"""
+        self._write_parent_new({"github": "parent-user"})
+        self._write_worktree_new({"github": "worktree-user"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            result = dispatch("gh pr list", str(self.worktree_dir))
+        self.assertIsNone(result)
+        # worktree 側の値で verify されたことを確認
+        self.assertEqual(v.call_args[0][0], "worktree-user")
+
+    def test_ancestor_conflict_returns_deny_with_ancestor_note(self):
+        """親階層に複数 tier 同居 → fail-closed deny に親階層注釈付き。"""
+        self._write_parent_new({"github": "A"})
+        self._write_parent_deprecated({"github": "B"})
+        result = dispatch("gh pr list", str(self.worktree_dir))
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        reason = out["permissionDecisionReason"]
+        self.assertIn("複数のパス", reason)
+        self.assertIn(str(self.parent_dir), reason)
+        self.assertIn("親ディレクトリ", reason)
+
+    def test_no_ancestor_returns_unconfigured_deny(self):
+        """親含め一切無い → 通常の「未設定」deny (親注釈なし)。"""
+        result = dispatch("gh pr create", str(self.worktree_dir))
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        reason = out["permissionDecisionReason"]
+        self.assertIn("未設定", reason)
+        # 親階層情報は無い
+        self.assertNotIn("親ディレクトリ", reason)
+
+    def test_ancestor_deprecated_path_warns_with_both_notes(self):
+        """親に deprecated パスがある場合、warn に migration note + 親注釈。"""
+        self._write_parent_deprecated({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None):
+            result = dispatch("gh pr list", str(self.worktree_dir))
+        out = result["hookSpecificOutput"]
+        self.assertIn("additionalContext", out)
+        ctx = out["additionalContext"]
+        # deprecation note と親階層注釈が両方含まれる
+        self.assertIn("migrate", ctx)
+        self.assertIn("親ディレクトリ", ctx)
+        self.assertIn(str(self.parent_dir), ctx)
+
+
+class TestAncestorDepthLimit(unittest.TestCase):
+    """親遡及の max_levels 制限を paths.py 側で検証する単体テスト。"""
+
+    def test_depth_limit_stops_search(self):
+        import shutil
+        import tempfile
+        from core import paths as paths_mod
+
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+
+        # /tmp/.../a/b/c/d/e/f/g/h/i/j/k/cwd と深くネストして
+        # ルート ("/tmp/.../a") に accounts.local.json を置く
+        deep = Path(tmp)
+        levels = ["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9", "L10", "L11", "cwd"]
+        for lv in levels:
+            deep = deep / lv
+            deep.mkdir()
+        anchor = Path(tmp) / "L0"
+        (anchor / ".claude" / "cloud-account-guard").mkdir(parents=True)
+        (anchor / ".claude" / "cloud-account-guard" / "accounts.local.json").write_text(
+            "{}", encoding="utf-8"
+        )
+
+        # 制限内 (cwd から 13 階層上は anchor → max_levels=13 で見える)
+        found, resolved = paths_mod.discover_accounts_files_with_ancestors(
+            str(deep), max_levels=14
+        )
+        self.assertEqual(len(found), 1)
+        self.assertEqual(resolved, anchor.resolve())
+
+        # 制限外 (max_levels=5 だと anchor まで届かない)
+        found, resolved = paths_mod.discover_accounts_files_with_ancestors(
+            str(deep), max_levels=5
+        )
+        self.assertEqual(found, [])
+        self.assertIsNone(resolved)
+
+
+class TestCacheIntegration(BaseWithTmpProject):
+    def test_second_call_hits_cache(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch(
+            "services.github.verify", return_value=None
+        ) as mock_verify:
+            dispatch("gh pr list", str(self.project_dir))
+            dispatch("gh pr view 1", str(self.project_dir))
+        self.assertEqual(mock_verify.call_count, 1)
+
+    def test_accounts_mtime_change_invalidates_cache(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch(
+            "services.github.verify", return_value=None
+        ) as mock_verify:
+            dispatch("gh pr list", str(self.project_dir))
+            # mtime を強制的に変化させる
+            accounts_path = self.new_dir / "accounts.local.json"
+            stat = accounts_path.stat()
+            os.utime(accounts_path, (stat.st_atime + 100, stat.st_mtime + 100))
+            dispatch("gh pr list", str(self.project_dir))
+        self.assertEqual(mock_verify.call_count, 2)
+
+    def test_failure_is_not_cached(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch(
+            "services.github.verify", return_value="不一致"
+        ) as mock_verify:
+            dispatch("gh pr list", str(self.project_dir))
+            dispatch("gh pr view 1", str(self.project_dir))
+        self.assertEqual(mock_verify.call_count, 2)
+
+
+class TestIdentityEnvCacheIntegration(BaseWithTmpProject):
+    """hook プロセスの env の変化でも成功 cache を使い回さない (v0.17.0)。
+
+    プロジェクトごとの固定 (`.claude/settings.local.json` の `env` に `AWS_PROFILE`
+    等を書く) では、アカウントを決めるのは行頭の inline env ではなく hook プロセスの
+    env になる。settings の `env` は保存した時点で起動中のセッションに反映されるので、
+    cache キーがそれを見ないと、値を変えた直後の TTL の間は前の値での成功で通る。
+    同じリポジトリを固定したセッションと固定していないセッションも cache を共有しない。
+    """
+
+    AWS_WRITE = "aws s3 rm s3://vca-probe-bucket/key"
+
+    def test_process_env_profile_change_reverifies(self):
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value=None) as mock_verify:
+            with mock.patch.dict(os.environ, {"AWS_PROFILE": "a"}):
+                dispatch(self.AWS_WRITE, str(self.project_dir))
+            with mock.patch.dict(os.environ, {"AWS_PROFILE": "b"}):
+                dispatch(self.AWS_WRITE, str(self.project_dir))
+        self.assertEqual(mock_verify.call_count, 2)
+
+    def test_pinned_and_unpinned_sessions_do_not_share_cache(self):
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value=None) as mock_verify:
+            with mock.patch.dict(os.environ, {}):
+                os.environ.pop("AWS_PROFILE", None)
+                dispatch(self.AWS_WRITE, str(self.project_dir))
+            with mock.patch.dict(os.environ, {"AWS_PROFILE": "pinned"}):
+                dispatch(self.AWS_WRITE, str(self.project_dir))
+        self.assertEqual(mock_verify.call_count, 2)
+
+    def test_same_process_env_uses_cache(self):
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value=None) as mock_verify:
+            with mock.patch.dict(os.environ, {"AWS_PROFILE": "a"}):
+                dispatch(self.AWS_WRITE, str(self.project_dir))
+                dispatch(self.AWS_WRITE, str(self.project_dir))
+        self.assertEqual(mock_verify.call_count, 1)
+
+    def test_inline_value_decides_the_key_over_process_env(self):
+        """行頭の inline env がある変数は、実行時に効くその値でキーを作る。
+
+        CLI が使うのは inline の値なので、hook プロセス側の同じ変数が変わっても
+        同じ entry を使ってよい (再検証は不要)。
+        """
+        self._write_accounts({"aws": "123456789012"})
+        command = "AWS_PROFILE=a " + self.AWS_WRITE
+        with mock.patch("services.aws.verify", return_value=None) as mock_verify:
+            with mock.patch.dict(os.environ, {"AWS_PROFILE": "x"}):
+                dispatch(command, str(self.project_dir))
+            with mock.patch.dict(os.environ, {"AWS_PROFILE": "y"}):
+                dispatch(command, str(self.project_dir))
+        self.assertEqual(mock_verify.call_count, 1)
+
+    def test_unrelated_env_change_keeps_cache(self):
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value=None) as mock_verify:
+            with mock.patch.dict(os.environ, {"VCA_UNRELATED_PROBE": "1"}):
+                dispatch(self.AWS_WRITE, str(self.project_dir))
+            with mock.patch.dict(os.environ, {"VCA_UNRELATED_PROBE": "2"}):
+                dispatch(self.AWS_WRITE, str(self.project_dir))
+        self.assertEqual(mock_verify.call_count, 1)
+
+    def test_gcloud_active_config_change_reverifies(self):
+        self._write_accounts({"gcloud": "vca-probe-project"})
+        write = "gcloud run deploy svc --image vca-probe-image"
+        with mock.patch("services.gcloud.verify", return_value=None) as mock_verify:
+            with mock.patch.dict(os.environ, {"CLOUDSDK_ACTIVE_CONFIG_NAME": "a"}):
+                dispatch(write, str(self.project_dir))
+            with mock.patch.dict(os.environ, {"CLOUDSDK_ACTIVE_CONFIG_NAME": "b"}):
+                dispatch(write, str(self.project_dir))
+        self.assertEqual(mock_verify.call_count, 2)
+
+    def test_github_config_dir_change_reverifies(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None) as mock_verify:
+            with mock.patch.dict(os.environ, {"GH_CONFIG_DIR": "/vca-probe/a"}):
+                dispatch("gh pr create --fill", str(self.project_dir))
+            with mock.patch.dict(os.environ, {"GH_CONFIG_DIR": "/vca-probe/b"}):
+                dispatch("gh pr create --fill", str(self.project_dir))
+        self.assertEqual(mock_verify.call_count, 2)
+
+
+class TestInlineEnvPropagation(BaseWithTmpProject):
+    """インライン env がマージされ verify(env=...) に伝播することの統合テスト (要望1)。"""
+
+    def test_inline_env_merged_into_verify(self):
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value=None) as mock_verify:
+            result = dispatch("AWS_PROFILE=prod aws s3 ls", str(self.project_dir))
+        self.assertIsNone(result)
+        env = mock_verify.call_args.kwargs.get("env")
+        self.assertIsNotNone(env)
+        self.assertEqual(env.get("AWS_PROFILE"), "prod")
+        # hook プロセスの env もマージされている (PATH 等が温存される)
+        self.assertIn("PATH", env)
+
+    def test_no_inline_env_passes_none(self):
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value=None) as mock_verify:
+            dispatch("aws s3 ls", str(self.project_dir))
+        # インライン env 無し → env=None (親環境継承)
+        self.assertIsNone(mock_verify.call_args.kwargs.get("env"))
+
+    def test_different_profile_bypasses_cache(self):
+        """profile が異なれば cache hit せず再検証される (誤 allow 防止)。"""
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value=None) as mock_verify:
+            dispatch("AWS_PROFILE=a aws s3 ls", str(self.project_dir))
+            dispatch("AWS_PROFILE=b aws s3 ls", str(self.project_dir))
+        self.assertEqual(mock_verify.call_count, 2)
+
+    def test_same_profile_uses_cache(self):
+        """同一 profile の連続実行は cache hit で verify 1 回。"""
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value=None) as mock_verify:
+            dispatch("AWS_PROFILE=a aws s3 ls", str(self.project_dir))
+            dispatch("AWS_PROFILE=a aws s3 ls", str(self.project_dir))
+        self.assertEqual(mock_verify.call_count, 1)
+
+    def test_compound_distinct_profiles_each_verified(self):
+        """単一 dispatch の複合コマンドでも profile が異なれば各々検証する (P1 誤 allow 防止)。
+
+        `AWS_PROFILE=prod aws ... && AWS_PROFILE=dev aws ...` で prod だけ検証し
+        dev を無検証 allow する穴 (service 単位集約) を塞いだことの回帰テスト。
+        """
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value=None) as mock_verify:
+            dispatch(
+                "AWS_PROFILE=prod aws s3 cp a b && AWS_PROFILE=dev aws s3 rm c",
+                str(self.project_dir),
+            )
+        self.assertEqual(mock_verify.call_count, 2)
+        seen = {
+            (call.kwargs.get("env") or {}).get("AWS_PROFILE")
+            for call in mock_verify.call_args_list
+        }
+        self.assertEqual(seen, {"prod", "dev"})
+
+    def test_compound_same_profile_verified_once(self):
+        """複合コマンドでも同一 profile なら (service, env) に集約され verify は 1 回。"""
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value=None) as mock_verify:
+            dispatch(
+                "AWS_PROFILE=prod aws s3 cp a b && AWS_PROFILE=prod aws s3 rm c",
+                str(self.project_dir),
+            )
+        self.assertEqual(mock_verify.call_count, 1)
+
+
+class TestInfoCommandsReadonly(BaseWithTmpProject):
+    """情報系コマンド (version / help) は検証対象外 (要望4)。"""
+
+    def test_command_aws_version_skipped(self):
+        self._write_accounts({"aws": "123456789012"})
+        # `command` wrapper 剥がし後 `aws --version` → READONLY → 検証スキップ
+        self.assertIsNone(dispatch("command aws --version", str(self.project_dir)))
+
+    def test_aws_help_skipped(self):
+        self._write_accounts({"aws": "123456789012"})
+        self.assertIsNone(dispatch("aws help", str(self.project_dir)))
+
+    def test_gcloud_version_skipped(self):
+        self._write_accounts({"gcloud": "p"})
+        self.assertIsNone(dispatch("gcloud version", str(self.project_dir)))
+
+    def test_gh_version_skipped(self):
+        self._write_accounts({"github": "Mao-o"})
+        self.assertIsNone(dispatch("gh --version", str(self.project_dir)))
+
+    def test_kubectl_version_skipped(self):
+        self._write_accounts({"kubectl": "ctx"})
+        self.assertIsNone(dispatch("kubectl version", str(self.project_dir)))
+
+    def test_firebase_version_skipped(self):
+        self._write_accounts({"firebase": "proj"})
+        self.assertIsNone(dispatch("firebase --version", str(self.project_dir)))
+
+
+class TestSwitchStandaloneNote(BaseWithTmpProject):
+    """切替を案内する deny には「単独で実行せよ」の注記が付く。
+
+    案内された切替を、切替後に実行したいコマンドと連結して打つと連結先が
+    切替前の状態で検証されて再び deny される。注記が無いと案内どおりに打った
+    つもりの往復が起きる (マージ前レビューの指摘ではなく実運用で観測)。
+    """
+
+    _MISMATCH = (
+        "GitHub [github.com] アカウント不一致: 現在=other, 期待=Mao-o"
+        " — 切り替え: gh auth switch --hostname github.com --user Mao-o"
+    )
+
+    def _reason(self, command: str, verify_value: str) -> str:
+        with mock.patch("services.github.verify", return_value=verify_value):
+            result = dispatch(command, str(self.project_dir))
+        self.assertIsNotNone(result)
+        return result["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_switch_hint_deny_carries_standalone_note(self):
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._reason("gh pr create", self._MISMATCH)
+        self.assertIn("案内された形のまま単独で実行してください", reason)
+        # 注記は検出コマンド行の後、末尾側に 1 回だけ
+        self.assertEqual(reason.count("案内された形のまま単独で実行してください"), 1)
+        self.assertLess(reason.index("(検出コマンド:"), reason.index("案内された形のまま"))
+
+    def test_chained_switch_and_write_is_denied_with_note(self):
+        """案内どおりの切替を write と連結した形: 切替は self-remediation だが
+        連結先が切替前の状態で検証され deny。その deny にも注記が付く。"""
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._reason(
+            "gh auth switch --hostname github.com --user Mao-o && gh pr create",
+            self._MISMATCH,
+        )
+        self.assertIn("案内された形のまま単独で実行してください", reason)
+        self.assertRegex(reason, r"\(検出コマンド: .*gh pr create\)")
+
+    def test_login_guidance_carries_note(self):
+        """ログイン案内も remediation コマンド (readonly) で、連結すると同じ往復に
+        なるため注記を付ける。"""
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._reason(
+            "gh pr create",
+            "GitHub [github.com]: このホストにログインしていません — "
+            "gh auth login --hostname github.com --skip-ssh-key を実行してください。",
+        )
+        self.assertIn("案内された形のまま単独で実行してください", reason)
+
+    def test_note_absent_for_config_shape_error(self):
+        """設定ファイルの型不正 (remediation コマンドの案内なし) には注記を付けない。"""
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._reason(
+            "gh pr create",
+            'GitHub: accounts.local.json の "github" は文字列またはオブジェクトで'
+            "指定してください (現在: int)。",
+        )
+        self.assertNotIn("案内された形のまま単独で実行してください", reason)
+
+    def test_note_is_not_extracted_as_guided_command(self):
+        """注記本文が remediation contract の案内コマンド抽出に拾われない
+        (拾われると allow 経路の無いコマンドとして contract テストが落ちる)。"""
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._reason("gh pr create", self._MISMATCH)
+        cmds = _guided_commands(reason)
+        self.assertEqual(cmds, ["gh auth switch --hostname github.com --user Mao-o"])
+
+
+    def test_unset_state_guidance_carries_note(self):
+        """未設定系 (「<cmd> を実行してください」) の案内にも注記が付く。"""
+        self._write_accounts({"gcloud": {"project": "my-proj"}})
+        with mock.patch(
+            "services.gcloud.verify",
+            return_value="GCP: アクティブプロジェクトが設定されていません。"
+            "gcloud config set project my-proj を実行してください。",
+        ):
+            result = dispatch("gcloud run deploy x", str(self.project_dir))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("案内された形のまま単独で実行してください", reason)
+
+    def test_user_controlled_marker_text_does_not_trigger_note(self):
+        """検出コマンド (user 入力) に文言契約の語が含まれても、verify() の出力が
+        remediation を案内していなければ注記は付かない。"""
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._reason(
+            "gh pr create --title '切り替え: を実行してください'",
+            'GitHub: accounts.local.json の "github" は文字列またはオブジェクトで'
+            "指定してください (現在: int)。",
+        )
+        self.assertIn("切り替え: を実行してください", reason)  # 検出コマンド行に残る
+        self.assertNotIn("案内された形のまま単独で実行してください", reason)
+
+
+    def test_no_note_when_the_value_was_not_guided(self):
+        """値をコマンドの形で案内しなかった deny には注記を付けない。
+
+        `期待=<値>` の表示に REMEDIATION_PATTERNS の形を書いた値が当たると、案内して
+        いないのに注記が付き、文面で唯一コマンドの形をしたその値の実行を促していた
+        (マージ前レビューの指摘)。verify は mock せず、CLI の出力だけを差し替える。
+        """
+        gh_status = (
+            "github.com\n  ✓ Logged in to github.com account other (keyring)\n"
+            "  - Active account: true\n"
+        )
+        for svc, expected, stdout, command in (
+            ("kubectl", "x; kubectl config use-context evil", "dev-ctx\n", "kubectl apply -f x.yaml"),
+            ("gcloud", "x; gcloud config set project evil", "other\n", "gcloud run deploy svc"),
+            ("firebase", "x; firebase use evil", "proj-other\n", "firebase deploy"),
+            ("github", "x; gh auth switch --user evil", gh_status, "gh pr create"),
+        ):
+            with self.subTest(svc=svc):
+                self._write_accounts({svc: expected})
+                fake = SimpleNamespace(stdout=stdout, stderr="", returncode=0)
+                with self.isolated_cache(), mock.patch("subprocess.run", return_value=fake):
+                    out = dispatch(command, str(self.project_dir))["hookSpecificOutput"]
+                self.assertEqual(out["permissionDecision"], "deny")
+                reason = out["permissionDecisionReason"]
+                self.assertIn("手で確認してください", reason)
+                self.assertNotIn("案内された形のまま単独で実行してください", reason)
+
+    def test_no_note_from_a_displayed_firebaserc_value(self):
+        """`--project <alias>` の不一致は flag を直す案内で、切替は案内しない。`.firebaserc` の
+        alias の行き先 (`(→ <project>)`) が切替コマンドの形でも、表示だけで注記を付けない。
+
+        行き先はリポジトリのファイルの値で、UNSAFE の文を伴わないので、表示した値が
+        REMEDIATION_PATTERNS に当たると注記が付いていた (マージ前レビューの指摘)。許容形の
+        行き先は今までどおり表示する (対照)。
+        """
+        (self.project_dir / "firebase.json").write_text("{}", encoding="utf-8")
+        self._write_accounts({"firebase": "right-project"})
+        fake = SimpleNamespace(stdout="", stderr="", returncode=1)
+        for target, shown in (
+            ("wrong-project", "(→ wrong-project)"),
+            ("x; firebase use evil", "(→ 表示しない値)"),
+            ("wrong-project\nfirebase use evil-project", "(→ 表示しない値)"),
+        ):
+            with self.subTest(target=target):
+                (self.project_dir / ".firebaserc").write_text(
+                    json.dumps({"projects": {"prod": target}}), encoding="utf-8"
+                )
+                with self.isolated_cache(), mock.patch("subprocess.run", return_value=fake):
+                    out = dispatch("firebase deploy --project prod", str(self.project_dir))[
+                        "hookSpecificOutput"
+                    ]
+                self.assertEqual(out["permissionDecision"], "deny")
+                reason = out["permissionDecisionReason"]
+                self.assertNotIn("案内された形のまま単独で実行してください", reason)
+                self.assertNotIn("firebase use evil", reason)
+                self.assertIn(f"コマンド指定 --project prod {shown},", reason)
+                self.assertIn("--project を外すか --project right-project を指定してください", reason)
+
+    def test_no_note_from_a_displayed_github_host(self):
+        """gh の dict 期待値で値が文字列でない entry は `GitHub [<host>]: 期待値は文字列で…` と
+        host を表示するだけで、切替もログインも案内しない。host (accounts.local.json のキー) が
+        切替コマンドの形でも、表示だけで注記を付けない (host は許容形のときだけ表示する。
+        マージ前レビューの指摘)。"""
+        gh_status = (
+            "github.com\n  ✓ Logged in to github.com account me (keyring)\n"
+            "  - Active account: true\n"
+        )
+        self._write_accounts(
+            {"github": {"github.com": "me", "x gh auth switch --user evil": 1}}
+        )
+        fake = SimpleNamespace(stdout=gh_status, stderr="", returncode=0)
+        with self.isolated_cache(), mock.patch("subprocess.run", return_value=fake):
+            out = dispatch("gh pr create", str(self.project_dir))["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        reason = out["permissionDecisionReason"]
+        self.assertNotIn("案内された形のまま単独で実行してください", reason)
+        self.assertNotIn("gh auth switch", reason)
+        self.assertIn("GitHub [表示しない host]: 期待値は文字列で指定してください", reason)
+
+    def test_aws_note_is_kept_when_profile_names_are_not_guided(self):
+        """aws は許容形から外れた profile 名を文 (UNSAFE) に置き換えたうえで
+        `AWS_PROFILE=<profile>` を必ず案内するので、その文があっても AWS 専用の注記を
+        落とさない (落とすと使い方の説明だけが消える。マージ前レビューの指摘)。外れた名前が
+        一部のときと、全部のとき。"""
+        self._write_accounts({"aws": "123456789012"})
+        config = self.project_dir / "aws_config"
+        fake = SimpleNamespace(stdout="111111111111\n", stderr="", returncode=0)
+        for profiles, guided in (
+            (("x; touch pwned", "prod"), "AWS_PROFILE=prod aws ..."),
+            (("x; touch pwned",), "AWS_PROFILE=<profile> aws ..."),
+        ):
+            with self.subTest(profiles=profiles):
+                config.write_text(
+                    "".join(
+                        f"[profile {name}]\nsso_account_id = 123456789012\n" for name in profiles
+                    ),
+                    encoding="utf-8",
+                )
+                with self.isolated_cache(), mock.patch.dict(
+                    os.environ, {"AWS_CONFIG_FILE": str(config)}
+                ), mock.patch("subprocess.run", return_value=fake):
+                    out = dispatch("aws s3 rm s3://b/k", str(self.project_dir))[
+                        "hookSpecificOutput"
+                    ]
+                self.assertEqual(out["permissionDecision"], "deny")
+                reason = out["permissionDecisionReason"]
+                self.assertIn(shell_word.UNSAFE, reason)  # 外れた名前を文にした deny であること
+                self.assertIn(guided, reason)
+                self.assertIn("AWS_PROFILE=<profile> は元のコマンドの行頭に付けて", reason)
+
+    def test_install_advice_does_not_trigger_note(self):
+        """CLI 未インストール案内 (`brew install gh を実行してください`) は cloud CLI の
+        切替 / ログインではないので注記を付けない (マージ前レビューの指摘)。"""
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._reason(
+            "gh pr create",
+            "GitHub: gh コマンドが見つかりません。brew install gh を実行してください。",
+        )
+        self.assertNotIn("案内された形のまま単独で実行してください", reason)
+
+    def test_every_service_declares_remediation_patterns(self):
+        """全 service が REMEDIATION_PATTERNS を持ち、空でなく、コンパイルできる。"""
+        import re as _re
+        from services import ALL
+        for svc in ALL:
+            with self.subTest(service=svc.ACCOUNT_KEY):
+                pats = getattr(svc, "REMEDIATION_PATTERNS", None)
+                self.assertIsInstance(pats, tuple)
+                self.assertTrue(pats)
+                for p in pats:
+                    _re.compile(p)
+
+    def test_probe_name_only_diagnostic_does_not_trigger_note(self):
+        """コマンド名だけの診断文 (`firebase use がタイムアウトしました`) は案内ではない
+        (マージ前レビューの指摘)。"""
+        self._write_accounts({"firebase": "my-proj"})
+        with mock.patch(
+            "services.firebase.verify",
+            return_value="Firebase: firebase use がタイムアウトしました。"
+            "再試行するか、ネットワーク接続を確認してください。",
+        ):
+            result = dispatch("firebase deploy", str(self.project_dir))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertNotIn("案内された形のまま単独で実行してください", reason)
+
+    def test_note_allows_guided_chain_and_forbids_appending_original(self):
+        """firebase の案内 `firebase login && firebase use <x>` 自体は許可される連結。
+        注記はそれを禁じず、元のコマンドの連結だけを禁じる文面であること。"""
+        self._write_accounts({"firebase": "my-proj"})
+        with mock.patch(
+            "services.firebase.verify",
+            return_value="Firebase: 現在のプロジェクトを取得できません。"
+            "firebase login && firebase use my-proj を実行してください。",
+        ):
+            result = dispatch("firebase deploy", str(self.project_dir))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("案内された形のまま単独で実行してください", reason)
+        self.assertIn("元のコマンド (検出コマンド) を同じコマンド行に連結すると", reason)
+        # 案内された連結形は実際に allow される (readonly login + self-remediation use)
+        with mock.patch("services.firebase.verify", return_value=None) as v:
+            self.assertIsNone(
+                dispatch("firebase login && firebase use my-proj", str(self.project_dir))
+            )
+        v.assert_not_called()
+
+
+    def test_aws_uses_service_specific_note(self):
+        """AWS の remediation はインライン env (元のコマンドに付ける) なので、汎用の
+        「単独で実行」注記ではなく AWS 専用文面を出す (マージ前レビューの指摘)。"""
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch(
+            "services.aws.verify",
+            return_value="AWS アカウント不一致: 現在=999999999999, 期待=123456789012\n"
+            "切り替え手順 (環境に応じて選択):\n"
+            "  AWS_PROFILE=prod aws ...  # 行頭インライン指定\n"
+            "  aws sso login --profile prod  # SSO 再ログイン",
+        ):
+            result = dispatch("aws s3 cp a s3://b", str(self.project_dir))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("AWS_PROFILE=<profile> は元のコマンドの行頭に付けて", reason)
+        self.assertNotIn("案内された形のまま単独で実行してください", reason)
+        # 注記は案内本文が出し分けるコマンド名 (aws configure 等) を固定で書かない
+        # (不一致時は configure を案内しないため食い違う。マージ前レビューの指摘)
+        self.assertNotIn("aws configure", reason.split("※", 1)[1])
+
+    def test_mixed_services_emit_each_note_once(self):
+        """gh と aws が同時に不一致なら、汎用注記と AWS 注記がそれぞれ 1 回ずつ。"""
+        self._write_accounts({"github": "Mao-o", "aws": "123456789012"})
+        with mock.patch("services.github.verify", return_value=self._MISMATCH), mock.patch(
+            "services.aws.verify",
+            return_value="AWS アカウント不一致: 現在=9, 期待=1\n  AWS_PROFILE=prod aws ...",
+        ):
+            result = dispatch(
+                "gh pr create && aws s3 cp a s3://b", str(self.project_dir)
+            )
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertEqual(reason.count("案内された形のまま単独で実行してください"), 1)
+        self.assertEqual(reason.count("AWS_PROFILE=<profile> は元のコマンドの行頭に付けて"), 1)
+
+
+class TestAccountSwitchInvalidation(BaseWithTmpProject):
+    """内部バックログ: アカウント状態を変えうるコマンド (切替 / ログイン系) を検出
+    したら、当該 service の成功 cache を PreToolUse 時点で破棄し、切替コマンド自身の
+    検証成功も cache しない。切替後の最初の write が必ず再検証されることを固定する。
+    (0.7.3 までは 30 秒の成功 cache が切替後も有効で、別アカウントの write が通った)"""
+
+    def test_gh_switch_to_other_then_write_reverifies(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            # 1) verify OK → cache 書込
+            self.assertIsNone(dispatch("gh pr list", str(self.project_dir)))
+            # 2) 期待値以外への切替: cache 破棄 → 実行前の状態を再検証 (OK) → cache なし
+            self.assertIsNone(
+                dispatch("gh auth switch --user other", str(self.project_dir))
+            )
+            # 3) 切替後の write は cache hit せず再検証 → 不一致なら deny
+            v.return_value = "GitHub [github.com] アカウント不一致: 現在=other, 期待=Mao-o"
+            result = dispatch("gh pr create", str(self.project_dir))
+        self.assertEqual(v.call_count, 3)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_switch_itself_does_not_seed_cache(self):
+        """切替コマンドの検証成功 (実行前の状態) を cache に残すと、直後の write が
+        切替後の状態を検証せずに通る。"""
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            dispatch("gh auth switch --user other", str(self.project_dir))
+            dispatch("gh pr create", str(self.project_dir))
+        self.assertEqual(v.call_count, 2)
+
+    def test_readonly_login_invalidates_cache(self):
+        """`gh auth login --skip-ssh-key` は検証しない (readonly) が、成功 cache は破棄する。"""
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            dispatch("gh pr list", str(self.project_dir))
+            self.assert_cache_published("gh pr list", v)
+            self.assertIsNone(dispatch("gh auth login --skip-ssh-key", str(self.project_dir)))
+            self.assertEqual(v.call_count, 1)
+            dispatch("gh pr create", str(self.project_dir))
+        self.assertEqual(v.call_count, 2)
+
+    def test_self_remediation_invalidates_cache(self):
+        """期待値への切替 (self-remediation) も無条件に cache を破棄する
+        (切替が失敗して状態が変わらなかった場合に古い成功が残らないように)。"""
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            dispatch("gh pr list", str(self.project_dir))
+            self.assert_cache_published("gh pr list", v)
+            self.assertIsNone(dispatch("gh auth switch -u Mao-o", str(self.project_dir)))
+            self.assertEqual(v.call_count, 1)
+            dispatch("gh pr create", str(self.project_dir))
+        self.assertEqual(v.call_count, 2)
+
+    def test_every_service_switch_invalidates_cache(self):
+        """service ごとの切替 / ログイン系コマンドの後、write が再検証される。"""
+        rows = [
+            # (accounts key, expected, warm write, switch command, write)
+            ("github", "Mao-o", "gh pr list", "gh auth logout", "gh pr create"),
+            ("github", "Mao-o", "gh pr list", "gh auth refresh -s repo", "gh pr create"),
+            ("gcloud", "my-proj", "gcloud run deploy", "gcloud config set project other", "gcloud run deploy"),
+            ("gcloud", "my-proj", "gcloud run deploy", "gcloud config set account x@example.com", "gcloud run deploy"),
+            ("gcloud", "my-proj", "gcloud run deploy", "gcloud config configurations activate work", "gcloud run deploy"),
+            ("gcloud", "my-proj", "gcloud run deploy", "gcloud auth login", "gcloud run deploy"),
+            ("gcloud", "my-proj", "gcloud run deploy", "gcloud auth activate-service-account --key-file=k.json", "gcloud run deploy"),
+            ("firebase", "proj-dev", "firebase deploy", "firebase use other", "firebase deploy"),
+            ("firebase", "proj-dev", "firebase deploy", "firebase use --clear", "firebase deploy"),
+            ("firebase", "proj-dev", "firebase deploy", "firebase login", "firebase deploy"),
+            ("firebase", "proj-dev", "firebase deploy", "firebase login:use other@example.com", "firebase deploy"),
+            ("kubectl", "ctx", "kubectl apply -f x.yaml", "kubectl config use-context other", "kubectl apply -f x.yaml"),
+            ("kubectl", "ctx", "kubectl apply -f x.yaml", "kubectl config set-context --current --namespace=x", "kubectl apply -f x.yaml"),
+            ("aws", "123456789012", "aws s3 cp a b", "aws sso login --profile prod", "aws s3 cp a b"),
+            ("aws", "123456789012", "aws s3 cp a b", "aws configure", "aws s3 cp a b"),
+            ("aws", "123456789012", "aws s3 cp a b", "aws configure set profile.x.region us-east-1", "aws s3 cp a b"),
+            ("aws", "123456789012", "aws s3 cp a b", "aws login", "aws s3 cp a b"),
+        ]
+        for key, expected, warm, switch, write in rows:
+            # cache dir を row ごとに作り直す。共有すると前 row の tombstone で
+            # warm-up が cache を publish できず、この test が vacuous になる。
+            with self.subTest(switch=switch), self.isolated_cache():
+                self._write_accounts({key: expected})
+                with mock.patch(f"services.{key}.verify", return_value=None) as v:
+                    self.assertIsNone(dispatch(warm, str(self.project_dir)))
+                    self.assertEqual(v.call_count, 1)
+                    # 「切替で無効化された」と言えるためには、まず cache がある状態を
+                    # 作れていなければならない。publish を推測せず観測する。
+                    self.assert_cache_published(warm, v)
+                    self.assertIsNone(dispatch(switch, str(self.project_dir)))
+                    after_switch = v.call_count
+                    self.assertIsNone(dispatch(write, str(self.project_dir)))
+                # 切替後の write は cache hit せず必ず再検証される
+                self.assertEqual(v.call_count, after_switch + 1)
+
+    def test_readonly_login_compound_with_query_is_not_cached(self):
+        """L2 P1: readonly の login (cands に入らない) と検証対象セグメントを同一
+        コマンドで実行しても、その service の検証成功は cache しない
+        (判定は service 単位)。
+
+        後段は **QUERY tier** を使う。v0.15.0 で「期待値以外 / 不明への切替 +
+        同 service の WRITE」は連結そのものが deny になり (下記
+        TestChainedSwitchAndWrite)、cache を論じる前に止まるため。QUERY は
+        write 側に数えないので、この経路 (cands に入らない切替 + 検証される
+        セグメント) はここでしか確認できない。
+        """
+        self._write_accounts({"github": "Mao-o", "gcloud": "my-proj"})
+        rows = [
+            ("github", "gh auth login --with-token < other.txt && gh pr list", "gh pr list"),
+            (
+                "gcloud",
+                "gcloud auth activate-service-account --key-file=sa.json && gcloud projects list",
+                "gcloud projects list",
+            ),
+        ]
+        for key, compound, second in rows:
+            with self.subTest(compound=compound):
+                with mock.patch(f"services.{key}.verify", return_value=None) as v:
+                    self.assertIsNone(dispatch(compound, str(self.project_dir)))
+                    self.assertEqual(v.call_count, 1)
+                    dispatch(second, str(self.project_dir))
+                self.assertEqual(v.call_count, 2)
+
+    def test_switch_with_different_inline_env_target_is_not_cached(self):
+        """切替セグメントと write セグメントの inline env が異なり別 target になっても、
+        同 service の write 側の成功を cache しない。
+
+        切替先は**期待値**にする (v0.15.0: 期待値以外への切替 + write の連結は
+        deny されるため)。切替 target は self-remediation で verify されず、
+        write target だけが検証されるが、cache 判定は service 単位なので
+        その成功も publish されない。
+        """
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            self.assertIsNone(
+                dispatch(
+                    "gh auth switch --user Mao-o && GH_HOST=github.com gh pr create",
+                    str(self.project_dir),
+                )
+            )
+            self.assertEqual(v.call_count, 1)
+            dispatch("GH_HOST=github.com gh pr create", str(self.project_dir))
+        self.assertEqual(v.call_count, 2)
+
+    def test_cross_cli_kubeconfig_switch_invalidates_kubectl_cache(self):
+        """L2 P2: 別 CLI / plugin が kubeconfig の current-context を書き換える形
+        (PATTERNS に一致しない候補を含む) でも kubectl の cache を破棄する。"""
+        self._write_accounts({"kubectl": "ctx", "gcloud": "my-proj", "aws": "123456789012"})
+        for switch in (
+            "gcloud container clusters get-credentials c --region r",
+            "aws eks update-kubeconfig --name c",
+            "az aks get-credentials -g rg -n c",
+            "kubectx other",
+            "kubectl ctx other",
+        ):
+            # cache dir ごと作り直す。以前は `cache.invalidate("kubectl")` で前 subTest の
+            # cache を消していたが、invalidate は tombstone も立てるため直後の warm-up が
+            # cache を publish できず、この test 全体が vacuous になっていた。
+            with self.subTest(switch=switch), self.isolated_cache():
+                with mock.patch("services.kubectl.verify", return_value=None) as v, \
+                     mock.patch("services.gcloud.verify", return_value=None), \
+                     mock.patch("services.aws.verify", return_value=None):
+                    dispatch("kubectl apply -f x.yaml", str(self.project_dir))
+                    self.assertEqual(v.call_count, 1)
+                    self.assert_cache_published("kubectl apply -f x.yaml", v)
+                    dispatch(switch, str(self.project_dir))
+                    # `kubectl ctx other` は kubectl の write として自身も検証される
+                    # (cache はしない)。他は kubectl の target にならない
+                    after_switch = v.call_count
+                    dispatch("kubectl apply -f x.yaml", str(self.project_dir))
+                self.assertEqual(v.call_count, after_switch + 1)
+
+    def test_npx_firebase_tools_forms(self):
+        """`npx firebase-tools ...` (剥がし後 `firebase-tools ...`) も firebase と同じ
+        readonly / self-remediation / 無効化の扱いになる。"""
+        self._write_accounts({"firebase": {"default": "proj-dev", "prod": "proj-prod"}})
+        with mock.patch("services.firebase.verify", return_value="不一致") as v:
+            for cmd in ("npx firebase-tools login", "npx firebase-tools use", "npx firebase-tools use prod"):
+                with self.subTest(cmd=cmd):
+                    self.assertIsNone(dispatch(cmd, str(self.project_dir)))
+            v.assert_not_called()
+        # 上の subTest ループの `login` / `use prod` が tombstone を立てているので、
+        # cache dir を作り直さないと warm-up が publish できず vacuous になる。
+        with self.isolated_cache(), \
+                mock.patch("services.firebase.verify", return_value=None) as v:
+            dispatch("npx firebase-tools deploy", str(self.project_dir))
+            self.assert_cache_published("npx firebase-tools deploy", v)
+            self.assertIsNone(dispatch("npx firebase-tools use other", str(self.project_dir)))
+            dispatch("npx firebase-tools deploy", str(self.project_dir))
+        self.assertEqual(v.call_count, 3)
+
+    def test_switch_does_not_invalidate_other_services(self):
+        self._write_accounts({"github": "Mao-o", "aws": "123456789012"})
+        with mock.patch("services.github.verify", return_value=None), \
+             mock.patch("services.aws.verify", return_value=None) as aws_v:
+            dispatch("aws s3 cp a b", str(self.project_dir))
+            dispatch("gh auth switch --user other", str(self.project_dir))
+            dispatch("aws s3 cp a b", str(self.project_dir))
+        self.assertEqual(aws_v.call_count, 1)
+
+    def test_compound_switch_and_write_is_not_cached(self):
+        """`firebase use prod && firebase deploy` (期待値内の切替 + write) は実行前の
+        状態で 1 回検証するが、成功を cache しないため次の deploy は再検証される。"""
+        self._write_accounts({"firebase": {"default": "proj-dev", "prod": "proj-prod"}})
+        with mock.patch("services.firebase.verify", return_value=None) as v:
+            self.assertIsNone(
+                dispatch("firebase use prod && firebase deploy", str(self.project_dir))
+            )
+            self.assertEqual(v.call_count, 1)
+            dispatch("firebase deploy", str(self.project_dir))
+        self.assertEqual(v.call_count, 2)
+
+    def test_display_only_commands_keep_cache(self):
+        """状態を変えない readonly (`firebase use` 引数なし / `gh auth status` /
+        `gcloud config get-value`) は cache を破棄しない (過剰な再検証を避ける)。"""
+        rows = [
+            ("github", "Mao-o", "gh pr list", "gh auth status", "gh pr create"),
+            ("firebase", "proj-dev", "firebase deploy", "firebase use", "firebase deploy"),
+            ("gcloud", "my-proj", "gcloud run deploy", "gcloud config get-value project", "gcloud run deploy"),
+            ("kubectl", "ctx", "kubectl apply -f x.yaml", "kubectl config current-context", "kubectl apply -f x.yaml"),
+            ("aws", "123456789012", "aws s3 cp a b", "aws sts get-caller-identity", "aws s3 cp a b"),
+        ]
+        for key, expected, warm, readonly, write in rows:
+            with self.subTest(readonly=readonly):
+                self._write_accounts({key: expected})
+                with mock.patch(f"services.{key}.verify", return_value=None) as v:
+                    dispatch(warm, str(self.project_dir))
+                    self.assertIsNone(dispatch(readonly, str(self.project_dir)))
+                    dispatch(write, str(self.project_dir))
+                self.assertEqual(v.call_count, 1)
+
+    def test_switch_invalidates_even_without_accounts_file(self):
+        """accounts 未設定 (deny) の状態でも切替コマンドは cache を破棄する
+        (設定追加 → 切替 → write の順でも古い成功が残らない)。"""
+        from core import cache
+
+        cache.set_success("github", str(self.project_dir), "Mao-o", 1.0)
+        # readonly の login は未設定でも allow (deny しない) かつ cache 破棄
+        self.assertIsNone(dispatch("gh auth login --skip-ssh-key", str(self.project_dir)))
+        self.assertFalse(cache.get_success("github", str(self.project_dir), "Mao-o", 1.0))
+
+
+class TestChainedSwitchAndWrite(BaseWithTmpProject):
+    """内部バックログ (v0.15.0): 「期待値以外への切替 + 同 service の write」の連結を deny。
+
+    hook は PreToolUse で 1 回しか動かないため、`gh auth switch --user other &&
+    gh pr create` は **切替前**の状態で検証される。現在値が期待値と一致していれば
+    allow され、切替後 (期待外) のアカウントで write が走っていた
+    (0.14.0 までは README の既知の制限として開示するだけだった)。
+
+    以下の各テストは `verify` を **成功 (None) で mock** する = 切替前のアカウントは
+    期待値と一致している状態。0.14.0 ではこれが allow の根拠になっていたので、
+    deny を主張するテストはこの形でしか意味を持たない。
+    """
+
+    _MARKER = "切替と書込を同一コマンドに連結しています"
+
+    def _dispatch(self, command: str, service: str = "github", verify_value=None):
+        with mock.patch(f"services.{service}.verify", return_value=verify_value) as v:
+            result = dispatch(command, str(self.project_dir))
+        return result, v
+
+    def _assert_chain_denied(self, command: str, service: str = "github"):
+        result, v = self._dispatch(command, service)
+        self.assertIsNotNone(result, f"連結形が allow された: {command}")
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn(self._MARKER, out["permissionDecisionReason"])
+        # 現在値が何であっても切替後は検証できないので CLI は呼ばない
+        # (確実に deny になるコマンドで実時間予算を使わない)。
+        self.assertFalse(v.called, f"deny 確定なのに verify を呼んでいる: {command}")
+        return out["permissionDecisionReason"]
+
+    def _assert_no_chain_deny(self, command: str, service: str = "github"):
+        result, v = self._dispatch(command, service)
+        if result is not None:
+            self.assertNotIn(
+                self._MARKER,
+                result["hookSpecificOutput"].get("permissionDecisionReason", "")
+                + result["hookSpecificOutput"].get("additionalContext", ""),
+                f"新規則が発火してはいけない形で発火した: {command}",
+            )
+        return result, v
+
+    # --- deny になる形 ---
+
+    def test_switch_to_other_then_write_is_denied(self):
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._assert_chain_denied(
+            "gh auth switch --user other && gh pr create"
+        )
+        # 案内は**期待値へ**切り替える形で書く。「切替を単独で実行せよ」だけだと
+        # 検出コマンド行 (`--user other`) を単独実行する読みになり、それは allow
+        # されるので 2 往復かかり、かつ gh の状態が期待外に移ったまま残る。
+        self.assertIn("期待値 (Mao-o) へ切り替える操作を単独で実行してから", reason)
+        self.assertIn("gh auth switch --user other", reason)
+        self.assertIn("gh pr create", reason)
+
+    def test_deny_reason_names_the_expected_value_for_dict_entries(self):
+        """dict 期待値は `key=値` の列で載せる (キーの意味は service ごとに違う)。"""
+        self._write_accounts({"github": {"github.com": "Mao-o"}})
+        reason = self._assert_chain_denied(
+            "gh auth switch --user other && gh pr create"
+        )
+        self.assertIn("期待値 (github.com=Mao-o) へ", reason)
+
+    def test_separator_variants_are_denied(self):
+        """`;` / 改行のような別の区切りでも同じ連結として扱う。"""
+        self._write_accounts({"github": "Mao-o"})
+        for command in (
+            "gh auth switch --user other; gh pr create",
+            "gh auth switch --user other\ngh pr create",
+            "gh auth switch --user other && echo ok && gh pr create",
+        ):
+            with self.subTest(command=command):
+                self._assert_chain_denied(command)
+
+    def test_switch_target_unknown_statically_is_denied(self):
+        """切替先が静的に判らない形は deny 側に倒す (判らないから通す = ガードが消える)。"""
+        self._write_accounts({"github": "Mao-o"})
+        for command in (
+            "gh auth switch && gh pr create",
+            "gh auth switch --user $GH_USER && gh pr create",
+            'gh auth switch --user "$GH_USER" && gh pr create',
+        ):
+            with self.subTest(command=command):
+                self._assert_chain_denied(command)
+
+    def test_readonly_login_then_write_is_denied(self):
+        """readonly 扱いの切替 (login 系) も切替先が判らないので deny 側。"""
+        self._write_accounts({"github": "Mao-o", "gcloud": "my-proj"})
+        self._assert_chain_denied("gh auth login --skip-ssh-key && gh pr create")
+        self._assert_chain_denied(
+            "gcloud auth activate-service-account --key-file=sa.json"
+            " && gcloud run deploy svc",
+            service="gcloud",
+        )
+
+    def test_aws_has_no_self_remediation_so_chain_is_denied(self):
+        """aws は期待値 (Account ID) と profile 名の照合が hook からは不能で
+        `is_self_remediation` を宣言しない = 切替先が原理的に判らないため deny 側。
+        単独実行の `aws sso login` は従来どおり readonly で通る。"""
+        self._write_accounts({"aws": "123456789012"})
+        self._assert_chain_denied(
+            "aws sso login --profile prod && aws s3 cp a s3://b", service="aws"
+        )
+        result, v = self._dispatch("aws sso login --profile prod", service="aws")
+        self.assertIsNone(result)
+        self.assertFalse(v.called)
+
+    def test_switch_then_disclosing_read_is_denied(self):
+        """DISCLOSING (WRITE 扱い) も write 側に数える — 期待外アカウントの
+        認証情報が切替後に出力されるため。"""
+        self._write_accounts({"github": "Mao-o"})
+        self._assert_chain_denied("gh auth switch --user other && gh auth token")
+
+    def test_cross_cli_switch_then_write_is_denied(self):
+        """別 CLI が kubeconfig を書き換える形 (kubectl の PATTERNS に一致しない) でも、
+        kubectl の write が続けば deny する。"""
+        self._write_accounts({"kubectl": "ctx", "gcloud": "my-proj"})
+        with mock.patch("services.gcloud.verify", return_value=None):
+            self._assert_chain_denied(
+                "gcloud container clusters get-credentials c --region r"
+                " && kubectl apply -f x.yaml",
+                service="kubectl",
+            )
+
+    def test_firebase_switch_to_other_then_deploy_is_denied(self):
+        self._write_accounts({"firebase": {"default": "proj-dev", "prod": "proj-prod"}})
+        self._assert_chain_denied(
+            "firebase use proj-other && firebase deploy", service="firebase"
+        )
+
+    def test_cached_success_does_not_mask_the_chain_deny(self):
+        """成功 cache があっても連結は deny する (cache hit で素通りすると穴が残る)。
+
+        現状は二重の防御 — 切替を含む service は `switching_here` で cache を読まない
+        ため、規則を cache hit 判定の**後**に移す mutation ではこのテストは落ちない
+        (実測)。`switching_here` 側を将来触ったときの床として置く。
+        """
+        self._write_accounts({"github": "Mao-o"})
+        with self.isolated_cache():
+            with mock.patch("services.github.verify", return_value=None) as v:
+                dispatch("gh pr create", str(self.project_dir))
+                self.assert_cache_published("gh pr create", v)
+            self._assert_chain_denied("gh auth switch --user other && gh pr create")
+
+    def test_deny_reason_does_not_advertise_the_chained_commands(self):
+        """検出コマンド行は案内コマンドとして抽出されない (remediation 契約を汚さない)。"""
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._assert_chain_denied(
+            "gh auth switch --user other && gh pr create"
+        )
+        self.assertEqual(_guided_commands(reason), [])
+
+    # --- deny にならない形 (判定表の据え置き) ---
+
+    def test_switch_to_expected_then_write_is_unchanged(self):
+        """期待値へ向かう切替 (self-remediation) + write は従来どおり
+        「切替前の状態で通常検証」。新しい deny は生えない。"""
+        self._write_accounts({"github": "Mao-o"})
+        result, v = self._assert_no_chain_deny(
+            "gh auth switch --user Mao-o && gh pr create"
+        )
+        self.assertIsNone(result)
+        self.assertEqual(v.call_count, 1)
+
+    def test_switch_then_query_is_unchanged(self):
+        """QUERY / READONLY は write 側に数えない (リモートを変えないため)。"""
+        self._write_accounts({"github": "Mao-o"})
+        for command in (
+            "gh auth switch --user other && gh pr list",
+            "gh auth switch --user other && gh auth status",
+        ):
+            with self.subTest(command=command):
+                result, _v = self._assert_no_chain_deny(command)
+                self.assertIsNone(result)
+
+    def test_readonly_policy_deny_does_not_promote_query_to_write(self):
+        """`"$readonly": "deny"` は QUERY 不一致の扱いを戻す設定で、セグメントの
+        tier を変える設定ではない (連結規則の write 側には数えない)。"""
+        self._write_accounts({"github": "Mao-o", "$readonly": "deny"})
+        result, v = self._assert_no_chain_deny(
+            "gh auth switch --user other && gh pr list"
+        )
+        self.assertIsNone(result)
+        self.assertEqual(v.call_count, 1)
+
+    def test_write_before_switch_is_unchanged(self):
+        """write が切替より前なら、その write は検証済みの状態で走る。"""
+        self._write_accounts({"github": "Mao-o"})
+        result, v = self._assert_no_chain_deny(
+            "gh pr create && gh auth switch --user other"
+        )
+        self.assertIsNone(result)
+        self.assertEqual(v.call_count, 1)
+
+    def test_switch_alone_is_unchanged(self):
+        """切替セグメント単体 (自分自身も WRITE tier) を自己 flag しない。"""
+        self._write_accounts({"github": "Mao-o"})
+        result, v = self._assert_no_chain_deny("gh auth switch --user other")
+        self.assertIsNone(result)
+        self.assertEqual(v.call_count, 1)
+
+    def test_login_then_expected_switch_is_unchanged(self):
+        """deny 文面自身が案内する連結形 (`firebase login && firebase use <期待>`) は
+        write 側が self-remediation なので deny しない。"""
+        self._write_accounts({"firebase": {"default": "proj-dev", "prod": "proj-prod"}})
+        result, v = self._assert_no_chain_deny(
+            "firebase login && firebase use prod", service="firebase"
+        )
+        self.assertIsNone(result)
+        self.assertFalse(v.called)
+
+    def test_other_service_write_is_not_affected(self):
+        """切替と write が別 service なら連結規則は発火しない。"""
+        self._write_accounts({"github": "Mao-o", "aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value=None) as aws_v:
+            result, gh_v = self._assert_no_chain_deny(
+                "gh auth switch --user other && aws s3 cp a s3://b"
+            )
+        self.assertIsNone(result)
+        self.assertEqual(gh_v.call_count, 1)
+        self.assertEqual(aws_v.call_count, 1)
+
+    # --- identity を変えない STATE_CHANGING は切替側に数えない (v0.15.0) ---
+
+    def test_inert_state_changes_do_not_create_a_chain_deny(self):
+        """`STATE_CHANGING` は cache 破棄が目的なので identity を変えない config
+        変更も含む。それを切替側に数えると、切替ですらない日常形 (kubectl の
+        namespace 切替 / gcloud の region 設定 / gh の scope 追加) に deny が生える。
+        """
+        self._write_accounts({
+            "github": "Mao-o", "gcloud": "my-proj", "kubectl": "ctx",
+        })
+        for command, service in (
+            ("kubectl config set-context --current --namespace=foo"
+             " && kubectl apply -f x.yaml", "kubectl"),
+            ("gcloud config set compute/region us-central1"
+             " && gcloud run deploy svc", "gcloud"),
+            ("gcloud config set disable_prompts true && gcloud run deploy svc",
+             "gcloud"),
+            ("gh auth refresh -s project && gh pr create", "github"),
+        ):
+            with self.subTest(command=command):
+                result, _v = self._assert_no_chain_deny(command, service)
+                self.assertIsNone(result, f"新規に deny された: {command}")
+
+    def test_identity_changing_lookalikes_are_still_denied(self):
+        """inert 宣言は form 単位。同じ subcommand でも identity が変わる形は deny。"""
+        self._write_accounts({
+            "github": "Mao-o", "gcloud": "my-proj", "kubectl": "ctx",
+        })
+        for command, service in (
+            # context 名は変わらないまま認証情報が差し替わる
+            ("kubectl config set-credentials u --token=t && kubectl apply -f x.yaml",
+             "kubectl"),
+            # 位置引数で別 context を書き換える形は inert ではない
+            ("kubectl config set-context other --namespace=foo"
+             " && kubectl apply -f x.yaml", "kubectl"),
+            ("gcloud config set core/account other && gcloud run deploy svc",
+             "gcloud"),
+            # key は inert でも宣言外 option が付いたら inert と言い切れない
+            ("gcloud config set compute/region x --configuration other"
+             " && gcloud run deploy svc", "gcloud"),
+            ("gh auth refresh -u other && gh pr create", "github"),
+        ):
+            with self.subTest(command=command):
+                self._assert_chain_denied(command, service)
+
+    # --- 案内形 + 装飾 option は据え置き (v0.15.0) ---
+
+    def test_guided_switch_with_decoration_options_is_unchanged(self):
+        """案内された切替形に装飾 option を 1 つ足しただけで deny になってはいけない
+        (この述語が deny を抑止する唯一の出口なので、anchored の厳しさが誤 deny に
+        直結する)。"""
+        self._write_accounts({
+            "gcloud": "my-proj", "kubectl": "ctx", "firebase": "proj-dev",
+        })
+        for command, service in (
+            ("gcloud config set project my-proj --quiet && gcloud run deploy svc",
+             "gcloud"),
+            ("kubectl config use-context ctx --v=4 && kubectl apply -f y.yaml",
+             "kubectl"),
+            ("firebase use proj-dev --non-interactive && firebase deploy",
+             "firebase"),
+        ):
+            with self.subTest(command=command):
+                result, _v = self._assert_no_chain_deny(command, service)
+                self.assertIsNone(result, f"新規に deny された: {command}")
+
+    def test_switch_with_landing_spot_options_is_still_denied(self):
+        """着地先を変える option 付きは「期待値への切替」と言えないので deny 側に
+        残す (blanket な option 許容にしない)。"""
+        self._write_accounts({"gcloud": "my-proj", "kubectl": "ctx"})
+        for command, service in (
+            ("gcloud config set project my-proj --configuration other"
+             " && gcloud run deploy svc", "gcloud"),
+            ("kubectl config use-context ctx --kubeconfig=/tmp/kc"
+             " && kubectl apply -f y.yaml", "kubectl"),
+        ):
+            with self.subTest(command=command):
+                self._assert_chain_denied(command, service)
+
+    # --- 例外は deny 側に倒す (床) ---
+
+    def test_self_remediation_exception_falls_to_deny(self):
+        """`_is_expected_switch` の `except Exception: return False` の床。
+        例外を True 側に倒す mutation をここで落とす (docstring / DEVELOPMENT.md が
+        「例外も deny 側に倒してある」と主張しているため)。"""
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch(
+            "services.github.is_self_remediation", side_effect=RuntimeError
+        ):
+            self._assert_chain_denied("gh auth switch --user Mao-o && gh pr create")
+
+    def test_changes_identity_exception_falls_to_deny(self):
+        """`_changes_identity` の `except Exception: return True` の床。
+        inert 判定が壊れたときに「切替ではない」へ倒れると規則が消える。"""
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch(
+            "services.github.changes_identity", side_effect=RuntimeError
+        ):
+            self._assert_chain_denied("gh auth refresh -s project && gh pr create")
+
+    # --- mode は従来どおり全体を弱める ---
+
+    def test_mode_warn_converts_the_chain_deny_into_context(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch.dict(os.environ, {"CLOUD_ACCOUNT_GUARD_MODE": "warn"}):
+            result, _v = self._dispatch(
+                "gh auth switch --user other && gh pr create"
+            )
+        self.assertIsNotNone(result, "warn でも連結の指摘自体は届くこと")
+        out = result["hookSpecificOutput"]
+        self.assertNotIn("permissionDecision", out)
+        self.assertIn(self._MARKER, out["additionalContext"])
+
+    def test_mode_off_skips_the_chain_rule(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch.dict(os.environ, {"CLOUD_ACCOUNT_GUARD_MODE": "off"}):
+            result, v = self._dispatch(
+                "gh auth switch --user other && gh pr create"
+            )
+        self.assertIsNone(result)
+        self.assertFalse(v.called)
+
+    def test_missing_key_deny_still_wins(self):
+        """期待値が未設定なら従来どおり設定誘導の deny (連結規則より先に出る)。"""
+        self._write_accounts({"gcloud": "my-proj"})
+        result, _v = self._dispatch("gh auth switch --user other && gh pr create")
+        self.assertIsNotNone(result)
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn('"github" キーがありません', reason)
+        self.assertNotIn(self._MARKER, reason)
+
+
+class TestLoginCommandsReadonly(BaseWithTmpProject):
+    """内部バックログ: 認証取得系 (login / logout / configure 等) は資源を変更しない
+    ため検証せず allow する。未ログインで検証が失敗する状態でも、deny 文面が案内する
+    ログインコマンド自体が deny される remediation loop にならない。"""
+
+    _ACCOUNTS = {
+        "github": "Mao-o",
+        "aws": "123456789012",
+        "gcloud": "my-proj",
+        "firebase": "proj-dev",
+        "kubectl": "ctx",
+    }
+
+    _LOGIN_COMMANDS = [
+        "aws sso login",
+        "aws sso login --profile prod",
+        "aws sso logout",
+        "aws login",
+        "aws logout",
+        "aws configure",
+        "aws configure sso",
+        "aws configure sso-session",
+        "aws configure list-profiles",
+        "aws configure set region us-east-1 --profile prod",
+        "gh auth login --skip-ssh-key",
+        "gh auth login --skip-ssh-key=true",
+        "gh auth login --hostname ghe.example.com --skip-ssh-key",
+        "gh auth login --with-token < token.txt",
+        "gh auth login --with-token=1 < token.txt",
+        "gh auth login --git-protocol https",
+        "gh auth login -p https --web",
+        "gh auth login --git-protocol=https --hostname ghe.example.com",
+        "gh auth logout --hostname github.com",
+        # `gh auth refresh` はここに置かない (Codex R4 P1) —
+        # test_similar_write_commands_still_verified 側で deny を assert する
+        "gh auth setup-git",
+        "gcloud auth login",
+        "gcloud auth login --update-adc",
+        "gcloud auth application-default login",
+        "gcloud auth activate-service-account --key-file=key.json",
+        "gcloud auth revoke",
+        "firebase login",
+        # `firebase login:ci` は **ここに置かない** — CI 用 refresh token を stdout に
+        # 出す DISCLOSING な形なので検証対象に戻した (0.14.0)。
+        "firebase logout",
+        "npx firebase-tools login",
+        "npx firebase-tools use",
+    ]
+
+    def _patch_all_verify_to_deny(self):
+        patchers = []
+        for svc in ALL_SERVICES:
+            name = svc.__name__.rsplit(".", 1)[-1]
+            p = mock.patch(f"services.{name}.verify", return_value="未ログイン (検証失敗)")
+            patchers.append((name, p.start()))
+            self.addCleanup(p.stop)
+        return dict(patchers)
+
+    def test_login_commands_allowed_without_verify(self):
+        self._write_accounts(self._ACCOUNTS)
+        mocks = self._patch_all_verify_to_deny()
+        for cmd in self._LOGIN_COMMANDS:
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(dispatch(cmd, str(self.project_dir)))
+        for name, m in mocks.items():
+            self.assertEqual(m.call_count, 0, name)
+
+    def test_login_commands_allowed_without_accounts_file(self):
+        """accounts.local.json 未設定でもログイン系は deny しない (初期設定前の
+        `aws sso login` 等が止まらない)。"""
+        for cmd in self._LOGIN_COMMANDS:
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(dispatch(cmd, str(self.project_dir)))
+
+    def test_similar_write_commands_still_verified(self):
+        """ログイン系に似た名前の write / 認証情報を出力する読取 / 期待値以外への切替 /
+        リモートの認可を変更しうる認証系 (`gh auth refresh` の scope 変更) は
+        従来どおり検証される。"""
+        self._write_accounts(self._ACCOUNTS)
+        self._patch_all_verify_to_deny()
+        for cmd in (
+            "aws sso-admin create-permission-set --name x",
+            # `aws sso list-accounts` はリモート read なので QUERY tier
+            # (検証は走るが deny しない) に移した → TestReadOnlyTierIsWarnOnly 側で
+            # 「検証される」ことを assert する。
+            "aws configure export-credentials --profile prod",
+            "gh repo create foo",
+            "gh auth token",
+            "firebase login:ci",
+            # SSH 鍵のアップロードが起きうる login 形は readonly にしない (Codex R2 P1-1)
+            "gh auth login",
+            "gh auth login --web",
+            "gh auth login --hostname ghe.example.com",
+            "gh auth login --git-protocol ssh",
+            "gh auth login -p ssh --skip-ssh-keys",
+            # 明示 false は無効 (Codex R3 P1)
+            "gh auth login --git-protocol ssh --skip-ssh-key=false",
+            "gh auth login --with-token=false < token.txt",
+            "gh auth login -p https --git-protocol ssh",
+            # scope 要求はアカウント側の OAuth grant を拡張するので、鍵操作抑止
+            # flag が付いた login でも検証対象 (Codex R4 P1 の論拠を login にも適用)
+            "gh auth login --skip-ssh-key --scopes admin:org",
+            "gh auth login -s admin:org --skip-ssh-key",
+            "gh auth login -p https -s repo",
+            # `gh auth refresh` はアカウント側の OAuth grant scope を変えうる
+            # (Codex R4 P1)。裸形・scope 指定のどちらも検証対象。
+            "gh auth refresh",
+            "gh auth refresh -s repo",
+            "gh auth refresh --scopes admin:org",
+            "gh auth refresh --remove-scopes repo",
+            "gcloud config set project other",
+            "gcloud auth application-default print-access-token",
+            "firebase use other",
+            "kubectl config use-context other",
+        ):
+            with self.subTest(cmd=cmd):
+                result = dispatch(cmd, str(self.project_dir))
+                self.assertIsNotNone(result)
+                self.assertEqual(
+                    result["hookSpecificOutput"]["permissionDecision"], "deny"
+                )
+
+
+_CLI_CMD_RE = re.compile(
+    r"(?<![\w/.-])"                      # 直前が単語 / パス文字でない (ghe.example.com の gh 等を除外)
+    r"((?:[A-Z][A-Z0-9_]*=\S+\s+)?"      # 任意の行頭インライン env (AWS_PROFILE=prod)
+    r"(?:gh|firebase|aws|gcloud|kubectl)"
+    r"(?:\s+[A-Za-z0-9_.:/=<>@-]+)+)"    # ASCII 引数 1 個以上 (日本語に当たった時点で終端)
+)
+
+
+def _guided_commands(reason: str) -> list[str]:
+    """deny reason から案内されているコマンド行を抽出する (出現順・重複なし)。
+
+    `(検出コマンド: ...)` (D14) は deny を起こしたコマンド自身なので除外する。
+    `&&` は区切りとして扱い、`firebase login && firebase use x` は 2 コマンドになる。
+    """
+    cmds: list[str] = []
+    for line in reason.splitlines():
+        if line.lstrip().startswith("(検出コマンド:"):
+            continue
+        for m in _CLI_CMD_RE.finditer(line):
+            cmd = m.group(1).strip()
+            if cmd not in cmds:
+                cmds.append(cmd)
+    return cmds
+
+
+class TestRemediationGuidanceContract(BaseWithTmpProject):
+    """内部バックログ contract: deny 文面が案内するコマンドは必ず allow 経路にある。
+
+    各 service の verify を mock せず subprocess だけ差し替えて実際の deny 文面を
+    作り、そこから案内コマンドを抽出して dispatcher に通す。案内コマンドは
+    (a) readonly または self-remediation として **検証なしで allow** されるか、
+    (b) `AWS_PROFILE=<profile> aws ...` の行頭インライン指定は **その env で検証**
+    される (案内どおりに打てば検証に反映される) かのどちらかでなければならない。
+    deny → 案内どおり実行 → また deny、の remediation loop をここで機械的に防ぐ。
+    """
+
+    def setUp(self):
+        super().setUp()
+        home = Path(self.tmp) / "home"
+        (home / ".aws").mkdir(parents=True)
+        xdg = Path(self.tmp) / "xdg"
+        xdg.mkdir()
+        patcher = mock.patch.dict(
+            os.environ, {"HOME": str(home), "XDG_CONFIG_HOME": str(xdg)}
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.home = home
+
+    def _write_firebaserc(self, projects: dict) -> None:
+        (self.project_dir / ".firebaserc").write_text(
+            json.dumps({"projects": projects}), encoding="utf-8"
+        )
+
+    def _deny_reason(self, command: str, run_mock) -> str:
+        with mock.patch("subprocess.run", side_effect=run_mock):
+            result = dispatch(command, str(self.project_dir))
+        self.assertIsNotNone(result, f"{command} should be denied")
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        return out["permissionDecisionReason"]
+
+    def _assert_guidance_is_allowed(self, reason: str, run_mock) -> list[str]:
+        cmds = _guided_commands(reason)
+        self.assertTrue(cmds, f"no command extracted from:\n{reason}")
+        # verify() 由来の deny (検出コマンド行を持つ) が案内コマンドを含むなら
+        # 「単独で実行せよ」の注記が必ず付く (各 service の REMEDIATION_PATTERNS が
+        # 案内文を取りこぼしていないことをここで機械的に確認する)。accounts 未設定 deny は
+        # verify 前に返るので対象外。値の一部でもコマンドの形で案内しなかった deny (UNSAFE を
+        # 含む。REMEDIATION_NOTE を持つ aws は除く) にも注記は付かないが、ここの入力は許容形の
+        # 値だけなので当たらない (TestSwitchStandaloneNote.test_no_note_when_the_value_was_not_guided)。
+        if "(検出コマンド:" in reason:
+            self.assertTrue(
+                "案内された形のまま単独で実行してください" in reason
+                or "AWS_PROFILE=<profile> は元のコマンドの行頭に付けて" in reason,
+                f"remediation note missing:\n{reason}",
+            )
+        for cmd in cmds:
+            with self.subTest(guided=cmd):
+                if cmd.startswith("AWS_PROFILE="):
+                    # 行頭インライン指定は「その profile で検証される」ことが契約
+                    profile = cmd.split()[0].split("=", 1)[1]
+                    concrete = cmd.replace("aws ...", "aws s3 cp a s3://b")
+                    with mock.patch("subprocess.run", side_effect=run_mock) as run:
+                        dispatch(concrete, str(self.project_dir))
+                    self.assertTrue(run.called, concrete)
+                    env = run.call_args.kwargs.get("env") or {}
+                    self.assertEqual(env.get("AWS_PROFILE"), profile)
+                    continue
+                with mock.patch("subprocess.run", side_effect=run_mock) as run:
+                    result = dispatch(cmd, str(self.project_dir))
+                self.assertIsNone(result, f"guided command denied: {cmd}\n{reason}")
+                self.assertFalse(run.called, f"guided command was verified: {cmd}")
+        return cmds
+
+    @staticmethod
+    def _const(stdout="", stderr="", returncode=0):
+        fake = SimpleNamespace(stdout=stdout, stderr=stderr, returncode=returncode)
+        return lambda *_a, **_k: fake
+
+    # --- GitHub ---
+
+    def test_github_scalar_mismatch(self):
+        self._write_accounts({"github": "Mao-o"})
+        run = self._const(
+            "github.com\n  ✓ Logged in to github.com account other (keyring)\n"
+            "  - Active account: true\n"
+        )
+        reason = self._deny_reason("gh pr create", run)
+        cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("gh auth switch --hostname github.com --user Mao-o", cmds)
+
+    def test_github_host_not_logged_in(self):
+        self._write_accounts(
+            {"github": {"github.com": "Mao-o", "ghe.example.com": "mao-corp"}}
+        )
+        run = self._const(
+            "github.com\n  ✓ Logged in to github.com account Mao-o (keyring)\n"
+            "  - Active account: true\n"
+        )
+        reason = self._deny_reason("gh pr create", run)
+        cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("gh auth login --hostname ghe.example.com --skip-ssh-key", cmds)
+
+    def test_github_no_active_account(self):
+        """未ログイン時の案内は SSH 鍵アップロードが起きない `--skip-ssh-key` 付きの形
+        (素の `gh auth login` は readonly ではないので案内すると loop になる)。"""
+        self._write_accounts({"github": "Mao-o"})
+        run = self._const("", "You are not logged into any GitHub hosts.\n", 1)
+        reason = self._deny_reason("gh pr create", run)
+        cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("gh auth login --skip-ssh-key", cmds)
+        self.assertNotIn("gh auth login", cmds)
+
+    # --- Firebase ---
+
+    def test_firebase_scalar_mismatch(self):
+        self._write_accounts({"firebase": "proj-dev"})
+        run = self._const("proj-other\n")
+        reason = self._deny_reason("firebase deploy", run)
+        cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("firebase use proj-dev", cmds)
+
+    def test_firebase_dict_mismatch_lists_aliases(self):
+        self._write_accounts({"firebase": {"default": "proj-dev", "prod": "proj-prod"}})
+        self._write_firebaserc({"default": "proj-dev", "prod": "proj-prod"})
+        run = self._const("proj-other\n")
+        reason = self._deny_reason("firebase deploy", run)
+        cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("firebase use default", cmds)
+        self.assertIn("firebase use prod", cmds)
+
+    def test_firebase_unresolved_suggests_login_and_use(self):
+        """未ログイン (`firebase use` 非ゼロ終了) + ローカル設定なし → `firebase login`
+        と `firebase use <期待>` を案内。両方とも検証なしで通る。"""
+        self._write_accounts({"firebase": "proj-dev"})
+        run = self._const("", "Error: not logged in\n", 1)
+        with mock.patch("services.firebase.shutil.which", return_value="/usr/bin/firebase"):
+            reason = self._deny_reason("firebase deploy", run)
+            cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("firebase login", cmds)
+        self.assertIn("firebase use proj-dev", cmds)
+
+    def test_firebase_shadowed_project_id_is_not_guided_and_gets_no_note(self):
+        """期待値 (project ID) と同じ名前の alias が `.firebaserc` で別の project を指すと、
+        `firebase use <期待値>` では期待した project にならない。コマンドを案内しない deny に
+        「案内されたコマンドは単独で実行」の注記を付けない (現在値を取れない deny の
+        `firebase login` の語が REMEDIATION_PATTERNS に当たらないようにしてある)。"""
+        self._write_accounts({"firebase": "fb-prod"})
+        self._write_firebaserc({"fb-prod": "fb-elsewhere", "zz-decoy": "fb-decoy"})
+        with mock.patch("services.firebase.shutil.which", return_value="/usr/bin/firebase"):
+            for label, run in (
+                ("mismatch", self._const("fb-elsewhere\n")),
+                ("unresolved", self._const("", "Error: not logged in\n", 1)),
+            ):
+                with self.subTest(label):
+                    reason = self._deny_reason("firebase deploy", run)
+                    self.assertIn("解決先が期待値と合わないか確かめられない", reason)
+                    self.assertNotIn("firebase use", reason.split("(検出コマンド:")[0])
+                    self.assertNotIn("firebase login", reason.split("(検出コマンド:")[0])
+                    self.assertNotIn("案内された形のまま単独で実行してください", reason)
+
+    def test_firebase_dict_unresolved_lists_aliases(self):
+        """L2 P2: dict 期待値 + 未解決のときは `firebase use YOUR_PROJECT` (placeholder、
+        self-remediation に乗らず loop) ではなく alias ごとの具体コマンドを案内する。"""
+        # alias に default を置かない (default があると、CLI から現在値を取れなくても
+        # `.firebaserc` から解決でき、deny にならない)
+        self._write_accounts({"firebase": {"dev": "proj-dev", "prod": "proj-prod"}})
+        self._write_firebaserc({"dev": "proj-dev", "prod": "proj-prod"})
+        run = self._const("", "Error: not logged in\n", 1)
+        with mock.patch("services.firebase.shutil.which", return_value="/usr/bin/firebase"):
+            reason = self._deny_reason("firebase deploy", run)
+            cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("firebase login", cmds)
+        self.assertIn("firebase use dev", cmds)
+        self.assertIn("firebase use prod", cmds)
+        self.assertNotIn("YOUR_PROJECT", reason)
+
+    # --- AWS ---
+
+    def _write_aws_config(self, text: str) -> None:
+        (self.home / ".aws" / "config").write_text(text, encoding="utf-8")
+
+    def test_aws_mismatch_with_profile_in_config(self):
+        self._write_accounts({"aws": "123456789012"})
+        self._write_aws_config(
+            "[profile prod]\nsso_session = corp\nsso_account_id = 123456789012\n"
+            "[sso-session corp]\nsso_start_url = https://corp.awsapps.com/start\n"
+        )
+        run = self._const("111111111111\n")
+        reason = self._deny_reason("aws s3 cp a s3://b", run)
+        cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("AWS_PROFILE=prod aws ...", cmds)
+        self.assertIn("aws sso login --profile prod", cmds)
+        # export は「コマンド」として案内しない (Claude Code の Bash では効かない)
+        self.assertNotRegex(reason, r"(?m)^\s+export\s")
+        # config の他の値 (sso_start_url 等) を文面に漏らさない
+        self.assertNotIn("awsapps", reason)
+
+    def test_aws_no_credentials_without_config(self):
+        self._write_accounts({"aws": "123456789012"})
+        run = self._const("", "Error loading SSO Token: Token for corp does not exist\n", 255)
+        reason = self._deny_reason("aws s3 cp a s3://b", run)
+        cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("aws sso login --profile <profile>", cmds)
+        self.assertIn("aws configure", cmds)
+        self.assertIn("aws configure list-profiles", cmds)
+
+    # --- GCP ---
+
+    def test_gcloud_project_unset(self):
+        self._write_accounts({"gcloud": "my-proj"})
+        run = self._const("(unset)\n")
+        reason = self._deny_reason("gcloud run deploy", run)
+        cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("gcloud config set project my-proj", cmds)
+
+    def test_gcloud_dict_account_mismatch(self):
+        self._write_accounts({"gcloud": {"project": "my-proj", "account": "me@example.com"}})
+
+        def run(cmd, **_kw):
+            value = "my-proj\n" if cmd[-1] == "project" else "other@example.com\n"
+            return SimpleNamespace(stdout=value, stderr="", returncode=0)
+
+        reason = self._deny_reason("gcloud run deploy", run)
+        cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("gcloud config set account me@example.com", cmds)
+
+    # --- kubectl ---
+
+    def test_kubectl_context_mismatch(self):
+        self._write_accounts({"kubectl": "prod-ctx"})
+        run = self._const("dev-ctx\n")
+        reason = self._deny_reason("kubectl apply -f x.yaml", run)
+        cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("kubectl config use-context prod-ctx", cmds)
+
+    def test_kubectl_context_unset(self):
+        self._write_accounts({"kubectl": "prod-ctx"})
+        run = self._const("", "error: current-context is not set\n", 1)
+        reason = self._deny_reason("kubectl apply -f x.yaml", run)
+        cmds = self._assert_guidance_is_allowed(reason, run)
+        self.assertIn("kubectl config use-context prod-ctx", cmds)
+
+    # --- 未設定 deny の SETUP_HINT ---
+
+    def test_setup_hints_commands_are_readonly(self):
+        """accounts 未設定 deny が案内する「現在値の確認コマンド」は accounts 無しでも通る。"""
+        run = self._const("", "", 1)
+        for write in (
+            "gh pr create",
+            "firebase deploy",
+            "aws s3 cp a s3://b",
+            "gcloud run deploy",
+            "kubectl apply -f x.yaml",
+        ):
+            with self.subTest(write=write):
+                reason = self._deny_reason(write, run)
+                self.assertIn("未設定", reason)
+                self._assert_guidance_is_allowed(reason, run)
+
+
+class TestConcurrentInvalidationRace(BaseWithTmpProject):
+    """PR #43 Codex R2 P1-2: 同じ service の Bash hook が並行したとき、切替前の状態を
+    検証した結果が切替後に公開されない (epoch + in-flight 窓)。"""
+
+    def test_verify_started_before_invalidate_is_not_published(self):
+        """hook B (`gh pr list`) の verify 中に hook A (`gh auth switch`) の PreToolUse が
+        cache を無効化 → B の成功は (開始時 epoch が古いので) 書かれない。"""
+        from core import cache
+
+        self._write_accounts({"github": "Mao-o"})
+        calls = []
+
+        def verify_then_concurrent_switch(*_a, **_k):
+            calls.append(1)
+            if len(calls) == 1:
+                cache.invalidate("github")  # B の検証中に A の無効化が走った
+            return None
+
+        with mock.patch.object(cache, "IN_FLIGHT_SEC", 0), \
+             mock.patch("services.github.verify", side_effect=verify_then_concurrent_switch) as v:
+            self.assertIsNone(dispatch("gh pr list", str(self.project_dir)))  # B
+            self.assertIsNone(dispatch("gh pr create", str(self.project_dir)))  # 切替後の write
+        self.assertEqual(v.call_count, 2)
+
+    def test_verify_started_after_invalidate_within_window_is_not_published(self):
+        """A: `gh auth switch --user other` の PreToolUse (無効化) → A の切替が完了する前に
+        B: `gh pr list` が旧状態を検証して成功 → in-flight 窓内なので entry は書かれず、
+        次の write は再検証される。"""
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            self.assertIsNone(dispatch("gh auth switch --user other", str(self.project_dir)))
+            self.assertIsNone(dispatch("gh pr list", str(self.project_dir)))  # B (窓内)
+            self.assertEqual(v.call_count, 2)
+            dispatch("gh pr create", str(self.project_dir))
+        self.assertEqual(v.call_count, 3)
+
+    def test_cache_resumes_after_in_flight_window(self):
+        """窓を過ぎれば通常どおり成功が cache される (窓内の再検証は一時的なコスト)。"""
+        from core import cache
+
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            dispatch("gh auth switch --user other", str(self.project_dir))
+            with mock.patch.object(cache, "IN_FLIGHT_SEC", 0):  # 60 秒経過した状況
+                dispatch("gh pr list", str(self.project_dir))
+                dispatch("gh pr create", str(self.project_dir))
+        self.assertEqual(v.call_count, 2)
+
+
+class TestLeadingGlobalOptions(BaseWithTmpProject):
+    """PR #43 Codex P1: `aws --profile prod sso login` のように CLI 名直後に global
+    option が置かれた形 (`aws [global options] <command> <subcommand>`) でも、
+    剥がした形で readonly / 切替 (cache 無効化) / self-remediation を判定する。"""
+
+    _ACCOUNTS = {
+        "github": "Mao-o",
+        "aws": "123456789012",
+        "gcloud": "my-proj",
+        "firebase": "proj-dev",
+        "kubectl": "ctx",
+    }
+
+    def test_login_with_leading_options_is_readonly(self):
+        self._write_accounts(self._ACCOUNTS)
+        rows = [
+            ("aws", "aws --profile prod sso login"),
+            ("aws", "aws --profile=prod sso login"),
+            ("aws", "aws --region us-east-1 --profile prod configure sso"),
+            ("aws", "aws --debug --no-verify-ssl --output json sso logout"),
+            ("aws", "aws --profile default configure sso"),
+            ("aws", "aws --profile prod login"),
+            ("gcloud", "gcloud --account me@example.com auth login"),
+            ("gcloud", "gcloud --configuration work --quiet auth activate-service-account --key-file=k.json"),
+            ("gcloud", "gcloud --project x config get-value project"),
+            ("kubectl", "kubectl --context foo -n ns config current-context"),
+            ("kubectl", "kubectl --kubeconfig k.yaml config view"),
+            ("firebase", "firebase -P prod login"),
+            ("firebase", "firebase --debug use"),
+            # `login:ci` は DISCLOSING に移したので readonly 行には置かない (0.14.0)。
+            ("firebase", "npx firebase-tools --project prod login"),
+        ]
+        for key, cmd in rows:
+            with self.subTest(cmd=cmd):
+                with mock.patch(f"services.{key}.verify", return_value="不一致") as v:
+                    self.assertIsNone(dispatch(cmd, str(self.project_dir)))
+                v.assert_not_called()
+
+    def test_switch_with_leading_options_invalidates_cache(self):
+        """P1 の再現: `aws s3 cp` (検証成功・cache) → `aws --profile default configure sso`
+        → `aws s3 cp` が cache hit せず再検証される。"""
+        rows = [
+            ("aws", "aws s3 cp a b", "aws --profile default configure sso"),
+            ("aws", "aws s3 cp a b", "aws --profile prod sso login"),
+            ("aws", "aws s3 cp a b", "aws --region us-east-1 --profile=prod sso login"),
+            ("gcloud", "gcloud run deploy", "gcloud --project x config set project other"),
+            ("gcloud", "gcloud run deploy", "gcloud --quiet auth login"),
+            ("kubectl", "kubectl apply -f x.yaml", "kubectl --context foo config use-context other"),
+            ("firebase", "firebase deploy", "firebase --project prod use other"),
+            ("firebase", "firebase deploy", "firebase -P prod login"),
+            # boolean global flag の `=value` 形 (Codex R5 P1-A)。pflag/cobra は bool に
+            # 分離形を許さないためこれが正当な呼び出し形で、剥がせないと anchored な
+            # STATE_CHANGING に当たらず切替後も古い cache が TTL 分残る。
+            ("kubectl", "kubectl apply -f x.yaml",
+             "kubectl --insecure-skip-tls-verify=true config use-context other"),
+            ("kubectl", "kubectl apply -f x.yaml",
+             "kubectl --disable-compression=false config use-context other"),
+            ("gcloud", "gcloud run deploy", "gcloud --quiet=true config set project other"),
+            ("firebase", "firebase deploy", "firebase --debug=true use other"),
+            ("aws", "aws s3 cp a b", "aws --no-verify-ssl=true configure set region us-east-1"),
+        ]
+        for key, write, switch in rows:
+            # cache dir を row ごとに作り直す (共有すると前 row の tombstone で
+            # warm-up が publish できず vacuous になる)。
+            with self.subTest(switch=switch), self.isolated_cache():
+                self._write_accounts({key: self._ACCOUNTS[key]})
+                with mock.patch(f"services.{key}.verify", return_value=None) as v:
+                    dispatch(write, str(self.project_dir))
+                    self.assertEqual(v.call_count, 1)
+                    self.assert_cache_published(write, v)
+                    self.assertIsNone(dispatch(switch, str(self.project_dir)))
+                    after_switch = v.call_count
+                    dispatch(write, str(self.project_dir))
+                self.assertEqual(v.call_count, after_switch + 1)
+
+    def test_cross_cli_kubeconfig_switch_with_leading_options(self):
+        self._write_accounts({"kubectl": "ctx", "aws": "123456789012", "gcloud": "my-proj"})
+        for switch in (
+            "aws --profile prod eks update-kubeconfig --name c",
+            "gcloud --project x container clusters get-credentials c --region r",
+            # release track 形 (Codex R5 P1-B)
+            "gcloud beta container clusters get-credentials c --region r",
+            "gcloud alpha container clusters get-credentials c --region r",
+            "gcloud --project x beta container clusters get-credentials c --region r",
+        ):
+            # `cache.invalidate("kubectl")` で前 subTest の cache を消していたが、
+            # invalidate は tombstone も立てるため warm-up が publish できず vacuous
+            # だった。cache dir ごと作り直す。
+            with self.subTest(switch=switch), self.isolated_cache():
+                with mock.patch("services.kubectl.verify", return_value=None) as v, \
+                     mock.patch("services.aws.verify", return_value=None), \
+                     mock.patch("services.gcloud.verify", return_value=None):
+                    dispatch("kubectl apply -f x.yaml", str(self.project_dir))
+                    self.assert_cache_published("kubectl apply -f x.yaml", v)
+                    dispatch(switch, str(self.project_dir))
+                    dispatch("kubectl apply -f x.yaml", str(self.project_dir))
+                self.assertEqual(v.call_count, 2)
+
+    def test_self_remediation_with_leading_options(self):
+        self._write_accounts(self._ACCOUNTS)
+        for key, cmd in (
+            ("gcloud", "gcloud --quiet config set project my-proj"),
+            ("kubectl", "kubectl --kubeconfig k.yaml config use-context ctx"),
+            ("firebase", "firebase --debug use proj-dev"),
+        ):
+            with self.subTest(cmd=cmd):
+                with mock.patch(f"services.{key}.verify", return_value="不一致") as v:
+                    self.assertIsNone(dispatch(cmd, str(self.project_dir)))
+                v.assert_not_called()
+
+    def test_deny_reason_shows_original_candidate(self):
+        """剥がした形は判定にだけ使い、deny 文面の検出コマンドは元の形 (option 付き)。"""
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch(
+            "services.aws.verify", return_value="AWS アカウント不一致: 現在=x, 期待=y"
+        ):
+            result = dispatch("aws --profile other s3 rm s3://x", str(self.project_dir))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("検出コマンド: aws --profile other s3 rm s3://x", reason)
+
+    def test_unknown_leading_option_is_verified_conservatively(self):
+        """未知の option が先頭にあれば剥がさず通常検証 (readonly に乗らない)。"""
+        self._write_accounts({"aws": "123456789012"})
+        with mock.patch("services.aws.verify", return_value="不一致") as v:
+            result = dispatch("aws --totally-unknown-option sso login", str(self.project_dir))
+        self.assertIsNotNone(result)
+        v.assert_called_once()
+
+    def test_version_and_help_remain_readonly(self):
+        """`aws --version` は剥がすと `aws` になるため元の形でも判定する。"""
+        self._write_accounts(self._ACCOUNTS)
+        for key, cmd in (
+            ("aws", "aws --version"),
+            ("gcloud", "gcloud --help"),
+            ("github", "gh --version"),
+            ("kubectl", "kubectl --help"),
+            ("firebase", "firebase --version"),
+        ):
+            with self.subTest(cmd=cmd):
+                with mock.patch(f"services.{key}.verify", return_value="不一致") as v:
+                    self.assertIsNone(dispatch(cmd, str(self.project_dir)))
+                v.assert_not_called()
+
+
+class TestDenyProvenance(BaseWithTmpProject):
+    """deny に出所タグ (要望3) と検出セグメント (要望5) が含まれる。"""
+
+    def test_deny_has_source_tag(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value="GitHub 不一致"):
+            result = dispatch("gh pr create", str(self.project_dir))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("[cloud-account-guard]", reason)
+        self.assertIn("CLI 本体のエラーではありません", reason)
+
+    def test_deny_has_detected_segment(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value="GitHub 不一致"):
+            result = dispatch("gh pr create", str(self.project_dir))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("検出コマンド: gh pr create", reason)
+
+    def test_unconfigured_deny_also_tagged(self):
+        # accounts 未設定 deny にも出所タグが付く (検出セグメントは verify 前なので無し)
+        result = dispatch("gh pr create", str(self.project_dir))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("[cloud-account-guard]", reason)
+
+
+class TestHyphenatedCommandsAreNotMatched(BaseWithTmpProject):
+    """`aws-vault` / `gh-ost` / `kubectl-*` は別コマンドなので発火しない。
+
+    `^aws\\b` は `aws-vault exec prod -- aws s3 rm` を aws として拾い、hook の
+    既定 profile で `sts` を実行していた。既定資格情報が無ければ永久 deny、
+    既定が期待値なら実行 profile が prod でも allow という二重の誤り。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._write_accounts(
+            {"aws": "111111111111", "github": "Mao-o", "kubectl": "prod-ctx"}
+        )
+
+    def test_hyphenated_neighbours_do_not_fire(self):
+        # verify を必ず失敗させたうえで **呼ばれないこと** を見る。deny の有無だけを
+        # 見ると、実 CLI がたまたま期待値にログインしている環境では素通りして
+        # vacuous になる (実 CLI は起動させない)。
+        for command in (
+            "aws-vault exec prod -- aws s3 rm s3://b/x",
+            "gh-ost --help",
+            "kubectl-foo get pods",
+        ):
+            with self.subTest(command=command), self.isolated_cache():
+                with mock.patch("services.aws.verify", return_value="AWS 不一致") as ma, \
+                     mock.patch("services.github.verify", return_value="GH 不一致") as mg, \
+                     mock.patch("services.kubectl.verify", return_value="k8s 不一致") as mk:
+                    self.assertIsNone(dispatch(command, str(self.project_dir)))
+                self.assertEqual(
+                    (ma.call_count, mg.call_count, mk.call_count), (0, 0, 0), command
+                )
+
+    def test_real_cli_still_fires(self):
+        with mock.patch("services.aws.verify", return_value="AWS 不一致") as m:
+            with self.isolated_cache():
+                result = dispatch("aws s3 rm s3://b/x", str(self.project_dir))
+        self.assertIsNotNone(result)
+        self.assertEqual(m.call_count, 1)
+
+    def test_npx_firebase_tools_still_fires(self):
+        self._write_accounts({"firebase": "my-fb"})
+        with mock.patch("services.firebase.verify", return_value="FB 不一致") as m:
+            with self.isolated_cache():
+                result = dispatch("npx firebase-tools deploy", str(self.project_dir))
+        self.assertIsNotNone(result)
+        self.assertEqual(m.call_count, 1)
+
+
+class TestSegmentationRegressions(BaseWithTmpProject):
+    """誤 deny / 検証バイパスだったセグメント形の回帰テスト。"""
+
+    def setUp(self):
+        super().setUp()
+        self._write_accounts({"aws": "111111111111", "github": "Mao-o"})
+
+    def test_heredoc_body_does_not_trigger_verification(self):
+        # 誤 deny 側: heredoc 本文の CLI 例は実行されないので検証してはいけない。
+        command = "cat > deploy.sh <<'EOF'\n#!/bin/bash\ngh release create v1\nEOF"
+        with mock.patch("services.github.verify", return_value="GitHub 不一致") as m:
+            with self.isolated_cache():
+                self.assertIsNone(dispatch(command, str(self.project_dir)))
+        self.assertEqual(m.call_count, 0)
+
+    def test_command_v_does_not_trigger_verification(self):
+        with mock.patch("services.github.verify", return_value="GitHub 不一致") as m:
+            with self.isolated_cache():
+                self.assertIsNone(
+                    dispatch("command -v gh >/dev/null 2>&1", str(self.project_dir))
+                )
+        self.assertEqual(m.call_count, 0)
+
+    def test_previously_bypassing_forms_now_verify(self):
+        # バイパス側: いずれも実際に CLI が走る形なので検証を走らせる。
+        for command in (
+            "(gh pr create --fill)",
+            "{ gh pr create; }",
+            'for f in *.tgz; do gh release upload v1 "$f"; done',
+            "if gh pr create; then echo ok; fi",
+            "! gh pr create",
+            "</dev/null gh pr create",
+            "2>/dev/null gh pr create",
+            "/opt/homebrew/bin/gh pr create",
+            "\\gh pr create",
+            "timeout 30 gh pr create --fill",
+            "gh pr list | xargs -I{} gh pr close {}",
+            "nice -n 10 gh pr create",
+            "setsid gh pr create",
+        ):
+            with self.subTest(command=command), self.isolated_cache():
+                with mock.patch(
+                    "services.github.verify", return_value="GitHub 不一致"
+                ) as m:
+                    result = dispatch(command, str(self.project_dir))
+                self.assertIsNotNone(result, command)
+                self.assertGreaterEqual(m.call_count, 1, command)
+
+    def test_watch_wraps_kubectl(self):
+        self._write_accounts({"kubectl": "prod-ctx"})
+        with mock.patch("services.kubectl.verify", return_value="ctx 不一致") as m:
+            with self.isolated_cache():
+                result = dispatch("watch -n 5 kubectl delete pod x", str(self.project_dir))
+        self.assertIsNotNone(result)
+        self.assertEqual(m.call_count, 1)
+
+
+class TestContextOptionRouting(BaseWithTmpProject):
+    """context option は inline env と同じく「別の検証対象」として扱う。"""
+
+    def setUp(self):
+        super().setUp()
+        self._write_accounts({"aws": "111111111111"})
+
+    def test_context_is_passed_to_verify(self):
+        with mock.patch("services.aws.verify", return_value=None) as m:
+            with self.isolated_cache():
+                dispatch("aws --profile other s3 rm s3://b/x", str(self.project_dir))
+        self.assertEqual(m.call_args.kwargs.get("context"), {"profile": "other"})
+
+    def test_flag_after_subcommand_is_seen(self):
+        with mock.patch("services.aws.verify", return_value=None) as m:
+            with self.isolated_cache():
+                dispatch("aws s3 rm s3://b/x --profile other", str(self.project_dir))
+        self.assertEqual(m.call_args.kwargs.get("context"), {"profile": "other"})
+
+    def test_different_profiles_in_one_chain_are_verified_separately(self):
+        """1 コマンド内の 2 つ目の profile も検証する。
+
+        context を grouping key に含めないと 1 エントリに畳まれ、後段
+        (`--profile b`) が検証されないまま allow される。
+        """
+        with mock.patch("services.aws.verify", return_value=None) as m:
+            with self.isolated_cache():
+                dispatch(
+                    "aws --profile a s3 rm x && aws --profile b s3 rm y",
+                    str(self.project_dir),
+                )
+        contexts = [c.kwargs.get("context") for c in m.call_args_list]
+        self.assertEqual(contexts, [{"profile": "a"}, {"profile": "b"}])
+
+    def test_no_flag_yields_empty_context(self):
+        with mock.patch("services.aws.verify", return_value=None) as m:
+            with self.isolated_cache():
+                dispatch("aws s3 rm s3://b/x", str(self.project_dir))
+        self.assertEqual(m.call_args.kwargs.get("context"), {})
+
+    def test_success_cache_is_not_shared_across_contexts(self):
+        """既定 profile の成功 cache を `--profile other` が hit してはいけない。"""
+        with self.isolated_cache():
+            with mock.patch("services.aws.verify", return_value=None) as m:
+                self.assert_cache_published("aws s3 rm s3://b/x", m, expected_calls=1)
+                # 別 context は cache を跨がず再検証される。
+                dispatch("aws --profile other s3 rm s3://b/x", str(self.project_dir))
+                self.assertEqual(m.call_count, 2)
+
+
+class TestHeredocBodyIsNotCommandLine(BaseWithTmpProject):
+    """heredoc 本文はデータであって引数ではない (両方向の実害を固定する)。"""
+
+    def setUp(self):
+        super().setUp()
+        self._write_accounts({"aws": "111111111111", "kubectl": "prod-ctx"})
+
+    def test_body_does_not_choose_the_verification_target(self):
+        # 本文の `--profile prod` を採用すると、実行は既定 profile なのに prod で
+        # 検証して allow する (false-allow)。
+        command = (
+            "aws cloudformation deploy --template-file - <<EOF\n"
+            "--profile prod\nEOF"
+        )
+        with mock.patch("services.aws.verify", return_value=None) as m:
+            with self.isolated_cache():
+                dispatch(command, str(self.project_dir))
+        self.assertEqual(m.call_args.kwargs.get("context"), {})
+
+    def test_yaml_body_does_not_cause_a_false_deny(self):
+        # マニフェスト本文の `- --context` / `- prod` を指定と誤読すると誤 deny。
+        command = (
+            "kubectl apply -f - <<'EOF'\nspec:\n  - args:\n"
+            "    - --context\n    - prod\nEOF"
+        )
+        with mock.patch("services.kubectl.verify", return_value=None) as m:
+            with self.isolated_cache():
+                dispatch(command, str(self.project_dir))
+        self.assertEqual(m.call_args.kwargs.get("context"), {})
+
+
+class TestVersionPinnedNpxSpecs(BaseWithTmpProject):
+    """`npx firebase-tools@<version>` を検証対象から落とさない。"""
+
+    def setUp(self):
+        super().setUp()
+        self._write_accounts({"firebase": "my-fb"})
+
+    def test_version_pinned_deploy_is_verified(self):
+        with mock.patch("services.firebase.verify", return_value="FB 不一致") as m:
+            with self.isolated_cache():
+                result = dispatch(
+                    "npx firebase-tools@13.31.0 deploy --only hosting",
+                    str(self.project_dir),
+                )
+        self.assertIsNotNone(result)
+        self.assertEqual(m.call_count, 1)
+
+    def test_version_pinned_login_invalidates_cache(self):
+        from core.dispatcher import _analyze_command
+
+        _targets, switching, _segments = _analyze_command("npx firebase-tools@13 login")
+        self.assertIn("services.firebase", [s.__name__ for s in switching])
+
+
+class TestVerificationCoverageFloor(BaseWithTmpProject):
+    r"""「検証対象であり続ける」ことを入力の一覧で固定する (カバレッジの床)。
+
+    mutation テストは**新しい挙動が効いていること**しか見ないので、
+    「以前は検証できていた入力を取りこぼすようになった」型の退行を原理的に
+    検出できない。v0.9.0 の開発中に実際、`(?=\s|$)` 化と heredoc delimiter の
+    制限で 5 経路の検証が静かに消えた (0.8.0 との出力突き合わせで発見)。
+
+    lenient 方針は「deny を減らす」であって「検証しない」ではない。
+    ここに並ぶのは**実際に CLI が実行される**形なので、検証対象から外れたら退行。
+    """
+
+    # (コマンド, 検証対象になるべき service)
+    MUST_VERIFY = [
+        # 素の形
+        ("gh pr create --fill", "github"),
+        ("aws s3 rm s3://b/x", "aws"),
+        ("gcloud run deploy svc --image x", "gcloud"),
+        ("firebase deploy --only hosting", "firebase"),
+        ("kubectl delete pod x", "kubectl"),
+        # npm 経由 (版固定を含む) — lookahead 化で一度落とした形
+        ("npx firebase-tools deploy", "firebase"),
+        ("npx firebase-tools@13.31.0 deploy --only hosting", "firebase"),
+        ("npx firebase-tools@13 deploy", "firebase"),
+        # 透過 wrapper / 実行ラッパ
+        ("sudo aws s3 rm s3://b/x", "aws"),
+        ("timeout 30 gh pr create --fill", "github"),
+        ("nice -n 10 aws s3 rm s3://b/x", "aws"),
+        ("stdbuf -oL gcloud run deploy svc --image x", "gcloud"),
+        ("watch -n 5 kubectl delete pod x", "kubectl"),
+        ("xargs -I{} gh pr close {}", "github"),
+        ("mise exec -- firebase deploy", "firebase"),
+        ("env FOO=bar aws s3 rm s3://b/x", "aws"),
+        ("command aws s3 rm s3://b/x", "aws"),
+        ("command -p gh pr create", "github"),
+        # パス / エスケープ
+        ("/opt/homebrew/bin/gh pr create", "github"),
+        ("./node_modules/.bin/firebase deploy", "firebase"),
+        ("\\gh pr create", "github"),
+        # 構文プレフィックス (実際に実行される位置)
+        ("(gh pr create --fill)", "github"),
+        ("{ gh pr create; }", "github"),
+        ("! gh pr create", "github"),
+        ("2>/dev/null gh pr create", "github"),
+        ('for f in *; do gh release upload v1 "$f"; done', "github"),
+        # 複合コマンドの各段
+        ("gh auth status && gh pr create --fill", "github"),
+        ("cd sub; aws s3 rm s3://b/x", "aws"),
+        ("gh pr list | xargs -I{} gh pr close {}", "github"),
+        # heredoc の**外**にある実行コマンド
+        ("cat > x.sh <<'EOF'\nnot executed\nEOF\ngh pr create --fill", "github"),
+        ("cat <<END-OF-FILE\nbody\nEND-OF-FILE\naws s3 rm s3://b/x", "aws"),
+        ("(( x = 1 << 2 ))\ngh pr create --fill", "github"),
+        ("(( x = 1 << y ))\ngh pr create --fill", "github"),
+        # context flag 付きでも検証対象であること (照合先が変わるだけ)
+        ("aws --profile other s3 rm s3://b/x", "aws"),
+        ("aws s3 rm s3://b/x --profile other", "aws"),
+        ("gcloud --project other run deploy svc --image x", "gcloud"),
+        ("firebase deploy -P other", "firebase"),
+        ("kubectl --context other delete pod x", "kubectl"),
+        # インライン env
+        ("AWS_PROFILE=prod aws s3 rm s3://b/x", "aws"),
+        # --- wrapper の flag 形 (PR #48 Codex P1 x2) ---
+        # optional 引数を持つ long option の bare 形は値を取らない。
+        # 「値を取る」と誤登録すると後続のコマンド名を食って検証が消える。
+        ("xargs --replace gh pr close {}", "github"),
+        ("xargs --eof gh pr create", "github"),
+        ("xargs --max-lines gh pr create", "github"),
+        ("xargs --replace={} gh pr close {}", "github"),
+        # 値を取る flag を登録し損ねても、値が数値なら arg-like ネットで到達する。
+        # (`watch` は一次情報が取れないため flag 表を空にしてネットに任せている)
+        ("watch --equexit 5 gh pr create", "github"),
+        ("watch -q 5 gh pr create", "github"),
+        ("watch -n 5 gh pr create", "github"),
+        ("watch --interval=5 gh pr create", "github"),
+        # 非数値の値を取る flag は登録が要る (一次情報で確定済みのもの)
+        ("timeout -s KILL 30 gh pr create", "github"),
+        ("timeout --signal=KILL 30 gh pr create", "github"),
+        ("timeout --preserve-status 30 gh pr create", "github"),
+        ("stdbuf -o L gh pr create", "github"),
+        ("sudo -u deploy gh pr create", "github"),
+        ("npx -p pkg firebase deploy", "firebase"),
+        ("time -o out.txt gh pr create", "github"),
+        ("exec -a name gh pr create", "github"),
+        ("xargs -E END gh pr create", "github"),
+        ("xargs -I {} gh pr close {}", "github"),
+        ("nice -n 10 gh pr create", "github"),
+        ("caffeinate -t 60 gh pr create", "github"),
+        # --- 算術文脈の内側の `<<` は左シフト (PR #48 Codex R2 P1) ---
+        # delimiter 語の形から推定していた頃は、後方に同名の行があると
+        # 後続コマンドを heredoc 本文として飲み込んで検証が消えていた。
+        ("(( x = 1 << y ))\ngh pr create --fill\ny", "github"),
+        ("(( x = 1 << 2 ))\ngh pr create --fill\n2", "github"),
+        ("(( x = 1 << (a+b) ))\ngh pr create --fill\na+b", "github"),
+        ("$(( 1 << y ))\ngh pr create --fill\ny", "github"),
+        # 終端 option の効果は wrapper が包む引数列に限る (別セグメントは検証する)
+        ("watch --help; gh pr create --fill", "github"),
+        ("nice --help && gh pr create --fill", "github"),
+        # 値を取る短縮形は終端扱いしない (過剰検証側)
+        ("sudo -h myhost gh pr create", "github"),
+        # --- xargs の入力系 option は値を消費する (PR #48 Codex R3 P1) ---
+        # 非数値の値なので安全網が効かず、登録漏れだと検証が丸ごと消える。
+        ("xargs -a input gh pr close 1", "github"),
+        ("xargs --arg-file input gh pr close 1", "github"),
+        ("xargs -d , gh pr close 1", "github"),
+        ("xargs --delimiter , gh pr close 1", "github"),
+        ("xargs --process-slot-var V gh pr close 1", "github"),
+        ("npx -w pkg firebase deploy", "firebase"),
+        ("npx --workspace pkg firebase deploy", "firebase"),
+        # --- timeout の DURATION 全構文 (PR #48 Codex R4 P1) ---
+        ("timeout 1e3 gh pr create --fill", "github"),
+        ("timeout inf gh pr create --fill", "github"),
+        ("timeout .5 gh pr create --fill", "github"),
+        ("timeout 1E3 gh pr create --fill", "github"),
+        # --- シェル経由 wrapper のクォート内解析 (PR #48 Codex R4 P1) ---
+        ("watch 'gh pr create --fill'", "github"),
+        ("watch -n 5 'kubectl delete pod x'", "kubectl"),
+        ("npx -c 'gh pr create --fill'", "github"),
+        ("sudo -s 'gh pr create --fill'", "github"),
+        # --- 混在クォート delimiter の後ろのコマンド (PR #48 Codex R5 P1) ---
+        ('cat <<E"OF"\nbody\nEOF\ngh pr create --fill', "github"),
+        ("cat <<E'OF'\nbody\nEOF\naws s3 rm s3://b/x", "aws"),
+        ('cat <<"EO"F\nbody\nEOF\ngh pr create --fill', "github"),
+        # --- ANSI-C エスケープ delimiter の後ろのコマンド (PR #48 Codex R6 P1) ---
+        ("cat <<$'E\\x4fF'\nbody\nEOF\ngh pr create --fill", "github"),
+        ("cat <<$'E\\117F'\nbody\nEOF\naws s3 rm s3://b/x", "aws"),
+        # --- 短縮 option の連結内の必須値 (PR #48 Codex R7 A) ---
+        ("timeout -vk 1 5 gh pr create --fill", "github"),
+        ("timeout -k1 5 gh pr create --fill", "github"),
+        ("sudo -Eu deploy gh pr create --fill", "github"),
+        ("xargs -tI{} gh pr close {}", "github"),
+        # --- heredoc 宣言 + 演算子の後ろの実コマンドは検証する (R7 B の逆側) ---
+        ("cat <<EOF; gh pr create --fill\nbody\nEOF", "github"),
+        ("cat <<EOF && aws s3 rm s3://b/x\nbody\nEOF", "aws"),
+    ]
+
+    def setUp(self):
+        super().setUp()
+        self._write_accounts(
+            {
+                "github": "Mao-o",
+                "aws": "111111111111",
+                "gcloud": "my-proj",
+                "firebase": "my-fb",
+                "kubectl": "prod-ctx",
+            }
+        )
+
+    def test_all_listed_commands_reach_verification(self):
+        for command, service in self.MUST_VERIFY:
+            with self.subTest(command=command), self.isolated_cache():
+                with mock.patch(
+                    f"services.{service}.verify", return_value="不一致"
+                ) as m:
+                    result = dispatch(command, str(self.project_dir))
+                self.assertIsNotNone(
+                    result, f"検証対象から外れた (退行): {command!r}"
+                )
+                self.assertGreaterEqual(
+                    m.call_count, 1, f"{service}.verify が呼ばれない: {command!r}"
+                )
+
+    # 逆側の床: 実行されない / 別コマンドなので検証してはいけない形。
+    MUST_NOT_VERIFY = [
+        "cat > deploy.sh <<'EOF'\ngh release create v1\nEOF",
+        "cat <<-EOF\n\taws s3 rm s3://b/x\n\tEOF",
+        "command -v gh",
+        "command -V aws",
+        "command -pv aws",
+        "aws-vault exec prod -- aws s3 rm s3://b/x",
+        "gh-ost --help",
+        "kubectl-foo get pods",
+        "firebase-admin deploy",
+        "gh auth status",
+        "aws sts get-caller-identity",
+        "npx firebase-tools@13.31.0 login",
+        "npx firebase-tools@13 use",
+        # --- 終端 option 付きの wrapper は後続を実行しない (PR #48 Codex R2 P2) ---
+        "watch --help gh pr create",
+        "watch --version gh pr create",
+        "nice --help gh pr create",
+        "stdbuf --help gh pr create",
+        "setsid --help gh pr create",
+        "xargs --help gh pr create",
+        "timeout --help gh pr create",
+        "sudo --help gh pr create",
+        "sudo -V gh pr create",
+        "npx --help gh pr create",
+        "caffeinate --help gh pr create",
+        # --- 数値の heredoc delimiter は正当 (PR #48 Codex R4 P2) ---
+        # 弾くと本文の各行が候補になり、データを書くだけのコマンドを deny しうる。
+        "cat <<123\ngh pr create\n123",
+        "cat > x.sh <<456\naws s3 rm s3://b/x\n456",
+        # 直接 exec する wrapper のクォート塊は「空白入りのコマンド名」
+        "watch --exec 'gh pr create'",
+        # --- 算術コマンドは CLI を実行しない (PR #48 Codex R5 P2) ---
+        "(( gh ))",
+        "(( aws + 1 ))",
+        "((gh))",
+        "(( kubectl > 0 ))",
+        "if (( gh )); then echo x; fi",
+        # --- heredoc 本文は演算子が挟まってもデータのまま (PR #48 Codex R7 B) ---
+        "cat <<EOF; echo done\ngh pr create\nEOF",
+        "cat <<EOF | tee f\ngh pr create\nEOF",
+        "cat <<EOF > out; echo x\naws s3 rm s3://b/x\nEOF",
+        # --- timeout が拒否する duration は剥がさない (PR #48 Codex R7 C) ---
+        "timeout nan gh pr create",
+        "timeout -5 gh pr create",
+        "timeout 30S gh pr create",
+        "timeout 30ss gh pr create",
+    ]
+
+    def test_listed_commands_do_not_reach_verification(self):
+        for command in self.MUST_NOT_VERIFY:
+            with self.subTest(command=command), self.isolated_cache():
+                with contextlib.ExitStack() as stack:
+                    mocks = [
+                        stack.enter_context(
+                            mock.patch(
+                                f"services.{svc}.verify", return_value="不一致"
+                            )
+                        )
+                        for svc in (
+                            "github", "aws", "gcloud", "firebase", "kubectl",
+                        )
+                    ]
+                    result = dispatch(command, str(self.project_dir))
+                    calls = sum(m.call_count for m in mocks)
+                self.assertIsNone(result, f"検証されてしまう: {command!r}")
+                self.assertEqual(calls, 0, f"verify が呼ばれた: {command!r}")
+
+
+class TestDebugTrace(BaseWithTmpProject):
+    """内部バックログ: `CLOUD_ACCOUNT_GUARD_DEBUG=1` で分解結果 (segments /
+    matched service / readonly / cache hit / verify 所要 ms / 決定) を stderr に
+    1 行 JSON で出す。判定表 (allow/deny/warn) 自体には影響しない観測専用機能。"""
+
+    def setUp(self):
+        super().setUp()
+        self._debug_patcher = mock.patch.dict(
+            os.environ, {"CLOUD_ACCOUNT_GUARD_DEBUG": "1"}
+        )
+        self._debug_patcher.start()
+        self.addCleanup(self._debug_patcher.stop)
+
+    def test_disabled_by_default_emits_nothing(self):
+        """既定 (env 変数無し) では stderr に何も書かない (回帰防止)。"""
+        self._debug_patcher.stop()
+        try:
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("CLOUD_ACCOUNT_GUARD_DEBUG", None)
+                buf = io.StringIO()
+                with contextlib.redirect_stderr(buf):
+                    dispatch("git status", str(self.project_dir))
+                self.assertEqual(buf.getvalue(), "")
+        finally:
+            self._debug_patcher.start()
+
+    def test_trace_readonly_segment_and_allow_decision(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            result = dispatch("gh auth status", str(self.project_dir))
+        self.assertIsNone(result)
+        trace = json.loads(buf.getvalue())
+        self.assertEqual(len(trace["segments"]), 1)
+        seg = trace["segments"][0]
+        self.assertEqual(seg["service"], "github")
+        self.assertTrue(seg["readonly"])
+        self.assertEqual(trace["decision"], "allow")
+        self.assertIsInstance(trace["elapsed_ms"], (int, float))
+
+    def test_trace_deny_decision_and_non_readonly_segment(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            result = dispatch("gh pr create", str(self.project_dir))
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        trace = json.loads(buf.getvalue())
+        self.assertEqual(trace["decision"], "deny")
+        self.assertFalse(trace["segments"][0]["readonly"])
+
+    def test_trace_records_cache_hit_without_verify_ms(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None) as v:
+            self.assert_cache_published("gh pr list", v)  # warm-up (未 trace)
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                result = dispatch("gh pr list", str(self.project_dir))
+            self.assertIsNone(result)
+            self.assertEqual(v.call_count, 1, "2 回目は cache hit で verify は呼ばれない")
+        trace = json.loads(buf.getvalue())
+        self.assertTrue(trace["cache_hit"].get("github"))
+        self.assertNotIn("github", trace["verify_ms"])
+
+    def test_trace_records_verify_ms_on_cache_miss(self):
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None):
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                result = dispatch("gh pr list", str(self.project_dir))
+        self.assertIsNone(result)
+        trace = json.loads(buf.getvalue())
+        self.assertIn("github", trace["verify_ms"])
+        self.assertIsInstance(trace["verify_ms"]["github"], (int, float))
+        self.assertNotIn("github", trace["cache_hit"])
+
+    def test_trace_stderr_write_failure_does_not_lose_decision(self):
+        """マージ前レビューの指摘: stderr が書き込み不能 (BrokenPipeError 等の
+        OSError) でも、trace 出力の失敗で計算済みの decision (deny) を
+        呼び出し元に返さないまま落とさない。trace は decision-neutral の
+        はずが、この例外が dispatch() の外まで伝播すると計算済みの result が
+        失われていた (修正前は本テストが RuntimeError/OSError で失敗する)。"""
+
+        class _BrokenStderr:
+            def write(self, s):
+                raise OSError("stderr is closed")
+
+            def flush(self):
+                pass
+
+        with contextlib.redirect_stderr(_BrokenStderr()):
+            result = dispatch("gh pr create", str(self.project_dir))
+        self.assertIsNotNone(result)
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_trace_does_not_affect_decision(self):
+        """trace 収集の有無で判定結果 (allow/deny) が変わらないことを固定する。"""
+        self._write_accounts({"github": "Mao-o"})
+        with mock.patch("services.github.verify", return_value=None):
+            with contextlib.redirect_stderr(io.StringIO()):
+                with_debug = dispatch("gh pr list", str(self.project_dir))
+        self._debug_patcher.stop()
+        try:
+            with mock.patch.dict(os.environ, {}, clear=False), \
+                 mock.patch("services.github.verify", return_value=None):
+                os.environ.pop("CLOUD_ACCOUNT_GUARD_DEBUG", None)
+                with self.isolated_cache():
+                    without_debug = dispatch("gh pr list", str(self.project_dir))
+        finally:
+            self._debug_patcher.start()
+        self.assertEqual(with_debug, without_debug)
+
+
+class TestFirebaseCombinedShortOptions(BaseWithTmpProject):
+    """短い context option を含む結合形 (`firebase -jP prod deploy`) は deny する (v0.20.0)。
+
+    firebase-tools 15.24.0 (commander 5.1.0) は `-jP prod` を `-j -P prod` に、`-jc x` を
+    `-j -c x` に分ける。旧版はこれらを未知の 1 トークンとして読み飛ばし、アクティブな project
+    (既定の root) で照合して allow していた (内部バックログ)。展開はせず、確かめられない
+    として止める。
+    """
+
+    def setUp(self):
+        super().setUp()
+        (self.project_dir / "firebase.json").write_text("{}", encoding="utf-8")
+        (self.project_dir / ".firebaserc").write_text(
+            json.dumps({"projects": {"prod": "wrong-project"}}), encoding="utf-8"
+        )
+        sub = self.project_dir / "sub"
+        sub.mkdir()
+        (sub / "firebase.json").write_text("{}", encoding="utf-8")
+        self._write_accounts({"firebase": "right-project"})
+
+    def _dispatch(self, command: str):
+        def fake_run(argv, **kwargs):
+            # `firebase use` は root ごとにアクティブな project を答える: sub は wrong-project。
+            in_sub = "--config" in argv or str(kwargs.get("cwd", "")).endswith("/sub")
+            return SimpleNamespace(
+                stdout=("wrong-project" if in_sub else "right-project") + "\n",
+                stderr="", returncode=0,
+            )
+
+        with self.isolated_cache(), mock.patch(
+            "services.firebase.shutil.which", return_value="/usr/bin/firebase"
+        ), mock.patch("subprocess.run", side_effect=fake_run):
+            return dispatch(command, str(self.project_dir))
+
+    @staticmethod
+    def _decision(out):
+        return (out or {}).get("hookSpecificOutput", {}).get("permissionDecision")
+
+    def test_separate_forms_are_denied(self):
+        """対照: 分けて書いた形は従来どおり行き先で照合して deny する。"""
+        for command in ("firebase deploy -P prod", "firebase deploy -c sub/firebase.json"):
+            with self.subTest(command=command):
+                self.assertEqual(self._decision(self._dispatch(command)), "deny")
+
+    def test_combined_forms_with_a_context_option_are_denied(self):
+        for command in (
+            "firebase -jP prod deploy",
+            "firebase deploy -iP prod",
+            "firebase deploy -jPprod",
+            "firebase deploy -jc sub/firebase.json",
+            "firebase -ic sub/firebase.json deploy",
+        ):
+            with self.subTest(command=command):
+                out = self._dispatch(command)
+                self.assertEqual(self._decision(out), "deny", out)
+                reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+                self.assertIn("-c / -P", reason)
+                self.assertIn("結合したトークン", reason)
+                self.assertIn(f"(検出コマンド: {command})", reason)
+                # 切替をコマンドの形で案内しない (dispatcher の「単独で実行」の注記も付かない)
+                self.assertNotIn("firebase use", reason)
+
+    def test_combined_forms_without_a_context_option_are_read_as_before(self):
+        """値を取らない文字だけの結合形 (`-ji`) は従来どおり読み飛ばし、アクティブな project で照合する。"""
+        for command in ("firebase -ji deploy", "firebase deploy -ij --only hosting"):
+            with self.subTest(command=command):
+                self.assertIsNone(self._decision(self._dispatch(command)))
+
+    def test_query_command_with_a_combined_form_is_denied(self):
+        """リモート read のみのコマンドでも、結合形は宣言外の option なので tier が WRITE になり止める。"""
+        out = self._dispatch("firebase -jP prod projects:list")
+        self.assertEqual(self._decision(out), "deny", out)
+        self.assertIn("結合したトークン", json.dumps(out, ensure_ascii=False))
+
+    def test_wording_when_not_stopping(self):
+        """QUERY 扱いで届いたとき (警告) は、止めないことを言い、書き直しを求めない。"""
+        from core.dispatcher import _combined_short_error
+        from services import firebase as fb
+
+        text = _combined_short_error(fb, [("firebase x", "firebase x")], stops=False)
+        self.assertIn("実行は止めません", text)
+        self.assertNotIn("書いてください", text)
+
+    def test_not_cached_as_success(self):
+        """止めた形のあとで、同じ形の照合が成功 cache から通らない。
+
+        1 回目で成功 cache が積まれないこと (`continue` で verify に進まない) と、同じキーの
+        成功 cache があっても結合形の判定が cache より先に止めることの両方を見る。
+        """
+        from core import cache
+        from core.cli_options import COMBINED_SHORT_KEY
+        from services import firebase as fb
+
+        command = "firebase -jP prod deploy"
+        accounts = self.new_dir / "accounts.local.json"
+        with self.isolated_cache(), mock.patch(
+            "services.firebase.shutil.which", return_value="/usr/bin/firebase"
+        ), mock.patch(
+            "subprocess.run",
+            return_value=SimpleNamespace(stdout="right-project\n", stderr="", returncode=0),
+        ):
+            first = dispatch(command, str(self.project_dir))
+            key = (
+                "firebase", str(self.project_dir), "right-project",
+                accounts.stat().st_mtime, {}, {COMBINED_SHORT_KEY: "-jP"},
+            )
+            ident = cache.identity_env(fb, os.environ)
+            # 1 回目は成功を積まない
+            self.assertFalse(cache.get_success(*key, identity_env=ident))
+            self.assertTrue(
+                cache.set_success(
+                    *key, epoch=cache.current_epoch("firebase"), identity_env=ident
+                )
+            )
+            second = dispatch(command, str(self.project_dir))
+        self.assertEqual(self._decision(first), "deny")
+        self.assertEqual(self._decision(second), "deny")
+
+
+class TestFirebaseLegacyProjectKeyWithoutCli(BaseWithTmpProject):
+    """firebase.json の旧形式キー `"firebase"` を、CLI の無い経路で見落とさない (v0.20.0)。
+
+    firebase-tools 15.24.0 の applyRC は configstore の切替先が無いとき、`.firebaserc` の alias
+    より先にこのキー (config.defaults.project) を使う。旧版のローカル解決はこれを見ず、
+    `npx firebase deploy` を `.firebaserc` の default で照合して allow していた (内部バックログ)。
+    """
+
+    def _decision(self, firebase_json: str, firebaserc: dict) -> str | None:
+        (self.project_dir / "firebase.json").write_text(firebase_json, encoding="utf-8")
+        (self.project_dir / ".firebaserc").write_text(json.dumps(firebaserc), encoding="utf-8")
+        self._write_accounts({"firebase": "right-project"})
+        with self.isolated_cache(), mock.patch(
+            "subprocess.run", side_effect=FileNotFoundError("firebase")
+        ):
+            out = dispatch("npx firebase deploy", str(self.project_dir))
+        return (out or {}).get("hookSpecificOutput", {}).get("permissionDecision")
+
+    def test_legacy_key_is_denied(self):
+        self.assertEqual(
+            self._decision(
+                json.dumps({"firebase": "evil-project"}),
+                {"projects": {"default": "right-project"}},
+            ),
+            "deny",
+        )
+
+    def test_without_legacy_key_local_resolution_is_used(self):
+        """対照: 旧形式キーが無い厳密な JSON なら、従来どおりローカル設定 (default) で照合する。"""
+        hosting = json.dumps(
+            {"hosting": {"redirects": [{"source": "/a", "destination": "https://example.com/x"}]}}
+        )
+        self.assertIsNone(
+            self._decision(hosting, {"projects": {"default": "right-project"}})
+        )
+        self.assertEqual(
+            self._decision(hosting, {"projects": {"default": "wrong-project"}}), "deny"
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,1288 @@
+"""コマンド → サービス振り分けと検証オーケストレーション。"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shlex
+import sys
+import time
+from pathlib import Path
+
+from core import (
+    auto_switch, budget, cache, cli_options, mode, output, paths, shell_word, tiers, workdir,
+)
+from core.command_parser import extract_candidates
+from services import ALL as SERVICES
+
+_BUILDER_PATH = (
+    'python3 "${CLAUDE_PLUGIN_ROOT}/hooks/cloud-account-guard/scripts/accounts_builder.py"'
+)
+
+_MIGRATE_HINT = (
+    "旧パスから統合するには builder の migrate サブコマンドを使用してください: "
+    + _BUILDER_PATH
+    + " migrate --commit"
+)
+
+
+# **キーが未記載の service は allow ではなく deny する** (fail-closed)。「使っている
+# service なのにキーが無い」は「検証しなくてよい」ではなく「期待値を宣言し忘れて
+# いる」状態で、素通しするとこの plugin が防ぐはずの事故 (別アカウントでの write)
+# がそのまま通る。README とこの deny 文面はかつて「未記載のサービスは検証対象外
+# (= allow)」と逆を約束しており、実装 (deny) と食い違っていた (内部バックログ)。
+# 実装側を正として文面を揃え、あわせてキー追加の具体コマンドを載せる。
+#
+# 案内が `init` ではなく `set` なのは、キー未記載 deny が「accounts.local.json は
+# 見つかっている」ときにしか出ないため。そのファイルが親から継承されている場合
+# `init` は「継承中の設定を覆い隠す」として exit 2 で拒否する (builder `_cmd_init`)
+# が、`set` は継承元を直接編集するのでどちらの階層でも通る。
+#
+# **`--commit` を直接案内しない。** `--from-cli` は「今ログインしているアカウント」を
+# 期待値として提案するので、間違ったアカウントに入ったまま commit すると、この plugin
+# が防ぐはずの状態をそのまま正解として焼き付けてしまう。deny を消すのが目的の相手に
+# 一発で通る呪文を渡すと必ずそう使われるため、`--dry-run` + 確認の 2 段にする。
+def _missing_key_hint(account_key: str) -> str:
+    return (
+        f"追加: {_BUILDER_PATH} set --service {account_key} --from-cli --dry-run\n"
+        "(--from-cli は現在ログイン中のアカウントを提案します。意図したアカウントか"
+        "確認してから --dry-run を --commit に変えてください)"
+    )
+
+
+# **予算切れも deny に倒す** (fail-closed)。hook は hooks.json の timeout を超えると
+# Claude Code 側で打ち切られ、出力が破棄されて tool call がそのまま進む
+# (公式仕様上の fail-open)。複合コマンド (`gh ... && aws ... && gcloud ...`) は
+# service ごとに直列で verify するため、subprocess timeout の合計だけを見ていると
+# hook timeout を超えうる — CLI 未検出も CLI timeout も deny に倒しているのに、
+# ここだけ無音で通ることになる (内部バックログ)。予算を使い切った service は
+# CLI を呼ばずにこの deny へ集約し、必ず hook timeout 内に JSON を返す。
+#
+# QUERY tier (リモート read) だけのときは止めない (`stops=False`)。不一致でも通す
+# 判定表なのに「検証しきれなかったから止める」のは非対称なため。
+def _budget_expired_error(account_key: str, *, stops: bool = True) -> str:
+    consequence = (
+        "未検証のまま通すと hook 自体が時間切れになり、検証結果が破棄されたまま"
+        "コマンドが実行されるため deny します。"
+        if stops
+        else "リモート read のみのコマンドなので実行は止めませんが、"
+        "このコマンドではアカウントを確認できていません。"
+    )
+    return (
+        f'"{account_key}" の検証を開始できませんでした: '
+        f"1 コマンド分の検証時間 (予算 {budget.TOTAL_BUDGET_SECONDS:.0f} 秒) を"
+        "使い切っています。\n"
+        + consequence
+        + "\n対処: コマンドをサービスごとに分けて実行するか、応答が遅い CLI "
+        "(ネットワーク待ち / 未ログイン) を解消してから再試行してください。"
+    )
+
+
+# 注記の要否は、verify() が返した文字列に **その service が案内する remediation
+# コマンドの実形** (services/<svc>.py の REMEDIATION_PATTERNS、引数付き) が一致するかで
+# 決める。文言 (「〜を実行してください」等) や語幹 (「firebase use」) で判定すると
+# `brew install gh を実行してください` (インストール案内) や
+# `firebase use がタイムアウトしました` (診断文) まで拾う。検出コマンド (user 入力) を
+# 合成した後の本文にも掛けない (`--title '切り替え:'` で誤発火する)。契約の維持は
+# tests の TestRemediationGuidanceContract が「案内コマンドを含む deny には必ず注記が
+# 付く」ことで機械的に確認する。例外は `shell_word.UNSAFE` の文を含む deny (値の一部を許容形
+# から外れるためコマンドの形で案内しなかった。ほかの entry の切替を案内していても付けない。
+# REMEDIATION_NOTE を持つ service は除く。_dispatch_impl の注記の判定を参照)。firebase の
+# `.firebaserc` の解決先を理由に entry を省いた deny は `UNSAFE` を含まないので、案内した行が
+# あれば注記を付ける。
+def _guides_remediation(err: str, service) -> bool:
+    patterns = getattr(service, "REMEDIATION_PATTERNS", ())
+    return any(re.search(p, err) for p in patterns)
+
+
+# 案内した remediation コマンド (切替 / ログイン) は案内された形のままなら通る (切替は
+# self-remediation、ログインは readonly。`firebase login && firebase use <x>` のように
+# 案内文が自ら連結している形も通る) が、**元のコマンド (検出コマンド) を同じ Bash に
+# 連結する**と、そちらが切替前の状態で検証されて deny になる (_all_self_remediation は
+# 全セグメントが切替であることを要求する)。案内どおりに打ったのに再び deny される往復を
+# 防ぐため、remediation を案内する deny には必ず添える (値の一部でもコマンドの形で案内
+# しなかった deny は、ほかの entry の切替を案内していても除く。ただし REMEDIATION_NOTE を
+# 持つ service には、この除外を当てない)。service が REMEDIATION_NOTE を宣言していれば
+# それを優先する (AWS: インライン env は単独実行するものではない)。
+_REMEDIATION_STANDALONE_NOTE = (
+    "※ 案内した切替 / ログインコマンドは案内された形のまま単独で実行してください。"
+    "元のコマンド (検出コマンド) を同じコマンド行に連結すると、そちらが切替前の状態で"
+    "検証されて再び deny されます。切替が完了してから元のコマンドを実行してください。"
+)
+
+def _match_service(candidate: str):
+    """候補セグメントにマッチする最初のサービスを返す。"""
+    for svc in SERVICES:
+        for pattern in svc.PATTERNS:
+            if re.search(pattern, candidate):
+                return svc
+    return None
+
+
+def _normalize_candidate(candidate: str, service) -> tuple[str, dict]:
+    """CLI 名直後の global option (`aws --profile prod sso login`) を剥がした形を返す。
+
+    service が GLOBAL_OPTIONS_WITH_VALUE / GLOBAL_FLAGS を宣言していなければ無変更。
+    剥がした option は 2 要素目 (将来の flag 照合用。現状 dispatcher は使わない)。
+    """
+    with_value = getattr(service, "GLOBAL_OPTIONS_WITH_VALUE", frozenset())
+    flags = getattr(service, "GLOBAL_FLAGS", frozenset())
+    if not with_value and not flags:
+        return candidate, {}
+    return cli_options.strip_leading_options(candidate, with_value, flags)
+
+
+def _context_override(candidate: str, service) -> dict[str, str]:
+    """候補に書かれた「照合先を決める option」の値を返す (`--profile` / `--project` 等)。
+
+    service が `CONTEXT_OPTIONS` を宣言していなければ常に空 dict (= 従来どおり
+    アクティブなアカウントと照合)。値の解析は共通スキャナ
+    (`cli_options.find_context_options`) に一本化してある。
+    """
+    options = getattr(service, "CONTEXT_OPTIONS", None)
+    if not options:
+        return {}
+    with_value = getattr(service, "GLOBAL_OPTIONS_WITH_VALUE", frozenset())
+    return cli_options.find_context_options(candidate, options, with_value)
+
+
+def _candidate_forms(candidate: str, service) -> tuple[str, ...]:
+    """判定に使う候補の形 (元の形 + global option を剥がした形、同じなら 1 つ)。
+
+    両方に当てるのは、`aws --version` のように剥がすと CLI 名だけになる形を元の
+    pattern (`^aws\\s+--version`) で拾い続けるため。
+    """
+    if service is None:
+        return (candidate,)
+    normalized, _opts = _normalize_candidate(candidate, service)
+    return (candidate, normalized) if normalized != candidate else (candidate,)
+
+
+def _matches_any(forms: tuple[str, ...], patterns) -> bool:
+    return any(re.search(p, form) for p in patterns for form in forms)
+
+
+def _segment_tier(forms: tuple[str, ...], service) -> str:
+    """候補セグメントの tier (`core/tiers.py`: READONLY / QUERY / WRITE)。
+
+    分類規則 (READONLY / QUERY / DISCLOSING の宣言と option 審査) は
+    `core/tiers.classify` に一本化してある。dispatcher 側の責務は
+    「READONLY を検証対象から外す」「QUERY 不一致を deny にしない」だけ。
+    """
+    return tiers.classify(forms, service)
+
+
+def _is_state_changing(forms: tuple[str, ...], service) -> bool:
+    """候補セグメントが service のアカウント状態を変えうる (切替 / ログイン系) なら True。"""
+    return _matches_any(forms, getattr(service, "STATE_CHANGING", []))
+
+
+def _service_name(service) -> str:
+    return service.__name__.rsplit(".", 1)[-1]
+
+
+def _find_accounts_file(
+    project_dir: str,
+) -> tuple[Path | None, str | None, list[tuple[str, Path]], Path | None, str | None]:
+    """accounts.local.json を 3-tier + 親ディレクトリ遡及 + グローバル既定で探す。
+
+    実体は `core/paths.resolve_accounts_file_for_verification()` — プロジェクト側の
+    解決は **builder (`scripts/accounts_builder.py`) と同じ関数を共有する**。
+    「hook が読むファイル」と「builder が書くファイル」が食い違うと、親から
+    継承しているプロジェクトで builder が子ファイルを作り、その子ファイルで
+    遡及が止まって継承分が全て未設定になる (詳細は paths 側の docstring)。
+    プロジェクト側で見つからないときだけ `$HOME` のグローバル既定に落ちる
+    (builder は書込先を決めるため、こちらの経路は使わない)。
+    戻り値の意味も paths 側の docstring を参照。
+    """
+    return paths.resolve_accounts_file_for_verification(project_dir)
+
+
+def _global_note(accounts_path: Path) -> str:
+    """グローバル既定を採用した場合の 1 行注釈 (deny / warn の前置き)。
+
+    プロジェクトに accounts.local.json が無いまま検証が動く唯一の経路なので、
+    「どのファイルの期待値で判定したか」を必ず添える。
+    """
+    return (
+        f"プロジェクトに accounts.local.json が無いため、グローバル既定 "
+        f"{shell_word.escape_controls(accounts_path)} を使用しています。"
+    )
+
+
+def _decide(
+    effective_mode: str, body: str, notes: list[str], *, query_warn: bool = False
+) -> dict:
+    """検証結果 (deny 相当の本文) を mode / tier に応じた hook 出力へ変換する。
+
+    `enforce` は従来どおり deny、`warn` は `additionalContext` で通知のみ。
+    判定そのもの (何を問題とみなすか) は mode に依らず同じで、変わるのは
+    「止めるか / 伝えるだけか」だけ。
+
+    `query_warn` は「検証を起動したセグメントが全て QUERY tier (リモート read) だった」
+    場合に立つ。mode=enforce でも deny せず `additionalContext` で通す — 止めるのは
+    書込系だけ、という判定表の唯一の緩和方向 (`core/tiers.py`)。mode=warn は全 tier を
+    warn にするので mode 側の header が優先される (二重に前置きしない)。
+
+    **mode=warn のときは QUERY 専用の header も付かない。** どちらも止めないので
+    「なぜ止まらないか」は mode header の 1 本で足り、tier ごとの前置きを重ねると
+    「止めていない理由」が 2 通り書かれることになる。
+    """
+    parts = [body] + [n for n in notes if n]
+    text = "\n\n".join(parts)
+    if effective_mode == mode.WARN:
+        return output.warn(mode.WARN_HEADER + "\n\n" + text)
+    if query_warn:
+        return output.warn(tiers.QUERY_WARN_HEADER + "\n\n" + text)
+    return output.deny(text + "\n\n" + mode.DENY_HINT)
+
+
+def _notes_only(notes: list[str]) -> dict | None:
+    """`off` で検証しないときでも、モード解決の注意書きだけは届ける。
+
+    `CLOUD_ACCOUNT_GUARD_MODE=of` (typo) のような不正値は enforce に倒しつつ
+    note を作るが、`"$mode": "off"` が同時にあると検証前に抜けるため、
+    従来はこの note が誰にも届かなかった = **env の綴り間違いが黙って無視される**。
+    結果 (通す) は利用者の意図どおりでも、env を直すまで「env で off にできて
+    いる」と誤解し続ける。deny は作らず通知だけ返す。
+
+    **dedup はしない**ので、不正値が立っている間は対象コマンドの度に出る
+    (実測: 同じ入力で 3 回連続とも通知)。warn モードの deny 相当の通知も cache
+    しない = 毎回出る仕様なので揃えてある。正しい値 (`off`) や未設定では
+    `None` に戻るため、鳴り続けるのは実際に設定が壊れている間だけ。
+    """
+    text = "\n\n".join(n for n in notes if n)
+    if not text:
+        return None
+    return output.warn(text)
+
+
+def _unreadable_accounts(accounts_path: Path, why: str) -> str:
+    """読めない期待値ファイル (UTF-8 でない / 桁の多すぎる整数 / 入れ子が深すぎる) の deny 本文。
+
+    判定は不正な JSON と同じ (mode は env だけで決める。`"$mode"` は読めないため)。
+    """
+    return (
+        f"{shell_word.escape_controls(accounts_path)} を読めません ({why})。UTF-8 で保存した JSON か、"
+        "入れ子が深すぎないかを確認・修正してください。"
+    )
+
+
+def _ancestor_note(project_dir: str, resolved_dir: Path | None) -> str:
+    """親ディレクトリの accounts.local.json を採用した場合の 1 行注釈。
+
+    deny / warn のメッセージに前置きとして埋め込み、worktree 利用者が
+    「どこから読まれているか」を把握できるようにする。
+    cwd 階層で見つかった場合や、まったく見つからなかった場合は空文字を返す。
+    """
+    if resolved_dir is None:
+        return ""
+    try:
+        project = Path(project_dir).resolve()
+    except OSError:
+        return ""
+    if resolved_dir == project:
+        return ""
+    return (
+        f"accounts.local.json は親ディレクトリ {shell_word.escape_controls(resolved_dir)} から継承して "
+        "います (worktree 内に同名ファイルは不要)。"
+    )
+
+
+def _analyze_command(
+    command: str, trace: dict | None = None
+) -> tuple[list[tuple], list, list[tuple]]:
+    """コマンドを分解し (targets, switching, segments) を返す。
+
+    targets は検証対象 (non-readonly) の (svc, cands, inline_env, ctx, tier) リスト。
+    cands の各要素は (元の候補, global option を剥がした候補) の組で、前者は deny 文面の
+    検出コマンド表示、後者は self-remediation 判定に使う。
+
+    segments は**出現順**の全セグメント (readonly / サービス未マッチも含む) で、
+    各要素は (svc または None, tier または None, 剥がした形, そのセグメントが状態を
+    変える service の組)。targets は (service, env, ctx) ごとに畳まれて順序を失うため、
+    「切替 → write の連結」(`_unexpected_switch_before_write`) の判定にはこちらを使う。
+
+    tier は `core/tiers.py` の QUERY / WRITE。同じエントリに畳まれたセグメントの
+    **最も厳しい側**を採る (`gh pr list && gh pr create` は WRITE)。READONLY の
+    セグメントは従来どおり targets に入らない。
+    switching はアカウント状態を変えうるセグメント (STATE_CHANGING) を含む service の
+    リスト (重複なし、出現順)。readonly 扱いのセグメント (`gh auth login` /
+    `aws sso login` 等) も switching には含める — 検証はしないが、実行後に
+    アカウントが変わるため成功 cache を破棄する必要があるため。
+
+    同一サービスでも **インライン env が異なるセグメントは別エントリ**にする。
+    `AWS_PROFILE=prod aws ... && AWS_PROFILE=dev aws ...` のような複合コマンドで
+    後段 (dev) を検証せず誤 allow するのを防ぐため、(service, inline_env) の組
+    ごとに 1 エントリへ集約する。同一 (service, env) のセグメントは 1 エントリに
+    まとめる (アクティブアカウントは 1 つなので verify は組ごとに 1 回で十分)。
+
+    cands はその (service, env) 組に属する全候補。self-remediation 判定が全
+    セグメントを見る必要があることと、deny reason に検出コマンドを併記する (D14)
+    ことの両方で使う。inline_env はコマンド行頭のインライン環境変数
+    (`AWS_PROFILE=prod aws ...` の `{"AWS_PROFILE": "prod"}`) で、検証 subprocess
+    に渡しコマンド実行時と同条件で検証する。
+
+    trace: `CLOUD_ACCOUNT_GUARD_DEBUG=1` 時のみ非 None。各セグメントの
+    (segment, service, readonly, tier) を `trace["segments"]` に追記する
+    (判定表そのものには影響しない、観測専用)。
+    """
+    order: list = []
+    cand_map: dict = {}
+    tier_map: dict = {}
+    switching: list = []
+    segments: list[tuple] = []
+    for cand, inline_env in extract_candidates(command):
+        svc = _match_service(cand)
+        # `aws --profile prod sso login` のような CLI 名直後の global option は剥がした
+        # 形でも判定する (anchored pattern は `aws sso login` の形を前提にしている)。
+        forms = _candidate_forms(cand, svc)
+        tier = _segment_tier(forms, svc) if svc is not None else None
+        is_ro = tier == tiers.READONLY
+        if trace is not None:
+            trace["segments"].append(
+                {
+                    "segment": cand,
+                    "service": _service_name(svc) if svc is not None else None,
+                    "readonly": is_ro,
+                    "tier": tier,
+                }
+            )
+        # STATE_CHANGING は PATTERNS に一致しない候補にも全 service 分を当てる。
+        # `gcloud container clusters get-credentials` / `aws eks update-kubeconfig` /
+        # `kubectx other` のように別 CLI / plugin が kubeconfig を書き換える形で
+        # kubectl の cache を破棄するため (kubectl.STATE_CHANGING 参照)。
+        changed = tuple(other for other in SERVICES if _is_state_changing(forms, other))
+        for other in changed:
+            if other not in switching:
+                switching.append(other)
+        # readonly / サービス未マッチのセグメントも segments には残す。切替側
+        # (`gh auth login` は readonly、`gcloud ... get-credentials` は kubectl の
+        # PATTERNS に一致しない) が落ちると連結の判定ができない。
+        segments.append((svc, tier, forms[-1], changed))
+        if svc is None or is_ro:
+            continue
+        # コンテキスト option (`aws --profile other ...`) は inline env と同じく
+        # 「検証すべき対象」を変えるので grouping key に含める。含めないと
+        # `aws --profile a s3 rm && aws --profile b s3 rm` が 1 エントリに畳まれ、
+        # 後段 (b) が検証されないまま誤 allow される。
+        ctx = _context_override(cand, svc)
+        key = (svc, tuple(sorted(inline_env.items())), tuple(sorted(ctx.items())))
+        if key not in cand_map:
+            cand_map[key] = []
+            tier_map[key] = tier
+            order.append(key)
+        elif tier == tiers.WRITE:
+            # 同じエントリに畳まれたセグメントは最も厳しい tier を採る。tier を
+            # grouping key に入れて分ける手もあるが、それだと同じ service を 2 回
+            # verify して warn と deny を同時に返すことになる。
+            tier_map[key] = tiers.WRITE
+        cand_map[key].append((cand, forms[-1]))
+    targets: list = []
+    for key in order:
+        svc, env_items, ctx_items = key
+        targets.append(
+            (svc, cand_map[key], dict(env_items), dict(ctx_items), tier_map[key])
+        )
+    return targets, switching, segments
+
+
+def _all_self_remediation(cands: list, service, entry) -> bool:
+    """全候補セグメントが「期待値へ向かう切替コマンド」なら True。
+
+    deny reason が案内する remediation コマンド (例: gh auth switch --user
+    <expected>) 自体が PATTERNS にマッチして deny される self-remediation
+    loop を防ぐ。期待値以外への切替はここで True にならず通常検証に落ちる。
+    切替 + write の合せ技 (`gh auth switch -u X && gh pr create`) も write
+    側のセグメントが残るため通常検証される。判定中の例外は安全側 (通常検証)。
+    """
+    fn = getattr(service, "is_self_remediation", None)
+    if fn is None:
+        return False
+    try:
+        return all(fn(c, entry) for c in cands)
+    except Exception:
+        return False
+
+
+# 切替と write を**同一コマンドに連結**した形は、hook が PreToolUse で 1 回しか
+# 動かないため write が切替**前**の状態で検証される。現在値が期待値と一致していれば
+# allow され、切替後の期待外アカウントで write が走る = この plugin が防ぐはずの事故
+# がそのまま通る (0.14.0 までは README の既知の制限として開示するだけだった)。
+#
+# 判定は「切替先が期待値か」だけで決め、**CLI は呼ばない**。現在値が何であっても
+# 切替後の状態は検証できないので verify の結果で判定が変わる余地がなく、確実に deny
+# になるコマンドで実時間予算 (`core/budget.py`) を使うと、同じコマンド行の他 service が
+# 予算切れ deny に落ち、最悪は hook timeout (= 出力破棄 = fail-open) に近づく。
+def _is_expected_switch(service, form: str, entry) -> bool:
+    """切替セグメントが期待値へ向かう形 (self-remediation) なら True。
+
+    **判定できない場合は False (= deny 側)**。引数なしの `gh auth switch`
+    (インタラクティブ選択)、`--user $VAR` のような静的に解決できない切替先、
+    `is_self_remediation` を宣言しない service (aws: 期待値の Account ID と
+    profile 名の照合が hook からは不能) がこれに当たる。「切替後の状態が判らない
+    × write」を判らないことを理由に通すと、ガードが消える方向の失敗になる。
+    """
+    fn = getattr(service, "is_self_remediation", None)
+    if fn is None:
+        return False
+    try:
+        return bool(fn(form, entry))
+    except Exception:
+        return False
+
+
+def _changes_identity(service, form: str, entry) -> bool:
+    """切替セグメントが「その service の identity を変えうる形」なら True。
+
+    **未宣言なら True** (= `STATE_CHANGING` 全体を切替として扱う従来どおりの挙動)。
+    `STATE_CHANGING` は成功 cache の破棄が目的なので「identity を変えない config
+    変更」も含んでいる (`kubectl config set-context --current --namespace=x` /
+    `gcloud config set compute/region x` / `gh auth refresh`)。cache 破棄は過剰でも
+    再検証 1 回で済むが、**連結規則では過剰が誤 deny になる** — 切替ですらない形に
+    「切替先不明の切替」として deny を生やしてしまう。そこで service 側が
+    `changes_identity(form, expected)` で inert な形を allow-list 宣言できるように
+    し、切替側の条件をそれで絞る。
+
+    判定中の例外は **True (= deny 側)**。`_is_expected_switch` の例外を False
+    (deny 側) に倒しているのと同じ向き — 「判らないから通す」を作らない。
+    """
+    fn = getattr(service, "changes_identity", None)
+    if fn is None:
+        return True
+    try:
+        return bool(fn(form, entry))
+    except Exception:
+        return True
+
+
+def _unexpected_switch_before_write(
+    service, entry, segments: list[tuple]
+) -> tuple[str, str] | None:
+    """`(切替セグメント, write セグメント)` の最初の組を返す (無ければ None)。
+
+    `segments` は `_analyze_command` が作る出現順のセグメント列。
+
+    - **切替側**: その service の状態を変えるセグメント (別 CLI 経由の
+      `gcloud container clusters get-credentials` 等も含む) のうち、
+      **identity を変えうる形** (`_changes_identity`) で、かつ期待値へ
+      向かわないもの
+    - **write 側**: その service の **WRITE tier** セグメントのうち、期待値への
+      切替そのものではないもの
+
+    QUERY / READONLY は write 側に数えない。リモートを変えないので切替後の状態で
+    走っても資源は変わらず、厳格化を「連結された write」だけに限るため
+    (`"$readonly": "deny"` でも数えない — あれは QUERY 不一致の扱いを戻す設定で、
+    セグメントの tier そのものを変える設定ではない)。
+
+    write 側から self-remediation を除くのは `firebase login && firebase use <期待>`
+    (deny 文面自身が案内する連結形) を deny しないため。`firebase use <期待>` は
+    WRITE tier だが、実行後の状態は期待値なので連結を止める理由が無い。
+
+    同一セグメントが切替でも write でもある形 (`gh auth switch --user other` 単体) を
+    自己 flag しないよう、**write 判定を先に、pending への追加を後に**行う。
+    """
+    pending: list[str] = []
+    for seg_service, tier, form, changed in segments:
+        if (
+            seg_service is service
+            and tier == tiers.WRITE
+            and pending
+            and not _is_expected_switch(service, form, entry)
+        ):
+            return pending[0], form
+        if (
+            service in changed
+            and _changes_identity(service, form, entry)
+            and not _is_expected_switch(service, form, entry)
+        ):
+            pending.append(form)
+    return None
+
+
+def _detected(cands) -> str:
+    """`(検出コマンド: ...)` の行に出すセグメントの並び (制御文字はエスケープする)。
+
+    セグメントはコマンドそのもの (利用者の入力) で、引数に改行を含めると、この行の外に偽の行
+    (「切り替え: ...」) を差し込める。値を置き換えず 1 行のまま示す
+    (`shell_word.escape_controls`。v0.21.0)。
+    """
+    return ", ".join(shell_word.escape_controls(orig) for orig, _norm in cands)
+
+
+def _expected_display(entry) -> str:
+    """deny 文面に載せる期待値の表示形 (str はそのまま / dict は `key=値` の列)。
+
+    dict のキーの意味は service ごとに違う (github: host / gcloud:
+    project|account / firebase: alias) ので、意味を要約せず書かれたまま見せる。
+    値の解釈は service の verify() が持つ規則であって、ここで再現すると
+    2 箇所に規則が生える。str 以外の値は落とす (verify() も使わない)。キーと値は
+    示せる形のときだけ示す (`shell_word.shown`。改行を含む値で偽の行を差し込めないように)。
+
+    **`REMEDIATION_PATTERNS` に一致する形を作らないこと** — この文面は
+    `_guides_remediation` を通さない chain error なので、切替コマンドの実形を
+    書くと「案内されたコマンド」の契約 (単独実行の注記) を汚す。期待**値**だけを
+    載せる。
+    """
+    if isinstance(entry, str):
+        return shell_word.shown(entry)
+    if isinstance(entry, dict):
+        pairs = [
+            f"{shell_word.shown(k)}={shell_word.shown(v)}"
+            for k, v in entry.items() if isinstance(v, str) and v
+        ]
+        if pairs:
+            return ", ".join(pairs)
+    return ""
+
+
+def _switch_then_write_error(
+    account_key: str, entry, switch_form: str, write_form: str
+) -> str:
+    expected = _expected_display(entry)
+    target = f"期待値 ({expected}) へ" if expected else "期待値へ"
+    return (
+        f'"{account_key}" の切替と書込を同一コマンドに連結しています。'
+        "切替後の状態で write が実行されるため、"
+        f"{target}切り替える操作を単独で実行してから再度お試しください。\n"
+        "(hook はコマンド実行前に 1 回だけ動くため、連結された write は切替前の"
+        "状態で検証され、切替後のアカウントは検証できません。切替を単独で実行すれば"
+        "成功キャッシュが破棄され、次の write が切替後の状態で検証されます)\n"
+        "(検出コマンド: アカウント状態を変える操作="
+        f"{shell_word.escape_controls(switch_form)} / "
+        f"書込={shell_word.escape_controls(write_form)})"
+    )
+
+
+def _deprecation_note(kind: str) -> str:
+    """kind に応じた旧パス移行案内 (deny/warn の suffix 用) を返す。"""
+    if kind == "deprecated":
+        return (
+            ".claude/accounts.local.json は旧パスです。"
+            ".claude/cloud-account-guard/accounts.local.json への移行を推奨します。\n"
+            + _MIGRATE_HINT
+        )
+    if kind == "legacy":
+        return (
+            "accounts.json は旧名です。"
+            ".claude/cloud-account-guard/accounts.local.json に移行してください。\n"
+            + _MIGRATE_HINT
+        )
+    return ""
+
+
+_DEPRECATION_WARN_TTL = 86400  # 1 日
+
+
+def _should_emit_deprecation_warn(project_dir: str) -> bool:
+    """deprecation warn を出すべきか判定する (1 日 1 回に制限)。
+
+    alert fatigue を避けるため、同一プロジェクトへの deprecation warn は
+    1 日に 1 回のみ発火する。deny メッセージ内の note は制限しない
+    (deny は実行阻止のため常に表示すべき)。
+
+    記録は成功 cache と同じ dir に置き、その dir が自分の所有で他のユーザーが書けないとき
+    だけ使う (`cache.state_dir`)。旧実装は共有の `/tmp` の同名 dir を確かめずに使い、別の
+    ユーザーが置いた記録で案内を止められ、置かれた symlink を辿って空のファイルを書きえた。
+    使えなければ 1 日 1 回に絞れないので、毎回出す。
+    """
+    flag_dir = cache.state_dir()
+    if flag_dir is None:
+        return True
+    key = hashlib.sha256(f"deprecation-warn:{project_dir}".encode()).hexdigest()[:16]
+    flag_path = flag_dir / f"deprecation-{key}.flag"
+    try:
+        if flag_path.exists():
+            mtime = flag_path.stat().st_mtime
+            if time.time() - mtime < _DEPRECATION_WARN_TTL:
+                return False
+        flag_path.write_text("")
+    except OSError:
+        pass
+    return True
+
+
+def _format_unstattable(conflicts: list[tuple[str, Path]]) -> str | None:
+    """競合 (D4) に数えた配置パスに stat できないものがあれば、その deny 本文を返す (無ければ None)。
+
+    stat できない配置パスはファイルがあるかどうかを確かめられないので「ある」に数える
+    (`paths._may_hold_accounts`)。その階層の `.claude` に権限が無いと 3 つの配置パスすべてが
+    そうなるので、`_format_conflicts` の「複数のパスに存在します」と migrate / rm の案内は事実と
+    合わず、案内どおりにしても直らない。確かめられないパスとその理由だけを示す。
+    文面は builder と共有する (`paths.describe_unstattable`)。
+    """
+    return paths.describe_unstattable(conflicts)
+
+
+def _format_conflicts(conflicts: list[tuple[str, Path]]) -> str:
+    lines = ["複数のパスに accounts.local.json が存在します (曖昧さを避けるため検証を停止):"]
+    for kind, path in conflicts:
+        lines.append(f"  - {shell_word.escape_controls(path)} ({kind})")
+    lines.append("どれか 1 つに統合してください:")
+    lines.append("  " + _MIGRATE_HINT)
+    # migrate --commit は旧ファイルを残すため、その後の手動削除を案内しないと
+    # `len(found) >= 2` の deny が解消されず remediation loop になる (R4)。
+    legacy_paths = [path for kind, path in conflicts if kind != "new"]
+    if legacy_paths:
+        lines.append("  migrate --commit 完了後、以下の旧ファイルを手動で削除してください:")
+        for path in legacy_paths:
+            # パスはシェルの 1 語にする。サブディレクトリで作業していると、途中の
+            # ディレクトリ名はリポジトリが決められる (`;` や空白を含みうる)。
+            # 制御文字を含むパスは、`shlex.quote` が改行などをそのまま残す (引用符の中で
+            # 行が分かれ、偽の行を差し込める) ので、コマンドの形では案内しない (v0.21.1)。
+            text = str(path)
+            if shell_word.escape_controls(text) == text:
+                lines.append(f"    rm {shlex.quote(text)}")
+            else:
+                lines.append(
+                    f"    {shell_word.escape_controls(text)} {shell_word.NOT_COMMAND_FORM_REMOVE}"
+                )
+    return "\n".join(lines)
+
+
+def _auto_switch(
+    svc, entry, project_dir: str, proc_env, ctx, switching_here: bool,
+    trace: dict | None, *, help_only: bool = False,
+) -> auto_switch.Outcome:
+    """deny になる不一致を、期待値への自動切替で置き換えられるか試す。
+
+    呼ぶ条件 (enforce / 止める tier / opt-in 済み) は呼び出し側が決める。ここでは
+    `core/auto_switch.attempt` を呼び、デバッグ trace に結果を残すだけ
+    (`_dispatch_impl` を太らせないための切り出し)。例外は握って「切り替えなかった」
+    扱いにする — 自動切替は deny を置き換える補助で、失敗しても判定は従来どおり
+    deny のまま残るべきなので、ここで hook 全体を内部エラー (= fail-open) に
+    落とさない。
+    """
+    try:
+        outcome = auto_switch.attempt(
+            svc, entry, project_dir, env=proc_env, context=ctx,
+            switching_here=switching_here, help_only=help_only,
+        )
+    except Exception as e:  # noqa: BLE001
+        outcome = auto_switch.Outcome(
+            note=f"※ 自動切替 (auto-switch) は内部エラーのため行いませんでした "
+            f"({type(e).__name__})。"
+        )
+    if trace is not None:
+        trace["auto_switch"][_service_name(svc)] = {
+            "resolved": outcome.resolved,
+            "switched": [list(step) for step in outcome.switched],
+            "note": outcome.note,
+        }
+    return outcome
+
+
+def _combined_short_error(svc, cands, *, stops: bool) -> str:
+    """短い context option を含む結合形 (`-jP prod`) で照合先を確かめられないときの文。
+
+    `cli_options.find_context_options` がこの形を見つけると、照合先を読まずに止める
+    (展開の規則を再現しない)。示すのは option の名前だけで、トークン自体は検出コマンドの
+    行に出る。分けて書くよう文で案内し、コマンドの形では案内しない。
+    """
+    names = sorted(
+        (name for name in getattr(svc, "CONTEXT_OPTIONS", {})
+         if len(name) == 2 and name[0] == "-" and name[1] != "-"),
+        key=str.lower,
+    )
+    shown = " / ".join(names)
+    head = (
+        f'"{svc.ACCOUNT_KEY}": 短いオプションを結合したトークン (-jP のような形) に、照合先を'
+        f"決める option ({shown}) が含まれているため、どの照合先で動くかを確かめられません"
+        " (hook は結合形を展開しません)。"
+    )
+    tail = (
+        f"{shown} はほかの文字と結合せず、単独のトークンで書いてください。"
+        if stops
+        else "リモート read のみのコマンドなので実行は止めません。"
+    )
+    return f"{head}\n{tail}\n(検出コマンド: {_detected(cands)})"
+
+
+# 起動リポジトリの外で走るセグメントの deny (v0.19.0)。hook は**起動したときの env**
+# (+ settings の `env`) と、起動したディレクトリの期待値で検証する。別のリポジトリで
+# 走るコマンドは、そのリポジトリで意図されたアカウント (期待値も、ディレクトリ単位の
+# env ツールが切り替えるはずの env も) を hook から照合できない。移動先のパスは
+# 文面に出さない (`cd` の引数はコマンド由来で、改行などで偽の行を差し込めるため)。
+def _outside_error(root: Path | None, *, stops: bool) -> str:
+    where = f" ({shell_word.escape_controls(root)}) " if root is not None else ""
+    head = (
+        f"起動したリポジトリ{where}の外で実行されるコマンドです。"
+        "この hook は、セッションを起動したディレクトリの期待値と環境変数で照合するため、"
+        "別のリポジトリ (または移動先を読めない cd の後) での実行は照合できません。"
+    )
+    if not stops:
+        return head + " (リモート read のみのコマンドなので実行は止めません)"
+    return (
+        head
+        + "\nそのリポジトリで Claude Code を起動し直して実行してください "
+        "(Subagent に任せても、hook と Bash の環境変数は変わりません)。"
+    )
+
+
+def _target_dirs(cands, seg_dirs: dict) -> set:
+    """target の各セグメントが走るディレクトリ (None = 静的に決められない)。"""
+    dirs: set = set()
+    for orig, _norm in cands:
+        dirs |= seg_dirs.get(orig, {None})
+    return dirs
+
+
+def _touches_identity(svc, names) -> bool:
+    """`names` (環境変数名の集合。ANY_ENV を含みうる) が service の identity env に当たるか。"""
+    if workdir.ANY_ENV in names:
+        return True
+    exact = getattr(svc, "IDENTITY_ENV_VARS", frozenset())
+    prefixes = getattr(svc, "IDENTITY_ENV_PREFIXES", ())
+    return any(n in exact or n.startswith(tuple(prefixes)) for n in names)
+
+
+def _pinned(
+    svc, inline_env: dict, cands, env_changes: dict, directory: str, trace: dict | None
+) -> bool:
+    """期待値の代わりに、公式のディレクトリ単位の固定で決まっているか (v0.19.0)。
+
+    service が `is_pinned` を宣言していなければ False (gh / kubectl は固定の仕組みが
+    無いので登録を促す)。判定は **hook プロセスの env だけ**で行う: コマンド行頭の
+    インライン env (`AWS_PROFILE=x aws ...`) や、同じコマンドの中の `export` /
+    `unset` / 代入 / `source` は、ディレクトリ単位の固定ではなくその実行だけの指定で、
+    これを固定とみなすと未登録の deny を行頭の 1 語で抜けられる (その値でアカウントが
+    決まるのに、何とも照合しない)。identity env をそうして変えている target は固定
+    されていないとみなす。判定の例外も固定されていない側 (= 従来どおり deny) に倒す。
+    """
+    fn = getattr(svc, "is_pinned", None)
+    if fn is None:
+        return False
+    changed: set = set()
+    for orig, _norm in cands:
+        changed |= env_changes.get(orig, {workdir.ANY_ENV})
+    overridden = {
+        k for k, v in (inline_env or {}).items() if os.environ.get(k) != v
+    }
+    if _touches_identity(svc, changed | overridden):
+        pinned = False
+    else:
+        try:
+            pinned = bool(fn(dict(os.environ), directory))
+        except Exception:  # noqa: BLE001
+            pinned = False
+    if trace is not None:
+        trace.setdefault("pinned", {})[_service_name(svc)] = pinned
+    return pinned
+
+
+def _all_pin_actions(cands, svc) -> bool:
+    """target の全セグメントが、未登録時に案内する固定の操作 (`firebase use <x>`) か。
+
+    service が `is_pin_action` を宣言していなければ False。
+    """
+    fn = getattr(svc, "is_pin_action", None)
+    if fn is None:
+        return False
+    return all(fn(norm) for _orig, norm in cands)
+
+
+def _unregistered_error(svc, where: str, *, stops: bool) -> str:
+    """期待値が未登録で、ディレクトリ単位の固定も無いときの文。"""
+    pin_hint = getattr(svc, "PIN_HINT", "")
+    head = f'{where} に "{svc.ACCOUNT_KEY}" キーがありません。' + (
+        "期待値が無いと照合できないため deny します。\n"
+        if stops
+        else "期待値が無いと照合できません (リモート read のみの"
+        "コマンドなので実行は止めません)。\n"
+    )
+    if pin_hint:
+        return head + pin_hint + "\nまたは、期待値を登録して照合させます:\n" + _missing_key_hint(svc.ACCOUNT_KEY)
+    return head + _missing_key_hint(svc.ACCOUNT_KEY)
+
+
+def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
+    """`dispatch()` の実処理。`trace` は `CLOUD_ACCOUNT_GUARD_DEBUG=1` 時のみ
+    非 None で、判定表そのものには影響しない (観測専用)。"""
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR") or cwd
+    if not project_dir:
+        return None
+
+    targets, switching, segments = _analyze_command(command, trace)
+    # 各セグメントが走るディレクトリ (Bash の cwd + コマンド中の cd) と起動リポジトリ。
+    # 起動リポジトリの外で走る target は照合せずに止める (`_outside_error`)。
+    launch_root = workdir.launch_root(project_dir)
+    seg_dirs = workdir.segment_dirs(command, cwd or project_dir)
+    env_changes = workdir.segment_env_changes(command)
+    # アカウント状態を変えうるコマンド (切替 / ログイン / ログアウト) は、実行前
+    # (PreToolUse) の時点で当該 service の成功 cache を全て破棄する。実行後に
+    # 破棄する hook は無いので、実行前に消しておくことで実行後の最初の write が
+    # 必ず再検証される (切替の実行中に並行した検証が成功を書く窓は cache 側の
+    # epoch + in-flight 窓で塞ぐ)。self-remediation (期待値への切替) や readonly
+    # 扱いの login も、実行に失敗して状態が変わらない可能性があるため無条件に破棄する。
+    for svc in switching:
+        cache.invalidate(_service_name(svc))
+    if not targets:
+        return None
+
+    # 検証を起動したセグメントが**全て QUERY tier** (リモート read) なら、不一致でも
+    # 止めずに警告だけ返す (`core/tiers.py`)。accounts.local.json を読む前に決まる
+    # deny のうち「未設定」もこれに従う — 読むだけのコマンドのために設定を強制すると、
+    # install 直後の全プロジェクトで deny が始まる離脱要因に逆戻りするため。
+    # **競合 (複数パス) と JSON 破損は tier に関係なく deny のまま**にする。
+    # そちらは「アカウントが合っていない」ではなく「どの設定が効くか決められない /
+    # 設定が壊れている」状態で、読むだけでも判定の土台が無い (かつ bare な状態確認
+    # コマンドは READONLY なのでデッドロックにもならない)。
+    query_only = all(tier == tiers.QUERY for _svc, *_r, tier in targets)
+
+    # モードは env → accounts.local.json の "$mode" → enforce の順で決まる
+    # (`core/mode.py`)。env が off なら**ファイルを読む前に**抜ける — 検証しない
+    # のだから accounts.local.json の有無も CLI の状態も見る必要がない。
+    # cache の無効化 (上の switching ループ) より後に置くのは、off の間に実行された
+    # 切替が cache に残ると enforce へ戻した直後に古い成功で通ってしまうため。
+    env_mode, env_note = mode.from_env()
+    mode_notes = [env_note] if env_note else []
+    if env_mode == mode.OFF:
+        # `from_env()` は「mode」か「不正値 note」の片方しか返さないので、この経路の
+        # note は常に空 (= None を返す)。形を下の off と揃えておく。
+        return _notes_only(mode_notes)
+    # accounts.local.json を読む前に決まる deny (競合 / 未設定 / 壊れた JSON) は
+    # "$mode" が読めないため env だけで mode を決める。
+    pre_file_mode = mode.effective(env_mode, None)
+
+    accounts_path, kind, conflicts, resolved_dir, source = _find_accounts_file(
+        project_dir
+    )
+    if source == paths.SOURCE_GLOBAL and accounts_path is not None:
+        source_note = _global_note(accounts_path)
+    else:
+        source_note = _ancestor_note(project_dir, resolved_dir)
+
+    if conflicts:
+        body = _format_unstattable(conflicts) or _format_conflicts(conflicts)
+        if source_note:
+            body = source_note + "\n\n" + body
+        return _decide(pre_file_mode, body, mode_notes)
+
+    if accounts_path is None:
+        # 期待値のファイルがどこにも無くても、起動リポジトリの中でディレクトリ単位の
+        # 固定が効いている service は止めない (v0.19.0)。外で走る target は固定の有無を
+        # 判定できない (hook の env は起動ディレクトリのもの) ので止める。
+        outside_problems: list[str] = []
+        remaining = []
+        for t in targets:
+            svc, cands, inline_env, _ctx, tier = t
+            dirs = _target_dirs(cands, seg_dirs)
+            stops_t = tier != tiers.QUERY
+            if not all(workdir.is_inside(d, launch_root) for d in dirs):
+                outside_problems.append(_outside_error(launch_root, stops=stops_t))
+                continue
+            if _pinned(
+                svc, inline_env, cands, env_changes, next(iter(dirs)), trace
+            ) or _all_pin_actions(cands, svc):
+                continue
+            remaining.append(t)
+        if not remaining:
+            if outside_problems:
+                return _decide(
+                    pre_file_mode,
+                    "\n\n".join(dict.fromkeys(outside_problems)),
+                    mode_notes,
+                    query_warn=all(
+                        tier == tiers.QUERY for *_r, tier in targets
+                    ),
+                )
+            return _notes_only(mode_notes)
+        targets = remaining
+        query_only = all(tier == tiers.QUERY for _svc, *_r, tier in targets) and all(
+            "リモート read のみ" in p for p in outside_problems
+        )
+        hints = [getattr(svc, "SETUP_HINT", "") for svc, *_rest in targets]
+        hint_block = "\n".join(h for h in hints if h)
+        # 文面は tier で分ける。QUERY だけのときは allow するので、そこに
+        # 「deny されます」と書くと**結果と矛盾する**文面になる (キー欠落の経路は
+        # 既に `stops` で分けてある。同じ齟齬をここで作り直さない)。
+        consequence = (
+            "(使用する service のキーは全て必要です。キーの無い service の"
+            "コマンドも deny されます)"
+            if not query_only
+            else "(使用する service のキーは全て必要です。リモート read のみの"
+            "コマンドなので実行は止めません)"
+        )
+        msg = (
+            ".claude/cloud-account-guard/accounts.local.json が未設定です。\n"
+            + consequence
+            + "\n初期化: /cloud-account-guard:accounts-init"
+        )
+        if hint_block:
+            msg += "\n\n" + hint_block
+        pin_hints = [getattr(svc, "PIN_HINT", "") for svc, *_rest in targets]
+        pin_block = "\n".join(dict.fromkeys(h for h in pin_hints if h))
+        if pin_block:
+            msg += "\n\n期待値を登録する代わりに、ディレクトリごとに固定することもできます:\n" + pin_block
+        # グローバル既定 (`$HOME/.claude/cloud-account-guard/accounts.local.json`) を
+        # 置けば全プロジェクトの既定として使えることも案内する。user scope で
+        # install した直後に「未設定のプロジェクトだけが deny される」状態から
+        # 抜ける出口が無かったため (内部バックログ)。
+        global_path = paths.global_accounts_file()
+        if global_path is not None:
+            msg += (
+                f"\n\n全プロジェクト共通の既定にするには {shell_word.escape_controls(global_path)} を"
+                "作成してください (プロジェクト側の設定が優先されます)。"
+            )
+        if outside_problems:
+            msg = "\n\n".join(dict.fromkeys(outside_problems)) + "\n\n" + msg
+        # 未設定はファイルが**どこにも無い**状態なので、"$readonly" で従来挙動に
+        # 戻す余地はない (読むファイルが無い) → 既定 (warn) で判断する。
+        return _decide(pre_file_mode, msg, mode_notes, query_warn=query_only)
+
+    try:
+        accounts = json.loads(accounts_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        return _decide(
+            pre_file_mode,
+            f"{shell_word.escape_controls(accounts_path)} の JSON が不正です: {e.msg} (行 {e.lineno})。"
+            "内容を確認・修正してください。",
+            mode_notes,
+        )
+    except (ValueError, RecursionError) as e:
+        # UTF-8 でない (UnicodeDecodeError) / 桁の多すぎる整数 (Python の上限。版と設定で
+        # 変わる) / 入れ子が深すぎる (RecursionError) ファイルも、不正な JSON と同じに扱う。
+        # 前の 2 つは ValueError の子 (JSONDecodeError も子だが、上で捕まえる)。捕まえないと
+        # dispatch() の外まで抜け、__main__ の最終防波堤が「内部エラーのため検証をスキップ」
+        # (実行は止めない) にしていた。
+        return _decide(
+            pre_file_mode, _unreadable_accounts(accounts_path, type(e).__name__), mode_notes
+        )
+    except OSError as e:
+        return _decide(
+            pre_file_mode,
+            f"{shell_word.escape_controls(accounts_path)} の読み込みに失敗しました: "
+            f"{shell_word.escape_controls(e)}",
+            mode_notes,
+        )
+    if paths.nested_deeper_than(accounts, paths.MAX_ACCOUNTS_DEPTH):
+        return _decide(
+            pre_file_mode,
+            _unreadable_accounts(
+                accounts_path, f"入れ子が {paths.MAX_ACCOUNTS_DEPTH} 段より深い"
+            ),
+            mode_notes,
+        )
+
+    if not isinstance(accounts, dict):
+        return _decide(
+            pre_file_mode,
+            f"{shell_word.escape_controls(accounts_path)} はオブジェクト ({{...}}) である必要があります。",
+            mode_notes,
+        )
+
+    # ここで初めて "$mode" が読める (ファイルの形が確定した後)。
+    file_mode, file_note = mode.from_accounts(accounts)
+    if file_note:
+        mode_notes.append(file_note)
+    effective_mode = mode.effective(env_mode, file_mode)
+    if effective_mode == mode.OFF:
+        return _notes_only(mode_notes)
+
+    # "$readonly" も同じタイミングで読める。`deny` なら QUERY を WRITE と同じに扱う
+    # (0.13.0 までの挙動)。
+    readonly_policy, policy_note = tiers.policy_from_accounts(accounts)
+    if policy_note:
+        mode_notes.append(policy_note)
+
+    # 自動切替 (auto-switch) を有効にしている service (env → "$auto_switch" → 無効)。
+    # 使うのは**止める場面**だけ = enforce で errors に積まれる target
+    # (`core/auto_switch.py`)。不正な指定の note も mode の note と同じ経路で届ける。
+    auto_enabled, auto_notes = auto_switch.resolve(accounts, SERVICES)
+    mode_notes.extend(auto_notes)
+
+    try:
+        accounts_mtime = accounts_path.stat().st_mtime
+    except OSError:
+        accounts_mtime = 0.0
+
+    # errors は deny 相当 (WRITE tier)、query_errors は allow + 警告相当 (QUERY tier)。
+    # 同じ list に混ぜて後から分けられないのは、どちらに倒すかが**セグメントの
+    # tier ごと**に決まるため (`gh pr list && aws s3 rm ...` は aws だけが deny)。
+    errors: list[str] = []
+    query_errors: list[str] = []
+    remediation_notes: list[str] = []  # 出現順・重複なし
+    # 自動切替した事実の通知。allow になっても必ず届ける (マシン全体に効く副作用
+    # なので、Claude と利用者が知らないまま進ませない)。
+    switch_notices: list[str] = []
+    for svc, cands, inline_env, ctx, tier in targets:
+        # `"$readonly": "deny"` なら QUERY も止める側に寄せる。
+        problems = (
+            query_errors
+            if tier == tiers.QUERY and readonly_policy == tiers.POLICY_WARN
+            else errors
+        )
+        stops = problems is errors
+        dirs = _target_dirs(cands, seg_dirs)
+        if not all(workdir.is_inside(d, launch_root) for d in dirs):
+            problems.append(_outside_error(launch_root, stops=stops))
+            continue
+        entry = accounts.get(svc.ACCOUNT_KEY)
+        if entry is None or entry == "":
+            # 期待値が未登録でも、公式のディレクトリ単位の固定 (env / firebase use) が
+            # 効いていれば止めない (v0.19.0)。gh / kubectl は固定の仕組みが無いので登録を促す。
+            if _pinned(
+                svc, inline_env, cands, env_changes, next(iter(dirs)), trace
+            ) or _all_pin_actions(cands, svc):
+                continue
+            problems.append(_unregistered_error(svc, shell_word.escape_controls(accounts_path), stops=stops))
+            continue
+
+        if not isinstance(entry, (str, dict)):
+            # **値の型不正は tier に関係なく deny** (競合 / JSON 破損と同じクラス)。
+            # 「アカウントが合っていない」ではなく「期待値として読めない物が書かれて
+            # いる」状態で、読むだけのコマンドで黙って通すと設定のバグが隠れる。
+            errors.append(
+                f'{shell_word.escape_controls(accounts_path)} の "{svc.ACCOUNT_KEY}" 値は文字列または '
+                f'オブジェクトであるべきです (現在: {type(entry).__name__})。'
+            )
+            continue
+
+        # 期待値以外への切替 (切替先が静的に判らない形も含む) と同 service の write を
+        # 同一コマンドに連結した形は、現在値に関わらず deny する
+        # (`_unexpected_switch_before_write`)。cache / self-remediation / verify より
+        # **前**に置く: 成功 cache があってもこの穴は塞がらないし、verify の結果で
+        # 判定が変わる余地も無いため。
+        # **`problems` ではなく `errors` に積む。** この規則の発火条件は「同 service に
+        # WRITE tier のセグメントがある」ことなので、同 service の別 target
+        # (QUERY tier) を処理している最中でも止める側が正しい。mode=warn / off は
+        # 従来どおり `_decide` / 上の early return が全体を弱める。
+        chained = _unexpected_switch_before_write(svc, entry, segments)
+        if chained is not None:
+            errors.append(
+                _switch_then_write_error(svc.ACCOUNT_KEY, entry, *chained)
+            )
+            continue
+
+        if _all_self_remediation([norm for _orig, norm in cands], svc, entry):
+            continue
+
+        # 短い context option を含む結合形 (`firebase -jP prod deploy`) は照合先を確かめ
+        # られない (cli_options.find_context_options)。既定のコンテキストで照合すると、
+        # 別の照合先で動くコマンドを通しうるので、cache も verify も見ずに止める。
+        # tier の扱いは verify() の不一致と同じ (QUERY は警告)。
+        if cli_options.COMBINED_SHORT_KEY in ctx:
+            problems.append(_combined_short_error(svc, cands, stops=stops))
+            continue
+
+        svc_name = _service_name(svc)
+        # verify 開始時点の epoch。開始後に (並行する hook の) 切替検出で epoch が進んだ
+        # 場合、この検証は旧状態を見ている可能性があるため結果を cache に公開しない
+        # (cache.set_success が epoch を照合する)。
+        epoch = cache.current_epoch(svc_name)
+        # 切替を含むコマンドでは、その service の target は cache を読まず (上で破棄
+        # 済みだが防御的に) 実行前の状態を新たに検証し、成功しても cache に残さない
+        # (実行後に状態が変わる)。判定は service 単位 — readonly の `gh auth login`
+        # は cands に入らず、inline env が違う切替セグメントは別 target になるため、
+        # cands だけを見ると `gh auth login && gh pr create` の成功が cache される。
+        switching_here = svc in switching
+        # 検証に渡すのと同じ env (hook プロセスの env + 行頭の inline env) のうち、
+        # CLI がどのアカウントで動くかを決める変数。プロジェクトごとの固定 (settings の
+        # `env` の `AWS_PROFILE` 等) は保存した時点で起動中のセッションに反映されるので、
+        # cache キーに含めないと値を変えた直後に前の値での成功で通る。読む側と書く側で
+        # 同じ snapshot を使う。
+        ident = cache.identity_env(svc, {**os.environ, **(inline_env or {})})
+        if not switching_here and cache.get_success(
+            svc_name, project_dir, entry, accounts_mtime, inline_env, ctx,
+            identity_env=ident,
+        ):
+            if trace is not None:
+                trace["cache_hit"][svc_name] = True
+            continue
+
+        # 予算切れの判定は **CLI を起動する直前** に置く。cache hit と
+        # self-remediation は subprocess を起動しないので、予算が尽きていても
+        # そのまま通してよい (上の continue で先に抜けている)。
+        # QUERY tier は不一致でも止めないので、「検証しきれなかった」ことを理由に
+        # 止めるのも筋が通らない (知っていても通す判定表なのに、知らないから止める
+        # のは非対称)。警告側に回す。
+        if budget.expired():
+            problems.append(_budget_expired_error(svc.ACCOUNT_KEY, stops=stops))
+            continue
+
+        # コマンド行頭のインライン env を hook プロセスの env にマージして渡す。
+        # inline_env が空なら env=None (= 親環境継承) のままにする。空 dict を
+        # subprocess.run(env={}) に渡すと環境変数が一切無い状態になり危険なため。
+        proc_env = {**os.environ, **inline_env} if inline_env else None
+        _verify_start = time.monotonic() if trace is not None else None
+        err = svc.verify(entry, project_dir, env=proc_env, context=ctx)
+        if trace is not None:
+            trace["verify_ms"][svc_name] = round(
+                (time.monotonic() - _verify_start) * 1000, 2
+            )
+        switch_note = ""
+        if (
+            err
+            and stops
+            and effective_mode == mode.ENFORCE
+            and svc.ACCOUNT_KEY in auto_enabled
+        ):
+            # この target のコマンドがどれも `--help` 付きなら切り替えない (ヘルプの表示の
+            # ためにマシン全体の切替をしない。deny のまま)。`--help` の無いコマンドが 1 つでも
+            # あれば、そのために従来どおり切り替える。
+            outcome = _auto_switch(
+                svc, entry, project_dir, proc_env, ctx, switching_here, trace,
+                help_only=all(auto_switch.requests_help(norm) for _orig, norm in cands),
+            )
+            if outcome.switched:
+                switch_notices.append(auto_switch.notice(svc, outcome.switched))
+            if outcome.resolved:
+                # 切り替えた後の再検証が一致した = このコマンドは止めない。切替直後
+                # なので成功 cache には書かない (attempt が invalidate 済みで、
+                # in-flight 窓の間は書いても publish されない)。
+                continue
+            if outcome.error:
+                err = outcome.error
+            switch_note = outcome.note or ""
+        if err:
+            # 注記の要否は verify() の出力だけで決める (検出コマンドを足す前)。
+            # 値の一部を許容形から外れるためコマンドの形で案内しなかった deny (shell_word.UNSAFE
+            # の文を含む) には、ほかの entry の切替を案内していても付けない (firebase の
+            # `.firebaserc` の解決先で省いた deny は UNSAFE を含まないので、案内した行があれば
+            # 付く):
+            # 文面の `期待=<値>` の表示に REMEDIATION_PATTERNS の形を書いた値
+            # (`x; kubectl config use-context other` 等) が当たり、案内していないのに
+            # 「案内したコマンドは案内された形のまま単独で実行」と、その値の実行を促して
+            # しまう。代償として、ある entry は案内し別の entry は抑止した deny (gh の
+            # 複数 host / firebase の dict) からも注記が消える (案内したコマンドを連結して
+            # 打つと再び deny されるだけで、安全側)。
+            # REMEDIATION_NOTE を持つ service (aws) には当てない: 許容形から外れた profile 名は
+            # 文に置き換えたうえで `AWS_PROFILE=<profile>` を必ず案内するので、注記を落とすと
+            # 使い方の説明だけが消える。deny に出る値の表示 (`現在=` / `期待=` / コマンド指定 /
+            # firebase の `(→ <alias の行き先>)` / gh の `[<host>]` / 自動切替の注記) は、どの
+            # service も示せる形のときだけ出す (services 側。core/shell_word.py の shown。v0.21.0
+            # で全部の表示に揃えた)。この UNSAFE の除外は、その二重化として残す。
+            if _guides_remediation(err, svc) and (
+                hasattr(svc, "REMEDIATION_NOTE") or shell_word.UNSAFE not in err
+            ):
+                note_text = getattr(svc, "REMEDIATION_NOTE", _REMEDIATION_STANDALONE_NOTE)
+                if note_text not in remediation_notes:
+                    remediation_notes.append(note_text)
+            # D14: どのセグメントが検証を起動したかを deny reason に併記し、
+            # 複合コマンドで原因コマンドを一目で特定できるようにする。
+            problems.append(
+                f"{err}\n(検出コマンド: {_detected(cands)})"
+                + (f"\n{switch_note}" if switch_note else "")
+            )
+        elif not switching_here:
+            cache.set_success(
+                svc_name, project_dir, entry, accounts_mtime, inline_env, ctx,
+                epoch=epoch, identity_env=ident,
+            )
+
+    note = _deprecation_note(kind) if kind in ("deprecated", "legacy") else ""
+
+    def _assemble(problems: list[str]) -> str:
+        # 同一サービスが複数 env で検証対象になると env 非依存のエラー
+        # (キー欠落 / 型不正) が重複しうるため exact-duplicate を畳む。
+        # verify 失敗は (検出コマンド: ...) でセグメントが異なれば残る。
+        body = "\n\n".join(dict.fromkeys(problems))
+        for note_text in remediation_notes:
+            body = body + "\n\n" + note_text
+        for notice_text in switch_notices:
+            # 別 service の deny と同じ行で gh を切り替えた場合も、切り替えた事実は伝える。
+            body = body + "\n\n" + notice_text
+        if source_note:
+            body = source_note + "\n\n" + body
+        if note:
+            body = body + "\n\n" + note
+        return body
+
+    if errors:
+        # deny するときは **deny の理由だけ**を本文にする。同じコマンド行に QUERY の
+        # 不一致があっても、それは止めていない話なので混ぜない (止められた理由が
+        # 読み取れなくなる)。QUERY 側は deny が解消した次の実行で警告として出る。
+        # mode=warn ではどちらも止めないので QUERY 側の不一致情報だけが落ちるが、
+        # mode header (`_decide` の docstring) が「mode=warn なので止めていない」を
+        # 先に伝える形に揃えてある。実際に落ちるのは別 service が混在したときだけ
+        # (同一 service なら 1 target に畳まれて WRITE になる)。
+        return _decide(effective_mode, _assemble(errors), mode_notes)
+
+    if query_errors:
+        return _decide(
+            effective_mode, _assemble(query_errors), mode_notes, query_warn=True
+        )
+
+    if switch_notices:
+        # 自動切替で一致した (止めない) 経路。切り替えた事実は必ず通知する。mode の
+        # note (`"$auto_switch"` の一部が不正、等) もここで一緒に届ける。
+        parts = switch_notices + [n for n in mode_notes if n]
+        if note and _should_emit_deprecation_warn(project_dir):
+            parts.append(note)
+        return output.warn("\n\n".join(parts))
+
+    # warn は deprecation note が出るときのみ発火させる。verify 成功時は
+    # source_note (親継承 / グローバル既定) 単独では warn を出さず silent
+    # (worktree で親採用は通常運用なので毎回通知するとノイズになる)。
+    # alert fatigue 防止: warn (verify 成功時) は 1 日 1 回に制限する。
+    # deny 内の note は常に表示 (実行阻止メッセージの一部のため)。
+    if note and _should_emit_deprecation_warn(project_dir):
+        body = note
+        if source_note:
+            body = source_note + "\n\n" + body
+        return output.warn(body)
+
+    return None
+
+
+_DEBUG_ENV_VAR = "CLOUD_ACCOUNT_GUARD_DEBUG"
+
+
+def _debug_enabled() -> bool:
+    return os.environ.get(_DEBUG_ENV_VAR) == "1"
+
+
+def _trace_decision(result: dict | None) -> str:
+    """`result` から決定を 1 語で表す (デバッグ trace 専用、判定表には使わない)。"""
+    if result is None:
+        return "allow"
+    hook_output = result.get("hookSpecificOutput", {}) if isinstance(result, dict) else {}
+    if hook_output.get("permissionDecision") == "deny":
+        return "deny"
+    if "additionalContext" in hook_output:
+        return "warn"
+    return "unknown"
+
+
+def dispatch(command: str, cwd: str) -> dict | None:
+    """PreToolUse エントリポイント。
+
+    `CLOUD_ACCOUNT_GUARD_DEBUG=1` のときのみ、分解結果 (segments / matched
+    service / readonly / cache hit / verify 所要 ms / 決定) を stderr に 1 行
+    JSON で出す (内部バックログ: 例外時の無音 fail-open に加えて、正常系でも
+    どのセグメントがどう判定されたか事後に追えなかった問題への対応)。
+    出力先は stderr のみで、この trace 自体は allow/deny の判定に一切影響しない。
+
+    hook 1 回分の実時間予算 (`core/budget.py`) はここで張り、`finally` で必ず
+    解除する。解除しないと、同一プロセスで dispatch を繰り返す経路 (テスト) や
+    hook timeout の制約が無い経路 (builder) に締切が残り、既定の subprocess
+    timeout が黙って縮む。
+    """
+    budget.start()
+    try:
+        return _dispatch_with_trace(command, cwd)
+    finally:
+        budget.clear()
+
+
+def _dispatch_with_trace(command: str, cwd: str) -> dict | None:
+    """`dispatch()` の本体 (予算の張り替えを含まない)。"""
+    if not _debug_enabled():
+        return _dispatch_impl(command, cwd, None)
+
+    trace: dict = {"segments": [], "cache_hit": {}, "verify_ms": {}, "auto_switch": {}}
+    start = time.monotonic()
+    result = _dispatch_impl(command, cwd, trace)
+    trace["elapsed_ms"] = round((time.monotonic() - start) * 1000, 2)
+    trace["decision"] = _trace_decision(result)
+    try:
+        print(json.dumps(trace, ensure_ascii=False, sort_keys=True), file=sys.stderr)
+    except (TypeError, ValueError, OSError):
+        # trace に JSON 化できない値が紛れても、stderr が閉じている/書き込み不能
+        # (BrokenPipeError 等の OSError) でも、デバッグ出力の失敗で hook 本体の
+        # 判定結果を握りつぶさない (マージ前レビューの指摘: trace は
+        # decision-neutral のはずが、この例外が dispatch() の外まで伝播すると
+        # 計算済みの result が呼び出し元に返らず失われていた)。
+        pass
+    return result

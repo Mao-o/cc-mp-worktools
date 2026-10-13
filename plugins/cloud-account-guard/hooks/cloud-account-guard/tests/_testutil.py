@@ -1,0 +1,178 @@
+"""テスト共通のパス設定と実環境からの隔離。
+
+パス設定: cloud-account-guard/ と hooks/ を sys.path に通す。
+
+隔離: v0.13.0 以降、`verify()` は CLI を起動する前に **ローカル設定ファイル**
+(`~/.config/gh/hosts.yml` / `~/.config/gcloud/configurations/config_<name>`) を読み、
+dispatcher は accounts.local.json が無いとき `$HOME` のグローバル既定を見る。
+何もしないと**開発者の実環境が verdict を変える** (実際に、開発者の hosts.yml の
+アクティブアカウントが fixture の期待値と一致して「CLI を呼ばずに allow」になり、
+CLI モックを前提にしたテストが壊れた)。`start_isolation()` で設定ディレクトリと
+`$HOME` を使い捨て dir に固定し、判定を変えうる env を落とす。
+"""
+from __future__ import annotations
+
+import errno
+import os
+import sys
+from pathlib import Path
+from unittest import mock
+
+_PKG_DIR = Path(__file__).resolve().parent.parent
+_HOOKS_DIR = _PKG_DIR.parent
+if str(_PKG_DIR) not in sys.path:
+    sys.path.insert(0, str(_PKG_DIR))
+if str(_HOOKS_DIR) not in sys.path:
+    sys.path.insert(0, str(_HOOKS_DIR))
+
+
+# 実環境から漏れるとローカル読取 / モード解決の結果が変わる env。
+LEAKY_ENV_VARS = (
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    "GH_HOST",
+    "GOOGLE_CLOUD_PROJECT",
+    "GCLOUD_PROJECT",
+    "GOOGLE_CLOUD_QUOTA_PROJECT",
+    "CLOUD_ACCOUNT_GUARD_MODE",
+    "CLOUD_ACCOUNT_GUARD_DEBUG",
+    "CLOUD_ACCOUNT_GUARD_AUTO_SWITCH",
+)
+
+_CLOUDSDK_PREFIX = "CLOUDSDK_"
+
+# 隔離中の `$HOME`。**実在しない絶対パス**を使う:
+# - 実 HOME を読まない / 書かない
+# - fixture (tempfile 配下) と親子関係を持たないので、親遡及の停止条件
+#   (`core/paths._crosses_home`) を実 HOME のときと同じ形に保てる
+#   (tmp 配下に置くと共通の親で遡及が止まり、既存テストの前提が変わる)
+ISOLATED_HOME = Path("/nonexistent-home-cloud-account-guard")
+
+
+def cli_config_env(root: Path, home: Path = ISOLATED_HOME) -> dict[str, str]:
+    """gh / gcloud のローカル設定 dir を `root` 配下 (= 存在しない) に向ける env。
+
+    `HOME` も含める。`Path.home()` の patch だけでは `os.environ["HOME"]` が実
+    環境のまま残り、**「hook プロセスの HOME」の 2 つの読み方が食い違う**:
+    設定ディレクトリの解決は patch 後の `Path.home()` を見るのに、
+    `cli_config.home_overridden()` は `os.environ["HOME"]` と比べる。ここで
+    揃えておかないと、実 `os.environ` からコピーした env を渡すテスト
+    (`_LocalConfigBase._env()` / `test_main`) で「HOME 上書き」の判定が実
+    `$HOME` を基準に行われ、隔離の内側で実環境が判定に混ざる。
+    """
+    return {
+        "GH_CONFIG_DIR": str(root / "gh"),
+        "XDG_CONFIG_HOME": str(root / "xdg"),
+        "CLOUDSDK_CONFIG": str(root / "gcloud"),
+        "HOME": str(home),
+    }
+
+
+def _leaky_names(env) -> list[str]:
+    """`env` に含まれる「判定を変えうる env」の名前 (pop 対象)。
+
+    反復中に削除できるよう list を先に作る。
+    """
+    names = [name for name in LEAKY_ENV_VARS if name in env]
+    names += [
+        name
+        for name in env
+        if name.startswith(_CLOUDSDK_PREFIX) and name != "CLOUDSDK_CONFIG"
+    ]
+    return names
+
+
+def sanitized_env(base) -> dict[str, str]:
+    """`base` のコピーから判定を変えうる env を落とす (`base` は変更しない)。
+
+    子プロセスを起動するテスト (`test_main`) が `start_isolation()` と**同じ
+    除去規則**を使うための共有点。prefix ループを各所で再実装すると、
+    `LEAKY_ENV_VARS` に足したときに一方だけ更新される。
+    """
+    env = dict(base)
+    for name in _leaky_names(env):
+        env.pop(name, None)
+    return env
+
+
+class _Isolation:
+    def __init__(self, patchers, home: Path):
+        self._patchers = patchers
+        self.home = home
+
+    def stop(self) -> None:
+        for patcher in reversed(self._patchers):
+            patcher.stop()
+
+
+# pathlib の `Path.is_file()` が Python 3.13 まで握りつぶす errno。これ以外の OSError
+# (ENAMETOOLONG・EACCES など) はそのまま投げる (3.14 からは False を返す)。
+_PATHLIB_IGNORED_ERRNOS = (errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP)
+_REAL_IS_FILE = Path.is_file
+# 本物の `Path.is_file()` が、上の errno 以外の stat の失敗を例外にする版 (3.14 から False)。
+REAL_IS_FILE_RAISES = sys.version_info < (3, 14)
+
+
+def _is_file_like_py313(self, *args, **kwargs):
+    # 3.13 の本物と同じく、follow_symlinks を stat に渡し、パスの ValueError (NUL を含む等) は
+    # False にする。
+    try:
+        os.stat(self, follow_symlinks=kwargs.get("follow_symlinks", True))
+    except OSError as e:
+        if e.errno not in _PATHLIB_IGNORED_ERRNOS:
+            raise
+        return False
+    except ValueError:
+        return False
+    return _REAL_IS_FILE(self, *args, **kwargs)
+
+
+def patch_is_file_like_py313():
+    """`Path.is_file` を Python 3.13 までの挙動 (上の errno 以外の OSError を投げる) に差し替える。
+
+    try の外の `Path.is_file()` から例外が抜ける経路を、3.14 以降でも再現するために使う
+    (返り値は patcher。`start()` / `stop()` か with で使う)。使う側は、本物がその版で fixture に
+    どう振る舞うか (`assert_real_is_file_on_this_version`) も前提として確かめる。
+    """
+    return mock.patch.object(Path, "is_file", _is_file_like_py313)
+
+
+def assert_real_is_file_on_this_version(case, path) -> None:
+    """前提: 本物の `Path.is_file` が、この版で stat できない path を 3.13 までは OSError に、
+    3.14 からは False にする (差し替えが再現しているのが本物の旧い挙動であること)。"""
+    if REAL_IS_FILE_RAISES:
+        case.assertRaises(OSError, _REAL_IS_FILE, path)
+        return
+    try:
+        result = _REAL_IS_FILE(path)
+    except OSError as e:
+        case.fail(f"本物の Path.is_file がこの版 ({sys.version.split()[0]}) で OSError を投げた: {e!r}")
+    case.assertFalse(result)
+
+
+def start_isolation(root: Path, home: Path = ISOLATED_HOME) -> _Isolation:
+    """実環境の CLI 設定 / `$HOME` / env から切り離す。
+
+    `setUpModule()` か `setUp()` から呼び、返り値の `stop()` で解除する
+    (`addCleanup` / `tearDownModule` に登録すること)。
+    """
+    patchers = [
+        mock.patch.dict(os.environ, cli_config_env(Path(root), home)),
+        mock.patch.object(Path, "home", staticmethod(lambda: home)),
+    ]
+    for patcher in patchers:
+        patcher.start()
+    # patch.dict は stop() で元の内容を復元するため、開始後の pop は安全。
+    for name in _leaky_names(os.environ):
+        os.environ.pop(name, None)
+    return _Isolation(patchers, home)
+
+
+def assert_utf8(test, text: str) -> None:
+    """text が UTF-8 で書けることを確かめる。書けないときは例外ではなく assertion の失敗にする。"""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError as e:
+        test.fail(f"UTF-8 で書けない文字が残った ({e}): {text!r}")

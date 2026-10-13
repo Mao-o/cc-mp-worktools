@@ -65,7 +65,7 @@ tag 名は **`<plugin-name>/v<version>`** (例: `sensitive-files-guardrail/v0.33
   dry-run、`--apply` で作成 + push)。規約導入時の遡及付与と通常運用で同じコードを使う
 - **旧規約の bare tag (`v0.2.0` 〜 `v0.14.0`) はそのまま残すが、今後は打たない。**
   marketplace 全体を指すもの (`v0.2.0`) と個別 plugin のリリースを指すもの
-  (`v0.3.2` = verify-cloud-account、`v0.11.0` / `v0.12.0` / `v0.14.0` =
+  (`v0.3.2` = verify-cloud-account (現 cloud-account-guard)、`v0.11.0` / `v0.12.0` / `v0.14.0` =
   sensitive-files-guardrail) が名前から区別できず混在していたのが、規約を
   変えた理由
 

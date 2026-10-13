@@ -15,6 +15,16 @@
 (更新判定のキーは各 plugin の `plugin.json` の `version`)、semver を振ると
 「plugin のバージョン」と混同されるため採っていません。
 
+## 2026-10-13
+
+### Changed
+
+- plugin `verify-cloud-account` を **`cloud-account-guard` に rename** (0.23.0)。
+  `.claude-plugin/marketplace.json` の entry (name / displayName / source) を差し替え、
+  README の plugin 一覧・"Renamed / removed plugins" 節 (設定パスと環境変数の移し方) と
+  SECURITY.md の節名を更新。利用者がいないため、旧名 entry を 1 リリース残す手順は省略した。
+  CLAUDE.md の旧規約 tag の説明 (`v0.3.2`) には現在の名前を併記
+
 ## 2026-09-23
 
 ### Added

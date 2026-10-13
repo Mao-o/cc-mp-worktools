@@ -1,0 +1,3001 @@
+# Changelog
+
+## 0.23.0
+
+### Changed: plugin 名を verify-cloud-account から cloud-account-guard に変える
+
+auto-switch / project-accounts の追加で、この plugin は gh のアカウントを「確かめて止める」だけでなく
+「正しいアカウントへ直す」ものになった。旧名からは止めるだけの hook と読まれ、auto-switch の切替を
+事故と誤解する事例が出たため、名前を変える。利用者に見える名前はすべて揃えて変え、**旧名の読み込みは
+残さない** (互換の fallback は無い。移し方は marketplace の README の「Renamed / removed plugins」節)。
+
+- plugin 名 / marketplace entry: `verify-cloud-account` → `cloud-account-guard`
+  (skill は `/cloud-account-guard:*`、hook のディレクトリは `hooks/cloud-account-guard/`)
+- 期待値ファイルの配置パス: `.claude/verify-cloud-account/accounts.local.json` →
+  `.claude/cloud-account-guard/accounts.local.json` (グローバル既定の `~/.claude/` 側も同じ)。
+  旧パスは読まない。移さないと、そのプロジェクトでは期待値ファイルが無い扱いになり、親ディレクトリや
+  グローバル既定の期待値で照合される
+- 環境変数: `VERIFY_CLOUD_ACCOUNT_MODE` / `_AUTO_SWITCH` / `_DEBUG` → `CLOUD_ACCOUNT_GUARD_MODE` /
+  `_AUTO_SWITCH` / `_DEBUG`。旧名は読まない
+- キャッシュの置き場所: `$TMPDIR/cc-mp-verify-cloud-account/` → `$TMPDIR/cc-mp-cloud-account-guard/`
+  (旧ディレクトリは使われなくなるだけで、消しても消さなくてもよい)
+- deny / 通知の文面の接頭辞: `[verify-cloud-account]` → `[cloud-account-guard]`
+- リリース tag: 今後は `cloud-account-guard/v<version>`。既存の `verify-cloud-account/v*` はそのまま残す
+- 変えないもの: 判定・照合・自動切替の挙動、旧世代の配置パス (`.claude/accounts.local.json` /
+  `.claude/accounts.json`) の扱いと accounts-migrate の統合元
+
+## 0.22.0
+
+### Changed: 自動切替の通知で、想定どおりの動作として扱うよう Claude に伝える
+
+auto-switch が gh を切り替えたときの通知 (`additionalContext`、deny 時は注記) は、切り替えた事実と
+「gh の設定はこのマシンの全ターミナル・セッションで共有される」という副作用だけを伝えていた。これを
+読んだ Claude が切替を事故として扱い、謝罪したり元のアカウントへ戻すことを提案したりした。
+
+- 通知の末尾に、利用者が有効にした機能の想定どおりの動作であり、謝罪や元に戻す提案はせず、切り替えた
+  こと (どのアカウントからどのアカウントへ) を利用者に 1 行で伝えるよう指示する文を足した
+  (`core/auto_switch.NOTICE_GUIDANCE`)。通知は従来どおり 1 行
+- 変えないもの: いつ切り替えるか・切り替えないかの判定、副作用の範囲の説明、deny / allow の判定
+
+## 0.21.4
+
+### Fixed: 代入だけのセグメントを CLI のコマンドとして検出しない
+
+値が `/…/firebase-tools` や `/usr/local/bin/gh` のように CLI 名で終わる、代入だけのセグメント
+(`FT=/x/node_modules/firebase-tools; echo hi`、`FT=/x/firebase-tools` 単独、`X=1 FT=/x/firebase-tools`)
+が、その CLI のコマンドとして検出され、firebase のキーが無いプロジェクトで「"firebase" キーがありません」
+の deny になっていた (npx のキャッシュを grep するための代入だけで止まった。旧版から)。コマンド名の
+ディレクトリ部を落として basename に揃える処理が、`NAME=値` の代入のトークンにも働いていた。
+
+- 代入だけのセグメント (後ろにコマンド語が無いセグメント) は、どの service のコマンドとしても検出しない。
+  代入の値はコマンド名として読まない。セグメントは代入のまま候補に残る
+- 変えないもの: `FOO=1 firebase deploy` (代入 + コマンド) と `FT=/x/firebase-tools; firebase deploy`
+  (次のセグメントのコマンド)、パス付きのコマンド名 (`/opt/homebrew/bin/gh`) の basename 化は従来どおり検出する。
+  代入の値を後でコマンドとして使う形 (`FT=/x/firebase-tools "$FT" deploy`) も従来と同じ候補で、この修正で
+  allow にはならない (変数経由の一般則の範囲)。値に `$(` / バッククォートを含む代入
+  (`X=$(/usr/bin/firebase deploy)`、``X=`/usr/bin/gh pr create` ``) は従来どおり、置換の中のパス付き CLI を
+  検出して deny する (代入を剥がせない形では basename 化が必要なため。値の終端が確定する代入だけを対象外にする)。
+  deny / allow が変わるのは、コマンド語の無い代入だけのセグメント (deny → allow) だけ
+
+### Fixed: firebase の deny 文面の `firebase use` / `--project` の案内を `.firebaserc` の解決先と照合する
+
+firebase-tools は `firebase use <x>` / `--project <x>` の x を `.firebaserc` の alias として先に解決する。
+`pin-env` は 0.17.1 で、期待した project に解決される語だけを案内するようにしたが、hook の deny 文面の
+案内は `.firebaserc` と照合していなかった。期待値と同じ名前の alias が別の project を指していると、案内
+どおりにしても別の project になり (続く検証で deny されるので保護は働くが)、同じ deny に戻った。
+`--project <期待値>` の案内は「コマンド指定 --project X (→ Y) … --project X を指定してください」と
+自分の deny と矛盾した。
+
+- 案内する語は、期待した project に着くものだけ (`firebase.resolve_target` と同じ解決)。dict は
+  `pin-env` と同じ順 (alias → project ID): entry ごとに alias を試し、着かなければ期待値の project ID を
+  案内する。scalar の `firebase use` は project ID だけ (`is_self_remediation` が期待値そのものしか通さない
+  ため)。scalar の `--project` は、project ID が影になっているとき、期待した project を指す alias
+  (名前順で着く先頭) も案内する (`--project` の値は hook が `.firebaserc` で解決して照合するので alias で通る) (`.firebaserc` に無い alias 名は firebase-tools が project ID として扱うので、これも
+  project ID の案内になる)。同じ語になる entry は 1 行にまとめる
+- 着く語が無いとき (alias が別の project を指す、`.firebaserc` を firebase-tools と同じ内容に読めると確かめ
+  られない) は、コマンドの形で案内せず、`.firebaserc` と `accounts.local.json` を手で確認する文にする。
+  一部の entry だけ省いたときは、その旨の行を添える。案内できる行が無く、許容形で省いた entry と解決先で
+  省いた entry が混在するときは、両方の文を連結する。この文は `firebase use <x>` の形も `firebase login` の
+  語も含まないので、「案内された形のまま単独で実行」の注記は付かない (案内したコマンドが無いため)
+- 対象は `firebase use` の案内 (不一致・現在値を取得できない) と `--project` の案内 (不一致)。値の検証と
+  クォートは 0.17.1 の規則のまま。hook の deny / allow の判定は変えない
+- scalar の期待値で project ID が alias に影になっているとき、`firebase use` の案内では project を指す別の
+  alias は案内しない (`is_self_remediation` は scalar の期待値そのものの名前しか通さないので、alias の
+  `firebase use` は検証に回って deny され、案内がまた行き止まりになる。判定を変えずに済む側に倒した。
+  影のときは手で確認する文)。`--project` の案内は、alias でも照合に通るので alias を案内する
+- 既存の挙動の変化: `.firebaserc` に alias が無い dict の期待値の案内は、`firebase use <alias>` から
+  `firebase use <project ID>` に変わる (alias 名は project ID として扱われ、期待した project にならないため)
+
+## 0.21.3
+
+### Fixed: builder と pin-env の出力に出す値の制御文字をエスケープする
+
+0.21.2 でパスとキー名を直したが、値の表示が残っていた。値は期待値ファイル・CLI の出力・CLI の設定
+(AWS の profile 名など)・env から来て、リポジトリ側が決められる。`json.dumps` は改行などの U+0020 未満
+の制御文字は直すが、DEL・C1 (`\x85` / `\x9b`)・行区切り (U+2028)・書式文字 (双方向制御など)・孤立
+サロゲートはそのまま出すので、それらを含む値で出力の外に偽の行を差し込めた。孤立サロゲート
+(`accounts.local.json` の `"\udcff"` や argv の不正なバイト列から入る) は、UTF-8 で書けず出力が
+`UnicodeEncodeError` で落ちた (旧版から。内部バックログ)。
+
+- 値の JSON 表示は `core/shell_word.py` の `json_one_line` にまとめた。`json.dumps(ensure_ascii=False)` の
+  出力のうち、行を割る文字・孤立サロゲートだけを JSON として同じ値に戻る `\uXXXX` (BMP の外は代理対) に
+  する。日本語などの普通の文字と、`json.dumps` が直していた文字の出力は変わらない。置き換えではなく
+  JSON の文法の内側のエスケープなので、JSON として読めば元の値に戻る (settings の `env` に貼る断片は
+  そのまま使える。隣り合う孤立サロゲートの高位・低位の組だけは、読み直すと 1 文字に結合する)
+- builder の値の表示 (`+ add` / `- current` / `= unchanged` / `- remove` / `+ merged from` などの変更の
+  差分・`migrate` の値の衝突・`show` の期待値・`$mode` / `$readonly` / `$auto_switch` の値・不一致のときの
+  CLI 現在値) は `json_one_line` を通す。置き換える (`shown`) と、差分から何が変わるか分からなくなるため。
+  変更の見出し (`status`) と、`remove --host` が「存在しません」と答える host 名は、パスやキー名と
+  同じ `escape_controls` を通す
+- `pin-env` の候補 (profile 名・構成名) は、選んでもらう名前そのものなので置き換えず、`json_one_line` で
+  `"a", "b"` の形に並べる (重複も除かない)。`shown` を通すと、空白や `=` を含む名前がどれも
+  「(表示しない値)」の 1 個にまとまり、数も区別も消えて、候補を選ばせる手順が成り立たなかった。
+  このセッションと書き込み先の現在値も `json_one_line` (`--show-values` が無いときに隠す値は今まで通り隠す)。
+  値の行 (`AWS_PROFILE: ...`) は deny 文面と同じ `shell_word.shown` (外れた値は「(表示しない値)」。
+  値そのものは env の断片に出る)
+- `pin-env` の env の断片 (`"NAME": "value"`) は貼り付けて使う値そのものなので置き換えず、`json_one_line` で
+  1 行に収める。候補を選ばせる目印は候補の名前を出さない固定の文 (`<上の候補から 1 つ>`。名前を並べると、`("a / b", "c")` と `("a", "b", "c")` が同じ目印になる。正典はクォート付きの `候補` の行)
+- `escape_controls` (パス・キー名・エラー文・検出コマンドの表示。hook の deny 文面も使う) も孤立サロゲートを
+  `\udcff` の形にする。UTF-8 で書けない文字を出力に残さない方向の変更で、deny / allow の判定は変えていない
+- skill `project-accounts` の候補の例を新しい形 (`候補 "a", "b"`) に合わせ、値の行に「(表示しない値)」が
+  出たときは固定する値が env の断片 (JSON) の値なので、その値で固定してよいかを `AskUserQuestion` で確かめる、を足した
+- `builder` の `--commit` (`init` / `set` / `remove` / `migrate` / `auto-switch`) は、UTF-8 で書けない値 (孤立サロゲート。
+  argv の不正なバイト列や既存ファイルの `"\udcff"`) を含むとき、書き込まずに exit 1 にする。今までは
+  `write_text` が open で切り詰めた後に encode で失敗し、`accounts.local.json` が 0 バイトになった
+  (既存の内容が全部消える。無関係なキーの `set` / `remove` / `migrate` でも、既存ファイルに `"\udcff"` があれば同じ)。
+  encode を open より前に済ませ、失敗したらファイルに触れない。`.gitignore` への追記も同じ順にした
+- 値の形が不正な理由に出すオブジェクトのキー名は 0.21.2 で通してあるので変更なし
+- deny / allow の判定は変えていない (表示だけ)
+
+## 0.21.2
+
+### Fixed: builder と pin-env の出力に出すパスの制御文字をエスケープする
+
+builder (`accounts_builder.py`) と `pin-env` の出力は、skill 経由で Claude が実行して読む。出力に出す
+パスの途中のディレクトリ名はリポジトリ側が決められる (改行や端末の制御シーケンスを含む名前を置ける)
+のに、0.21.0 / 0.21.1 で直した deny 文面と違い、そのまま出していた。改行入りのパスで、出力の外に
+偽の行を差し込めた (内部バックログ)。
+
+- 出力に出すパス (対象の注記・変更の見出し・書込 / 作成 / 更新の報告・継承元・グローバル既定・
+  `--path` を断る理由・既存ファイルを読めない理由・複数パスの競合 / 旧パスの一覧・`pin-env` の
+  書き込み先と、その先を決められない理由) と、OS や CLI のエラー文を、hook の deny 文面と同じ部品
+  (`escape_controls`) に通す。グローバル既定のキー名も同じ
+- `migrate --commit` の旧ファイル削除の案内 (`rm '<path>'`) と、案内文に埋め込む `--path <file>` は、
+  パスに制御文字を含むときはコマンドの形にせず、エスケープした表示と「手で削除 / 指定してください」
+  にする (hook の deny 文面の旧ファイル削除の案内と同じ分岐。`shlex.quote` は改行をそのまま残す)。
+  制御文字を含まないパス (空白や `;` を含むものなど) の案内は変わらない
+- 期待値ファイルのキー名 (`show` の行頭・`migrate` の `+ merged from` / `= unchanged` / 値の衝突の行・
+  値の形が不正な理由に出すオブジェクトのキー) も、同じ部品に通す。キーは値と違って `--show-values` を
+  待たずに出るうえ、リポジトリ側が決められる名前なので、改行入りのキーで偽の行を差し込めた。表示だけを
+  変え、`--service` との照合などの判定には生のキーを使い続ける。値の表示は別の課題
+- `pin-env` の書き込み先を決める `git rev-parse` の出力を `\n` だけで行に割る。`splitlines()` は
+  U+2028 や `\x1c` などでも割るので、それらを含むパスで「git リポジトリの外」と誤報告していた
+- 「制御文字を含むため、コマンドの形では案内しません。手で削除してください」の注記を
+  `core/shell_word.py` の定数にまとめた (builder の `migrate` と hook の deny 文面で同じ文言が
+  2 箇所に書かれていた。文言は変わらない)
+- deny / allow の判定は変えていない (文面だけ)
+
+## 0.21.1
+
+### Fixed: deny 文面に出すパスの制御文字をエスケープする
+
+deny 文面に出す起動ディレクトリ由来のパスは、途中のディレクトリ名をリポジトリ側が決められる
+(clone しただけのリポジトリでも、改行や端末の制御シーケンスを含む名前のディレクトリを置ける)。
+0.21.0 で値と検出コマンドの表示は直したが、パスの表示が残っていて、改行入りのパスで deny 文面の
+外に偽の行を差し込めた (内部バックログ)。
+
+- 期待値ファイルのパス (不正な JSON / 読めない / オブジェクトでない / 値の型が不正 / キーが
+  未登録 / 読み込みの失敗の各 deny、グローバル既定を使っている旨の注釈)、親ディレクトリの注釈、
+  起動リポジトリの外で実行される deny の起動リポジトリ、未設定の deny が案内するグローバル既定の
+  パス、配置パスの競合と stat できない配置パスの一覧 (builder の同じ一覧を含む) を、
+  `escape_controls` に通す。読み込みの失敗に添える OS のエラー文もエスケープする
+- 配置パスの競合の deny が案内する旧ファイルの削除 (`rm '<path>'`) は、パスに制御文字を含むときは
+  コマンドの形にせず、エスケープした表示と「手で削除してください」にする (`shlex.quote` は改行を
+  そのまま残すので、引用符の中で行が分かれる)。制御文字を含まないパス (空白を含むものなど) の案内は
+  変わらない
+- deny / allow の判定は変えていない (文面だけ)
+
+### Fixed: builder が UTF-8 でない・入れ子の深いファイルで traceback にならない
+
+hook は 0.18.0 で、期待値ファイルの UnicodeDecodeError / RecursionError を不正な JSON と同じ扱いに
+した。builder の読み込みは揃っておらず、例外が main() の外まで抜けて traceback で終わっていた
+(検証が飛ぶわけではない。内部バックログ)。
+
+- 既存の期待値ファイルの読み込み (`init` / `set` / `remove` / `show` / `auto-switch` /
+  `pin-env` / `migrate`) が、UTF-8 でない・入れ子が深い・桁の多すぎる整数のファイルで、
+  不正な JSON と同じ exit code (1) の `既存 <path> を読めません (<例外の型>)` に終わる
+- グローバル既定の読み込み (`init` / `set` が出す「グローバル既定を覆い隠す」警告のキー一覧) は、
+  同じ理由で読めないとき、一覧を出さずに続ける。`pin-env` が読む `settings.local.json` は、
+  同じ理由で読めないとき、壊れた JSON と同じ報告にする
+- `pin-env` が `settings.local.json` の有無を確かめるとき、stat できないパスを「無い」ではなく
+  読めないファイルとして報告する (hook と同じ分類)。`.gitignore` と `CLAUDE.md` の有無の確認は
+  best-effort のまま、stat できない名前で例外にしない (Python 3.13 までの `Path.exists()` は
+  ENAMETOOLONG などを投げる)
+- hook が deny する深さ (入れ子が 32 段より深い) のファイルを、builder も同じ文面
+  (`既存 <path> を読めません (入れ子が 32 段より深い)`) で止める。通すと Python 3.12 では、読めた
+  あとの書き戻し (`json.dumps`) が RecursionError の traceback になっていた。深さの上限と数え方は
+  `core/paths.py` に移し、hook と builder が同じものを使う (グローバル既定の読み込みも同じ基準)
+- `init` / `set` / `migrate` の `--commit` が `.gitignore` にエントリを足すとき、`.gitignore` の中身が
+  UTF-8 でなくても traceback にならない (書き込みのあとに UnicodeDecodeError で終わっていた)。
+  `.gitignore` は書き換えず、既存の warning の行を出して exit 0 で続ける
+- `--value` に深すぎる入れ子の JSON が来ても (`[` を 10 万個並べるなど)、RecursionError にならず
+  文字列のまま扱う
+- hook の最終防波堤 (「内部エラーのため検証をスキップしました」) に入る例外の文字列も
+  `escape_controls` に通す。パスを含む OSError が抜けたとき、改行入りのパスで偽の行を差し込めた
+- hook の判定は変えていない
+
+### Tests
+
+- deny 文面のパス (`tests/test_deny_path_escape.py`): 改行 + 偽の行 + ESC を含むディレクトリ名で、
+  各 deny の文面に偽の行が行頭に出ないこと、エスケープした形で示されること、ESC が残らないこと、
+  rm の案内の分岐 (制御文字ありはコマンドにしない / 空白だけのパスは従来どおり quote つき)
+- builder の読み込み (`TestUnreadableExistingFile`): サブコマンド × (UTF-8 でない / 入れ子が深い)、
+  migrate の読めない旧パス / 新パス、グローバル既定、`.gitignore` / `CLAUDE.md` の stat できない名前。
+  `settings_env` の単体 (UTF-8 でない / 入れ子が深い / 桁の多すぎる整数 / stat できないパス)。
+  桁の多すぎる整数の case は、整数の桁数に上限のある Python (3.11+) でだけ流す
+- builder: hook が deny する深さ (パース後に 32 段超) のファイルを全サブコマンドで、3000 段の入れ子 (Python 3.12 で書き戻しが落ちていた形) の拒否、UTF-8 でない
+  `.gitignore` (init / set / migrate の `--commit`)、深すぎる `--value`。最終防波堤の文面の
+  エスケープ (`tests/test_main.py`)
+- 1,492 → 1,520 件
+
+## 0.21.0
+
+### Changed: deny 文面に示す値は、どの表示も許容形のときだけ示す
+
+deny 文面の `現在=` / `期待=` / 検出したコマンドが指定した値 (`コマンド指定 --context=...` など) の
+表示は、一部 (firebase の `現在=` など) を除いて値をそのまま出していた。値は accounts.local.json・
+リポジトリの `.firebaserc`・CLI の設定・コマンドの引数から来るので、改行を含む値で、値の外に
+偽の行 (切替コマンドだけの行など) を deny 文面に差し込めた。改行を含まなくても、切替コマンドの
+形を書いた値は、表示されただけで「案内したコマンドは単独で実行」の注記の判定に当たり、コマンドの
+形で案内していない deny に注記が付いた (内部バックログ)。
+
+- 値を文面に示すときは、service に関わらず共通の部品 (`core/shell_word.py` の `shown` /
+  `shown_all`) を通す。示すのは、案内に使える形 (英数字で始まり、英数字と `.` `_` `-` `:` `/`
+  `@` `+` だけからなる形) の値か、空白 (Unicode の空白を含む) も `=` も含まず、制御文字・
+  書式文字 (ゼロ幅スペースなど)・行区切り / 段落区切り・未割り当て / 私用領域 / サロゲート、
+  既定で無視される文字 (Unicode の Default_Ignorable_Code_Point。Hangul filler・異体字セレクタ・
+  結合書記素接合子など)、空白に見える文字 (点字の空白、エジプト聖刻文字の空白 U+13441-13442、U+1D159、U+FFFC、
+  U+303F など) も含まず、結合文字で始まらない値。
+  それ以外は「(表示しない値)」に置き換える。Hangul filler (`ㅤ`) や点字の空白を空白の代わりに
+  置いた値は、空白を含まなくても文面の上では切替コマンドの形に見え、先頭の結合文字は前の
+  `期待=` の `=` と合成されて別の記号 (`≠`) に見えるため。値の途中の結合文字 (NFD で書いた
+  日本語の名前の濁点など) は示す。日本語の名前・`_local`・`a,b` のような普通の名前は、案内
+  コマンドには入れないが値としては示す (何が不一致かを文面に残す)。切替コマンドの形
+  (`REMEDIATION_PATTERNS`) はどれも空白を要する (aws の形は `=` を要する) ので、示す値が
+  表示だけで注記の判定に当たることはない。対象は全 service の `現在=` / `期待=`、コマンド指定
+  (kubectl の `--context`、gcloud の `--project` / `--account`、firebase の `--project`、aws の
+  `--profile`)、firebase の alias の行き先 (`(→ <project>)`)、gh の host (`GitHub [<host>]`)、
+  自動切替の注記に出す host とアカウント、`"$auto_switch"` (と環境変数) に書いた対応していない
+  名前、並行セッションのガードの注記に出す host とアカウント、切替と書込の連結の deny の期待値
+- 値を置き換えずに出す箇所は、制御文字をエスケープして 1 行に収める (`core/shell_word.py` の
+  `escape_controls`。改行は `\n`、ほかの C0 / C1 の制御文字と DEL は `\xNN`、行区切り /
+  段落区切りと書式文字 (双方向制御の文字・ゼロ幅スペースなど) は `\uNNNN`、BMP の外の書式文字は
+  `\UNNNNNNNN`)。対象は `(検出コマンド: ...)` の行 (切替と書込の連結の deny と、
+  短いオプションの結合形の deny を含む)、切替に失敗したときに転記する gh の出力、認証情報を
+  取得できないときに転記する aws の stderr、並行セッションのガードの注記に出す記録のパス。
+  コマンドの引数に改行を入れて `(検出コマンド: ...)` の行の外に偽の行を作る形と、CLI の出力の
+  端末の制御シーケンス (行の消去・カーソル移動) や BEL が deny 文面に残る形を塞ぐ
+- 検出したコマンドが指定した値は、0.20.0 まで `shlex.quote` だけを通して示していたが、quote は
+  改行も空白入りのコマンドの形も残すので、同じく `shown` を通す。指定した値は
+  `(検出コマンド: ...)` の行で分かる
+- deny / allow の判定は変えていない。案内に使える形の値の文面も変わらない
+
+### Changed: `--help` 付きの gh コマンドでは自動切替をしない
+
+`gh auth git-credential --help` のようなヘルプの表示は、`gh --help` の形に当たらないので通常の
+検証に乗り、自動切替 (auto-switch) を有効にしていると、不一致のたびにマシン全体の gh の
+アカウントを切り替えていた (内部バックログ)。
+
+- 対象のコマンドがどれも `--help` (`--help=<値>` を含む) 付きなら切り替えず、従来どおり deny し、
+  切り替えなかった理由を添える。`--help` の無いコマンドが同じ行にあれば、そのために従来どおり
+  切り替える
+- `-h` はヘルプとして数えない (gh の `auth` 配下では `--hostname` の短い形で、実際の操作になる)
+- deny / allow の判定は変えていない (自動切替の発火条件だけ)
+
+### Tests
+
+- 値の表示の契約 (`tests/test_shown_values.py`): service × 値の出どころ (期待値・CLI の現在値・
+  `.firebaserc` の現在値と alias の行き先・コマンドの flag・gh の host・自動切替の注記・
+  `"$auto_switch"` の名前・連結の deny・短いオプションの結合形の deny) に、切替コマンドの形の値
+  (空白版・改行版・CR 版・先頭改行版・行区切り版・ノーブレークスペース版・ゼロ幅スペース版・
+  Hangul filler 版・点字の空白版・結合書記素接合子版) を
+  入れ、差し込んだコマンドが検出コマンドの行の外のどの行にも出ないことと、注記の有無が無害な
+  値のときと同じことを確かめる。検出コマンドの行は 1 行で、制御文字がエスケープされていること、
+  普通の名前 (日本語 / `_local` / `a,b`) は示すこと、空白も `=` も含まない形の差し込みは示しても
+  注記を左右しないことも確かめる
+- `shown` / `escape_controls` の単体 (`TestShown` / `TestEscapeControls`。示す値が単独で切替コマンドの
+  形にならないことの総当たり、全コードポイントについて「文字の間に挟んで示すものに、印字できない
+  文字・既定で無視される文字・空白に見える文字が無い」「先頭の結合文字は示さない」「書式文字は
+  エスケープで残らない」の生成を含む)、`"$auto_switch"` の名前と並行セッションの記録と自動切替の
+  報告の汎用形 (`test_auto_switch.py`)、gh / aws の CLI の出力の転記
+- 自動切替の `--help` (`TestOnlyWhereItWouldStop` / `TestAttempt`)、切替の失敗・不足・報告の
+  文の値 (`TestDescribeSwitch` / `TestSwitchErrorsShowOnlyAllowedValues`)
+- コマンド指定・gh の host・alias の行き先の表示のテストを、新しい挙動 (`shown` の判定で示す) に
+  合わせた
+- 1,462 → 1,486 件
+
+## 0.20.0
+
+### Changed: 短いオプションの結合形に `-P` / `-c` が含まれる firebase のコマンドを deny する
+
+`firebase -jP prod deploy` / `firebase deploy -iPprod` / `firebase deploy -jc sub/firebase.json`
+のように、短いオプションを結合したトークンに `-P` / `-c` が含まれる形は、firebase-tools では
+`-j -P prod` などに分かれ、その project / root で動く。0.19.1 までの hook はこのトークンを未知の
+option として読み飛ばし、アクティブな project (既定の root) で照合していたので、別の project
+への deploy を allow しえた (内部バックログ)。
+
+- 結合形は展開せず、照合先を確かめられないとして deny する (CLI の展開の規則を再現しない)。
+  文面は `-P` / `-c` を単独のトークンに分けて書くよう案内する。成功 cache も見ない
+- 値を取らない文字だけの結合形 (`-ji` など) は従来どおり読み飛ばす。`-Pprod` のように先頭の
+  文字が `-P` / `-c` の形も従来どおり値の連結形として読む
+- 短い形の context option を持つのは firebase だけで、aws / gcloud / kubectl には当たらない
+- README の「`-P=prod` を同じ規則で扱う」を実際の挙動に合わせた。hook は値 `prod` と読むが、
+  firebase-tools は `=prod` と読む (`-c=x` も `=x` というファイル)。通常の構成ではコマンドは
+  失敗するが、`=` で始まる alias やファイルを細工したリポジトリでは照合先と実行先が食い違いうる
+  ので、README の既知の制限に載せた (判定は変えていない)
+
+### Changed: CLI の無い経路で、firebase.json の旧形式キー `"firebase"` を見落とさない
+
+firebase-tools は configstore の切替先が無いとき、`.firebaserc` の alias より先に firebase.json の
+旧形式キー `"firebase"` の project で動く。hook の PATH に `firebase` が無い構成
+(`npx firebase deploy` など) のローカル設定の解決はこのキーを見ず、`.firebaserc` の default で
+照合して、別の project への deploy を allow しえた (内部バックログ)。
+
+- firebase.json (`--config` 付きのコマンドではそのファイル) にこのキーがあれば、値に関わらず
+  ローカル設定から解決せず、現在値を取得できないとして deny する
+- キーの有無を確かめられない firebase.json も同じく deny する: 読めない・UTF-8 でない・U+FEFF が
+  ある・コメントがある・厳密な JSON として読めない (NaN・末尾のカンマなど)。コメント付きの
+  firebase.json を使い、CLI の無い経路で firebase を使う構成は、この版から deny になる。URL の
+  ような文字列の中の `//` は当たらない。空のファイルは firebase-tools と同じく `{}` として読む
+- builder の現在値 (`init` の提案・`show`) も同じ解決を使うので、CLI が答えられない環境では
+  これらの firebase.json で現在値を出さない
+
+### Tests
+
+- 結合形の印付け (`TestCombinedShortContextOption`)、dispatcher での deny と文面
+  (`TestFirebaseCombinedShortOptions`)。止めた結合形は、同じキーの成功 cache を積んでおいても
+  cache より先に止まり、1 回目の deny で成功 cache を積まないこと (マージ前レビューの指摘)
+- CLI の無い経路の旧形式キー (`TestFirebaseLegacyProjectKeyWithoutCli` /
+  `TestLocalResolutionAndFirebaseJsonLegacyKey`)。入れ子が深すぎて厳密な JSON として読めない
+  firebase.json・存在するが読めない firebase.json も止めること、configstore の切替先があっても
+  旧形式キーの判定を先に行うこと (マージ前レビューの指摘)
+- 1,445 → 1,462 件
+
+## 0.19.1
+
+### Fixed: stat できない accounts.local.json で検証をスキップしない
+
+accounts.local.json の配置パス (旧パスとグローバル既定を含む) の存在確認は、pathlib の
+`Path.is_file()` を使っていた。これは Python 3.13 まで、ENOENT など以外の stat の失敗 (権限の
+無いディレクトリの EACCES・長すぎる名前を指す symlink の ENAMETOOLONG) を例外にするので、例外が
+hook の外まで抜けて「内部エラーのため検証をスキップ」(実行は止めない) になっていた。長すぎる
+名前を指す symlink はリポジトリに置けるので、旧パス (`.claude/accounts.json`) をそれにするだけで、
+同じ階層の新パスに正しいファイルがあっても、どの service のコマンドでも検証を外せた (ふつうの
+ファイルなら複数のパスの競合で deny になる配置)。3.14 からはそのファイルを無いものとして扱い、
+同じ階層のほかの配置パス → 親ディレクトリ → グローバル既定へ黙って探索を進めていた (内部
+バックログ)。
+
+- stat できない配置パスは、ファイルがあるかどうかを確かめられないので「ある (が読めない)」に
+  数える (Python の版に依らない)。読めない期待値ファイルと同じく tier に関係なく deny する。
+  同じ階層にほかの配置パスもあれば、複数のパスの競合と同じく deny する
+- その deny の文面は、確かめられないパスと理由 (権限が無い・名前が長すぎる など) を示し、移行と
+  削除の案内はしない。途中のディレクトリに権限が無いと 3 つの配置パスすべてがこれに当たり、
+  「複数のパスに存在します」と migrate / rm の案内は事実と合わない (案内どおりにしても直らない)
+  ため。パスが 1 つだけなら、従来の「読み込みに失敗しました」の文面のまま
+- 無いとみなすのは、無いと確かめられたとき (ENOENT / ENOTDIR。行き先の無い symlink を含む) と、
+  通常のファイルでないとき (ディレクトリなど) だけ。symlink のループ (ELOOP) は、0.19.0 まで
+  どの版でも無いものとして扱っていたが、確かめられないものとして deny に変わる
+- グローバル既定 (`~/.claude/verify-cloud-account/accounts.local.json`) も同じ。0.19.0 までは
+  stat できないと、Python 3.13 までは検証をスキップし、3.14 からは未設定の扱い (リモート read
+  のみのコマンドは警告で通す) だった
+- 0.19.0 のディレクトリ単位の固定は、期待値が未登録のときの代わりとして働く。3.14 で stat
+  できない配置パスを無いものとして扱うと、固定の環境変数 (`AWS_PROFILE` など) があるだけで、
+  書き込みのコマンドも照合せずに通っていた。stat できない配置パスは、固定があっても deny する
+- 0.19.0 の README の既知の制限 (存在確認で stat できない accounts.local.json) を外した
+
+### Fixed: 成功 cache の型の誤った値と、他のユーザーの dir で検証を省かない
+
+- 成功 cache の entry の timestamp が数値でない (文字列・null・配列など) と TypeError、float に
+  収まらない整数だと OverflowError が hook の外まで抜け、「内部エラーのため検証をスキップ」に
+  なっていた。epoch のファイルの `Infinity` (JSON として読める) も、`int()` の OverflowError で
+  同じだった (内部バックログ)。値が期待した型でない entry は cache miss (通常の照合)、epoch の
+  ファイルは無効化の記録が無いのと同じ (epoch 0) にする
+- 同じ確認で、timestamp が NaN・無限大・未来の時刻の entry (期限が切れない) と、success が
+  `"false"` のような真に数えていた値の entry も cache miss にした。epoch / tombstone は int64 に
+  収まる非負の整数だけを読む (書き戻す `json.dumps` が、桁の多すぎる整数で ValueError を
+  投げうるため)
+- cache の dir (`$TMPDIR/cc-mp-verify-cloud-account`) は、自分の所有で、他のユーザーが書けない
+  (mode の group / other に w が無い) 実ディレクトリ (symlink でない) のときだけ使う。TMPDIR の
+  無い Linux などでは共有の `/tmp` に置かれ、0.19.0 までは別のユーザーが先に作った dir を確かめ
+  ずに使っていたので、置かれた entry で検証を省き (上の型の誤りと組み合わせればスキップ)、置かれた
+  symlink を辿って書きえた (内部バックログ)。作るときは 0700。条件を満たさない dir は直さずに
+  使わず、cache を読まず書かずに毎回検証する。umask 002 の環境で以前の版が作った dir (0775) も
+  これに当たり、消すまで毎回検証する (消せば次の実行で 0700 で作り直される)
+- 旧パスの移行案内を 1 日 1 回に絞る記録も同じ dir に置く。0.19.0 までは共有の `/tmp` の同名
+  dir を確かめずに使い、別のユーザーが置いた記録で案内を止められ、置かれた symlink を辿って空の
+  ファイルを書きえた。dir を使えないときは毎回出す
+- 自動切替の並行セッションのガードの記録も、同じ dir を使えないときと、読めないとき (stat
+  できない・入れ子が深い) は記録が無いのと同じにする (壊れた記録と同じ扱い)。0.19.0 は、Python
+  3.13 までだと stat できない記録で例外になり、それを握った dispatcher が「内部エラーのため自動
+  切替を行わない」(deny のまま) にしていた (3.14 からは記録が無いのと同じに切り替えていた)。
+  検証のスキップにはなっていなかった
+
+### Fixed: builder (show / migrate / pin-env / 書き込み) の表示を hook の deny に揃える
+
+上の修正で、stat できない配置パスを「ある」に数えるようになり、同じ探索を使う builder の振る舞いも
+変わっていた (マージ前レビューの指摘)。新パスに正しいファイル・旧パス (`.claude/accounts.json`) に
+長すぎる名前を指す symlink のとき、show は「複数のパスに存在します … migrate --commit」と hook が
+避けている案内を出し、migrate は Python 3.13 までだと traceback で止まり、3.14 からは stat できない
+旧パスを空として「統合」して書き込んでいた。新パスだけがその symlink のときは、3.14 の show が
+`(empty)` と「照合せずに通します」を出していた (hook はどれも deny)。
+
+- 期待値ファイルの読み込みは、stat できないパスを空として読まず「確かめられません」で止める
+- show / pin-env の複数パスのエラー、migrate、旧パスがあるときの書き込み (init / set / remove /
+  auto-switch) の拒否は、stat できない配置パスがあれば hook と同じ文面 (確かめられないパスと理由)
+  を出し、migrate / rm を案内しない
+- 配置パスとグローバル既定の存在確認で、Python 3.13 までに traceback で止まらない
+- プロジェクト側に何も無く、グローバル既定が stat できないとき、show / pin-env / auto-switch は
+  「`--path <グローバル既定>` を付けて再実行」を案内せず、hook と同じ文面で exit 1 にする (hook は
+  そのファイルを読めない期待値ファイルとして deny し、`--path` で開き直しても読めないため)。show は
+  従来、グローバル既定を読めなければ未登録の一覧を出さずに exit 0 で終えていたが、stat できない
+  場合に限って止める側に揃えた。壊れた JSON など、stat できるが読めない場合は従来どおり exit 0。
+  `--path` が無いパスを指していても、プロジェクト側に別の期待値ファイルがあれば hook はそちらを
+  読むので、show / pin-env はグローバル既定を見ない (stat できなくても止めない)。そのプロジェクト側の
+  ファイルが stat できないときは、hook はそれで deny するので、show / pin-env も hook と同じ文面で
+  exit 1 にする (「そちらを読みます」と案内して exit 0 で終えない)
+- `--path` に symlink のループを渡すと、Python 3.12 までは `Path.resolve()` の RuntimeError で
+  traceback になっていた (3.13 からは投げない)。どの版でも書き込まずに止め、hook は同じ入力を
+  deny する。止まり方は版とループの形で分かれる (Python 3.9.6 / 3.12.13 / 3.13.16 / 3.14.0 で
+  show / pin-env / auto-switch / set / remove / init / migrate を実測):
+  - 3.12 まで: どの形でも「確かめられません」で exit 1
+  - 3.13 から: 自分を指す 1 段のループは「確かめられません」で exit 1。2 段以上のループ
+    (`accounts.local.json` → `loopa` → `loopb` → `loopa`) では `Path.resolve()` がループの途中の
+    パス (`loopa`) を返すので、「--path は dispatcher が読む配置を指してください」で exit 2
+    (案内は事実と合わないが、書き込まない)
+
+### Fixed: pin-env の gcloud の構成
+
+- stat できない構成ファイル (長すぎる名前を指す symlink など) があると、Python 3.13 までは例外が
+  builder の外まで抜けていた。読めない構成と同じく候補にしない (hook の経路ではないので、検証の
+  スキップではない)
+
+### Tests
+
+- stat できない配置パス: 状態ごとの数え方 (通常のファイル・無い・行き先の無い symlink・
+  ディレクトリ・`.claude` がファイル・長すぎる名前を指す symlink・symlink のループ・権限の無い
+  `.claude`)、その階層で探索が止まること、グローバル既定 (`test_paths.py`)。`__main__.main()` を
+  プロセス内で動かし、新パスの隣の旧パス・それだけの旧パス (リモート read のみのコマンド)・祖先の
+  権限の無い `.claude`・グローバル既定で、どれも deny になり warn (スキップ) にならないこと
+  (`TestAccountsFileThatCannotBeStatted`)。`Path.is_file` は 0.18.0 と同じく 3.13 までの挙動に
+  差し替え、本物の挙動も前提として確かめる。stat できない旧パスと固定の環境変数
+  (`AWS_PROFILE`) がそろっても、書き込みのコマンドが deny のままであること
+- 成功 cache: 期待した型でない entry の値 (timestamp・success) と epoch の値 (`test_cache.py`)。
+  timestamp が文字列 / null / 配列の entry で、`__main__` を実プロセスで起こすと通常の照合
+  (deny) になり、正しい entry なら cache hit (allow) のままであること (`test_main.py`)。他の
+  ユーザーが書ける dir (0777 / 0770 / 0703)・所有者が違う dir (所有者は mock)・自分の dir を指す
+  symlink を使わないこと、新しい dir は 0700 であること (`TestCacheDirOwnership`)。移行案内の
+  記録を他のユーザーが書ける dir に置かず、毎回出すこと (`test_dispatcher.py`)
+- 自動切替の記録: stat できない・入れ子が深い記録は無いのと同じで、次の切替の記録で置き換わる
+  (`test_auto_switch.py`)。pin-env: stat できない構成を候補にしない (`test_pin_env.py`)
+- cache の dir を自分で作る既存のテストは 0700 で作る (umask 002 の環境でも同じ結果にするため)
+- builder: 上の 2 つの入力で show / pin-env / migrate (`--commit` 有無) / init / set /
+  auto-switch が hook と同じ文面で止まり、新パスを書き換えないこと。本物の `Path.is_file` と、
+  3.13 までの挙動に差し替えたものの両方で流す (`TestUnstattableAccountsPath`)
+- builder: 新パスだけが stat できないときの auto-switch (`--commit` 有無)、権限の無いディレクトリの
+  下を指す `--path` での show / pin-env、symlink のループを指す `--path` (`Path.resolve()` を
+  3.12 までの挙動に差し替える)、stat できないグローバル既定での show / pin-env / auto-switch と
+  init の警告。`--path` が無いパスを指し、プロジェクト側に新パスがあるときの show / pin-env が、
+  stat できないグローバル既定で止まらないこと、そのプロジェクト側の新パスが stat できなければ hook と
+  同じ文面で止まること。配置パスの存在確認を `Path.is_file()` に戻す変異が、
+  置き換えた箇所ごとに落ちる
+- 1,397 → 1,445 件
+
+## 0.19.0
+
+### Changed: 期待値が未登録でも、ディレクトリ単位の公式の固定があれば通す
+
+accounts.local.json に service のキーが無いと、0.18.0 までは一律に deny していた。CLI 自身に
+ディレクトリ単位でアカウントを固定する公式の仕組みがある service は、それで固定されていれば
+照合せずに通す (固定の値が、そのディレクトリで意図したアカウントの宣言になるため)。
+固定されていなければ、固定の方法と期待値の登録の両方を案内して deny する。
+
+- gcloud: `CLOUDSDK_CORE_ACCOUNT` が空でない、または `CLOUDSDK_ACTIVE_CONFIG_NAME` が account を
+  持つ構成を指している (project は問わない)
+- aws: `AWS_PROFILE` が空でない (`AWS_ACCESS_KEY_ID` は固定とみなさない)
+- firebase: そのディレクトリで `firebase use` の切替先が記録されている。commit される
+  `.firebaserc` の `default` だけでは固定とみなさない (チームで共有するファイルで、利用者が
+  選んだ値ではない)。未登録の間は、案内した `firebase use <x>` も止めない
+- gh / kubectl: 固定の公式の仕組みが無いので従来どおり (登録を促す)
+- accounts.local.json がどこにも無い場合も同じ扱い
+- 判定は hook の環境変数 (起動時の値 + settings の `env`) だけで行う。行頭のインライン env
+  (起動時の値と違うもの) や、同じコマンドの前段の `export` / `unset` / 代入 / `source` などで
+  その service のアカウントを決める環境変数を変えた場合は、固定されていないとみなす
+  (その場の 1 語で未登録の deny を抜けられないように)
+- 期待値を登録してある service は、従来どおり照合する
+
+### Added: 起動したリポジトリの外で走るコマンドを止める
+
+hook は Claude Code を起動したときの環境変数と、起動したディレクトリの期待値で照合する。
+ディレクトリ単位で環境変数を切り替えるツールの値は PreToolUse hook に届かないため、別の
+リポジトリで走るコマンド (`cd ../other && gcloud ...`) や、Bash の作業ディレクトリ自体が外に
+ある状態では、意図されたアカウントを照合できず、誤ったアカウントでの書き込みを通しうる。
+
+- 各セグメントが走るディレクトリを、hook input の `cwd` とコマンド中の `cd` / `pushd` から
+  静的に求め (`core/workdir.py`)、起動したリポジトリ (起動ディレクトリを含む git の作業ツリー)
+  の外なら照合せずに deny する (リモート read のみなら警告して通す)
+- 行き先を静的に決められない `cd` (`cd "$D"` / `cd -` / `popd` / glob など) の後は外として扱う
+- deny は、そのリポジトリで Claude Code を起動し直すよう案内する。移動先のパスは文面に出さない
+  (コマンド由来の文字列を deny 理由に入れない)
+
+### Changed: gcloud の値が環境変数で決まっているときは `gcloud config set` を案内しない
+
+`CLOUDSDK_CORE_ACCOUNT` / `CLOUDSDK_CORE_PROJECT` は設定ファイルより優先される (`--configuration`
+を付けても。空文字なら未設定。2026-10-09 実測)。不一致や未設定の deny が `gcloud config set` を
+案内すると、案内どおりに実行しても同じ deny が続いていた。
+
+- 値が環境変数で決まっているときは、その環境変数を設定している場所の直し方と
+  `--account` / `--project` を案内する
+- 環境変数が無く未設定のときは、`--account` / `--project`、ディレクトリごとの固定
+  (`/verify-cloud-account:project-accounts`)、マシン全体の既定 (`gcloud config set`) の順に案内する
+- 不一致の案内 (`切り替え: gcloud config set ...`) には、この実行だけなら `--account` /
+  `--project` を付ける方法も添える
+
+### Changed: gcloud のローカル読取で `CLOUDSDK_CORE_ACCOUNT` / `CLOUDSDK_CORE_PROJECT` を読む
+
+この 2 つがあると、0.18.0 までは検証のたびに `gcloud config get-value` を起動していた
+(1 回 1 秒前後)。gcloud と同じ優先順位 (環境変数 > 設定ファイル、空文字は未設定) で読む。
+ローカル読取で通せるのは従来どおり一致のときだけで、不一致・未設定は CLI で取り直してから
+判断する。ほかの `CLOUDSDK_*` や `GOOGLE_CLOUD_PROJECT` 等があるときは従来どおり CLI に委ねる。
+
+### Added: show に、期待値が未登録の service の固定の状況を出す
+
+`/verify-cloud-account:accounts-show` (builder の `show`) の末尾に、キーの無い service ごとに
+「固定済み (通す) / 未固定 (止める) / 固定の仕組みが無い (止める)」を出す。値は出さない。
+判定は show を実行した環境変数で行う旨も添える (hook は起動時の環境変数で判定する)。
+
+## 0.18.0
+
+### Fixed: `.firebaserc` を firebase-tools と違う内容に読んで照合しない
+
+`firebase --project <alias> ...` の照合と、CLI から現在値を取れないとき (hook の PATH に
+`firebase` が無い `npx firebase` の構成など) のローカル設定の解決は、`.firebaserc` を厳密な
+JSON として読み、読めなければ alias 0 件として扱っていた。firebase-tools は `.firebaserc` の
+すべての U+FEFF とコメント (`//` / `/* */`) を除いてから読むので、コメントのあるファイルでは
+`--project <alias>` を alias の行き先ではなく値そのもので照合し、alias のキーの中の U+FEFF や
+`NaN` のあるファイルでも行き先を取り違えて、別の project で動くコマンドを allow しえた
+(内部バックログ)。
+
+- 0.17.1 の pin-env と同じ判定 (UTF-8 でない・U+FEFF がある・`//` か `/*` がある (文字列の
+  中の URL なども含む)・JSON として読めない・`projects` がオブジェクトでないか文字列でない値を
+  持つ、などに当たらない) で、firebase-tools と同じ内容に読めると確かめられたときだけ
+  `.firebaserc` を使う。確かめられなければ、`--project` 付きのコマンドは「--project の行き先を
+  確かめられません」で deny し (弾く主な条件を文面に並べ、期待値も示す)、ローカル設定からは
+  解決しない (現在値を取得できないとして deny)。cjson のコメントの除去は再現しないので、URL を
+  含むだけの厳密な JSON も対象になる (fail-closed の代償)
+- 弾く条件の文 (pin-env の「固定できません」と共通) は網羅と言わない書き方にした (「…、などに
+  当たる」)。Python の json が読めない形には、上限が版と設定で変わるもの (桁の多すぎる整数) も
+  あり、並べていない。そのため締めの文も言い切らない: pin-env は「これらに当たらない形にすると
+  案内できることがあります」(0.17.1 は「案内できます」)、hook の deny は「これらに当たらない形に
+  すると確かめられることがあります」(マージ前レビューの指摘)
+- 「--project の行き先を確かめられません」の deny の「--project を外す」案内は、外すとコマンドが
+  アクティブな project で動く (指定していた project ではなくなる) ことを言う。意図した project が
+  アクティブかを確かめてから外すよう案内する (マージ前レビューの指摘)
+- 同じ deny の先頭の文に、期待値 (`期待=`) も示す (dict の期待値には「のいずれか」を付ける)。
+  0.17.1 の同じコマンドの deny (`--project` の不一致) は期待した project を示しており、上の
+  「意図した project がアクティブかを確かめる」にはそれが要るため。示すのは許容形の値だけで、
+  外れる値があれば出所の文を添える (`--config` 付きのコマンドの deny と同じ部品。マージ前
+  レビューの指摘)
+- 入れ子の深い `.firebaserc` で例外が hook の外まで抜け、「内部エラーのため検証をスキップ」
+  (実行は止めない) になっていた。読めないファイルとして上と同じに扱う
+- stat できない `.firebaserc` (長すぎる名前を指す symlink など。権限の細工は要らず、リポジトリに
+  置ける) でも、pathlib の `Path.is_file()` が Python 3.13 まで例外を投げ、同じく検証をスキップ
+  していた (`--project` 付きのコマンドは CLI の有無に関係なく通る経路)。firebase-tools と同じく
+  無いもの (alias 0 件) として扱う (0.18.0 より前からある。マージ前レビューの指摘)
+- 空文字の alias も、firebase-tools と同じく alias の数に数える (`{"a": "", "b": "x"}` は
+  alias 2 つで、`default` が無ければ未解決)。0.17.1 までは 1 つと数えて `x` を現在値にしていた
+
+### Fixed: firebase の `--config` / `-c` を照合先に反映する
+
+`firebase --config <path> ...` は、指定した firebase.json のあるディレクトリを project root に
+して、そこの `.firebaserc` と、そこで `firebase use` した project で動く。0.17.1 までの hook は
+`--config` を見ずに、プロジェクトのディレクトリから firebase.json を親方向に探した root で照合
+していた (内部バックログ)。
+
+- `--config` / `-c` を照合先を変えるコンテキスト指定 flag として扱い、指定したファイルのある
+  ディレクトリを project root にする (`firebase use` にも同じ `--config` を付ける)。相対パスは
+  プロジェクトのディレクトリから探し、見つからなければ deny する (hook はコマンドの作業
+  ディレクトリを知らない)
+- 相対パスは、プロジェクトのディレクトリを symlink を解いた実体のパスにしてから解決する (CLI
+  本体と同じ。Node の作業ディレクトリは実体のパス)。論理パスから解決すると、CLI に渡す
+  `--config` の root が論理パスになり、`firebase use` が実体のパスで記録した切替先を CLI が
+  引き当て損ねて、別の project で答えうる (マージ前レビューの指摘)
+- `--config` 付きのコマンドの deny は、切替をコマンドの形 (`firebase use <期待値>`) で案内せず、
+  そのファイルのあるディレクトリで切り替えるよう文で案内する。firebase-tools は切替先を
+  ディレクトリごとに記録し、`--config` 付きのコマンドはそのファイルのあるディレクトリから親へ
+  探した切替先で動くので、そのディレクトリがプロジェクトのディレクトリと別でそこに切替先が
+  記録されていると、プロジェクトのディレクトリで `firebase use <期待値>` を打っても変わらない
+  (その形で案内すると、案内どおりに切り替えても同じ deny を繰り返す) ため (マージ前レビューの
+  指摘)
+- この deny の先頭行に示す現在値 (`現在=`) と期待値 (`期待=`) は、許容形の値だけを示す
+  (外れていれば「表示しない値」)。CLI が無いとき現在値はリポジトリの `.firebaserc` から解決
+  されるので、値が切替コマンドの形 (`x firebase use other` など) だと、示すだけで「単独で
+  実行」の注記の判定に当たり、案内していないコマンドに注記が付くため (マージ前レビューの
+  指摘)。現在値の表示は、`--config` の無い不一致の deny も同じにする (表示だけの変更)
+- `--config` 付きのコマンドで現在値を取得できない deny も、先頭行に期待値 (`期待=`) を同じ形で
+  示す (dict の期待値には「のいずれか」を付ける)。0.17.1 の同じコマンドの deny は、案内する
+  切替コマンド (`firebase use <期待値>`) で期待した project を示していたので、コマンドの形の
+  案内をやめても、どの project に切り替えるかを文面に残すため (マージ前レビューの指摘)
+- `--config` の無いコマンドで現在値を取得できない deny も、切替コマンドを 1 つも案内できないとき
+  (期待値がドメイン付きの project ID のときや、dict のどの entry も切替コマンドにできないとき) は、
+  先頭行に期待値 (`期待=`) を同じ形で示す (dict の期待値には「のいずれか」を付ける)。この deny の
+  案内は「期待した project に切り替えてください」で、どの project に切り替えるかが要るため。
+  許容形から外れる値は示さず、出所は従来どおり添える「手で確認してください」の文が言う (マージ前
+  レビューの指摘)
+- 期待値に許容形から外れる値があるときは、`--config` 付きのコマンドの deny (現在値を取得できない
+  deny も含む) に「表示していない期待値があります (accounts.local.json の "firebase" を確認して
+  ください)」と出所を添える。許容形から外れる値はどの project とも一致せず、案内どおりに切り
+  替えても deny が続くので、何を直せばよいかを文面に残すため (マージ前レビューの指摘)
+- CLI が無いときのローカル設定の解決は、`--config` 付きのコマンドでは切替先を、指定した
+  ファイルのあるディレクトリ (symlink を解かないパス) の親方向だけで探す。firebase-tools は
+  そのパスの親方向だけを探すので、実体のパスでも探すと、`--config` のパスが symlink を通る
+  とき (symlink を通る絶対パスや、symlink のディレクトリを通る相対パス)、firebase-tools が
+  見ない切替先 (そのディレクトリで切り替えると実体のパスで記録される) で照合して allow しうる
+  ため (マージ前レビューの指摘)。既知の制限: この形では、案内どおりそのディレクトリで切り
+  替えても効かないことがある (hook は firebase-tools と同じ切替先で照合するので、deny のまま)
+- 値が変数展開などで静的に解決できないときは、他のコンテキスト指定 flag と同じく既定の root で
+  照合する
+
+### Fixed: 読めない accounts.local.json / 成功 cache で検証をスキップしない
+
+- accounts.local.json (旧パスを含む) が UTF-8 でない・桁の多すぎる整数がある (Python の上限。
+  3.11 以降の既定は 4,300 桁)・入れ子が深すぎると、例外が hook の外まで抜け、「内部エラーの
+  ため検証をスキップ」(実行は止めない) になっていた。JSON が不正なときと同じ扱いにする (tier に
+  関係なく deny。`"$mode"` は読めないので、mode は環境変数だけで決まる) (内部バックログ。
+  桁数はマージ前レビューの指摘)
+- 入れ子が 32 段より深いファイルも同じ扱いにする。読み込みが通る深さでも、後段 (成功 cache の
+  キーを作るところなど) が同じ深さを辿って例外になりうるため。正規の形は 2 段まで
+- 成功 cache の entry が UTF-8 でない・入れ子が深いとき、epoch のファイルが入れ子が深いときも、
+  読めないものとして扱う (entry は cache miss、epoch は無効化の記録が無いのと同じ。同じく
+  検証をスキップしていた)
+- stat できない entry / epoch のファイル (長すぎる名前を指す symlink など) も同じ扱いにする。
+  pathlib の `Path.is_file()` が Python 3.13 まで例外を投げ、同じく検証をスキップしていた
+  (epoch は検証のたびに読むので、置かれている間はその service のすべてのコマンドで。0.18.0 より
+  前からある。マージ前レビューの指摘)
+- 既知の制限: 存在確認で stat できない accounts.local.json (旧パスを含む。長すぎる名前を指す
+  symlink など) は、Python 3.13 以前ではまだ「内部エラーのため検証をスキップ」になる (3.14
+  以降は、そのファイルが無いものとして扱われる。README の既知の制限。別の変更で直す)
+
+### Tests
+
+- `.firebaserc` の読み方: firebase-tools と同じ行き先になる厳密な JSON・コメント・alias の
+  キーの中の U+FEFF・確かめられない形のすべてで `--project` が deny になり、コマンドを案内
+  せず、外すと行き先が変わることと、直し方を言い切らないことを言う。その deny が示す期待値
+  (scalar / dict・ドメイン付きの project ID・空文字と null の entry・許容形から外れる値と
+  出所の文) (`TestProjectFlagResolvesLikeFirebaseTools`)、
+  ローカル設定の解決と空文字の alias の数え方、そこで現在値を取得できない deny が切替コマンドに
+  できない期待値も `期待=` に示すこと (`TestLocalResolutionNeedsAConfirmedFirebaserc`)、
+  入れ子の深い `.firebaserc` で検証をスキップしない (`TestDeepFirebasercDoesNotSkipVerification`。
+  判定に加えて理由も見る)、stat できない `.firebaserc` (`TestFirebasercThatCannotBeStatted`)
+- `--config` / `-c`: 指定したディレクトリでの `--project` の解決・`firebase use` の引数と
+  cwd・symlink の下のプロジェクトでの相対パスの解決・ローカル設定の起点・見つからないファイルの
+  deny (`TestFirebaseConfigOption`)、dispatcher での全記法と注記
+  (`TestFirebaseConfigOptionRouting`)、deny → そのディレクトリで切り替える → 同じコマンドが
+  通る、の往復 (CLI の有無・scalar / dict の期待値・切替先が無いとき (期待値を示す)・ファイルが
+  プロジェクトのディレクトリにあるとき。許容形から外れた期待値・現在値は示さず、注記を付けない。
+  外れた期待値があれば、不一致・現在値を取得できない deny の両方で出所の文を添え、`期待=` に
+  示せる値 (ドメイン付きの project ID も) だけなら添えない。`現在=` も同じ形を示す。dict の
+  空文字・null の entry は `期待=` にも出所の判定にも入れない。
+  `TestFirebaseConfigSwitchGuidance`)、`--config` の無い不一致の deny も許容形から外れる現在値を
+  `現在=` に示さない (`TestFirebaseCurrentValueShownWithoutConfig`)、CLI が無いとき symlink を
+  通る `--config` (絶対パス / symlink のディレクトリを通る相対パス) で firebase-tools と同じ
+  切替先を引く (`TestFirebaseConfigThroughASymlinkWithoutCli`)
+- 読めないファイル: accounts.local.json の入れ子の上限 (`TestAccountsFile`)、成功 cache の
+  entry / epoch (読めない・stat できない。`test_cache.py`)、`__main__` を実プロセスで起こす
+  e2e (UTF-8 でない・入れ子が深い・桁の多すぎる整数のある accounts.local.json と旧パス、入れ子の
+  深い `.firebaserc`、読めない成功 cache。どれも warn (スキップ) にならない)
+- stat できないファイルのテストは `Path.is_file` を Python 3.13 までの挙動に差し替え、3.14 以降
+  でも同じ失敗を再現する。差し替えは本物と同じ入力で比べて同じに振る舞う (違うのは 3.14 で
+  本物が変わった「stat できないパス」だけ。`TestIsFileLikePy313`)。使う側は、本物がその版で
+  同じ fixture にどう振る舞うか (3.13 までは例外、3.14 からは False) も前提として確かめ、その
+  前提の helper 自身も、前提と食い違う path で落ちることを確かめる
+  (`TestAssertRealIsFileOnThisVersion`。マージ前レビューの指摘)
+- 1,317 → 1,358 件
+
+## 0.17.1
+
+### Fixed: 案内するコマンドに値をそのまま埋め込まない
+
+deny 文面の切替案内 (`kubectl config use-context <期待値>` / `gcloud config set project
+<期待値>` / `gh auth switch --hostname <host> --user <期待値>` / `firebase use <alias>` /
+`AWS_PROFILE=<profile> aws ...` 等) は、期待値や CLI の設定から来た値をそのまま
+コマンドに埋め込んでいた。Claude は deny の案内をそのまま実行しがちで、期待値のファイルは
+リポジトリに置かれうるので、値に `;` / `$()` / 空白 / 改行や先頭の `-` があると、案内
+どおりに打ったコマンドが別のコマンドや option として走りえた。
+
+- 案内するコマンドに入れる値は、英数字で始まり英数字と `.` `_` `-` `:` `/` `@` `+` だけ
+  からなる形のときだけコマンドに出し、`shlex.quote` も通す。firebase の alias /
+  project ID は pin-env の `firebase use` と同じく `.` `_` `-` まで。外れた値はコマンドの
+  形で案内せず、「手で確認してください」の文にする。普通の値 (EKS や kubeadm の context
+  名、メールアドレスの account を含む) の文面は変わらない。許容形は狭く、シェル上は無害な
+  値 (`_local` や日本語の context 名など) も外れるので、外れた値の文面は「案内に使える形
+  ではない」とだけ言い、危険な文字を含むとは言わない (マージ前レビューの指摘)
+- firebase の dict 期待値の案内行 (`firebase use <alias>  # → <project>`) は、`#` の後ろの
+  project も許容形 (`.` `_` `-` `:` `/` `@` `+`。コメントなので alias より広い) に限る
+  (改行が入るとコメントの外に出てコマンドになる)。ドメイン付きの project ID
+  (`example.com:my-project`) は行にする。案内できない entry は行にせず、その旨を添える
+- 値の一部でもコマンドの形で案内しなかった deny (「手で確認してください」の文がある deny) には、
+  ほかの entry の切替を案内していても、「案内した切替 / ログインコマンドは案内された形のまま
+  単独で実行」の注記を付けない。`期待=<値>` の表示が切替コマンドの形に見えると
+  (`x; kubectl config use-context other` 等)、案内していないのに注記が付き、その値の実行を
+  促していた。ある entry は案内し別の entry は抑止した deny (gh の複数 host 等) からも注記が
+  消えるが、安全側として受け入れた。AWS は外れた profile 名を文に置き換えたうえで
+  `AWS_PROFILE=<profile>` を必ず案内するので、AWS 専用の注記は付ける (マージ前レビューの指摘)
+- 同じ理由で、文面に表示する値のうち `.firebaserc` の alias の行き先
+  (`--project <alias> (→ <project>)`) と gh の host 名 (`GitHub [<host>]`) は、許容形のとき
+  だけ出す (外れていれば「表示しない値」「表示しない host」)。どちらも切替を案内しない deny
+  (`--project` の不一致・期待値の型の誤り) にも出るので、値が切替コマンドの形だと表示だけで
+  注記が付いていた (0.17.1 より前からある。マージ前レビューの指摘)
+- 旧パスの削除の案内 (複数のパスの衝突の deny と builder の `migrate --commit` が出す
+  `rm <path>`) も、パスを quote してシェルの 1 語にする。サブディレクトリで作業していると、
+  途中のディレクトリ名はリポジトリが決められる (0.17.1 より前からある。マージ前レビューの
+  指摘)
+- AWS の profile 名は、許容形から外れる名前をコマンドにも「対応する profile」の一覧にも
+  出さない (一覧の名前も `<profile>` に当てはめて使われる)。外れた名前しか無ければ
+  `<profile>` のままにする
+- 検出したコマンド自身が指定した値 (`--context` / `--project` / `--account` /
+  `--profile`) を文面に示すところは、検証せずに quote して示す
+- deny / allow の判定は変えていない (変えたのは文面だけ)。実装は `core/shell_word.py`
+
+### Fixed: pin-env (マージ前レビューの指摘)
+
+- **firebase の dict 期待値で、alias を `.firebaserc` と照合してから案内するようにした。**
+  0.17.0 は期待値の alias をそのまま `firebase use <alias>` で案内していた。`firebase use`
+  は alias を `.firebaserc` で解決するので、同じ alias が別の project を指していたり
+  alias が無かったり (alias 名が project ID として扱われる) すると、案内どおりにしても
+  期待した project にならず、続く検証が deny し続けた。このディレクトリの `.firebaserc` で
+  期待した project に解決される alias だけを案内し、無ければ期待値の project ID で案内する
+  (既定で隠す)。期待値の alias が `firebase use` に渡せない形のときも、0.17.0 の
+  「固定できません」ではなく project ID で案内する
+- project ID と同じ名前の alias が `.firebaserc` で別の project を指しているときは、
+  `firebase use <project ID>` がその alias に切り替わるので、project ID でも案内しない
+  (scalar の期待値も同じ)。alias も project ID も出せなければ「固定できません」
+- dict 期待値で project ID の候補が複数あるときは、名前順の先頭を案内しつつ、その ID で
+  よいかをユーザーに確かめる注記を添える (黙って 1 つを選んでいた)。候補の一覧へは誘導
+  しない (accounts-show は、pin-env が除いた ID も期待値として出す)。skill
+  (project-accounts) は、ユーザーが別の ID を選んだら `firebase use` を組み立てずに、
+  ユーザーに手で実行してもらう (マージ前レビューの指摘)
+- **firebase-tools と同じ内容に読めない `.firebaserc` では「固定できません」にした。**
+  firebase-tools は `.firebaserc` のすべての U+FEFF とコメント (`//` / `/* */`) を除いてから
+  JSON として読むが、pin-env は厳密な JSON として読んでいた。コメントのあるファイルでは
+  alias を 0 件と読んで同名の alias の確認をすり抜け、alias のキーの中の U+FEFF は別の
+  キーと読むので、案内した `firebase use` が別の project に切り替わりえた。UTF-8 として
+  読めない・U+FEFF を含む・`//` か `/*` を含む (文字列の中の URL なども含む)・厳密な JSON
+  として読めない (`NaN` 等・構文の誤り・深い入れ子)・`projects` がオブジェクトでないか
+  文字列でない値を持つ、のどれかなら案内しない (firebase-tools は文字列でない alias の値も
+  そのまま行き先に使う。マージ前レビューの指摘)。判定は保守的で、URL を含むだけの厳密な
+  JSON も「固定できません」になる (cjson のコメントの除去を再現しない代償)。理由の文は
+  「厳密な JSON に直すと案内できる」ではなく、弾く条件を並べる形にした。通常の検証の照合は
+  変えていない
+- **前後に空白のある期待値を「固定できません」にした。** 通常の検証は CLI が出した
+  (前後の空白を除いた) 現在値と期待値を完全一致で照合するので、
+  `{"project": " my-project "}` のような期待値はどの現在値とも一致しない。0.17.0 の
+  pin-env は空白を除いた値で構成を照合し、固定を案内していたので、案内どおりに固定しても
+  deny が続いた。gcloud (0.17.0 の「空白だけの値は不正」と同じ扱い) と、同じ食い違いの
+  あった aws / firebase に入れた。通常の検証の照合の仕方は変えていない
+
+### Tests
+
+- `tests/test_shell_word.py` (許容形と quote、service ごとの案内: 許容形の値は文面が
+  変わらない / 外れた値はコマンドにならない / どちらも deny のまま)、pin-env の
+  `.firebaserc` との照合と前後の空白 (`TestPaddedExpectedIsNotPinned`)
+- テスト整理 (挙動の変更なし): `tests/test_docs.py` の配布ファイルの走査から、gitignore
+  済みの手元専用のローカルガイドを名前で除いた。保守者の手元の plugin 直下にあると、その
+  本文で offender になり、手元の test だけが落ちていた (clean clone の CI は通る)。
+  配布ファイルに書かれた参照は今までどおり検出する
+- マージ前レビューの指摘の回帰テスト: 値を案内しなかった deny に注記が付かない
+  (`TestSwitchStandaloneNote`。kubectl / gcloud / firebase / gh を実際の verify で)、
+  `rm <path>` がシェルの 1 語になる (衝突の deny と migrate)、firebase-tools と違う内容に読む
+  `.firebaserc` では案内しない (`TestPinEnvReadsFirebasercLikeFirebaseTools`。判定の条件
+  ごとに、その条件だけが捕まえる入力を置く)、project ID の候補が複数のときの注記、外れた
+  値の文面、`#` の後ろのドメイン付き project ID。`TestFirebaseGuidance` の
+  `test_hostile_values_are_not_guided_as_a_command` は、`example.com:my-project` を dict の
+  project としては案内する形に期待値を変えた
+- 同じく、表示した値 (`.firebaserc` の alias の行き先・gh の host) だけでは注記が付かない、
+  AWS は profile 名の一部 / 全部が外れても AWS の注記を付ける (`TestSwitchStandaloneNote`)、
+  表示する値は許容形のときだけ (`TestGithubGuidance` / `TestFirebaseGuidance`)、
+  `.firebaserc` の `projects` の形 (文字列でない値・オブジェクトでない)・`projects` の無い
+  ファイルは対象外 (案内が出る)・深い入れ子・URL を含む厳密な JSON (代償を固定する)
+  (`TestPinEnvReadsFirebasercLikeFirebaseTools`)、複数 ID の注記が pin-env の確認を通って
+  いない ID も並ぶ一覧へ誘導しない (`TestPlanFirebase`)
+- 1,267 → 1,317 件
+
+## 0.17.0
+
+### Added: プロジェクトごとのアカウント固定 (各 CLI の公式の仕組みを案内)
+
+自動切替 (0.16.0) は gh だけで、aws / gcloud / firebase を使い分けるには毎回
+切り替えが要った。この 3 つは、CLI 自身にプロジェクト (ディレクトリ) ごとに
+アカウントを決める公式の仕組みがある (aws の `AWS_PROFILE`、gcloud の
+`CLOUDSDK_ACTIVE_CONFIG_NAME`、firebase の `firebase use`)。マシン全体を切り替える
+自動切替は並行する別のリポジトリの作業と競合するので、VCA は切り替えを足さず、
+固定の仕組みを案内する。照合はこれまでどおり続ける。
+
+- **skill `/verify-cloud-account:project-accounts` を追加。** 「プロジェクトごとに
+  アカウントを切り替えたい」「aws も自動で切り替えて」等の依頼で、aws は
+  `AWS_PROFILE`、gcloud は `CLOUDSDK_ACTIVE_CONFIG_NAME` (一致する構成が無ければ
+  `CLOUDSDK_CORE_PROJECT` / `CLOUDSDK_CORE_ACCOUNT`) を `.claude/settings.local.json`
+  の `env` に書き、firebase は `firebase use <alias>` をそのディレクトリで 1 回
+  実行する。書く前に足す行と書き込み先を見せて承認を得る。書いた後は `pin-env` と
+  show で反映を確かめる
+- **builder に `pin-env` サブコマンドを追加 (読み取り専用)。** 期待値から固定に
+  使う値を出す:
+  - aws: 期待するアカウントの profile 名。複数あれば選ばせる (role の権限が違い
+    うるため)
+  - gcloud: project / account が期待値と一致する名前付き構成。無ければ
+    `CLOUDSDK_CORE_*` (検証のたびに `gcloud config get-value` が走る旨を添える)
+  - firebase: `.firebaserc` の alias
+  - 書き込み先 (git リポジトリのルートの `.claude/settings.local.json`。worktree
+    からは main checkout のファイル) と、このセッション・書き込み先の現在値
+  - project ID などの期待値は既定で隠す (`--show-values` で表示)。出すのは
+    profile 名・構成名・alias 名だけで、Claude に `~/.aws/config` や gcloud の
+    設定ファイルを読ませない。settings.local.json は builder が書かない
+  - 書き込み先を決められない構成 (git の外 / bare / submodule / ルートがホーム /
+    所有者が違う / Windows) では推測せず理由を出す
+- README に「プロジェクトごとにアカウントを固定する (公式の方法)」節を追加
+  (CLI ごとの仕組み・書く場所・効く範囲、優先順位、保存時点の反映、`/cd` の注意)
+
+### Changed
+
+- **検証の成功 cache が、アカウントを決める環境変数の変化で再検証するようにした。**
+  0.16.1 までの cache キーは行頭の inline env と context option だけで、hook
+  プロセスの env を含まなかった。settings の `env` は保存した時点で起動中の
+  セッションに反映されるので、固定した `AWS_PROFILE` などを変えた直後の 30 秒
+  (TTL) の間は、前の値での成功で通りえた。同じリポジトリを固定したセッションと
+  固定していないセッションも entry を共有していた。CLI ごとにアカウント・認証・
+  設定の場所を決める変数 (`AWS_*` / `CLOUDSDK_*` / `KUBECONFIG` / `GH_TOKEN` /
+  `GH_HOST` / `GH_CONFIG_DIR` / firebase の `FIREBASE_TOKEN` 等) の値をキーに
+  入れる。値は hash の材料にだけ使い、cache ファイルには書かない
+- auto-switch skill: gh 以外 (aws / gcloud / firebase) を頼まれたら project-accounts
+  の手順に回す
+- README の direnv の節: settings の `env` の例を `.claude/settings.json` (commit
+  される共有設定) から `.claude/settings.local.json` に直し、「本 plugin では
+  未実測」を実測結果 (hook の検証にも届く・保存した時点で反映) に置き換えた
+- plugin の description に project-accounts skill を追記
+
+### Fixed (マージ前レビューの指摘)
+
+- **skill が確認なしで実行できる builder の呼び出しを、読み取り専用の形に絞った。**
+  skill の `allowed-tools` は、skill を呼んだターンの間、一致したコマンドを権限確認
+  なしで通す付与。auto-switch と project-accounts は builder を `*` 付きで、
+  accounts-init / accounts-migrate / accounts-show は Bash を丸ごと付与していたので、
+  誤った呼び出しやプロンプトインジェクションで、期待値を書き換える `set` / `remove` /
+  `auto-switch` の `--commit` や、期待値を表示する `--show-values` が確認なしで走り
+  えた。付与は、各 skill が実行する読み取り専用の形 (show / pin-env と、init・migrate・
+  auto-switch の `--dry-run`) を引数まで書いた完全一致だけにした。`--commit` /
+  `--show-values` / `--path` を付けた形は通常の権限確認を通す (`*` では「この option
+  だけ除く」を書けず、option の省略形 `--show` / `--com` でも抜けるため)。default
+  モードでは、skill の手順で承認した後にもう一度確認が出ることがある
+- **pin-env が案内する `firebase use <alias>` に、シェルの構文を含む値を出さないように
+  した。** この行は skill の手順で Claude がそのまま実行する。期待値の alias /
+  project ID や、リポジトリの `.firebaserc` の alias に `;` / `$()` / 空白などや先頭の
+  `-` があると、その文字列がコマンドや option として走りえた。英数字で始まり、英数字と
+  `.` `_` `-` だけからなる名前のときだけコマンドを出し、クォートもする。`.firebaserc`
+  の外れた alias は使わずに project ID を案内し、期待値の alias / project ID が外れて
+  いれば「固定できません」を出す
+- builder の案内のうち、グローバル既定のパスを埋め込んだ `--path <file>` をクォートした
+  (init / show / auto-switch / pin-env)。ホームのパスに空白があると、案内どおりに足しても
+  別々の引数に割れていた
+- pin-env が出す settings.local.json の `env` の断片を JSON として組み立てるようにした。
+  値の `"` / 改行 / `\` をそのまま埋め込んでいたので、別のキー (`BASH_ENV` など) を足した
+  形や、JSON として読めない形になりえた (普通の値の出力は変わらない)
+- pin-env: 書き込み先の settings.local.json が、JSON としては読めてもオブジェクトでない
+  (`[]` など) とき、`env` の無いオブジェクトと同じ扱いで黙って進んでいた。「JSON の
+  最上位がオブジェクトではありません」の注意を出す (skill はファイルを書き直さず、
+  ユーザーに直してもらう)
+- pin-env: gcloud の期待値に、truthy で文字列でない project / account (例
+  `{"project": 123, "account": "..."}`) や空白だけの値があると、その項目を黙って落とし、
+  残りの項目だけで構成を照合・固定していた。通常の検証は同じ期待値で deny するので、
+  固定しても通らない。不正な期待値として「固定できません」を出す (None / `""` などの
+  falsy な値は、通常の検証と同じく書かれていないものとして扱う)
+
+### Tests
+
+- identity env と cache キー (`TestIdentityEnvInCacheKey` /
+  `TestIdentityEnvCacheIntegration`)、全 service の宣言 (`TestIdentityEnvContract`)、
+  pin-env (`tests/test_pin_env.py`)、skill の付与 (`tests/test_skill_permissions.py`)、
+  `firebase use` の値 (`TestFirebaseCommandIsShellSafe`)、案内の `--path` のクォート。
+  1,201 → 1,267 件
+
+## 0.16.1
+
+### Added: 自動切替を Claude から設定する入口
+
+0.16.0 は自動切替の有効化の方法を README にしか書いておらず、「自動切り替えして」と
+頼まれた Claude が手順にたどり着けなかった (どの skill の description にも自動切替が
+無く、本文も「README を案内する」だけ)。プロジェクト単位の `"$auto_switch"` は、
+Claude が accounts.local.json を直接触らない約束のため書けなかった。
+
+- **skill `/verify-cloud-account:auto-switch` を追加。** 明示の依頼 (「自動切り替え
+  して」「gh の切替で止まるのをやめたい」等) にだけ反応し、Claude からは勧めない。
+  副作用 (切替はマシン全体の gh に効く) の説明 → `gh auth status` でログイン済みの
+  確認 → 範囲 (このプロジェクト / 全プロジェクト) の確認 → 設定、の順に進める。
+  全プロジェクトは `~/.claude/settings.json` の `env` に 1 行足す (commit される
+  `.claude/settings.json` には書かない)。skill の `allowed-tools` (確認なしで使える
+  ツールの付与) は `gh auth status` と builder の呼び出しだけに絞り、settings.json の
+  編集は通常の権限確認を通す
+- **builder に `auto-switch --enable / --disable` サブコマンドを追加。**
+  `"$auto_switch"` を書く (予約キーのうち builder が書くのはこれだけ。`"$mode"` /
+  `"$readonly"` は検証を弱めるキーなので引き続き手編集)。`--dry-run` / `--commit` /
+  `--path` と対象ファイルの決め方 (親ディレクトリ遡及) は `set` と同じ。値の解釈は
+  hook と同じ関数に委ね、有効な集合が変わらないときは書き換えない。無効化で有効な
+  service が残らなければキーごと消す
+- accounts.local.json がまだ無いときは作らずに exit 1 で拒否する
+  (`"$auto_switch"` だけのファイルはグローバル既定を覆い隠し、期待値を書いていない
+  service がすべて未設定 = deny になるため)。init / グローバル既定 (`--path`) /
+  環境変数の経路を案内する
+- 環境変数 `VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH` が設定されていれば、ファイルより
+  優先されることを出力で知らせる。期待値が未設定か形が不正 (`null` / `""` / 空
+  オブジェクト等。hook が切替先を決められない) なら注意を出す。「次の gh コマンドから
+  効きます」は、期待値が有効で環境変数による上書きも無いときだけ言う
+- skill は、切替先 (期待値) が gh にログイン済みかを照合する前に、値を表示してよいかを
+  AskUserQuestion で確かめる (builder の show は既定で値を隠すため)
+
+### Changed
+
+- README の設定例で、プロジェクト単位の env の置き場所を `.claude/settings.json`
+  (commit される共有設定) から `.claude/settings.local.json` に直した
+- accounts-init / accounts-show の skill と README の「予約キーは builder が書かない」
+  を、`"$auto_switch"` だけは `auto-switch` サブコマンドで書く、に訂正
+- plugin の description に自動切替と auto-switch skill を追記 (skill の本数は書かない)
+- README の自動切替の節に、settings の `env` について次を明記:
+  - 値を足す・変える (有効化・`off`) と起動中のセッションにも反映されるが、キーを
+    消しても再起動するまで有効なまま (すぐ止めたいなら `off`)
+  - env を消しただけでは、各プロジェクトの `"$auto_switch"` は有効なまま残る
+  - 同じキーは、プロジェクトの設定 (`.claude/settings.local.json` /
+    `.claude/settings.json`) の `env` が `~/.claude/settings.json` より優先される
+
+### Tests
+
+- builder の `TestAutoSwitchSubcommand` (有効化 / 無効化 / 冪等 / 不正値の置換と
+  掃除 / ファイルが無いときの拒否 / グローバル既定 / 親ディレクトリ遡及 / 旧パス
+  との同居 / env の開示 / 期待値が未設定・不正のときの注意 / 引数)。1,182 → 1,201 件
+
+## 0.16.0
+
+### Added: 自動切替 (auto-switch、opt-in)
+
+gh のアカウント不一致で deny する代わりに、**hook が期待アカウントへ
+`gh auth switch` してからコマンドを通す** opt-in 機能 (内部バックログ)。gh の
+アカウントを頻繁に切り替える運用で、不一致のたびに「deny → 案内された切替を単独で
+実行 → 元のコマンドを打ち直す」往復で止まっていたのを無くす。利用者向けの正本は
+README の「自動切替 (auto-switch)」節。
+
+- **既定は無効**。有効化は環境変数 `VERIFY_CLOUD_ACCOUNT_AUTO_SWITCH=github`
+  (settings.json の `env`。全プロジェクトに効かせる経路はこれだけ) か、
+  accounts.local.json の予約キー `"$auto_switch": ["github"]` (プロジェクト単位)。
+  解決順は env → `"$auto_switch"` → 無効で、env の `off` はファイルの指定も含めて
+  無効にする
+- 値は service 名の並び。対応は現状 **`github` のみ**。`true` のような一括指定・
+  不正な値・対応していない service 名は無効として扱い、deny 文面に注記を添える
+- **切り替えるのは deny になる場面だけ**: mode が `enforce` で、WRITE tier (と
+  `"$readonly": "deny"` の QUERY) の不一致。QUERY の警告や `warn` / `off` では
+  切り替えない (切替はマシン全体に効く副作用なので、読むだけのために他の作業の gh を
+  動かさない)
+- 切替先は **gh にログイン済みのアカウント**だけ (`gh auth status` に非アクティブとして
+  出ているもの)。dict 期待値は全 host が切り替えられるときだけ切り替える
+  (all-or-nothing)。トークン用 env (`GH_TOKEN` 等) / `GH_HOST` がある、コマンド自身が
+  アカウント状態を変える操作を含む、検証時間の予算が無い、のいずれかなら切り替えない
+- 切り替える前に github の成功 cache を破棄し、切り替えた後にもう一度検証してから
+  通す。切り替えた事実は `additionalContext` で Claude に伝える (同じ行の別 service
+  が deny した場合も deny 文面に添える)。切替に失敗したら従来どおり deny + 理由
+- **並行セッションのガード**: 直前 60 秒以内に同じ host を**別のアカウントへ**自動切替
+  した記録 (`$TMPDIR/cc-mp-verify-cloud-account/github.autoswitch.json`) があれば、
+  切り替えずに deny する。別アカウントを期待する 2 つのセッションが交互に切り替えると、
+  hook が通したコマンドが別アカウントで動きうるため。同じアカウントへの切替では
+  見送らない
+- 実装: `core/auto_switch.py` (設定の解決・ガード・手順)、`services/github.py` の
+  `plan_switch` / `apply_switch` / `describe_switch` / `parse_logged_in_accounts`。
+  service 契約 (`services/__init__.py`) に自動切替の 3 関数を追加
+- `gh auth switch --hostname <host> --user <user>` の挙動は gh 2.101.0 で実測
+  (非対話、ネットワーク無しで約 50ms、未ログインのアカウント / host は rc=1 で何も
+  変えない、既にアクティブなアカウントへの切替は rc=0)
+
+### Changed
+
+- builder の `show` が `"$auto_switch"` を `[auto-switch: github]` のように表示する
+  (有効な service の判定は dispatcher と同じ関数)。`init` / `set` / `remove` /
+  `migrate` は既存の値を保持する (テストで固定)
+- README / skill の「`"$mode"` は builder が値を書かない唯一のキー」を訂正
+  (`"$readonly"` / `"$auto_switch"` も同じ扱い)
+
+### Tests
+
+- `test_auto_switch.py` (設定の解決・ガード・`attempt()` の各段)、
+  `test_github_switch.py` (計画・実行・一覧の解析)、`test_dispatcher_auto_switch.py`
+  (状態を持つ偽の gh で、検証 → 計画 → 切替 → 再検証を実際の service コードに通す)、
+  builder の `TestAutoSwitchKey`。1,090 → 1,182 件
+- mutation で各ガード (止める場面の判定 / mode / コマンド自身の状態変更 / 並行
+  セッションのガード / cache 破棄の順序 / トークン env / all-or-nothing / 予算確認
+  3 箇所 / 再検証 / 切替の記録 / 通知 / builder の表示 / stdin・env の受け渡し) を
+  壊すと、新しいテストが assertion で落ちることを確認した
+
+## 0.15.1
+
+### Fixed
+
+- `hooks/hooks.json` の `${CLAUDE_PLUGIN_ROOT}` をダブルクォートで囲んだ。plugin の
+  配置パスに空白が含まれると、コマンドが複数の語に分かれて hook が起動できなくなるため
+  (Claude Code 2.1.281 の `claude plugin validate` が warning を出すようになった)。README 等の
+  コマンド例も同じ形に揃えた
+- deny メッセージと builder が案内する修正コマンド (`accounts_builder.py set` / `migrate --commit`)、
+  `accounts-*` skill の実行手順、生成する CLAUDE.md テンプレートのコマンドも、パスをクォートした
+  形にした。空白を含む plugin root では、案内どおりに実行してもコマンドが分割されていたため
+
+## 0.15.0
+
+内部バックログの精査分 2 件 + マージ前レビューの反映。**判定表の変更は 2 方向だけ**:
+
+- **唯一の厳格化 = identity を変える切替 + 同 service の書込の連結。** 同一コマンド内で
+  「アカウント / プロジェクト / コンテキストを期待値以外に変える操作 (変え先が静的に
+  判らない形を含む)」の後に「同じ service の WRITE tier セグメント」が続く形を deny する。
+  **アカウントを変えない設定変更** (`kubectl config set-context --current
+  --namespace=x` / `gcloud config set compute/region x` / `gh auth refresh`) は
+  切替として数えない
+- **唯一の緩和 = 期待値への切替の受理形に装飾オプションを含める。**
+  `gcloud config set project <期待値> --quiet` のように出力 / 対話の制御だけを足した形も
+  「期待値への切替」として認識する (従来は完全一致のみ)。着地先を変えるオプション
+  (`--configuration` / `--kubeconfig` / `--config` 等) は対象外
+- tier 分類 / `"$readonly"` / 検証モード / キャッシュの規則は **一切変えていない**
+
+### 1. 切替と書込を同一コマンドに連結した形を deny (判定表の追加)
+
+hook は PreToolUse で**コマンド実行前に 1 回だけ**動くため、
+`gh auth switch --user other && gh pr create` は書込が**切替前**の状態で検証される。
+切替前が期待値どおりなら allow され、切替後 (期待外) のアカウントで書込が走っていた
+= この plugin が防ぐはずの事故が、最も自然な連結の書き方で素通しになっていた。
+0.14.0 までは README の既知の制限として開示するだけだった。
+
+判定表への追加行 (利用者向けの正本は README の
+「切替と書込を同一コマンドに連結した形は deny」):
+
+| 同一コマンド内の形 | 判定 |
+|---|---|
+| **期待値以外**への切替 → 同 service の WRITE | **deny** (追加) |
+| 切替先が静的に判らない切替 → 同 service の WRITE (引数なしの `gh auth switch` / `--user $VAR` / login 系 / aws 全般) | **deny** (追加) |
+| **期待値**への切替 (self-remediation) → 同 service の WRITE | 従来どおり (切替前の状態で通常検証) |
+| **アカウントを変えない**設定変更 → 同 service の WRITE | 従来どおり (下記) |
+| 切替 → QUERY / READONLY | 従来どおり (deny しない) |
+| 切替 → **別 service** の WRITE / 書込 → 切替 | 従来どおり |
+
+- **対処は「期待値へ切り替える操作を単独で実行してから書込を打つ」**。切替の検出時点で
+  成功キャッシュを破棄しているので、次の書込は切替後の状態で検証される (0.8.0 からの
+  挙動)。deny 文面には期待値そのものを載せる — 検出コマンドの切替先を単独実行しても、
+  それは期待外への切替なので書込は依然 deny になる
+- **deny は現在のアカウントに依らない**ので判定に CLI を呼ばない。確実に deny になる
+  コマンドで検証時間の予算を使うと、同じコマンド行の他 service が予算切れ deny に
+  落ち、最悪は hook timeout (出力が破棄されて無音で通る) に近づくため
+- **「アカウントを変えない設定変更」は切替として数えない。** 成功キャッシュの破棄は
+  これらでも行う (過剰でも再検証 1 回で済む) が、連結の deny は「次のコマンドがどの
+  アカウントで動くか」を変える形だけに限る。数えない形の allow-list:
+  `kubectl config set-context --current [--namespace=x]` /
+  `gcloud config set <非 identity key>` (`compute/region` / `compute/zone` /
+  `run/region` / `functions/region` / `disable_prompts` /
+  `core/disable_usage_reporting` / `core/verbosity` / `core/user_output_enabled` /
+  `core/disable_color`) / `gh auth refresh` (`--user` なし)。
+  同じ subcommand でも identity が変わる形 (`set-credentials` / `set-cluster` /
+  位置引数で context 名を書く `set-context` / `--user` 付きの `set-context --current` /
+  `config set project|account` / `gh auth refresh --user`) は従来どおり数える
+- 別 CLI が状態を書き換える形 (`gcloud container clusters get-credentials ... &&
+  kubectl apply ...` / `aws eks update-kubeconfig ... && kubectl apply ...`) も同じ扱い
+- **書込側が期待値への切替なら deny しない** ので、deny 文面自身が案内する連結形
+  (`firebase login && firebase use <期待 alias>`) は従来どおり通る
+- `"$readonly": "deny"` は QUERY 不一致の扱いを戻す設定で、QUERY をこの規則の書込側に
+  数えることはしない。`VERIFY_CLOUD_ACCOUNT_MODE=warn` / `off` は従来どおり全体を弱める
+- **誤 deny 側の代償を受け入れている**: 切替先が静的に判らない形は期待値への切替で
+  あっても連結が deny になる。特に AWS は期待値 (Account ID) と profile 名の照合が
+  hook からは不能なため、`aws sso login --profile prod && aws s3 cp ...` は常に deny
+  (単独実行の `aws sso login` は従来どおり readonly で通る)。失敗方向としては
+  「検証が消える」より「過剰に deny する」を選んだ
+- **この deny はコマンド行のセグメント分解に依存する。** 末尾の単独 `&`
+  (バックグラウンド実行) と `bash -c '...'` の内側は分解しないため、
+  `gh auth switch --user other & gh pr create` は検出されない (0.14.0 以前と同じ挙動。
+  README の既知の制限に明記した)
+
+### 1b. 期待値への切替の受理形に装飾オプションを含める (唯一の緩和)
+
+deny 文面が案内する切替形に `--quiet` を 1 つ足しただけで「期待値への切替」と
+認識されなくなっていた (gcloud / kubectl / firebase の判定が完全一致だったため。
+`gh` だけはトークン解析で耐えていた)。0.14.0 までは認識できなくても「通常検証に落ちる」
+= 現在値が合っていれば allow だったので表に出なかったが、上の連結規則で**同じ判定が
+deny を抑止する唯一の出口**になったため、案内どおり打った形が deny になる。
+
+受理する装飾オプション (着地先を変えないものだけの allow-list):
+`gcloud` = `--quiet` / `-q` / `--verbosity` / `--format` / `--no-user-output-enabled`、
+`kubectl` = `--v` / `--request-timeout`、
+`firebase` = `--non-interactive` / `--debug` / `--json`。
+
+- **着地先を変えるオプションは受理しない** (blanket なオプション許容にしない)。
+  `gcloud config set project <期待値> --configuration other` は非アクティブな
+  configuration に書き、`kubectl config use-context <期待値> --kubeconfig=/tmp/kc` は
+  別ファイルに書くため、実行後もアクティブな値は期待値にならない
+- **緩和はこの形の単独実行にも及ぶ。** 期待値への切替は検証をスキップするので、
+  `gcloud config set project <期待値> --quiet` を単独で実行したとき、現在値が期待値と
+  **不一致でも** deny されなくなる (0.14.0 は deny)。装飾なしの形が 0.8.0 から受けて
+  いる扱いと同じで、実行後の状態が期待値になることが静的に判る形に限られる
+
+### 2. テスト基盤: pytest の有無判定を実行 interpreter の import 可否で行う
+
+`tests/test_single_test_invocation.py` の pytest 経路テストが
+`shutil.which("pytest")` で有無を見ていた。clean な venv がグローバルの pytest
+実行ファイルを `PATH` から継承していると判定が成功し、`sys.executable -m pytest` が
+`No module named pytest` で落ちる = 標準ライブラリだけで走るはずの suite が環境依存で
+赤になる。`importlib.util.find_spec("pytest")` に変更した (pytest を持たない venv で
+修正前は FAIL、修正後は skip になることを実測)。
+
+### テスト
+
+- 全 suite 1090 件 green (0.14.0 時点 1029 件から +61)
+- 新規: `tests/test_dispatcher.py` の `TestChainedSwitchAndWrite` 27 メソッド
+  (deny 側 / 据え置き側 / inert な設定変更 / 装飾 option 付きの案内形 /
+  例外経路の床 2 経路 / mode の合成 / キー未記載の優先)。**`verify` を成功で mock
+  する** = 切替前は期待値と一致している状態で測る (0.14.0 で allow だった根拠を
+  そのまま入力にしないと、deny を主張するテストが意味を持たない)
+- 新規: `tests/test_services.py` の `changes_identity` 系 3 クラス +
+  `is_self_remediation` の option allow-list、`tests/test_cli_options.py` の
+  `TestStripAllowedOptions`
+- 追加テストは対応する実装行を壊す mutation で先に落ちることを使い捨てコピー
+  (plugin ディレクトリ全体) で確認した。**16 件すべて failures のみ / errors 0**
+  (= テストが走った上で落ちている)。内訳: 規則の削除 / 書込側の self-remediation
+  除外の削除 / 書込側の tier 条件を QUERY まで緩める / `changes_identity` の宣言を
+  無視 / 常に inert 扱い / 例外経路を allow 側へ (2 経路) / inert key 集合に
+  `project` を足す / inert の option 審査を外す / `gh auth refresh` を subcommand
+  単位で inert に / kubectl inert の option 集合に `--user` を足す / 位置引数
+  チェックを外す / 許容 option の allow-list を blanket 許容に / 期待値表示を空へ /
+  deny 文面を旧文言へ戻す
+- **「規則をキャッシュ hit 判定の後ろへ移す」mutation は落ちない** — 切替を含む
+  service はそもそもキャッシュを読まないため実バグを再現していない (記録のみ)
+- 既存テスト 3 件の期待値を更新した。2 件は「期待外 / 不明への切替 + write」の
+  連結を allow として固定していたもので、キャッシュを公開しないことの確認という
+  本来の意図は QUERY / 期待値への切替を使う形へ移した。1 件は
+  `gcloud config set project <期待値> --quiet` を「認識しない」側で固定していたもので、
+  上の緩和により「認識する」へ反転した (着地先を変える `--configuration` 付きで
+  固定し直した)
+- **旧版との出力ペア比較で厳格化の範囲を測った** (0.14.0 と同じ手順)。0.14.0 側の
+  テスト / README / docs から抽出した 869 コマンドを「切替前は期待値と一致」および
+  「不一致」の 2 シナリオで両版に流し、(判定, 検証された service) を突合:
+  完全一致 1712 / 厳格化 13 (すべて連結形) / **緩和 0 / 説明不能 0**。
+  判定は据え置きだが CLI 呼出が消えた 13 件は、同じ連結形の不一致シナリオ
+  (CLI を呼ばずに deny する設計どおり)
+- **この測定は上の「唯一の緩和」を検出できない。** コーパスは 0.14.0 の
+  テスト / docs から抽出するため、緩和の対象 (装飾 option 付きの案内形。
+  0.14.0 では認識されない形なので docs に書かれていない) がそもそも母集団に無い。
+  緩和の範囲は測定ではなく設計から書いてある (上の「1b」)。
+  **「緩和 0」は母集団への主張であって、緩和が無いことの証明ではない**
+
+## 0.14.0
+
+内部バックログの精査分 3 件 + マージ前レビューの反映。**判定機構そのものを
+変えた**ので、判定表の変更点を先に書く:
+
+- **緩和は 1 箇所だけ**: リモートを読むだけのコマンド (QUERY tier) の不一致・
+  キー未記載・未設定が、**deny → warn + allow** になった
+- **それ以外は厳格化**: 認証情報を出力する形 / option (DISCLOSING) が READONLY を
+  素通ししていたのを検証対象に戻した。想定外の option が付いた READONLY 形は
+  QUERY に降格する (deny ではなく「検証は走らせる」)
+
+### 1. セグメントを 3 tier に分ける (`core/tiers.py` 新設)
+
+従来は「READONLY なら素通し / それ以外は不一致で deny」の 2 値だった。
+
+| tier | 不一致・未設定のとき | 例 |
+|---|---|---|
+| `READONLY` | 検証しない | `gh auth status` / `firebase use` / `aws sso login` / `--version` |
+| `QUERY` | **allow + `additionalContext` で「現在=X 期待=Y」** | `gh pr list` / `gh api` の GET / `aws s3 ls` / `gcloud ... list` / `kubectl get` |
+| `WRITE` (既定) | deny | `gh pr create` / `firebase deploy` / `kubectl apply` |
+
+`gh pr list` / `aws s3 ls` は資源を変更しないのに deny され、回復手段として案内する
+`gh auth switch` は**ユーザー全体の CLI 状態を変える**。読むためにそこまで要求するのは
+過剰で、離脱の直接要因になっていた。QUERY tier は検証を走らせたうえで実行は止めず、
+切替案内を含む本文 (`verify()` が返す文面をそのまま流用) を通知する。
+
+- 同じコマンド行に write が混ざれば厳しい側を採る (`gh pr list && gh pr create` は deny)
+- QUERY の不一致は cache しない (従来どおり「成功のみ cache」)
+- 予算切れ (検証しきれなかった) も QUERY では警告に倒す — 不一致でも通す判定表なのに
+  「知らないから止める」のは非対称だから
+- **`accounts.local.json` に `"$readonly": "deny"` を書くと 0.13.0 までの挙動に戻る**
+  (QUERY を WRITE と同じに扱う)。`"$mode"` と同じ予約キーで、builder は値を書かない。
+  不正な値は `deny` として扱う (fail-closed)
+- **設定が壊れている / 曖昧なときは tier に関係なく deny のまま**: 複数パス競合 /
+  JSON 不正 / 期待値の型不正。「どの設定が効くか決まらない」状態では読むだけでも
+  判定の土台が無く、引数なしの状態確認コマンドは READONLY なのでデッドロックにも
+  ならない
+
+### 2. 認証情報を出力する形 / option を READONLY から取り消す (DISCLOSING)
+
+READONLY が「CLI 名からの前方一致 regex + option 無審査」だったため、
+**allow-list に載せたコマンドが option 次第で開示に化ける**穴が素通ししていた:
+
+| サービス | 素通ししていた形 |
+|---|---|
+| GitHub | `gh auth status --show-token` (`-t`。連結形 `-at` も) / `gh auth list --show-token` |
+| Kubernetes | `kubectl config view --raw` / `kubectl cluster-info dump` |
+| AWS | `aws configure get aws_secret_access_key` / `aws_session_token` |
+| Firebase | `firebase login:ci` (CI 用トークンを出力する) |
+
+`DISCLOSING` に一致した形は READONLY / QUERY を取り消して WRITE 扱いにする
+(判定順は DISCLOSING → READONLY → QUERY → WRITE)。すでに検証対象だった
+`gh auth token` / `aws configure export-credentials` / `aws sts get-session-token` /
+`gcloud auth print-access-token` 系も、**形そのものが開示**であることを宣言側に
+書いた (将来 READONLY を広げたときに素通しへ戻らないようにするため)。
+
+- **一致していれば通る**ので、開示コマンドが恒久的に使えなくなるわけではない
+  (「期待したアカウントで認証情報を見る」ことだけが許される = remediation loop に
+  ならない)
+- 値の真偽は見ない。`--show-token=false` も「書かれている」として厳格側に倒す —
+  真偽で緩めると `--skip-ssh-key=false` ですり抜けた穴を逆向きに作り直すことになる
+
+### 3. READONLY を「option まで含めて安全と言える形」の宣言にする
+
+同型の穴が反復していた根本は「コマンド名の allow-list」構造そのもの。各 service が
+`READONLY_SAFE_OPTIONS` (READONLY の形 → 許容する option 名の集合) を宣言でき、
+**宣言外の option が付いていたら QUERY に降格**する (= 検証は走るが止めない):
+
+- `gh auth status --json` / `aws configure import --csv ...` が対象
+  (いずれも deny ではなく警告)
+- 宣言の無い READONLY エントリは**従来どおり option 無審査**。認証取得系
+  (`gh auth login` / `aws sso login` / `gcloud auth login` / `firebase login`) には
+  宣言しない — 未ログインのデッドロックを解くためのエントリで、降格させると
+  deny 文面が案内するコマンド自身が検証予算を使い始める
+- option の検出は `cli_options.find_option_names` に一本化した (分離形 / `=` 形 /
+  短縮連結 `-at` / 値 token の消費)
+- `gh api` は option 次第で write になるので、**安全な option の allow-list**で
+  読み取りを証明する (`-X/--method` が GET・HEAD かつ body 系 option 無し、かつ
+  全 option が列挙済み)。危険な option の denylist にすると、gh に option が
+  増えるたび黙って穴が開く
+
+**表は推測で広げていない。** 列挙は実際に観測された形に限り、未知は「未知として
+降格」で扱う (思いつきで「たぶん危ない option」を足すと誤 deny 側に穴が空く)。
+
+### 4. マージ前レビューで見つかった判定の死角を塞ぐ
+
+上の 3 つを入れた後のレビューで、**判定が緩む方向の死角**が 5 件出た。いずれも
+判定表そのものではなく「表に当てる前の形」と「表の同クラスの漏れ」:
+
+- **行継続 (`\` + 改行) を畳んでから判定する** (`core/command_parser.py`)。
+  畳まないと候補文字列に改行が残り、`.*` を含む判定表エントリだけが死ぬ。
+  複数行で書いた `aws ssm get-parameter --name n --with-decryption` は
+  DISCLOSING (deny) が外れ、1 行目だけで一致する QUERY (警告のみ) に落ちていた
+  (0.13.0 では deny だった形 = **0.14.0 の開発中に入り込んだ唯一の退行**で、
+  リリース前に解消した)。複数行で書いた
+  `aws configure export-credentials` / `kubectl cluster-info dump` も同じ死角で
+  素通ししていた。シェルと同じく**削除**する (空白 1 個に置換すると語の途中で
+  改行した形が別のコマンドに化ける)。quote の内側は畳まない
+- **gcloud の QUERY は書込動詞を跨がない**。`gcloud ... list` の「末尾が read
+  verb」判定が group token を無制限に飲むため、`list` という名前のリソースへの
+  書込 (`gcloud functions deploy list` / `gcloud pubsub topics delete list` /
+  `gcloud config set project list` など) が「リモート read」に化けて警告のみで
+  通っていた。サブコマンド位置の書込動詞で繰り返しを打ち切る (denylist ではなく
+  停止条件なので、未知の verb は従来どおり跨げる = 誤 deny を新造しない)
+- **`kubectl get secret(s)` にオプションを付けた形を DISCLOSING に追加**。
+  Secret の `data` は base64 だけで実質平文なので、`-o yaml` / `-o json` /
+  `--template` 付きは `aws secretsmanager get-secret-value` と同クラス。
+  名前一覧 (`kubectl get secrets`) と `describe secret` は QUERY のまま
+- **`aws` の credential 発行 read を DISCLOSING に追加**:
+  `aws sts get-federation-token` (`get-session-token` の兄弟 API) /
+  `aws ecr get-login-password` (`ecr-public` も) / `aws eks get-token` /
+  `aws codeartifact get-authorization-token`。いずれも出力そのものが認証情報
+  (docker login 用パスワード / kubeconfig 用 bearer token / レジストリ用トークン)
+  なのに、名前が `get-*` なので一括 QUERY に落ちていた
+- **`kubectl config view --flatten` を `--raw` と同格にした**。kubectl v1.34.1 で
+  実測したところ `--flatten` は `--raw` 無しでも token / `client-key-data` を平文で
+  出力する (オプション無し / `--minify` だけなら `REDACTED` / `DATA+OMITTED`)。
+  「そのまま認証に使える kubeconfig を作る」オプションなので redaction を通らない。
+  これまで QUERY (警告のみ) に降格していたのを WRITE 扱いにする
+
+あわせて文面と表示の齟齬も直した:
+
+- 未設定 + リモート read の警告本文から「キーの無い service のコマンドも deny
+  されます」を外した (止めていないのに deny と書いていた)
+- `"$readonly"` に空文字 / `null` を書いた場合を **他の不正値と同じ deny + 注記**に
+  揃えた (これまでは未設定扱いで警告のみになり、`accounts-show` の表示
+  「不正な値 — deny として扱われます」と食い違っていた)。`accounts-show` の
+  有効判定も dispatcher と同じ関数から決めるようにして、二度と分岐しないようにした
+
+### 既知の制限 (新規)
+
+- QUERY は**コマンド形**で判定するため、表に無い「リモートの機密を返す read」は
+  期待外アカウントでも警告のみになる。既知の形は DISCLOSING の表に載せ、0.13.0
+  までと同じく不一致で deny する。それ以外で止めたいプロジェクトは
+  `"$readonly": "deny"`
+- `kubectl get cm,secret -o yaml` のようなカンマ結合と `kubectl get all -o yaml` は
+  Secret として検出できない (QUERY = 警告のみ)。Secret 単体を指定する形
+  (`secret` / `secrets` / `secret/<name>`) は検出する
+- gcloud の書込動詞による打ち切りは、group 名が同じ綴りの系統 (`gcloud deploy ...`
+  = Cloud Deploy) の read を QUERY にしない。0.13.0 までと同じ扱いがこの系統だけ
+  残る形で、新たな deny は生えない
+- 未知の option は「安全と証明できない」側に倒すので、CLI に読み取り option が
+  増えると (実際は読み取りでも) WRITE として検証される
+
+### テスト
+
+- 全 suite 1029 件 green (0.13.0 時点 967 件から +62)
+- 新規: `tests/test_tiers.py` (tier 分類の表 = 5 service × READONLY / QUERY /
+  WRITE / DISCLOSING の代表形、判定順、宣言の drift 検出、`"$readonly"` の解決、
+  gcloud の書込動詞打ち切りの両方向 32 形、行継続の畳み込み)、
+  dispatcher / services / cli_options / builder への追加
+- **旧版との出力ペア比較で退行を測った**。tier 分類は READONLY の regex を残したまま
+  実効 verdict を変えるので、「旧版が拾えていた入力を落とした」型の退行は mutation
+  では検出できない。merge 済みの旧版と新版で同じコーパス (テスト / README / 判定表に
+  現れる 810 コマンド) を流し、差分を「挙動不変 654 / 意図した緩和 118 /
+  意図した厳格化 19 / 未宣言 option の降格 3 / 候補ゼロの断片 16 / 説明不能 0」に
+  分類した。**検証が消える方向 (旧 verify → 新 readonly) は 0 件**
+  - ただし**ペア比較はコーパスに入っている形しか測れない**。複数行 (行継続) で
+    書いたコマンドはコーパスに無く、この方法では死角が見えなかった (上の 4 節)
+- 追加テストは対応する実装行を壊す mutation で先に落ちることを使い捨てコピーで
+  確認した (開示 option の宣言除去 / QUERY 境界の `\b` 化 / `gh api` の option
+  allow-list 除去 / QUERY 警告の無効化 / 逆に全て警告化 / DISCLOSING を QUERY の
+  後ろへ移動 / option 審査の無効化 / 未設定経路の tier 判定を「どれか QUERY なら」に
+  緩める、および 4 節の 5 件を戻す mutation)。`gh api` の body option 除外だけは
+  allow-list が同じ入力を先に弾くため mutation が空振りする (= 二重の防御) ので、
+  2 層が矛盾しないことを disjointness テストで固定した
+  - **plugin ディレクトリ全体をコピーして測る**。`hooks/` だけコピーすると
+    README / docs を参照するテストが未改変コピーでも落ち、その「ノイズ」に紛れて
+    生き残った mutation を見落とす (実際に 4 件見落としていた)
+- tier が今日 WRITE のままでも消してはいけない DISCLOSING 宣言 (`gh auth token` /
+  `aws configure export-credentials` / `aws kms decrypt` /
+  `gcloud auth print-*-token`) は、tier の表では守れないので **membership の契約
+  テスト**で固定した (削除しても tier が変わらないため)
+
+## 0.13.0
+
+内部バックログの精査分 2 件 (いずれも「使い始めてすぐ外したくなる」= 離脱率低減)。
+**deny / allow の判定表は変えていない**。変えたのは (1) 現在値をどこから取るか、
+(2) 検証をいつ走らせるか / 結果を deny として返すか、の 2 点。
+
+### 1. `gh` / `gcloud` の現在値をローカル設定ファイルから読む
+
+cache が無いとき (TTL 切れ / 初回) の現在値取得に、毎回 CLI を起動していた:
+
+- `gh auth status` は**全 host のトークンを API で検証**するためネットワーク往復が
+  入り (〜500ms)、オフラインでは失敗して「アクティブアカウントを取得できません」で
+  deny していた
+- `gcloud config get-value` は Python CLI の起動込みで 1 回 〜1s
+  (dict 期待値では project / account の 2 回)
+
+どちらもアクティブアカウントはローカルの設定ファイルに書かれている
+(`hosts.yml` の `<host>.user` / `configurations/config_<name>` の `[core]` の
+`project` / `account`) ので、そこから読む経路を足した (`core/cli_config.py` に
+最小 YAML / INI パーサを新設)。
+
+**ローカル読取で通せるのは allow だけで、エラー方向 (不一致 / 未ログイン / 未設定) は
+必ず CLI で取り直してから判断する。** 速くなるのは成功ケース (= 大多数) で、
+ローカル読取を誤っても **deny を新造しない** — 誤読のコストは「CLI を 1 回呼ぶ」
+だけに留まり、deny 文面と判定は従来どおり CLI の出力から作られる。
+
+env で値が上書きされうる場合は**エミュレートせず CLI に委ねる**
+(gh: `GH_TOKEN` 等のトークン env / `GH_HOST`。gcloud: `CLOUDSDK_CONFIG` と
+`CLOUDSDK_ACTIVE_CONFIG_NAME` 以外の `CLOUDSDK_*` / `GOOGLE_CLOUD_PROJECT` /
+`GCLOUD_PROJECT` / `GOOGLE_CLOUD_QUOTA_PROJECT`)。優先順位を推測で実装して
+取り違えた値で allow するより、遅くても gcloud / gh 自身に決めさせる方が安全。
+設定ファイルが「想定の形」でないときも同じく CLI に落ちる。
+
+**`HOME` が hook プロセスと違うときも CLI に委ねる** (両 service)。`HOME` は
+gh / gcloud のどちらも設定ディレクトリ解決に使うため、`HOME=/other gh pr create`
+の形では実行される CLI が別の設定ファイルを読む。hook 側のファイルで判断すると
+**違うアカウントで allow しうる** (ローカル読取の導入前は検証 subprocess にも
+同じ env を渡していたので不一致 deny だった) ため、bail 条件に加えた
+(マージ前レビューの指摘)。
+
+`aws` (sts 呼出が必須) / `firebase` / `kubectl` は従来どおり。cache の TTL
+(30 秒) も変えていない — 延長は「hook の外で起きた切替を見逃す窓」を広げるため、
+ローカル読取で 1 回あたりのコストが下がった今は必要性も薄い。
+
+残る挙動差: `hosts.yml` のアクティブアカウントの**トークンが失効している**場合、
+従来は `gh auth status` の失敗で deny だったものが allow になる (README 既知の
+制限に追記)。失効トークンでは write 自体が通らないため、別アカウントでの
+書き込みにはならない (実行した `gh` が認証エラーで失敗する)。
+
+### 2. 検証を止める / 弱める escape hatch
+
+従来、deny を一時的に止める手段は `/plugin disable` か `accounts.local.json` の
+書き換えしかなく、後者は「builder 経由でしか触らない」運用と衝突していた。
+user scope で install した直後は設定を置いていない**全プロジェクト**で
+`gh` / `aws` の deny が始まるため、離脱の直接要因になっていた。
+
+- **検証モード** (`core/mode.py`): `enforce` (既定) / `warn` (通知のみ) /
+  `off` (検証しない)。指定は環境変数 `VERIFY_CLOUD_ACCOUNT_MODE` か
+  `accounts.local.json` の予約キー `"$mode"` で、**env が優先**
+  (ファイルを書き換えずに外せることが escape hatch の要件)
+- **グローバル既定**: プロジェクト側 (3-tier + 親遡及) で何も見つからないときだけ
+  `~/.claude/verify-cloud-account/accounts.local.json` を読む。`"$mode": "warn"` を
+  ここに書けば **`accounts.local.json` を持たないプロジェクト**の既定にできる
+  (自前の設定があるプロジェクトはこのファイルを読まないので、そちらは
+  `VERIFY_CLOUD_ACCOUNT_MODE` かそのプロジェクトの `"$mode"` を使う)
+- deny 文面の末尾に mode の案内を 1 行添える。deny を消したい相手に
+  `set --from-cli --commit` を勧めると「間違ったアカウントを正解として焼き付ける」
+  使い方を誘発するため、**期待値に触らない出口**を先に見せる
+
+判定表は変えていない: 何を問題とみなすかは mode に依らず同じで、変わるのは
+「止めるか / 伝えるだけか / 見ないか」だけ。**既定 (env も `"$mode"` も無い) の
+挙動は従来と完全に同じ**。不正な値 (`VERIFY_CLOUD_ACCOUNT_MODE=yes` 等) は
+enforce に倒し (fail-closed)、その旨を文面に添える (黙って戻すと「off にしたのに
+deny される」の原因が分からない)。
+
+細部の判断:
+
+- `off` の early return は**アカウント切替コマンドによる cache 破棄より後**に置く。
+  前に出すと off の間の切替が cache に残り、enforce へ戻した直後に古い成功で通る
+- グローバル既定は**固定パスの専用経路**で、親遡及は従来どおり `$HOME` を越えない
+  (遡及で上らせると「たまたま `$HOME` 配下にあるプロジェクトだけが継承する」
+  位置依存の挙動に戻る)。認めるのは現行パスのみで、
+  `~/.claude/accounts.local.json` / `~/.claude/accounts.json` (旧パス) は読まない
+  — 無関係な `~/.claude/accounts.json` の継承は v0.12.0 で塞いだ不具合そのもの
+- 同一階層の tier 競合 (fail-closed deny) はグローバル既定で救済しない
+- **builder はグローバル既定へ落ちない**。プロジェクト設定を作るつもりの編集が、
+  利用者の全プロジェクトに効くファイルを書き換えないようにするため。この非対称
+  (dispatcher は落ちる / builder は落ちない) を黙っていると、v0.12.0 で塞いだ
+  shadowing が 1 段上で再発する形になるため、**builder 側で必ず開示する**:
+  新規作成になるときは「グローバル既定 `<path>` の N キーは継承されません」と
+  警告し、`show` は「プロジェクトに無い」ときグローバル既定の存在と「hook は
+  このファイルで検証します」を出す (キー単位マージはしない)
+- `"$mode"` は**ファイルを読めたときだけ**効く。未設定 / JSON 破損 / 複数パス競合の
+  deny はファイルを読む前に確定するため、そこを弱められるのは
+  `VERIFY_CLOUD_ACCOUNT_MODE` のみ。また `off` で検証しない場合でも env の不正値は
+  `additionalContext` で通知する (`VERIFY_CLOUD_ACCOUNT_MODE=of` のような綴り間違いが
+  黙って無視されると、env が効いていると誤解したままになる)
+- `"$mode"` は **builder が値を書かない唯一のキー**。`init` / `set` / `remove` は
+  既存値を壊さず保持するが、設定・変更は手編集 (または env) で行う
+- `accounts-show` は `"$mode"` を `[mode]` として表示する (service ではないので
+  CLI 突合の対象外。値も機密ではないのでそのまま出す)
+
+### テスト
+
+- 全 suite 967 件 green (0.12.0 時点 858 件から +109)
+- 新規: `tests/test_cli_config.py` (最小 YAML / INI パーサ)、
+  `tests/test_mode.py` (モード解決)、`tests/test_testutil.py` (隔離そのものの
+  負テスト)、services / dispatcher / paths / builder への追加
+- **実環境からの隔離**を追加した (`tests/_testutil.start_isolation()`)。現在値の
+  取得元が `$HOME` / `~/.config` に広がったため、隔離しないと開発者の
+  `hosts.yml` / グローバル既定 / `VERIFY_CLOUD_ACCOUNT_MODE` がテストの verdict を
+  変える (実際に、開発者のアクティブアカウントが fixture の期待値と一致して
+  「CLI を呼ばずに allow」になり、CLI を mock したテストが壊れた)。
+  隔離の env 除去には**負テストを置いた** — 現在のマシンに `GH_TOKEN` 等が無いと
+  除去を消しても全 suite が green のまま通る (マージ前レビューの mutation で
+  survive を確認した唯一の箇所だった)
+- マージ前レビューで足したテストは、いずれも**対応する実装行を壊す mutation で
+  先に落ちる**ことを使い捨てコピーで確認した (HOME bail の除去 ×2 / 隔離の env
+  除去 / 隔離 env からの `HOME` 削除 / shadowing 警告の除去 / `show` の開示の除去 /
+  `off` の note 破棄 / グローバル既定をプロジェクト側にも効かせる改変 /
+  ローカル読取を CLI より優先させる改変 の 9 種)。負テスト自身が
+  assertion FAILURE として落ちるよう `assertIsNotNone(err)` を先に置いた
+  (従来は `TypeError` の ERROR で落ち、「走っていない」と読み違えやすかった)
+
+## 0.12.0
+
+内部バックログの精査分 5 件。**判定表 (allow/deny/warn) に 2 つの変更がある** —
+hook の実時間予算切れを deny に足したこと (穴だった fail-open を塞ぐ) と、
+親ディレクトリ遡及の停止条件を足したこと (拾いすぎを止める) の 2 点。
+
+### 1. キー未記載サービスの扱いを実装 (deny) に合わせて明文化
+
+実装は「使う service のキーが `accounts.local.json` に無ければ deny」だったのに、
+README と未設定 deny の文面は「未記載のサービスは検証対象外 (= allow)」と**逆を
+約束**していた。AWS 専用プロジェクトで `gh pr list` を叩くと
+`"github" キーがありません` で止まるのに、README を読んだ人は allow されると
+思っている、という食い違い。
+
+**実装 (deny) を正として文面を揃えた。** 期待値が宣言されていない状態で通すと、
+この plugin が防ぐはずの「別アカウントでの書き込み」をそのまま素通しするため。
+あわせてキー未記載 deny に**キー追加の具体コマンド**を載せた。案内が `init` では
+なく `set` なのは、この deny が「`accounts.local.json` は見つかっている」ときにしか
+出ず、そのファイルが親から継承されている場合 `init` は「継承中の設定を覆い隠す」
+として拒否するため (`set` は継承元を直接編集するのでどちらの階層でも通る)。
+
+案内は **`--dry-run` + 確認の 2 段**にした。`--from-cli` は「今ログインしている
+アカウント」を期待値として提案するので、`--commit` の一発コマンドを渡すと、
+間違ったアカウントに入ったまま**この plugin が防ぐはずの状態を正解として焼き付ける**
+使い方を誘発する。deny を消すのが目的の相手に一発で通る形を渡さない。
+
+判定 (deny) 自体は従来どおりで、変わったのは README と deny の文面のみ。
+
+### 2. hook 1 回分の実時間予算を導入 (`core/budget.py`)
+
+hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code 側で
+打ち切られ、**出力が破棄されてコマンドがそのまま実行される** (公式仕様上の
+fail-open)。一方で個々の subprocess timeout は 1 コマンドあたりの上限でしかなく、
+`gh ... && aws ... && gcloud ...` のような複合コマンドはサービスごとに直列で
+検証するため合計が hook timeout を超えうる。CLI 未検出も CLI timeout も deny に
+倒しているのに、ここだけ無音で通るのは判定表の穴だった。
+
+- hook 1 回に**総予算 15 秒**を置き、各 CLI 呼び出しの timeout を「既定値」と
+  「残り予算」の小さい方に丸める (下限 1 秒 — 0 秒 timeout は必ず失敗する
+  無意味な呼び出しになるため)
+- 予算を使い切ったサービスは **CLI を呼ばずに deny**。判定は CLI 起動の直前に
+  置いたので、cache hit と自己修復の切替 (時間を使わない経路) は従来どおり通る
+- 「予算 + 超過見積り < hook timeout」はテストが `hooks.json` を読んで機械照合する
+- **並列化 (ThreadPoolExecutor) は採らなかった**。`concurrent.futures` の worker は
+  非 daemon スレッドでインタプリタ終了時に join されるため、ハングした subprocess を
+  抱えたまま予算切れを返してもプロセスが終了できず、結局 hook timeout に落ちる
+
+実運用で予算切れに当たるのは、先行するサービスの CLI が遅く予算を消費した場合。後続
+サービスの timeout は残予算に合わせて短縮され、その deny は各サービスの timeout 文面で
+出る (再試行すると検証済みサービスは cache hit する)。
+
+### 3. `accounts-show` の `[match]` 判定を hook (verify) と一本化
+
+`gh` が GitHub Enterprise を先に列挙する環境
+(`{"ghe.example.com": ..., "github.com": ...}`) で、show は「最初の host」と照合して
+`[mismatch]`、hook は `github.com` を優先照合して allow、という乖離が出ていた。
+**同じ規則を 2 箇所に実装していたことが原因**なので、service 側に
+`matches(expected, current) -> bool` を公開して `verify()` と builder の両方が
+同じ 1 実装を使う形にした。`matches()` を持たない service は従来どおり builder の
+汎用判定に落ちる (`services/__init__.py` の契約に追記)。
+
+### 4. 実装者ガイドを `docs/DEVELOPMENT.md` として同梱
+
+service の契約・`verify()` の実装規則・`PATTERNS` の先頭アンカ規則・キャッシュの
+キー構成・hook 登録の注意点・設計判断の履歴 (D1〜D20)・リリース手順が、追跡され
+ないローカルファイルにしか無く、clone した人にも worktree で作業している本人にも
+辿れなかった。README と監査記録のリンク先も差し替えた。
+
+**同じ内容が二重管理で陳腐化しないよう、「コードが正本のもの (属性一覧・件数・
+定数値・分類表) はガイドに複製しない」方針にした** — 実際、移設元では
+テスト件数・ディレクトリツリー・キャッシュキーの構成要素がいずれも古くなっていた。
+配布ファイルが未同梱ファイルや内部トラッカーの ID を参照していないことは、
+`tests/test_docs.py` が機械的に検査する。
+
+### 5. 親ディレクトリ遡及に停止条件を追加
+
+`accounts.local.json` の親遡及は最大 10 階層という**階層数だけ**が上限だったため、
+`<home>/dev/<org>/<repo>` のような配置では 5 階層でホームディレクトリに届き、
+**無関係な `~/.claude/accounts.json` を継承して検証していた**。しかも verify 成功時は
+継承注釈が出ない (silent) ので気付けない。
+
+停止条件に次の 2 つを足した (**境界の階層自身は探索する**):
+
+- **git repo の境界** — `.git` **ディレクトリ**を持つ階層 (通常の toplevel) と、
+  `.git` **ファイル**が submodule の gitdir (`<common>/modules/<name>`) を指す階層
+  (submodule root)。`.git` ファイルが linked worktree の gitdir
+  (`<common>/worktrees/<name>`) を指す場合だけは境界にせず、worktree から親 repo の
+  設定を継承する従来の運用はそのまま (ただし `<common>` が祖先の repo のもので
+  あることを確かめる。下記)
+- **`$HOME` およびその上** (`/Users`, `/` 等)
+
+`.git` ファイルの判定は**内容の読み取りだけ**で行う (git コマンドは実行しない)。
+`gitdir:` の指す先は種別の判定にしか使わず、探索先としては辿らない。読めない・
+上記いずれの形でもない `.git` ファイルは**境界扱い** (fail-closed) にする。
+
+マージ前レビューの指摘で submodule を境界に加えた。当初は `.git` がファイルなら
+一律に通過扱いだったため、**submodule をプロジェクトとして起動すると探索が
+superproject へ続いていた**。superproject に active な CLI と一致する
+accounts.local.json があると、未設定の submodule での状態変更コマンドが repo 境界で
+fail-closed せず allow される。
+
+種別の予備判定は gitdir の**末尾 2 要素**を見る (`worktrees/<name>` なら worktree、
+`modules/<name>` なら submodule)。これもマージ前レビューの指摘によるもので、当初は
+パス中に `.git` という要素があることを厳密に要求していたため、**bare repository
+(`repo.git/worktrees/<name>`) や `--separate-git-dir` で初期化した repo
+(`/custom/gitdir/worktrees/<name>`) から作った linked worktree が判読不能扱いに
+なり、その repo の設定を継承できず設定済みの状態変更コマンドが deny されていた**。
+git の common directory の名前は `.git` とは限らないため、レイアウト
+(`worktrees/` / `modules/`) だけで識別する。入れ子の扱い
+(`modules/a/modules/b` は境界、`modules/sub/worktrees/wt` は通過) は変わらない。
+`--separate-git-dir` repo の **main** worktree は gitdir が common directory を
+直接指すため、従来どおり境界 (repo toplevel) として扱う。
+
+ただし**末尾の形だけで linked worktree を確定させると逆方向に穴が開く**ため、
+gitdir 側のメタデータで裏付けを取る形にした (マージ前レビューの指摘)。
+`--separate-git-dir` で初期化した独立 repo の gitdir が偶然 `worktrees/<name>` で
+終わる場合 (`/store/worktrees/repo` など)、その main checkout が linked worktree と
+誤分類される。accounts.local.json を持つ workspace の配下に (間に `.git` を挟まず)
+置かれていると所属確認も通ってしまい、**独立 repo の root を越えて外側の設定を
+継承**し、そのアカウントが active session と一致すれば未設定の repo で状態変更
+コマンドが allow される。判定条件は「gitdir が実在するディレクトリであること」
+「git が置く `commondir` (common directory へのパス) が読めること」「同じく
+`gitdir` (作業ツリーの `.git` への back-pointer) があり、resolve した先が
+**いま読んでいる `<dir>/.git` と一致**すること」の 3 つで、1 つでも欠ければ独立
+repo 扱い = 境界にする。common directory も `commondir` の内容から求める
+(末尾 2 要素を落とす推定より、git 自身が書いた値のほうが信頼できる)。
+git コマンドを呼ばない方針は変えていない (読むのは `.git` と gitdir 内の
+メタファイルだけ)。
+
+`gitdir:` の値がドライブ文字 (`C:/...`) や UNC (`//server/...`) の絶対パスの場合に
+**相対として `.git` のある階層へ繋がない**ようにした (マージ前レビューの指摘)。
+繋ぐと別の common directory と比較することになり、正当な linked worktree を境界と
+誤判定して継承が切れる。
+
+さらに、linked worktree を通過させるのは **gitdir の common directory
+(`<common>/worktrees/<name>` の `<common>`) が、この後探索する祖先の repo のものと
+一致する場合だけ**にした (マージ前レビューの指摘)。正当な linked worktree は
+無関係な repo の中にも置けるため (repo A の `repo-a/vendor/b-wt` に repo B の
+worktree を追加する形)、形だけで通すと探索が repo B を離れて **repo A の
+accounts.local.json を継承**する。repo A の期待アカウントが active session と
+一致すれば、未設定の repo B worktree で状態変更コマンドが allow されてしまう。
+所属の確認は探索と同じ方向 (ファイルシステムの親方向) へ同じ停止条件で走査し、
+最初に見付かった祖先の `.git` (ディレクトリ / gitdir ポインタ) を
+`Path.resolve()` で正規化して common directory 同士で突き合わせる。一致しない
+場合と、祖先の `.git` を判読できず比較できない場合は **worktree root を境界**に
+する (fail-closed)。祖先に repo が 1 つも無い配置 (workspace 直下に worktree を
+並べる形) は継承元を取り違えようがないため従来どおり上る。
+
+**互換性 (非互換の変更)**: 次の 4 つの配置は継承されなくなる (未設定として deny):
+(1) ホームディレクトリ直下に `accounts.local.json` / `accounts.json` を置いて全プロジェクト
+の既定にしていた場合、(2) **repo の toplevel より上** (例: 複数 repo を束ねる親ディレクトリ)
+に置いて配下の repo に継承させていた場合、(3) **superproject に置いて submodule に継承**
+させていた場合、(4) **別の repo の中に置いた linked worktree から、その外側 repo
+(またはその配下のディレクトリ) の設定を継承**させていた場合。落ちる方向は
+fail-closed のため安全側。移行は、
+各 repo の toplevel に `accounts_builder.py set --service <svc> --from-cli --dry-run` →
+`--commit` で複製するか、`--path` で明示する。グローバル既定の専用経路は現時点では無い
+(別途検討)。
+
+### テスト
+
+全 suite green。追加は予算 (`tests/test_budget.py`)・パス解決の境界
+(`tests/test_paths.py`)・配布ファイルの参照検査 (`tests/test_docs.py`) の 3 ファイルと、
+dispatcher / builder / services への回帰テスト。追加したテストは**対応する実装行を
+壊す mutation で先に落ちることを確認**してから採用した (予算配線 10 種・境界と照合
+規則 8 種・docs 参照 4 種)。その過程で「`show` が service を渡し忘れても suite が
+green のままになる」抜けが見つかり、`show` の呼び出し経路を通すテストを足した。
+
+`.git` ファイルの種別判定 (submodule / linked worktree / 判読不能) にも
+`tests/test_paths.py` で回帰テストを足し、**修正前のコードでは submodule 形と
+判読不能形が落ち、linked worktree 形は通る**ことを使い捨てコピーで確認してから
+採用した。
+
+linked worktree の所属確認にも同じ手順で回帰テストを足した。**修正前のコードでは
+「無関係な repo の中に置いた worktree がその repo (および配下のディレクトリ) を
+継承する」形と「祖先の `.git` が判読できない形」が落ち、自分の repo の中・外に
+置いた worktree、submodule の worktree、bare / `--separate-git-dir` repo の
+worktree、入れ子 worktree はいずれも通る**ことを使い捨てコピーで確認している。
+
+linked worktree のメタデータ検証も同様に、**修正前のコードでは「gitdir が偶然
+`worktrees/<name>` で終わる `--separate-git-dir` の main checkout」「`commondir`
+の無い gitdir」「gitdir がディレクトリでない形」「back-pointer が別の worktree を
+指す形」「`commondir` が絶対パスで末尾からの推定と食い違う形」が落ち、実物の
+`git worktree add` が作る構造 (`<common>/worktrees/<name>/{commondir,gitdir,HEAD}`)
+は通る**ことを使い捨てコピーで確認した。worktree 系の既存テストの fixture は、
+実物と同じメタデータを置く形に更新している。あわせて、実際の linked worktree
+(gitdir が `<repo>/.git/worktrees/<name>`) が本体 checkout の設定を従来どおり
+継承することを実機でも確認した。
+
+## 0.11.1
+
+**remediation コマンドを案内する deny 文面に「案内したコマンドは単独で実行すること」
+の注記を追加** (`core/dispatcher.py`)。判定表 (allow/deny/warn) は変更していない。
+
+### 変更内容
+
+1. **注記の追加** — 不一致 / 未設定 / 未ログインの deny が案内する remediation
+   コマンド (`gh auth switch` / `gh auth login` / `gcloud config set` /
+   `firebase use` / `kubectl config use-context` / AWS の切り替え手順) は単独なら
+   通る (切替は self-remediation、ログインは readonly) が、その後に実行したい
+   コマンドと同じコマンド行に連結すると、連結先が切替**前**の状態で検証されて
+   再び deny される。案内どおりに打ったつもりで二度 deny を踏む往復が実運用で
+   観測されたため、remediation を案内する deny の末尾にだけ注記を足す。
+   設定ファイルの型不正や `--project` フラグ不一致など、別コマンドの実行を
+   案内しない deny には付けない。
+2. **判定は service 宣言の remediation コマンド実形で行う** — 各 service が
+   `REMEDIATION_PATTERNS` (引数付きの実コマンド形の正規表現。例: `gh auth switch --…` /
+   `gcloud config set project <x>` / `firebase use <x>` / `kubectl config use-context <x>` /
+   `AWS_PROFILE=<p>`) を宣言し、dispatcher は verify() の返り値にそれが一致するときだけ
+   注記を付ける。文言 (「〜を実行してください」) で判定するとインストール案内
+   (`brew install gh …`) を、語幹 (`firebase use`) で判定すると診断文 (`firebase use が
+   タイムアウトしました`) を拾い、検出コマンド (user 入力) を合成した後の本文で判定すると
+   `--title '切り替え:'` のような文字列で誤発火する (いずれもマージ前レビューの指摘)。
+   注記の文面は「案内された形のまま単独で実行 / 元のコマンドを連結しない」とし、案内文
+   自身が連結している `firebase login && firebase use <x>` (許可される形) と矛盾しない。
+   AWS は remediation がインライン env (`AWS_PROFILE=<p>` を元のコマンドの行頭に付ける)
+   で「単独で実行」が成り立たないため、service 側が `REMEDIATION_NOTE` で専用文面を
+   宣言し dispatcher はそれを優先する (マージ前レビューの指摘)。
+3. **回帰テスト 12 件** (`tests/test_dispatcher.py::TestSwitchStandaloneNote`) と
+   contract の強化 — 不一致 / 未設定 / ログイン案内に注記が付く、連結形でも付く、
+   型不正・インストール案内には付かない、user 入力の文言では発火しない、注記本文が
+   案内コマンド抽出に拾われない、案内文自身の連結形 (`firebase login && firebase use`) は allow されつつ注記の文面と矛盾しない、診断文では発火しない、全 service が `REMEDIATION_PATTERNS` を宣言している、AWS は専用注記を出し複数 service 同時 deny でも各注記は 1 回。既存の remediation contract テストに「verify() 由来の deny
+   が案内コマンドを含むなら注記が必ず付く」を追加し、文言契約の取りこぼしを
+   全 service 横断で機械検出する。
+
+## 0.11.0
+
+**2026-08 精査バックログ (内部バックログ) の残 6 件を消化**: `gh` 旧バージョン対応、
+内部エラーの無音 fail-open解消とデバッグトレース、他 plugin 名を書かない
+signpost への一般化、dead code 整理、テスト空白の穴埋め、単体テスト指定の DX 不具合修正。
+判定表 (allow/deny/warn) 自体を変更する項目は無い。
+
+### 変更内容
+
+1. **`gh auth status` の旧バージョン (gh < 2.40) 出力に対応** (`services/github.py`)
+   — 複数アカウント対応の `Active account: true/false` marker が無い単一アカウント
+   形式 (`✓ Logged in to github.com as your-github-user`) を `parse_active_accounts` が
+   fallback で解釈するようにした。marker 行が一切無い出力でのみ fallback するため、
+   新形式の判定には影響しない。あわせて、`Logged in to` はあるのにどちらの形式にも
+   一致しない (未知の将来フォーマット等) 場合のメッセージを「gh の出力を解釈できま
+   せん (`gh --version` を確認、2.40 以上を推奨)」に変更し、本当に未ログインの場合
+   (`Logged in to` が出力に無い) の案内と区別した。README に前提バージョンを明記。
+2. **内部エラーの無音 fail-open を解消し、`VERIFY_CLOUD_ACCOUNT_DEBUG=1` でデバッグ
+   トレースを追加** (`__main__.py` / `core/dispatcher.py`) — `dispatch()` 内の
+   未捕捉例外は従来 exit 1 (JSON 無し) になり、公式仕様上は non-blocking error
+   として無音で action が進行するだけだった。`__main__.py` で例外を捕捉し、
+   `additionalContext` で `[verify-cloud-account] 内部エラーのため検証をスキップ
+   しました: <型>: <メッセージ>` を明示し、同じ理由を stderr にも出す。
+   加えて `VERIFY_CLOUD_ACCOUNT_DEBUG=1` 時のみ、分解結果 (segments / matched
+   service / readonly / cache hit / verify 所要 ms / 決定) を stderr に 1 行
+   JSON で出す (判定表そのものには影響しない観測専用)。
+3. **生成される signpost (`CLAUDE.md`) から他 plugin 名を除去** — builder
+   (`init`/`set`/`remove`/`migrate` の `--commit`) が生成する `CLAUDE.md` と、
+   その元になるテンプレート (`scripts/templates/project_claude.md`)、README、
+   builder 内コメントが特定のセキュリティ系 hook plugin 名を名指ししていた。
+   plugin 間疎結合方針 (D9) に反し、他 plugin 非導入環境では事実に反する記述に
+   なる (`Claude は直接編集できません` という断定も環境依存で不正確だった) ため、
+   「セキュリティ系 hook が有効な環境では直接アクセスが拒否されることがある」
+   という一般化した表現に置き換えた。既存の生成済み `CLAUDE.md` は上書きしない
+   (テンプレート変更は新規生成分のみに反映)。
+4. **dead code の整理** (`services/github.py` / `scripts/accounts_builder.py`)
+   — 呼び出し元の無い `_cli_error_reason()` と、旧名 alias
+   `_parse_active_accounts` を削除 (対応する後方互換テストも削除)。
+   `accounts_builder.py` の migrate 表示ロジックで、`source_kind` を
+   誤った値 (`k` = key 自身) で代入した直後に正しい値 (`kk` = source kind) で
+   上書きしていた冗長な 2 行を 1 行に整理 (`additions` は key ごとに高々 1 エントリ
+   のため、常に上書き後の値が使われており実害は無かった)。
+   なお `services/kubectl.py` の旧 `_context_override` (0.9.0 で共通スキャナに
+   統合済み) は本 batch 着手前に既に削除済みだったため対象外。
+5. **テスト空白の穴埋め** — `TestAws` / `TestGcloud` / `TestKubectl` の `verify()`
+   レベルに `subprocess.TimeoutExpired` テストを追加 (github / firebase には
+   既存)。`gh auth status` の非アクティブ host (`Active account: false`) / ログイン
+   失敗 host / 旧バージョン単一アカウント形式の fixture テストを追加。
+   `_should_emit_deprecation_warn` (1 日 1 回の抑制) の直接テストを追加。
+6. **テストを 1 件だけ指定して実行できない DX 不具合を修正**
+   (`tests/__init__.py`) — 各テストファイルの `import _testutil` (トップレベル、
+   `core`/`hooks` を sys.path に通す副作用専用) は、ディレクトリ探索
+   (`python3 -m unittest discover tests`、探索先自体を検索パスに入れる) では
+   解決できるが、クラス/メソッド単位の指定 (`python3 -m unittest
+   tests.test_x.Class.method` / `pytest tests/test_x.py::Class::method`、
+   `tests/` 自体は検索パスに入らない) では `ModuleNotFoundError` になっていた。
+   `tests/__init__.py` が自身のディレクトリを sys.path に足すことで、呼び出し形式
+   によらず解決できるようにした (呼び出し側 = 機械ゲート / CI / README のテスト
+   実行手順は無変更)。README に単体指定の例を追記。
+7. **マージ前レビューの指摘: デバッグトレースの stderr 書き込み失敗で計算済みの
+   判定を落とす不具合を修正** (`core/dispatcher.py` / `__main__.py`) — 上記 2.
+   で追加した trace の `print(..., file=sys.stderr)` が失敗時に捕捉していたのは
+   `TypeError` / `ValueError` のみで、stderr が閉じている・書き込み不能なとき
+   (`BrokenPipeError` 等の `OSError`) は捕捉されず `dispatch()` の外まで例外が
+   伝播していた。これにより計算済みの判定 (deny を含む) が呼び出し元に返らないまま
+   失われ、`__main__.py` の内部エラー回復経路 (fail-open) に落ちて
+   `additionalContext` の warn に化けていた。さらに `__main__.py` 側の回復経路
+   自身も同じ stderr へ書き込もうとしており、それが失敗すると stdout への判定
+   JSON 出力が一切行われないまま異常終了していた。trace と回復経路のどちらも
+   stderr への書き込み失敗を `OSError` ごと捕捉して黙って捨て、stdout への判定
+   出力を必ず優先する順序に修正した。trace は decision-neutral な診断出力に
+   すぎず、判定表 (allow/deny/warn) 自体は無変更。
+
+### テスト
+
+727 → 752 件 (+25)。うち 3 件はテスト実行そのもの (単体指定 3 形式) をサブ
+プロセスで検証する回帰テスト、別の 3 件は上記 7. の stderr 書き込み失敗
+(`dispatch()` レベル / `__main__.py` 回復経路レベル / 実プロセスの broken pipe
+での E2E) を固定する回帰テスト。
+
+## 0.10.0
+
+**builder (`scripts/accounts_builder.py`) に既存値の更新・削除と、書込前の
+入力検証を追加した** (内部バックログ)。`init` は既存キーと異なる値を拒否
+するだけで、値の切替や削除の手段が無かった問題と、`--value` / `migrate`
+経由で不正な形の値が書き込まれ、後になって dispatcher の hook 実行時に
+初めて deny される問題を解消する。
+
+### 変更内容
+
+1. **`set` / `remove` サブコマンドを追加** — `set --service <svc>
+   [--value <v> | --from-cli] [--host <h>] [--dry-run|--commit]` は既存キーの
+   値を更新する (無ければ新規追加)。`remove --service <svc> [--host <h>]
+   [--dry-run|--commit]` は既存キーを削除する。どちらも `--host` で dict 値
+   (GitHub の hostname / Firebase の alias 等) の特定キーだけを追加・上書き・
+   削除できる。**最後の 1 つの host/alias を remove すると、空 dict `{}` を
+   残さずキー自体を削除する** — 空 dict のままだと github/firebase/gcloud の
+   `verify()` が「オブジェクトが空です」で permanent deny するが、この deny
+   文面は次に何をすべきか分からない。未記載にしておけば dispatcher が
+   「キーがありません。対象サービスのアカウントを追加してください」で deny
+   するため、設定を促す案内としてこちらのほうが分かりやすい。dict を
+   受け付けない service
+   (aws/kubectl) への `--host` 指定は早期にエラーにする。書込パス固定
+   (D2)・値隠蔽 (D3)・mtime 更新による cache 無効化・CLAUDE.md/`.gitignore`
+   の自動同梱は init/migrate と同じ経路を流用する。
+   `accounts-init` SKILL の skipped 分岐 (旧: 「手動でファイルを編集するか
+   将来の switch サブコマンドを使う」) は `set`/`remove` の案内に差し替えた。
+   さらに **`remove` は値が `null` (壊れた entry) のキーも削除できるように
+   した** (独立レビュー指摘で修正)。当初は `existing.get(service_key) is
+   None` で『キーが存在しない』と『値が `null`』を区別しておらず、
+   `{"github": null}` のように dispatcher がまさに deny する形を見つけても
+   remove が「何もしません」と早期終了し、修復する手段が無かった。キーの
+   有無を `in` 演算子で判定するように直し、`--host` 指定時は従来どおり
+   (既存値がオブジェクトでない) エラーに倒す。`set` は元々 commit 時に
+   既存値の有無に関わらず値を上書きするため、この形は当初から修復できて
+   いた (回帰テストで固定)。さらに **`remove --host` は削除後の残り dict の
+   形も再検証するようにした** (独立レビュー指摘で修正) — 最後の 1 つでなくても
+   残り dict が `_validate_entry_shape(strict_keys=False)` に拒否される形
+   (例: `DICT_ALLOWED_KEYS` を宣言する gcloud で project/account 以外の
+   キーだけが残る) になることがあり、そのままでは書込は成功しても
+   `verify()` が fail-closed deny する状態になっていた。この形も空 dict の
+   場合と同じくキー自体を削除し、理由を stdout に明示する。
+2. **`--value` の JSON dict を構造化データとして解釈** — 従来は `--value` を
+   常に生文字列として保存していたため、`--value
+   '{"project":"p","account":"a"}'` が JSON 文字列そのものとして保存され、
+   gcloud の `verify()` が dict 期待値と JSON 文字列を比較して永久不一致に
+   なっていた。`json.loads` を試み、**dict なら dict として保存し、それ以外
+   (不正な JSON、または dict 以外の JSON 型) は生文字列のまま保存する**
+   (`init` / `set` 共通の `_parse_value`)。dict 以外を素通しするのは、数字
+   だけの username (`--value 12345`) のような値が JSON 数値/真偽値/配列に
+   暗黙変換されて型が壊れるのを防ぐため。
+3. **書込前スキーマ検証 (`_validate_entry_shape`)** — `init` / `set` /
+   `migrate` は書込前に値の形 (文字列、または service ごとの許容 dict 形) を
+   検証し、不正なら書き込まずに exit 1 にする。各 service は
+   `ACCEPTS_DICT` (dict 形を受け付けるか) と、`gcloud` のみ
+   `DICT_ALLOWED_KEYS = frozenset({"project","account"})` (許容キー) を宣言
+   する。`init`/`set` は未知キーも個々の値の不正も即座に拒否する厳格モード
+   だが、**`migrate` は旧パスから取り込む値 (additions) だけを対象にし、
+   未知キーと「dict 内に使える値が 1 つでも残っていれば良い」の両方を
+   許容する** (`strict_keys=False`) — `gcloud.verify()` は宣言外のキーを
+   黙って無視するだけで拒否しないし、`gcloud`/`firebase` の `verify()` は
+   `{"default":"proj-dev","old":null}` のような部分的に壊れた dict も
+   使える値が 1 つ残っていれば成立させる。migrate でだけ厳格化すると
+   verify() では通っていた形を後から書けなくする退行になる。migrate が
+   触っていない新パス側の既存エントリは検証対象にしない (無関係な統合作業
+   まで exit 1 にしないため)。
+   **この leniency の範囲は service ごとの `DICT_VALUE_CHECK` 契約に限る**
+   (独立レビュー指摘で修正)。当初は全 service に一律で適用していたため、
+   **その service の `verify()` が形を理由に deny する値まで書けてしまい、
+   書込時検証をすり抜けて実行時 deny に化けていた** — 例:
+   `{"gcloud":{"project":"p","account":123}}` は `gcloud.verify()` が
+   truthy な非文字列の `account` を「文字列で指定してください」で拒否するのに、
+   builder は「`project` が有効だから」と通していた。各 service は
+   `verify()` の実装に対応する契約を宣言する: `github` は `"all"`
+   (dict の全キーの値が文字列必須)、`gcloud` は `"truthy"`
+   (falsy な値は `verify()` が黙って無視するので許容、truthy な非文字列は
+   拒否)、`firebase` は `"none"` (`verify()` が使えない値を filter で捨てる
+   ので値の型では拒否しない)。守る不変条件は「**builder が受理した形は、
+   その service の `verify()` が形を理由に deny しない**」で、service ×
+   形状 (scalar / 正常 dict / 部分欠落 / falsy 値 / truthy 非文字列 /
+   未知キー / 空 dict) の表で固定した。
+   さらに **`DICT_ALLOWED_KEYS` 宣言時は「使える値が 1 つでもあるか」の判定を
+   許可キーの値だけに限定した** (独立レビュー指摘で修正)。
+   `{"gcloud":{"region":"us-central1"}}` は未知キー `region` の非空文字列を
+   使える値と誤認して受理していたが、`gcloud.verify()` は `project` も
+   `account` も無いとして deny する — migrate は成功と報告した entry が
+   そのままでは使えなかった。`DICT_ALLOWED_KEYS` を宣言しない service
+   (`github`/`firebase`) は影響を受けない。
+4. **空文字・空白のみの値を書けないようにした** (独立レビュー指摘)。
+   `set --service aws --value "$UNSET_VAR" --commit` のように未定義の環境変数を
+   渡すと空文字に展開され、`"aws": ""` が書き込めてしまっていた。dispatcher は
+   `entry == ""` を**キーの欠落と同じ**扱いにするため、以後その service は
+   設定を直すまで恒久 deny になる — 書込時検証を追加した当の builder 自身が、
+   検証をすり抜ける値を作っていたことになる。scalar の値にも dict のキー・値と
+   同じ規則 (`strip()` 後に非空) を課し、`init` / `set` / `migrate` の全経路で
+   効くようにした (ガードは `_validate_entry_shape` の 1 箇所)。
+5. **migrate の衝突判定を情報欠落の有無で判定する専用の比較関数に変更** —
+   新旧で `merged[key] != value` という値そのものの不一致だけを見ていた
+   ため、scalar `"USER"` と dict `{"github.com":"USER"}` のように
+   **意味的には同じアカウント**を指す新旧値まで値衝突として手動解決を
+   要求していた。当初 `show`/`verify` 用の `_entries_equal` (CLI 実測値が
+   期待値を満たすかの非対称な述語) を流用したが、独立レビューで
+   **multi-host/multi-alias dict が絡むと情報が黙って失われる**ことが
+   判明した — 例: new=scalar `"USER"` / old=dict
+   `{"github.com":"USER","ghe.example.com":"example-org"}` は、
+   `_entries_equal` が最初の host の値だけを見て一致と判定し、
+   `ghe.example.com` の値を conflict 検出も警告もなく消してしまう。
+   `_migrate_keep_new_without_loss` を新設し、「new 側を採用しても old 側の
+   情報を失わないか」だけを見る専用の比較にした。dict-dict でも同じ考え方
+   (old の全キーが new に含まれているか) を適用し、new が old のサブセット
+   になるケースも conflict のまま手動解決に落とす。
+   さらに **scalar と dict の比較に host / フィールドの意味論を持たせた**
+   (独立レビュー指摘で修正)。当初は「値が一致し old が単一キーなら非損失」と
+   していたが、これは**どのホストを照合するかという制約の違いを見ていない**:
+   scalar の `"github": "USER"` はアクティブな状態に応じた 1 ホストを照合するのに対し
+   `{"ghe.example.com": "USER"}` は名指しの GHE ホストを照合するので、値が
+   同じでも制約は別物で、統合すると GHE の制約が conflict 検出も警告もなく
+   消えていた。各 service が「scalar 期待値と等価になる dict キー」
+   (`SCALAR_EQUIVALENT_DICT_KEY`) を宣言し、両方向をそれで判定する。
+   **宣言できるのは scalar の照合先が実行時の状態に依らず固定される service
+   だけで、現状は `gcloud` の `"project"` のみ** — `verify()` の scalar 分岐が
+   project しか照合しないため、`{"project": <同値>}` と静的に等価になる。
+   `github` は一度 `"github.com"` を宣言したが**撤回した** (独立レビュー指摘で
+   修正): scalar の照合先は「github.com にログイン中ならそれ、無ければ最初の
+   ログイン済みホスト」で**実行時の状態に依存する**ため、GHE だけにログイン
+   している環境では scalar `"USER"` は通り `{"github.com":"USER"}` は
+   「このホストにログインしていません」で deny になる。等価でないものを等価と
+   宣言していたので、統合時に明示された `github.com` の要求が無警告で
+   書き換わる/消える余地が残っていた。`firebase` も**宣言しない** — dict キーは
+   `.firebaserc` の alias 名で `verify()` の判定 (値のいずれかに一致するか) には
+   効かない一方、`firebase use <alias>` の自己回復案内が読む情報を持つため、
+   畳み込むと案内先が消える。キーを宣言しない service と、キーが一致しない
+   組み合わせは conflict にして利用者に選ばせる。
+   加えて **dict どうしの比較でキーの存在を先に要求するようにした**
+   (独立レビュー指摘で修正)。`new_val.get(k) == v` だけで比較していたため、
+   old が `{"ghe.example.com": null}` のような壊れた値を持ち new がその
+   ホストを省略していると、「キー欠落の `None`」と「保存された `null`」が
+   どちらも `None` になって一致と判定され、conflict にならなかった。
+   old 側の値は追加分ではないので形式検証にもかからず、ホストの entry が
+   黙って失われたまま「旧ファイルを削除してよい」と案内していた。
+
+6. **builder の対象ファイルを dispatcher と同じ解決に揃えた** (独立レビュー
+   指摘で修正)。従来 builder は常に cwd 直下の新パスを対象にしていたため、
+   **祖先の accounts.local.json を継承している worktree / サブディレクトリで
+   設定を壊していた**: `set --commit` が編集した service だけを含む子ファイルを
+   作り、dispatcher の親ディレクトリ遡及がその子ファイルで止まるため、
+   継承していた他の service が一斉に未設定 (deny) になる。`remove` も継承
+   entry を「存在しません」と報告し、`show` は「ファイルが無い」と表示して
+   いた。3-tier lookup + 親遡及の解決を `core/paths.resolve_accounts_file()`
+   に切り出し、**dispatcher と builder の両方がこれを呼ぶ**ようにした
+   (`init` / `show` / `set` / `remove` / `migrate` の全サブコマンド)。
+   あわせて:
+   - 解決した対象パスを dry-run / commit の出力の先頭に
+     `対象: <パス> (祖先ディレクトリ <親> から継承)` の形で必ず表示する
+   - `init` は継承中に cwd 直下へ新規作成しようとすると **exit 2 で拒否**する
+     (shadowing の説明と `set` / `remove` / `--path` の案内付き)
+   - 全サブコマンドに **`--path <file>`** を追加した。明示時は解決を飛ばして
+     そのファイルを対象にする (worktree 専用設定を意図的に作るための
+     escape hatch)。受け付けるのは dispatcher が読む配置だけで、書込を伴う
+     コマンドでは新パスのみ — 他の場所に書いても hook が読まないため
+   - 複数 tier が同居する階層 (D4 fail-closed) は builder も同じ理由で拒否する。
+     判定を cwd ではなく**解決した階層**で行うようにしたので、継承先に旧パスが
+     同居している場合も見落とさない
+   - `--path` の指定先が解決結果と食い違う場合は警告を出す (近い側を指定すると
+     現在有効な設定を覆い隠し、遠い側を指定すると書いても読まれない)
+   - `.gitignore` への追記と `CLAUDE.md` の同梱先も、cwd ではなく**書き込んだ
+     ファイルが属するディレクトリ**に合わせた
+
+   **この変更で builder の書込範囲は cwd 配下に限られなくなる**: 解決は最大
+   10 階層まで親を遡るため、accounts.local.json を持たないプロジェクトで
+   `set` を実行すると、祖先 (ホームディレクトリを含む) のファイルが編集対象に
+   なりうる。「hook が読むファイルを編集する」という意図どおりの挙動だが、
+   従来より書込先が広がるため、対象パスを出力先頭に必ず表示する仕様と合わせて
+   README にも明記した。
+
+### 既知の制限 (新規)
+
+- `git push` / `git clone` / `git fetch` など `gh` 以外の GitHub 操作は元々
+  検証対象外だったが、README に明記していなかったので追記した (挙動の変更
+  ではない)。
+- scalar 期待値と dict 期待値の統合を自動で非衝突と判定できるのは、
+  `SCALAR_EQUIVALENT_DICT_KEY` を宣言する service (**現状 `gcloud` のみ**) に
+  限る。`github` は scalar の照合先が「github.com がアクティブでなければ最初の
+  アクティブホスト」という**実行時の状態に依存する**照合なのでどの静的な
+  ホスト名とも等価にならず、`firebase` は dict キー (alias) が照合の判定に
+  効かない。どちらも値が一致していても conflict として手動解決を求める
+  (どちらの形を残すかで検証対象と自己回復の案内が変わるため、自動では
+  選べない)。
+
+## 0.9.0
+
+**候補コマンドの切り出しと解釈を 1 つの解析層として作り直した** (内部バックログ
+6 件)。誤 deny (使えない) と検証バイパス (守れていない) の両方向に出ていた問題を
+まとめて塞ぐ。方針は従来どおり lenient — 誤 deny は allow 方向に倒し、バイパスは
+deny を増やすのではなく**「検証を走らせる」**方向に倒す。
+
+### 変更内容
+
+1. **コンテキスト指定 flag を検証に反映** (この batch の主眼) — `aws --profile
+   other s3 rm` / `gcloud --project other run deploy` / `firebase deploy -P other` /
+   `kubectl --context other delete pod` は、これまで hook の**既定コンテキスト**
+   だけを照合していた。既定が期待値なら「検証は既定 / 実行は other」で allow され、
+   誤アカウント事故の典型経路がそのまま通っていた (false-allow)。
+   `core/cli_options.py` に `find_context_options` を追加し、候補の**行全体**から
+   コンテキスト option の値を拾う。各 service は `CONTEXT_OPTIONS` を宣言し、
+   AWS は検証コマンドに `--profile` を付与 (CLI の資格情報解決順を実行時と揃える)、
+   GCP は `--project` / `--account` を直接照合し `--configuration` を引き渡し、
+   Firebase は `.firebaserc` の alias を解決してから照合、Kubernetes は
+   `--context` を直接照合し `--kubeconfig` を引き渡す。
+   **GCP は key ごとに独立して上書き**する — project を flag で上書きしても
+   account の期待値があれば account はアクティブ値と照合する (早期 return にすると
+   新たな false-allow を作る)。gh は `CONTEXT_OPTIONS` を宣言しない
+   (`--hostname` / `--user` は「どのアカウントで実行するか」ではなく操作**対象**の
+   指定のため。README 既知の制限のとおり)。
+   option の記法 (`--opt value` / `--opt=value` / `-Pprod` / `-P=prod` / `--` 終端 /
+   値トークンの消費) は既存の `strip_leading_options` と `_option_name_value` を
+   共有し、走査の打ち切り条件だけが違う (正規化は未知 option で打ち切る / context
+   抽出は global option を後方からも拾うため走査を続ける)。値が変数展開等で静的に
+   解決できないときは従来どおり既定コンテキストで照合する。
+   dispatcher は context を inline env と同じく **grouping key と cache key に含める**
+   — 含めないと `aws --profile a s3 rm x && aws --profile b s3 rm y` が 1 エントリに
+   畳まれて後段が検証されず、既定 profile の成功 cache を別 profile が hit する。
+   未配線の dead code だった `kubectl._context_override` は共通スキャナに統合して削除。
+
+2. **heredoc 本文を候補にしない** — `core/command_parser.py` は改行を無条件の
+   区切りにしており、`cat > deploy.sh <<'EOF' ... EOF` の本文 1 行 1 行が候補に
+   なっていた。本文の CLI 例は実行されないため、スクリプトや PR 本文を heredoc で
+   書くだけでファイル生成そのものが deny される (実際に本 batch の作業中、
+   インストール済みの 0.8.0 が commit message 作成を 2 回 deny した)。
+   `man 1 bash` の Here Documents 節に沿って `<<[-]word` を検出し、delimiter 行まで
+   同一セグメントに取り込む (quote 付き / `\` 付き delimiter、`<<-` のタブ除去、
+   1 行に複数 heredoc に対応。here-string `<<<` は対象外)。delimiter 行の改行では
+   セグメントを閉じるので、heredoc の**次**のコマンドは従来どおり検証される。
+   bare 形の delimiter は識別子に限定し、`(( x = 1 << 2 ))` の算術左シフトを
+   heredoc と誤検出して後続セグメントを飲み込むことがないようにした。
+
+3. **`command -v gh` を素通し** — `command` は透過 wrapper だが、`-v` / `-V` 付きは
+   後続 CLI を**実行せずパスを表示するだけ** (`man 1 bash`: `command [-pVv]`)。
+   剥がすと `gh` 単体の候補になり、インストール確認の定型句でアカウント検証が
+   走って deny されていた。`-v` / `-V` (連結形 `-pv` 含む) があれば剥がさない。
+   `command gh ...` / `command -p gh ...` / `command -- gh ...` は従来どおり検証。
+
+4. **PATTERNS の `\b` を `(?=\s|$)` に** — `\b` はハイフンも語境界とするため
+   `aws-vault exec prod -- aws s3 rm` が aws として発火し、hook の既定 profile で
+   `sts` を実行していた。既定資格情報が無ければ永久 deny、既定が期待値なら実行
+   profile が prod でも allow という**二重の誤り**。`gh-ost` / `kubectl-*` も同様。
+   全 service を空白/終端の lookahead に統一した。Firebase だけは
+   `npx firebase-tools deploy` が剥がし後に `firebase-tools deploy` になるため
+   `-tools` を明示的に許可する。これにより `aws-vault` 経由の実行は
+   「誤った検証」から「検証対象外」に変わる (README 既知の制限に明記)。
+
+5. **検証バイパスだったセグメント形を正規化** — `(gh pr create --fill)` /
+   `{ gh pr create; }` / `for f in *; do gh release upload ...; done` /
+   `if gh pr create; then` / `! gh pr create` / `</dev/null gh pr create` /
+   `2>/dev/null gh pr create` / `/opt/homebrew/bin/gh pr create` / `\gh pr create`
+   は、いずれも行頭 anchored な PATTERNS に一致せず service=None (検証スキップ) に
+   なっていた。先頭の `(` `{` `!` / 予約語 / リダイレクト、末尾の `)` `;` `}` `&`、
+   コマンド名のパスと `\` を正規化する。末尾の括弧は**開き括弧と対応していない
+   ときだけ**落とすので `gh pr view $(echo 1)` の引数は壊さない。
+
+6. **実行ラッパを追加** — `timeout` / `nice` / `stdbuf` / `setsid` / `caffeinate` /
+   `watch` / `xargs` を透過 wrapper に追加した。`timeout 30 gh pr create` /
+   `... | xargs -I{} gh pr close {}` / `watch -n 5 kubectl get pods` は全て
+   service=None で素通りしていた。`timeout` は flag だけでなく先頭の位置引数
+   DURATION も消費する (GNU の文法に一致しない形なら剥がさず不透明のまま =
+   従来どおり検証スキップ)。全て `_WRAPPER_ENV_CLASS` に `passthrough` として
+   登録。option 表の根拠と、取り違えた場合の劣化方向 (常に「検証スキップ」側で
+   誤 deny にはならない) は `docs/wrapper-env-audit.md` に記録した。
+   `ionice` は cloud CLI と組み合わせる現実的な形も開発機の man page も確認できず、
+   推測で allow-list を広げない方針から**追加していない**。
+
+7. **独立レビューで検出した自作の退行を修正** — 上記 2〜6 を入れた直後に、
+   0.8.0 と 0.9.0 の出力を突き合わせる敵対的レビューを別途かけ、**新規に作り込んだ
+   false-allow を 5 経路**見つけて潰した。いずれも「安全側に倒したつもりが、
+   検証そのものを消していた」型の誤り:
+   - `npx firebase-tools@13.31.0 deploy` — CLI 名の lookahead が `@` で失敗し
+     **検証対象から丸ごと外れていた**。`@<version>` を明示的に許可し、PATTERNS /
+     READONLY / STATE_CHANGING / self-remediation で同じ prefix を共有する
+     (片方だけ許可すると `login` が切替として認識されず成功 cache が残る)
+   - `cat <<END-OF-FILE` / `<<EOF.txt` — delimiter を識別子形に限定していたため
+     `END` までしか読めず、terminator が現れないまま**後続コマンドを全部**
+     本文として飲み込んでいた。delimiter は 1 トークン丸ごと取る
+   - `(( x = 1 << y ))` — 算術左シフトを heredoc と誤認して同様に飲み込む。
+     **terminator の実在を確認してから本文として扱う**方式に変更し、
+     「閉じていなければ末尾まで飲み込む」挙動そのものを廃止した
+     (誤検出が「以降すべて検証しない」に化ける経路を構造的に塞ぐ)
+   - heredoc 本文の行が option 走査に食われる — `--template-file - <<EOF` の本文に
+     `--profile prod` があると **prod で検証して allow** し、YAML マニフェストの
+     `- --context` / `- prod` があると**誤 deny** していた。本文は候補文字列からも
+     落とす
+   - context option の値として `-` (次の option / stdin) と `{}`
+     (`xargs -I{}` の置換 placeholder) を採用していた
+
+8. **wrapper flag 表を 3 分類で全件監査** — 「その flag が次の token を消費するか」の
+   取り違えが**逆方向に 2 件**見つかった (PR #48 Codex P1 x2)。どちらも
+   コマンド本体を見失って**検証がまるごと消える**方向:
+   - `xargs --replace gh pr close {}` — GNU の long option は optional 引数を
+     **`=` 形でのみ**取るのに必須扱いで登録していたため、bare 形が `gh` を食っていた。
+     `_WRAPPER_FLAGS_OPTIONAL_VALUE` を導入して bare 形は消費しないようにした
+     (`--replace` / `--eof` / `--max-lines`)
+   - `watch --equexit 5 gh pr create` — 値を取る flag の登録漏れで `5` がコマンド名の
+     位置に残っていた
+   あわせて全 wrapper の flag を「値を取らない / 必須引数 / optional 引数」の
+   3 分類に確定させ、**根拠 (ローカル man page か上流リファレンスか) を明記**して
+   `docs/wrapper-env-audit.md` に記録した。裏が取れない flag は登録しない
+   (消費しない側 = v0.8.0 と同じ検証スキップに留まり、コマンドを食わない)。
+   構造的な保険として、flag 領域の後に残る**純粋な数値トークンを読み飛ばす**安全網を
+   入れた。コマンド名が純粋な数値になることは無いので安全で、これにより一次情報を
+   取れない `watch` の flag 表を**空にできる** (値が bool か数値かを推測しなくてよい)。
+
+9. **算術文脈を構文として検出 / wrapper の終端 option を処理** (PR #48 Codex R2) —
+   - `(( x = 1 << y ))` の左シフトを heredoc 開始と誤認し、後方に `y` 行があると
+     後続コマンドを本文として飲み込んで**検証が消えて**いた。delimiter 語の形
+     (数値か識別子か) から推定する方式は `(a+b)` / `$n` / `0x10` など別の
+     オペランド形で必ず抜けるため、**算術文脈そのもの** (`(( ... ))`) を構文として
+     検出する方式に変えた (`$(( ... ))` は従来から保護済み)。閉じ `))` が
+     存在するときだけ算術と見なし、未閉じで残り全部を飲み込まないようにしている
+   - `watch --help gh pr create` のように**表示して終了する option** 付きで
+     呼ばれた wrapper を剥がすと、実行されないコマンドで**誤 deny** していた。
+     終端 option を検出したら wrapper を剥がさない。効果は wrapper が包む引数列に
+     限定し、`watch --help; gh pr create` のように別コマンドとして続く形は
+     従来どおり検証する (ここを取り違えるとバイパスになる)。
+     短縮形 (`-h` / `-v`) は `sudo -h host` のような値付き option と衝突するため
+     既定では終端扱いせず、過剰検証側に倒した
+
+10. **xargs の全 option を列挙して分類しきる** (PR #48 Codex R3) —
+    `xargs -a input gh pr close 1` / `-d , ...` は入力系 option が次の token を
+    消費するのに未登録で、コマンド本体を見失って**検証が消えて**いた。
+    `-a` / `--arg-file` / `-d` / `--delimiter` / `--process-slot-var` を必須値として
+    登録し、あわせて **GNU / BSD xargs の全 option を 3 分類で完全列挙**した
+    (piecemeal に足すと同じ穴が繰り返し出るため)。
+    分類表には**値が数値か非数値か**を併記した — 数値は arg-like 安全網が拾うので
+    登録漏れが致命傷にならないが、**非数値は安全網が効かないので登録が必須**という
+    区別が、今回の見落としの本質だったため。
+    他 wrapper も同じ観点で再確認し、`npx` の `-w/--workspace` (非数値) を追加。
+    `watch` は値を取る option が**すべて数値**であることを確認したので、flag 表を
+    空にしたまま安全網に委ねる判断は正しいと再確認できた。
+
+    なお `-a` / `-d` は当初「開発機の man (BSD) に無く裏が取れない」として登録を
+    見送り、その判断を**報告で開示**していた。外部レビューが GNU `xargs --help` の
+    逐語を提示してくれたことで解消した — **裏が取れないものを黙って落とさず開示する
+    運用がそのまま解消につながった実例**として記録しておく。
+
+11. **duration 全構文 / シェル経由 wrapper の解析 / 数値 heredoc delimiter**
+    (PR #48 Codex R4) —
+    - `timeout` の DURATION は strtod ベースなので 10 進整数・小数だけではない。
+      `timeout 1e3 gh pr create` / `timeout inf ...` が剥がせず**検証が消えて**いた。
+      科学記数法 / `inf` / `infinity` / `nan` / 小数点始まり・終わり / 16 進浮動小数 /
+      接尾辞付きを受理する。受理し損ねる方が危険なので迷う形は受理側に倒した
+    - `watch 'gh pr create'` は既定で `sh -c` に渡る**コマンド文字列**なのに、
+      クォートを剥がさず `'gh pr create'` のままにしていたため検証されなかった。
+      wrapper を「シェル経由 / 直接 exec」で分類し、シェル経由のものはクォートを
+      剥がして中身を解析する (`--exec` 付きの `watch` は直接 exec なので剥がさない)。
+      クォート内が複合コマンドの場合は剥がした結果を**再分割**して各段を候補にする。
+      同じ分類で `sudo -s|-i` と `npx -c` も解析対象に加えた。あわせて option の
+      値がクォートされている形 (`sudo -p 'enter password' gh ...`) で値が途中で
+      切れ、残りが候補先頭に混ざる問題も直した
+    - **数値の heredoc delimiter を弾いていたガードを撤去**した。`cat <<123` は
+      bash が受理する正当な形で、弾くと本文の各行が候補になり**データを書くだけの
+      コマンドを誤 deny** する。算術シフトの除外は算術文脈の構文検出が担っており、
+      語形からの推定は不要になっていた (前 round の残骸)
+
+12. **heredoc delimiter のシェル word 解析 / 算術コマンドの括弧保持**
+    (PR #48 Codex R5) —
+    - delimiter を「先頭の 1 断片」しか読んでいなかったため、`cat <<E"OF"` を
+      `E` と誤読し、一致する行が現れないまま**後続コマンドを本文として飲み込んで
+      いた** (検証が消える)。`man 1 bash` の「delimiter is the result of quote
+      removal on word」に従い、**隣接断片を連結してから quote 除去する**形に変えた
+      (`E"OF"` / `"EO"F` / `E\\OF` / `$'EOF'` 等がすべて `EOF` に解決)。
+      解決できない word は heredoc と見なさない (過剰検証側)
+    - `(( gh ))` のように**保護対象の CLI 名で始まる算術コマンド**の括弧を剥がして
+      `gh` に正規化しており、bash が変数を評価するだけで CLI を実行しないのに
+      **誤 deny** していた。これは内部の不整合で、R2 で入れた算術文脈の追跡を
+      括弧剥がしの経路が使っていなかったのが原因。判定を `_arithmetic_span` に
+      一本化し、`((` を見る全経路 (セグメント分割 / heredoc 本文除去 /
+      構文プレフィックス剥がし) で共有させた。subshell の `( ... )` は従来どおり
+      候補にする
+
+13. **ANSI-C エスケープ展開とクォート状態の全経路共有** (PR #48 Codex R6) —
+    - `<<$'E\\x4fF'` の delimiter を literal のまま扱っていたため、bash が
+      `EOF` に展開する terminator を見つけられず**後続コマンドを本文として
+      飲み込んで**いた。`man 1 bash` QUOTING 節の逐語表に従って ANSI-C
+      エスケープを展開してから delimiter にする。解釈できないエスケープが
+      あれば delimiter を確定させない (過剰検証側)
+    - heredoc 開始の再スキャンがクォート状態を追跡しておらず、
+      `--metadata '{"k":"<<X bar"}' <<EOF` の `X` を先に登録して本物の heredoc の
+      本文除去に失敗していた。**失敗の質が悪く**、検証がスキップされるのではなく
+      本文行 (`--profile allowed`) が引数として解釈され、**承認されていない既定
+      profile で走るコマンドが「許可された profile」として検証を通って**いた
+    - 2 ラウンド続けて「片方の経路が仕組みを持っているのに、もう片方が使って
+      いない」型が出たため、個別対応をやめて**シェル構文を見る全経路を棚卸し**した。
+      quote / 置換 / 算術のスキップを `_skip_opaque` に一本化し、
+      セグメント分割・heredoc 本文除去・括弧の均衡判定がすべてこれを通る。
+      **不変条件として docs に明記**し、`TestQuoteStateIsSharedAcrossAllPaths` が
+      振る舞いで守る (クォート内の構文もどきがどの経路でも解釈されないことを一括表明)
+
+14. **短縮 option 連結の値解析 / heredoc と演算子の共存 / duration の受理範囲**
+    (PR #48 Codex R7) —
+    - 値を取る短縮 option が他と連結されていると引数を取り逃していた
+      (`timeout -vk 1 5 cmd` / `sudo -Eu deploy cmd`)。POSIX/GNU の連結規則を
+      実装し、**flag 消費を `_parse_wrapper_flags` の 1 実装に統合**した
+      (「剥がす」「有無」「値」「終端判定」の 4 用途が同じ規則を通る)
+    - heredoc 宣言の後、改行より前に演算子が来ると本文が後続セグメントに付き、
+      **データとして書いているだけの行が実行可能な候補**になっていた。宣言から
+      本文終端までは演算子でセグメントを切らないようにし、あわせて本文除去時に
+      **`<<delim` の宣言トークンも落とす** (残すと再分割で「本文待ち」と再解釈され、
+      演算子の後ろの**実際に実行されるコマンドが候補から消える**)
+    - `timeout` の DURATION を strtod 文法で受理していたため `nan` / `30S` など
+      **timeout 自身が拒否する形**まで剥がしており、実行されないコマンドで
+      誤 deny しうる状態だった。coreutils の `parse_duration()` / `apply_suffix()`
+      の規則 (NaN・負値・大文字接尾辞・余分な文字を拒否) をそのまま実装した
+
+### テスト
+
+448 → 581 件 (+133)。追加分は 39 パターンの mutation で検証済み — 各修正を 1 つずつ
+元に戻すと対応するテストが必ず落ちることを確認した。
+
+**mutation テストだけでは足りない**ことが今回はっきりした。mutation は「新しい挙動が
+効いていること」しか見ないので、**以前は検証できていた入力を取りこぼすようになった**型の
+退行を原理的に検出できない。実際 5 経路の検証が静かに消えていた。そのため
+0.8.0 と 0.9.0 に**同一のコマンド文字列コーパス (2457 件)** を流し、「どの service が
+検証対象になるか」を全件突き合わせる差分検証を実施した (コーパスは 0.8.0 の全テストに
+登場する文字列 + 新規テストの入力 + service × 操作 × コンテキスト flag × wrapper ×
+複合形 + **各 wrapper の文書化された全 flag × bare / `=value` / 分離形 / 短縮連結**の
+マトリクス)。結果は「検証が消えた」51 件がすべて意図した修正 (heredoc 本文 /
+`command -v` / ハイフン付き別コマンド) か改善 (0.8.0 が readonly を検証していた形) で、
+**説明のつかない消失はゼロ**。導出したコンテキスト値 65 件も全て実在する flag に由来する
+ことを確認した。
+
+この差分検証の観点を恒久化するため、`TestVerificationCoverageFloor` に
+「検証対象であり続けるべき入力」と「検証してはいけない入力」の一覧を置いた。
+lenient 方針は「deny を減らす」であって「検証しない」ではない。
+
+`TestWrapperEnvPropagationContract` に「passthrough 分類の全 wrapper が env 伝播
+ケースを持つ」guard を追加した (D16 チェックリスト手順 6 の機械化)。追加した時点で
+`builtin` の欠落を検出したのでケースを補っている。
+
+ハイフン付き別コマンドのテストは deny の有無ではなく `verify` の**呼び出し回数**で
+判定する。deny の有無だけを見ると、実 CLI がたまたま期待値にログインしている環境
+では素通りして vacuous になる (mutation 実行で実際に検出漏れとして現れた)。
+
+### 見送り
+
+- `aws-vault exec <profile> --` を「`AWS_PROFILE` を合成する条件付き wrapper」として
+  扱う対応 (今回は検証対象外に倒すところまで)
+- `gh auth status --show-token` 等の開示系オプションの扱い、READONLY の前方一致
+  regex 機構そのものの再設計 (いずれも別途)
+
+## 0.8.0
+
+**remediation loop の解消 (ログイン系の素通し / AWS 切替案内の修正) と、切替
+コマンドでの成功 cache 即時無効化** (内部バックログ)。
+verify-cloud-account は「記載済み service の不一致 × 書込系コマンド」だけを deny
+し、それ以外は lenient に倒す方針に沿って、deny 文面が案内するコマンド自体が deny
+される 3 つの経路を塞いだ。
+
+### 変更内容
+
+1. **認証取得系コマンドを検証スキップ (READONLY) に** (内部バックログ) — `aws sso login` /
+   `aws sso logout` / `aws login` / `aws logout` / `aws configure ...`、`gh auth
+   logout` / `setup-git`、`gh auth login` は SSH 鍵のアップロードが起きず、かつ
+   scope 要求も無い形 (`--skip-ssh-key` / `--with-token` / `--git-protocol https`
+   (`-p https`) 付き、かつ `-s` / `--scopes` 無し)
+   のみ。判定は regex ではなく `github.is_readonly()` が token 列を走査して flag の
+   **実効 boolean** を解釈する (`--skip-ssh-key=false` / `--with-token=0` のような明示
+   false は無効、`=true|1|yes` と裸形は有効、`--git-protocol` は値が `https` のときだけ、
+   繰り返しは後勝ち。gh は `--flag=false` を無効として扱い鍵アップロード経路に入る
+   ため) (SSH git protocol を選ぶ login は既存の SSH 公開鍵を GitHub アカウントに
+   アップロードしうる = 期待外アカウントへのリモート write。それ以外の login は通常
+   検証し、deny 文面は `gh auth login --skip-ssh-key` / `--hostname <host>
+   --skip-ssh-key` を案内する。aws / gcloud / firebase のログイン系に同種の副作用は
+   無い)、`gcloud auth login` /
+   `application-default login` / `revoke` / `set-quota-project` /
+   `activate-service-account` / `revoke` (firebase の `login` / `logout` は 0.7.3 で
+   対応済み。`npx firebase-tools login` の形も同じ扱いに揃えた)。いずれもクラウド
+   資源を変更せず、ローカルの認証状態・profile 設定を作るだけ。従来は `^aws\b` 等に
+   一致して検証され、SSO token 期限切れ等で `aws sts get-caller-identity` が失敗すると
+   deny 文面が案内する `aws sso login --profile <profile>` 自体が deny され、Claude
+   内で回復できなかった。`--with-token` / `--web` / `--key-file` 等のオプション付きも
+   資源に触らないため同じ扱い。READONLY に載せた形については accounts.local.json
+   未設定のプロジェクトでも deny しない。認証情報を出力する
+   `aws configure export-credentials` /
+   `gcloud auth application-default print-access-token` は `gh auth token` と同じく
+   検証対象のまま。
+   **素通しの基準は「コマンド名」ではなく「リモートに何も書かないと証明できる形」**
+   — 名前で括るとオプション次第で write に化ける形まで巻き込むため、証明できない
+   ものは READONLY に載せず、regex で表せない場合は `is_readonly()` で実効値を
+   解釈する。この基準により **`gh auth refresh` は READONLY に含めない** — 保存済み
+   認証情報の権限を拡張・修正するコマンドで、`gh auth refresh --scopes admin:org`
+   のように CLI OAuth app の grant scope をアカウント側 (= リモート) で変更しうる
+   ため、期待外アカウントに対してはリモート write と同じ扱いにする。`refresh` だけは
+   READONLY から外れるので accounts.local.json 未設定なら他の write と同様に deny
+   される (deny 文面は `refresh` を案内しないので remediation loop にはならない)。
+   一方 `STATE_CHANGING` には残すため、実行後の成功 cache は従来どおり破棄される。
+   **同じ論拠を `gh auth login` にも適用**し、`-s` / `--scopes` が付いた login も
+   readonly から外した (gh 2.98 `gh-auth-login.1`: `-s, --scopes <strings>
+   Additional authentication scopes to request`)。`gh auth login --skip-ssh-key
+   --scopes admin:org` は SSH 鍵操作こそ起きないが、`refresh --scopes` と同じく
+   アカウント側の OAuth grant を拡張する。`--scopes` は値を取る flag なので
+   `=false` では無効化できず、付いていれば無条件に readonly から外す
+   (`_login_is_keyless` が分離形 `-s <v>` / `=` 形 / 連結形 `-s<v>` を解釈し、
+   分離形は値 token も消費する)。deny 文面が案内するのは `--skip-ssh-key` /
+   `--hostname <host> --skip-ssh-key` の形だけなので remediation contract は壊れない。
+   `gh auth logout` (`-h/--hostname` / `-u/--user`) はローカル `hosts.yml` のエントリ
+   削除、`gh auth setup-git` (`-f/--force` / `-h/--hostname`) はローカル git config の
+   credential.helper 設定で、取りうるオプションを含めていずれもアカウント側の OAuth
+   grant には触れないため READONLY のまま (gh 2.98 の各 man page で確認)。
+2. **「deny 文面が案内するコマンドは必ず allow 経路にある」contract テスト** (内部バックログ) —
+   `tests/test_dispatcher.py::TestRemediationGuidanceContract` が各 service の verify
+   を mock せず subprocess だけ差し替えて実際の deny 文面 (不一致 / 未ログイン / 未設定
+   / SETUP_HINT) を生成し、案内コマンドを抽出して dispatcher に通す。案内コマンドは
+   readonly または self-remediation として検証なしで allow されるか、AWS の
+   `AWS_PROFILE=<profile> aws ...` はその env で検証されることを assert する。
+   今後 deny 文面に allow 経路の無いコマンドを書くと機械的に落ちる。
+3. **アカウント状態を変えうるコマンドで成功 cache を即時無効化** (内部バックログ) — 各 service
+   に `STATE_CHANGING` パターンを追加し、dispatcher が `gh auth switch` / `login` /
+   `logout` / `refresh`、引数ありの `firebase use ...` / `firebase login*` / `logout`、
+   `aws sso login` / `aws login` / `aws configure ...`、`gcloud config set` / `unset` /
+   `configurations activate` / `create` / `gcloud auth login` /
+   `activate-service-account` / `revoke` / `application-default` / `gcloud init`、
+   `kubectl config use-context` / `set-*` / `unset` / `delete-*` / `rename-context`
+   を検出すると、PreToolUse 時点で `cache.invalidate(service)` により当該 service の
+   entry を project / 期待値 / inline env を問わず全て破棄する (CLI のアカウント状態
+   はマシン全体で共有されるため service 単位)。readonly 扱いのログイン系や
+   self-remediation (期待値への切替) も無条件に破棄する (切替が失敗して状態が
+   変わらなかった場合に古い成功が残らないように)。あわせて**切替コマンドを含む
+   コマンドでは、その service の検証成功を cache しない** — 検証は実行前の状態に
+   対して行われるため、これを cache すると直後の write が切替後の状態を検証せずに
+   通る。判定は service 単位で、readonly の `gh auth login && gh pr create` や
+   inline env が異なる `gh auth switch --user other && GH_HOST=... gh pr create` の
+   write 側も cache しない。STATE_CHANGING は service の PATTERNS に一致しない候補
+   にも当てるため、`gcloud container clusters get-credentials` /
+   `aws eks update-kubeconfig` / `az aks get-credentials` / `kubectx` / `kubectl ctx`
+   のように別 CLI / plugin が kubeconfig を書き換える形でも kubectl の cache を
+   破棄する。表示系の `aws configure list` / `list-profiles` / `get` /
+   `export-credentials` は状態を変えないため対象外。従来は `gh pr list`
+   (検証成功・cache) → `gh auth switch --user other` → `gh pr create` が 30 秒以内
+   なら cache hit で別アカウントの write が通っていた (0.7.3 の README 注記を解消)。
+   cache ファイル名を `<service>-<sha256>.json` に変更 (service 単位の glob 削除の
+   ため。旧形式のファイルは読まれず TTL 後に無害なゴミとして残るのみ)。
+   **並行する hook との競合 (epoch + in-flight 窓)**: 無効化が entry の削除だけだと、
+   切替 hook と並行して走った同 service の hook が旧状態を検証して新しい entry を
+   書き、切替後に TTL 残り分だけ通る。`invalidate()` は service ごとの epoch
+   (`<service>.epoch`、`max(現在 + 1, time_ns)` で単調増加) と切替検出時刻
+   (tombstone) を先に書いてから削除し、entry には verify 開始時点の epoch を記録する。
+   読む側は epoch が現在と違えば無視、書く側は開始時と現在の epoch が違えば書かず
+   (`set_success(..., epoch=)`)、さらに tombstone から 60 秒 (`IN_FLIGHT_SEC`、定数)
+   以内は切替の実行中とみなして書かない。PreToolUse は実行前にしか走らず切替の
+   完了時刻が分からないため、この窓で「無効化後・切替完了前に開始した並行検証」の
+   結果が公開されるのを防ぐ (残る穴は 60 秒超の対話 login 中の並行検証のみ。README
+   既知の制限)。PostToolUse hook で実行後に無効化する案は、全 Bash 呼出に Python
+   プロセスが恒久的に乗ることと plugin 再読込の非互換を避けるため採用しない。
+   cache / epoch の書き込みは tmp + `os.replace` の atomic write。
+4. **AWS deny 文面の切替案内を Claude Code で効く形に** (内部バックログ) — 従来は
+   `export AWS_PROFILE=<profile>` を第一に案内していたが、Claude Code の Bash は
+   呼出ごとに env を持ち越さず、hook は Claude 本体の env を継承するため、`export`
+   しても次の `aws ...` は同じ理由で deny され続けた。案内を
+   `AWS_PROFILE=<profile> aws ...` (行頭インライン。この形のみ検証に反映) →
+   `aws sso login --profile <profile>` (1. で readonly 化) → 認証情報なしのときは
+   `aws configure` の順に改め、`export` は「次の呼出に持ち越されず検証にも反映され
+   ない (ターミナル側で設定して claude を起動し直す場合のみ有効)」の注記に変更した。
+   さらに `~/.aws/config` (`$AWS_CONFIG_FILE` / `~` 展開対応) を走査し、期待 Account
+   ID を `sso_account_id` (IAM Identity Center) または `role_arn`
+   (`arn:aws:iam::<id>:role/...`) に持つ profile (`[default]` 含む) があれば
+   `<profile>` を具体名にし、複数あれば一覧を添える。見つからなければ `<profile>`
+   のまま `aws configure list-profiles` (readonly) で確認するよう案内する。config の
+   profile 名以外の内容 (sso_start_url 等) は読んでも文面に出さない。
+5. **Firebase の dict 期待値 + 現在値未解決のときの案内** — 従来は
+   `firebase login && firebase use YOUR_PROJECT` (placeholder) を案内していたが、
+   `firebase use YOUR_PROJECT` を文字どおり実行すると self-remediation に乗らず同じ
+   deny を繰り返す。不一致時と同じ alias ごとの `firebase use <alias>  # → <project>`
+   一覧を案内するようにした (contract テストで dict + 未解決ケースを固定)。あわせて
+   期待値の形の検証 (空 dict / 非文字列) を CLI 呼出より前に移した。
+6. **`npx firebase-tools ...` 形の整合** — wrapper 剥がし後の `firebase-tools ...` は
+   PATTERNS (`^firebase\b`) に一致する一方、READONLY / self-remediation は
+   `^firebase\s+` だったため `npx firebase-tools login` が検証され (未ログインなら
+   deny)、`npx firebase-tools use prod` の切替も通常 write として cache されていた。
+   READONLY / STATE_CHANGING / self-remediation を `^firebase(?:-tools)?\s+` に揃えた。
+7. **AWS config 走査の堅牢化** — HOME 未設定で `Path.home()` が `RuntimeError` を投げる
+   環境でも例外を漏らさない (漏れると hook が異常終了して無音 fail-open)。
+   `AWS_CONFIG_FILE=~user/...` も展開する。
+8. **CLI 名直後の global option を剥がして判定** (PR #43 Codex P1) — AWS CLI は
+   `aws [global options] <command> <subcommand>` を受理し `--profile` は global
+   option のため、`aws --profile default configure sso` / `aws --profile prod sso login`
+   が READONLY / STATE_CHANGING の anchored pattern に一致せず、default profile の
+   成功 cache が 30 秒残って別アカウントの write が通り、login 形も readonly に
+   乗らなかった。`core/cli_options.py` の `strip_leading_options` が各 service の
+   宣言 (`GLOBAL_OPTIONS_WITH_VALUE` / `GLOBAL_FLAGS`: aws / gcloud / kubectl /
+   firebase。gh は root に `--help` / `--version` 以外の global option が無い) に
+   従って先頭の option を剥がし、元の形と剥がした形の両方で READONLY /
+   STATE_CHANGING を、剥がした形で self-remediation を判定する。剥がした option の
+   値は将来の flag 照合 (内部バックログ) 用に返し、deny 文面の検出コマンドには元の形を表示
+   する。未知の option が先頭にあれば剥がさず通常検証 (保守的)。`--help` /
+   `--version` は宣言しない (剥がすと `aws --version` が readonly から外れるため)。
+   **boolean flag の `--flag=<bool>` 形も剥がす** (Codex R5 P1-A) — Go の pflag /
+   cobra は bool に分離形 `--flag value` を許さず `=` 形のみ受け付けるため、
+   `kubectl --insecure-skip-tls-verify=true config use-context other` は正当な
+   呼び出し形。当初は `name in flags and not eq` として `=` 付きを「未知 option」
+   扱いで無変更にしており、STATE_CHANGING に当たらず切替後も古い成功 cache が
+   TTL 分残っていた。**値の真偽で剥がすかどうかは変えない** (剥がす目的は後続の
+   subcommand を見つけることで、flag の実効値は「どの操作が走るか」に影響しない)。
+   これは 内部バックログ の `--skip-ssh-key=false` (`github.is_readonly`) と同じ失敗形が
+   `cli_options` 側に残っていたもの。
+9. **README** — readonly 一覧に認証取得系を追加、self-remediation 節の「成功 cache 内は
+   再検証されない」注記と `export AWS_PROFILE` の記述を実装に合わせて更新、cache 節に
+   「切替・ログイン系コマンドでの即時無効化」の表を追加、解析対象に「CLI 名直後の
+   global option」を追記、既知の制限に「期待値以外への切替 + write を同一コマンドで
+   実行すると実行前の状態で検証される」を追記。
+10. **gcloud の release track 形を READONLY / STATE_CHANGING に含める**
+    (Codex R5 P1-B + 自己 sweep) — gcloud はほぼ全てのコマンドを `alpha` / `beta`
+    (一部 `preview`) でも公開しており、同じ操作が同じ副作用で走る。anchored pattern を
+    GA 形だけで書いていたため track 形がすり抜けていた。Codex の指摘は cross-CLI の
+    `gcloud beta container clusters get-credentials` (kubectl の cache を破棄すべき形)
+    だったが、自己 sweep の結果 **gcloud 自身の STATE_CHANGING 全パターンが同じ穴**
+    だった: `gcloud beta config set project other` が切替として検出されず、warm な
+    成功 cache が残ったまま次の `gcloud run deploy` が通っていた。共有の
+    `_TRACK = r"(?:(?:alpha|beta|preview)\s+)?"` を READONLY (`auth list` /
+    `config get-value` / 認証取得系) と STATE_CHANGING (`config set|unset` /
+    `configurations activate|create` / `auth` 系 / `init`) の各 anchored pattern に
+    入れ、kubectl 側の cross-CLI pattern には `(?:(?:alpha|beta)\s+)?` を入れた。
+    track × command の実在は SDK 生成物 `data/cli/gcloud_completions.py` の
+    command tree で確認 (config / init は alpha・beta・preview、auth 系と
+    container clusters get-credentials は alpha・beta)。存在しない組に当たっても
+    実行が失敗するだけなので prefix は全パターンで統一した。
+    **資格情報を出力する `auth print-access-token` /
+    `auth application-default print-access-token` は track 形でも READONLY にしない**
+    (0.8.0 の carve-out を track 追加で広げていないことをテストで固定)。
+
+### 非互換性
+
+- 切替・ログイン系コマンドの直後は必ず再検証が走る (cache hit しない)。切替コマンド
+  自身も (期待値以外への `gh auth switch` 等は) cache を使わず毎回検証する。
+- cache ファイル名の形式変更。`$TMPDIR/cc-mp-verify-cloud-account/` の旧形式
+  (`<sha256>.json`) は参照されなくなる。
+- 切替・ログイン系コマンドの検出から 60 秒間 (`IN_FLIGHT_SEC`) は当該 service の成功
+  cache を書かない (毎回再検証)。
+- 素の `gh auth login` (`--skip-ssh-key` / `--with-token` / `--git-protocol https` 無し)
+  は 0.8.0 でも従来どおり検証対象 (readonly にしたのは上記 3 形のみ)。
+- `-s` / `--scopes` 付きの `gh auth login` も検証対象 (`--skip-ssh-key` 等が付いていても
+  readonly にならない)。scope 要求はアカウント側の OAuth grant を拡張するため。
+- `gh auth refresh` も 0.8.0 で readonly にはしない (従来どおり検証対象)。
+  accounts.local.json 未設定 / 期待アカウント以外がアクティブなら deny される。
+  `STATE_CHANGING` には含めるので成功 cache の即時破棄は従来どおり働く。
+
+### 対象外 (別項で扱う)
+
+- 期待値以外への切替と write を同一コマンドで実行する形
+  (`gh auth switch --user other && gh pr create`)。hook は実行前の状態でしか検証
+  できないため、README の既知の制限に記載した。
+- 読み取り専用サブコマンド (`gh pr list` 等) の不一致時 allow + 警告 (内部バックログ)、
+  `--profile` / `--project` flag の解析 (内部バックログ)。
+
+### テスト
+
+- `tests/test_cache.py` に 4 件 (`invalidate` の service 単位破棄 / 他 service 非影響
+  / project・期待値・env 横断 / prefix 衝突なし)
+- `tests/test_dispatcher.py::TestAccountSwitchInvalidation` 13 件 (切替 → write の
+  再検証、切替自身を cache しない、readonly ログインと self-remediation の無効化、
+  全 service の切替表、readonly 切替 + write の複合や inline env 違いの別 target でも
+  cache しない、別 CLI 経由の kubeconfig 書換、`npx firebase-tools` 形、他 service
+  非影響、`firebase use prod && firebase deploy`、表示系 readonly は cache 維持、
+  未設定時の無効化)。**回帰ガードの実効性修正**: 上記と `TestLeadingGlobalOptions` の
+  無効化テストは subTest 間で cache dir を共有しており、前 row の tombstone
+  (in-flight 窓) が warm-up の cache publish を抑止するため、STATE_CHANGING を壊しても
+  green のままだった (24 ケースが vacuous)。row ごとに cache dir を作り直し、warm-up が
+  cache を publish したことを直接 assert するようにして、全ケースが mutation で
+  bite することを確認した
+- `tests/test_dispatcher.py::TestLoginCommandsReadonly` 3 件 (ログイン系 30 コマンドが
+  検証なしで allow / 未設定でも allow / 類似 write・認証情報出力・`gh auth refresh`
+  (裸形 / `-s repo` / `--scopes admin:org` / `--remove-scopes repo`) は従来どおり deny)
+- `tests/test_dispatcher.py::TestRemediationGuidanceContract` 14 件 (上記 2.)
+- `tests/test_services.py` に `TestAws` 5 件 (案内の順序と `export` 不在 / config から
+  の profile 解決 / 認証情報なし / HOME 不能時に例外を漏らさない) +
+  `TestAwsProfileScan` 8 件 + `TestFirebase` 3 件 (dict 未解決の alias 案内 / 不正な
+  形で CLI を叩かない / `firebase-tools use` の self-remediation) +
+  `TestAuthCommandPatterns` 3 件 (READONLY / STATE_CHANGING のパターン表)
+- `tests/test_cli_options.py` 新設 11 件 (global option 剥がしの形: `--opt value` /
+  `--opt=value` / flag / 短縮形 / `--` 終端 / 未知 option・値欠落・quote 不正は無変更 /
+  quote 保持 / `--help` `--version` は剥がさない) +
+  `tests/test_dispatcher.py::TestLeadingGlobalOptions` 7 件 (global option 先行形の
+  readonly 判定 / 切替での cache 無効化 (Codex P1 の再現) / 別 CLI 経由 kubeconfig /
+  self-remediation / deny 文面は元の形 / 未知 option は通常検証 / `--version` 維持)
+- `tests/test_cache.py` に epoch / in-flight 窓 10 件 (無効化で epoch が進み旧 epoch の
+  結果は書かれない / 窓内は現在の epoch でも書かない / 窓を過ぎれば書ける / 窓は
+  service 別 / 削除と競合して残った entry の無視 / epoch ファイル消失後の単調性 /
+  後方互換 / 破損 epoch / service 別 epoch / tmp 残骸なし) +
+  `tests/test_dispatcher.py::TestConcurrentInvalidationRace` 3 件 (検証中に無効化が
+  走った結果は公開されない / 無効化後・切替完了前に開始した検証は窓内で公開されない /
+  窓を過ぎれば cache が再開) +
+  `tests/test_main.py` 新設 4 件 (stdin → stdout E2E: 未設定 write の deny JSON /
+  readonly login は無出力で epoch を進める / 非対象コマンドと不正 JSON は無出力)
+- `tests/test_services.py::TestGithubLoginKeyless` 5 件 (login flag の実効 boolean:
+  有効 18 形 / 無効 18 形 / quote 不正時の fallback / `-s` `--scopes` 付きは
+  鍵操作抑止 flag があっても readonly にしない 11 形 / `--` 以降の `--scopes` は
+  引数扱い)
+- 新規 91 件のうち 60 件は旧実装 (0.7.3 の cache / dispatcher / services に差し替えて
+  実行、レビュー対応分は各修正前の実装) で fail することを確認済み。残りは旧実装でも
+  成り立つ契約の固定 (既存 self-remediation / readonly が案内コマンドを通すこと、
+  表示系 readonly が cache を保つこと、他 service の cache に影響しないこと、類似 write
+  の deny、検出コマンドの表示、未知 option の保守的扱い、tmp 残骸なし)
+
+テスト 352 → 443 件。
+
+## 0.7.3
+
+**Firebase の現在値解決順を firebase-tools 本体に合わせる (P0 bug fix,
+`services/firebase.py`)**: v0.3.2 以降は `.firebaserc` の `default` を
+`firebase use` の出力より優先していたが、firebase-tools (`lib/command.js` の
+applyRC) は `--project` → configstore の activeProjects (`firebase use
+<alias|project>` で更新) → `.firebaserc` の順で解決し、`firebase use X` は
+configstore しか書き換えない (`.firebaserc` は `--add` / `--alias` 時のみ)。
+このため 2 つの誤判定が起きていた:
+
+- **false-allow**: 期待値が `.firebaserc` の default (例 `proj-dev`) のとき、
+  `firebase use prod` で切り替えていても default で照合され `firebase deploy` が
+  prod に通っていた
+- **永久 deny**: 期待値 `proj-prod`・default `proj-dev` では `firebase use proj-prod`
+  を実行しても「現在=proj-dev」と判定され続けていた
+
+### 変更内容
+
+1. **解決順の反転** — `firebase use` (非 TTY では解決済み project ID を 1 行出力)
+   を最優先し、CLI から取れないとき (hook の PATH に無い / 非ゼロ終了 / 出力が空 /
+   複数行ヘルプ) だけローカル設定に fallback する。`get_active_account()`
+   (builder の `accounts-show` / `accounts-init` が使用) も同じ順。
+2. **fallback も applyRC と同じ規則・同じ情報源にする** — `.firebaserc` だけを
+   読むと `firebase use <alias>` の切替 (configstore にしか無い) を見落として
+   default で照合してしまうため、configstore
+   (`$XDG_CONFIG_HOME` または `~/.config` 配下の `configstore/firebase-tools.json`
+   の `activeProjects`、project_dir から親方向に探索) の切替先を `.firebaserc` の
+   alias で解決 → 無ければ alias が 1 つならその値 → `default` の順にした。
+   `npx firebase ...` / `pnpm exec firebase ...` のように hook 側に `firebase` が
+   無い構成でも切替を見落とさない。configstore は JSON として読むが
+   `activeProjects` 以外は使わず、内容をメッセージに出さない。
+   探索の起点は firebase-tools の `detectProjectRoot` と同じく `firebase.json` を
+   親方向に探した project root (無ければ cwd) で、monorepo の子ディレクトリで
+   Claude を起動しても親の `.firebaserc` で alias を解決できる。
+   `.firebaserc` / configstore が不正な形 (list /
+   非 UTF-8 等) でも例外にせず未解決扱い (従来は top-level が list だと
+   AttributeError で hook が異常終了 = fail-open)。
+3. **timeout の専用メッセージ** — `firebase use` が 10 秒でタイムアウトしたときは
+   `.firebaserc` に fallback せず「Firebase: firebase use がタイムアウトしました。
+   再試行するか、ネットワーク接続を確認してください。」で deny する (他 service
+   の timeout 文言と同形)。従来は timeout が「firebase login && firebase use ...」
+   の誤案内になっていた。fallback しないのは、`.firebaserc` が configstore の
+   切替を知らないため timeout 経路だけ false-allow が残るのを防ぐため (fail-closed)。
+4. **`firebase login` / `logout` を検証スキップ (READONLY) に** — CLI 優先化に伴う
+   regression 防止。未ログイン (`firebase use` が requireAuth で非ゼロ終了) かつ
+   configstore が期待外に切替済みだと、`firebase login` 自体が fallback の
+   configstore 値で deny され、案内される `firebase use <期待>` も認証必須で失敗する
+   デッドロックになるため。`login:ci` / `login:add` / `login:use` / `logout` を含む
+   (project を変更しない認証操作。直後の write は次回 hook で再検証される)。
+5. **CLI が PATH にあるが実行できないときに hook が異常終了しない** —
+   `subprocess.run` が投げる FileNotFoundError 以外の `OSError` (実行権限なし /
+   形式不正等) を firebase は「CLI 不可 → ローカル設定 fallback」に乗せ、他 4 service
+   (gh / aws / gcloud / kubectl) は「コマンドを実行できません」の deny にした。
+   従来は例外が漏れて hook が非ゼロ終了し、PreToolUse の無音 fail-open になっていた。
+6. **README** — 期待値取得の表と解説、readonly 一覧、切替後の再検証に関する注記
+   (成功 cache 内は再検証されない) を実装に合わせて更新。
+7. **`firebase use` の cwd を project root に固定** — 従来は hook / builder
+   プロセスの cwd を継承していたため、builder (`accounts-init` / `accounts-show`)
+   を project_dir の外から起動すると CLI 優先化によって無関係なディレクトリの
+   project を報告・書込しうる。`firebase.json` を親方向に探した project root
+   (無ければ project_dir) を cwd にし、ローカル設定 fallback と解決の起点を揃えた。
+   project_dir が存在しない場合は cwd 指定の `OSError` を CLI 不可として扱い、
+   従来どおり fallback する。
+
+### 非互換性
+
+- `firebase use <alias>` で default 以外に切り替えているプロジェクトでは、期待値が
+  default の project ID のままだと deny に変わる (本来の意図どおり)。`.firebaserc`
+  の default で運用しているプロジェクトは挙動不変。
+- `.firebaserc` があっても毎回 `firebase use` (認証チェックを含む) が走るように
+  なった (30 秒の成功 cache は従来どおり)。オフライン等で 10 秒を超えると
+  timeout deny になる。
+
+### 対象外 (別項で扱う)
+
+- 切替コマンド直後 30 秒以内の成功 cache による false-allow (`firebase use prod &&
+  firebase deploy` や、切替を allow した直後の deploy が cache hit で検証されない)。
+  全 service 共通の cache 無効化として別途対応する。
+- `--project` / `-P` flag による実行時 override。
+
+### テスト
+
+- `tests/test_services.py::TestFirebase` に 25 件追加 (CLI 優先 / false-allow と
+  永久 deny の解消 / timeout 専用メッセージ / 空出力・非ゼロ終了・実行不可
+  (PermissionError)・単一 alias の fallback / configstore の切替先参照 (CLI 不在・
+  非ゼロ終了・親ディレクトリ・実体パス・env の `XDG_CONFIG_HOME`・破損時) /
+  `firebase.json` を起点にした project root 解決 / `firebase use` の cwd 固定と
+  project_dir 不在時の扱い / 不正な `.firebaserc`)
+- `tests/test_services.py::TestCliExecErrors` 新設 4 件 (gh / aws / gcloud / kubectl
+  の `OSError` が deny 文字列になり例外が漏れない)
+- `tests/test_active_account.py::TestFirebaseActiveAccount` に 5 件追加 (CLI 優先 /
+  timeout は None / configstore 参照 / builder 経路の cwd 固定)、1 件を fallback
+  意味論の名前に変更
+- `tests/test_dispatcher.py::TestFirebaseResolutionOrderE2E` 4 件追加
+  (`firebase.verify` を mock せず subprocess だけ差し替えた end-to-end。npx 構成、
+  未ログイン + configstore 切替済みでの `firebase login` allow / `deploy` deny を含む)
+- 新規 38 件のうち 33 件は旧実装 (main) で fail することを確認済み (残り 5 件は
+  fallback 条件の仕様固定)
+
+テスト 314 → 352 件。
+
+## 0.7.2
+
+**D11 インライン env 伝播の透過 wrapper 挙動を監査・体系化 (ドキュメント + 回帰テスト)**:
+v0.7.0 (D11) で導入した「行頭インライン env を検証 subprocess に伝播する」設計が、
+PR #33 の Codex レビュー 3 round + その後の内部バックログで連続して env 関連 edge case
+(複合コマンド bypass / 透過 wrapper 跨ぎの override 漏れ / sudo の env scrub 未考慮)
+を生んだことを受け、**透過 wrapper × env 挙動を全数監査し、再発防止の guard を
+入れた**。コード挙動の変更は無し (直前の sudo 修正で現リストは健全と判定)、
+分類の固定化と将来 wrapper 追加時のガードのみ追加。
+
+### 変更内容
+
+1. **wrapper env 伝播クラスの分類宣言** (`core/command_parser.py`) —
+   `_WRAPPER_ENV_CLASS` を追加し、全透過 wrapper を `"passthrough"` (継承 env を
+   素通す → pre-wrapper env を伝播してよい) / `"conditional_scrub"` (フラグ依存で
+   scrub する → 無条件には伝播しない、現状 `sudo` のみ) に分類した。これは
+   parser の振る舞いそのものではなく**分類の宣言**で、実際の剥がし/収集は従来の
+   `_strip_one_wrapper` / `_normalize_segment` / `_sudo_preserves_env` が行う。
+   `env` は `_strip_one_wrapper` で特別扱い (オプション無しのみ剥がし、`env -i` /
+   `env -u` / `env --` は opaque) するため意図的に分類対象外。
+2. **分類 guard の回帰テスト** (`tests/test_command_parser.py`) —
+   `TestWrapperEnvClassificationGuard` (4 件) が「`_WRAPPERS_SINGLE/TWO/THREE` の
+   全要素が `_WRAPPER_ENV_CLASS` に分類済み」「死にエントリが無い」「分類値が既知」
+   「conditional_scrub は sudo のみ」を assert する。将来 wrapper を `_WRAPPERS_*`
+   に足したのに分類を忘れると即座に落ちるため、env 挙動の検討漏れによる
+   whack-a-mole 再発を機械的に防ぐ。
+3. **wrapper env 伝播の contract テスト** (`tests/test_command_parser.py`) —
+   `TestWrapperEnvPropagationContract` (5 件) が passthrough wrapper の pre-wrapper
+   env 伝播 / sudo の scrub・preserve / `env -i`・`-u`・`--` の opaque 維持 /
+   オプション無し `env` の収集を 1 つの表で固定化する。
+4. **監査ドキュメント追加** (`docs/wrapper-env-audit.md`) — wrapper × env 挙動の
+   完全な表 (実機 probe 根拠付き)、伝播可否の方針、誤 deny 回避ポリシーとの整合、
+   **将来 wrapper (`ssh` / `docker run -e` / `kubectl exec` 等) 追加時のチェック
+   リスト**を記録。`ssh` / `docker` / `kubectl exec` のように別実行コンテキストへ
+   移送する wrapper は「ローカル行頭 env が届かない」ため透過 wrapper に足さない
+   (検証スキップ = 誤 deny 回避ポリシーと整合) という原則を明文化。
+5. **README 追記** (`README.md`) — インライン env 伝播の節に「透過 wrapper を
+   跨ぐときの env 伝播」サブセクションを追加し、`sudo` の env scrub 挙動を利用者
+   向けに説明 + 監査ドキュメントへのリンクを張った。
+
+### 監査結論
+
+`sudo` の scrub 補正により**現行 wrapper リストの env 挙動はすべて正しく分類・
+処理されている**。`sudo` が唯一の env scrub wrapper、`env -i`/`-u`/`--` が唯一の
+env reset 形式で、どちらも対応済み。残る passthrough wrapper は実機で env 素通しを
+確認した。過剰な再設計 (全 wrapper allow-list 化等) は誤 deny を増やすため不採用とし、
+分類 guard で将来の再発を防ぐ方針とした。コードの検証ロジックは無変更。
+
+テスト 314 件 (新規 9 件: classification guard 4 + propagation contract 5)。
+
+## 0.7.1
+
+**sudo の env scrub を考慮した pre-sudo インライン env の非伝播 (セキュリティ修正)**:
+`AWS_PROFILE=prod sudo aws s3 rm s3://x` のように透過 wrapper (`sudo`) の**前**に
+インライン env を置くと、検証 subprocess には pre-sudo の `AWS_PROFILE=prod` が
+伝播する一方、実際の `sudo aws ...` は `-E`/`--preserve-env` 無しでは継承環境を
+scrub するため root のデフォルト環境 (prod 無し) で実行されていた。結果として
+「検証は prod / 実行は別アカウント」の非対称が生じ、未承認 profile で mutating
+コマンドが通る false-allow バイパスになりうる問題 (0.7.0 の D11 で混入) を修正した。
+
+### 変更内容
+
+1. **pre-sudo インライン env の scrub 補正** (`core/command_parser.py`) —
+   `_normalize_segment` が `sudo` を剥がす直前に preserve-env 指定の有無を判定し、
+   `-E` / `--preserve-env` / `--preserve-env=LIST` のいずれも無い場合は、それまでに
+   収集した pre-sudo env を破棄する。sudo が継承環境を scrub する実挙動に検証側を
+   合わせ、検証≠実行の非対称を解消する。env を捨てると検証はデフォルト環境で走り
+   deny されうるが、これは安全方向 (false-allow → 安全側 deny)。
+   - preserve-env 判定は新ヘルパ `_sudo_preserves_env()` が担当。`sudo` 直後の
+     flag 領域 (`--` 単独トークンまたは非 `-` トークンが来るまで) に preserve-env
+     フラグが現れるかを `_drop_wrapper_flags` と同じ flag 消費規則で走査する。
+     `--preserve-env=LIST` はリスト内容や sudoers の env_keep/env_reset まで静的に
+     不可知のため、preserve 指定があれば保守的に伝播を許す (保持しすぎ方向は誤 deny
+     を増やすだけで安全側)。
+   - **対象は sudo のみ**。`time` / `nohup` / `command` / `exec` / `env` 等の他
+     wrapper は env を scrub しないため pre-wrapper env 伝播 (D11) を従来どおり維持。
+   - **post-sudo の command-line env** (`sudo FOO=bar cmd` の `FOO=bar`) は sudo
+     自身が target へ渡すため伝播を維持する (pre-sudo env とは別物として扱う)。
+   - c731faf の inner-wins (内側 env 優先) 挙動は非 scrub wrapper で不変。
+2. **回帰テスト追加** (`tests/test_command_parser.py`) — `TestSudoEnvScrub` クラス
+   12 件を追加 (pre-sudo scrub / `-E`・`--preserve-env`・`--preserve-env=LIST` での
+   保持 / 非 sudo wrapper での D11 維持 / 多段 sudo 経由での drop / post-sudo
+   command-line env の伝播 / `sudo --` 終端 / inner-wins 維持)。あわせて従来
+   `FOO=bar sudo gh ...` がバグ挙動 (pre-sudo env 伝播) を固定化していた
+   `test_env_after_wrapper_collected` を、D11 本来の意図 (非 scrub wrapper の
+   pre-wrapper env 収集) を表す `test_env_before_nonscrub_wrapper_collected`
+   (`time` wrapper) に置き換えた。
+
+テスト 305 件 (新規 12 件、既存 1 件を正しい期待値に修正)。
+
+## 0.7.0
+
+**インライン環境変数の検証 subprocess への伝播 + 診断性改善**: コマンド行頭の
+インライン env (`AWS_PROFILE=prod aws ...`) が検証 subprocess に渡されず、SSO
+ログイン済みでも永久に deny される問題を解消した。あわせて deny の出所明示・
+情報系コマンドの誤検証防止・診断性向上を同梱。
+
+### 変更内容
+
+1. **インライン env の検証 subprocess への伝播** (`core/command_parser.py` +
+   `core/dispatcher.py` + 5 service files + `core/cache.py`) — 従来
+   `extract_candidates` は先頭 `KEY=VALUE` を剥がして捨てていたが、剥がした env
+   を保持して検証 subprocess に渡すようにした。`AWS_PROFILE=prod aws ...` の
+   インライン profile 運用で、ログイン済みでも default profile で検証が失敗し
+   永久 deny する問題 (剥がすが使わない非対称) を解消:
+   - `extract_candidates` が `(候補断片, inline_env dict)` を返す
+   - dispatcher が `{**os.environ, **inline_env}` をマージして `verify(env=)` に渡す
+     (マージは dispatcher に一元化し、service → core 依存を作らない)
+   - 各 service の `verify(expected, project_dir, env=None)` → 内部 `_run_*(env)` →
+     `subprocess.run(env=)`。env=None は従来どおり親環境継承 (後方互換)
+   - cache キーに inline_env を含め、profile A の成功が profile B で誤 allow されない
+   - 値に未展開の `$VAR` を含む env は静的解決不能のため伝播しない (剥がしはする)
+2. **deny メッセージの出所明示** (`core/output.py`) — 全 deny の先頭に
+   `[verify-cloud-account] ... (CLI 本体のエラーではありません)` タグを付け、
+   AWS CLI 等のナマエラー (`Unable to locate credentials` 等) と誤認され CLI
+   レベルの切り分けに時間を浪費するのを防ぐ
+3. **情報系コマンドの検証スキップ** (5 service files) — `aws --version` /
+   `gcloud help` 等のバージョン・ヘルプ表示コマンドを READONLY に追加。
+   `command aws --version` 等の診断コマンドが誤って検証対象になり deny される
+   問題を解消 (5 サービス共通の穴を一括対応)
+4. **検出セグメントの併記** (`core/dispatcher.py`) — verify 失敗の deny に
+   `(検出コマンド: ...)` を付け、複合コマンドのどのセグメントが検証を起動した
+   かを明示して診断性を改善
+5. **direnv / CLAUDE_ENV_FILE の制限を明文化** (README + 実装者ガイド) —
+   公式仕様 (hooks.md) で `CLAUDE_ENV_FILE` は PreToolUse hook に渡らない
+   (SessionStart / Setup / CwdChanged / FileChanged のみ) ため、`.envrc` /
+   direnv 経由の env は検証 subprocess に届かない。これは harness 仕様起因で
+   plugin では根本解決できないため、回避策 (インライン env / settings.json env /
+   起動時 env) を明記する方針とした
+
+テスト 280 件 (新規 19 件: env 抽出 6 + service env 伝播 6 + cache 分離 3 +
+dispatch 統合 4)。
+
+## 0.6.0
+
+**self-remediation loop の解消**: deny reason が案内する切替コマンド (例:
+`gh auth switch --hostname github.com --user <期待>`) 自体が自サービスの
+PATTERNS にマッチして deny され、案内に従えない問題を解消した。
+gh / gcloud / firebase / kubectl の 4 サービスで同型の loop を確認し一括対応。
+
+### 変更内容
+
+1. **期待値へ向かう切替コマンドの許可** (`core/dispatcher.py` + 4 service files) —
+   各サービスに `is_self_remediation(candidate, expected)` を追加し、dispatcher は
+   候補セグメントが全て期待値へ向かう切替のとき検証をスキップして許可する:
+   - github: `gh auth switch --user <期待>` (`-u` / `--user=` / dict 期待値の
+     `--hostname` 照合に対応、hostname 省略時は github.com)
+   - gcloud: `gcloud config set project|account <期待値>`
+   - firebase: `firebase use <期待 alias | project ID>`
+   - kubectl: `kubectl config use-context <期待値>`
+2. **安全性の維持**:
+   - 期待値以外への切替・`--user` 無し (インタラクティブ) は通常検証に落ちる
+   - 切替 + write の合せ技 (`gh auth switch -u X && gh pr create`) は write 側が
+     通常検証される (切替前の現在値で照合)
+   - remediation skip は成功キャッシュを書かないため、直後の write は再検証される
+   - 期待値が未設定のサービスは従来どおり設定誘導の deny
+   - aws は期待値 (Account ID) と切替手段 (profile / SSO) の照合が不能のため対象外
+     (主経路 `export AWS_PROFILE` はシェル組込で元々 hook 対象外)
+3. **`_collect_targets` の集約形式変更** (`core/dispatcher.py`) — 同一サービスの
+   候補セグメントを `(svc, [cand, ...])` に集約 (verify は従来どおりサービスごと 1 回)
+
+テスト 261 件 (新規 31 件: services 24 + dispatcher 7)。
+
+## 0.5.1
+
+**UX 改善 (P3)**: UX 監査の残 P3 フィードバック 9 件を反映。
+
+### 改善内容
+
+1. **Firebase CLI 未インストール検出** (`services/firebase.py`) —
+   `shutil.which` で CLI の存在を確認し、未インストール時は
+   `npm install -g firebase-tools` を案内 (従来は「プロジェクト取得
+   できません」と未設定と区別できなかった)
+2. **タイムアウト時の再試行案内** (4 service files) — 全サービスの
+   timeout エラーに「再試行するか、ネットワーク接続を確認してください」
+   を追加
+3. **.gitignore 自動エントリ追加** (`scripts/accounts_builder.py`) —
+   `init --commit` / `migrate --commit` 時に `.gitignore` へ
+   accounts.local.json のエントリを best-effort で追加。
+   `.gitignore` 未存在時は作成しない
+4. **GCP 複数エラーの表示階層** (`services/gcloud.py`) — dict 形式で
+   project + account の両方がエラーの場合、ヘッダ付きインデントリストで
+   表示
+5. **SETUP_HINT 重複出力の解消** (5 service files + `core/dispatcher.py`)
+   — 共通の init コマンド参照を dispatcher に集約し、SETUP_HINT は
+   サービス固有の最小 JSON 例のみに簡素化
+6. **README の CLAUDE.md 断リンク修正** (`README.md`) — 存在しない
+   `CLAUDE.md` へのリンクを修正
+7. **README に `--verbose` デバッグヒント追加** (`README.md`) —
+   hook 出力を確認する方法として `claude --verbose` を案内
+8. **plugin.json description 短縮** — 冗長な機能列挙を 1 文に集約
+9. **output.py warn hookEventName** — 確認済み、変更不要
+
+### スキップした P3
+
+- **deny-first 設計 (SessionStart 早期通知)** — 新規 hook 追加を伴う
+  設計変更のため今回はスキップ
+
+### テスト
+
+- Firebase CLI 未インストール検出テスト 1 件追加 (`test_services.py`)
+- .gitignore 自動エントリテスト 5 件追加 (`test_accounts_builder.py`)
+
+合計テスト件数: 222 → 228。
+
+## 0.5.0
+
+**UX 改善**: architect-reviewer 4 視点 UX 監査の P2/P3 フィードバックを反映。
+deny/warn メッセージの具体性向上、SETUP_HINT の最小 JSON 例追加、
+deprecation warn の alert fatigue 対策。
+
+### P2 (8 件)
+
+1. **AWS deny メッセージ改善** (`services/aws.py`) — stderr 先頭行を表示、
+   切り替え手順を `AWS_PROFILE` / `aws sso login` / `aws configure` の
+   3 パターンで具体化
+2. **Firebase deny メッセージ改善** (`services/firebase.py`) — alias → project
+   逆引き一覧を表示し `firebase use <alias>` の具体例を案内
+3. **Deprecation warn 1 日 1 回制限** (`core/dispatcher.py`) — tmpdir に
+   flag ファイルを置き同一プロジェクトへの warn を 86400 秒に制限。
+   deny 内の note は制限しない
+4. **GitHub str 形式の照合改善** (`services/github.py`) — 複数 host ログイン時
+   に `github.com` を優先照合、deny にホスト名を表示、dict 形式への移行案内
+5. **SETUP_HINT に最小 JSON 例追加** (5 service files) — 全サービスの
+   SETUP_HINT に `{"<key>": "<value>"}` の最小例を追加
+6. **skipped ケースの解決手順具体化** (`skills/accounts-init/SKILL.md`) —
+   `accounts-show` での比較 → 該当キー削除 → 再実行のステップを案内
+7. **marketplace.json category** — 既に設定済みのため変更不要
+8. **Skill triggers に英語フレーズ追加** (3 SKILL.md files) — 英語環境での
+   自動ロード率を向上
+
+### P3 (1 件)
+
+- **未設定 deny メッセージ改善** (`core/dispatcher.py`) — 「全サービス不要
+  なら記述不要」の 1 行を追加し、accounts.local.json が部分記述で OK と明示
+
+### 非互換性
+
+なし。メッセージ文言の改善のみで判定ロジックの変更はない。
+
+### テスト
+
+既存 222 テスト全 green (テストケースの追加なし)。
+
+## 0.4.0
+
+**Feature**: 親ディレクトリ遡及による `accounts.local.json` 発見。
+git worktree 配下で作業しているとき、worktree 内に `accounts.local.json`
+を複製しなくても親 repo (本体 checkout) の設定を自動で継承して検証する。
+
+### 主要な変更
+
+1. **`core/paths.py` に `discover_accounts_files_with_ancestors()` を追加** —
+   `project_dir` から始めて 1 階層ずつ親へ遡り、最初に accounts.local.json が
+   見つかった階層を採用する。`max_levels` (既定 10) で安全側の上限を持つ。
+2. **`core/dispatcher._find_accounts_file` を親遡及対応に拡張** — 返値に
+   `resolved_dir` を追加し、親階層採用時は deny / warn メッセージに
+   `accounts.local.json は親ディレクトリ <絶対パス> から継承しています
+   (worktree 内に同名ファイルは不要)。` の 1 行注釈を前置きする。
+3. **採用優先度** — cwd 階層に何か 1 つでもあればそこを採用 (親階層は見ない)。
+   親採用は cwd に何も無いときのフォールバック経路。
+4. **3-tier 競合 (D4) 維持** — 同一階層に new/deprecated/legacy が同居する
+   場合は従来どおり fail-closed deny。親遡及対象は「最初に見つかった階層」
+   のみで、複数階層を横断した競合検出はしない (worktree 親採用は曖昧では
+   ないため)。
+
+### 非互換性
+
+なし。cwd に accounts.local.json がある既存プロジェクトの挙動は完全に同じ。
+worktree から親 repo の accounts.local.json が継承される挙動は追加機能。
+
+### テスト
+
+- `tests/test_dispatcher.py::TestAncestorLookup` に 6 ケース追加
+  (親採用成功 / 失敗 deny + 親注釈 / cwd 優先 / 親階層 D4 競合 /
+   親含め未設定 / 親 deprecated パス warn)
+- `tests/test_dispatcher.py::TestAncestorDepthLimit` に 1 ケース追加
+  (`max_levels` 上限テスト)
+
+合計テスト件数: 215 → 222。
+
+### 想定ユースケース
+
+```
+/repo/main-checkout/.claude/verify-cloud-account/accounts.local.json
+/repo/main-checkout/.worktrees/feature-x/   ← cwd (worktree)
+```
+
+worktree (`/repo/main-checkout/.worktrees/feature-x/`) で `gh pr create` を
+叩いても、親 repo の `accounts.local.json` が継承されて検証が走る。
+
+## 0.3.2
+
+**Bug fix**: Firebase の `firebase use` 出力パース修正
+(`services/firebase.py`)。アクティブ project が無い状態で `firebase use`
+が出力する複数行ヘルプメッセージの末尾トークン (例: "folder.") を
+project ID として誤取得し、`.firebaserc` が正しく配置されていても
+全 firebase コマンドが「Firebase プロジェクト不一致: 現在=folder.」で
+block される回帰を修正。
+
+### 主要な変更
+
+1. **`_from_cli()` 堅牢化** — 単一行・単一トークンのみを project ID と
+   みなす。複数行 (ヘルプメッセージ) や空白を含む行は空文字を返す。
+2. **`_from_firebaserc()` 優先** — `get_active_account()` および `verify()`
+   の評価順序を `_from_firebaserc() or _from_cli()` に逆転。`.firebaserc`
+   が JSON で構造化された Firebase CLI 標準設定ファイルであり、CLI 出力
+   フォーマットの version 依存性を回避するため。
+
+### 非互換性
+
+なし。`.firebaserc` 配置プロジェクトは bug 解消、未配置プロジェクトは
+従来どおり `_from_cli()` にフォールバック (堅牢化により誤値ではなく
+`None` を返すように改善)。
+
+### テスト
+
+- `tests/test_active_account.py::TestFirebaseActiveAccount` に 2 ケース追加
+  (ヘルプメッセージ単独 / ヘルプメッセージ + `.firebaserc` 優先)
+- `tests/test_services.py::TestFirebase` に 1 ケース追加 (`verify()` 経由の
+  回帰防止)
+
+合計テスト件数: 212 → 215。
+
+## 0.3.1
+
+**プロジェクト側 `.claude/verify-cloud-account/CLAUDE.md` の builder 同梱**。
+Claude (LLM) が `accounts.local.json` を直接 Read / Write / Edit しようとして
+sensitive-files-guardrail 等で deny された後も、同ディレクトリの CLAUDE.md を
+覗いた瞬間に「builder 経由 (Bash) が正規経路」と理解できるようにする。
+
+### 主要な変更
+
+1. **builder が CLAUDE.md を同梱** —
+   `scripts/accounts_builder.py` の `init --commit` および `migrate --commit`
+   が成功した直後に、新パスのディレクトリ
+   (`.claude/verify-cloud-account/`) に `CLAUDE.md` を配置する。
+   既に存在する場合はスキップ (ユーザー編集を尊重)。テンプレートは
+   `scripts/templates/project_claude.md`。
+2. **best-effort** — テンプレート読み込み失敗・書き込み失敗のいずれも
+   warning 1 行を出すだけで builder 自体は成功させる。CLAUDE.md は
+   dispatcher が読みに来るパスではないため、欠損しても plugin 本体の動作には
+   影響しない。
+3. **疎結合の維持** — 本変更は verify-cloud-account 内で完結する。
+   sensitive-files-guardrail 側の deny reason やパターンには手を入れない
+   (cc-marketplaces の plugin 設計原則)。
+
+### 設計判断
+
+- **D6**: signpost を「埋め込まれた static 文字列」ではなく
+  `scripts/templates/project_claude.md` に切り出した。テンプレートだけ更新
+  すれば文言を反映できる + diff レビューが容易。
+- **D7**: `init --commit` での CLAUDE.md 生成は `action` (add / unchanged /
+  skipped) に依存しない。既存 `accounts.local.json` だけ持っていて signpost
+  が無いユーザーが、再度 init を流せば後付けで signpost を入れられる経路を
+  担保する。
+- **D8**: dry-run では生成しない。実際にファイルが書かれる commit 時のみ
+  signpost を置く (dry-run と commit の I/O 影響境界を一致させる)。
+
+### 非互換性
+
+なし。CLAUDE.md は dispatcher の判定経路に関与しないため、既存挙動への
+影響はない。
+
+### テスト
+
+`tests/test_accounts_builder.py::TestProjectClaudeMd` を新設 (8 ケース):
+
+- init/migrate commit で CLAUDE.md が生成される
+- 既存 CLAUDE.md は上書きしない
+- dry-run では生成しない
+- action=unchanged でも signpost が後付けされる
+- template 欠損時に builder が成功する (best-effort)
+
+合計テスト件数: 204 → 212。
+
+## 0.3.0
+
+**accounts.local.json builder + 配置パス刷新**。Claude (LLM) が
+accounts.local.json を安全に作成・参照・更新できる正規経路として
+`scripts/accounts_builder.py` を新設し、配置パスを
+`.claude/verify-cloud-account/accounts.local.json` へ移行。旧パスは
+deprecation 案内付きで後方互換、新旧両方存在時は fail-closed で deny。
+
+### 主要な変更
+
+1. **配置パスの 3-tier lookup + 競合時 fail-closed** — `core/paths.py` を新設し
+   定数 (`ACCOUNTS_FILE_NEW` / `ACCOUNTS_FILE_DEPRECATED` / `ACCOUNTS_FILE_LEGACY`)
+   と helper (`accounts_file_new()` / `discover_all_accounts_files()`) を提供。
+   `core/dispatcher._find_accounts_file` を書き直し、複数パス検出時は deny +
+   migrate 案内を返す。
+2. **builder スクリプト新設** — `scripts/accounts_builder.py` に `init` /
+   `show` / `migrate` の 3 サブコマンドを実装:
+   - 書込対象パスは `paths.ACCOUNTS_FILE_NEW` に固定 (argv 指定不可、assertion
+     で担保) — D2
+   - 既定で stdout の値は隠蔽、`--show-values` 明示時のみ露出 — D3
+   - 旧 → 新の統合は migrate で行う。値衝突時は自動マージせず deny — D5
+3. **Agent Skill 3 本** — `skills/accounts-init/SKILL.md` /
+   `skills/accounts-show/SKILL.md` / `skills/accounts-migrate/SKILL.md`。
+   いずれも「動作の安定とフォーマット統一のため builder 経由で操作する」
+   「値表示前に AskUserQuestion で承認を得る」フローを Claude プロンプトで
+   明示 — D1/D3。description のトリガから Claude が自発的にロードする。
+4. **services 公開 API 追加** — 5 service 全てに `get_active_account()` と
+   `suggest_accounts_entry()` を追加 (scalar / dict は service 側で自動選択)。
+   `_parse_active_accounts` は `parse_active_accounts` に昇格 (alias 残置)。
+   `services/__init__.py` の契約コメント更新。
+5. **SETUP_HINT の書き換え** — 従来の `mkdir -p .claude && echo ...` の手動
+   作成案内を削除し、`/verify-cloud-account:accounts-init` への誘導に置換。
+6. **テスト拡張**:
+   - `tests/test_active_account.py` 新設 (27 ケース: 5 service の
+     `get_active_account` / `suggest_accounts_entry` を subprocess mock でテスト)
+   - `tests/test_accounts_builder.py` 新設 (28 ケース: D2/D3 特化 + migrate 3
+     シナリオ + 値衝突 deny)
+   - `tests/test_dispatcher.py` に `TestPathMigration` クラス追加 (6 ケース:
+     3-tier lookup + 競合検出 deny)
+7. **ドキュメント刷新** — README.md / CLAUDE.md を新パス + builder + 設計判断
+   (D1〜D5) に対応。
+
+### 非互換性
+
+- 配置パスが `.claude/accounts.local.json` → `.claude/verify-cloud-account/accounts.local.json`
+  に移行。**旧パスのみの環境は後方互換で動作し続ける** が、deny/warn に
+  deprecation 案内が付く。**新旧両方存在する環境では fail-closed で deny**
+  される (D4)。
+- 旧パス → 新パスへの統合は `scripts/accounts_builder.py migrate --commit`
+  または `/verify-cloud-account:accounts-migrate` で行う。
+
+### D1〜D5 (設計判断の要点)
+
+- **D1**: 動作の安定とフォーマット統一のため、builder が唯一の正規書込/参照
+  経路。Agent Skill が対話フローを提供する。
+- **D2**: builder の書込対象は 1 ファイル固定 (argv で変えられない)。
+- **D3**: stdout の値表示は `--show-values` 明示時のみ。Agent Skill は
+  AskUserQuestion で第二段階の確認フローを提供。
+- **D4**: 複数パス存在は deny (自動採用せず)。
+- **D5**: migrate で旧 → 新を統合、値衝突は deny。
+
+## 0.2.0
+
+初期公開版 (以前のローカル hook からの plugin 化)。
