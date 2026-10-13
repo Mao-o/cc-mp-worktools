@@ -61,10 +61,10 @@
 - 通常の Read / Bash / Edit / Write 経路で、既定パターンに一致するファイルが
   検出されずに素通りする
 
-### `verify-cloud-account`
+### `cloud-account-guard`
 
 - 目的は**アカウント誤爆の予防**で、認証情報そのものの保護ではありません。
-  利用者が hook を無効化すれば検証は走りません (`VERIFY_CLOUD_ACCOUNT_MODE=off`)
+  利用者が hook を無効化すれば検証は走りません (`CLOUD_ACCOUNT_GUARD_MODE=off`)
 - Firebase の configstore などトークンを含むファイルを読みますが、使うのは
   プロジェクト識別子だけで、内容をメッセージに出しません。**ここに値が漏れる経路が
   あれば報告対象です**

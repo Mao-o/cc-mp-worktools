@@ -59,7 +59,7 @@ plugin 個々のバージョンは marketplace の ref とは別管理で、各 
 | `sensitive-files-guardrail` | 機密ファイル (.env, 秘密鍵等) のうっかり露出を予防する多段 hook (実値 redaction + .gitignore 未登録検出) | PreToolUse (Read/Bash/Edit/Write) + Stop | [README](plugins/sensitive-files-guardrail/README.md) |
 | `session-facts` | セッション開始時にリポジトリの分析結果 (スタック/スクリプト/env キー等) を Markdown で注入する hook | SessionStart + SubagentStart (Explore/Plan) | [README](plugins/session-facts/README.md) |
 | `external-ai-assist` | Cursor / Codex などの外部 AI CLI を並走・クロスレビューに使う hook 集 | PreToolUse (Agent/ExitPlanMode/Bash) + PostToolUse (Agent/Bash/Write/Edit/NotebookEdit) + Stop | [README](plugins/external-ai-assist/README.md) |
-| `verify-cloud-account` | Bash 実行前にクラウド CLI (gh/firebase/aws/gcloud/kubectl) のアクティブアカウントを検証する hook | PreToolUse (Bash) | [README](plugins/verify-cloud-account/README.md) |
+| `cloud-account-guard` | Bash 実行前にクラウド CLI (gh/firebase/aws/gcloud/kubectl) のアクティブアカウントを検証する hook | PreToolUse (Bash) | [README](plugins/cloud-account-guard/README.md) |
 | `file-split-advisor` | 行数 tier + 責務混在シグナルを組み合わせて分割検討メモを返す非 block hook | PostToolUse (Write/Edit) | [README](plugins/file-split-advisor/README.md) |
 | `verify-plugin-release` | `gh pr create` / `gh pr ready` の前に plugin repo の完了条件 (version bump・CHANGELOG・テスト・validate・競合) を検査し、満たさなければ PR 作成を止める hook | PreToolUse (Bash) | [README](plugins/verify-plugin-release/README.md) |
 | `worktree-cwd-guard` | linked worktree で動く session が、同じ repo の別の checkout (main 側や他の worktree) を git の書き込み操作や Write/Edit で書き換えるのを止める hook | PreToolUse (Bash/Write/Edit/MultiEdit/NotebookEdit) | [README](plugins/worktree-cwd-guard/README.md) |
@@ -76,7 +76,7 @@ plugin 個々のバージョンは marketplace の ref とは別管理で、各 
 |---|---|---|---|---|
 | `llms-docs` | **あり** (HTTPS GET) | 専用の 3 skill の取得先 (`code.claude.com` / `platform.claude.com` / `ai-sdk.dev` / `firebase.google.com`)、汎用 loader の同梱 presets の取得先 (`plugins/llms-docs/scripts/presets.json` の `url` / `index_url`。ホストの一覧は [llms-docs の README](plugins/llms-docs/README.md#同梱-presets))、利用者が `sources.json` に書いた URL | リクエストヘッダのみ (User-Agent, Accept-Encoding, 条件付き `If-None-Match` / `If-Modified-Since`)。リポジトリの内容・ファイル内容は送らない | 専用の無効化変数は無い。Skill を呼ばなければ取得は走らず、キャッシュが新しい間は再取得もしない。完全に止めるなら plugin を無効化する |
 | `external-ai-assist` | **あり** (第三者 AI CLI 経由) | Cursor CLI (`cursor-agent` / `cursor`) と Codex CLI (`codex`) が各社のクラウドへ送る | Explore サブエージェントの prompt、ExitPlanMode の plan 本文、そのターンに編集したパスの `git diff HEAD` | `EXTERNAL_AI_EXPLORE_PARALLEL=0` / `EXTERNAL_AI_PLAN_REVIEW=0` / `EXTERNAL_AI_POST_REVIEW=0` (既定はいずれも有効)。対象 CLI が PATH に無ければ何もしない |
-| `verify-cloud-account` | **あり** (間接) | 起動するクラウド CLI 経由。`gh auth status` はトークンを API で検証するため往復が入り、`aws sts get-caller-identity` は AWS STS を呼ぶ。`gcloud` / `kubectl` / `firebase` の照合はローカル設定の読み取り | CLI に渡すのは固定引数のみ。リポジトリの内容・`accounts.local.json` の中身・Firebase configstore のトークンは送らない | `VERIFY_CLOUD_ACCOUNT_MODE=off` (既定 `enforce`)。`off` は照合自体を行わず CLI も起動しない |
+| `cloud-account-guard` | **あり** (間接) | 起動するクラウド CLI 経由。`gh auth status` はトークンを API で検証するため往復が入り、`aws sts get-caller-identity` は AWS STS を呼ぶ。`gcloud` / `kubectl` / `firebase` の照合はローカル設定の読み取り | CLI に渡すのは固定引数のみ。リポジトリの内容・`accounts.local.json` の中身・Firebase configstore のトークンは送らない | `CLOUD_ACCOUNT_GUARD_MODE=off` (既定 `enforce`)。`off` は照合自体を行わず CLI も起動しない |
 | `sensitive-files-guardrail` | なし | — | ローカルの読み取りと read-only な `git` 呼び出しのみ | 該当なし |
 | `session-facts` | なし | — | ローカルの read-only な `git` 呼び出しのみ。env は `.env.example` 等のテンプレートから**キー名だけ**を読む (値は読まない) | 該当なし |
 | `file-split-advisor` | なし | — | 外部プロセスを一切起動しない | 該当なし |
@@ -107,7 +107,7 @@ CLI は読み取り権限を持つエージェントなので、作業ツリー�
 | `sensitive-files-guardrail` | 非対応 | PreToolUse/Stop hook 専用。Codex 側の対応可否は未検証 |
 | `session-facts` | **対応** (`.codex-plugin/`) | コアが必要とするのは SessionStart のみで Codex の hooks framework と互換。`SubagentStart`相当は matcher 未確認のため保留 |
 | `external-ai-assist` | 非対応 | PreToolUse/PostToolUse/Stop hook 専用。Claude 固有のツール名 (Agent/ExitPlanMode/NotebookEdit) に依存するため移植は未着手 |
-| `verify-cloud-account` | 非対応 | PreToolUse hook が主機能 (同梱 Skill 3 本は補助)。Codex 側の対応可否は未検証 |
+| `cloud-account-guard` | 非対応 | PreToolUse hook が主機能 (同梱 Skill 3 本は補助)。Codex 側の対応可否は未検証 |
 | `file-split-advisor` | 非対応 | PostToolUse hook 専用。Codex 側の対応可否は未検証 |
 | `verify-plugin-release` | 非対応 | PreToolUse (Bash) hook 専用。Codex 側の対応可否は未検証 |
 | `worktree-cwd-guard` | 非対応 | PreToolUse hook 専用。Codex 側の対応可否は未検証 |
@@ -136,6 +136,7 @@ Codex 側のコマンド引数はこの repo では未検証です。**正確な
 |---|---|---|
 | `doc-researcher` | `llms-docs` (0.9.0 で rename) | `/plugin uninstall doc-researcher@mao-worktools` → `/plugin install llms-docs@mao-worktools` |
 | `sensitive-files-guard` | `sensitive-files-guardrail` (0.14.x で rename) | `/plugin uninstall sensitive-files-guard@mao-worktools` → `/plugin install sensitive-files-guardrail@mao-worktools` |
+| `verify-cloud-account` | `cloud-account-guard` (0.23.0 で rename) | `/plugin uninstall verify-cloud-account@mao-worktools` → `/plugin install cloud-account-guard@mao-worktools`。設定ファイルと環境変数の移し方は下記 |
 | `agent-org` | 別 marketplace へ分離 (本 marketplace では削除) | `/plugin uninstall agent-org@mao-worktools` (後継 plugin は本 marketplace の対象外) |
 
 `sensitive-files-guard` → `sensitive-files-guardrail` の rename に伴い、
@@ -151,6 +152,26 @@ mv -n ~/.claude/sensitive-files-guard/patterns.local.txt ~/.claude/sensitive-fil
 
 新パスに既にファイルがある場合、`-n` により上書きせず何もしません。
 新パス側が権威なので、旧パスにしか無い行が必要なときだけ手で追記してください。
+
+`verify-cloud-account` → `cloud-account-guard` の rename では、設定の置き場所と
+環境変数の名前も変わりました。**旧パス・旧変数名は読まれません** (互換の読み込みは
+ありません)。移さないと、そのプロジェクトでは期待値ファイルが見つからない扱いになり、
+親ディレクトリやグローバル既定の期待値で照合されます。
+
+| 旧 | 新 |
+|---|---|
+| `<project>/.claude/verify-cloud-account/accounts.local.json` | `<project>/.claude/cloud-account-guard/accounts.local.json` |
+| `~/.claude/verify-cloud-account/accounts.local.json` (グローバル既定) | `~/.claude/cloud-account-guard/accounts.local.json` |
+| `VERIFY_CLOUD_ACCOUNT_MODE` / `_AUTO_SWITCH` / `_DEBUG` | `CLOUD_ACCOUNT_GUARD_MODE` / `_AUTO_SWITCH` / `_DEBUG` |
+| `/verify-cloud-account:*` (skill) | `/cloud-account-guard:*` |
+
+プロジェクトごとに次を実行し、`.gitignore` に旧パスを書いていた場合は新パスの行も
+足してください:
+
+```bash
+mkdir -p .claude/cloud-account-guard
+mv -n .claude/verify-cloud-account/accounts.local.json .claude/cloud-account-guard/accounts.local.json
+```
 
 plugin README にパス設定の詳細があります
 ([plugins/sensitive-files-guardrail/README.md](plugins/sensitive-files-guardrail/README.md))。
