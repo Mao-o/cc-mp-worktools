@@ -2,6 +2,35 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.40.0] - 2026-10-15
+
+### 追加: 汎用 loader の `anchor_style` と `show_overflow` (どちらも既定のままなら出力は変わらない)
+
+専用 parser 3 本を汎用 loader (`parse-llms-txt.py`) に統合する段階の 1 つ (検索結果の付加情報)。
+書かなければ `search` / `search-content` の出力は今までどおり (同梱 presets の出力は変わらない。
+`presets.json` は変えていない)。
+
+- `anchor_style`: `search` / `search-content` の各 `Section:` 行の末尾に ` [<ページ URL>#<anchor>]` を付ける。
+  `github` (単語を `-` でつなぐ。`parse-claude-docs.py` と同じ) と `devsite` (`_` でつなぐ。
+  `parse-firebase.py` と同じ) から選ぶ。anchor の作り方は専用 parser と共通の関数をそのまま使う。
+  ページ URL は `URL:` 行の URL から `.md`・`page_url_strip_suffix`・`#…`・末尾の `/` を外したもの
+  (`llms.txt` から付けた `….md` の URL や Firebase の `….md.txt` の URL に `#…` を付けても節には届かないため)。
+  クエリは残す (`?surface=cli` と `?surface=ide` のようにクエリだけ違うページで、anchor の URL を `<page_ref>`
+  に渡したときに別のページへ解かれないため)。
+  URL が `http(s)://` で始まらないページと、最初の見出しより前の本文には付けない。`page_url` か
+  `index_url` が要る
+- `show_overflow`: `true` で、`--max-hits` を超えて表示しなかったヒットのある節を各ページの末尾に
+  `Other sections with hits (not shown):` として並べる (`parse-claude-docs.py` と同じ)
+- `page_url_strip_suffix` を `anchor_style` とも組み合わせられるようにした (これまでは `page_ref_forms` の
+  `url` か `slug` が要った)
+- `search-content` の並べ替え (changelog のページを後ろへ、全語一致 → 部分一致 → ヒット数 → ページ順) は
+  汎用 loader が既に専用 parser と同じ規則で行っていたので、キーは足していない
+  (`--include-changelog-priority` も既にある)
+- 移行の照合テスト: Claude Code / Claude Platform の仮 profile に 2 つのキーを入れ、`search-content` の
+  fixture のケースが専用 parser の出力と一致するようになった。手元の全キャッシュで回すゲートにも、実在する
+  ページでの `search-content` のケース (Claude Code 2 件、Claude Platform 1 件) を足した
+- 専用 parser の anchor のテスト (Claude Code 4 件、Firebase 4 件) を汎用 loader 側に移した
+
 ## [0.39.0] - 2026-10-15
 
 ### 追加: 汎用 loader の `page_ref_forms` と `page_url_strip_suffix` (どちらも既定のままなら出力は変わらない)

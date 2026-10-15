@@ -189,6 +189,10 @@ CORPUS_CASES = [
      ["sections", "https://platform.claude.com/docs/en/api/messages/create", *_P]),
     ("cd-plat-corpus-sections-slug", "claude-docs", ["sections", "prompt-caching", *_P]),
     ("cd-plat-corpus-sections-slug-ambiguous", "claude-docs", ["sections", "messages/create", *_P]),
+    # anchor_style / show_overflow: Section: anchors and the overflow list
+    ("cd-code-corpus-search-content", "claude-docs", ["search-content", "PreToolUse matcher"]),
+    ("cd-code-corpus-search-content-page", "claude-docs", ["search-content", "matcher", "--page-ref", "hooks"]),
+    ("cd-plat-corpus-search-content", "claude-docs", ["search-content", "cache_control ttl", *_P]),
 ]
 
 
@@ -370,11 +374,13 @@ def compare(expected: str, actual: str, expected_err: str = "", actual_err: str 
 GENERIC_PROFILES = {
     "claude-code": {"url": "https://code.claude.com/docs/llms-full.txt", "split": "h1",
                     "page_url": "line:Source: ", "index_url": "https://code.claude.com/docs/llms.txt",
-                    "page_ref_forms": ["int", "url", "slug"]},
+                    "page_ref_forms": ["int", "url", "slug"],
+                    "anchor_style": "github", "show_overflow": True},
     "claude-platform": {"url": "https://platform.claude.com/llms-full.txt", "split": "frontmatter",
                         "page_url": "frontmatter:url", "index_url": "https://platform.claude.com/llms.txt",
                         "strip_trailing_headings": True, "min_heading_level": 2, "label": "Claude Platform",
-                        "page_ref_forms": ["int", "url", "slug"]},
+                        "page_ref_forms": ["int", "url", "slug"],
+                        "anchor_style": "github", "show_overflow": True},
     "ai-sdk": {"url": "https://ai-sdk.dev/llms-full.txt", "split": "frontmatter",
                "page_url": "frontmatter:url", "protect_tables": False, "compact_pack": True,
                "untitled_warn_ratio": 0.10, "label": "AI SDK", "tags_key": "tags",
@@ -411,6 +417,13 @@ GENERIC_PARITY_EXPECTED: frozenset = frozenset({
     "as-search-content",
     "as-content",
     "as-search",
+    # anchor_style "github" + show_overflow (the second on the fixture only).
+    # cd-plat-search-content matches on the fixture too, but its made-up
+    # query has no hit on the full corpus, where the old script's zero-hit
+    # output adds a ``Next:`` line (as in cd-code-search-content-zero);
+    # cd-plat-corpus-search-content covers the platform there
+    "cd-code-search-content",
+    "cd-code-search-content-page",
 })
 
 # Cases that match once the generic loader's ``    URL: …`` entry lines are
@@ -435,6 +448,7 @@ FIXTURE_ONLY_PARITY: frozenset = frozenset({
     "as-content",                  # title "Loom is not assignable"
     "as-content-heading",          # heading "API Signature" of page 3
     "as-sections",                 # title "useCompletion": one page in the fixture, many in the corpus
+    "cd-code-search-content-page", # slug "snapshotting"
 })
 
 # Cases where the full-corpus gate compares a failure on purpose (the error

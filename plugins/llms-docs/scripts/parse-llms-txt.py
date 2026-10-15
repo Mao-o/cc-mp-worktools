@@ -71,6 +71,7 @@ from _common import (  # noqa: E402
     search_content_rank_key,
     search_index_entries,
     search_rank_key,
+    section_url_anchor,
 )
 from _commands import (  # noqa: E402
     PageView,
@@ -103,6 +104,7 @@ _PROFILE_KEYS = {
     "strip_trailing_headings", "min_heading_level", "protect_tables", "compact_pack",
     "untitled_warn_ratio", "label", "cache_name", "tags_key", "frontmatter_yaml_values",
     "split_candidates", "join_rate_guard", "page_ref_forms", "page_url_strip_suffix",
+    "anchor_style", "show_overflow",
 }
 # Keys accepted only from the bundled presets. ``cache_name`` drops the URL
 # hash from the cache file name (to reuse the cache files of the dedicated
@@ -115,6 +117,10 @@ _MIN_HEADING_LEVELS = (1, 2)
 # default is the order before ``page_ref_forms`` existed.
 _PAGE_REF_FORMS = ("int", "url", "slug", "title", "url_substring")
 _DEFAULT_PAGE_REF_FORMS = ("int", "title", "url_substring")
+# How a ``Section:`` line links into its page (``heading_anchor_slug`` styles):
+# ``github`` = Mintlify / GitHub heading ids (words joined with ``-``),
+# ``devsite`` = Google DevSite heading ids (words joined with ``_``).
+_ANCHOR_STYLES = ("github", "devsite")
 _PAGE_REF_HELP = "Page number, or what the profile's page_ref_forms allow (title / URL substring by default)"
 PRESETS_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "presets.json")
 _PAGE_URL_FORMS = '"none", "frontmatter:<key>", "line:<prefix>" or "link:<link text>"'
@@ -316,7 +322,22 @@ def _validate_display_keys(path: str, name: str, raw: dict, profile: dict) -> No
     if guard and profile["page_url"] is None:
         _bad(path, f"sources.{name}.join_rate_guard needs page_url (the pages' own URLs are what the index is checked against)")
     profile["join_rate_guard"] = guard
+    _validate_hit_display_keys(path, name, raw, profile)
     _validate_page_ref_keys(path, name, raw, profile)
+
+
+def _validate_hit_display_keys(path: str, name: str, raw: dict, profile: dict) -> None:
+    """``anchor_style`` / ``show_overflow``: what a ``search`` /
+    ``search-content`` hit block adds (both off by default)."""
+    style = raw.get("anchor_style")
+    if style is not None:
+        if style not in _ANCHOR_STYLES:
+            _bad(path, f"sources.{name}.anchor_style must be one of: {', '.join(_ANCHOR_STYLES)} (or null)")
+        if profile["page_url"] is None and not profile["index_url"]:
+            _bad(path, f"sources.{name}.anchor_style needs page_url or index_url "
+                       f"(the anchor links into the page's URL)")
+    profile["anchor_style"] = style
+    profile["show_overflow"] = _bool_key(path, name, raw, "show_overflow", False)
 
 
 def _validate_page_ref_keys(path: str, name: str, raw: dict, profile: dict) -> None:
@@ -345,9 +366,9 @@ def _validate_page_ref_keys(path: str, name: str, raw: dict, profile: dict) -> N
         if (not isinstance(suffix, str) or not suffix or re.search(r"[\s/?#]", suffix)):
             _bad(path, f"sources.{name}.page_url_strip_suffix must be a suffix such as "
                        f'".md.txt" (no spaces, "/", "?" or "#"), or null')
-        if not needs_url:
+        if not needs_url and profile["anchor_style"] is None:
             _bad(path, f'sources.{name}.page_url_strip_suffix is only used by the "url" and "slug" '
-                       f"page_ref_forms")
+                       f"page_ref_forms and by anchor_style")
     profile["page_url_strip_suffix"] = suffix
 
 
@@ -1283,6 +1304,23 @@ def _headings(body_lines: list[str]) -> list[str]:
     return out
 
 
+def _anchor_for(profile: dict, doc: dict):
+    """``anchor_for`` of the hit renderers under ``anchor_style``: the leaf
+    title of a ``Section:`` line -> `` [<page URL>#<anchor>]``. The page URL
+    is the human-facing one: ``#…``, a trailing ``/``,
+    ``page_url_strip_suffix`` (``.md.txt``) and ``.md`` removed (a fragment
+    on a raw fetch URL resolves to nothing). The query stays: pages that
+    differ only by it (``?surface=cli`` / ``?surface=ide``) are different
+    pages, and the anchor's URL passed back as a ``url`` page ref has to
+    reach the page the hit came from. ``None`` (no anchors) without the key
+    or without an absolute page URL."""
+    style = profile["anchor_style"]
+    if style is None or not re.match(r"https?://", doc["url"] or ""):
+        return None
+    url = _ref_url_key_with_query(doc["url"], profile["page_url_strip_suffix"])
+    return lambda title: section_url_anchor(url, title, style=style)
+
+
 def _url_line(doc: dict) -> list[str]:
     """``    URL: …`` and, with ``tags_key``, ``    tags: a, b`` under a
     result heading (each only when the page has one)."""
@@ -1477,7 +1515,8 @@ def cmd_search_content(args):
         d = docs[idx]
         printed += 1
         shown.append((idx, hits, ()))
-        print_page_hits(f"[{idx}] {d['title'] or '(untitled)'}", hits, noun="document", extra_lines=_url_line(d))
+        print_page_hits(f"[{idx}] {d['title'] or '(untitled)'}", hits, noun="document", extra_lines=_url_line(d),
+                        anchor_for=_anchor_for(profile, d), show_overflow=profile["show_overflow"])
     if total == 0:
         print("No matching content found.")
         print()
@@ -1544,7 +1583,9 @@ def cmd_search(args):
     for r in results:
         tag = " [body-only]" if r["body_only"] else f" (index_score: {r['index_score']})"
         print_search_result(f"[{r['doc_idx']}] {r['title']}{tag}", r["body_hits"],
-                            extra_lines=_url_line(docs[r["doc_idx"]]))
+                            extra_lines=_url_line(docs[r["doc_idx"]]),
+                            anchor_for=_anchor_for(profile, docs[r["doc_idx"]]),
+                            show_overflow=profile["show_overflow"])
     print(f"({len(results)} documents, ranked via index → body)")
     print()
     # The top index candidate keeps a Next: line even when appended pages
