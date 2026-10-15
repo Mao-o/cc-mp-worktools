@@ -111,8 +111,11 @@ _PROFILE_KEYS = {
     "untitled_warn_ratio", "label", "cache_name", "tags_key", "frontmatter_yaml_values",
     "split_candidates", "join_rate_guard", "page_ref_forms", "page_url_strip_suffix",
     "anchor_style", "show_overflow", "rank_from", "index_join", "index_group_variants",
-    "link_annotations", "link_path_aliases",
+    "link_annotations", "link_path_aliases", "members",
 }
+# A profile with ``members`` is an alias of several sources for ``search``;
+# it reads no file of its own, so it takes no other key but these.
+_MEMBERS_PROFILE_KEYS = {"members", "description"}
 # Keys accepted only from the bundled presets. ``cache_name`` drops the URL
 # hash from the cache file name (to reuse the cache files of the dedicated
 # loaders), so a user profile must not set it: a user entry that reuses a
@@ -199,6 +202,8 @@ def _validate_profile(path: str, name: str, raw, at: str | None = None) -> dict:
     unknown = set(raw) - _PROFILE_KEYS
     if unknown:
         _bad(path, f"sources.{at} has unknown keys: {', '.join(sorted(unknown))}")
+    if "members" in raw and at == name:
+        return _validate_members_profile(path, name, raw)
     if raw.get("split") == "auto" and at == name:
         return _validate_auto_profile(path, name, raw)
     if "split_candidates" in raw:
@@ -273,6 +278,42 @@ def _validate_profile(path: str, name: str, raw, at: str | None = None) -> dict:
     profile["index_url"] = index_url
     _validate_display_keys(path, at, raw, profile)
     return profile
+
+
+def _validate_members_profile(path: str, name: str, raw: dict) -> dict:
+    """``members``: *name* is an alias that ``search`` runs on each listed
+    source in turn (the other commands read one source and refuse it). The
+    names are checked against the configured sources once the user file is
+    laid over the presets: a nested alias in ``load_sources``, a missing
+    member only when the alias is used (``_get_profile``)."""
+    extra = set(raw) - _MEMBERS_PROFILE_KEYS
+    if extra:
+        _bad(path, f"sources.{name} lists members, so it reads no file of its own: "
+                   f"{', '.join(sorted(extra))} cannot go with it (only members and description)")
+    members = raw["members"]
+    if (not isinstance(members, list) or len(members) < 2
+            or not all(isinstance(m, str) and _NAME_RE.match(m) for m in members)
+            or len(set(members)) != len(members)):
+        _bad(path, f"sources.{name}.members must be a list of 2 or more distinct source names")
+    if name in members:
+        _bad(path, f"sources.{name}.members must not name {name} itself")
+    if not isinstance(raw.get("description", ""), str):
+        _bad(path, f"sources.{name}.description must be a string")
+    return {"name": name, "members": tuple(members), "description": raw.get("description", ""),
+            "origin": path, "url": None, "split": "members", "cache_name": None, "label": None}
+
+
+def _check_members(sources: dict) -> None:
+    """No ``members`` entry names a configured source that is an alias
+    itself (an alias of aliases is refused, not flattened). A member that is
+    not configured (a preset renamed or removed by an update) is left to
+    ``_get_profile``, so it stops only a search on that alias, not every
+    command."""
+    for name, p in sources.items():
+        for member in p.get("members") or ():
+            if member in sources and sources[member].get("members"):
+                _bad(p["origin"], f"sources.{name}.members names {member!r}, which lists members "
+                                  f"itself ({sources[member]['origin']}); name the sources it lists instead")
 
 
 def _bool_key(path: str, name: str, raw: dict, key: str, default: bool) -> bool:
@@ -514,6 +555,7 @@ def load_sources(path: str, *, explicit: bool) -> dict:
         sources.update(_read_sources_file(path))
     elif explicit:
         die(f"no sources file at {path} (given by --sources-file or ${SOURCES_ENV}; {README_HINT})")
+    _check_members(sources)
     return sources
 
 
@@ -540,12 +582,33 @@ def _read_sources_file(path: str) -> dict:
     return profiles
 
 
-def _get_profile(args) -> dict:
+def _missing_members(sources: dict, profile: dict) -> list[str]:
+    """The ``members`` of *profile* that are not configured sources."""
+    return [m for m in profile.get("members") or () if m not in sources]
+
+
+def _get_profile(args, *, members_ok: bool = False) -> dict:
+    """The profile ``--source`` names. A ``members`` alias is only for
+    ``search`` (*members_ok*), which gets it with ``member_profiles``; any
+    other command exits 2 naming the sources to pick from."""
     sources = load_sources(args.sources_file, explicit=args.sources_file_explicit)
     if args.source not in sources:
         known = ", ".join(sorted(sources)) or "(none)"
         die(f"unknown --source {args.source!r}. Configured: {known}")
-    return sources[args.source]
+    profile = sources[args.source]
+    if profile.get("members"):
+        names = profile["members"]
+        missing = _missing_members(sources, profile)
+        if missing:
+            die(f"--source {args.source} lists members that are not configured sources: "
+                f"{', '.join(missing)} (in {profile['origin']}; a bundled preset may have been "
+                f"renamed or removed). Configured: {', '.join(sorted(sources))}")
+        if not members_ok:
+            die(f"--source {args.source} names several sources ({', '.join(names)}); only 'search' "
+                f"reads several at once. Give '{args.command}' one of them: "
+                + " / ".join(f"--source {m}" for m in names), code=2)
+        return dict(profile, member_profiles=[sources[m] for m in names])
+    return profile
 
 
 # ---------------------------------------------------------------------------
@@ -1489,13 +1552,23 @@ def _index_candidates(args, profile: dict, docs: list[dict]) -> list[dict]:
     return results
 
 
-def _source_hint_args(args) -> tuple:
-    """``--source`` is always required here, so it is always echoed. An
+def _source_hint_args(args, source: str | None = None) -> tuple:
+    """``--source`` is echoed unless a ``members`` search leaves it to each page (below). An
     explicit sources file (``--sources-file`` or ``$LLMS_DOCS_SOURCES_FILE``)
     is echoed as ``--sources-file`` too: the hint may run in a shell without
     that env var, where the same name could resolve to a bundled preset —
-    another corpus — instead of failing."""
-    out = ["--source", shlex.quote(args.source)]
+    another corpus — instead of failing.
+
+    *source* names the source in place of ``--source``. A ``search`` on a
+    ``members`` alias (``args.members``) passes the member a hint is for;
+    without one it leaves ``--source`` out, for the caller to put each
+    page's own ``--source`` next to its number (the alias opens no page)."""
+    if source is not None:
+        out = ["--source", shlex.quote(source)]
+    elif getattr(args, "members", None):
+        out = []
+    else:
+        out = ["--source", shlex.quote(args.source)]
     if args.sources_file_explicit:
         out += ["--sources-file", shlex.quote(args.sources_file)]
     if getattr(args, "index_file", None) is not None:
@@ -1751,7 +1824,12 @@ def cmd_sources(args):
     print("=" * 60)
     for name, p in sorted(sources.items()):
         origin = "preset" if p["origin"] == PRESETS_FILE else "user"
-        print(f"{name}  [{origin}, {p['split']}]  {p['url']}")
+        if p.get("members"):
+            missing = _missing_members(sources, p)
+            state = f"broken: {', '.join(missing)}" if missing else "search only"
+            print(f"{name}  [{origin}, members, {state}]  {' + '.join(p['members'])}")
+        else:
+            print(f"{name}  [{origin}, {p['split']}]  {p['url']}")
         if p["description"]:
             print(f"    {p['description']}")
     print()
@@ -1966,8 +2044,11 @@ def cmd_search_content(args):
                         query=args.query)
 
 
-def cmd_search(args):
-    profile, path, docs = _load_docs(args)
+def _search_results(args, profile: dict) -> tuple:
+    """Rank and drill one source for ``search``: ``(profile, path, docs,
+    results, from_index)`` with *results* in display order. *profile* is the
+    one the split chose (``split: "auto"``)."""
+    profile, path, docs = _load_docs(args, profile)
     _warn_if_untitled_ratio_high(profile, docs, path)
     if not args.query.strip():
         die("query must not be empty")
@@ -1982,13 +2063,6 @@ def cmd_search(args):
              "title": docs[idx]["title"] or "(untitled)", "url": None}
             for score, idx, _entry in scored
         ]
-    print(f'Search results for "{args.query}" ({_header_source(profile, path)})')
-    if from_index:
-        print(f"  (index: {args.index_file or _index_cache_path(args.cache_dir, profile)})")
-    else:
-        print(f"  (top-{args.top_n} candidate docs drilled into bodies)")
-    print("=" * 60)
-    print()
     # The full-corpus search also runs when the candidates have body hits but
     # none has every keyword in one section (full_corpus_extra_hits).
     # It takes one min_level for the whole corpus; every page of a profile
@@ -2003,6 +2077,44 @@ def cmd_search(args):
     ):
         results.append({"doc_idx": idx, "index_score": None, "body_hits": hits, "body_only": True,
                         "title": docs[idx]["title"] or "(untitled)", "url": None})
+    results.sort(key=lambda r: search_rank_key(r, include_changelog_priority=args.include_changelog_priority))
+    return profile, path, docs, results, from_index
+
+
+def _print_body_only_notice(profile: dict, results: list[dict]) -> None:
+    if all(r["body_only"] for r in results):
+        ranked_on = "title/description/tags" if profile.get("tags_key") else "title/description"
+        print(f"  (no {ranked_on} match — showing full-body search results instead)")
+        print()
+
+
+def _print_search_rows(profile: dict, docs: list[dict], results: list[dict], prefix: str = "") -> None:
+    """The result blocks of one source; *prefix* (``[<source>] ``) leads each
+    title line when several sources are listed together."""
+    for r in results:
+        tag = " [body-only]" if r["body_only"] else f" (index_score: {r['index_score']})"
+        # an index row shows the entry's URL (as llms.txt writes it); the
+        # anchor is made from it the same way as from a page's URL
+        shown = {"url": r["url"]} if r["url"] else docs[r["doc_idx"]]
+        print_search_result(f"{prefix}[{r['doc_idx']}] {r['title']}{tag}", r["body_hits"],
+                            extra_lines=_url_line(shown),
+                            anchor_for=_anchor_for(profile, shown),
+                            show_overflow=profile["show_overflow"])
+
+
+def cmd_search(args):
+    profile = _get_profile(args, members_ok=True)
+    if profile.get("members"):
+        _search_members(args, profile)
+        return
+    profile, path, docs, results, from_index = _search_results(args, profile)
+    print(f'Search results for "{args.query}" ({_header_source(profile, path)})')
+    if from_index:
+        print(f"  (index: {args.index_file or _index_cache_path(args.cache_dir, profile)})")
+    else:
+        print(f"  (top-{args.top_n} candidate docs drilled into bodies)")
+    print("=" * 60)
+    print()
     if not results:
         print("No matching documents found.")
         print()
@@ -2014,20 +2126,8 @@ def cmd_search(args):
                          index_hint_args=_source_hint_args(args) + corpus_hint_args(args),
                          scope="documents")
         return
-    if all(r["body_only"] for r in results):
-        ranked_on = "title/description/tags" if profile.get("tags_key") else "title/description"
-        print(f"  (no {ranked_on} match — showing full-body search results instead)")
-        print()
-    results.sort(key=lambda r: search_rank_key(r, include_changelog_priority=args.include_changelog_priority))
-    for r in results:
-        tag = " [body-only]" if r["body_only"] else f" (index_score: {r['index_score']})"
-        # an index row shows the entry's URL (as llms.txt writes it); the
-        # anchor is made from it the same way as from a page's URL
-        shown = {"url": r["url"]} if r["url"] else docs[r["doc_idx"]]
-        print_search_result(f"[{r['doc_idx']}] {r['title']}{tag}", r["body_hits"],
-                            extra_lines=_url_line(shown),
-                            anchor_for=_anchor_for(profile, shown),
-                            show_overflow=profile["show_overflow"])
+    _print_body_only_notice(profile, results)
+    _print_search_rows(profile, docs, results)
     if from_index:
         print(f"({len(results)} documents from {_label(profile)})")
     else:
@@ -2038,6 +2138,68 @@ def cmd_search(args):
     keep = next(((r["doc_idx"], ()) for r in results if not r["body_only"]), None)
     render_next_content(hit_candidates([(r["doc_idx"], r["body_hits"], ()) for r in results],
                                        keep=keep),
+                        hint_args=_source_hint_args(args) + corpus_hint_args(args),
+                        query=args.query)
+
+
+def _search_members(args, alias: dict) -> None:
+    """``search`` on a ``members`` alias: each member in the listed order, as
+    ``search --source <member>`` would rank it, under a ``--- <label>
+    (--source <member>) ---`` heading, each title line led by ``[<member>]``.
+    Page numbers are per source, so every ``Next:`` line carries its page's
+    own ``--source``. Every member is searched before anything is printed: a
+    member that cannot be read (no cache and no network, a join rate below
+    the guard) stops the whole search with its own error, rather than
+    printing the others as if they were all."""
+    names = alias["members"]
+    if not args.query.strip():
+        die("query must not be empty")
+    for opt, value in (("--file", args.file), ("--index-file", args.index_file)):
+        if value is not None:
+            die(f"{opt} is a file of one source, and --source {args.source} names several "
+                f"({', '.join(names)}): search one of them with {opt} (--source <name>)", code=2)
+    args.members = names
+    runs = [(member["name"], *_search_results(args, member)) for member in alias["member_profiles"]]
+    labels = " + ".join(_label(run[1]) for run in runs)
+    print(f'Search results for "{args.query}" ({labels}; source: {args.source})')
+    print("=" * 60)
+    print()
+    ranked = []
+    # The top index candidate (of the first member that has one) keeps a
+    # Next: line even when appended pages rank above it.
+    keep = None
+    for name, profile, _path, _docs, results, _from_index in runs:
+        extra = ("--source", shlex.quote(name))
+        ranked += [(r["doc_idx"], r["body_hits"], extra) for r in results]
+        if keep is None:
+            keep = next(((r["doc_idx"], extra) for r in results if not r["body_only"]), None)
+        print(f"--- {_label(profile)} (--source {name}) ---")
+        print()
+        if not results:
+            print(f"  (no matching documents in {_label(profile)})")
+            print()
+            continue
+        _print_body_only_notice(profile, results)
+        _print_search_rows(profile, _docs, results, prefix=f"[{name}] ")
+        print(f"({len(results)} documents from {_label(profile)})")
+        print()
+    if not ranked:
+        print("No matching documents found.")
+        print()
+        print("Tip: try broader keywords, another --source, or 'search-content' for a full-body scan")
+        for name, profile, _path, docs, _results, _from_index in runs:
+            print()
+            print(f"--- {_label(profile)} (--source {name}) ---")
+            render_zero_hits(args.query, (d["body_lines"] for d in docs),
+                             subcommand="search",
+                             hint_args=_source_hint_args(args, name) + corpus_hint_args(args),
+                             index_hint_args=_source_hint_args(args, name) + corpus_hint_args(args),
+                             scope="documents")
+        return
+    print(f"Note: page numbers are per source. For follow-up commands, pass the --source "
+          f"<{'|'.join(names)}> shown in brackets.")
+    print()
+    render_next_content(hit_candidates(ranked, keep=keep),
                         hint_args=_source_hint_args(args) + corpus_hint_args(args),
                         query=args.query)
 

@@ -295,6 +295,7 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `link_path_aliases` | | `link_annotations` のとき、同じページを指す別のパスの接頭辞の組のリスト (例 `[["/docs/en/", "/en/"]]`)。`(/…)` のリンクがそのままではどのページにも当たらないとき、組の片方の接頭辞をもう片方に置き換えて探す (両方向)。完全な URL のリンクには使わない。接頭辞は `/` で始まり `/` で終わる |
 | `label` | | 結果のヘッダに出す表示名 |
 | `cache_name` | | 同梱 presets 専用 (`sources.json` に書くとエラー)。キャッシュのファイル名を `<cache_name>-llms-full.txt` / `<cache_name>-llms.txt` にする |
+| `members` | | 2 つ以上の source 名のリスト (例 `["cloudflare-workers", "cloudflare-d1"]`)。この profile はファイルを読まない別名になり、`search --source <この名前>` が各 source を書いた順に検索する。結果は source ごとに `--- <label> (--source <source>) ---` の見出しの下に並び、各行の先頭に `[<source>]` が付く。ページ番号は source ごとなので、`Next:` の行はそのページの `--source` を持つ (別名のままではページを開けない)。`search` 以外のコマンドは終了コード 2 で止まり、選べる source を出す。`--file` / `--index-file` (1 つの source のファイル) とは一緒に使えない (終了コード 2)。どれか 1 つの source を読めない (キャッシュが無く取得にも失敗した、対応づけの割合が下限を下回った) ときは、何も出さずにその source のエラーで止まる。書けるキーは `members` と `description` だけ。別名 (`members` を持つ profile) と自分自身は書けない (`sources.json` で同梱 preset の source を別名に置き換えた場合も、その source を `members` に書いた別名はエラーになる)。存在しない source を書いた別名 (plugin の更新で同梱 preset の名前が変わった・無くなった場合を含む) は、その別名を `--source` に指定したときだけ、存在しない名前を出して止まる。ほかの source のコマンドはそのまま動き、`sources` の一覧ではその別名を `[user, members, broken: <存在しない名前>]` と出す |
 
 source 名は `^[a-z0-9][a-z0-9-]*$` (キャッシュのファイル名になるため)。未知のキーや不正な値は
 エラーにする。profile を試すときは `--file <手元の llms-full.txt>` で取得せずに読める (`--file` のときは
