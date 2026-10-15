@@ -42,7 +42,6 @@ import os
 import re
 import shlex
 import sys
-from collections import Counter
 from urllib.parse import urljoin
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
@@ -1275,7 +1274,9 @@ def _entry_docs(entries: list[dict], docs: list[dict] | None, profile: dict) -> 
     one whose query is the entry's too: ``?surface=cli`` and ``?surface=api``
     are different pages, as for a URL ``page_ref``. Else the last page with
     no query (``api?id=strings``, an anchor of the one ``api`` page); else,
-    for an entry with no query, the last page; else none (``?surface=web``
+    for an entry with no query, the first page (the one its URL as a
+    ``page_ref`` opens, as its ref does before llms-full.txt is cached when
+    the URL is listed twice); else none (``?surface=web``
     is not the ``cli`` or ``api`` page, and joining it would show their
     body under its title).
     ``"title"``: the page with the same title (as ``join_index_urls``
@@ -1300,7 +1301,9 @@ def _entry_docs(entries: list[dict], docs: list[dict] | None, profile: dict) -> 
             elif bare:
                 out.append(bare[-1])
             else:
-                out.append(pages[-1] if pages and "?" not in e["url"].split("#", 1)[0] else None)
+                # the first page, as a URL page_ref resolves it: the ref
+                # shown before llms-full.txt is cached opens the same page
+                out.append(pages[0] if pages and "?" not in e["url"].split("#", 1)[0] else None)
         return out
     entry_count: dict = {}
     for e in entries:
@@ -1325,19 +1328,19 @@ def _entry_refs(entries: list[dict], doc_of: list) -> list[str]:
     (only a URL with characters such as ``'`` or ``&`` in its path needs it),
     since it is meant to be put in place of ``<slug>`` in a command.
 
-    Entries whose URLs differ only by the query (``x?surface=cli`` /
-    ``x?surface=api``) share one slug, which would open the first of their
-    pages for each: such an entry with a query is shown by its full URL,
-    query included, which a URL ``page_ref`` resolves to the page with that
-    query (or, as for ``api?id=strings``, to the one page of that URL)."""
+    A slug drops the query, so it names whichever page of that URL the
+    resolver takes first: ``x?surface=cli`` listed once would open the
+    ``x?surface=api`` page when only that one is there. An entry with a
+    query is therefore always shown by its full URL, query included, which
+    a URL ``page_ref`` resolves to the page with that query, else to the
+    page of that URL with no query (``api?id=strings``, a place in the one
+    ``api`` page), else to no page."""
     slugs = build_unique_slugs([e["url"] for e in entries], avoid_dash=True)
-    shared = Counter(normalize_doc_url(e["url"]) for e in entries)
 
     def _ref(e: dict) -> str:
-        nu = normalize_doc_url(e["url"])
-        if shared[nu] > 1 and "?" in e["url"].split("#", 1)[0]:
+        if "?" in e["url"].split("#", 1)[0]:
             return shlex.quote(_ref_url_key_with_query(e["url"], None))
-        return shlex.quote(slugs.get(nu, "?"))
+        return shlex.quote(slugs.get(normalize_doc_url(e["url"]), "?"))
     return [str(idx) if idx is not None else _ref(e) for e, idx in zip(entries, doc_of)]
 
 

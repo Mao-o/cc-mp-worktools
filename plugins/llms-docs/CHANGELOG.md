@@ -22,7 +22,8 @@ All notable changes to this plugin will be documented here.
 - `index_join`: 項目とページの対応づけ方。`title` (既定。タイトルが両側で 1 つだけのとき。`page_url` の
   無い profile 用) / `url` (ページ自身の URL と、`.md`・クエリ・`#…`・末尾の `/` を無視して比べる。同じ URL の
   ページが複数あるときは、クエリまで一致するページを優先し、なければクエリの無いページ (`api?id=strings` のような
-  1 ページ内の位置を指すクエリ)、それも無ければ項目にクエリが無いときだけ最後のページ。どのページともクエリが
+  1 ページ内の位置を指すクエリ)、それも無ければ項目にクエリが無いときだけ先頭のページ (`page_ref_forms` の `url` と
+  同じ。`llms-full.txt` のキャッシュの有無で開くページが変わらないため)。どのページともクエリが
   合わない項目 (`?surface=web` で、ページは `cli` と `api` だけ) は対応づけない。別のクエリのページの本文を
   その項目のタイトルで出さないため)。`url` のときは `search` が
   対応づけの割合を見て、50% 未満なら終了コード 2、80% 未満なら WARNING を出す (`join_rate_guard` は
@@ -30,8 +31,9 @@ All notable changes to this plugin will be documented here.
 - `index_group_variants`: `fetch-index` で `X (Python)` / `X (Go)` のような項目の並びを 1 行にまとめ、
   `Variants:` の行を付ける
 - `rank_from: "index"` は `page_ref_forms` に `slug` と `url` が要る (一覧に出る URL の末尾を `sections` /
-  `content` に渡せるように。`llms.txt` に 2 回出る URL は完全な URL (クエリ込み) で出す。
-  `?surface=cli` と `?surface=api` のようにクエリだけ違う項目が同じ 1 ページに開かないため)。
+  `content` に渡せるように。クエリを持つ項目と、`llms.txt` に 2 回出る URL は完全な URL (クエリ込み) で出す。
+  URL の末尾はクエリを落とすため、一覧に 1 回しか出ない `x?surface=cli` でも、`llms-full.txt` に
+  `x?surface=api` のページしか無ければ黙ってそのページに開いてしまう)。
   `page_url` を書いた profile では `index_join: "url"` が要る (`title` で対応づけると、未キャッシュ時に出す URL の末尾がページ自身の URL と
   合わず開けないため)。`--file` のときは `--index-file` も要る (`--file` は通信しないため)。`--file` のときは
   `llms-full.txt` の取得の案内を出さず、対応づけが 0 件ならその旨だけを出す

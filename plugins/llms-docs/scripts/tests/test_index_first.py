@@ -265,12 +265,13 @@ class QueryVariantJoinTest(_Case):
                 self.assertIn("api zzq body", blocks["[1] Overview API"])
         self.assertEqual(self.calls, [])
 
-    def test_other_query_or_repeated_url_takes_the_last_page(self):
+    def test_which_page_of_a_shared_url_an_entry_joins(self):
         """The last page with the entry's query; else the last page with no
         query (``api?id=…`` anchors of one ``api`` page); else, for an entry
-        with no query, the last page; else none (``?surface=web`` is not the
-        cli or api page). Two pages with the very same URL: the last (as the
-        dedicated parser)."""
+        with no query, the first page (the one its ref opens before
+        llms-full.txt is cached: a URL page_ref takes the first); else none
+        (``?surface=web`` is not the cli or api page). Two pages with the
+        very same URL: the last (as the dedicated parser)."""
         profile = self.profile()
         docs = [{"title": t, "url": u} for t, u in (
             ("A", "https://example.com/docs/x?surface=cli"), ("B", "https://example.com/docs/x?surface=api"),
@@ -286,7 +287,7 @@ class QueryVariantJoinTest(_Case):
         except Exception as e:  # a crash is a failure, not an error of the run
             self.fail(f"_entry_docs crashed: {e!r}")
         # a page with no URL is joined to no entry, not even one whose URL is empty
-        self.assertEqual(got, [None, 0, 3, None, None, 6, 1])
+        self.assertEqual(got, [None, 0, 3, None, None, 6, 0])
 
     def test_entry_whose_query_no_page_has_is_skipped(self):
         """``?surface=web`` with pages for cli and api only: search skips the
@@ -406,8 +407,10 @@ class QueryVariantJoinTest(_Case):
         self.assertEqual(code, 0, err)
         self.assertIn("['https://example.com/api?id=strings'] Strings\n", out)
         self.assertIn("['https://example.com/api?id=numbers'] Numbers\n", out)
-        # a URL listed once keeps its slug, query or not
-        self.assertIn("[guide] Guide\n", out)
+        # an entry with a query is listed by its full URL even when its URL
+        # is listed once: a slug drops the query and could open another
+        # query's page; one with no query keeps its slug
+        self.assertIn("['https://example.com/guide?tab=a'] Guide\n", out)
         self.assertIn("[intro] Intro\n", out)
         next_line = next(ln[len("Next: "):] for ln in out.splitlines() if ln.startswith("Next: "))
         self.write(None, full_text)
@@ -856,6 +859,163 @@ class RefRoundTripTest(_Case):
         code, out, err = self.run_argv(argv)
         self.assertEqual(code, 0, err)
         self.assertRegex(out, r'^Sections in \[0\] "Hooks"')
+
+
+class QueryDecisionTableTest(_Case):
+    """index_join "url": every combination of the queries of the entries
+    sharing one URL in ``llms.txt``, of the pages sharing it in
+    ``llms-full.txt``, and of the way the refs are listed (``llms-full.txt``
+    not cached yet / cached / ``--file`` + ``--index-file``). Each ref a
+    listing prints, put in its ``Next:`` line as the line reads and split by
+    the shell rules, is run with ``sections``; and ``search`` is run. The
+    invariants:
+
+    * I1: an entry with a query opens its query's page, or a page with no
+      query (``api?id=strings``, a place in the one ``api`` page), never
+      another query's page. An entry with no query opens the page with no
+      query when there is one, else the first page of that URL (as a URL
+      page_ref resolves it)
+    * I2: an entry with a query that no page has, and no page without a
+      query, opens nothing (exit 1); an entry with a page opens it (exit 0)
+    * I3: the three ways open the same page (or all fail) for each entry
+    * I4: each ``search`` result shows the body of the page its entry opens
+
+    Repeated pages (the same URL and query twice) are copies that read the
+    same, as upstream repeats a page: which copy opens is not asserted.
+
+    One split of I3 is left as it is (``SLUG_SPLIT``): an entry with no
+    query, listed once, whose URL heads several pages, is listed by its
+    slug before ``llms-full.txt`` is cached, and a slug that several pages
+    end is ambiguous (exit 1, as with the dedicated parser: only the full
+    URL form picks one of them); the page number listed once the bodies
+    are cached opens the page. Pinned, so that a change to either side
+    shows here."""
+
+    URL = "https://example.com/docs/x"
+    QUERIES = {None: "", "cli": "?surface=cli", "api": "?surface=api"}
+    ENTRY_SHAPES = {"none": (None,), "cli": ("cli",), "none+cli": (None, "cli"),
+                    "cli+api": ("cli", "api"), "none*2": (None, None), "cli*2": ("cli", "cli")}
+    PAGE_SHAPES = {"no page": (), "none": (None,), "cli": ("cli",), "api": ("api",),
+                   "none+cli": (None, "cli"), "cli+api": ("cli", "api"), "none*2": (None, None),
+                   "cli*2": ("cli", "cli")}
+    SLUG_SPLIT = {("none", "none+cli"), ("none", "cli+api"), ("none", "none*2"), ("none", "cli*2")}
+    # pages that always join keep the join rate of search above its guard
+    FILLERS = ("alpha", "beta")
+    REF_RE = re.compile(r"^\[(.+?)\] (Entry \d|Filler \w+)(?: \(score: \d+\))?$", re.M)
+    OPENED_RE = re.compile(r'^Sections in \[\d+\] "Page (\w+)"')
+
+    @classmethod
+    def _corpus(cls, entry_qs: tuple, page_qs: tuple) -> tuple[str, str]:
+        index = "".join(f"- [Entry {k}]({cls.URL}{cls.QUERIES[q]}): zzq entry {k}\n"
+                        for k, q in enumerate(entry_qs))
+        index += "".join(f"- [Filler {f}](https://example.com/docs/{f}): zzq filler\n" for f in cls.FILLERS)
+        full = "".join(f"# Page {q or 'none'}\nSource: {cls.URL}{cls.QUERIES[q]}\n\n## Body\n"
+                       f"zzq marker-{q or 'none'}\n" for q in page_qs)
+        full += "".join(f"# Page {f}\nSource: https://example.com/docs/{f}\n\n## Body\nzzq marker-{f}\n"
+                        for f in cls.FILLERS)
+        return index, full
+
+    @staticmethod
+    def _expected(q, page_qs: tuple):
+        """The page (its query name) entry query *q* opens, or ``None``."""
+        if q is not None and q in page_qs:
+            return q
+        if None in page_qs:
+            return "none"
+        if q is None and page_qs:
+            return page_qs[0]
+        return None
+
+    def _listed(self, command: list, corpus: tuple, n_entries: int) -> tuple[dict, str]:
+        code, out, err = self.run_g(*command, corpus=corpus)
+        self.assertEqual(code, 0, err)
+        refs = {t: r for r, t in self.REF_RE.findall(out) if t.startswith("Entry ")}
+        self.assertEqual(sorted(refs), [f"Entry {k}" for k in range(n_entries)], out)
+        nexts = [ln[len("Next: "):] for ln in out.splitlines() if ln.startswith("Next: ")]
+        self.assertEqual(len(nexts), 1, out)
+        next_line = nexts[0]
+        if command[0] == "search-index":  # it points at search; open the ref with sections
+            next_line = f"{SCRIPT} sections <page_ref> " + next_line.split(" ", 3)[3]
+        return refs, next_line
+
+    def _open(self, next_line: str, ref: str):
+        """The page (its query name) the ref opens, or ``None`` on exit 1."""
+        placeholder = "<page_ref>" if "<page_ref>" in next_line else "<slug>"
+        try:
+            argv = shlex.split(next_line.replace(placeholder, ref), comments=True)
+        except ValueError as e:
+            self.fail(f"{ref}: not a shell command: {e}")
+        code, out, err = self.run_argv(argv)
+        if code == 1:
+            self.assertEqual(out, "", err)
+            return None
+        self.assertEqual(code, 0, err)
+        m = self.OPENED_RE.match(out)
+        self.assertIsNotNone(m, out)
+        return m.group(1)
+
+    def _opened_by_way(self, index: str, full: str, n_entries: int) -> dict:
+        """{way: {entry title: opened page or None}}, over fetch-index and
+        search-index (which must agree)."""
+        full_path, index_path = os.path.join(self.tmp, "f.txt"), os.path.join(self.tmp, "i.txt")
+        Path(full_path).write_text(full, encoding="utf-8")
+        Path(index_path).write_text(index, encoding="utf-8")
+        got = {}
+        for way in ("uncached", "cached", "file"):
+            corpus = ("--file", full_path, "--index-file", index_path) if way == "file" \
+                else ("--cache-dir", self.tmp)
+            per_command = []
+            for command in (["fetch-index"], ["search-index", "zzq"]):
+                if self.full_cache().exists():
+                    self.full_cache().unlink()
+                self.write(index, full if way == "cached" else None)
+                refs, next_line = self._listed(command, corpus, n_entries)
+                if way == "uncached":
+                    self.assertFalse(any(r.isdigit() for r in refs.values()), refs)
+                    self.write(None, full)  # the bodies get cached before the ref is used
+                per_command.append({t: self._open(next_line, r) for t, r in refs.items()})
+            self.assertEqual(per_command[0], per_command[1], f"{way}: fetch-index vs search-index")
+            got[way] = per_command[0]
+        return got
+
+    def _search_bodies(self, index: str, full: str) -> dict:
+        """{entry title: the marker of the body search shows under it}."""
+        self.write(index, full)
+        code, out, err = self.run_g("search", "zzq", "--top-n", "10")
+        self.assertEqual(code, 0, err)
+        shown = {}
+        for block in re.split(r"\n(?=\[\d+\] )", out):
+            m = re.match(r"\[\d+\] (Entry \d) \(index_score", block)
+            if m:
+                markers = set(re.findall(r"marker-(\w+)", block))
+                self.assertEqual(len(markers), 1, block)
+                shown[m.group(1)] = markers.pop()
+        return shown
+
+    def test_every_cell_keeps_the_invariants(self):
+        for e_name, entry_qs in self.ENTRY_SHAPES.items():
+            for p_name, page_qs in self.PAGE_SHAPES.items():
+                with self.subTest(entries=e_name, pages=p_name):
+                    index, full = self._corpus(entry_qs, page_qs)
+                    got = self._opened_by_way(index, full, len(entry_qs))
+                    for k, q in enumerate(entry_qs):
+                        title = f"Entry {k}"
+                        want = self._expected(q, page_qs)
+                        opened = {way: got[way][title] for way in got}
+                        if (e_name, p_name) in self.SLUG_SPLIT:
+                            self.assertIsNotNone(want)
+                            self.assertEqual(opened, {"uncached": None, "cached": want, "file": want})
+                            continue
+                        # I3: the three ways agree
+                        self.assertEqual(len(set(opened.values())), 1,
+                                         f"{title} ({q or 'no query'}) opens {opened}")
+                        # I1 / I2: the expected page, or nothing
+                        self.assertEqual(opened["cached"], want, f"{title} ({q or 'no query'})")
+                    # I4: search shows each entry with the body of its page
+                    shown = self._search_bodies(index, full)
+                    want_shown = {f"Entry {k}": self._expected(q, page_qs) for k, q in enumerate(entry_qs)}
+                    self.assertEqual(shown, {t: p for t, p in want_shown.items() if p is not None})
+        self.assertEqual(self.full_fetches(), 0)
 
 
 class DefaultProfilesUnchangedTest(_Case):
