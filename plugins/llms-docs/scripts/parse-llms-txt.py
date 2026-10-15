@@ -502,7 +502,10 @@ def _frontmatter_at(lines: list[str], pos: int, required_key: str,
     ``\\"`` / ``\\\\`` resolved in double quotes and ``''`` in single
     quotes; indented lines continue an unquoted or single-quoted value, fill
     a key written with no value, and make up a ``|`` / ``>`` block scalar
-    (joined with spaces in every case: a value is shown on one line).
+    (joined with spaces in every case: a value is shown on one line). An
+    indented line starting with ``- `` is text under a value or a block
+    scalar, and a list item only under a key with no value. A block scalar
+    with no lines under it is empty.
     Indented ``key:`` lines under a key with no value are a nested mapping
     and are not read. Which lines open, belong to and close the block does
     not depend on *yaml_values*.
@@ -544,6 +547,12 @@ def _frontmatter_at(lines: list[str], pos: int, required_key: str,
             if cont_key is not None and cont_mode in ("empty", "list"):
                 cont_mode = "list"
                 lists.setdefault(cont_key, []).append(_fm_unquote(line.strip()[1:]))
+            elif (yaml_values and cont_mode in ("plain", "block")
+                  and _FM_CONTINUATION_RE.match(line)):
+                # an indented line under a plain value or a block scalar is
+                # text even when it starts with ``- `` (YAML reads it so)
+                parts[cont_key].append(line.strip())
+                indented.add(cont_key)
             continue
         if _FM_CONTINUATION_RE.match(line):
             if cont_mode == "empty" and _FM_NESTED_KEY_RE.match(line):
@@ -578,6 +587,9 @@ def _frontmatter_at(lines: list[str], pos: int, required_key: str,
             cont_key, cont_mode, parts[key] = key, "empty", [""]
         elif _FM_BLOCK_SCALAR_RE.match(value):
             cont_key, cont_mode, parts[key] = key, "block", [None]
+            if yaml_values:
+                # a block scalar with no lines under it is empty
+                fields[key] = ""
         elif not (value[0] in "'\"" and len(value) > 1 and value[-1] == value[0]):
             # unquoted, a flow ``[a, b]`` / ``{…}`` or an open single quote
             cont_key, cont_mode, parts[key] = key, "plain", [value]

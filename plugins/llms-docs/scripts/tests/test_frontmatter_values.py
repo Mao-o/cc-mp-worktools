@@ -237,6 +237,34 @@ class YamlValuesTest(unittest.TestCase):
                 self.assertEqual(_split(text, frontmatter_yaml_values=True)[0]["description"],
                                  f"{not_indicator} a")
 
+    def test_block_scalar_keeps_lines_that_look_like_list_items(self):
+        # an indented ``- `` line under a plain value or a block scalar is
+        # text in YAML, not a list item that is dropped
+        for fm, want in (("description: |\n  - a\n  - b\n", "- a - b"),
+                         ("description: >\n  intro\n  - x\n", "intro - x"),
+                         ("description: foo\n  - bar\n", "foo - bar")):
+            with self.subTest(fm=fm):
+                lines = ("---\ntitle: T\n" + fm + "---\nbody\n").splitlines(keepends=True)
+                fields, end, _lists = generic._frontmatter_at(lines, 0, "title", yaml_values=True)
+                self.assertEqual(fields["description"], want)
+                # the page boundary is the same with the key off
+                self.assertEqual(end, generic._frontmatter_at(lines, 0, "title")[1])
+                self.assertEqual(end, len(lines) - 1)
+
+    def test_unindented_list_line_does_not_continue_a_plain_value(self):
+        lines = "---\ntitle: T\ndescription: foo\n- bar\n---\nbody\n".splitlines(keepends=True)
+        fields, end, _lists = generic._frontmatter_at(lines, 0, "title", yaml_values=True)
+        self.assertEqual((fields["description"], end), ("foo", 5))
+
+    def test_empty_block_scalar_is_empty(self):
+        for indicator in ("|", ">-"):
+            for after in ("---\n", "url: https://example.com/x\n---\n"):
+                with self.subTest(indicator=indicator, after=after):
+                    text = f"---\ntitle: T\ndescription: {indicator}\n{after}body\n"
+                    self.assertEqual(_split(text, frontmatter_yaml_values=True)[0]["description"], "")
+                    # the default keeps the indicator, as before the key existed
+                    self.assertEqual(_split(text)[0]["description"], indicator)
+
     def test_closed_quoted_value_is_not_continued(self):
         text = "---\ntitle: T\ndescription: \"done\"\n  stray\n---\nbody\n"
         self.assertEqual(_split(text, frontmatter_yaml_values=True)[0]["description"], "done")
@@ -299,6 +327,13 @@ class TagsTest(unittest.TestCase):
     def test_list_under_a_key_with_a_value_is_not_its_list(self):
         text = "---\ntitle: T\ntags: solo\n  - stray\n---\nbody\n"
         self.assertEqual(_split(text, tags_key="tags")[0]["tags"], ["solo"])
+
+    def test_block_scalar_tags_are_text(self):
+        # ``tags: |`` then ``- a`` is the text ``- a`` in YAML, read as one
+        # comma-separated tag (parse-ai-sdk.py reads it as the list ``[a]``)
+        text = "---\ntitle: T\ntags: |\n  - a\n---\nbody\n"
+        self.assertEqual(_split(text, tags_key="tags", frontmatter_yaml_values=True)[0]["tags"], ["- a"])
+        self.assertEqual(_split(text, tags_key="tags")[0]["tags"], ["|"])
 
     def test_a_later_key_ends_the_list(self):
         text = "---\ntitle: T\ntags:\n  - a\nother: \"v\"\n  - b\n---\nbody\n"

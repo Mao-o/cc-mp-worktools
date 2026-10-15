@@ -12,8 +12,9 @@ All notable changes to this plugin will be documented here.
 - `frontmatter_yaml_values` (`split: frontmatter` のみ): frontmatter の値を YAML どおりに読む。
   引用符を 1 組だけ外し、二重引用符の中の `\"` / `\\` と一重引用符の中の `''` を戻す
   (AI SDK のタイトル `TypeScript error "Cannot find module …"` が、今までは `\"` を含んだまま末尾が
-  欠けていた)。インデントされた次の行を値の続きとして読み、`|` / `>` のブロックスカラー
-  (`>-` などの指示子つきを含む) も読む。どれも空白でつないで 1 行にする。値の無いキーの下の
+  欠けていた)。インデントされた次の行を値の続きとして読み (`- ` で始まる行も、値のあるキーと
+  ブロックスカラーの下では値の続き)、`|` / `>` のブロックスカラー (`>-` などの指示子つきを含む) も
+  読む。どれも空白でつないで 1 行にする。中身の無いブロックスカラーは空の値になる。値の無いキーの下の
   インデントされた `key:` 行は入れ子の mapping として読まない。ページの区切りはこのキーで変わらない。
   既定にしなかったのは、同梱 presets の手元のコーパスで値の変わるページがあったため
   (Vite の `description: >-` 2 ページ、Vercel の `\"` を含む description 2 ページ)
@@ -22,7 +23,8 @@ All notable changes to this plugin will be documented here.
   (`search-index` / `search`)、`fetch-index` / `search-index` / `search-content` / `search` の
   各項目に `    tags: a, b` の行 (URL の行の後)、`content` / `sections` のヘッダに `# doc_tags:` の行
   として出る。`search` が本文検索に切り替わったときの注記は `(no title/description/tags match …`
-  になる。規則は `parse-ai-sdk.py` と同じ
+  になる。`parse-ai-sdk.py` の規則に合わせ、インデントの無い `- a` の行と空の `[]` も読む。
+  続き行に書いたカンマ区切り (`tags:` の次の行の `a, b`) は `frontmatter_yaml_values` のときだけ読む
 
 確認:
 
