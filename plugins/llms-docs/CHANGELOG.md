@@ -29,7 +29,13 @@ All notable changes to this plugin will be documented here.
   `sources.json` に書くとエラーにする。URL のハッシュを含まない名前なので、利用者が同じ名前の
   profile を別の URL で書いたときに、preset のキャッシュを読み書きしないようにするため
   (利用者の profile は今までどおり URL のハッシュ入りの名前を使う)。値は source 名と同じ規則
-  (`^[a-z0-9][a-z0-9-]*$`) で検証し、presets の中での重複もエラーにする
+  (`^[a-z0-9][a-z0-9-]*$`) で検証し、presets の中での重複もエラーにする。ファイル名から URL が
+  消える代わりに、キャッシュの `.meta.json` に取得 URL を記録し、記録した URL と取得しようとする URL が
+  違えば `--max-age` に関係なく再取得する。このとき前の URL の ETag / Last-Modified は送らず、取得に
+  失敗しても前の URL のキャッシュは返さない (別の corpus を返すことになるため、キャッシュが無いときと
+  同じくエラーにする)。URL を記録していない `.meta.json` (この版より前に書かれたもの) は一致とみなす。
+  `.meta.json` は全 script 共通の取得処理が書くので、専用 parser 3 本のキャッシュにも URL が記録されるが、
+  出力は変わらない
 
 確認:
 
@@ -39,6 +45,8 @@ All notable changes to this plugin will be documented here.
   `strip_trailing_headings` + `min_heading_level: 2` の profile のタイトル・URL・本文・節の一覧が
   一致する。fixture では全ページの `sections <番号>` の出力も一致する。どちらかのキーを外すと
   一致しなくなることもテストで固定した
+- マージ前レビューの指摘で、全文検索への切り替えを実際には通っていなかったテスト、末尾の H1 見出しを
+  除くこと、URL のハッシュから付くファイル名の値を固定していなかったテストを直した
 - parity harness の `GENERIC_PARITY_EXPECTED` には足していない。slug と URL でページを指す
   `sections` のケースと `content` のケースは fixture では一致するが、手元の全キャッシュでは
   ページ参照の解決 (slug / URL の形) とリンクの注釈が違い、一致しないため (後の段階で扱う)

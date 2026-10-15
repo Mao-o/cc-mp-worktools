@@ -156,7 +156,7 @@ pytest scripts/tests/test_common.py::ParseLlmsIndexTest::test_colon_description_
 | claude-docs (Platform) | `claude-platform-llms.txt`, `claude-platform-llms-full.txt` |
 | ai-sdk | `ai-sdk-llms-full.txt` |
 | firebase | `firebase-llms.txt` (index), `firebase-docs/` (per-page) |
-| 任意サイト (`parse-llms-txt.py`、presets 含む) | `generic-<source 名>-<url のハッシュ 12 桁>-llms-full.txt` (profile の URL を変えると別ファイルになる) |
+| 任意サイト (`parse-llms-txt.py`、presets 含む) | `generic-<source 名>-<url のハッシュ 12 桁>-llms-full.txt` (profile の URL を変えると別ファイルになる)。`cache_name` を持つ preset は `<cache_name>-llms-full.txt` / `<cache_name>-llms.txt` (URL を含まない名前なので、キャッシュの `.meta.json` に記録した取得 URL が profile の URL と違えば再取得する) |
 
 最新版が必要な場合は `--max-age 0` で強制再取得する（`rm` でも良いが、`fetch_url` は取得失敗時に既存キャッシュを stale なまま使い続けるフォールバックを持つため、`--max-age 0` の方が「取得できなければ既存キャッシュのまま」という安全側の挙動になる）。
 

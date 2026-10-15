@@ -417,7 +417,7 @@ class GzipAndConditionalGetTest(unittest.TestCase):
         with open(self._meta_path(cache_path), encoding="utf-8") as f:
             meta = json.load(f)
         self.assertEqual(meta, {
-            "content_hash": _common._content_hash(b"hello"),
+            "content_hash": _common._content_hash(b"hello"), "url": "https://example.com/x",
             "etag": '"abc123"', "last_modified": "Wed, 01 Jan 2026 00:00:00 GMT",
         })
 
@@ -446,7 +446,8 @@ class GzipAndConditionalGetTest(unittest.TestCase):
             _common.fetch_url("https://example.com/x", cache_path, user_agent="ua")
         with open(self._meta_path(cache_path), encoding="utf-8") as f:
             meta = json.load(f)
-        self.assertEqual(meta, {"content_hash": _common._content_hash(b"hello")})
+        self.assertEqual(meta, {"content_hash": _common._content_hash(b"hello"),
+                                "url": "https://example.com/x"})
 
     def test_response_without_validators_still_persists_a_content_hash(self):
         # A server that never sends ETag/Last-Modified must not leave a
@@ -462,7 +463,8 @@ class GzipAndConditionalGetTest(unittest.TestCase):
             _common.fetch_url("https://example.com/x", cache_path, user_agent="ua")
         with open(self._meta_path(cache_path), encoding="utf-8") as f:
             meta = json.load(f)
-        self.assertEqual(meta, {"content_hash": _common._content_hash(b"hello")})
+        self.assertEqual(meta, {"content_hash": _common._content_hash(b"hello"),
+                                "url": "https://example.com/x"})
 
     def test_sidecar_write_failure_does_not_fail_an_otherwise_successful_fetch(self):
         # The cache file itself is already written by the time the sidecar
@@ -900,6 +902,101 @@ class GzipAndConditionalGetTest(unittest.TestCase):
         self.assertEqual(result, cache_path)
         with open(cache_path) as f:
             self.assertEqual(f.read(), "stale content")
+
+
+class RecordedUrlTest(unittest.TestCase):
+    """The sidecar records the requested URL. A cache whose name doesn't
+    carry the URL (a preset's ``cache_name``) is fetched again when the URL
+    it is asked for differs from the recorded one — even with
+    ``max_age=None`` — and is never served for the other URL."""
+
+    OLD = "https://old.example/llms-full.txt"
+    NEW = "https://new.example/llms-full.txt"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.cache_path = os.path.join(self.tmp, "site-docs-llms-full.txt")
+        with open(self.cache_path, "w") as f:
+            f.write("old corpus")
+
+    def _write_meta(self, **extra):
+        meta = {"content_hash": _common._content_hash(b"old corpus"), "etag": '"old-etag"',
+                "last_modified": "Wed, 01 Jan 2026 00:00:00 GMT", **extra}
+        with open(self.cache_path + ".meta.json", "w", encoding="utf-8") as f:
+            json.dump(meta, f)
+
+    def _read(self):
+        with open(self.cache_path) as f:
+            return f.read()
+
+    def test_a_different_recorded_url_is_fetched_again_without_validators(self):
+        self._write_meta(url=self.OLD)
+        captured = {}
+
+        def _capture(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["if_none_match"] = req.get_header("If-none-match")
+            captured["if_modified_since"] = req.get_header("If-modified-since")
+            return _FakeResponse(b"new corpus", url=self.NEW)
+
+        with mock.patch("urllib.request.urlopen", side_effect=_capture):
+            result = _common.fetch_url(self.NEW, self.cache_path, user_agent="ua")
+        self.assertEqual(result, self.cache_path)
+        self.assertEqual(captured, {"url": self.NEW, "if_none_match": None, "if_modified_since": None})
+        self.assertEqual(self._read(), "new corpus")
+        with open(self.cache_path + ".meta.json", encoding="utf-8") as f:
+            self.assertEqual(json.load(f).get("url"), self.NEW)
+
+    def test_the_same_recorded_url_or_none_serves_the_cache(self):
+        # no url: a sidecar written before the url was recorded (or one whose
+        # url isn't a string, which the loader discards) counts as a match,
+        # so upgrading doesn't re-fetch every cache once
+        for label, extra in (("same url", {"url": self.NEW}), ("no url", {}),
+                             ("url not a string", {"url": 1})):
+            with self.subTest(label):
+                self._write_meta(**extra)
+                # AssertionError is not among the errors fetch_url catches,
+                # so a fetch reaches the test as a failure
+                with mock.patch("urllib.request.urlopen",
+                                side_effect=AssertionError("fetched although the cache matches")):
+                    result = _common.fetch_url(self.NEW, self.cache_path, user_agent="ua")
+                self.assertEqual(result, self.cache_path)
+                self.assertEqual(self._read(), "old corpus")
+
+    def test_a_failed_fetch_does_not_fall_back_to_the_other_urls_cache(self):
+        failures = {
+            "transport error": urllib.error.URLError("offline"),
+            "HTTP error": _http_error(503, self.NEW),
+            # validators are not sent, so a 304 can't confirm this cache
+            "304": _http_error(304, self.NEW),
+        }
+        for label, error in failures.items():
+            with self.subTest(label):
+                self._write_meta(url=self.OLD)
+                with mock.patch("urllib.request.urlopen", side_effect=error), \
+                        contextlib.redirect_stderr(io.StringIO()) as err:
+                    with self.assertRaises(SystemExit) as cm:
+                        _common.fetch_url(self.NEW, self.cache_path, user_agent="ua")
+                self.assertEqual(cm.exception.code, 1)
+                self.assertIn(f"Failed to fetch {self.NEW}", err.getvalue())
+                self.assertNotIn("using cached copy", err.getvalue())
+                with mock.patch("urllib.request.urlopen", side_effect=error), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(_common.FetchError):
+                        _common.fetch_url(self.NEW, self.cache_path, user_agent="ua",
+                                          max_age=604800, raise_on_error=True)
+                self.assertEqual(self._read(), "old corpus")
+
+    def test_a_failed_fetch_of_the_same_url_still_serves_the_stale_cache(self):
+        self._write_meta(url=self.NEW)
+        old_time = time.time() - 8 * 86400
+        os.utime(self.cache_path, (old_time, old_time))
+        with mock.patch("urllib.request.urlopen", side_effect=urllib.error.URLError("offline")), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            result = _common.fetch_url(self.NEW, self.cache_path, user_agent="ua", max_age=604800)
+        self.assertEqual(result, self.cache_path)
+        self.assertIn("using cached copy", err.getvalue())
 
 
 class LoadLinesTest(unittest.TestCase):

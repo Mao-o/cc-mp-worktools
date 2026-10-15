@@ -8,6 +8,7 @@ accepted only from the bundled presets, so its tests point ``PRESETS_FILE``
 at a temporary presets file. No network: fetches go to a fake.
 """
 
+import hashlib
 import json
 import os
 import tempfile
@@ -174,6 +175,14 @@ class StripTrailingHeadingsTest(unittest.TestCase):
                                                        drop_lines=["^Was this helpful"]))
         self.assertEqual([x for x in docs[0]["body_lines"] if x.strip()][-1], "More setup.\n")
 
+    def test_a_trailing_h1_is_dropped_too(self):
+        lines = ["---\n", "title: Delta\n", "url: https://example.com/delta\n", "---\n", "\n", "Delta text.\n", "\n", "# X\n", "\n"]
+        off = generic.split_documents(lines, _profile())
+        on = generic.split_documents(lines, _profile(strip_trailing_headings=True))
+        self.assertIn("# X\n", off[0]["body_lines"])
+        self.assertNotIn("# X\n", on[0]["body_lines"])
+        self.assertEqual([x for x in on[0]["body_lines"] if x.strip()][-1], "Delta text.\n")
+
 
 class MinHeadingLevelTest(_CliCase):
     def test_level_reaches_every_page(self):
@@ -200,13 +209,15 @@ class MinHeadingLevelTest(_CliCase):
         self.assertIn("Section: a shell comment outside any fence", out)
 
     def test_full_corpus_fallback_uses_the_floor(self):
-        # "setup" ranks Alpha by heading, but no candidate has both words in
-        # one section, so the full-corpus search runs with the profile floor
-        for profile, section in (({"min_heading_level": 2}, "Section: Setup "),
-                                 ({}, "Section: a shell comment outside any fence")):
+        # "more" is in no title, description or heading, so no candidate is
+        # ranked and only the full-corpus search finds the body line; it runs
+        # with the profile floor
+        for profile, section in (({"min_heading_level": 2}, "Section: Setup  (x1)"),
+                                 ({}, "Section: a shell comment outside any fence  (x1)")):
             with self.subTest(profile=profile):
-                code, out, err = self.run_cli(profile, "search", "more setup")
+                code, out, err = self.run_cli(profile, "search", "more")
                 self.assertEqual(code, 0, err)
+                self.assertIn("[body-only]", out)
                 self.assertIn(section, out)
 
 
@@ -361,8 +372,11 @@ class CacheNameTest(unittest.TestCase):
         self.write_presets({"site": {"url": URL, "split": "h1", "index_url": "https://example.com/llms.txt"}})
         code, err, calls = self.fetch_paths()
         self.assertEqual(code, 0, err)
-        self.assertRegex(calls[0][1], r"/generic-site-[0-9a-f]{12}-llms-full\.txt$")
-        self.assertRegex(calls[1][1], r"/generic-site-[0-9a-f]{12}-llms\.txt$")
+        full = hashlib.sha256(URL.encode("utf-8")).hexdigest()[:12]
+        index = hashlib.sha256(b"https://example.com/llms.txt").hexdigest()[:12]
+        self.assertEqual(calls, [(URL, str(self.cache / f"generic-site-{full}-llms-full.txt")),
+                                 ("https://example.com/llms.txt",
+                                  str(self.cache / f"generic-site-{index}-llms.txt"))])
 
     def test_user_entry_of_the_same_name_does_not_inherit_the_cache_name(self):
         # a user profile that reuses the preset's name for another URL must
