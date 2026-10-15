@@ -4,7 +4,7 @@
 to each ``Section:`` line of ``search`` / ``search-content``, as
 ``parse-claude-docs.py`` (github) and ``parse-firebase.py`` (devsite) do. The
 page URL is the human-facing one: ``.md``, ``page_url_strip_suffix``
-(``.md.txt``), query and ``#…`` removed. ``show_overflow`` lists the sections
+(``.md.txt``) and ``#…`` removed, the query kept. ``show_overflow`` lists the sections
 with hits beyond ``--max-hits`` (``Other sections with hits (not shown):``),
 as ``parse-claude-docs.py`` does. Both are off by default.
 
@@ -269,12 +269,12 @@ class AnchorEdgeTest(_Cli):
         self.assertNotIn("[/relative", out)
         self.assertEqual(len(section_lines(out)), 3, out)
 
-    def test_query_and_fragment_of_the_page_url_are_dropped(self):
+    def test_fragment_of_the_page_url_is_dropped_and_its_query_kept(self):
         page = ("# Q\nSource: https://example.com/q/?surface=cli#top\n\n## Part one\nkeyword\n")
         self.write(page)
         code, out, err = self.run_cmd("github", "search-content", "keyword")
         self.assertEqual(code, 0, err)
-        self.assertIn("  [https://example.com/q#part-one]\n", out)
+        self.assertIn("  [https://example.com/q?surface=cli#part-one]\n", out)
 
     def test_each_page_is_anchored_on_its_own_url(self):
         page2 = ("# Matchers guide\nSource: https://example.com/guide\n\n"
@@ -312,7 +312,11 @@ class AnchorRoundTripTest(_Cli):
     and its fragment is the anchor of a heading ``sections`` lists there."""
 
     PAGES = (HOOKS + "\n" + OVERFLOW + "\n"
-             + "# Hooks again\nSource: https://example.com/docs/en/hooks.md?x=1\n\n## Hook events\nmatchers too\n")
+             + "# Hooks again\nSource: https://example.com/docs/en/hooks.md?x=1\n\n## Hook events\nmatchers too\n"
+             # pages that differ only by the query (as on learn.chatgpt.com):
+             # the anchor of each reaches that page, not the first of the two
+             + "\n# Surface CLI\nSource: https://example.com/docs/a?surface=cli\n\n## Key bindings\nshortcuts for the cli\n"
+             + "\n# Surface IDE\nSource: https://example.com/docs/a?surface=ide\n\n## Key bindings\nshortcuts for the ide\n")
     FB_PAGES = FB_LIMITS + "\n" + FB_READ_WRITE.replace("query-limit", "other-limit").replace(
         "# Firestore Query Limits", "# Other Limits")
 
@@ -361,6 +365,15 @@ class AnchorRoundTripTest(_Cli):
         for opts in (("--file", shlex.quote(str(self.full))), self._cache_opts("refs")):
             self.assertGreaterEqual(self._check("refs", "github", "matchers", opts), 2)
             self.assertGreaterEqual(self._check("refs", "github", "widget", opts), 1)
+            self.assertEqual(self._check("refs", "github", "shortcuts", opts), 2)
+
+    def test_query_only_pages_are_anchored_on_their_own_query(self):
+        self.write(self.PAGES)
+        code, out, err = self.run_cmd("refs", "search-content", "shortcuts")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sorted(a for _, a in self._anchors(out)),
+                         ["https://example.com/docs/a?surface=cli#key-bindings",
+                          "https://example.com/docs/a?surface=ide#key-bindings"])
 
     def test_devsite_anchors_reach_their_page_and_heading(self):
         self.write(self.FB_PAGES)

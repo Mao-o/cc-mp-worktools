@@ -1307,14 +1307,17 @@ def _headings(body_lines: list[str]) -> list[str]:
 def _anchor_for(profile: dict, doc: dict):
     """``anchor_for`` of the hit renderers under ``anchor_style``: the leaf
     title of a ``Section:`` line -> `` [<page URL>#<anchor>]``. The page URL
-    is the human-facing one: query, ``#…``, a trailing ``/``,
+    is the human-facing one: ``#…``, a trailing ``/``,
     ``page_url_strip_suffix`` (``.md.txt``) and ``.md`` removed (a fragment
-    on a raw fetch URL resolves to nothing). ``None`` (no anchors) without
-    the key or without an absolute page URL."""
+    on a raw fetch URL resolves to nothing). The query stays: pages that
+    differ only by it (``?surface=cli`` / ``?surface=ide``) are different
+    pages, and the anchor's URL passed back as a ``url`` page ref has to
+    reach the page the hit came from. ``None`` (no anchors) without the key
+    or without an absolute page URL."""
     style = profile["anchor_style"]
     if style is None or not re.match(r"https?://", doc["url"] or ""):
         return None
-    url = _ref_url_key(doc["url"], profile["page_url_strip_suffix"])
+    url = _ref_url_key_with_query(doc["url"], profile["page_url_strip_suffix"])
     return lambda title: section_url_anchor(url, title, style=style)
 
 

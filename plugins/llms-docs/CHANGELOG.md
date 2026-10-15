@@ -13,8 +13,10 @@ All notable changes to this plugin will be documented here.
 - `anchor_style`: `search` / `search-content` の各 `Section:` 行の末尾に ` [<ページ URL>#<anchor>]` を付ける。
   `github` (単語を `-` でつなぐ。`parse-claude-docs.py` と同じ) と `devsite` (`_` でつなぐ。
   `parse-firebase.py` と同じ) から選ぶ。anchor の作り方は専用 parser と共通の関数をそのまま使う。
-  ページ URL は `URL:` 行の URL から `.md`・`page_url_strip_suffix`・クエリ・`#…`・末尾の `/` を外したもの
+  ページ URL は `URL:` 行の URL から `.md`・`page_url_strip_suffix`・`#…`・末尾の `/` を外したもの
   (`llms.txt` から付けた `….md` の URL や Firebase の `….md.txt` の URL に `#…` を付けても節には届かないため)。
+  クエリは残す (`?surface=cli` と `?surface=ide` のようにクエリだけ違うページで、anchor の URL を `<page_ref>`
+  に渡したときに別のページへ解かれないため)。
   URL が `http(s)://` で始まらないページと、最初の見出しより前の本文には付けない。`page_url` か
   `index_url` が要る
 - `show_overflow`: `true` で、`--max-hits` を超えて表示しなかったヒットのある節を各ページの末尾に
