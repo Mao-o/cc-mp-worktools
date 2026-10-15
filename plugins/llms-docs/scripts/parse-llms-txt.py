@@ -95,7 +95,7 @@ _PROFILE_KEYS = {
     "url", "split", "frontmatter_key", "line_prefix", "page_url", "url_base", "description",
     "drop_lines", "skip_empty", "frontmatter_delimiter", "h1_needs_url", "index_url",
     "strip_trailing_headings", "min_heading_level", "protect_tables", "compact_pack",
-    "untitled_warn_ratio", "label", "cache_name",
+    "untitled_warn_ratio", "label", "cache_name", "tags_key", "frontmatter_yaml_values",
 }
 # Keys accepted only from the bundled presets. ``cache_name`` drops the URL
 # hash from the cache file name (to reuse the cache files of the dedicated
@@ -278,6 +278,17 @@ def _validate_display_keys(path: str, name: str, raw: dict, profile: dict) -> No
     if cache_name is not None and (not isinstance(cache_name, str) or not _NAME_RE.match(cache_name)):
         _bad(path, f"sources.{name}.cache_name must match {_NAME_RE.pattern}")
     profile["cache_name"] = cache_name
+    tags_key = raw.get("tags_key")
+    if tags_key is not None:
+        if not isinstance(tags_key, str) or not _FM_KEY_NAME_RE.match(tags_key):
+            _bad(path, f"sources.{name}.tags_key must be a YAML key name (or null)")
+        if profile["split"] != "frontmatter":
+            _bad(path, f'sources.{name}.tags_key is only valid with split "frontmatter"')
+    profile["tags_key"] = tags_key
+    yaml_values = _bool_key(path, name, raw, "frontmatter_yaml_values", False)
+    if yaml_values and profile["split"] != "frontmatter":
+        _bad(path, f'sources.{name}.frontmatter_yaml_values is only valid with split "frontmatter"')
+    profile["frontmatter_yaml_values"] = yaml_values
 
 
 def resolve_sources_file(args) -> None:
@@ -452,14 +463,22 @@ def _merge_urlless_h1(docs: list[dict]) -> list[dict]:
 _FM_KEY_RE = re.compile(r"^([A-Za-z_][\w-]*)\s*:\s*(.*)$")
 _FM_LIST_RE = re.compile(r"^\s*- ")
 _FM_CONTINUATION_RE = re.compile(r"^\s+\S")
+# an indented ``key:`` line: a nested mapping under a key with no value
+_FM_NESTED_KEY_RE = re.compile(r"^\s+[A-Za-z_][\w-]*\s*:(\s|$)")
+# ``|`` / ``>`` with an optional chomping and indentation indicator
+_FM_BLOCK_SCALAR_RE = re.compile(r"^[|>](?:[-+]?[1-9]?|[1-9][-+])$")
 # a line that starts like Markdown, never the rest of a frontmatter value
 _FM_PROSE_START_RE = re.compile(r"^(#|[-*+>|`<\[!]|\d+\. )")
 _FM_LOOKAHEAD = 30
 
 
 def _frontmatter_at(lines: list[str], pos: int, required_key: str,
-                    delimiter: str = "---") -> tuple[dict, int] | None:
-    """Parse a frontmatter block opening at *pos*; return (fields, end) or None.
+                    delimiter: str = "---", *,
+                    yaml_values: bool = False) -> tuple[dict, int, dict] | None:
+    """Parse a frontmatter block opening at *pos*; return (fields, end, lists)
+    or None. *fields* maps each key to its value as one line of text;
+    *lists* maps a key written as a block list (``key:`` then ``- item``
+    lines) to its items (quotes removed as in ``_fm_unquote``).
 
     A ``---`` (or the profile's ``frontmatter_delimiter``) opens a block
     only when a closing one follows within ``_FM_LOOKAHEAD`` lines, every
@@ -475,12 +494,30 @@ def _frontmatter_at(lines: list[str], pos: int, required_key: str,
     also run on to the next lines without indentation (invalid YAML, but
     Cloudflare writes some descriptions so); such a line is taken as part
     of the value unless it looks like Markdown (``_FM_PROSE_START_RE``).
+
+    By default a value is its first line with the quote characters at both
+    ends stripped, and indented lines under a key are not read into it.
+    With *yaml_values* (the profile key ``frontmatter_yaml_values``) a value
+    is read the way YAML does: a quoted value loses one pair of quotes, with
+    ``\\"`` / ``\\\\`` resolved in double quotes and ``''`` in single
+    quotes; indented lines continue an unquoted or single-quoted value, fill
+    a key written with no value, and make up a ``|`` / ``>`` block scalar
+    (joined with spaces in every case: a value is shown on one line).
+    Indented ``key:`` lines under a key with no value are a nested mapping
+    and are not read. Which lines open, belong to and close the block does
+    not depend on *yaml_values*.
     """
     if lines[pos].rstrip("\n\r") != delimiter:
         return None
+    unquote = _fm_unquote if yaml_values else (lambda v: v.strip("'\""))
     fields: dict = {}
+    lists: dict = {}
+    parts: dict = {}  # key -> [first-line value, continuation lines...]
     open_key = None  # key whose double-quoted value is still open
     plain_key = None  # key whose unquoted value the next line may continue
+    cont_key = None  # key whose value indented lines (or list items) continue
+    cont_mode = None  # "plain" / "block" / "empty" / "list" / "map"
+    indented: set = set()  # keys an indented line continued (rebuilt from parts)
     for j in range(pos + 1, min(pos + _FM_LOOKAHEAD, len(lines))):
         line = lines[j].rstrip("\n\r")
         if open_key is not None and line == delimiter:
@@ -490,15 +527,30 @@ def _frontmatter_at(lines: list[str], pos: int, required_key: str,
         if open_key is not None:
             fields[open_key] += " " + line.strip()
             if _closes_double_quote(line):
-                fields[open_key] = fields[open_key].strip().strip('"')
+                text = fields[open_key].strip()
+                fields[open_key] = _fm_unquote(text) if yaml_values else text.strip('"')
                 open_key = None
             continue
         if line == delimiter:
-            return (fields, j + 1) if required_key in fields else None
+            if required_key not in fields:
+                return None
+            for key in indented:
+                fields[key] = _fm_joined(parts[key])
+            return fields, j + 1, lists
         if not line.strip():
             plain_key = None
             continue
-        if _FM_LIST_RE.match(line) or _FM_CONTINUATION_RE.match(line):
+        if _FM_LIST_RE.match(line):
+            if cont_key is not None and cont_mode in ("empty", "list"):
+                cont_mode = "list"
+                lists.setdefault(cont_key, []).append(_fm_unquote(line.strip()[1:]))
+            continue
+        if _FM_CONTINUATION_RE.match(line):
+            if cont_mode == "empty" and _FM_NESTED_KEY_RE.match(line):
+                cont_mode = "map"
+            if yaml_values and cont_mode in ("plain", "block", "empty"):
+                parts[cont_key].append(line.strip())
+                indented.add(cont_key)
             continue
         m = _FM_KEY_RE.match(line)
         if not m:
@@ -506,17 +558,51 @@ def _frontmatter_at(lines: list[str], pos: int, required_key: str,
                 # an unquoted value carried on to an unindented line
                 # (Cloudflare writes long descriptions this way)
                 fields[plain_key] += " " + line.strip()
+                if plain_key in parts:
+                    parts[plain_key].append(line.strip())
                 continue
             return None
-        value = m.group(2).strip()
+        key, value = m.group(1), m.group(2).strip()
+        lists.pop(key, None)
+        parts.pop(key, None)
+        indented.discard(key)
+        cont_key = cont_mode = None
         if value.startswith('"') and not _closes_double_quote(value[1:]):
-            open_key = m.group(1)
+            open_key = key
             fields[open_key] = value
             plain_key = None
             continue
-        fields[m.group(1)] = value.strip("'\"")
-        plain_key = m.group(1) if value and value[0] not in "'\"|>[{" else None
+        fields[key] = unquote(value)
+        plain_key = key if value and value[0] not in "'\"|>[{" else None
+        if not value:
+            cont_key, cont_mode, parts[key] = key, "empty", [""]
+        elif _FM_BLOCK_SCALAR_RE.match(value):
+            cont_key, cont_mode, parts[key] = key, "block", [None]
+        elif not (value[0] in "'\"" and len(value) > 1 and value[-1] == value[0]):
+            # unquoted, a flow ``[a, b]`` / ``{…}`` or an open single quote
+            cont_key, cont_mode, parts[key] = key, "plain", [value]
     return None
+
+
+def _fm_joined(pieces: list) -> str:
+    """The value of a key from its first line and the lines continuing it
+    (``pieces[0]`` is ``None`` for a block scalar, whose text is taken as
+    written, and ``""`` for a key written with no value)."""
+    if pieces[0] is None:
+        return " ".join(pieces[1:])
+    return _fm_unquote(" ".join(p for p in pieces if p))
+
+
+def _fm_unquote(value: str) -> str:
+    """Remove one pair of YAML quotes. Double-quoted: ``\\"`` and ``\\\\``
+    are resolved. Single-quoted: ``''`` is one quote. Anything else has the
+    quote characters at its ends stripped, as before."""
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        return re.sub(r'\\(["\\])', r"\1", value[1:-1])
+    if len(value) >= 2 and value[0] == value[-1] == "'":
+        return value[1:-1].replace("''", "'")
+    return value.strip("'\"")
 
 
 def _closes_double_quote(text: str) -> bool:
@@ -530,21 +616,23 @@ def _closes_double_quote(text: str) -> bool:
 
 def split_frontmatter(lines: list[str], profile: dict) -> list[dict]:
     key = profile["frontmatter_key"]
-    blocks: list[tuple[dict, int, int]] = []  # (fields, block_start, body_start)
+    blocks: list[tuple[dict, int, int, dict]] = []  # (fields, block_start, body_start, lists)
     fence = FenceTracker()
     i = 0
     while i < len(lines):
         if not fence.in_fence:
-            hit = _frontmatter_at(lines, i, key, profile["frontmatter_delimiter"])
+            hit = _frontmatter_at(lines, i, key, profile["frontmatter_delimiter"],
+                                  yaml_values=profile.get("frontmatter_yaml_values", False))
             if hit is not None:
-                blocks.append((hit[0], i, hit[1]))
+                blocks.append((hit[0], i, hit[1], hit[2]))
                 i = hit[1]
                 continue
         fence.update(lines[i])
         i += 1
     rule = profile["page_url"]
+    tags_key = profile.get("tags_key")
     docs = []
-    for k, (fields, _start, body_start) in enumerate(blocks):
+    for k, (fields, _start, body_start, lists) in enumerate(blocks):
         end = blocks[k + 1][1] if k + 1 < len(blocks) else len(lines)
         body = lines[body_start:end]
         if rule and rule[0] == "frontmatter":
@@ -558,8 +646,22 @@ def split_frontmatter(lines: list[str], profile: dict) -> list[dict]:
             "url": url,
             "body_lines": body,
             "min_level": 1,
+            "tags": _fm_tags(fields, lists, tags_key) if tags_key else [],
         })
     return docs
+
+
+def _fm_tags(fields: dict, lists: dict, key: str) -> list[str]:
+    """Items of the frontmatter key *key*: a block list (``- a`` lines), a
+    flow list ``[a, b]`` or a comma-separated value ``a, b``. Empty items
+    are dropped."""
+    if key in lists:
+        items = lists[key]
+    else:
+        value = fields.get(key, "").strip()
+        m = re.match(r"^\[(.*)\]$", value)
+        items = [_fm_unquote(t) for t in (m.group(1) if m else value).split(",")]
+    return [t for t in (item.strip() for item in items) if t]
 
 
 _URLISH_RE = re.compile(r"^(https?://|/)\S*$")
@@ -912,7 +1014,12 @@ def _headings(body_lines: list[str]) -> list[str]:
 
 
 def _url_line(doc: dict) -> list[str]:
-    return [f"    URL: {doc['url']}"] if doc["url"] else []
+    """``    URL: …`` and, with ``tags_key``, ``    tags: a, b`` under a
+    result heading (each only when the page has one)."""
+    out = [f"    URL: {doc['url']}"] if doc["url"] else []
+    if doc.get("tags"):
+        out.append(f"    tags: {', '.join(doc['tags'])}")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1014,7 +1121,7 @@ def _page_view(args) -> PageView:
         min_level=d["min_level"],
         # None keeps extract_content's default (a cut never ends mid-table)
         protect_tables=None if profile.get("protect_tables", True) else False,
-        meta={"source": d["url"] or None},
+        meta={"source": d["url"] or None, "tags": d.get("tags") or None},
     )
 
 
@@ -1032,7 +1139,7 @@ def _ranked(args, docs: list[dict], limit: int):
     headings = [_headings(d["body_lines"]) for d in docs]
     return search_index_entries(
         entries, args.query, limit=limit,
-        get_extras=lambda _e, idx: {"tags": [], "headings": headings[idx]},
+        get_extras=lambda _e, idx: {"tags": docs[idx].get("tags") or [], "headings": headings[idx]},
     ), headings
 
 
@@ -1160,7 +1267,8 @@ def cmd_search(args):
                          scope="documents")
         return
     if all(r["body_only"] for r in results):
-        print("  (no title/description match — showing full-body search results instead)")
+        ranked_on = "title/description/tags" if profile.get("tags_key") else "title/description"
+        print(f"  (no {ranked_on} match — showing full-body search results instead)")
         print()
     results.sort(key=lambda r: search_rank_key(r, include_changelog_priority=args.include_changelog_priority))
     for r in results:

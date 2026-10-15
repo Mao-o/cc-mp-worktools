@@ -280,6 +280,8 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `protect_tables` | | `false` で、`content` の節の切り出しを表の途中で止めることを許す (既定 `true`) |
 | `compact_pack` | | `true` で、`fetch-index --compact` を 1 行 80 桁以内に数件ずつ詰めて出す |
 | `untitled_warn_ratio` | | `split: frontmatter` のとき、frontmatter に `title:` の無いページがこの割合 (0〜1) を超えたら、`fetch-index` / `search-index` / `search` で stderr に WARNING を出す (本文の見出しで補ったタイトルも「無い」に数える) |
+| `frontmatter_yaml_values` | | `split: frontmatter` で `true` のとき、frontmatter の値を YAML どおりに読む。引用符を 1 組だけ外し、二重引用符の中の `\"` / `\\`、一重引用符の中の `''` を戻す。インデントされた次の行は値の続きとして読み、`\|` / `>` のブロックスカラーも読む (どれも空白でつないで 1 行にする)。既定 (`false`) はインデントされた続きの行を読まず、引用符は両端の文字を取るだけにする |
+| `tags_key` | | `split: frontmatter` のとき、タグとして読む frontmatter のキー (例 `tags`)。`- a` の行のリスト、`[a, b]`、`a, b` を読む。タグはランキングに加わり、一覧と検索結果に `tags: a, b` の行、`content` のヘッダに `# doc_tags:` の行として出る |
 | `label` | | 結果のヘッダに出す表示名 |
 | `cache_name` | | 同梱 presets 専用 (`sources.json` に書くとエラー)。キャッシュのファイル名を `<cache_name>-llms-full.txt` / `<cache_name>-llms.txt` にする |
 

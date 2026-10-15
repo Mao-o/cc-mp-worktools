@@ -2,6 +2,42 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.37.0] - 2026-10-15
+
+### 追加: 汎用 loader の profile に frontmatter の値とタグのキー 2 つ (どれも既定 off)
+
+専用 parser 3 本を汎用 loader (`parse-llms-txt.py`) に統合する段階の 1 つ (AI SDK の frontmatter)。
+キーはどれも既定では何もしないので、同梱 presets の出力は変わらない (`presets.json` は変えていない)。
+
+- `frontmatter_yaml_values` (`split: frontmatter` のみ): frontmatter の値を YAML どおりに読む。
+  引用符を 1 組だけ外し、二重引用符の中の `\"` / `\\` と一重引用符の中の `''` を戻す
+  (AI SDK のタイトル `TypeScript error "Cannot find module …"` が、今までは `\"` を含んだまま末尾が
+  欠けていた)。インデントされた次の行を値の続きとして読み、`|` / `>` のブロックスカラー
+  (`>-` などの指示子つきを含む) も読む。どれも空白でつないで 1 行にする。値の無いキーの下の
+  インデントされた `key:` 行は入れ子の mapping として読まない。ページの区切りはこのキーで変わらない。
+  既定にしなかったのは、同梱 presets の手元のコーパスで値の変わるページがあったため
+  (Vite の `description: >-` 2 ページ、Vercel の `\"` を含む description 2 ページ)
+- `tags_key` (`split: frontmatter` のみ): タグとして読む frontmatter のキー。`- a` の行のリスト
+  (インデントの有無を問わない)、`[a, b]`、`a, b` を読み、空の項目は捨てる。タグはランキングに加わり
+  (`search-index` / `search`)、`fetch-index` / `search-index` / `search-content` / `search` の
+  各項目に `    tags: a, b` の行 (URL の行の後)、`content` / `sections` のヘッダに `# doc_tags:` の行
+  として出る。`search` が本文検索に切り替わったときの注記は `(no title/description/tags match …`
+  になる。規則は `parse-ai-sdk.py` と同じ
+
+確認:
+
+- 同梱 presets の全件を、変更前の版と今回の版に同じ入力 (frontmatter 形式の presets 20 件の実コーパス、
+  parity の fixture、タグ・`\"`・ブロックスカラー・継続行を含む合成ファイル。10 種のサブコマンド) で流し、
+  960 回とも stdout・stderr・終了コードが一致した。frontmatter 形式の presets 20 件の実コーパス
+  (3,236 ページ) で、分割したページのタイトル・description・URL・本文が一致する
+- parity harness の ai-sdk の profile に 2 キーを足し、`as-fetch-index-compact` / `as-search-content` /
+  `as-content` / `as-search` が `parse-ai-sdk.py` の出力と一致するようになった (fixture と手元の全
+  キャッシュの両方)。`as-fetch-index` / `as-search-index` / `as-search-index-tags` は汎用 loader が出す
+  `URL:` の行だけが違う (`parse-ai-sdk.py` はこの 2 コマンドで URL を出さない)。この行を除けば一致する
+  ことをテストで固定した。preset でこの行を出すかは preset を足すときに決める
+- 継続行・ブロックスカラー・入れ子の mapping・引用符とエスケープ・block list / flow list /
+  カンマ区切りのタグ・表示とランキングの単体テストを足した
+
 ## [0.36.0] - 2026-10-15
 
 ### 追加: 汎用 loader の profile に表示と構造のキー 7 つ (どれも既定 off)
