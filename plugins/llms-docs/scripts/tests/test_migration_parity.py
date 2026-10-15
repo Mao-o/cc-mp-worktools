@@ -203,6 +203,14 @@ CORPUS_CASES = [
     ("cd-plat-corpus-content-links", "claude-docs", ["content", "prompt-caching", "--max-chars", "0", *_P]),
     # members: both sources with hits on the full corpus
     ("cd-corpus-search-both", "claude-docs", ["search", "hooks", "--source", "both"]),
+    # body "fetch": pages of the local page cache, by number / URL / slug, and the
+    # last page of the paged index
+    ("fb-corpus-sections-int", "firebase", ["sections", "2771"]),
+    ("fb-corpus-sections-url", "firebase", ["sections", "https://firebase.google.com/docs/projects/multiprojects"]),
+    ("fb-corpus-content-slug", "firebase", ["content", "multiprojects", "--max-chars", "0"]),
+    ("fb-corpus-search-content-page", "firebase", ["search-content", "deploy", "--page-ref", "2771"]),
+    ("fb-corpus-search", "firebase", ["search", "deploy targets"]),
+    ("fb-corpus-fetch-index-page", "firebase", ["fetch-index", "--offset", "7150"]),
 ]
 
 
@@ -305,7 +313,7 @@ def update_golden() -> None:
 #  2. ``Next:`` lines are kept with the script name replaced by ``<script>``,
 #     ``--source platform`` / ``--source claude-platform`` written as
 #     ``--source <platform>``, and the options that name the default corpus or
-#     a file (``--source code`` / ``claude-code`` / ``ai-sdk``, ``--cache-dir`` /
+#     a file (``--source code`` / ``claude-code`` / ``ai-sdk`` / ``firebase``, ``--cache-dir`` /
 #     ``--file`` / ``--index-file`` / ``--sources-file`` and their value)
 #     removed; a ``--source`` that points elsewhere, the subcommand, page ref,
 #     heading and other options still count
@@ -331,7 +339,7 @@ _HEADER_TAIL_RE = re.compile(r"\s*\((?:[^()]|\([^()]*\))*\)\s*$")
 _NEXT_RE = re.compile(r"^\s*Next: ")
 _NEXT_SCRIPT_RE = re.compile(r"^(\s*Next: )\S+\.py ")
 _NEXT_CORPUS_OPT_RE = re.compile(
-    r" --(?:source (?:code|claude-code|ai-sdk)(?!\S)|(?:cache-dir|file|index-file|sources-file) \S+)")
+    r" --(?:source (?:code|claude-code|ai-sdk|firebase)(?!\S)|(?:cache-dir|file|index-file|sources-file) \S+)")
 _NEXT_PLATFORM_RE = re.compile(r" --source (?:claude-)?platform(?!\S)")
 _TIP_RE = re.compile(r"^(Tip|Note): ")
 _COUNT_RE = re.compile(r"^\(\d+ [^()]*\b(?:total|shown)\b[^()]*\)$")
@@ -421,6 +429,11 @@ GENERIC_PROFILES = {
                "frontmatter_yaml_values": True},
     # ``--source both`` of the old script: search on both Claude docs sources
     "claude": {"members": ["claude-code", "claude-platform"]},
+    # no llms-full.txt: the llms.txt entries are the pages, each fetched on demand
+    "firebase": {"body": "fetch", "rank_from": "index", "index_url": "https://firebase.google.com/docs/llms.txt",
+                 "label": "Firebase", "page_ref_forms": ["int", "url", "slug"],
+                 "page_url_strip_suffix": ".md.txt", "anchor_style": "devsite", "min_heading_level": 2,
+                 "index_page_size": 100},
 }
 
 # Cases whose generic-loader output already matches the golden (normalised
@@ -489,6 +502,22 @@ GENERIC_PARITY_EXPECTED: frozenset = frozenset({
     "cd-search-both-two-groups",
     "cd-search-both-body-only",
     "cd-search-both-zero",
+    # body "fetch" (+ index_page_size, min_heading_level 2, anchor_style
+    # "devsite", page_url_strip_suffix ".md.txt"): firebase, whose llms.txt
+    # entries are the pages, each fetched on demand into the page cache
+    # (the same file names), with no more fetches than the old script
+    "fb-fetch-index",
+    "fb-fetch-index-page",
+    "fb-search-index",
+    "fb-search-index-zero",
+    "fb-search-content",
+    "fb-sections",
+    "fb-sections-url",
+    "fb-content",
+    "fb-content-heading",
+    "fb-content-dead",
+    "fb-search",
+    "fb-search-zero",
 })
 
 # Cases that match once the generic loader's ``    URL: …`` entry lines are
@@ -517,6 +546,10 @@ FIXTURE_ONLY_PARITY: frozenset = frozenset({
     "cd-code-content",             # slug "quillon-tag"
     "cd-code-content-heading",     # heading "Roll out a hub" of slug "hub"
     "cd-plat-content-nav-tail",    # slug "folding"
+    "fb-sections",                 # page 14: a page of the fixture's page cache
+    "fb-sections-url",             # URL …/docs/cli/labels
+    "fb-content",                  # slug "labels"
+    "fb-content-heading",          # page 14, heading "Get started"
 })
 
 # Cases where the full-corpus gate compares a failure on purpose (the error
@@ -526,6 +559,9 @@ FAILURE_PARITY_CASES: frozenset = frozenset({
     "cd-code-content-missing",
     "cd-code-corpus-content-url-missing",
     "cd-plat-corpus-sections-slug-ambiguous",
+    # a page that is not in the page cache, with the network off: the fetch
+    # error (exit 1) on both sides
+    "fb-content-dead",
 })
 
 _URL_ENTRY_RE = re.compile(r"^    URL: \S+$")
@@ -544,9 +580,19 @@ def _generic_argv(corpus: str, argv: list, cache_dir: str, sources_file: str) ->
     are copied to the generic cache names (``fetch-index`` / ``search-index``
     with ``rank_from: "index"`` word their hints by where the pages come
     from, and ``--file`` is not the old script's cache). ai-sdk is read as
-    ``--file``."""
+    ``--file``. Firebase (``body: "fetch"``) is read from the cache too: its
+    index and its page cache directory are copied to the generic names (the
+    page files keep their names, which both loaders derive alike)."""
+    g = _loader.load_script("parse-llms-txt.py")
     if corpus == "firebase":
-        return None  # no per-page fetch mode in the generic loader yet
+        profile = {"name": "firebase", **GENERIC_PROFILES["firebase"]}
+        index = os.path.join(cache_dir, "firebase-llms.txt")
+        if os.path.exists(index):
+            shutil.copyfile(index, g._index_cache_path(cache_dir, profile))
+        pages = os.path.join(cache_dir, "firebase-docs")
+        if os.path.isdir(pages):
+            shutil.copytree(pages, os.path.join(cache_dir, g._page_dir_name(profile)))
+        return [*argv, "--source", "firebase", "--sources-file", sources_file]
     argv = list(argv)
     if corpus == "ai-sdk":
         name, full, index = "ai-sdk", "ai-sdk-llms-full.txt", None
@@ -562,7 +608,6 @@ def _generic_argv(corpus: str, argv: list, cache_dir: str, sources_file: str) ->
     out = [*argv, "--source", name, "--sources-file", sources_file]
     if not index:
         return out + ["--file", os.path.join(cache_dir, full)]
-    g = _loader.load_script("parse-llms-txt.py")
     for member in GENERIC_PROFILES[name].get("members") or [name]:
         profile = {"name": member, **GENERIC_PROFILES[member]}
         for staged, target in ((f"{member}-llms-full.txt", g._cache_path(cache_dir, profile)),
@@ -1158,6 +1203,51 @@ class CorpusParityGateTest(unittest.TestCase):
         if not checked:
             self.skipTest(f"no claude-code / claude-platform full text in {self.cache}")
         self.assertGreater(resolved, 0)
+
+    def test_every_firebase_entry_resolves_and_caches_as_the_old_script_does(self):
+        """Every entry of the cached Firebase llms.txt, by its number, its
+        ``.md.txt`` URL, its page URL and the last one and two segments of
+        that: ``parse-firebase.py``'s resolver and the generic loader's
+        ``body: "fetch"`` pages reach the same entry, or fail with the same
+        first line; and the page cache file of every entry has the old name."""
+        index = self.cache / "firebase-llms.txt"
+        if not index.exists():
+            self.skipTest(f"no {index}")
+        old_mod = _loader.load_script("parse-firebase.py")
+        new_mod = _loader.load_script("parse-llms-txt.py")
+        import _common  # scripts/ is on sys.path (``_loader``)
+        entries = _common.parse_llms_index(_common.load_lines(str(index)))
+        profile = new_mod._validate_profile("sources.json", "firebase", GENERIC_PROFILES["firebase"])
+        args = mock.Mock(file=None, index_file=str(index), source="firebase", cache_dir="/c", max_age=None)
+        _path, docs = new_mod._fetch_entry_docs(args, profile)
+        self.assertEqual([d["url"] for d in docs], [e["url"] for e in entries])
+        old_names = {e["url"]: old_mod._url_to_cache_filename(e["url"]) for e in entries}
+        new_names = {e["url"]: os.path.basename(new_mod._page_cache_path("/c", profile, e["url"]))
+                     for e in entries}
+        self.assertEqual(new_names, old_names)
+
+        def call(fn, *a):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                try:
+                    return ("ok", fn(*a))
+                except SystemExit:
+                    return ("die", (err.getvalue().splitlines() or [""])[0])
+
+        resolved = 0
+        mismatches = []
+        for i, e in enumerate(entries):
+            page = e["url"][:-len(".md.txt")] if e["url"].endswith(".md.txt") else e["url"]
+            segs = page.rstrip("/").split("/")
+            for ref in (str(i), e["url"], page, segs[-1], "/".join(segs[-2:])):
+                old = call(old_mod._resolve_page_ref, entries, ref, None)
+                new = call(new_mod._resolve_page_ref, docs, ref, None,
+                           profile["page_ref_forms"], profile["page_url_strip_suffix"])
+                if old != new:
+                    mismatches.append(f"{ref!r}: old {old!r}, generic {new!r}")
+                resolved += old[0] == "ok"
+        self.assertEqual(mismatches[:20], [])
+        self.assertGreater(resolved, len(entries))
 
     def test_platform_pages_match_on_the_full_corpus(self):
         full = self.cache / "claude-platform-llms-full.txt"

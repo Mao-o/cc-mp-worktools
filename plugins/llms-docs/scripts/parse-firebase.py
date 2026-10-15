@@ -23,7 +23,6 @@ Page references (``<page_ref>``) accept three forms:
 
 import argparse
 import concurrent.futures
-import hashlib
 import os
 import re
 import sys
@@ -47,6 +46,7 @@ from _common import (
     load_lines,
     next_hint,
     normalize_doc_url,
+    page_cache_filename,
     parse_llms_index,
     retry_for_page_ref,
     search_content_in_body,
@@ -84,24 +84,14 @@ _URL_PREFIX = "https://firebase.google.com/"
 
 
 def _url_to_cache_filename(url: str) -> str:
-    """Convert a Firebase ``.md.txt`` URL to a cache filename.
+    """Convert a Firebase ``.md.txt`` URL to a cache filename
+    (``_common.page_cache_filename``, shared with the generic loader).
 
-    Strips the firebase.google.com host, replaces ``/`` with ``_`` for
-    legibility, and appends a short sha1 hash suffix to guarantee uniqueness.
-    Without the hash, distinct URLs that differ only by ``/`` vs ``_``
-    (e.g. ``.../auth/user.md.txt`` vs ``.../auth_user.md.txt``) would collapse
-    to the same filename and silently share a cache file. Note: the index page
-    URL is ``firebase.google.com/docs.md.txt`` (a sibling of ``/docs/...``),
-    not ``/docs/index.md.txt``, so the prefix must be the host root.
+    The prefix must be the host root: the index page URL is
+    ``firebase.google.com/docs.md.txt`` (a sibling of ``/docs/...``), not
+    ``/docs/index.md.txt``.
     """
-    h = hashlib.sha1(url.encode()).hexdigest()[:16]
-    if url.startswith(_URL_PREFIX):
-        path = url[len(_URL_PREFIX):]
-        if path:
-            base = path[:-len(".md.txt")] if path.endswith(".md.txt") else path
-            safe = base.replace("/", "_")
-            return f"{safe[:180]}-{h}.md.txt"
-    return f"{h}.md.txt"
+    return page_cache_filename(url, _URL_PREFIX)
 
 
 # ---------------------------------------------------------------------------

@@ -20,8 +20,13 @@ preset を置き換える。
   行を消す、ページ URL を読む前に行を消す、など
 - `index_url` の突き合わせで、別のページの URL が付く (完全一致・一意以外で付けている、別の
   `llms.txt` / `llms-full.txt` などのファイルを指す項目の URL を付けている、など)
-- 同梱 presets が壊れている (検証で落ちる・取得先が `llms-full.txt` でない)。`sources.json` が
+- 同梱 presets が壊れている (検証で落ちる・取得先が `llms-full.txt` でない。ただし `body: "fetch"`
+  の preset は `llms-full.txt` を持たないので `url` が無く、取得先は `index_url` の `llms.txt` と、
+  そこに並ぶ各ページ)。`sources.json` が
   無いときに presets まで使えなくなる、明示したファイルが無いのに黙って presets だけで動く
+- `body: "fetch"` の source で、取得するページが増える (`fetch-index` / `search-index` がページを
+  取る、`search` が候補の外のページを取る・全文 fallback をする、`search-content` を並行にして
+  最初の結果が全件の取得を待つ)。ページの cache で、別の URL のページの本文を返す
 - `Next:` ヒントが `--source` / `--sources-file` / `--file` / `--cache-dir` / `--max-age` を
   落とし、別の corpus を指すコマンドになる
 - `sources.json` の検証漏れで、source 名がキャッシュディレクトリの外を指せる・不正な値で
@@ -37,7 +42,8 @@ preset を置き換える。
   (学習トラックなど) の項目とタイトルが衝突して、その項目の URL が付くこと (タイトルだけでは区別
   できない。README で 2 段 index を `index_url` に書かないよう案内済み)
 - presets に入っていないサイト・製品があること (追加は改善提案 P3)
-- ページごとに別ファイルで公開するサイト
+- ページごとに別ファイルで公開し、`llms.txt` に全ページの絶対 URL が並ばないサイト (並ぶサイトは
+  `body: "fetch"` で読む)
 - `index_url` で URL が付かないページがあること (タイトルが完全一致しない・`llms.txt` の項目かページのどちらかでタイトルが重複する。付けないのは意図した動作)
 - 3 種のどれにも当てはまらない形状のサイトを読めないこと。新しい形状への対応は改善提案 (P3)
 - `scripts/check-preset-urls.py` が suite に入っていないこと (ネットワークに出る手動の点検道具。
