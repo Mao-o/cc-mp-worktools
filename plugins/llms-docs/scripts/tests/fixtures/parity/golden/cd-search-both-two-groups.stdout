@@ -1,0 +1,42 @@
+Search results for "sample" (Claude Code + Claude Developer Platform)
+============================================================
+
+--- Claude Code (--source code) ---
+
+[code] [5] Samples (index_score: 12)
+    URL: https://code.claude.com/docs/en/kit/samples.md
+    (2 body hits, showing 1)
+    Section: (top)  [before first heading]  (x2)
+      → Source: https://code.claude.com/docs/en/kit/samples
+        
+      → Find a sample kit project or a walkthrough close to what you want to make.
+        
+        Amet enim velit excepteur deserunt incididunt aliquip proident deserunt officia sint adipiscing exercitation cillum. Mollit voluptate anim officia incididunt laboris deserunt ullamco velit reprehenderit laborum duis voluptate excepteur.
+
+
+(1 pages from Claude Code)
+
+--- Claude Developer Platform (--source platform) ---
+
+[platform] [1] Memory spans [body-only]
+    URL: https://platform.claude.com/docs/en/build/memory-spans
+    (2 body hits, showing 1)
+    Section: Span hints/Hint format  (x2)  [https://platform.claude.com/docs/en/build/memory-spans#hint-format]
+        ```
+        
+      → # lorem: an unfenced sample comment line
+      → sample_call(lorem=1)
+        
+        ## Trim spans by folding
+
+
+[platform] [4] Overview (index_score: 2)
+    URL: https://platform.claude.com/docs/en/about/task-guides/overview.md
+    (no body hits — index match only)
+
+(2 pages from Claude Developer Platform)
+
+Note: doc_idx is unique within a source. For follow-up commands, pass the matching --source <code|platform> explicitly.
+
+Next: parse-claude-docs.py content 5 '(top)' --cache-dir <CACHE_DIR>
+Next: parse-claude-docs.py content 1 'Span hints/Hint format' --source platform --cache-dir <CACHE_DIR>

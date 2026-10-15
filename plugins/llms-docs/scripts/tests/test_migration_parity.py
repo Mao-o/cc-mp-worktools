@@ -141,6 +141,11 @@ CASES = [
     ("cd-plat-content-nav-tail", "claude-docs", ["content", "folding", *_P]),
     ("cd-plat-search", "claude-docs", ["search", "access token", *_P]),
     ("cd-search-both", "claude-docs", ["search", "releases", "--source", "both"]),
+    # both sources with hits (the Next: lines and the kept top candidate span them)
+    ("cd-search-both-two-groups", "claude-docs", ["search", "sample", "--source", "both"]),
+    # a body-only row (a page the index ranking missed) next to index rows
+    ("cd-search-both-body-only", "claude-docs", ["search", "overview", "--source", "both"]),
+    ("cd-search-both-zero", "claude-docs", ["search", "zzzparitynohit", "--source", "both"]),
     # --- ai-sdk
     ("as-fetch-index", "ai-sdk", ["fetch-index"]),
     ("as-fetch-index-compact", "ai-sdk", ["fetch-index", "--compact"]),
@@ -196,6 +201,8 @@ CORPUS_CASES = [
     # link_annotations: the ``→ [doc_idx N]`` after in-body links on whole pages
     ("cd-code-corpus-content-links", "claude-docs", ["content", "hooks", "--max-chars", "0"]),
     ("cd-plat-corpus-content-links", "claude-docs", ["content", "prompt-caching", "--max-chars", "0", *_P]),
+    # members: both sources with hits on the full corpus
+    ("cd-corpus-search-both", "claude-docs", ["search", "hooks", "--source", "both"]),
 ]
 
 
@@ -248,7 +255,10 @@ def run_script(script: str, argv: list, cache_dir: str) -> _Run:
            if k not in ("LLMS_DOCS_CACHE_DIR", "XDG_CACHE_HOME")}
     with mock.patch.dict(os.environ, env, clear=True), \
             mock.patch("urllib.request.urlopen", side_effect=_no_network(calls)):
-        code, out, err = _loader.run_cli(module, [script, *argv, "--cache-dir", cache_dir])
+        try:
+            code, out, err = _loader.run_cli(module, [script, *argv, "--cache-dir", cache_dir])
+        except Exception as e:  # a crash fails the comparison instead of erroring the run
+            code, out, err = f"crash: {e!r}", "", f"crash: {e!r}"
     return _Run(code, _scrub(out, cache_dir), _scrub(err, cache_dir), len(calls))
 
 
@@ -308,6 +318,12 @@ def update_golden() -> None:
 #  5. the unit word ``page`` / ``document`` as a whole word (not inside a
 #     flag name such as ``--page-ref``, an identifier or a path) and the
 #     ``URL:`` / ``url:`` case
+#  6. the source name in a multi-source search (``--source both`` / an alias
+#     with ``members``): in a group heading ``--- <label> (--source X) ---``
+#     and in the ``[X]`` before a result's ``[N]``, ``code`` / ``claude-code``
+#     are written ``<code>`` and ``platform`` / ``claude-platform``
+#     ``<platform>`` (the old and the generic names of the same source; which
+#     source a group or row names still counts)
 # ``compare`` looks at stdout; when the expected stdout is empty (an error
 # path) it also compares the first line of the normalised stderr.
 _HEADER_FOLLOW_RE = re.compile(r"^\s*(\((index|file|source): .*\)|Cache: .*)$")
@@ -321,6 +337,18 @@ _TIP_RE = re.compile(r"^(Tip|Note): ")
 _COUNT_RE = re.compile(r"^\(\d+ [^()]*\b(?:total|shown)\b[^()]*\)$")
 _URL_LABEL_RE = re.compile(r"^(\s*)(?:URL|url): ")
 _UNIT_RE = re.compile(r"(?<![-\w/<])(?:page|document)(s?)(?![-\w/>])")
+_SOURCE_NAMES = {"code": "<code>", "claude-code": "<code>",
+                 "platform": "<platform>", "claude-platform": "<platform>"}
+_GROUP_HEADING_RE = re.compile(r"^(--- .+ \(--source )(\S+)(\) ---)$")
+_ROW_SOURCE_RE = re.compile(r"^\[([a-z0-9-]+)\](?= \[\d+\] )")
+
+
+def _canonical_sources(line: str) -> str:
+    """Item 6 above: the old and the generic name of a source written alike."""
+    m = _GROUP_HEADING_RE.match(line)
+    if m:
+        return m.group(1) + _SOURCE_NAMES.get(m.group(2), m.group(2)) + m.group(3)
+    return _ROW_SOURCE_RE.sub(lambda r: f"[{_SOURCE_NAMES.get(r.group(1), r.group(1))}]", line)
 
 
 def _is_index_header(line: str) -> bool:
@@ -354,7 +382,7 @@ def normalize(text: str) -> list[str]:
             line = _NEXT_SCRIPT_RE.sub(r"\1<script> ", line)
             line = _NEXT_PLATFORM_RE.sub(" --source <platform>", line)
             line = _NEXT_CORPUS_OPT_RE.sub("", line)
-        line = _URL_LABEL_RE.sub(r"\1url: ", line)
+        line = _URL_LABEL_RE.sub(r"\1url: ", _canonical_sources(line))
         out.append(_UNIT_RE.sub(r"<unit>\1", line))
     return out
 
@@ -391,6 +419,8 @@ GENERIC_PROFILES = {
                "page_url": "frontmatter:url", "protect_tables": False, "compact_pack": True,
                "untitled_warn_ratio": 0.10, "label": "AI SDK", "tags_key": "tags",
                "frontmatter_yaml_values": True},
+    # ``--source both`` of the old script: search on both Claude docs sources
+    "claude": {"members": ["claude-code", "claude-platform"]},
 }
 
 # Cases whose generic-loader output already matches the golden (normalised
@@ -433,7 +463,8 @@ GENERIC_PARITY_EXPECTED: frozenset = frozenset({
     # rank_from "index" + index_join "url" + index_group_variants: the
     # llms.txt entries are ranked and listed, joined to the pages by URL.
     # cd-code-search-zero still differs: the old script adds a ``Next:`` line
-    # for the other source (multi-source search is a later step)
+    # for the other source (one source's zero-hit hint naming another source
+    # is not ported; ``members`` covers searching both at once)
     "cd-code-fetch-index",
     "cd-code-search-index",
     "cd-code-search-index-multi",
@@ -451,6 +482,13 @@ GENERIC_PARITY_EXPECTED: frozenset = frozenset({
     "cd-code-content-heading",
     "cd-plat-content",
     "cd-plat-content-nav-tail",
+    # members (the ``claude`` alias of claude-code + claude-platform):
+    # ``search --source both``, one group per source, ``[<source>]`` before
+    # each result and the page's own ``--source`` on each ``Next:`` line
+    "cd-search-both",
+    "cd-search-both-two-groups",
+    "cd-search-both-body-only",
+    "cd-search-both-zero",
 })
 
 # Cases that match once the generic loader's ``    URL: …`` entry lines are
@@ -518,19 +556,19 @@ def _generic_argv(corpus: str, argv: list, cache_dir: str, sources_file: str) ->
             i = argv.index("--source")
             source = argv[i + 1]
             del argv[i:i + 2]
-        if source == "both":
-            return None  # multi-source search is a later step
-        name = f"claude-{source}"
-        full, index = f"{name}-llms-full.txt", f"{name}-llms.txt"
+        # ``--source both``: the ``claude`` alias of the two sources
+        name = "claude" if source == "both" else f"claude-{source}"
+        index = True
     out = [*argv, "--source", name, "--sources-file", sources_file]
     if not index:
         return out + ["--file", os.path.join(cache_dir, full)]
     g = _loader.load_script("parse-llms-txt.py")
-    profile = {"name": name, **GENERIC_PROFILES[name]}
-    for staged, target in ((full, g._cache_path(cache_dir, profile)),
-                           (index, g._index_cache_path(cache_dir, profile))):
-        if os.path.exists(os.path.join(cache_dir, staged)):
-            shutil.copyfile(os.path.join(cache_dir, staged), target)
+    for member in GENERIC_PROFILES[name].get("members") or [name]:
+        profile = {"name": member, **GENERIC_PROFILES[member]}
+        for staged, target in ((f"{member}-llms-full.txt", g._cache_path(cache_dir, profile)),
+                               (f"{member}-llms.txt", g._index_cache_path(cache_dir, profile))):
+            if os.path.exists(os.path.join(cache_dir, staged)):
+                shutil.copyfile(os.path.join(cache_dir, staged), target)
     return out
 
 
@@ -674,16 +712,17 @@ class ComparatorTest(unittest.TestCase):
         # trailing count lines, whose inner spacing is free.
         # ``(index:`` / ``(file:`` lines survive indenting and widening (their
         # value is free), so they show up there and not under ``append``.
+        # The ``--source both`` cases add a Tip (zero hits) and two Notes.
         self.assertEqual(skipped, {
-            "append": {"line1-index": 6, "Tip": 9, "Note": 1, "Cache": 2},
+            "append": {"line1-index": 6, "Tip": 10, "Note": 3, "Cache": 2},
             "indent": {"line1-index": 6, "index": 9, "file": 1, "Cache": 2},
             "swapcase": {},
             "widen": {"line1-index": 6, "index": 9, "file": 1, "Cache": 2,
-                      "Tip": 9, "Note": 1, "count": 3},
+                      "Tip": 10, "Note": 3, "count": 3},
             "blank": {},
         })
-        self.assertEqual(tried, {"append": 1506, "indent": 1506, "swapcase": 907,
-                                 "widen": 865, "blank": 1524})
+        self.assertEqual(tried, {"append": 1607, "indent": 1610, "swapcase": 969,
+                                 "widen": 924, "blank": 1628})
 
     def test_dropped_and_reordered_lines_are_detected(self):
         stdout, _ = load_golden("cd-code-search-index")
@@ -726,6 +765,18 @@ class ComparatorTest(unittest.TestCase):
                                  "Next: parse-llms-txt.py content 3 --source claude-platform --file /b\n"), [])
         self.assertEqual(compare("Next: parse-ai-sdk.py content 3 --cache-dir /a\n",
                                  "Next: parse-llms-txt.py content 3 --source ai-sdk --file /b\n"), [])
+
+    def test_source_names_of_a_multi_source_search_are_written_alike(self):
+        """Item 6: the old script's and the generic loader's name of the same
+        source compare equal in group headings and before a result's number."""
+        golden = ("--- Claude Code (--source code) ---\n\n[code] [5] Samples (index_score: 12)\n"
+                  "--- Claude Developer Platform (--source platform) ---\n\n[platform] [1] Memory spans\n")
+        actual = ("--- Claude Code (--source claude-code) ---\n\n[claude-code] [5] Samples (index_score: 12)\n"
+                  "--- Claude Developer Platform (--source claude-platform) ---\n\n"
+                  "[claude-platform] [1] Memory spans\n")
+        self.assertEqual(compare(golden, actual), [])
+        # only at the start of a result line: the same text in a page body counts
+        self.assertNotEqual(compare("    see [code] [5] x\n", "    see [claude-code] [5] x\n"), [])
 
     def test_file_line_later_in_the_header_block_is_ignored(self):
         """``sections``: the generic loader prints ``(file: …)`` after the
@@ -801,6 +852,19 @@ class ComparatorTest(unittest.TestCase):
             "Next --source with another value": (
                 "[1] x\n\nNext: x.py search q --source both --cache-dir <CACHE_DIR>\n",
                 "[1] x\n\nNext: x.py search q --source bothx --cache-dir <CACHE_DIR>\n"),
+            # item 6 writes the two names of a source alike, not two sources alike
+            "group heading of the other source": ("--- Claude Code (--source code) ---\n",
+                                                  "--- Claude Code (--source claude-platform) ---\n"),
+            "group heading of an unknown source": ("--- Claude Code (--source code) ---\n",
+                                                   "--- Claude Code (--source claude-coder) ---\n"),
+            "group heading label": ("--- Claude Code (--source code) ---\n",
+                                    "--- Claude Platform (--source claude-code) ---\n"),
+            "row of the other source": ("[code] [5] Samples (index_score: 12)\n",
+                                        "[claude-platform] [5] Samples (index_score: 12)\n"),
+            "row source dropped": ("[platform] [5] Samples (index_score: 12)\n",
+                                   "[5] Samples (index_score: 12)\n"),
+            "row number next to the source": ("[platform] [5] Samples (index_score: 12)\n",
+                                              "[claude-platform] [6] Samples (index_score: 12)\n"),
         }
         stderr = {"stderr when stdout is empty": ("Error: No page found for slug: a\n",
                                                   "Error: No page found for: a\n")}

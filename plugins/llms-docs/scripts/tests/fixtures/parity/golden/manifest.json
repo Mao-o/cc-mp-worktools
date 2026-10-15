@@ -199,6 +199,21 @@
   "fetches": 0,
   "stderr": "WARNING: Claude Code index↔full-text join rate is 69% (11/16). Some index entries cannot be joined to full text.\nWARNING: Claude Developer Platform index↔full-text join rate is 79% (11/14). Some index entries cannot be joined to full text.\n  (skip: no full-text for https://platform.claude.com/docs/en/api/beta/crews/releases.md)\n  (skip: no full-text for https://platform.claude.com/docs/en/api/beta/kits/releases.md)\n"
  },
+ "cd-search-both-body-only": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": "WARNING: Claude Code index↔full-text join rate is 69% (11/16). Some index entries cannot be joined to full text.\n  (skip: no full-text for https://code.claude.com/docs/en/overview.md)\nWARNING: Claude Developer Platform index↔full-text join rate is 79% (11/14). Some index entries cannot be joined to full text.\n"
+ },
+ "cd-search-both-two-groups": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": "WARNING: Claude Code index↔full-text join rate is 69% (11/16). Some index entries cannot be joined to full text.\nWARNING: Claude Developer Platform index↔full-text join rate is 79% (11/14). Some index entries cannot be joined to full text.\n"
+ },
+ "cd-search-both-zero": {
+  "exit": 0,
+  "fetches": 0,
+  "stderr": "WARNING: Claude Code index↔full-text join rate is 69% (11/16). Some index entries cannot be joined to full text.\nWARNING: Claude Developer Platform index↔full-text join rate is 79% (11/14). Some index entries cannot be joined to full text.\n"
+ },
  "fb-content": {
   "exit": 0,
   "fetches": 0,

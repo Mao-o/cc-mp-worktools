@@ -2,6 +2,35 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.43.0] - 2026-10-15
+
+### 追加: 汎用 loader の `members` (複数の source をまとめて `search` する別名。書かなければ出力は変わらない)
+
+専用 parser 3 本を汎用 loader (`parse-llms-txt.py`) に統合する段階の 1 つ。`parse-claude-docs.py` の
+`search --source both` を、profile の別名で使えるようにした。`members` を持つ profile が無ければ今までどおり
+(同梱 presets の出力は変わらない。`presets.json` は変えていない)。
+
+- `{"members": ["claude-code", "claude-platform"]}`: その profile はファイルを読まない別名になり、
+  `search --source <別名>` が各 source を書いた順に検索する。結果は source ごとに
+  `--- <label> (--source <source>) ---` の見出しの下に並び、各行の先頭に `[<source>]` が付く。
+  ページ番号は source ごとなので、`Next:` の行はそのページの `--source` を持ち、そのまま実行すると
+  その行のページが開く (0 件のときの案内も source ごと)。並び・本文のヒット・`Next:` に残す最上位の
+  候補は旧 parser の `--source both` と同じ
+- `search` 以外のコマンドは別名を受け付けず、終了コード 2 で選べる source を出す。`--file` /
+  `--index-file` (1 つの source のファイル) とも一緒に使えない
+- どれか 1 つの source を読めない (キャッシュが無く取得にも失敗した、`llms.txt` との対応づけの割合が
+  下限を下回った) ときは、残りの source だけを全部の結果のように出さず、何も出さずにその source の
+  エラーで止まる。古いキャッシュは 1 つの source のときと同じく警告を出して使う
+- `members` には 2 つ以上の別々の source 名を書く。書けるキーは `members` と `description` だけ。
+  存在しない source、別名、自分自身は書けない。利用者の `sources.json` にも書ける (同梱 presets の
+  source を `members` に書いてよい)
+- `sources` の一覧では `<名前>  [user, members, search only]  a + b` と出す
+- テスト: `members` の検証と拒否、source の種類 (`llms.txt` でランキングする source どうし / ページで
+  ランキングする source どうし / 混在) × キャッシュの状態 (すべてある / 無くて取得する / 片方だけある) の
+  全組み合わせで、各見出しの下が `search --source <source>` 単独の結果と一致し、各行の番号と各 `Next:` の
+  行がその行のページを開くことを確かめる。移行の比較 (旧 parser との一致) に `search --source both` の
+  4 件を加えた (比較では、旧 parser と汎用 loader で名前が違う同じ source を同じものとして読む)
+
 ## [0.42.0] - 2026-10-15
 
 ### 追加: 汎用 loader の `link_annotations` / `link_path_aliases` と `content --no-link-annotations` (既定のままなら出力は変わらない)
