@@ -2,6 +2,55 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.41.0] - 2026-10-15
+
+### 追加: 汎用 loader の `rank_from` / `index_join` / `index_group_variants` (どれも既定のままなら出力は変わらない)
+
+専用 parser 3 本を汎用 loader (`parse-llms-txt.py`) に統合する段階の 1 つ (`llms.txt` の項目を主にする
+検索エンジン。`parse-claude-docs.py` と同じ動き)。書かなければ今までどおり、`llms-full.txt` のページの
+タイトル・説明・見出しでランキングする (同梱 presets の出力は変わらない。`presets.json` は変えていない)。
+
+- `rank_from: "index"`: `fetch-index` / `search-index` / `search` が `index_url` の `llms.txt` の項目を一覧・
+  ランキングする。表示するタイトル・説明・`URL:` も項目のもの。本文は `llms-full.txt` の、項目に対応づけた
+  ページから読む。`search` はページの無い項目を stderr に `(skip: no full-text …)` と出して飛ばし、
+  フッタは `(N documents from <label>)` になる
+- **`fetch-index` / `search-index` は `llms-full.txt` を取得しない** (軽い一覧のはずのコマンドが数十 MB を
+  取りに行かないため)。`--file`、またはキャッシュが `--max-age` 内で取得元が profile の `url` のときだけ
+  `[ref]` にページ番号を出す。それ以外は索引全体で一意になる URL の末尾を出し、次に取得したときに番号が
+  別のページを指すことがないようにする。`llms.txt` での並び順の番号は出さない。`--file` が 0 ページに
+  分かれたときは、ほかのコマンドと同じく形式の変化として終了コード 2 で止める
+- `index_join`: 項目とページの対応づけ方。`title` (既定。タイトルが両側で 1 つだけのとき。`page_url` の
+  無い profile 用) / `url` (ページ自身の URL と、`.md`・クエリ・`#…`・末尾の `/` を無視して比べる。同じ URL の
+  ページが複数あるときは、クエリまで一致するページを優先し、なければクエリの無いページ (`api?id=strings` のような
+  1 ページ内の位置を指すクエリ)、それも無ければ項目にクエリが無いときだけ先頭のページ (`page_ref_forms` の `url` と
+  同じ。`llms-full.txt` のキャッシュの有無で開くページが変わらないため)。どのページともクエリが
+  合わない項目 (`?surface=web` で、ページは `cli` と `api` だけ) は対応づけない。別のクエリのページの本文を
+  その項目のタイトルで出さないため)。`url` のときは `search` が
+  対応づけの割合を見て、50% 未満なら終了コード 2、80% 未満なら WARNING を出す (`join_rate_guard` は
+  一緒に書けない)
+- `index_group_variants`: `fetch-index` で `X (Python)` / `X (Go)` のような項目の並びを 1 行にまとめ、
+  `Variants:` の行を付ける
+- `rank_from: "index"` は `page_ref_forms` に `slug` と `url` が要る (一覧に出る URL の末尾を `sections` /
+  `content` に渡せるように。クエリを持つ項目と、`llms.txt` に 2 回出る URL は完全な URL (クエリ込み) で出す。
+  URL の末尾はクエリを落とすため、一覧に 1 回しか出ない `x?surface=cli` でも、`llms-full.txt` に
+  `x?surface=api` のページしか無ければ黙ってそのページに開いてしまう)。
+  `page_url` を書いた profile では `index_join: "url"` が要る (`title` で対応づけると、未キャッシュ時に出す URL の末尾がページ自身の URL と
+  合わず開けないため)。`--file` のときは `--index-file` も要る (`--file` は通信しないため)。`--file` のときは
+  `llms-full.txt` の取得の案内を出さず、対応づけが 0 件ならその旨だけを出す
+- `page_ref_forms` の `url` で同じ URL のページが複数あるときの選び方を `index_join: "url"` とそろえた:
+  クエリまで一致するページ、なければクエリの無いページ、それも無ければ参照にクエリが無いときだけ先頭の
+  ページ。参照のクエリがどのページとも合わないとき (`?surface=web` で、ページは `cli` と `api` だけ) は、
+  別のクエリのページを開かずに `No page found for URL` で止める (一覧に出たその項目の URL を渡しても、
+  別のページに黙って届かないため)。クエリの無い参照の解決は変わらない
+- URL の末尾を出すときは、`-` で始まらないように 1 段上のパスまで含め (`-` で始まると `<slug>` の位置で
+  オプションと読まれるため。専用 parser の一覧は変えていない)、`'` や `&` を含むときは shell 用に引用する
+- キャッシュの鮮度の判定 (`--max-age` と、取得元の URL の照合) を `fetch_url` と共通の関数にした
+- 移行の照合テスト: Claude Code / Claude Platform の仮 profile に 3 つのキーを入れ、`fetch-index` /
+  `search-index` / `search` の fixture のケース 10 件が専用 parser の出力と一致するようになった (手元の
+  全キャッシュでも一致)。専用 parser の対応するテスト (一覧の番号と URL の末尾 6 件、`search-index` 3 件、
+  対応づけの割合 2 件) を汎用 loader 側に移した。照合では汎用 loader も Claude docs の fixture を専用 parser と
+  同じくキャッシュから読む (`--file` では `fetch-index` の案内文が変わるため)
+
 ## [0.40.0] - 2026-10-15
 
 ### 追加: 汎用 loader の `anchor_style` と `show_overflow` (どちらも既定のままなら出力は変わらない)

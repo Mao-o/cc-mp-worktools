@@ -23,10 +23,13 @@ to list the configured profiles. Every subcommand except ``sources`` requires
 Out of scope (use a dedicated loader or WebFetch): two-level indexes whose
 ``llms.txt`` only links to more ``llms.txt`` files (Cloudflare's root; its
 per-product ``/<product>/llms-full.txt`` files are supported), sites that
-publish one file per page, and joining an ``llms.txt`` index against the full
-text other than by exact title. Only the profile's ``url`` (the
+publish one file per page. Only the profile's ``url`` (the
 ``llms-full.txt``) and, when set, its ``index_url`` (the ``llms.txt``, used
-to give URL-less pages a URL by exact title) are fetched. A two-level index
+to give URL-less pages a URL by exact title) are fetched. With ``rank_from:
+"index"`` the ``llms.txt`` entries are what ``fetch-index`` / ``search-index``
+/ ``search`` list and rank, joined to the pages by title or by URL
+(``index_join``); ``fetch-index`` / ``search-index`` then never fetch the
+``llms-full.txt`` (see ``_cached_docs``). A two-level index
 is not a usable ``index_url`` either: its entries that link another
 ``llms.txt`` file are skipped, but a page that shares its title with an entry
 for a page of another docs set still gets that entry's URL.
@@ -53,6 +56,8 @@ from _common import (  # noqa: E402
     add_max_chars_arg,
     add_max_snippet_chars_arg,
     assert_parsed,
+    build_unique_slugs,
+    cached_if_fresh,
     check_join_rate,
     corpus_hint_args,
     die,
@@ -60,6 +65,7 @@ from _common import (  # noqa: E402
     die_index_out_of_range,
     fetch_url,
     full_corpus_extra_hits,
+    group_index_variants,
     load_lines,
     next_hint,
     normalize_doc_url,
@@ -104,7 +110,7 @@ _PROFILE_KEYS = {
     "strip_trailing_headings", "min_heading_level", "protect_tables", "compact_pack",
     "untitled_warn_ratio", "label", "cache_name", "tags_key", "frontmatter_yaml_values",
     "split_candidates", "join_rate_guard", "page_ref_forms", "page_url_strip_suffix",
-    "anchor_style", "show_overflow",
+    "anchor_style", "show_overflow", "rank_from", "index_join", "index_group_variants",
 }
 # Keys accepted only from the bundled presets. ``cache_name`` drops the URL
 # hash from the cache file name (to reuse the cache files of the dedicated
@@ -324,6 +330,51 @@ def _validate_display_keys(path: str, name: str, raw: dict, profile: dict) -> No
     profile["join_rate_guard"] = guard
     _validate_hit_display_keys(path, name, raw, profile)
     _validate_page_ref_keys(path, name, raw, profile)
+    _validate_index_keys(path, name, raw, profile)
+
+
+_RANK_FROM = ("pages", "index")
+_INDEX_JOINS = ("title", "url")
+
+
+def _validate_index_keys(path: str, name: str, raw: dict, profile: dict) -> None:
+    """``rank_from`` / ``index_join`` / ``index_group_variants``: rank the
+    ``llms.txt`` entries instead of the pages (the index-first engine of
+    ``parse-claude-docs.py``). All off by default."""
+    rank_from = raw.get("rank_from", "pages")
+    if rank_from not in _RANK_FROM:
+        _bad(path, f"sources.{name}.rank_from must be one of: {', '.join(_RANK_FROM)}")
+    index_join = raw.get("index_join", "title")
+    if index_join not in _INDEX_JOINS:
+        _bad(path, f"sources.{name}.index_join must be one of: {', '.join(_INDEX_JOINS)}")
+    group = _bool_key(path, name, raw, "index_group_variants", False)
+    if rank_from == "index":
+        if not profile["index_url"]:
+            _bad(path, f'sources.{name}.rank_from "index" needs index_url (the llms.txt whose entries are ranked)')
+        if not {"slug", "url"} <= set(profile["page_ref_forms"]):
+            # an entry not joined to a page is listed by its URL slug (by its
+            # full URL when the index lists that URL twice), which has to be
+            # a page_ref the follow-up commands accept
+            _bad(path, f'sources.{name}.rank_from "index" needs "slug" and "url" in page_ref_forms '
+                       f"(entries not joined to a page are listed by URL slug; a URL listed twice "
+                       f"is shown by its full URL)")
+        if index_join == "title" and profile["page_url"] is not None:
+            _bad(path, f'sources.{name}.rank_from "index" with page_url needs index_join "url" '
+                       f"(entries listed by URL slug must match the pages' own URLs)")
+    else:
+        for key, on in (("index_join", "index_join" in raw), ("index_group_variants", group)):
+            if on:
+                _bad(path, f'sources.{name}.{key} is only valid with rank_from "index"')
+    if index_join == "url":
+        if profile["page_url"] is None:
+            _bad(path, f'sources.{name}.index_join "url" needs page_url (the pages\' own URLs are '
+                       f"what the index entries are joined to)")
+        if profile["join_rate_guard"]:
+            _bad(path, f'sources.{name}.join_rate_guard is redundant with index_join "url" '
+                       f"(search always checks the join rate then)")
+    profile["rank_from"] = rank_from
+    profile["index_join"] = index_join
+    profile["index_group_variants"] = group
 
 
 def _validate_hit_display_keys(path: str, name: str, raw: dict, profile: dict) -> None:
@@ -1015,9 +1066,9 @@ def _index_cache_path(cache_dir: str, profile: dict) -> str:
     return os.path.join(cache_dir, f"generic-{profile['name']}-{digest}-llms.txt")
 
 
-def _load_docs(args) -> tuple[dict, str, list[dict]]:
-    """Resolve the profile, fetch (or read ``--file``), and split."""
-    profile = _get_profile(args)
+def _load_docs(args, profile: dict | None = None) -> tuple[dict, str, list[dict]]:
+    """Resolve the profile (unless given), fetch (or read ``--file``), and split."""
+    profile = profile or _get_profile(args)
     if args.file is None:
         path = fetch_url(
             profile["url"], _cache_path(args.cache_dir, profile),
@@ -1030,7 +1081,10 @@ def _load_docs(args) -> tuple[dict, str, list[dict]]:
     # with split "auto", the chosen candidate's profile is used from here on
     _choice, profile, docs = resolve_split(load_lines(path), profile)
     assert_parsed(profile["name"], len(docs), path)
-    if profile["index_url"]:
+    # index_join "url": every page has its own URL, which is what the index
+    # entries are joined to (``_entry_docs``); the title join below only
+    # gives URL-less pages one, so it is not used then
+    if profile["index_url"] and profile["index_join"] != "url":
         label = profile.get("label") or profile["name"]
         index_lines = _load_index_lines(args, profile)
         if index_lines is not None:
@@ -1163,6 +1217,248 @@ def join_index_urls(docs: list[dict], index_lines: list[str]) -> int:
     return joined
 
 
+# ---------------------------------------------------------------------------
+# Index-first engine (rank_from "index")
+# ---------------------------------------------------------------------------
+
+def _label(profile: dict) -> str:
+    return profile.get("label") or profile["name"]
+
+
+def _load_index(args, profile: dict) -> tuple[str, list[dict]]:
+    """The profile's ``llms.txt`` entries for ``rank_from: "index"``:
+    ``--index-file`` if given, else fetched to the cache like the full text
+    (a failure with no cache exits). With ``--file`` the index has to be
+    given too: ``--file`` never touches the network. Entries that link
+    another ``llms.txt``-family file are not pages and are dropped."""
+    if args.index_file is not None:
+        if not os.path.exists(args.index_file):
+            die(f"--index-file '{args.index_file}' does not exist")
+        path = args.index_file
+    elif args.file is not None:
+        die(f"--source {args.source} ranks its llms.txt (rank_from \"index\"): with --file, "
+            f"also pass --index-file (a local copy of {profile['index_url']})")
+    else:
+        path = fetch_url(profile["index_url"], _index_cache_path(args.cache_dir, profile),
+                         user_agent=USER_AGENT, timeout=60, max_age=args.max_age)
+    entries = [e for e in parse_llms_index(load_lines(path)) if not _is_index_file_url(e["url"])]
+    assert_parsed(f"{_label(profile)} index", len(entries), path)
+    return path, entries
+
+
+def _cached_docs(args, profile: dict) -> list[dict] | None:
+    """The pages, for ``fetch-index`` / ``search-index`` with ``rank_from:
+    "index"``, only when they cost no download: ``--file``, or the cached
+    ``llms-full.txt`` when ``fetch_url`` would serve it as is (younger than
+    ``--max-age``, fetched from the profile's ``url``). A cache that the next
+    full-text command would fetch again is not used: page numbers taken from
+    it could name other pages after that fetch. ``None`` otherwise (the
+    entries are then listed by URL slug)."""
+    if args.file is not None:
+        if not os.path.exists(args.file):
+            die(f"--file '{args.file}' does not exist. Drop --file to auto-fetch to the cache.")
+        docs = resolve_split(load_lines(args.file), profile)[2]
+        assert_parsed(profile["name"], len(docs), args.file)
+        return docs
+    path = cached_if_fresh(_cache_path(args.cache_dir, profile), args.max_age, profile["url"])
+    if path is None:
+        return None
+    return resolve_split(load_lines(path), profile)[2]
+
+
+def _entry_docs(entries: list[dict], docs: list[dict] | None, profile: dict) -> list:
+    """For each index entry, the index of its page in *docs*, or ``None``.
+
+    ``index_join: "url"``: the page with the same URL (``.md``, query,
+    fragment and a trailing ``/`` ignored). Of pages sharing a URL, the last
+    one whose query is the entry's too: ``?surface=cli`` and ``?surface=api``
+    are different pages, as for a URL ``page_ref``. Else the last page with
+    no query (``api?id=strings``, an anchor of the one ``api`` page); else,
+    for an entry with no query, the first page (the one its URL as a
+    ``page_ref`` opens, as its ref does before llms-full.txt is cached when
+    the URL is listed twice); else none (``?surface=web``
+    is not the ``cli`` or ``api`` page, and joining it would show their
+    body under its title).
+    ``"title"``: the page with the same title (as ``join_index_urls``
+    compares them), when the title is unique among the entries and among the
+    pages."""
+    if not docs:
+        return [None] * len(entries)
+    if profile["index_join"] == "url":
+        by_url: dict = {}
+        for i, d in enumerate(docs):
+            nu = normalize_doc_url(d["url"] or "")
+            if nu:
+                by_url.setdefault(nu, []).append(i)
+        out = []
+        for e in entries:
+            pages = by_url.get(normalize_doc_url(e["url"]), [])
+            want = _ref_url_key_with_query(e["url"], None)
+            exact = [i for i in pages if _ref_url_key_with_query(docs[i]["url"], None) == want]
+            bare = [i for i in pages if "?" not in docs[i]["url"].split("#", 1)[0]]
+            if exact:
+                out.append(exact[-1])
+            elif bare:
+                out.append(bare[-1])
+            else:
+                # the first page, as a URL page_ref resolves it: the ref
+                # shown before llms-full.txt is cached opens the same page
+                out.append(pages[0] if pages and "?" not in e["url"].split("#", 1)[0] else None)
+        return out
+    entry_count: dict = {}
+    for e in entries:
+        key = _title_key(e["title"])
+        entry_count[key] = entry_count.get(key, 0) + 1
+    by_title: dict = {}
+    for i, d in enumerate(docs):
+        by_title.setdefault(_title_key(d["title"]), []).append(i)
+    out = []
+    for e in entries:
+        key = _title_key(e["title"])
+        pages = by_title.get(key, [])
+        out.append(pages[0] if len(pages) == 1 and entry_count[key] == 1 else None)
+    return out
+
+
+def _entry_refs(entries: list[dict], doc_of: list) -> list[str]:
+    """The ``[ref]`` of each entry: its page number when joined, else its URL
+    slug, made unique across the whole index. Never the entry's position in
+    ``llms.txt``: the page numbers follow ``llms-full.txt``, whose order
+    differs, so a position would open another page. A slug is shell-quoted
+    (only a URL with characters such as ``'`` or ``&`` in its path needs it),
+    since it is meant to be put in place of ``<slug>`` in a command.
+
+    A slug drops the query, so it names whichever page of that URL the
+    resolver takes first: ``x?surface=cli`` listed once would open the
+    ``x?surface=api`` page when only that one is there. An entry with a
+    query is therefore always shown by its full URL, query included, which
+    a URL ``page_ref`` resolves to the page with that query, else to the
+    page of that URL with no query (``api?id=strings``, a place in the one
+    ``api`` page), else to no page."""
+    slugs = build_unique_slugs([e["url"] for e in entries], avoid_dash=True)
+
+    def _ref(e: dict) -> str:
+        if "?" in e["url"].split("#", 1)[0]:
+            return shlex.quote(_ref_url_key_with_query(e["url"], None))
+        return shlex.quote(slugs.get(normalize_doc_url(e["url"]), "?"))
+    return [str(idx) if idx is not None else _ref(e) for e, idx in zip(entries, doc_of)]
+
+
+_SLUG_REF_NOTE = ("Note: llms-full.txt is not cached yet, so [ref] above is a URL slug, "
+                  "not an integer doc_idx. Run 'search' once (or 'sections <slug>' directly) "
+                  "to populate doc_idx numbering here too.")
+# With --file nothing is fetched: no entry matched one of its pages.
+_FILE_SLUG_REF_NOTE = "no entry matched a page of --file, so [ref] is a URL slug"
+
+
+def _fetch_index_from_index(args, profile: dict) -> None:
+    index_path, entries = _load_index(args, profile)
+    docs = _cached_docs(args, profile)
+    if docs:
+        _warn_if_untitled_ratio_high(profile, docs, args.file or _cache_path(args.cache_dir, profile))
+    doc_of = _entry_docs(entries, docs, profile)
+    refs = _entry_refs(entries, doc_of)
+    joined = any(i is not None for i in doc_of)
+    if profile["index_group_variants"]:
+        items = group_index_variants(entries)
+    else:
+        items = [{"type": "single", "index": i, "entry": e} for i, e in enumerate(entries)]
+    print(f"{_label(profile)} llms.txt Document Index (file: {index_path})")
+    print("=" * 60)
+    print()
+    lines = []
+    grouped = 0
+    for item in items:
+        if item["type"] == "single":
+            i = item["index"]
+            lines.append((f"[{refs[i]}] {entries[i]['title']}", entries[i]["description"], []))
+        else:
+            variants = ", ".join(f"{name} [{refs[i]}]" for i, name in item["variants"])
+            lines.append((item["base"], item["desc"], [f"    Variants: {variants}"]))
+            grouped += len(item["variants"])
+    if args.compact:
+        flat = [head + (f" — {extra[0].strip()}" if extra else "") for head, _desc, extra in lines]
+        if profile.get("compact_pack"):
+            _print_packed(flat)
+        else:
+            for line in flat:
+                print(line)
+        print()
+    else:
+        for head, desc, extra in lines:
+            print_entry(head, description=desc, extra_lines=extra)
+    print(f"({len(entries)} documents total, {len(lines)} entries shown — {grouped} documents grouped)")
+    print()
+    if joined:
+        next_hint("sections", "<page_ref>", *(_source_hint_args(args) + corpus_hint_args(args)))
+        if args.file is None:
+            print("  (llms-full.txt will be fetched automatically on first use)")
+    else:
+        next_hint("sections", "<slug>", *(_source_hint_args(args) + corpus_hint_args(args)))
+        if args.file is not None:
+            print(f"  ({_FILE_SLUG_REF_NOTE})")
+        else:
+            print("  (llms-full.txt not cached yet, so the bracketed ref above is a")
+            print("   URL slug, not an integer doc_idx; run 'search' once to fetch")
+            print("   it and get numeric doc_idx here too)")
+
+
+def _search_index_from_index(args, profile: dict) -> None:
+    index_path, entries = _load_index(args, profile)
+    if not args.query.strip():
+        die("query must not be empty")
+    docs = _cached_docs(args, profile)
+    if docs:
+        _warn_if_untitled_ratio_high(profile, docs, args.file or _cache_path(args.cache_dir, profile))
+    doc_of = _entry_docs(entries, docs, profile)
+    refs = _entry_refs(entries, doc_of)
+    scored = search_index_entries(entries, args.query, limit=args.limit)
+    print(f'Search-index results for "{args.query}" '
+          f"({_label(profile)}, source: {profile['name']}, index: {index_path})")
+    print("=" * 60)
+    print()
+    if not scored:
+        print("No matching documents found.")
+        print()
+        print("Tip: try broader keywords, 'search' for an automatic full-text fallback, "
+              "or 'search-content' to search bodies directly")
+    for score, i, entry in scored:
+        extra = [f"    URL: {entry['url']}"]
+        if args.show_sections and doc_of[i] is not None:
+            extra += [f"      - {h}" for h in _headings(docs[doc_of[i]]["body_lines"])]
+        print_entry(f"[{refs[i]}] {entry['title']} (score: {score})",
+                    description=entry["description"], extra_lines=extra)
+    print(f"({len(scored)} results, {len(entries)} documents searched)")
+    print()
+    if not any(i is not None for i in doc_of):
+        print(_SLUG_REF_NOTE if args.file is None else f"Note: {_FILE_SLUG_REF_NOTE}.")
+        print()
+    next_hint("search", '"<query>"', *(_source_hint_args(args) + corpus_hint_args(args)))
+
+
+def _index_candidates(args, profile: dict, docs: list[dict]) -> list[dict]:
+    """``search`` with ``rank_from: "index"``: the top ``--top-n`` entries,
+    each joined to its page (an entry with no page is skipped, on stderr).
+    With ``index_join: "url"`` the join rate is checked first: below 50% of
+    the entries the profile or the upstream format is broken (exit 2), below
+    80% a warning."""
+    _index_path, entries = _load_index(args, profile)
+    doc_of = _entry_docs(entries, docs, profile)
+    if profile["index_join"] == "url":
+        joinable = sum(1 for i in doc_of if i is not None)
+        check_join_rate(f"{_label(profile)} index↔full-text", joinable, len(entries),
+                        advice=_GUARD_ADVICE)
+    results = []
+    for score, i, entry in search_index_entries(entries, args.query, limit=args.top_n):
+        idx = doc_of[i]
+        if idx is None:
+            print(f"  (skip: no full-text for {entry['url']})", file=sys.stderr)
+            continue
+        results.append({"doc_idx": idx, "index_score": score, "body_hits": _body_hits(args, docs[idx]),
+                        "body_only": False, "title": entry["title"], "url": entry["url"]})
+    return results
+
+
 def _source_hint_args(args) -> tuple:
     """``--source`` is always required here, so it is always echoed. An
     explicit sources file (``--sources-file`` or ``$LLMS_DOCS_SOURCES_FILE``)
@@ -1208,7 +1504,8 @@ def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
     * ``int``: a document index
     * ``url``: a full ``http(s)://`` URL, compared normalised (see
       ``_ref_url_key``); of the pages with that URL, the first whose query
-      is the reference's too, else the first. No match ends the search
+      is the reference's too, else the first with no query, else (for a
+      reference with no query) the first. No match ends the search
       (``No page found for URL``): a URL names one page, and a later form
       (``title`` / ``url_substring``) would take a URL that is one letter
       short for the longer page it is a substring of
@@ -1240,11 +1537,21 @@ def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
                      if d["url"] and _ref_url_key(d["url"], strip_suffix) == target]
             if found:
                 # the page whose query is the reference's too; else the first
-                # page: one URL can head the same page twice in the upstream
-                # file, and the copies read the same
+                # page with no query (``api?id=strings`` is a place in the
+                # one ``api`` page); else, for a reference with no query, the
+                # first page: one URL can head the same page twice in the
+                # upstream file, and the copies read the same. A query no
+                # page has (``?surface=web`` with cli and api pages) names no
+                # page: opening another query's page would be silently wrong
                 raw = _ref_url_key_with_query(page_ref, strip_suffix)
                 exact = [i for i, u in found if _ref_url_key_with_query(u, strip_suffix) == raw]
-                return exact[0] if exact else found[0][0]
+                if exact:
+                    return exact[0]
+                bare = [i for i, u in found if "?" not in u.split("#", 1)[0]]
+                if bare:
+                    return bare[0]
+                if "?" not in page_ref.split("#", 1)[0]:
+                    return found[0][0]
             die(f"No page found for URL: {page_ref}")
         elif form == "slug":
             slug = page_ref.strip("/")
@@ -1390,7 +1697,11 @@ def _print_packed(entries: list[str], width: int = 80) -> None:
 
 
 def cmd_fetch_index(args):
-    profile, path, docs = _load_docs(args)
+    profile = _get_profile(args)
+    if profile["rank_from"] == "index":
+        _fetch_index_from_index(args, profile)
+        return
+    profile, path, docs = _load_docs(args, profile)
     _warn_if_untitled_ratio_high(profile, docs, path)
     print(f"{profile.get('label') or profile['name']} llms-full.txt Document Index (file: {path})")
     print("=" * 60)
@@ -1452,7 +1763,11 @@ def _ranked(args, docs: list[dict], limit: int):
 
 
 def cmd_search_index(args):
-    profile, path, docs = _load_docs(args)
+    profile = _get_profile(args)
+    if profile["rank_from"] == "index":
+        _search_index_from_index(args, profile)
+        return
+    profile, path, docs = _load_docs(args, profile)
     _warn_if_untitled_ratio_high(profile, docs, path)
     if not args.query.strip():
         die("query must not be empty")
@@ -1540,16 +1855,24 @@ def cmd_search(args):
     _warn_if_untitled_ratio_high(profile, docs, path)
     if not args.query.strip():
         die("query must not be empty")
-    scored, _headings_unused = _ranked(args, docs, args.top_n)
+    from_index = profile["rank_from"] == "index"
+    if from_index:
+        # ranked on the llms.txt entries (their titles and URLs are shown)
+        results = _index_candidates(args, profile, docs)
+    else:
+        scored, _headings_unused = _ranked(args, docs, args.top_n)
+        results = [
+            {"doc_idx": idx, "index_score": score, "body_hits": _body_hits(args, docs[idx]), "body_only": False,
+             "title": docs[idx]["title"] or "(untitled)", "url": None}
+            for score, idx, _entry in scored
+        ]
     print(f'Search results for "{args.query}" ({_header_source(profile, path)})')
-    print(f"  (top-{args.top_n} candidate docs drilled into bodies)")
+    if from_index:
+        print(f"  (index: {args.index_file or _index_cache_path(args.cache_dir, profile)})")
+    else:
+        print(f"  (top-{args.top_n} candidate docs drilled into bodies)")
     print("=" * 60)
     print()
-    results = [
-        {"doc_idx": idx, "index_score": score, "body_hits": _body_hits(args, docs[idx]), "body_only": False,
-         "title": docs[idx]["title"] or "(untitled)"}
-        for score, idx, _entry in scored
-    ]
     # The full-corpus search also runs when the candidates have body hits but
     # none has every keyword in one section (full_corpus_extra_hits).
     # It takes one min_level for the whole corpus; every page of a profile
@@ -1563,7 +1886,7 @@ def cmd_search(args):
         titles=[d["title"] or "" for d in docs],
     ):
         results.append({"doc_idx": idx, "index_score": None, "body_hits": hits, "body_only": True,
-                        "title": docs[idx]["title"] or "(untitled)"})
+                        "title": docs[idx]["title"] or "(untitled)", "url": None})
     if not results:
         print("No matching documents found.")
         print()
@@ -1582,11 +1905,17 @@ def cmd_search(args):
     results.sort(key=lambda r: search_rank_key(r, include_changelog_priority=args.include_changelog_priority))
     for r in results:
         tag = " [body-only]" if r["body_only"] else f" (index_score: {r['index_score']})"
+        # an index row shows the entry's URL (as llms.txt writes it); the
+        # anchor is made from it the same way as from a page's URL
+        shown = {"url": r["url"]} if r["url"] else docs[r["doc_idx"]]
         print_search_result(f"[{r['doc_idx']}] {r['title']}{tag}", r["body_hits"],
-                            extra_lines=_url_line(docs[r["doc_idx"]]),
-                            anchor_for=_anchor_for(profile, docs[r["doc_idx"]]),
+                            extra_lines=_url_line(shown),
+                            anchor_for=_anchor_for(profile, shown),
                             show_overflow=profile["show_overflow"])
-    print(f"({len(results)} documents, ranked via index → body)")
+    if from_index:
+        print(f"({len(results)} documents from {_label(profile)})")
+    else:
+        print(f"({len(results)} documents, ranked via index → body)")
     print()
     # The top index candidate keeps a Next: line even when appended pages
     # rank above it.

@@ -371,16 +371,18 @@ def compare(expected: str, actual: str, expected_err: str = "", actual_err: str 
 # Generic loader with provisional profiles (for later migration steps)
 # ---------------------------------------------------------------------------
 
+_INDEX_FIRST = {"rank_from": "index", "index_join": "url", "index_group_variants": True}
 GENERIC_PROFILES = {
     "claude-code": {"url": "https://code.claude.com/docs/llms-full.txt", "split": "h1",
                     "page_url": "line:Source: ", "index_url": "https://code.claude.com/docs/llms.txt",
-                    "page_ref_forms": ["int", "url", "slug"],
-                    "anchor_style": "github", "show_overflow": True},
+                    "label": "Claude Code", "page_ref_forms": ["int", "url", "slug"],
+                    "anchor_style": "github", "show_overflow": True, **_INDEX_FIRST},
     "claude-platform": {"url": "https://platform.claude.com/llms-full.txt", "split": "frontmatter",
                         "page_url": "frontmatter:url", "index_url": "https://platform.claude.com/llms.txt",
-                        "strip_trailing_headings": True, "min_heading_level": 2, "label": "Claude Platform",
+                        "strip_trailing_headings": True, "min_heading_level": 2,
+                        "label": "Claude Developer Platform",
                         "page_ref_forms": ["int", "url", "slug"],
-                        "anchor_style": "github", "show_overflow": True},
+                        "anchor_style": "github", "show_overflow": True, **_INDEX_FIRST},
     "ai-sdk": {"url": "https://ai-sdk.dev/llms-full.txt", "split": "frontmatter",
                "page_url": "frontmatter:url", "protect_tables": False, "compact_pack": True,
                "untitled_warn_ratio": 0.10, "label": "AI SDK", "tags_key": "tags",
@@ -424,6 +426,20 @@ GENERIC_PARITY_EXPECTED: frozenset = frozenset({
     # cd-plat-corpus-search-content covers the platform there
     "cd-code-search-content",
     "cd-code-search-content-page",
+    # rank_from "index" + index_join "url" + index_group_variants: the
+    # llms.txt entries are ranked and listed, joined to the pages by URL.
+    # cd-code-search-zero still differs: the old script adds a ``Next:`` line
+    # for the other source (multi-source search is a later step)
+    "cd-code-fetch-index",
+    "cd-code-search-index",
+    "cd-code-search-index-multi",
+    "cd-code-search-index-zero",
+    "cd-code-search",
+    "cd-code-search-body-only",
+    "cd-plat-fetch-index",
+    "cd-plat-search-index",
+    "cd-plat-search-index-variants",
+    "cd-plat-search",
 })
 
 # Cases that match once the generic loader's ``    URL: …`` entry lines are
@@ -471,6 +487,12 @@ def without_url_entry_lines(stdout: str) -> tuple[str, int]:
 
 
 def _generic_argv(corpus: str, argv: list, cache_dir: str, sources_file: str) -> list | None:
+    """The generic loader's argv for a legacy case. The Claude docs corpora
+    are read from the cache, as the old script reads them: the staged files
+    are copied to the generic cache names (``fetch-index`` / ``search-index``
+    with ``rank_from: "index"`` word their hints by where the pages come
+    from, and ``--file`` is not the old script's cache). ai-sdk is read as
+    ``--file``."""
     if corpus == "firebase":
         return None  # no per-page fetch mode in the generic loader yet
     argv = list(argv)
@@ -486,10 +508,15 @@ def _generic_argv(corpus: str, argv: list, cache_dir: str, sources_file: str) ->
             return None  # multi-source search is a later step
         name = f"claude-{source}"
         full, index = f"{name}-llms-full.txt", f"{name}-llms.txt"
-    out = [*argv, "--source", name, "--sources-file", sources_file,
-           "--file", os.path.join(cache_dir, full)]
-    if index:
-        out += ["--index-file", os.path.join(cache_dir, index)]
+    out = [*argv, "--source", name, "--sources-file", sources_file]
+    if not index:
+        return out + ["--file", os.path.join(cache_dir, full)]
+    g = _loader.load_script("parse-llms-txt.py")
+    profile = {"name": name, **GENERIC_PROFILES[name]}
+    for staged, target in ((full, g._cache_path(cache_dir, profile)),
+                           (index, g._index_cache_path(cache_dir, profile))):
+        if os.path.exists(os.path.join(cache_dir, staged)):
+            shutil.copyfile(os.path.join(cache_dir, staged), target)
     return out
 
 

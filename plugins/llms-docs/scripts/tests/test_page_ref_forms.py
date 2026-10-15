@@ -258,10 +258,32 @@ class UrlFormTest(unittest.TestCase):
                           ("https://example.com/docs/x/?surface=api", 1),
                           ("https://example.com/docs/x?surface=api#part", 1),
                           ("https://example.com/docs/x.md?surface=api", 1),
-                          # no page has the query: the first page with the URL, as before
-                          ("https://example.com/docs/x", 0), ("https://example.com/docs/x?surface=web", 0)):
+                          # a reference with no query: the first page with the URL, as before
+                          ("https://example.com/docs/x", 0)):
             with self.subTest(ref=ref):
                 self.assertEqual(resolve(ref, self.F, pages=pages)[0], want)
+
+    def test_a_query_no_page_has_names_no_page(self):
+        """``?surface=web`` with cli and api pages (or with one cli page)
+        opens neither: it is another page that is not there."""
+        two = [("CLI", "https://example.com/docs/x?surface=cli"), ("API", "https://example.com/docs/x?surface=api")]
+        for pages in (two, two[:1]):
+            for ref in ("https://example.com/docs/x?surface=web", "https://example.com/docs/x.md?surface=web#a"):
+                with self.subTest(pages=len(pages), ref=ref):
+                    self.assertEqual(resolve(ref, self.F, pages=pages),
+                                     (None, f"Error: No page found for URL: {ref}\n"))
+
+    def test_a_query_falls_back_to_the_page_with_no_query(self):
+        """``api?id=strings`` is a place in the one ``api`` page: the first
+        page of the URL with no query, ahead of pages with another query."""
+        pages = [("CLI", "https://example.com/api?surface=cli"), ("API", "https://example.com/api"),
+                 ("API again", "https://example.com/api/"), ("Other", "https://example.com/y")]
+        for ref in ("https://example.com/api?id=strings", "https://example.com/api.md?id=strings#x"):
+            with self.subTest(ref=ref):
+                self.assertEqual(resolve(ref, self.F, pages=pages)[0], 1)
+        self.assertEqual(resolve("https://example.com/api?surface=cli", self.F, pages=pages)[0], 0)
+        self.assertEqual(resolve("https://example.com/api", self.F, pages=pages)[0], 1)
+        self.assertEqual(resolve("https://example.com/api?id=a", self.F, pages=pages[1:2])[0], 0)
 
     def test_a_query_is_compared_with_the_suffix_off_both_sides(self):
         pages = [("CLI", "https://example.com/docs/x.md.txt?surface=cli"),
