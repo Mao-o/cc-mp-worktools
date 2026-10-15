@@ -63,7 +63,9 @@ from _common import (  # noqa: E402
     load_lines,
     next_hint,
     normalize_doc_url,
+    note_other_candidates,
     parse_llms_index,
+    prefer_lang_exact,
     retry_for_page_ref,
     search_content_in_body,
     search_content_rank_key,
@@ -100,7 +102,7 @@ _PROFILE_KEYS = {
     "drop_lines", "skip_empty", "frontmatter_delimiter", "h1_needs_url", "index_url",
     "strip_trailing_headings", "min_heading_level", "protect_tables", "compact_pack",
     "untitled_warn_ratio", "label", "cache_name", "tags_key", "frontmatter_yaml_values",
-    "split_candidates", "join_rate_guard",
+    "split_candidates", "join_rate_guard", "page_ref_forms", "page_url_strip_suffix",
 }
 # Keys accepted only from the bundled presets. ``cache_name`` drops the URL
 # hash from the cache file name (to reuse the cache files of the dedicated
@@ -109,6 +111,10 @@ _PROFILE_KEYS = {
 # preset's cache file, and two corpora would share one file.
 _PRESET_ONLY_KEYS = {"cache_name"}
 _MIN_HEADING_LEVELS = (1, 2)
+# What a page reference may be, tried in the order the profile lists them. The
+# default is the order before ``page_ref_forms`` existed.
+_PAGE_REF_FORMS = ("int", "url", "slug", "title", "url_substring")
+_DEFAULT_PAGE_REF_FORMS = ("int", "title", "url_substring")
 PRESETS_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "presets.json")
 _PAGE_URL_FORMS = '"none", "frontmatter:<key>", "line:<prefix>" or "link:<link text>"'
 _FM_KEY_NAME_RE = re.compile(r"^[A-Za-z_][\w-]*$")
@@ -309,6 +315,39 @@ def _validate_display_keys(path: str, name: str, raw: dict, profile: dict) -> No
     if guard and profile["page_url"] is None:
         _bad(path, f"sources.{name}.join_rate_guard needs page_url (the pages' own URLs are what the index is checked against)")
     profile["join_rate_guard"] = guard
+    _validate_page_ref_keys(path, name, raw, profile)
+
+
+def _validate_page_ref_keys(path: str, name: str, raw: dict, profile: dict) -> None:
+    """``page_ref_forms`` / ``page_url_strip_suffix`` (page references by URL or
+    slug, opt-in per profile)."""
+    forms = raw.get("page_ref_forms")
+    if forms is None:
+        forms = list(_DEFAULT_PAGE_REF_FORMS)
+    elif (not isinstance(forms, list) or not forms
+            or not all(isinstance(f, str) and f in _PAGE_REF_FORMS for f in forms)
+            or len(set(forms)) != len(forms)):
+        _bad(path, f"sources.{name}.page_ref_forms must be a non-empty list of distinct forms "
+                   f"from: {', '.join(_PAGE_REF_FORMS)}")
+    if forms[0] != "int":
+        # the listings and retry commands print page indexes as refs; a form
+        # tried before "int" could take such a number for a title or URL
+        _bad(path, f'sources.{name}.page_ref_forms must start with "int" (the listings print page '
+                   f"indexes as page refs)")
+    needs_url = [f for f in forms if f in ("url", "slug")]
+    if needs_url and profile["page_url"] is None and not profile["index_url"]:
+        _bad(path, f'sources.{name}.page_ref_forms "{needs_url[0]}" needs page_url or index_url '
+                   f"(the pages' URLs are what it is matched against)")
+    profile["page_ref_forms"] = tuple(forms)
+    suffix = raw.get("page_url_strip_suffix")
+    if suffix is not None:
+        if (not isinstance(suffix, str) or not suffix or re.search(r"[\s/?#]", suffix)):
+            _bad(path, f"sources.{name}.page_url_strip_suffix must be a suffix such as "
+                       f'".md.txt" (no spaces, "/", "?" or "#"), or null')
+        if not needs_url:
+            _bad(path, f'sources.{name}.page_url_strip_suffix is only used by the "url" and "slug" '
+                       f"page_ref_forms")
+    profile["page_url_strip_suffix"] = suffix
 
 
 # Keys that say how one split candidate reads the pages. With split "auto"
@@ -1116,28 +1155,89 @@ def _source_hint_args(args) -> tuple:
     return tuple(out)
 
 
-def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None) -> int:
-    """Integer index, else a unique title substring, else a unique URL substring."""
+def _ref_url_key(url: str, suffix: str | None) -> str:
+    """A URL as page references compare it: query, fragment, a trailing ``/``,
+    *suffix* (``.md.txt``) and ``.md`` removed. Both the page's URL and the
+    reference go through this, so a URL copied from the listing and the page's
+    human-facing URL name the same page."""
+    u = url.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+    if suffix and u.endswith(suffix):
+        u = u[:-len(suffix)]
+    return normalize_doc_url(u)
+
+
+def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
+                      forms: tuple = _DEFAULT_PAGE_REF_FORMS, strip_suffix: str | None = None) -> int:
+    """Resolve *page_ref* by the profile's ``page_ref_forms``, in that order:
+
+    * ``int``: a document index
+    * ``url``: a full ``http(s)://`` URL, compared normalised (see
+      ``_ref_url_key``); the first page with that URL wins, and no match
+      falls through to the next form
+    * ``slug``: the end of the URL (``hooks``, ``agent-sdk/hooks``). One page
+      wins; of several, the one at exactly ``/<lang>/<slug>`` wins (the
+      others are named); else the candidates are listed
+    * ``title`` / ``url_substring``: a unique case-insensitive substring of the
+      title / URL; several matches are listed
+    """
     if not page_ref:
         die("page_ref required: integer index, title substring or URL substring")
-    try:
-        idx = int(page_ref)
-    except ValueError:
-        pass
-    else:
-        if 0 <= idx < len(docs):
-            return idx
-        die_index_out_of_range(idx, len(docs))
-    needle = page_ref.lower()
-    for field_name in ("title", "url"):
-        found = [(i, d) for i, d in enumerate(docs) if d[field_name] and needle in d[field_name].lower()]
-        if len(found) == 1:
-            return found[0][0]
-        if len(found) > 1:
-            rows = [(i, d["title"] + (f" ({d['url']})" if d["url"] else "")) for i, d in found[:20]]
-            die_ambiguous_page(f"{field_name} substring", page_ref, rows, retry)
+    is_url = re.match(r"https?://", page_ref) is not None
+    for form in forms:
+        if form == "int":
+            try:
+                idx = int(page_ref)
+            except ValueError:
+                continue
+            if 0 <= idx < len(docs):
+                return idx
+            die_index_out_of_range(idx, len(docs))
+        elif form == "url":
+            if not is_url:
+                continue
+            target = _ref_url_key(page_ref, strip_suffix)
+            found = [(i, d["url"]) for i, d in enumerate(docs)
+                     if d["url"] and _ref_url_key(d["url"], strip_suffix) == target]
+            if found:
+                # the first page: one URL can head the same page twice in the
+                # upstream file, and the copies read the same
+                return found[0][0]
+        elif form == "slug":
+            slug = page_ref.strip("/")
+            if is_url or not slug:
+                continue
+            pattern = re.compile(rf"/{re.escape(slug)}/?$")
+            found = [(i, d["url"]) for i, d in enumerate(docs)
+                     if d["url"] and pattern.search(_ref_url_key(d["url"], strip_suffix))]
+            if len(found) > 1:
+                preferred = prefer_lang_exact(found, slug)
+                if len(preferred) == 1:
+                    note_other_candidates(slug, preferred[0][0], found, retry)
+                    return preferred[0][0]
+                die_ambiguous_page("slug", page_ref, found, retry)
+            if found:
+                return found[0][0]
+        else:
+            field_name = "title" if form == "title" else "url"
+            needle = page_ref.lower()
+            found = [(i, d) for i, d in enumerate(docs) if d[field_name] and needle in d[field_name].lower()]
+            if len(found) == 1:
+                return found[0][0]
+            if len(found) > 1:
+                rows = [(i, d["title"] + (f" ({d['url']})" if d["url"] else "")) for i, d in found[:20]]
+                die_ambiguous_page(f"{field_name} substring", page_ref, rows, retry)
+    if is_url and "url" in forms:
+        die(f"No page found for URL: {page_ref}")
+    if "slug" in forms and not is_url:
+        die(f"No page found for slug: {page_ref}")
     die(f"No document found for: {page_ref}")
     return -1
+
+
+def _resolve_ref(profile: dict, docs: list[dict], args) -> int:
+    """``_resolve_page_ref`` with the profile's page reference keys."""
+    return _resolve_page_ref(docs, args.page_ref, _page_ref_retry(args),
+                             profile["page_ref_forms"], profile["page_url_strip_suffix"])
 
 
 def _headings(body_lines: list[str]) -> list[str]:
@@ -1250,7 +1350,7 @@ def _page_ref_retry(args):
 
 def _page_view(args) -> PageView:
     profile, path, docs = _load_docs(args)
-    idx = _resolve_page_ref(docs, args.page_ref, _page_ref_retry(args))
+    idx = _resolve_ref(profile, docs, args)
     d = docs[idx]
     header = [f"  URL: {d['url']}"] if d["url"] else []
     header.append(f"  (file: {path})")
@@ -1322,7 +1422,7 @@ def cmd_search_content(args):
     profile, path, docs = _load_docs(args)
     if not args.query.strip():
         die("query must not be empty")
-    targets = ([_resolve_page_ref(docs, args.page_ref, _page_ref_retry(args))]
+    targets = ([_resolve_ref(profile, docs, args)]
                if args.page_ref is not None else range(len(docs)))
     print(f'Search-content results for "{args.query}" ({_header_source(profile, path)})')
     print("=" * 60)

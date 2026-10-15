@@ -284,6 +284,8 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `untitled_warn_ratio` | | `split: frontmatter` のとき、frontmatter に `title:` の無いページがこの割合 (0〜1) を超えたら、`fetch-index` / `search-index` / `search` で stderr に WARNING を出す (本文の見出しで補ったタイトルも「無い」に数える) |
 | `frontmatter_yaml_values` | | `split: frontmatter` で `true` のとき、frontmatter の値を YAML どおりに読む。引用符を 1 組だけ外し、二重引用符の中の `\"` / `\\`、一重引用符の中の `''` を戻す。インデントされた次の行は値の続きとして読み、`\|` / `>` のブロックスカラーも読む (どれも空白でつないで 1 行にする)。既定 (`false`) はインデントされた続きの行を読まず、引用符は両端の文字を取るだけにする |
 | `tags_key` | | `split: frontmatter` のとき、タグとして読む frontmatter のキー (例 `tags`)。`- a` の行のリスト、`[a, b]`、`a, b` を読む (`a, b` を次の行に書いたときは `frontmatter_yaml_values` が `true` のときだけ読む)。タグはランキングに加わり、一覧と検索結果に `tags: a, b` の行、`content` のヘッダに `# doc_tags:` の行として出る |
+| `page_ref_forms` | | `sections` / `content` / `search-content --page-ref` の `<page_ref>` を解く形と、試す順 (リスト)。`int` = ページ番号 / `url` = 完全な URL (`.md`・クエリ・`#…`・末尾の `/` を無視して完全一致。同じ URL のページが複数あれば先頭) / `slug` = URL の末尾 (`hooks`、`agent-sdk/hooks`。複数に当たるときは `/<lang>/<slug>` ちょうどの 1 ページを選んで他を知らせ、選べなければ候補を列挙して終了) / `title` = タイトルの部分一致 / `url_substring` = URL の部分一致 (複数に当たれば候補を列挙して終了)。先頭は `int` にする (一覧と `Next:` が出すのはページ番号)。`url` と `slug` は `page_url` か `index_url` が要る。既定は `["int", "title", "url_substring"]` (このキーが無かった頃の順) |
+| `page_url_strip_suffix` | | `.md.txt` のような接尾辞。`url` と `slug` の照合で、ページの URL と `<page_ref>` の両方から外す (一覧に出る `….md.txt` の URL も、人が読むページの URL も同じページに届く)。`page_ref_forms` に `url` か `slug` が要る。`url_substring` には効かない (URL の生の文字列を見る) |
 | `label` | | 結果のヘッダに出す表示名 |
 | `cache_name` | | 同梱 presets 専用 (`sources.json` に書くとエラー)。キャッシュのファイル名を `<cache_name>-llms-full.txt` / `<cache_name>-llms.txt` にする |
 

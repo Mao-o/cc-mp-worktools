@@ -2,6 +2,30 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.39.0] - 2026-10-15
+
+### 追加: 汎用 loader の `page_ref_forms` と `page_url_strip_suffix` (どちらも既定のままなら出力は変わらない)
+
+専用 parser 3 本を汎用 loader (`parse-llms-txt.py`) に統合する段階の 1 つ (URL・slug によるページ参照)。
+書かなければ `<page_ref>` は今までどおり、番号 → タイトルの部分一致 → URL の部分一致の順に解く
+(同梱 presets の出力は変わらない。`presets.json` は変えていない)。
+
+- `page_ref_forms`: `<page_ref>` を解く形と試す順をリストで書く。`int` / `url` (完全な URL。`.md`・クエリ・
+  `#…`・末尾の `/` を無視して完全一致。同じ URL のページが上流のファイルに 2 回ある場合は先頭) / `slug`
+  (URL の末尾。`hooks`、`agent-sdk/hooks`。複数に当たるときは `/<lang>/<slug>` ちょうどの 1 ページを選んで
+  他を stderr で知らせ、選べなければ候補ごとに実行できる行を付けて終了する) / `title` / `url_substring`。
+  `url` が当たらなければ次の形に進む。どの形でも当たらないときの失敗文は、`url` を書いた profile では
+  `No page found for URL: …`、`slug` を書いた profile では `No page found for slug: …`、それ以外は従来の
+  `No document found for: …`。先頭は `int` に限る (一覧と `Next:` が出す `[N]` はページ番号で、ほかの形が先に
+  番号を取ると別のページに届くため)。`url` / `slug` は `page_url` か `index_url` が要る。
+  `parse-claude-docs.py` と `parse-firebase.py` のページ参照 (番号 → 完全 URL → slug) と同じ解き方
+- `page_url_strip_suffix`: `.md.txt` のような接尾辞を、`url` / `slug` の照合でページの URL と `<page_ref>` の
+  両方から外す。`parse-firebase.py` が `.md.txt` を外して照合するのと同じ
+- 手元のキャッシュで全ページを自分の URL・slug で引き直して専用 parser と照合した: Claude Code 230 ページ・
+  Claude Platform 634 ページ・Firebase の索引 7,209 項目のうち 301 項目 (URL・末尾 1 段・末尾 2 段の各形) で、
+  解決先と失敗の種類が専用 parser と一致した。AI SDK の 526 ページ (frontmatter の `url:`) は、自分の URL で
+  自分に届いた
+
 ## [0.38.0] - 2026-10-15
 
 ### 追加: 汎用 loader の `split: "auto"` と `join_rate_guard` (どれも既定 off)

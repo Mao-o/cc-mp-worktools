@@ -339,10 +339,12 @@ def compare(expected: str, actual: str, expected_err: str = "", actual_err: str 
 
 GENERIC_PROFILES = {
     "claude-code": {"url": "https://code.claude.com/docs/llms-full.txt", "split": "h1",
-                    "page_url": "line:Source: ", "index_url": "https://code.claude.com/docs/llms.txt"},
+                    "page_url": "line:Source: ", "index_url": "https://code.claude.com/docs/llms.txt",
+                    "page_ref_forms": ["int", "url", "slug"]},
     "claude-platform": {"url": "https://platform.claude.com/llms-full.txt", "split": "frontmatter",
                         "page_url": "frontmatter:url", "index_url": "https://platform.claude.com/llms.txt",
-                        "strip_trailing_headings": True, "min_heading_level": 2, "label": "Claude Platform"},
+                        "strip_trailing_headings": True, "min_heading_level": 2, "label": "Claude Platform",
+                        "page_ref_forms": ["int", "url", "slug"]},
     "ai-sdk": {"url": "https://ai-sdk.dev/llms-full.txt", "split": "frontmatter",
                "page_url": "frontmatter:url", "protect_tables": False, "compact_pack": True,
                "untitled_warn_ratio": 0.10, "label": "AI SDK", "tags_key": "tags",
@@ -357,11 +359,16 @@ GENERIC_PROFILES = {
 #   cd-code-search-content-zero: the old script prints a second ``Next:``
 #     line (``search-content <query>``) the generic loader does not
 #   cd-code-content-missing: ``No page found for slug: …`` vs. the generic
-#     loader's ``No page found for: …``
+#     loader's ``No page found for: …`` (back in once ``page_ref_forms`` exists)
 # Tip wording (ai-sdk's zero-hit pointer to ``fetch-index --compact``) is
 # tolerated by dropping hint lines; a later migration step decides on it.
 GENERIC_PARITY_EXPECTED: frozenset = frozenset({
     "cd-code-sections-int",
+    # page_ref_forms ["int", "url", "slug"]: a slug ref and its failure message
+    "cd-code-sections",
+    "cd-code-content-missing",
+    "cd-plat-sections",
+    "cd-plat-sections-dup-title",
     "cd-plat-content-heading",
     "as-search-index-zero",
     "as-search-content-page",
@@ -769,12 +776,12 @@ def platform_page_mismatches(full_text: Path, profile: dict) -> list[str]:
 
 class PlatformStructureParityTest(unittest.TestCase):
     """``strip_trailing_headings`` + ``min_heading_level: 2`` reproduce the
-    old script's claude-platform pages and sections. The ``sections`` cases
-    by slug or URL (``cd-plat-sections`` / ``-dup-title``) and the
-    ``content`` case match on the fixture too, but not on the full corpus,
-    where the page refs resolve differently (slug / URL forms are a later
-    step) and links get ``→ [doc_idx N]`` notes (also later), so they are
-    not in ``GENERIC_PARITY_EXPECTED``; these checks go by page index."""
+    old script's claude-platform pages and sections. The ``content`` case
+    matches on the fixture too, but not on the full corpus, where links get
+    ``→ [doc_idx N]`` notes (a later step), so it is not in
+    ``GENERIC_PARITY_EXPECTED``; these checks go by page index. (The
+    ``sections`` cases by slug or URL, ``cd-plat-sections`` / ``-dup-title``,
+    are in it: ``page_ref_forms`` resolves them as the old script does.)"""
 
     FULL = FIXTURES / "claude-docs" / "claude-platform-llms-full.txt"
 
