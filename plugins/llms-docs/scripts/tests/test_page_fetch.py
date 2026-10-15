@@ -1330,10 +1330,8 @@ class CachedFirebaseRoundTripTest(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         parity.stage_corpus("firebase", tmp, source_dir=cache)
-        sources = os.path.join(tmp, "sources.json")
-        with open(sources, "w", encoding="utf-8") as f:
-            json.dump({"sources": {"firebase": parity.GENERIC_PROFILES["firebase"]}}, f)
-        argv = parity._generic_argv("firebase", [], tmp, sources)
+        # the bundled preset reads the old script's cache files where they are staged
+        argv = parity._generic_argv("firebase", [], parity.write_empty_sources(tmp))
         opened = 0
         for i, e in enumerate(entries):
             if fb._url_to_cache_filename(e["url"]) not in cached:

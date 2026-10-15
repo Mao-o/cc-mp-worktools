@@ -1029,6 +1029,9 @@ class PresetCacheSharingTest(unittest.TestCase):
                                  (src["full_url"], src["full_cache"]))
                 self.assertEqual((p["index_url"], os.path.basename(g._index_cache_path("/c", p))),
                                  (src["index_url"], src["index_cache"]))
+                # the old script folds a page's language variants into one
+                # hit; no fixture of the suite has such variants
+                self.assertIs(p["index_group_variants"], True)
         p = preset_profile("ai-sdk")
         self.assertEqual((p["url"], os.path.basename(g._cache_path("/c", p))),
                          (ai.LLMS_TXT_URL, ai.DEFAULT_CACHE_FILENAME))
@@ -1037,6 +1040,29 @@ class PresetCacheSharingTest(unittest.TestCase):
                          (fb.LLMS_TXT_URL, fb.INDEX_CACHE_NAME))
         self.assertEqual(g._page_dir_name(p), fb.PAGES_CACHE_SUBDIR)
         self.assertEqual(preset_profile("claude")["members"], ("claude-code", "claude-platform"))
+
+    def test_keys_no_fixture_case_tells_apart_keep_the_old_scripts_values(self):
+        """Preset keys whose removal (back to the default) no other test
+        notices: the fixture corpora have no page that tells the two values
+        apart. Each value is the old script's behaviour."""
+        expected = {
+            # the old script maps /docs/en/... and /en/... links to one page
+            ("claude-code", "link_path_aliases"): (("/docs/en/", "/en/"),),
+            ("claude-platform", "link_path_aliases"): (("/docs/en/", "/en/"),),
+            # the old script prints the "... more" line under every hit list
+            ("claude-platform", "show_overflow"): True,
+            # the old script lets a content cut stop inside a table
+            ("ai-sdk", "protect_tables"): False,
+            # the old script's headers say "Firebase", not the source name
+            ("firebase", "label"): "Firebase",
+            # the old script reads h2 and below as sections
+            ("firebase", "min_heading_level"): 2,
+            # the old script's --limit default
+            ("firebase", "index_page_size"): 100,
+        }
+        for (name, key), value in expected.items():
+            with self.subTest(preset=name, key=key):
+                self.assertEqual(preset_profile(name)[key], value)
 
     def test_every_case_fetches_no_more_than_the_old_script(self):
         """On the staged cache of the old scripts: no fetch at all for the

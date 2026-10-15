@@ -858,10 +858,14 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
     is neither fresh nor a stale fallback: it is fetched again without its
     validators, and a failed fetch is reported as if there were no cache.
     A sidecar with no ``url`` (written by an older version) counts as a
-    match. When the sidecar names another URL, the old body is removed and
-    the sidecar (naming *url*, without validators) is written before the new
-    body; failing either fails the fetch, so a body is never left behind
-    under a sidecar that names another URL.
+    match. When the sidecar names another URL — read whether or not the
+    body exists, since a sidecar can outlive its body — the old body is
+    removed and the sidecar (naming *url*, without validators) is written
+    before the new body; failing either fails the fetch, so a body is never
+    left behind under a sidecar that names another URL. The one known
+    exception: a body with no sidecar at all (a cache written by an older
+    version, or a fetch whose only sidecar write failed) counts as a match
+    for every URL, like a sidecar with no ``url``.
 
     On transport failure:
       * If a cache file already exists (even a stale one past *max_age*),
@@ -950,7 +954,10 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
     against the cache file's own bytes, not sent to any server.
     """
     cache_exists = os.path.exists(cache_path)
-    meta = _load_fetch_meta(cache_path) if cache_exists else {}
+    # The sidecar is read even with no body: one naming another URL can
+    # outlive its body (a body write failing after a URL change), and must
+    # still route this fetch through the URL-change order below.
+    meta = _load_fetch_meta(cache_path)
     url_changed = _meta_names_other_url(meta, url)
     if cache_exists and not url_changed and _young_enough(cache_path, max_age):
         return cache_path

@@ -31,7 +31,10 @@ All notable changes to this plugin will be documented here.
 本文を書いたあとで `.meta.json` の書き込みに失敗すると、新しい URL の本文が古い URL の `.meta.json` の
 まま残り、次に古い URL を求めたときにその本文を返していた。今は古い本文を消し、新しい URL を記録した
 `.meta.json` を先に書いてから本文を書く。どちらかに失敗したら取得の失敗として扱う (既存キャッシュは
-使わない)。URL が変わっていないときの挙動は変わらない。旧 3 script も同じ関数を使うので、同じく直る
+使わない)。本文が無く `.meta.json` だけが残っているとき (本文の書き込みに失敗したあと) も `.meta.json` の
+URL を見る (見ないと、続く取得で最後の `.meta.json` の書き込みに失敗したとき、別の URL の本文が残った)。
+例外として、`.meta.json` の無い本文 (URL を記録する前の版が書いたもの、または唯一の `.meta.json` の
+書き込みに失敗したもの) は、従来どおりどの URL にも一致するものとして扱う。URL が変わっていないときの挙動は変わらない。旧 3 script も同じ関数を使うので、同じく直る
 (通常の出力は変わらない)。README と `researching-library-docs` の SKILL の「取得に失敗したら既存の
 キャッシュを使う」に、この例外を書き足した。
 
@@ -40,7 +43,14 @@ All notable changes to this plugin will be documented here.
 - テスト: 旧 script と preset のキャッシュのファイル名と取得 URL が一致すること、全ケースで取得の回数が
   旧 script と同じ (Claude docs と ai-sdk は 0 回) であること、どちらかが取得したキャッシュをもう一方が
   取得せずに読み同じ出力になること、URL が変わったときの書き込みの各段階の失敗のあとで、どちらの URL にも
-  他方の本文を返さないこと、`.meta.json` を本文より先に書くこと、`list_page_urls` の既定・`false`・拒否する値
+  他方の本文を返さないこと (開始の状態 (本文の有無 × `.meta.json` 無し / 同じ URL / 別の URL) × 失敗する
+  書き込みの直積で確かめ、`.meta.json` の無い本文の例外のセルも期待値として固定する)、書き込みの失敗が
+  2 回続いたあとも別の URL の本文を返さないこと、`.meta.json` を本文より先に書くこと、
+  `list_page_urls` の既定・`false`・拒否する値、Claude docs の 2 preset の `index_group_variants`、
+  fixture のケースでは差が出ない preset のキー (`link_path_aliases` / `show_overflow` / `protect_tables` /
+  Firebase の `label` / `min_heading_level` / `index_page_size`) が旧 script の挙動の値であること
+- 手元の全コーパスで流すテスト (Firebase のページキャッシュを番号で開く) を、同梱 preset で旧 script の
+  キャッシュを読む形に直した (移行の比較の helper の引数が変わって動かなくなっていた)
 
 ## [0.44.0] - 2026-10-15
 
