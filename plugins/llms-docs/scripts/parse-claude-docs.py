@@ -21,7 +21,6 @@ import os
 import re
 import shlex
 import sys
-import time
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
@@ -34,7 +33,9 @@ from _common import (
     add_max_chars_arg,
     add_max_snippet_chars_arg,
     assert_parsed,
+    build_unique_slugs as _build_unique_slugs,
     build_url_to_full_index,
+    cached_if_fresh,
     check_join_rate,
     corpus_hint_args,
     die,
@@ -42,6 +43,7 @@ from _common import (
     die_index_out_of_range,
     fetch_url,
     full_corpus_extra_hits,
+    group_index_variants as _group_index_entries,
     load_lines,
     next_hint,
     normalize_doc_url,
@@ -399,47 +401,6 @@ def _cache_path(cache_dir: str, filename: str) -> str:
 # Subcommand handlers
 # ---------------------------------------------------------------------------
 
-def _group_index_entries(entries: list[dict]) -> list[dict]:
-    """Group entries with the same base title that differ only by parenthetical variant.
-
-    Detects patterns like "Batches (Python)", "Batches (Go)", etc. and collapses
-    consecutive same-base entries into a single group entry.
-
-    Returns a list of display items:
-        {"type": "single", "index": int, "entry": dict}
-        {"type": "group", "base": str, "desc": str, "variants": [(index, variant_name), ...]}
-    """
-    _VARIANT_RE = re.compile(r"^(.+?)\s*\(([^)]+)\)$")
-
-    items: list[dict] = []
-    i = 0
-    while i < len(entries):
-        m = _VARIANT_RE.match(entries[i]["title"])
-        if m:
-            base = m.group(1).strip()
-            variants = [(i, m.group(2))]
-            j = i + 1
-            while j < len(entries):
-                m2 = _VARIANT_RE.match(entries[j]["title"])
-                if m2 and m2.group(1).strip() == base:
-                    variants.append((j, m2.group(2)))
-                    j += 1
-                else:
-                    break
-            if len(variants) > 1:
-                items.append({
-                    "type": "group",
-                    "base": base,
-                    "desc": entries[i].get("description", ""),
-                    "variants": variants,
-                })
-                i = j
-                continue
-        items.append({"type": "single", "index": i, "entry": entries[i]})
-        i += 1
-    return items
-
-
 def _load_url_to_idx_if_cached(full_cache: str, max_age: int | None = None) -> dict:
     """Join llms.txt URLs to llms-full.txt doc_idx — but ONLY if the
     full-text file is already cached AND still fresh under *max_age*;
@@ -465,48 +426,9 @@ def _load_url_to_idx_if_cached(full_cache: str, max_age: int | None = None) -> d
     prevent — falling back to the slug form (always valid, ageless) until
     a fresh copy exists is the same trade-off ``fetch_url`` itself makes.
     """
-    if not os.path.exists(full_cache):
+    if cached_if_fresh(full_cache, max_age) is None:
         return {}
-    if max_age is not None:
-        age = time.time() - os.path.getmtime(full_cache)
-        if age >= max_age:
-            return {}
     return build_url_to_full_index(split_documents(load_lines(full_cache)))
-
-
-def _build_unique_slugs(raw_urls: list[str]) -> dict[str, str]:
-    """Map each *normalized* URL (keys are ``normalize_doc_url(u)`` for
-    each ``u`` in *raw_urls*) to a display slug unique across all of them.
-
-    Starts from the single last path segment (e.g. ``"hooks"``) and, only
-    for URLs whose slug collides with another URL's, grows the suffix one
-    segment at a time (``"agent-sdk/hooks"``, ...) until it no longer
-    collides — both single- and multi-segment slugs are valid
-    ``sections``/``content`` input (``_resolve_page_ref`` matches on the
-    URL's trailing path, see its docstring). Falls back to the full path
-    if even that doesn't disambiguate (only possible for literal URL
-    duplicates). Without this, ``.../hooks`` and ``.../agent-sdk/hooks``
-    would both display as ``[hooks]``, and passing either back in would
-    hit ``_resolve_page_ref``'s own ambiguous-slug error — making the
-    advertised copy-and-paste fallback reference unusable for exactly the
-    pages that need it most.
-    """
-    normalized = [normalize_doc_url(u) for u in raw_urls]
-    all_segments = [u.rstrip("/").lstrip("/").split("/") for u in normalized]
-    result = {}
-    for i, url in enumerate(normalized):
-        segments = all_segments[i]
-        for n in range(1, len(segments) + 1):
-            candidate = "/".join(segments[-n:])
-            if not any(
-                j != i and "/".join(all_segments[j][-n:]) == candidate
-                for j in range(len(normalized))
-            ):
-                result[url] = candidate
-                break
-        else:
-            result[url] = "/".join(segments) or "?"
-    return result
 
 
 def _joined_or_slug_ref(entry: dict, url_to_idx: dict, unique_slugs: dict) -> str:

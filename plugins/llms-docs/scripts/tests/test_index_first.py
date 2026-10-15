@@ -1,0 +1,591 @@
+"""``rank_from: "index"`` (the index-first engine) of parse-llms-txt.py.
+
+With ``rank_from: "index"`` the ``llms.txt`` entries are ranked and listed
+(their titles, descriptions and URLs are shown) and the page bodies are taken
+from ``llms-full.txt``, as ``parse-claude-docs.py`` does:
+
+* ``index_join`` says how an entry finds its page: ``"url"`` (the normalised
+  URL) or ``"title"`` (a title unique on both sides, the default)
+* ``fetch-index`` / ``search-index`` never download ``llms-full.txt``: they
+  join only against ``--file`` or a cached copy that ``fetch_url`` would serve
+  as is (younger than ``--max-age``, fetched from the profile's URL); else
+  each entry is listed by a URL slug unique across the index
+* ``index_group_variants`` collapses ``X (Python)`` / ``X (Go)`` runs into one
+  line with a ``Variants:`` list
+* ``search`` skips an entry with no page (on stderr) and, with ``index_join:
+  "url"``, checks the join rate (exit 2 below 50%)
+
+``FetchIndexDocIdxJoinTest`` / ``SearchIndexDocIdxJoinTest`` /
+``JoinRateTest`` are ported from ``test_parse_claude_docs.py``. No network:
+``urllib.request.urlopen`` is patched to fail and every call is recorded.
+"""
+
+import json
+import os
+import re
+import shlex
+import shutil
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import _loader  # noqa: F401  (side effect: adds scripts/ to sys.path)
+
+generic = _loader.load_script("parse-llms-txt.py")
+import _common  # noqa: E402  (scripts/ is on sys.path via _loader)
+
+SCRIPT = "parse-llms-txt.py"
+FULL_URL = "https://example.com/llms-full.txt"
+INDEX_URL = "https://example.com/llms.txt"
+CODE = {"url": FULL_URL, "split": "h1", "page_url": "line:Source: ", "index_url": INDEX_URL,
+        "page_ref_forms": ["int", "url", "slug"], "rank_from": "index", "index_join": "url"}
+SOURCES = {
+    "code": CODE,
+    "grouped": {**CODE, "index_group_variants": True},
+    "by-title": {**CODE, "index_join": "title"},
+    "label": {**CODE, "label": "Example Docs", "anchor_style": "github"},
+    "packed": {**CODE, "compact_pack": True},
+    "pages": {k: v for k, v in CODE.items() if k not in ("rank_from", "index_join")},
+}
+
+SKILLS_HOOKS_INDEX = ("- [Skills](https://example.com/en/skills): Package reusable capabilities\n"
+                      "- [Hooks](https://example.com/en/hooks): Configure hook matchers\n")
+# llms-full.txt order differs from llms.txt order: Skills is entry 0 but page 1
+HOOKS_SKILLS_FULL = ("# Hooks\nSource: https://example.com/en/hooks\n\nbody\n"
+                     "# Skills\nSource: https://example.com/en/skills\n\nbody\n")
+
+
+class _Case(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.sources = os.path.join(self.tmp, "sources.json")
+        Path(self.sources).write_text(json.dumps({"sources": SOURCES}), encoding="utf-8")
+        self.calls: list = []
+
+    def profile(self, name: str = "code") -> dict:
+        return generic._validate_profile(self.sources, name, SOURCES[name])
+
+    def full_cache(self, name: str = "code") -> Path:
+        return Path(generic._cache_path(self.tmp, self.profile(name)))
+
+    def index_cache(self, name: str = "code") -> Path:
+        return Path(generic._index_cache_path(self.tmp, self.profile(name)))
+
+    def write(self, index: str | None, full: str | None = None, name: str = "code") -> None:
+        if index is not None:
+            self.index_cache(name).write_text(index, encoding="utf-8")
+        if full is not None:
+            self.full_cache(name).write_text(full, encoding="utf-8")
+
+    def age(self, path: Path, seconds: int) -> None:
+        then = time.time() - seconds
+        os.utime(path, (then, then))
+
+    def run_g(self, *argv, source: str = "code", corpus: tuple | None = None):
+        """Run the generic loader on the temp cache (or *corpus* options)."""
+        opts = corpus if corpus is not None else ("--cache-dir", self.tmp)
+        full = [SCRIPT, *argv, "--source", source, "--sources-file", self.sources, *opts]
+        return self.run_argv(full)
+
+    def run_argv(self, argv: list):
+        def fake_urlopen(req, *a, **kw):
+            self.calls.append(getattr(req, "full_url", req))
+            raise OSError("test: network disabled")
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            try:
+                return _loader.run_cli(generic, list(argv))
+            except Exception as e:  # a crash is a failure, not an error of the run
+                self.fail(f"{argv[1:3]} crashed: {e!r}")
+
+    def full_fetches(self) -> int:
+        return sum(1 for u in self.calls if u == FULL_URL)
+
+
+class ProfileValidationTest(_Case):
+    """Each key is checked, and the combinations that cannot work are refused."""
+
+    def _err(self, raw: dict) -> str:
+        code, _out, err = _loader.run_cli(generic, [SCRIPT, "sources", "--sources-file", self._file(raw)])
+        self.assertEqual(code, 1)
+        return err
+
+    def _file(self, raw: dict) -> str:
+        path = os.path.join(self.tmp, "bad.json")
+        Path(path).write_text(json.dumps({"sources": {"x": raw}}), encoding="utf-8")
+        return path
+
+    def test_defaults_keep_the_page_ranking(self):
+        p = generic._validate_profile("s.json", "x", {"url": FULL_URL, "split": "h1"})
+        self.assertEqual((p["rank_from"], p["index_join"], p["index_group_variants"]),
+                         ("pages", "title", False))
+
+    def test_bad_values_and_combinations_are_refused(self):
+        cases = {
+            "rank_from must be one of": {**CODE, "rank_from": "entries"},
+            "index_join must be one of": {**CODE, "index_join": "slug"},
+            "index_group_variants must be true or false": {**CODE, "index_group_variants": "yes"},
+            'rank_from "index" needs index_url': {k: v for k, v in CODE.items() if k != "index_url"},
+            'rank_from "index" needs "slug" in page_ref_forms': {**CODE, "page_ref_forms": ["int", "url"]},
+            'index_join is only valid with rank_from "index"': SOURCES["pages"] | {"index_join": "title"},
+            'index_group_variants is only valid with rank_from "index"':
+                SOURCES["pages"] | {"index_group_variants": True},
+            'index_join "url" needs page_url': {**CODE, "page_url": "none",
+                                                "page_ref_forms": ["int", "slug"]},
+            "join_rate_guard is redundant": {**CODE, "join_rate_guard": True},
+        }
+        for needle, raw in cases.items():
+            with self.subTest(needle):
+                self.assertIn(needle, self._err(raw))
+
+    def test_title_join_and_group_variants_are_accepted(self):
+        for name in ("by-title", "grouped"):
+            with self.subTest(name):
+                p = self.profile(name)
+                self.assertEqual(p["rank_from"], "index")
+
+    def test_split_auto_shares_the_index_keys(self):
+        raw = {"url": FULL_URL, "split": "auto", "index_url": INDEX_URL,
+               "page_ref_forms": ["int", "url", "slug"], "rank_from": "index", "index_join": "url",
+               "split_candidates": [{"split": "h1", "page_url": "line:Source: "},
+                                    {"split": "frontmatter", "page_url": "frontmatter:url"}]}
+        p = generic._validate_profile("s.json", "x", raw)
+        self.assertEqual([c["index_join"] for c in p["split_candidates"]], ["url", "url"])
+
+
+class FetchIndexDocIdxJoinTest(_Case):
+    """Ported from ``test_parse_claude_docs.py``: fetch-index shows the
+    llms-full.txt page number of each entry when it is already cached (and
+    fresh), else a URL slug; it never fetches llms-full.txt for this."""
+
+    def test_shows_slug_and_does_not_fetch_full_text_when_uncached(self):
+        self.write("- [Hooks](https://example.com/en/hooks): Configure hook matchers\n")
+        code, out, err = self.run_g("fetch-index")
+        self.assertEqual(code, 0, err)
+        self.assertIn("[hooks] Hooks", out)
+        self.assertNotIn("[0]", out)
+        self.assertFalse(self.full_cache().exists())
+        self.assertEqual(self.calls, [])
+
+    def test_shows_joined_full_text_doc_idx_when_full_text_already_cached(self):
+        self.write(SKILLS_HOOKS_INDEX, HOOKS_SKILLS_FULL)
+        code, out, err = self.run_g("fetch-index")
+        self.assertEqual(code, 0, err)
+        self.assertIn("[1] Skills", out)
+        self.assertIn("[0] Hooks", out)
+        self.assertIn("Next: parse-llms-txt.py sections <page_ref>", out)
+
+    def test_grouped_variants_show_per_variant_ref_not_misleading_range(self):
+        self.write("- [Batches (Python)](https://example.com/en/batches-py): Python batches\n"
+                   "- [Batches (Go)](https://example.com/en/batches-go): Go batches\n", name="grouped")
+        code, out, err = self.run_g("fetch-index", source="grouped")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Batches\n    Python batches\n    Variants: Python [batches-py], Go [batches-go]\n", out)
+        self.assertNotIn("[0-1]", out)
+        self.assertIn("(2 documents total, 1 entries shown — 2 documents grouped)", out)
+
+    def test_falls_back_to_slug_when_full_text_cache_is_stale(self):
+        self.write(SKILLS_HOOKS_INDEX, HOOKS_SKILLS_FULL)
+        self.age(self.full_cache(), 1000)
+        code, out, err = self.run_g("fetch-index", "--max-age", "100")
+        self.assertEqual(code, 0, err)
+        self.assertIn("[skills] Skills", out)
+        self.assertIn("[hooks] Hooks", out)
+        self.assertNotIn("[0]", out)
+        self.assertNotIn("[1]", out)
+
+    def test_fresh_full_text_cache_within_max_age_still_joins(self):
+        self.write(SKILLS_HOOKS_INDEX, HOOKS_SKILLS_FULL)
+        self.age(self.full_cache(), 500)
+        code, out, err = self.run_g("fetch-index", "--max-age", "1000")
+        self.assertEqual(code, 0, err)
+        self.assertIn("[1] Skills", out)
+        self.assertIn("[0] Hooks", out)
+
+    def test_colliding_last_segment_slugs_are_disambiguated(self):
+        self.write("- [Hooks](https://example.com/en/hooks): zzcommon hook matchers\n"
+                   "- [Agent SDK Hooks](https://example.com/en/agent-sdk/hooks): Agent SDK hook matchers\n")
+        code, out, err = self.run_g("fetch-index")
+        self.assertEqual(code, 0, err)
+        self.assertIn("[en/hooks] Hooks", out)
+        self.assertIn("[agent-sdk/hooks] Agent SDK Hooks", out)
+        self.assertNotIn("[hooks]", out)
+
+
+class SearchIndexDocIdxJoinTest(_Case):
+    """Ported from ``test_parse_claude_docs.py``: search-index joins when
+    llms-full.txt is cached and fresh (no note), else shows slugs and a note."""
+
+    def test_uses_slug_and_shows_note_when_full_text_uncached(self):
+        self.write("- [Hooks](https://example.com/en/hooks): Configure hook matchers\n")
+        code, out, err = self.run_g("search-index", "hooks")
+        self.assertEqual(code, 0, err)
+        self.assertIn("[hooks] Hooks", out)
+        self.assertIn("Note:", out)
+
+    def test_uses_joined_doc_idx_and_omits_note_when_full_text_cached(self):
+        self.write(SKILLS_HOOKS_INDEX, HOOKS_SKILLS_FULL)
+        code, out, err = self.run_g("search-index", "hooks")
+        self.assertEqual(code, 0, err)
+        self.assertIn("[0] Hooks", out)
+        self.assertNotIn("Note:", out)
+
+    def test_falls_back_to_slug_and_shows_note_when_full_text_cache_is_stale(self):
+        self.write(SKILLS_HOOKS_INDEX, HOOKS_SKILLS_FULL)
+        self.age(self.full_cache(), 1000)
+        code, out, err = self.run_g("search-index", "hooks", "--max-age", "100")
+        self.assertEqual(code, 0, err)
+        self.assertIn("[hooks] Hooks", out)
+        self.assertIn("Note:", out)
+
+
+class IndexCommandsNeverFetchFullTextTest(_Case):
+    """Cost: fetch-index / search-index fetch llms-full.txt 0 times whether
+    its cache is fresh, stale, fetched from another URL or absent. The
+    index itself is cached and fresh, so no request at all is made."""
+
+    STATES = ("fresh", "stale", "other-url", "absent")
+
+    def _stage(self, state: str) -> None:
+        self.write(SKILLS_HOOKS_INDEX, None if state == "absent" else HOOKS_SKILLS_FULL)
+        if state == "stale":
+            self.age(self.full_cache(), 1000)
+        if state == "other-url":
+            Path(str(self.full_cache()) + ".meta.json").write_text(
+                json.dumps({"url": "https://other.example.com/llms-full.txt"}), encoding="utf-8")
+
+    def test_no_request_in_any_cache_state(self):
+        for command in (["fetch-index"], ["fetch-index", "--compact"], ["search-index", "hooks"],
+                        ["search-index", "hooks", "--show-sections"]):
+            for state in self.STATES:
+                with self.subTest(command=command, state=state):
+                    shutil.rmtree(self.tmp)
+                    os.makedirs(self.tmp)
+                    Path(self.sources).write_text(json.dumps({"sources": SOURCES}), encoding="utf-8")
+                    self.calls = []
+                    self._stage(state)
+                    code, out, err = self.run_g(*command, "--max-age", "100")
+                    self.assertEqual(code, 0, err)
+                    self.assertEqual(self.calls, [])
+                    joined = re.search(r"^\[0\] Hooks", out, re.M) is not None
+                    self.assertEqual(joined, state == "fresh", out)
+
+    def test_the_mock_does_see_a_full_text_fetch(self):
+        """Positive control: ``search`` needs the bodies and does fetch
+        llms-full.txt when it is not cached (the mocked fetch fails)."""
+        self.write(SKILLS_HOOKS_INDEX)
+        code, _out, _err = self.run_g("search", "hooks")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.full_fetches(), 1)
+
+    def test_cached_if_fresh_follows_fetch_url(self):
+        path = self.full_cache()
+        self.assertIsNone(_common.cached_if_fresh(str(path), 100, FULL_URL))
+        path.write_text("x", encoding="utf-8")
+        self.assertEqual(_common.cached_if_fresh(str(path), 100, FULL_URL), str(path))
+        self.assertEqual(_common.cached_if_fresh(str(path), None, FULL_URL), str(path))
+        self.age(path, 1000)
+        self.assertIsNone(_common.cached_if_fresh(str(path), 100, FULL_URL))
+        self.assertEqual(_common.cached_if_fresh(str(path), None, FULL_URL), str(path))
+        self.age(path, 0)
+        meta = Path(str(path) + ".meta.json")
+        meta.write_text(json.dumps({"url": "https://other.example.com/x"}), encoding="utf-8")
+        self.assertIsNone(_common.cached_if_fresh(str(path), 100, FULL_URL))
+        self.assertEqual(_common.cached_if_fresh(str(path), 100), str(path))
+        meta.write_text(json.dumps({"url": FULL_URL}), encoding="utf-8")
+        self.assertEqual(_common.cached_if_fresh(str(path), 100, FULL_URL), str(path))
+
+
+class JoinRateTest(_Case):
+    """Ported from ``test_parse_claude_docs.py``: with index_join "url",
+    search exits 2 when fewer than half of the entries join a page."""
+
+    ONE_PAGE = "# A\nSource: https://example.com/a\n\nbody a desc\n"
+
+    def test_low_join_rate_exits_2(self):
+        self.write("- [A](https://example.com/a): desc a\n"
+                   "- [B](https://example.com/b): desc b\n"
+                   "- [C](https://example.com/c): desc c\n"
+                   "- [D](https://example.com/d): desc d\n", self.ONE_PAGE)
+        code, _out, err = self.run_g("search", "desc")
+        self.assertEqual(code, 2)
+        self.assertIn("join rate", err)
+
+    def test_high_join_rate_does_not_fail(self):
+        self.write("- [A](https://example.com/a): desc a\n", self.ONE_PAGE)
+        code, _out, err = self.run_g("search", "desc")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("join rate", err)
+
+    def test_title_join_is_not_rate_checked(self):
+        self.write("- [A](https://example.com/a): desc a\n"
+                   "- [B](https://example.com/b): desc b\n"
+                   "- [C](https://example.com/c): desc c\n", self.ONE_PAGE, name="by-title")
+        code, _out, err = self.run_g("search", "desc", source="by-title")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("join rate", err)
+
+
+class SearchFromIndexTest(_Case):
+    """search ranks the entries, drills into the joined pages and shows the
+    entry's title and URL."""
+
+    def test_entry_title_and_url_are_shown_and_unjoined_entries_skipped(self):
+        self.write("- [Hook guide](https://example.com/en/hooks.md): Configure hook matchers\n"
+                   "- [Hook recipes](https://example.com/en/recipes.md): More hook matchers\n"
+                   "- [Skills](https://example.com/en/skills.md): Package\n",
+                   "# Hooks\nSource: https://example.com/en/hooks\n\n## Matchers\nhook matchers here\n"
+                   "# Skills\nSource: https://example.com/en/skills\n\nbody\n", name="label")
+        code, out, err = self.run_g("search", "hook matchers", source="label")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"\n  (index: {self.index_cache('label')})\n===", out)
+        self.assertIn("[0] Hook guide (index_score: ", out)
+        self.assertIn("    URL: https://example.com/en/hooks.md\n", out)
+        self.assertIn("[https://example.com/en/hooks#matchers]", out)
+        self.assertNotIn("Hook recipes", out)
+        self.assertIn("  (skip: no full-text for https://example.com/en/recipes.md)", err)
+        self.assertIn("(1 documents from Example Docs)", out)
+        self.assertIn("Next: parse-llms-txt.py content 0 Matchers", out)
+
+    def test_title_join_reads_the_page_of_the_same_title(self):
+        self.write("- [Hooks](https://example.com/docs/hooks): zzcommon hook matchers\n"
+                   "- [Skills](https://example.com/docs/skills): Package\n"
+                   "- [Skills](https://example.com/docs/skills-2): Package again\n",
+                   "# Skills\nSource: https://example.com/en/skills\n\nbody\n"
+                   "# Hooks\nSource: https://example.com/en/hooks\n\nhook matchers here\n",
+                   name="by-title")
+        code, out, err = self.run_g("search", "hooks", source="by-title")
+        self.assertEqual(code, 0, err)
+        self.assertIn("[1] Hooks (index_score: ", out)
+        code, out, err = self.run_g("fetch-index", source="by-title")
+        self.assertEqual(code, 0, err)
+        # "Skills" names two entries: neither is joined (slugs)
+        self.assertIn("[1] Hooks", out)
+        self.assertIn("[skills] Skills", out)
+        self.assertIn("[skills-2] Skills", out)
+
+    def test_title_shared_by_two_pages_is_not_joined(self):
+        self.write("- [Hooks](https://example.com/docs/hooks): Configure hook matchers\n",
+                   "# Hooks\nSource: https://example.com/en/hooks\n\nbody\n"
+                   "# Hooks\nSource: https://example.com/en/agent/hooks\n\nbody\n", name="by-title")
+        code, out, err = self.run_g("fetch-index", source="by-title")
+        self.assertEqual(code, 0, err)
+        self.assertIn("[hooks] Hooks", out)
+
+    def test_entries_linking_another_llms_txt_are_not_pages(self):
+        self.write("- [Hooks](https://example.com/en/hooks): Configure hook matchers\n"
+                   "- [Full text](https://example.com/llms-full.txt): Everything in one file\n"
+                   "- [SDK docs](https://example.com/sdk/llms.txt): Another index\n")
+        for command in (["fetch-index"], ["search-index", "file index hooks"]):
+            with self.subTest(command=command):
+                code, out, err = self.run_g(*command)
+                self.assertEqual(code, 0, err)
+                self.assertIn("[hooks] Hooks", out)
+                self.assertNotIn("Full text", out)
+                self.assertNotIn("SDK docs", out)
+        code, out, err = self.run_g("fetch-index")
+        self.assertIn("(1 documents total,", out)
+
+    def test_body_only_fallback_still_runs(self):
+        self.write("- [Hooks](https://example.com/en/hooks): Configure\n",
+                   "# Hooks\nSource: https://example.com/en/hooks\n\nbody\n"
+                   "# Notes\nSource: https://example.com/en/notes\n\nzzqword here\n")
+        code, out, err = self.run_g("search", "zzqword")
+        self.assertEqual(code, 0, err)
+        self.assertIn("[1] Notes [body-only]", out)
+        self.assertIn("    URL: https://example.com/en/notes\n", out)
+
+    def test_file_needs_index_file(self):
+        full = os.path.join(self.tmp, "full.txt")
+        Path(full).write_text(HOOKS_SKILLS_FULL, encoding="utf-8")
+        for command in (["fetch-index"], ["search-index", "hooks"], ["search", "hooks"]):
+            with self.subTest(command=command):
+                code, _out, err = self.run_g(*command, corpus=("--file", full))
+                self.assertEqual(code, 1)
+                self.assertIn("also pass --index-file", err)
+        missing = os.path.join(self.tmp, "no-such-index.txt")
+        code, _out, err = self.run_g("fetch-index", corpus=("--file", full, "--index-file", missing))
+        self.assertEqual(code, 1)
+        self.assertIn(f"--index-file '{missing}' does not exist", err)
+        self.assertEqual(self.calls, [])
+
+    def test_sections_and_content_do_not_read_the_index(self):
+        """With index_join "url" the pages carry their URLs: the full-text
+        commands do not fetch llms.txt (no index cache here)."""
+        self.write(None, HOOKS_SKILLS_FULL)
+        for command in (["sections", "hooks"], ["content", "skills"], ["search-content", "body"]):
+            with self.subTest(command=command):
+                code, _out, err = self.run_g(*command)
+                self.assertEqual(code, 0, err)
+        self.assertEqual(self.calls, [])
+
+    def test_compact_lists_one_entry_per_line_or_packed(self):
+        index = ("- [Batches (Python)](https://example.com/en/batches-py): Python batches\n"
+                 "- [Batches (Go)](https://example.com/en/batches-go): Go batches\n"
+                 "- [Hooks](https://example.com/en/hooks): Configure hook matchers\n")
+        self.write(index, name="grouped")
+        code, out, err = self.run_g("fetch-index", "--compact", source="grouped")
+        self.assertEqual(code, 0, err)
+        self.assertIn("\nBatches — Variants: Python [batches-py], Go [batches-go]\n[hooks] Hooks\n", out)
+        self.assertNotIn("Configure hook matchers", out)
+        self.write(index, name="packed")
+        code, out, err = self.run_g("fetch-index", "--compact", source="packed")
+        self.assertEqual(code, 0, err)
+        self.assertIn("\n[batches-py] Batches (Python)  [batches-go] Batches (Go)  [hooks] Hooks\n", out)
+
+    def test_show_sections_lists_the_joined_pages_headings(self):
+        self.write(SKILLS_HOOKS_INDEX,
+                   "# Hooks\nSource: https://example.com/en/hooks\n\n## Matchers\nx\n"
+                   "# Skills\nSource: https://example.com/en/skills\n\nbody\n")
+        code, out, err = self.run_g("search-index", "hooks", "--show-sections")
+        self.assertEqual(code, 0, err)
+        self.assertIn("[0] Hooks (score: ", out)
+        self.assertIn("      - Matchers\n", out)
+
+
+class RefRoundTripTest(_Case):
+    """Every ``[ref]`` that fetch-index / search-index print, put in place of
+    the ``<slug>`` / ``<page_ref>`` of their ``Next:`` line exactly as the line
+    reads, is a command that runs (shell rules) and opens that entry's page.
+    Both corpus option sets: the cache dir, and ``--file`` + ``--index-file``.
+    The URLs include the awkward shapes: a last segment starting with ``-``,
+    one with a quote, one with ``&``, and a ``.md`` suffix."""
+
+    INDEX = ("- [Dash](https://example.com/en/-dash.md): zzcommon dash\n"
+             "- [Quote](https://example.com/en/it's): zzcommon quote\n"
+             "- [Amp](https://example.com/en/a&b): zzcommon amp\n"
+             "- [Hooks](https://example.com/en/hooks): zzcommon hook matchers\n"
+             "- [Agent hooks](https://example.com/en/agent-sdk/hooks): zzcommon agent hooks\n")
+    FULL = ("# Agent hooks\nSource: https://example.com/en/agent-sdk/hooks\n\n## A\nx\n"
+            "# Hooks\nSource: https://example.com/en/hooks\n\n## H\nx\n"
+            "# Amp\nSource: https://example.com/en/a&b\n\n## B\nx\n"
+            "# Quote\nSource: https://example.com/en/it's\n\n## Q\nx\n"
+            "# Dash\nSource: https://example.com/en/-dash\n\n## D\nx\n")
+    TITLES = ("Dash", "Quote", "Amp", "Hooks", "Agent hooks")
+
+    def _refs_and_next(self, out: str) -> tuple[list, str]:
+        refs = [(m.group(2), m.group(1)) for m in re.finditer(r"^\[(.+?)\] (\w[\w ]*?)(?: \(score: \d+\))?$",
+                                                              out, re.M)]
+        nexts = [line[len("Next: "):] for line in out.splitlines() if line.startswith("Next: ")]
+        self.assertEqual(len(nexts), 1, out)
+        return refs, nexts[0]
+
+    def _follow(self, command: list, corpus, *, cache_full_after: bool) -> set:
+        code, out, err = self.run_g(*command, corpus=corpus)
+        self.assertEqual(code, 0, err)
+        refs, next_line = self._refs_and_next(out)
+        self.assertEqual(sorted(t for t, _r in refs), sorted(self.TITLES))
+        if cache_full_after:
+            # the bodies get cached (by a search) before the ref is used
+            self.full_cache().write_text(self.FULL, encoding="utf-8")
+        forms = set()
+        for title, ref in refs:
+            placeholder = "<page_ref>" if "<page_ref>" in next_line else "<slug>"
+            if command[0] == "search-index":
+                # search-index points at search; open the ref with sections
+                line = f"{SCRIPT} sections {placeholder} " + next_line.split(" ", 3)[3]
+            else:
+                line = next_line
+            with self.subTest(command=command, title=title, ref=ref):
+                try:
+                    argv = shlex.split(line.replace(placeholder, ref), comments=True)
+                except ValueError as e:
+                    self.fail(f"not a shell command: {e}")
+                code, out, err = self.run_argv(argv)
+                self.assertEqual(code, 0, err)
+                self.assertRegex(out, rf'^Sections in \[\d+\] "{re.escape(title)}"', out)
+            forms.add("int" if ref.isdigit() else "slug")
+        return forms
+
+    def test_slug_refs_reach_their_pages(self):
+        self.write(self.INDEX)
+        forms = self._follow(["fetch-index"], ("--cache-dir", self.tmp), cache_full_after=True)
+        self.assertEqual(forms, {"slug"})
+        self.full_cache().unlink()
+        forms = self._follow(["search-index", "zzcommon"],
+                             ("--cache-dir", self.tmp), cache_full_after=True)
+        self.assertEqual(forms, {"slug"})
+
+    def test_page_number_refs_reach_their_pages(self):
+        self.write(self.INDEX, self.FULL)
+        self.assertEqual(self._follow(["fetch-index"], ("--cache-dir", self.tmp), cache_full_after=False),
+                         {"int"})
+        full = os.path.join(self.tmp, "local full.txt")
+        index = os.path.join(self.tmp, "local -index.txt")
+        Path(full).write_text(self.FULL, encoding="utf-8")
+        Path(index).write_text(self.INDEX, encoding="utf-8")
+        corpus = ("--file", full, "--index-file", index)
+        self.assertEqual(self._follow(["fetch-index"], corpus, cache_full_after=False), {"int"})
+        self.assertEqual(self._follow(["search-index", "zzcommon"], corpus,
+                                      cache_full_after=False), {"int"})
+        self.assertEqual(self.calls, [])
+
+    def test_slug_never_starts_with_a_dash(self):
+        slugs = _common.build_unique_slugs(["https://example.com/en/-dash", "https://example.com/-x",
+                                            "https://example.com/en/ok"])
+        self.assertEqual(slugs, {"https://example.com/en/-dash": "en/-dash",
+                                 "https://example.com/-x": "example.com/-x",
+                                 "https://example.com/en/ok": "ok"})
+
+
+class DefaultProfilesUnchangedTest(_Case):
+    """Without rank_from, the full-text ranking and listing are as before
+    (the pages, not the index entries)."""
+
+    def test_pages_profile_lists_pages(self):
+        self.write("- [Only in index](https://example.com/en/x): x\n", HOOKS_SKILLS_FULL, name="pages")
+        code, out, err = self.run_g("fetch-index", source="pages")
+        self.assertEqual(code, 0, err)
+        self.assertIn("[0] Hooks", out)
+        self.assertNotIn("Only in index", out)
+        self.assertIn("(2 documents total)", out)
+
+
+@unittest.skipUnless(os.environ.get("LLMS_DOCS_PARITY_CORPUS") == "1",
+                     "local-only full-corpus gate (LLMS_DOCS_PARITY_CORPUS=1)")
+class CorpusRefsResolveTest(unittest.TestCase):
+    """On the full local Claude Code / Platform caches: every ref fetch-index
+    prints (page numbers when llms-full.txt is cached, slugs when not) opens
+    the page with the entry's URL, or, for an entry with no page, fails."""
+
+    def test_every_index_ref_opens_its_page(self):
+        from test_migration_parity import GENERIC_PROFILES
+        cache = Path(os.environ.get("LLMS_DOCS_CACHE_DIR")
+                     or os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
+                                     "llms-docs"))
+        checked = 0
+        for name in ("claude-code", "claude-platform"):
+            full, index = cache / f"{name}-llms-full.txt", cache / f"{name}-llms.txt"
+            if not (full.exists() and index.exists()):
+                continue
+            profile = generic._validate_profile("sources.json", name, GENERIC_PROFILES[name])
+            docs = generic.resolve_split(_common.load_lines(str(full)), profile)[2]
+            entries = [e for e in _common.parse_llms_index(_common.load_lines(str(index)))
+                       if not generic._is_index_file_url(e["url"])]
+            joined = generic._entry_docs(entries, docs, profile)
+            for doc_of in (joined, [None] * len(entries)):
+                for e, ref, idx in zip(entries, generic._entry_refs(entries, doc_of), joined):
+                    (arg,) = shlex.split(ref)
+                    with self.subTest(name=name, ref=ref):
+                        try:
+                            with mock.patch("sys.stderr"):
+                                got = generic._resolve_page_ref(docs, arg, None, profile["page_ref_forms"],
+                                                                profile["page_url_strip_suffix"])
+                        except SystemExit:
+                            got = None
+                        if idx is None:
+                            self.assertIsNone(got, f"{e['url']} has no page but {ref} opened one")
+                        else:
+                            self.assertIsNotNone(got, ref)
+                            self.assertEqual(_common.normalize_doc_url(docs[got]["url"]),
+                                             _common.normalize_doc_url(e["url"]))
+                    checked += 1
+        if not checked:
+            self.skipTest(f"no Claude Code / Platform caches in {cache}")
+        print(f"\n  checked {checked} refs")
+
+
+if __name__ == "__main__":
+    unittest.main()

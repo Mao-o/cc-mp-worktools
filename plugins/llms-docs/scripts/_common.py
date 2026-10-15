@@ -464,17 +464,101 @@ def normalize_doc_url(url: str) -> str:
     return u
 
 
-def build_url_to_full_index(docs) -> dict:
-    """Map normalised ``source_url`` → index in *docs* (from ``split_documents``).
+def build_url_to_full_index(docs, key: str = "source_url") -> dict:
+    """Map the normalised page URL → index in *docs* (from ``split_documents``).
 
-    Docs lacking a ``source_url`` are skipped silently.
+    *key* names the field holding the page URL: ``source_url`` in
+    ``parse-claude-docs.py``, ``url`` in ``parse-llms-txt.py``. Docs lacking
+    one are skipped silently. A URL that heads several pages maps to the
+    last of them.
     """
     out: dict = {}
     for i, d in enumerate(docs):
-        nu = normalize_doc_url(d.get("source_url", ""))
+        nu = normalize_doc_url(d.get(key, ""))
         if nu:
             out[nu] = i
     return out
+
+
+def build_unique_slugs(raw_urls: list[str]) -> dict[str, str]:
+    """Map each *normalized* URL (keys are ``normalize_doc_url(u)`` for
+    each ``u`` in *raw_urls*) to a display slug unique across all of them.
+
+    Starts from the single last path segment (e.g. ``"hooks"``) and, only
+    for URLs whose slug collides with another URL's, grows the suffix one
+    segment at a time (``"agent-sdk/hooks"``, ...) until it no longer
+    collides — both single- and multi-segment slugs are valid
+    ``sections``/``content`` input (the loaders' page reference resolvers
+    match on the URL's trailing path). Falls back to the full path
+    if even that doesn't disambiguate (only possible for literal URL
+    duplicates). Without this, ``.../hooks`` and ``.../agent-sdk/hooks``
+    would both display as ``[hooks]``, and passing either back in would
+    hit the resolver's own ambiguous-slug error — making the
+    advertised copy-and-paste fallback reference unusable for exactly the
+    pages that need it most. A slug never starts with ``-`` either (it grows
+    one more segment instead): put in place of ``<slug>`` in a command, it
+    would be read as an option.
+    """
+    normalized = [normalize_doc_url(u) for u in raw_urls]
+    all_segments = [u.rstrip("/").lstrip("/").split("/") for u in normalized]
+    result = {}
+    for i, url in enumerate(normalized):
+        segments = all_segments[i]
+        for n in range(1, len(segments) + 1):
+            candidate = "/".join(segments[-n:])
+            if candidate.startswith("-"):
+                continue
+            if not any(
+                j != i and "/".join(all_segments[j][-n:]) == candidate
+                for j in range(len(normalized))
+            ):
+                result[url] = candidate
+                break
+        else:
+            result[url] = "/".join(segments) or "?"
+    return result
+
+
+_VARIANT_TITLE_RE = re.compile(r"^(.+?)\s*\(([^)]+)\)$")
+
+
+def group_index_variants(entries: list[dict]) -> list[dict]:
+    """Group entries with the same base title that differ only by parenthetical variant.
+
+    Detects patterns like "Batches (Python)", "Batches (Go)", etc. and collapses
+    consecutive same-base entries into a single group entry.
+
+    Returns a list of display items:
+        {"type": "single", "index": int, "entry": dict}
+        {"type": "group", "base": str, "desc": str, "variants": [(index, variant_name), ...]}
+    """
+    items: list[dict] = []
+    i = 0
+    while i < len(entries):
+        m = _VARIANT_TITLE_RE.match(entries[i]["title"])
+        if m:
+            base = m.group(1).strip()
+            variants = [(i, m.group(2))]
+            j = i + 1
+            while j < len(entries):
+                m2 = _VARIANT_TITLE_RE.match(entries[j]["title"])
+                if m2 and m2.group(1).strip() == base:
+                    variants.append((j, m2.group(2)))
+                    j += 1
+                else:
+                    break
+            if len(variants) > 1:
+                items.append({
+                    "type": "group",
+                    "base": base,
+                    "desc": entries[i].get("description", ""),
+                    "variants": variants,
+                })
+                i = j
+                continue
+        items.append({"type": "single", "index": i, "entry": entries[i]})
+        i += 1
+    return items
 
 
 # ---------------------------------------------------------------------------
@@ -702,6 +786,42 @@ urllib.request.install_opener(
 )
 
 
+def _meta_names_other_url(meta: dict, url: str) -> bool:
+    """True when the sidecar *meta* records a fetch URL other than *url*. A
+    sidecar without ``url`` (written before it was recorded) counts as a
+    match, so upgrading doesn't re-fetch every cache once."""
+    return "url" in meta and meta["url"] != url
+
+
+def _young_enough(cache_path: str, max_age: int | None) -> bool:
+    """``fetch_url``'s age rule: any age with ``max_age=None``, else younger
+    than *max_age* seconds."""
+    if max_age is None:
+        return True
+    return time.time() - os.path.getmtime(cache_path) < max_age
+
+
+def cached_if_fresh(path: str, max_age: int | None, url: str | None = None) -> str | None:
+    """*path* when ``fetch_url(url, path, max_age=max_age)`` would serve it
+    from the cache without a request, else ``None``. Never fetches.
+
+    The same rule as ``fetch_url``: the file exists, is younger than
+    *max_age* (any age with ``None``), and its sidecar does not record a
+    fetch URL other than *url* (not checked when *url* is ``None``). For a
+    command that may use a cached file but must not download it (the
+    index-only commands joining the index to a cached ``llms-full.txt``):
+    a file that the next full-text command would fetch again is not used,
+    so numbers taken from it still name the same pages then."""
+    if not os.path.exists(path):
+        return None
+    if url is not None and _meta_names_other_url(_load_fetch_meta(path), url):
+        return None
+    try:
+        return path if _young_enough(path, max_age) else None
+    except OSError:
+        return None
+
+
 def fetch_url(url: str, cache_path: str, *, user_agent: str,
               timeout: int = 120, create_parent: bool = True,
               max_age: int | None = None, raise_on_error: bool = False) -> str:
@@ -806,15 +926,9 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
     """
     cache_exists = os.path.exists(cache_path)
     meta = _load_fetch_meta(cache_path) if cache_exists else {}
-    # A sidecar without ``url`` (written before it was recorded) counts as a
-    # match, so upgrading doesn't re-fetch every cache once.
-    url_changed = "url" in meta and meta["url"] != url
-    if cache_exists and not url_changed:
-        if max_age is None:
-            return cache_path
-        age = time.time() - os.path.getmtime(cache_path)
-        if age < max_age:
-            return cache_path
+    url_changed = _meta_names_other_url(meta, url)
+    if cache_exists and not url_changed and _young_enough(cache_path, max_age):
+        return cache_path
 
     headers = {"User-Agent": user_agent, "Accept-Encoding": "gzip"}
     # The cache's validators describe the URL it was fetched from: never
