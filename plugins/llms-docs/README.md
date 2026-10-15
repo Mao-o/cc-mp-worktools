@@ -275,6 +275,13 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `skip_empty` | | `true` で、本文が空 (空行と水平線だけ) のページを捨てる (Hono の `# Start of Hono documentation`、Codex のカテゴリ見出しのような見出しだけの行) |
 | `index_url` | | `url` の `llms-full.txt` と同じ範囲の `llms.txt` (他の `llms.txt` へのリンク集になっている 2 段の索引は指さない。下の「対象外」)。URL を持たないページに、タイトルが完全に一致する (大文字小文字・空白・`*_` の記号は無視) 項目の URL を付ける。同じタイトルの項目が 2 つ以上あるページ (ただし `?` か `#` を含む項目 (節への `?id=…` / `#…` など) を除いて、ページの項目がちょうど 1 つならそれを使う。Zod の `Codecs` はこの形)、同じタイトルのページが 2 つ以上あるとき (Zod はサイト冒頭と `packages/zod` のページがどちらも `Zod`)、近いだけのタイトル (`Basic Auth` と `Basic Auth Middleware`) には付けない (誤った URL は URL が無いより悪いため)。`llms.txt` は絶対 URL の項目だけを読み、`llms.txt` や `llms-<名前>.txt` (`llms-full.txt` / `llms-small.txt` など) を指す項目はページではないので除く。取得に失敗しても警告だけで本文は読める |
 | `h1_needs_url` | | `split: h1` で `true` のとき、`page_url` (`line:` / `link:`) の URL が見つからない H1 をページの区切りにせず、前のページの見出しとして残す (ページ本文の中で H1 を使うサイト向け) |
+| `strip_trailing_headings` | | `true` で、ページ末尾に本文の無いまま並ぶ見出し行 (ページ間に置かれたナビの見出し `## Messages` など) を除く。`drop_lines` の後に適用する。コードブロックの状態は見ない |
+| `min_heading_level` | | `sections` / `content` / 本文検索で節として数える最も浅い見出し (`1` か `2`)。既定は `split: h1` で `2`、ほかは `1`。本文にコードブロック外の `# …` 行があるサイトでは `2` にする |
+| `protect_tables` | | `false` で、`content` の節の切り出しを表の途中で止めることを許す (既定 `true`) |
+| `compact_pack` | | `true` で、`fetch-index --compact` を 1 行 80 桁以内に数件ずつ詰めて出す |
+| `untitled_warn_ratio` | | `split: frontmatter` のとき、frontmatter に `title:` の無いページがこの割合 (0〜1) を超えたら、`fetch-index` / `search-index` / `search` で stderr に WARNING を出す (本文の見出しで補ったタイトルも「無い」に数える) |
+| `label` | | 結果のヘッダに出す表示名 |
+| `cache_name` | | 同梱 presets 専用 (`sources.json` に書くとエラー)。キャッシュのファイル名を `<cache_name>-llms-full.txt` / `<cache_name>-llms.txt` にする |
 
 source 名は `^[a-z0-9][a-z0-9-]*$` (キャッシュのファイル名になるため)。未知のキーや不正な値は
 エラーにする。profile を試すときは `--file <手元の llms-full.txt>` で取得せずに読める (`--file` のときは

@@ -94,7 +94,16 @@ _SPLITS = ("h1", "frontmatter", "line")
 _PROFILE_KEYS = {
     "url", "split", "frontmatter_key", "line_prefix", "page_url", "url_base", "description",
     "drop_lines", "skip_empty", "frontmatter_delimiter", "h1_needs_url", "index_url",
+    "strip_trailing_headings", "min_heading_level", "protect_tables", "compact_pack",
+    "untitled_warn_ratio", "label", "cache_name",
 }
+# Keys accepted only from the bundled presets. ``cache_name`` drops the URL
+# hash from the cache file name (to reuse the cache files of the dedicated
+# loaders), so a user profile must not set it: a user entry that reuses a
+# preset's name for another URL would otherwise read and overwrite the
+# preset's cache file, and two corpora would share one file.
+_PRESET_ONLY_KEYS = {"cache_name"}
+_MIN_HEADING_LEVELS = (1, 2)
 PRESETS_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "presets.json")
 _PAGE_URL_FORMS = '"none", "frontmatter:<key>", "line:<prefix>" or "link:<link text>"'
 _FM_KEY_NAME_RE = re.compile(r"^[A-Za-z_][\w-]*$")
@@ -228,7 +237,47 @@ def _validate_profile(path: str, name: str, raw) -> dict:
     if index_url is not None and (not isinstance(index_url, str) or not re.match(r"^https?://\S+$", index_url)):
         _bad(path, f"sources.{name}.index_url must be an http(s) URL of the llms.txt for the same docs as url (not a 2-level index)")
     profile["index_url"] = index_url
+    _validate_display_keys(path, name, raw, profile)
     return profile
+
+
+def _bool_key(path: str, name: str, raw: dict, key: str, default: bool) -> bool:
+    value = raw.get(key, default)
+    if not isinstance(value, bool):
+        _bad(path, f"sources.{name}.{key} must be true or false")
+    return value
+
+
+def _validate_display_keys(path: str, name: str, raw: dict, profile: dict) -> None:
+    """Structure / display keys, each one behaviour and off by default (the
+    defaults reproduce the output before the key existed)."""
+    profile["strip_trailing_headings"] = _bool_key(path, name, raw, "strip_trailing_headings", False)
+    profile["protect_tables"] = _bool_key(path, name, raw, "protect_tables", True)
+    profile["compact_pack"] = _bool_key(path, name, raw, "compact_pack", False)
+    level = raw.get("min_heading_level")
+    # bool is an int subclass: ``true`` must not pass as 1
+    if level is not None and (isinstance(level, bool) or level not in _MIN_HEADING_LEVELS):
+        _bad(path, f"sources.{name}.min_heading_level must be 1 or 2")
+    profile["min_heading_level"] = level
+    ratio = raw.get("untitled_warn_ratio")
+    if ratio is not None:
+        if isinstance(ratio, bool) or not isinstance(ratio, (int, float)) or not 0 <= ratio <= 1:
+            _bad(path, f"sources.{name}.untitled_warn_ratio must be a number from 0 to 1 (or null)")
+        if profile["split"] != "frontmatter":
+            _bad(path, f'sources.{name}.untitled_warn_ratio is only valid with split "frontmatter"')
+    profile["untitled_warn_ratio"] = ratio
+    label = raw.get("label")
+    if label is not None and (not isinstance(label, str) or not label.strip()
+                              or any(c in label for c in "\r\n")):
+        _bad(path, f"sources.{name}.label must be a non-empty one-line string")
+    profile["label"] = label
+    for key in sorted(_PRESET_ONLY_KEYS & set(raw)):
+        if path != PRESETS_FILE:
+            _bad(path, f"sources.{name}.{key} is only valid in the bundled presets")
+    cache_name = raw.get("cache_name")
+    if cache_name is not None and (not isinstance(cache_name, str) or not _NAME_RE.match(cache_name)):
+        _bad(path, f"sources.{name}.cache_name must match {_NAME_RE.pattern}")
+    profile["cache_name"] = cache_name
 
 
 def resolve_sources_file(args) -> None:
@@ -266,7 +315,15 @@ def _read_sources_file(path: str) -> dict:
     unknown = set(data) - {"sources"}
     if unknown:
         _bad(path, f"unknown top-level keys: {', '.join(sorted(unknown))}")
-    return {name: _validate_profile(path, name, raw) for name, raw in data["sources"].items()}
+    profiles = {name: _validate_profile(path, name, raw) for name, raw in data["sources"].items()}
+    owners: dict = {}
+    for name, p in profiles.items():
+        if p["cache_name"] is not None:
+            if p["cache_name"] in owners:
+                _bad(path, f"sources.{name}.cache_name {p['cache_name']!r} is also used by "
+                           f"sources.{owners[p['cache_name']]} (one cache file per corpus)")
+            owners[p["cache_name"]] = name
+    return profiles
 
 
 def _get_profile(args) -> dict:
@@ -496,6 +553,7 @@ def split_frontmatter(lines: list[str], profile: dict) -> list[dict]:
             url = _body_url(body, rule)
         docs.append({
             "title": fields.get("title") or _first_heading(body),
+            "fm_titled": bool(fields.get("title")),
             "description": fields.get("description", ""),
             "url": url,
             "body_lines": body,
@@ -618,15 +676,43 @@ def _drop_boilerplate(body_lines: list[str], patterns: list) -> list[str]:
     return out
 
 
+def _strip_trailing_headings(body_lines: list[str]) -> list[str]:
+    """Drop the heading lines (and blank lines) dangling at the end of a page.
+
+    Some frontmatter exports put their navigation group labels
+    (``## Messages`` / ``### First steps``) between pages, so they land at
+    the tail of the page before; with no text under them they would show up
+    as empty sections. Same rule as the dedicated Claude docs loader: the
+    fence state is not consulted (a page that ends inside a fence never
+    closed loses a trailing ``# comment`` line of it)."""
+    end = len(body_lines)
+    while end > 0:
+        k = end - 1
+        while k >= 0 and not body_lines[k].strip():
+            k -= 1
+        if k >= 0 and re.match(r"^#{1,6} ", body_lines[k]):
+            end = k
+            continue
+        break
+    return body_lines[:end]
+
+
 def split_documents(lines: list[str], profile: dict) -> list[dict]:
     docs = _SPLITTERS[profile["split"]](lines, profile)
     base = profile["url_base"]
+    level = profile.get("min_heading_level")
     for d in docs:
         d.setdefault("description", "")
         if d["url"] and base and not re.match(r"^https?://", d["url"]):
             d["url"] = urljoin(base, d["url"])
         if profile["drop_lines"]:
             d["body_lines"] = _drop_boilerplate(d["body_lines"], profile["drop_lines"])
+        if profile.get("strip_trailing_headings"):
+            d["body_lines"] = _strip_trailing_headings(d["body_lines"])
+        if level is not None:
+            # ``None`` is the H2 floor everywhere downstream (PageView, body
+            # hits, the full-corpus fallback)
+            d["min_level"] = 1 if level == 1 else None
     if profile["skip_empty"]:
         # A heading with no body (Hono's "# Start of Hono documentation"
         # banner, Codex's category titles followed only by a "---" rule)
@@ -643,9 +729,21 @@ def _cache_path(cache_dir: str, profile: dict) -> str:
     """Cache file for *profile*. The URL is part of the name: reusing a
     source name for another URL (an edited profile, or a second sources
     file) must not serve the previous site's cached corpus under the new
-    name until ``--max-age`` expires."""
+    name until ``--max-age`` expires. A preset's ``cache_name`` (bundled
+    presets only, a slug) names the file instead: ``<cache_name>-llms-full.txt``."""
+    if profile.get("cache_name"):
+        return os.path.join(cache_dir, f"{profile['cache_name']}-llms-full.txt")
     digest = hashlib.sha256(profile["url"].encode("utf-8")).hexdigest()[:12]
     return os.path.join(cache_dir, f"generic-{profile['name']}-{digest}-llms-full.txt")
+
+
+def _index_cache_path(cache_dir: str, profile: dict) -> str:
+    """Cache file for the profile's ``index_url`` (same naming rule as
+    ``_cache_path``)."""
+    if profile.get("cache_name"):
+        return os.path.join(cache_dir, f"{profile['cache_name']}-llms.txt")
+    digest = hashlib.sha256(profile["index_url"].encode("utf-8")).hexdigest()[:12]
+    return os.path.join(cache_dir, f"generic-{profile['name']}-{digest}-llms.txt")
 
 
 def _load_docs(args) -> tuple[dict, str, list[dict]]:
@@ -680,8 +778,7 @@ def _load_index_lines(args, profile: dict) -> list[str] | None:
         return load_lines(args.index_file)
     if args.file is not None:
         return None
-    digest = hashlib.sha256(profile["index_url"].encode("utf-8")).hexdigest()[:12]
-    cache = os.path.join(args.cache_dir, f"generic-{profile['name']}-{digest}-llms.txt")
+    cache = _index_cache_path(args.cache_dir, profile)
     try:
         return load_lines(fetch_url(profile["index_url"], cache, user_agent=USER_AGENT,
                                     timeout=60, max_age=args.max_age, raise_on_error=True))
@@ -836,17 +933,62 @@ def cmd_sources(args):
     print(f"({len(sources)} sources)")
 
 
+def _header_source(profile: dict, path: str) -> str:
+    """``source: <name>, file: <path>`` for the result headers, led by the
+    profile's ``label`` when it has one."""
+    lead = f"{profile['label']}, " if profile.get("label") else ""
+    return f"{lead}source: {profile['name']}, file: {path}"
+
+
+def _warn_if_untitled_ratio_high(profile: dict, docs: list[dict], path: str) -> None:
+    """With ``untitled_warn_ratio`` set, warn on stderr when more than that
+    share of the pages has no ``title:`` in its frontmatter (a title taken
+    from the first body heading does not count). Only the commands that
+    browse the whole corpus call this (fetch-index / search-index / search)."""
+    limit = profile.get("untitled_warn_ratio")
+    if limit is None or not docs:
+        return
+    untitled = sum(1 for d in docs if not d.get("fm_titled"))
+    ratio = untitled / len(docs)
+    if ratio > limit:
+        print(
+            f"WARNING: {untitled}/{len(docs)} documents ({ratio:.0%}) have no "
+            f"title in {path}. The upstream format may have changed, or a "
+            f"stray '{profile['frontmatter_delimiter']}' line inside a document body is being mistaken for "
+            f"a new document boundary.",
+            file=sys.stderr,
+        )
+
+
+def _print_packed(entries: list[str], width: int = 80) -> None:
+    """Several entries per line, two spaces apart, while the line stays
+    within *width* (a single longer entry gets a line of its own)."""
+    line_buf = ""
+    for entry in entries:
+        if line_buf and len(line_buf) + len(entry) + 2 > width:
+            print(line_buf)
+            line_buf = entry
+        else:
+            line_buf = f"{line_buf}  {entry}" if line_buf else entry
+    if line_buf:
+        print(line_buf)
+
+
 def cmd_fetch_index(args):
     profile, path, docs = _load_docs(args)
-    print(f"{profile['name']} llms-full.txt Document Index (file: {path})")
+    _warn_if_untitled_ratio_high(profile, docs, path)
+    print(f"{profile.get('label') or profile['name']} llms-full.txt Document Index (file: {path})")
     print("=" * 60)
     print()
-    for i, d in enumerate(docs):
-        if args.compact:
-            print(f"[{i}] {d['title'] or '(untitled)'}")
-        else:
-            print_entry(f"[{i}] {d['title'] or '(untitled)'}", description=d["description"],
-                        extra_lines=_url_line(d))
+    titles = [f"[{i}] {d['title'] or '(untitled)'}" for i, d in enumerate(docs)]
+    if args.compact and profile.get("compact_pack"):
+        _print_packed(titles)
+    elif args.compact:
+        for title in titles:
+            print(title)
+    else:
+        for title, d in zip(titles, docs):
+            print_entry(title, description=d["description"], extra_lines=_url_line(d))
     print()
     print(f"({len(docs)} documents total)")
     print()
@@ -859,7 +1001,7 @@ def _page_ref_retry(args):
 
 
 def _page_view(args) -> PageView:
-    _profile, path, docs = _load_docs(args)
+    profile, path, docs = _load_docs(args)
     idx = _resolve_page_ref(docs, args.page_ref, _page_ref_retry(args))
     d = docs[idx]
     header = [f"  URL: {d['url']}"] if d["url"] else []
@@ -870,6 +1012,8 @@ def _page_view(args) -> PageView:
         body_lines=d["body_lines"],
         header_lines=header,
         min_level=d["min_level"],
+        # None keeps extract_content's default (a cut never ends mid-table)
+        protect_tables=None if profile.get("protect_tables", True) else False,
         meta={"source": d["url"] or None},
     )
 
@@ -894,10 +1038,11 @@ def _ranked(args, docs: list[dict], limit: int):
 
 def cmd_search_index(args):
     profile, path, docs = _load_docs(args)
+    _warn_if_untitled_ratio_high(profile, docs, path)
     if not args.query.strip():
         die("query must not be empty")
     scored, headings = _ranked(args, docs, args.limit)
-    print(f'Search-index results for "{args.query}" (source: {profile["name"]}, file: {path})')
+    print(f'Search-index results for "{args.query}" ({_header_source(profile, path)})')
     print("=" * 60)
     print()
     if not scored:
@@ -931,7 +1076,7 @@ def cmd_search_content(args):
         die("query must not be empty")
     targets = ([_resolve_page_ref(docs, args.page_ref, _page_ref_retry(args))]
                if args.page_ref is not None else range(len(docs)))
-    print(f'Search-content results for "{args.query}" (source: {profile["name"]}, file: {path})')
+    print(f'Search-content results for "{args.query}" ({_header_source(profile, path)})')
     print("=" * 60)
     print()
     total = 0
@@ -976,10 +1121,11 @@ def cmd_search_content(args):
 
 def cmd_search(args):
     profile, path, docs = _load_docs(args)
+    _warn_if_untitled_ratio_high(profile, docs, path)
     if not args.query.strip():
         die("query must not be empty")
     scored, _headings_unused = _ranked(args, docs, args.top_n)
-    print(f'Search results for "{args.query}" (source: {profile["name"]}, file: {path})')
+    print(f'Search results for "{args.query}" ({_header_source(profile, path)})')
     print(f"  (top-{args.top_n} candidate docs drilled into bodies)")
     print("=" * 60)
     print()
