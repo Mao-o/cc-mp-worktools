@@ -115,6 +115,7 @@ _MIN_HEADING_LEVELS = (1, 2)
 # default is the order before ``page_ref_forms`` existed.
 _PAGE_REF_FORMS = ("int", "url", "slug", "title", "url_substring")
 _DEFAULT_PAGE_REF_FORMS = ("int", "title", "url_substring")
+_PAGE_REF_HELP = "Page number, or what the profile's page_ref_forms allow (title / URL substring by default)"
 PRESETS_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "presets.json")
 _PAGE_URL_FORMS = '"none", "frontmatter:<key>", "line:<prefix>" or "link:<link text>"'
 _FM_KEY_NAME_RE = re.compile(r"^[A-Za-z_][\w-]*$")
@@ -1166,22 +1167,40 @@ def _ref_url_key(url: str, suffix: str | None) -> str:
     return normalize_doc_url(u)
 
 
+def _ref_url_key_with_query(url: str, suffix: str | None) -> str:
+    """``_ref_url_key`` that keeps the query: to choose, among the pages a
+    URL reference matches, the one whose query is the reference's too
+    (``?surface=cli`` / ``?surface=api``)."""
+    base, sep, query = url.split("#", 1)[0].rstrip("/").partition("?")
+    return _ref_url_key(base, suffix) + sep + query
+
+
+# How the error for an empty page_ref names each form.
+_PAGE_REF_FORM_WORDS = {"int": "integer index", "url": "full URL", "slug": "URL slug",
+                        "title": "title substring", "url_substring": "URL substring"}
+
+
 def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
                       forms: tuple = _DEFAULT_PAGE_REF_FORMS, strip_suffix: str | None = None) -> int:
     """Resolve *page_ref* by the profile's ``page_ref_forms``, in that order:
 
     * ``int``: a document index
     * ``url``: a full ``http(s)://`` URL, compared normalised (see
-      ``_ref_url_key``); the first page with that URL wins, and no match
-      falls through to the next form
+      ``_ref_url_key``); of the pages with that URL, the first whose query
+      is the reference's too, else the first. No match ends the search
+      (``No page found for URL``): a URL names one page, and a later form
+      (``title`` / ``url_substring``) would take a URL that is one letter
+      short for the longer page it is a substring of
     * ``slug``: the end of the URL (``hooks``, ``agent-sdk/hooks``). One page
       wins; of several, the one at exactly ``/<lang>/<slug>`` wins (the
-      others are named); else the candidates are listed
+      others are named); else the candidates are listed. The suffix comes
+      off the reference too (``overview.md.txt`` is ``overview``)
     * ``title`` / ``url_substring``: a unique case-insensitive substring of the
       title / URL; several matches are listed
     """
     if not page_ref:
-        die("page_ref required: integer index, title substring or URL substring")
+        words = [_PAGE_REF_FORM_WORDS[f] for f in forms]
+        die("page_ref required: " + (", ".join(words[:-1]) + " or " if len(words) > 1 else "") + words[-1])
     is_url = re.match(r"https?://", page_ref) is not None
     for form in forms:
         if form == "int":
@@ -1199,17 +1218,29 @@ def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
             found = [(i, d["url"]) for i, d in enumerate(docs)
                      if d["url"] and _ref_url_key(d["url"], strip_suffix) == target]
             if found:
-                # the first page: one URL can head the same page twice in the
-                # upstream file, and the copies read the same
-                return found[0][0]
+                # the page whose query is the reference's too; else the first
+                # page: one URL can head the same page twice in the upstream
+                # file, and the copies read the same
+                raw = _ref_url_key_with_query(page_ref, strip_suffix)
+                exact = [i for i, u in found if _ref_url_key_with_query(u, strip_suffix) == raw]
+                return exact[0] if exact else found[0][0]
+            die(f"No page found for URL: {page_ref}")
         elif form == "slug":
             slug = page_ref.strip("/")
+            if strip_suffix and slug.endswith(strip_suffix):
+                slug = slug[:-len(strip_suffix)]
             if is_url or not slug:
                 continue
             pattern = re.compile(rf"/{re.escape(slug)}/?$")
             found = [(i, d["url"]) for i, d in enumerate(docs)
                      if d["url"] and pattern.search(_ref_url_key(d["url"], strip_suffix))]
             if len(found) > 1:
+                # prefer_lang_exact reads the raw page URL, suffix and all, so
+                # a page whose URL carries page_url_strip_suffix is never
+                # "exactly /<lang>/<slug>" and such candidates are listed.
+                # Kept so on purpose: stripping the suffix there would read
+                # firebase's /docs/ml/… as a language and send refs its old
+                # parser stopped as ambiguous to the ml/ page.
                 preferred = prefer_lang_exact(found, slug)
                 if len(preferred) == 1:
                     note_other_candidates(slug, preferred[0][0], found, retry)
@@ -1226,8 +1257,6 @@ def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
             if len(found) > 1:
                 rows = [(i, d["title"] + (f" ({d['url']})" if d["url"] else "")) for i, d in found[:20]]
                 die_ambiguous_page(f"{field_name} substring", page_ref, rows, retry)
-    if is_url and "url" in forms:
-        die(f"No page found for URL: {page_ref}")
     if "slug" in forms and not is_url:
         die(f"No page found for slug: {page_ref}")
     die(f"No document found for: {page_ref}")
@@ -1581,12 +1610,12 @@ def main():
     p.set_defaults(func=cmd_search_content)
 
     p = sub.add_parser("sections", help="List sections in a document")
-    p.add_argument("page_ref", help="Integer index, title substring or URL substring")
+    p.add_argument("page_ref", help=_PAGE_REF_HELP)
     _add_common(p)
     p.set_defaults(func=cmd_sections)
 
     p = sub.add_parser("content", help="Print document/section content")
-    p.add_argument("page_ref", help="Integer index, title substring or URL substring")
+    p.add_argument("page_ref", help=_PAGE_REF_HELP)
     add_heading_path_arg(p)
     _add_common(p)
     add_max_chars_arg(p)

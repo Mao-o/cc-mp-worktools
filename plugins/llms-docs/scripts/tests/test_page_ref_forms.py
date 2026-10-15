@@ -167,6 +167,10 @@ class DefaultFormsTest(unittest.TestCase):
         # a URL is a URL substring; a slug is not a form (title then URL substring)
         self.assertEqual(resolve("https://example.com/docs/en/agent-sdk/hooks", d)[0], 1)
         self.assertEqual(resolve("agent-sdk/hooks", d)[0], 1)
+        # without the url form, a URL that is only the start of a page's URL
+        # still reaches that page by URL substring (as before the key existed)
+        self.assertEqual(resolve("https://example.com/docs/en/agent", d)[0], 1)
+        self.assertEqual(resolve("https://example.com/docs/en/agent", ("int", "slug", "title", "url_substring"))[0], 1)
 
     def test_title_substring_wins_over_url_substring_and_lists_ambiguity(self):
         d = ("int", "title", "url_substring")
@@ -187,6 +191,14 @@ class DefaultFormsTest(unittest.TestCase):
         self.assertIn("out of range (0-7)", resolve("8", ("int", "title"))[1])
         self.assertIn("out of range", resolve("-1", ("int", "title"))[1])
         self.assertIn("page_ref required", resolve("", ("int", "title"))[1])
+
+    def test_empty_ref_names_the_forms_of_the_profile(self):
+        # the default reads as the message before page_ref_forms existed
+        self.assertEqual(resolve("", ("int", "title", "url_substring")),
+                         (None, "Error: page_ref required: integer index, title substring or URL substring\n"))
+        self.assertEqual(resolve("", ("int", "url", "slug")),
+                         (None, "Error: page_ref required: integer index, full URL or URL slug\n"))
+        self.assertEqual(resolve("", ("int",)), (None, "Error: page_ref required: integer index\n"))
 
     def test_int_is_not_tried_when_the_form_is_not_listed(self):
         # such a profile cannot be written (int must come first), but the
@@ -221,11 +233,42 @@ class UrlFormTest(unittest.TestCase):
     def test_the_first_page_of_a_repeated_url_wins(self):
         self.assertEqual(resolve("https://example.com/docs/en/plugins/install", self.F)[0], 3)
 
-    def test_no_match_falls_through_to_the_next_form(self):
-        # "url" finds nothing; "url_substring" is the next form and does
-        self.assertEqual(resolve("https://example.com/docs/en/agent", ("int", "url", "url_substring"))[0], 1)
-        # a form that is not listed does not rescue it
-        self.assertIsNone(resolve("https://example.com/docs/en/agent", ("int", "url", "title"))[0])
+    def test_no_match_ends_the_search(self):
+        # a URL names one page: one that matches no page is not handed to
+        # url_substring / title, which would take it for a longer page
+        for forms in (("int", "url", "url_substring"), ("int", "url", "slug", "title", "url_substring"),
+                      ("int", "url", "title")):
+            with self.subTest(forms=forms):
+                self.assertEqual(resolve("https://example.com/docs/en/agent", forms),
+                                 (None, "Error: No page found for URL: https://example.com/docs/en/agent\n"))
+
+    def test_a_missing_full_url_does_not_reach_a_longer_page(self):
+        idx, err = resolve("https://example.com/docs/en/agent", ("int", "url", "slug", "title", "url_substring"))
+        self.assertIsNone(idx)
+        # "…/en/hook" is the start of "…/en/hooks" (and of its title "Hooks")
+        pages = [("Hooks guide", "https://example.com/docs/en/hooks-guide"), ("Other", "https://example.com/o")]
+        idx, err = resolve("https://example.com/docs/en/hooks-guid", ("int", "url", "slug", "title", "url_substring"),
+                           pages=pages)
+        self.assertEqual((idx, err), (None, "Error: No page found for URL: https://example.com/docs/en/hooks-guid\n"))
+
+    def test_a_query_picks_the_page_with_that_query(self):
+        pages = [("CLI", "https://example.com/docs/x?surface=cli"), ("API", "https://example.com/docs/x?surface=api"),
+                 ("Other", "https://example.com/docs/y")]
+        for ref, want in (("https://example.com/docs/x?surface=api", 1), ("https://example.com/docs/x?surface=cli", 0),
+                          ("https://example.com/docs/x/?surface=api", 1),
+                          ("https://example.com/docs/x?surface=api#part", 1),
+                          ("https://example.com/docs/x.md?surface=api", 1),
+                          # no page has the query: the first page with the URL, as before
+                          ("https://example.com/docs/x", 0), ("https://example.com/docs/x?surface=web", 0)):
+            with self.subTest(ref=ref):
+                self.assertEqual(resolve(ref, self.F, pages=pages)[0], want)
+
+    def test_a_query_is_compared_with_the_suffix_off_both_sides(self):
+        pages = [("CLI", "https://example.com/docs/x.md.txt?surface=cli"),
+                 ("API", "https://example.com/docs/x.md.txt?surface=api")]
+        for ref in ("https://example.com/docs/x?surface=api", "https://example.com/docs/x.md.txt?surface=api"):
+            with self.subTest(ref=ref):
+                self.assertEqual(resolve(ref, self.F, ".md.txt", pages=pages)[0], 1)
 
     def test_the_form_is_for_http_urls_only(self):
         # a profile without url_base lists relative URLs; the url form does not read a path as one…
@@ -326,6 +369,25 @@ class SuffixTest(unittest.TestCase):
                 self.assertEqual(self.r(ref)[0], {"overview": 0, "auth/overview": 0, "limits": 1}[ref])
         self.assertEqual(self.r("plain")[0], 2)  # a page without the suffix is unaffected
 
+    def test_a_slug_with_the_suffix_reaches_its_page(self):
+        # the suffix comes off the reference too (a slug copied from a listed URL)
+        for ref, want in (("overview.md.txt", 0), ("auth/overview.md.txt", 0), ("/auth/overview.md.txt/", 0),
+                          ("firestore/limits.md.txt", 1)):
+            with self.subTest(ref=ref):
+                self.assertEqual(self.r(ref, ("int", "slug"))[0], want)
+        # only at the end: nothing is cut out of the middle
+        self.assertIsNone(self.r("overview.md.txt.x", ("int", "slug"))[0])
+
+    def test_lang_pages_with_the_suffix_stay_ambiguous(self):
+        # prefer_lang_exact reads the raw URL, suffix included, so neither page
+        # is "exactly /en/hooks" (kept so: see the slug form in the resolver)
+        pages = [("Hooks", "https://example.com/docs/en/hooks.md.txt"),
+                 ("Agent SDK Hooks", "https://example.com/docs/en/agent-sdk/hooks.md.txt")]
+        idx, err = resolve("hooks", ("int", "slug"), ".md.txt", pages=pages)
+        self.assertIsNone(idx)
+        self.assertIn("Ambiguous slug 'hooks'", err)
+        self.assertNotIn("Note:", err)
+
     def test_without_the_key_the_suffix_is_part_of_the_url(self):
         self.assertIsNone(self.r("https://example.com/docs/auth/overview", suffix=None)[0])
         self.assertEqual(self.r("https://example.com/docs/auth/overview.md.txt", suffix=None)[0], 0)
@@ -390,6 +452,7 @@ class CliTest(unittest.TestCase):
             "plain": H1,
             "refs": {**H1, "page_ref_forms": ["int", "url", "slug"]},
             "suffix": {**H1, "page_ref_forms": ["int", "url", "slug"], "page_url_strip_suffix": ".md.txt"},
+            "all": {**H1, "page_ref_forms": ["int", "url", "slug", "title", "url_substring"]},
         }}), encoding="utf-8")
         self.full = Path(self.tmp, "full.txt")
         self.full.write_text(corpus_text(), encoding="utf-8")
@@ -427,6 +490,23 @@ class CliTest(unittest.TestCase):
         self.assertEqual((code, err.splitlines()[0]), (1, "Error: No page found for URL: https://example.com/none"))
         code, out, err = self.run_cmd("refs", "sections", "no-such")
         self.assertEqual((code, err.splitlines()[0]), (1, "Error: No page found for slug: no-such"))
+
+    def test_a_missing_url_stops_even_with_the_substring_forms(self):
+        code, out, err = self.run_cmd("all", "sections", "https://example.com/docs/en/agent")
+        self.assertEqual((code, (err.splitlines() or [""])[0]),
+                         (1, "Error: No page found for URL: https://example.com/docs/en/agent"))
+        self.assertEqual(out, "")
+        code, out, err = self.run_cmd("all", "sections", "https://example.com/docs/en/agent-sdk/hooks")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Agent SDK Hooks", out.splitlines()[0])
+
+    def test_help_names_page_ref_forms(self):
+        for cmd in ("sections", "content"):
+            with self.subTest(cmd):
+                code, out, err = _loader.run_cli(generic, [SCRIPT, cmd, "--help"])
+                self.assertEqual(code, 0, err)
+                self.assertIn("page_ref_forms", out)
+                self.assertNotIn("Integer index, title substring", out)
 
     def test_the_note_for_the_other_pages_runs_as_printed(self):
         self.full.write_text(corpus_text(PAGES[:2]), encoding="utf-8")
