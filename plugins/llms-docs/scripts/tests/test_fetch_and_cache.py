@@ -1022,6 +1022,192 @@ class RecordedUrlTest(unittest.TestCase):
         self.assertEqual(result, self.cache_path)
         self.assertIn("using cached copy", err.getvalue())
 
+    def _served_offline(self, url):
+        """What ``fetch_url(url)`` serves with the network down: the cached
+        text, or ``None`` when it fails."""
+        with mock.patch("urllib.request.urlopen", side_effect=urllib.error.URLError("offline")), \
+                contextlib.redirect_stderr(io.StringIO()):
+            try:
+                path = _common.fetch_url(url, self.cache_path, user_agent="ua")
+            except SystemExit:
+                return None
+        with open(path) as f:
+            return f.read()
+
+    def test_a_write_failing_after_a_url_change_never_serves_one_urls_body_for_the_other(self):
+        """The cache holds OLD's body and sidecar; NEW is fetched and one of
+        the writes fails (the old body's removal, the sidecar, or the body).
+        The fetch fails, and afterwards neither URL is served the other's
+        body (before, a failed sidecar write left NEW's body under OLD's
+        sidecar, which a later request for OLD then served)."""
+        real_write = _common._atomic_write
+        real_unlink = os.unlink
+
+        def failing_write(which):
+            def write(path, data):
+                if path.endswith(".meta.json") == (which == "sidecar"):
+                    raise OSError(f"{which} not written")
+                return real_write(path, data)
+            return write
+
+        def failing_unlink(path, *a, **kw):
+            if path == self.cache_path:
+                raise PermissionError("old body not removed")
+            return real_unlink(path, *a, **kw)
+
+        failures = {
+            "sidecar": mock.patch.object(_common, "_atomic_write", side_effect=failing_write("sidecar")),
+            "body": mock.patch.object(_common, "_atomic_write", side_effect=failing_write("body")),
+            "old body removal": mock.patch.object(_common.os, "unlink", side_effect=failing_unlink),
+        }
+        for label, patch in failures.items():
+            with self.subTest(label):
+                with open(self.cache_path, "w") as f:
+                    f.write("old corpus")
+                self._write_meta(url=self.OLD)
+                with patch, mock.patch("urllib.request.urlopen",
+                                       return_value=_FakeResponse(b"new corpus", url=self.NEW)), \
+                        contextlib.redirect_stderr(io.StringIO()) as err:
+                    with self.assertRaises(SystemExit) as cm:
+                        _common.fetch_url(self.NEW, self.cache_path, user_agent="ua")
+                self.assertEqual(cm.exception.code, 1)
+                self.assertIn(f"Failed to fetch {self.NEW}", err.getvalue())
+                self.assertIn(self._served_offline(self.OLD), (None, "old corpus"))
+                self.assertIn(self._served_offline(self.NEW), (None, "new corpus"))
+
+    # Failure points of one fetch, in write order: the sidecar written before
+    # the body (only on a URL change), the body, the sidecar written last.
+    _FAILURE_POINTS = ("body", "sidecar first", "sidecar last", "none")
+
+    def _fetch_failing_at(self, url, failure, body, max_age=0):
+        """``fetch_url(url)`` answered with *body*, one write failing at
+        *failure*. Returns the text it served, or ``None`` when it failed."""
+        real_write = _common._atomic_write
+        written = {"body": False}
+
+        def write(path, data):
+            is_sidecar = path.endswith(".meta.json")
+            point = ("sidecar last" if written["body"] else "sidecar first") if is_sidecar else "body"
+            if point == failure:
+                raise OSError(f"{point} not written")
+            real_write(path, data)
+            if not is_sidecar:
+                written["body"] = True
+
+        with mock.patch.object(_common, "_atomic_write", side_effect=write), \
+                mock.patch("urllib.request.urlopen", return_value=_FakeResponse(body.encode(), url=url)), \
+                contextlib.redirect_stderr(io.StringIO()):
+            try:
+                path = _common.fetch_url(url, self.cache_path, user_agent="ua", max_age=max_age)
+            except SystemExit:
+                return None
+        with open(path) as f:
+            return f.read()
+
+    def _remove(self, path):
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
+
+    def test_a_sidecar_naming_another_url_without_a_body_still_routes_through_the_url_change(self):
+        """Only the sidecar is left (it names OLD; a body write failed after a
+        URL change). NEW is fetched and its last sidecar write fails: the
+        sidecar written first already names NEW, so OLD is not served NEW's
+        body (before, the sidecar was not read without a body, so NEW's body
+        was left under OLD's sidecar)."""
+        os.unlink(self.cache_path)
+        self._write_meta(url=self.OLD)
+        self.assertEqual(self._fetch_failing_at(self.NEW, "sidecar last", "new corpus"), "new corpus")
+        self.assertEqual(_common._load_fetch_meta(self.cache_path).get("url"), self.NEW)
+        self.assertIsNone(self._served_offline(self.OLD))
+        self.assertEqual(self._served_offline(self.NEW), "new corpus")
+
+    def test_two_failed_writes_in_a_row_never_serve_one_urls_body_for_the_other(self):
+        """A fetched, then B fetched with the body write failing (only B's
+        sidecar is left), then A fetched with the last sidecar write failing.
+        B must not then be served A's body."""
+        A, B = self.OLD, self.NEW
+        with self.subTest("A, B (body fails), A (last sidecar fails), B"):
+            self._remove(self.cache_path)
+            self.assertEqual(self._fetch_failing_at(A, "none", "A corpus"), "A corpus")
+            self.assertIsNone(self._fetch_failing_at(B, "body", "B corpus"))
+            self.assertFalse(os.path.exists(self.cache_path))
+            self.assertEqual(self._fetch_failing_at(A, "sidecar last", "A corpus"), "A corpus")
+            self.assertIn(self._served_offline(B), (None, "B corpus"))
+            self.assertEqual(self._served_offline(A), "A corpus")
+
+    def test_no_start_state_and_failure_point_serves_one_urls_body_for_the_other(self):
+        """Every start (body present / absent × sidecar none / naming NEW /
+        naming OLD) × every failure point of a fetch of NEW: neither that
+        fetch nor a later request for either URL is served the other URL's
+        body. A body is told apart by its text: ``old ...`` is OLD's,
+        ``new ...`` is NEW's.
+
+        The known exception is fixed here too: a body with no sidecar counts
+        as a match for every URL (a cache written before the URL was
+        recorded), so the cells that end with a body and no sidecar serve it
+        for the other URL."""
+        known_exception = {
+            # the body write fails and the stale fallback serves OLD's body
+            # (no sidecar says whose it is) for NEW, now and later
+            ("body present", "sidecar none", "body"): {"fetch": "old corpus", self.NEW: "old corpus"},
+            # NEW's body is written but its only sidecar write fails
+            ("body present", "sidecar none", "sidecar last"): {self.OLD: "new corpus"},
+            ("body absent", "sidecar none", "sidecar last"): {self.OLD: "new corpus"},
+        }
+        starts = {
+            "sidecar none": (None, "old corpus"),
+            "sidecar names NEW": (self.NEW, "new corpus (earlier)"),
+            "sidecar names OLD": (self.OLD, "old corpus"),
+        }
+        owner = {"old": self.OLD, "new": self.NEW}
+        seen_exceptions = {}
+        for body_state in ("body present", "body absent"):
+            for sidecar_state, (recorded, start_body) in starts.items():
+                for failure in self._FAILURE_POINTS:
+                    cell = (body_state, sidecar_state, failure)
+                    with self.subTest(cell=cell):
+                        self._remove(self.cache_path)
+                        self._remove(self.cache_path + ".meta.json")
+                        if body_state == "body present":
+                            with open(self.cache_path, "w") as f:
+                                f.write(start_body)
+                        if recorded is not None:
+                            self._write_meta(url=recorded)
+                        served = {"fetch": self._fetch_failing_at(self.NEW, failure, "new corpus")}
+                        for url in (self.OLD, self.NEW):
+                            served[url] = self._served_offline(url)
+                        wrong = {}
+                        for who, text in served.items():
+                            wanted = self.NEW if who == "fetch" else who
+                            if text is not None and owner[text.split()[0]] != wanted:
+                                wrong[who] = text
+                        if wrong:
+                            seen_exceptions[cell] = wrong
+                        self.assertEqual(wrong, known_exception.get(cell, {}))
+        self.assertEqual(seen_exceptions, known_exception)
+
+    def test_a_url_change_writes_the_sidecar_before_the_body(self):
+        """The order itself: a run stopped between the two writes (no
+        exception to handle) leaves no body under the other URL's sidecar."""
+        self._write_meta(url=self.OLD)
+        seen = []
+        real_write = _common._atomic_write
+
+        def record(path, data):
+            meta = _common._load_fetch_meta(self.cache_path)
+            seen.append((os.path.basename(path), os.path.exists(self.cache_path), meta.get("url")))
+            return real_write(path, data)
+
+        with mock.patch.object(_common, "_atomic_write", side_effect=record), \
+                mock.patch("urllib.request.urlopen", return_value=_FakeResponse(b"new corpus", url=self.NEW)):
+            _common.fetch_url(self.NEW, self.cache_path, user_agent="ua")
+        name = os.path.basename(self.cache_path)
+        self.assertEqual(seen[:2], [(name + ".meta.json", False, self.OLD), (name, False, self.NEW)])
+        self.assertEqual(self._read(), "new corpus")
+        with open(self.cache_path + ".meta.json", encoding="utf-8") as f:
+            meta = json.load(f)
+        self.assertEqual((meta["url"], meta["content_hash"]), (self.NEW, _common._content_hash(b"new corpus")))
+
 
 class LoadLinesTest(unittest.TestCase):
     def test_invalid_utf8_is_replaced_not_raised(self):

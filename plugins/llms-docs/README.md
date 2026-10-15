@@ -156,9 +156,9 @@ pytest scripts/tests/test_common.py::ParseLlmsIndexTest::test_colon_description_
 | claude-docs (Platform) | `claude-platform-llms.txt`, `claude-platform-llms-full.txt` |
 | ai-sdk | `ai-sdk-llms-full.txt` |
 | firebase | `firebase-llms.txt` (index), `firebase-docs/` (per-page) |
-| 任意サイト (`parse-llms-txt.py`、presets 含む) | `generic-<source 名>-<url のハッシュ 12 桁>-llms-full.txt` (profile の URL を変えると別ファイルになる)。`cache_name` を持つ preset は `<cache_name>-llms-full.txt` / `<cache_name>-llms.txt` (URL を含まない名前なので、キャッシュの `.meta.json` に記録した取得 URL が profile の URL と違えば再取得する) |
+| 任意サイト (`parse-llms-txt.py`、presets 含む。上の 4 行の preset は上の名前) | `generic-<source 名>-<url のハッシュ 12 桁>-llms-full.txt` (profile の URL を変えると別ファイルになる)。`cache_name` を持つ preset は `<cache_name>-llms-full.txt` / `<cache_name>-llms.txt` (URL を含まない名前なので、キャッシュの `.meta.json` に記録した取得 URL が profile の URL と違えば再取得する) |
 
-最新版が必要な場合は `--max-age 0` で強制再取得する（`rm` でも良いが、`fetch_url` は取得失敗時に既存キャッシュを stale なまま使い続けるフォールバックを持つため、`--max-age 0` の方が「取得できなければ既存キャッシュのまま」という安全側の挙動になる）。
+最新版が必要な場合は `--max-age 0` で強制再取得する（`rm` でも良いが、`fetch_url` は取得失敗時に既存キャッシュを stale なまま使い続けるフォールバックを持つため、`--max-age 0` の方が「取得できなければ既存キャッシュのまま」という安全側の挙動になる）。ただし `cache_name` を持つ preset (と専用 script) のキャッシュで、`.meta.json` に記録した取得 URL が今の URL と違うとき (preset の URL が変わったとき) は、取得できなければ既存キャッシュを使わずエラーにする (別の URL の内容を返さないため)。
 
 ## 任意の llms-full.txt を読む
 
@@ -203,6 +203,11 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading
 | `factory` | Factory (Droid) | あり (`llms.txt` とタイトルで突き合わせ。104 中 104) |
 | `devin` | Devin | あり |
 | `cloudflare-<製品>` | Cloudflare の製品別 `/<製品>/llms-full.txt`。製品は `workers` / `d1` / `r2` / `kv` / `durable-objects` / `pages` / `queues` / `workers-ai` / `vectorize` / `hyperdrive` / `agents` / `workflows` / `ai-gateway` / `browser-rendering` / `containers` | あり (`index.md`)。`browser-rendering` は製品名が Browser Run に変わり、取得先は `/browser-run/llms-full.txt` (52 ページ中 51 でページ内に URL。URL の無い 1 件は他の製品と同じ API リファレンスのページ)。source 名は変えていない |
+| `claude-code` / `claude-platform` | Claude Code (`code.claude.com/docs`) / Claude Developer Platform (`platform.claude.com`)。`llms.txt` の項目でランキングし、本文は `llms-full.txt` から読む (`rank_from: index`)。`claude` は両方をまとめて `search` する別名 (`members`) | あり |
+| `ai-sdk` | AI SDK (Vercel AI SDK) | あり (`search` / `sections` / `content` に出す。`fetch-index` / `search-index` の一覧には出さない) |
+| `firebase` | Firebase (`llms-full.txt` が無いので、`llms.txt` の各ページを必要なときに取得する。`body: fetch`) | あり (`.md.txt`) |
+
+`claude-code` / `claude-platform` / `claude` / `ai-sdk` / `firebase` は専用の 3 script (`parse-claude-docs.py` / `parse-ai-sdk.py` / `parse-firebase.py`) と同じ出力になるよう設定した preset で、キャッシュも専用 script と同じファイル (下の「キャッシュ」の表) を読み書きする。それぞれの skill (`researching-claude-docs` / `researching-ai-sdk` / `researching-firebase`) は、まだ専用 script を使う。
 
 **取得先のホスト** (`scripts/presets.json` の `url` / `index_url` から出した一覧。ネットワークの出口を決める根拠にする。
 1 行に 1 ホスト、次のコードブロックはテストが読む):
@@ -211,18 +216,22 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading
 agent-plugins.org
 agentclientprotocol.com
 agentskills.io
+ai-sdk.dev
 bun.com
+code.claude.com
 developers.cloudflare.com
 developers.openai.com
 docs.cline.bot
 docs.devin.ai
 docs.factory.com
 docs.ollama.com
+firebase.google.com
 hono.dev
 learn.chatgpt.com
 modelcontextprotocol.io
 nextjs.org
 orm.drizzle.team
+platform.claude.com
 render.com
 vercel.com
 vite.dev
@@ -232,8 +241,8 @@ zod.dev
 
 preset の追加・移転のたびにこの一覧を presets.json に合わせる (`presets.json` との集合の一致は suite が確かめる。
 ルートの README の Privacy 表はこの一覧を指しており、ホストを列挙していない)。
-専用の 3 skill の取得先 (`code.claude.com` / `platform.claude.com` / `ai-sdk.dev` / `firebase.google.com`) は
-この一覧に含まない。
+専用の 3 skill の取得先 (`code.claude.com` / `platform.claude.com` / `ai-sdk.dev` / `firebase.google.com`) も、
+同じ取得先の preset があるので含む。
 
 他の製品や他のサイトは、下の `sources.json` に profile を書けば読める。
 
@@ -291,6 +300,7 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `rank_from` | | `index` で、`fetch-index` / `search-index` / `search` が `index_url` の `llms.txt` の項目を一覧・ランキングする (表示するタイトル・説明・`URL:` も項目のもの。見出しはランキングに使わない)。本文は `llms-full.txt` から、`index_join` で項目に対応づけたページを読む。`fetch-index` / `search-index` は `llms-full.txt` を取得しない: `--file`、またはキャッシュが `--max-age` 内で、取得元が profile の `url` のときだけページ番号を `[ref]` に出し、それ以外は索引全体で一意になる URL の末尾 (`hooks`、`agent-sdk/hooks`) を出す (`llms.txt` での並び順の番号は出さない。`llms-full.txt` と順序が違い、別のページを開くため)。`search` はページの無い項目を stderr に `(skip: no full-text …)` と出して飛ばす。`index_url` と、`page_ref_forms` の `slug` と `url` が要る (クエリを持つ項目と、`llms.txt` に 2 回出る URL は完全な URL (クエリ込み) で出すため)。`--file` のときは `--index-file` も要り、取得の案内は出さない (対応づけが 0 件なら、その旨だけを出す)。既定は `pages` (ページのタイトル・説明・見出しでランキングする) |
 | `index_join` | | `rank_from: index` のとき、項目とページの対応づけ方。`title` (既定) = タイトルが項目側でもページ側でも 1 つだけのときに一致させる (比べ方は `index_url` と同じ。`page_url` の無い profile 用で、`page_url` があるときは `url` にする。一覧に出す URL の末尾がページ自身の URL と合わないため) / `url` = ページ自身の URL と項目の URL を `.md`・クエリ・`#…`・末尾の `/` を無視して比べる。同じ URL のページが複数あるときは、クエリまで一致するページを優先し、なければクエリの無いページ (`api?id=strings` のような 1 ページ内の位置を指すクエリ)、それも無ければ項目にクエリが無いときだけ先頭のページ (`page_ref_forms` の `url` と同じ。`llms-full.txt` のキャッシュの有無で開くページが変わらないため)。どのページともクエリが合わない項目 (`?surface=web` で、ページは `cli` と `api` だけ) は対応づけない (`?surface=cli` と `?surface=api` は別のページ)。`url` では `search` が対応づけの割合を見て、50% 未満なら終了コード 2 で止め、80% 未満なら stderr に WARNING を出す (`join_rate_guard` と同じ基準。`join_rate_guard` と一緒には書けない)。`url` は `page_url` が要り、`sections` などで `index_url` によるタイトルの突き合わせをしない |
 | `index_group_variants` | | `rank_from: index` で `true` のとき、`fetch-index` で `X (Python)` / `X (Go)` のように同じ名前に括弧書きだけ違う項目が続いたら 1 行にまとめ、`Variants: Python [ref], Go [ref]` の行を付ける |
+| `list_page_urls` | | `false` で、`fetch-index` / `search-index` のページの一覧に `URL:` 行を出さない (`search` / `search-content` / `sections` / `content` には出す)。`rank_from: index` とは一緒に書けない (項目の一覧の参照は URL から作るため)。既定 `true` |
 | `link_annotations` | | `true` で、`content` の本文にある Markdown リンクのうち、この source の別のページを指すものの後ろに ` → [doc_idx N]` を付ける (`content N` でリンク先を開ける)。読むリンクは `(https://…)` と `(/…)` (ページ自身のホストで読む。ページに URL が無ければ `url` のホスト) で、`beta` や `./beta` のような相対リンクは読まない。URL は `.md`・`page_url_strip_suffix`・`#…`・末尾の `/` を無視して比べ、同じ URL のページが複数あるときの選び方は `index_join: url` と同じ (一覧に出る番号と一致する)。コードブロックの中、`\|` で始まり `\|` で終わる行 (表の行)、ページ自身の URL へのリンク、どのページでもない URL には付けない。`content --no-link-annotations` で 1 回だけ止められる。`page_url` か `index_url` が要る (`page_url` が無く `index_url` で URL を付ける profile は、`--file` のとき `--index-file` も渡さないと注釈が付かない。ページの URL が `/…` の相対のままになる profile (`url_base` が無い) も付かない)。URL が `#…` だけ違うページどうしは区別しない (旧 parser と同じく後ろのページを指す)。既定は付けない |
 | `link_path_aliases` | | `link_annotations` のとき、同じページを指す別のパスの接頭辞の組のリスト (例 `[["/docs/en/", "/en/"]]`)。`(/…)` のリンクがそのままではどのページにも当たらないとき、組の片方の接頭辞をもう片方に置き換えて探す (両方向)。完全な URL のリンクには使わない。接頭辞は `/` で始まり `/` で終わる |
 | `label` | | 結果のヘッダに出す表示名 |

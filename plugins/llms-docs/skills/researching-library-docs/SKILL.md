@@ -193,7 +193,7 @@ llms-full.txt にページ URL が無く、`llms.txt` とタイトルが一致�
 | 症状 | 対処 |
 |---|---|
 | `unknown --source` | `sources` で一覧を確認して選び直す |
-| ネットワーク失敗 | 既存キャッシュがあれば WARNING を出して続行。無ければ Error。復旧後は `--max-age 0` で再取得 |
+| ネットワーク失敗 | 既存キャッシュがあれば WARNING を出して続行。無ければ Error。復旧後は `--max-age 0` で再取得。例外: preset の取得 URL が変わった直後 (キャッシュの `.meta.json` の URL と違う) は、既存キャッシュがあっても Error |
 | 結果ゼロ (`No matching ...` の下に `Why nothing matched:` で語ごとのページ数) | 全語が 0 件なら言い換えを続けず、別の語・`search-index`・別の `--source` に切り替える。一部の語だけ 0 件ならその語を落とす。全語があるのに 0 件 (同じセクションに揃わない) なら語を減らす。続けて出る `Next:` がそのまま実行できる |
 | 曖昧な page_ref (`Ambiguous title substring` / `Ambiguous url substring`) | 候補ごとに実行できるコマンドが付く。選んでそのまま実行する |
 | `Error: heading '...' not found.` | `Closest sections:` の候補 (コマンド付き) を先に使う。全見出しは `Available sections:` に続く |

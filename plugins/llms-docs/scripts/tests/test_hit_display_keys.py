@@ -465,10 +465,16 @@ class ProfileKeysTest(unittest.TestCase):
                 self.assertIn("has keys shared by the candidates", rejection(moved))
 
     def test_bundled_presets_do_not_set_the_keys(self):
-        """Off by default: the bundled presets print what they printed before."""
+        """Off by default: the bundled presets print what they printed before.
+        The presets that take over a dedicated script set them on purpose
+        (their output is the old script's, pinned by ``test_migration_parity``)."""
+        from test_migration_parity import PARITY_PRESETS
         presets = json.loads(Path(generic.PRESETS_FILE).read_text(encoding="utf-8"))["sources"]
         self.assertTrue(presets)
+        self.assertTrue(set(PARITY_PRESETS) <= set(presets))
         for name, raw in presets.items():
+            if name in PARITY_PRESETS:
+                continue
             with self.subTest(preset=name):
                 self.assertFalse({"anchor_style", "show_overflow"} & set(raw))
                 p = generic._validate_profile(generic.PRESETS_FILE, name, raw)
