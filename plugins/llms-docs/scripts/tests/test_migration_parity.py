@@ -960,12 +960,16 @@ class CorpusParityGateTest(unittest.TestCase):
 
     def _assert_not_an_empty_match(self, case_id: str, old, new) -> None:
         """Both sides failing compares nothing unless the case is about that failure."""
+        if case_id in FIXTURE_ONLY_PARITY:
+            self.assertTrue(old.code != 0 and new.code != 0,
+                            f"{case_id} resolves on the full corpus now; take it out of FIXTURE_ONLY_PARITY")
+            return
         if old.code != 0 and new.code != 0 and case_id not in FAILURE_PARITY_CASES:
             self.fail(f"{case_id}: both fail on the full corpus ({(old.stderr.splitlines() or [''])[0]!r}); "
                       "give it a ref the corpus has, or list it in FIXTURE_ONLY_PARITY / FAILURE_PARITY_CASES")
 
     def test_expected_parity_cases_match_on_the_full_corpus(self):
-        ids = (GENERIC_PARITY_EXPECTED - FIXTURE_ONLY_PARITY) | {c[0] for c in CORPUS_CASES}
+        ids = GENERIC_PARITY_EXPECTED | {c[0] for c in CORPUS_CASES}
         ran = 0
         for case_id in filter(self._cached, sorted(ids)):
             with self.subTest(case=case_id):
