@@ -48,11 +48,20 @@ jobs:
       # ハッチ)。ただし fetch_url() はライブ取得自体が失敗しても exit させず
       # WARNING を出して同ジョブ内で既に書かれたキャッシュへ黙って fallback する
       # (stale-serve) ため、cache dir を空にするだけでは「常に実際の上流から
-      # 取得できた」保証にはならない。parse-firebase.py の一部ページ fetch 失敗
-      # (per-page skip) も同様に exit 0 のまま stderr にだけ残る。どちらも
+      # 取得できた」保証にはならない。firebase (`body: "fetch"` の preset) の
+      # 一部ページ fetch 失敗 (per-page skip) も同様に exit 0 のまま stderr に
+      # だけ残る。どちらも
       # code != 0 を経由しないため、下の Python 側は stderr のマーカー文字列
       # (FETCH_FAILURE_MARKERS) を見て1回だけ再試行し、なお残れば FAIL (fetch)
       # 扱いにする (Codex R1 P2)。
+      #
+      # 各 check は汎用 loader parse-llms-txt.py を `--source <preset>`
+      # (claude-code / claude-platform / ai-sdk / firebase。presets.json に同梱)
+      # で直接呼ぶ。旧専用 script 名 (parse-claude-docs.py ほか) は
+      # parse-llms-txt.py へ引数を変換して exec するだけの互換 shim で、
+      # 削除予定のため canary からは使わない。件数・hit 数は loader の出力行
+      # ("(N documents total" / "of N documents shown" / "(N documents from" /
+      # "(N body hits, showing") から読む。
       #
       # 閾値は 2026-08-30 に手元で fetch-index/search を実行して実測した値の
       # およそ 50〜70% を下限にしている (実測: code 202 / platform 688 /
@@ -73,7 +82,7 @@ jobs:
           import sys
           import time
 
-          SCRIPTS = "plugins/llms-docs/scripts"
+          LOADER = "plugins/llms-docs/scripts/parse-llms-txt.py"
           PYTHON = sys.executable
           RESULT_PATH = os.environ["CANARY_RESULT_PATH"]
 
@@ -91,8 +100,9 @@ jobs:
 
 
           # fetch_url() の stale-serve fallback (_common.py _handle_fetch_failure)
-          # は "WARNING: fetch failed ..." を、parse-firebase.py の per-page skip
-          # (cmd_search / cmd_search_content 内で raise_on_error=True の
+          # は "WARNING: fetch failed ..." を、firebase preset (`body: "fetch"`)
+          # の per-page skip (parse-llms-txt.py _print_skip: search の
+          # _fetch_pages_concurrently / search-content で raise_on_error=True の
           # FetchError を捕捉する経路 — まだキャッシュが無く stale-serve もできない
           # 1ページ分の失敗) は "(skip: fetch failed ..." を、それぞれ exit 0 の
           # まま stderr に残す (Codex R1 P2 #1)。retry の要否判定が `code != 0`
@@ -104,14 +114,18 @@ jobs:
               "(skip: fetch failed",
           )
 
-          # parse-ai-sdk.py の frontmatter タイトル欠落率チェック
+          # parse-llms-txt.py の frontmatter タイトル欠落率チェック
           # (_warn_if_untitled_ratio_high) も exit 0 のまま件数を保持して警告だけ
-          # 出す (Codex R1 P2 #2)。他パーサに同種の exit 0 構造警告は無いことを
-          # 2026-08-31 にソースで確認済み (parse-claude-docs.py に自前の WARNING
-          # は無し、parse-firebase.py の自前 WARNING は --page-ref 省略時の性能
-          # 注意のみ)。件数が floor 以上でもこの警告が出ていれば構造的な劣化と
-          # して扱う — この文字列は check_join_rate() の 0.5〜0.8 の soft
-          # WARNING (_common.py) には含まれないので join-rate+query 側の
+          # 出す (Codex R1 P2 #2)。fetch-index / search-index / search で、
+          # preset に untitled_warn_ratio が設定されている source に限って出る。
+          # loader の他の exit 0 WARNING は、オプションの効き方の注意
+          # (--page-ref 省略 / --show-sections / --include-changelog-priority)
+          # と、index_join が "url" 以外の source だけが通る index 取得失敗・
+          # join_rate_guard 未実施の通知で、この canary の preset (いずれも
+          # index_join "url" か index 無し) では構造劣化の兆候にならない。
+          # 件数が floor 以上でもこの警告が出ていれば構造的な劣化として扱う —
+          # この文字列は check_join_rate() の 0.5〜0.8 の soft WARNING
+          # (_common.py) には含まれないので join-rate+query 側の
           # 既存の "join rate" in err 判定 (kind=threshold) と衝突しない。
           STRUCTURAL_WARNING_MARKERS = (
               "The upstream format may have changed",
@@ -126,12 +140,12 @@ jobs:
           #     "Error: Failed to fetch {url}: {error}" を出して exit 1 する。
           #   - die() 系ヘルパー (query must not be empty / page_ref required /
           #     ambiguous heading・slug / index out of range など) は fetch と
-          #     無関係。assert_parsed()/check_join_rate() の exit 2 は上の
-          #     "format may have changed"/"join rate" 判定で先に structural に
-          #     分類される。
-          #   - parse-ai-sdk.py / parse-claude-docs.py / parse-firebase.py は
-          #     自前の sys.exit を持たない (全て _common.py のヘルパー経由・
-          #     argparse 自身の exit 2・非捕捉例外の既定 exit 1 のいずれか)。
+          #     無関係。assert_parsed() の exit 2 は "format may have changed"、
+          #     check_join_rate() の exit 2 は "join rate" の文言で、上の判定で
+          #     先に structural に分類される。
+          #   - parse-llms-txt.py / _commands.py は自前の sys.exit を持たない
+          #     (全て _common.py のヘルパー経由・argparse 自身の exit 2・
+          #     非捕捉例外の既定 exit 1 のいずれか)。
           # exit 124 (run_once() 自身の 60s subprocess timeout) だけは文言に
           # 頼らず終了コードで直接 fetch 扱いにする — この行を出すのは canary
           # 自身の run_once() であって上流パーサではないため。FETCH_FAILURE_
@@ -237,14 +251,17 @@ jobs:
 
           # entries >= floor (fetch-index; live-fetches the lightweight llms.txt index)
           ENTRIES_CHECKS = [
-              ("code entries", [f"{SCRIPTS}/parse-claude-docs.py", "fetch-index", "--source", "code", "--max-age", "0"],
-               re.compile(r"\((\d+) pages total"), 120),
-              ("platform entries", [f"{SCRIPTS}/parse-claude-docs.py", "fetch-index", "--source", "platform", "--max-age", "0"],
-               re.compile(r"\((\d+) pages total"), 400),
-              ("ai-sdk entries", [f"{SCRIPTS}/parse-ai-sdk.py", "fetch-index", "--max-age", "0"],
+              # "(N documents total, M entries shown — K documents grouped)":
+              # N is every page the index lists (grouped variants included)
+              ("code entries", [LOADER, "fetch-index", "--source", "claude-code", "--max-age", "0"],
+               re.compile(r"\((\d+) documents total"), 120),
+              ("platform entries", [LOADER, "fetch-index", "--source", "claude-platform", "--max-age", "0"],
                re.compile(r"\((\d+) documents total"), 400),
-              ("firebase entries", [f"{SCRIPTS}/parse-firebase.py", "fetch-index", "--max-age", "0", "--limit", "1"],
-               re.compile(r"of (\d+) pages shown"), 5000),
+              ("ai-sdk entries", [LOADER, "fetch-index", "--source", "ai-sdk", "--max-age", "0"],
+               re.compile(r"\((\d+) documents total"), 400),
+              # paged (index_page_size): "(1 of N documents shown, offset=0)"
+              ("firebase entries", [LOADER, "fetch-index", "--source", "firebase", "--max-age", "0", "--limit", "1"],
+               re.compile(r"of (\d+) documents shown"), 5000),
           ]
 
           for name, args, pattern, floor in ENTRIES_CHECKS:
@@ -260,21 +277,23 @@ jobs:
                   return ok, f"{n} entries (floor {floor})", (None if ok else "threshold")
               run_check(name, args, extract)
 
-          # code/platform: index<->full-text join rate >= 0.8 (only claude-docs
-          # joins two separate upstream files; ai-sdk/firebase have no such join).
-          # `search` is the only subcommand that exercises check_join_rate(), and
+          # code/platform: index<->full-text join rate >= 0.8 (only the
+          # claude-code / claude-platform presets join two separate upstream
+          # files - index_join "url"; ai-sdk/firebase have no such join).
+          # `search` (parse-llms-txt.py _index_candidates) is the only
+          # subcommand that exercises check_join_rate() for these presets, and
           # it prints a WARNING (0.5-0.8) or a hard Error+exit 2 (<0.5) when the
           # ratio is unhealthy - checked below via stderr for both sources. For
           # code, the same call's stdout doubles as the representative-query
-          # ("hooks") hit check. platform has no representative-query floor in
-          # the ticket, so instead of trusting "no join-rate message" alone
-          # (proven vacuous by a fixture: healthy join rate + zero actual search
-          # results still prints nothing to stderr), it also positively asserts
-          # search's own "(N pages from ...)" summary line has N >= 1.
+          # ("hooks") hit check. platform has no representative-query floor,
+          # so instead of trusting "no join-rate message" alone (proven vacuous
+          # by a fixture: healthy join rate + zero actual search results still
+          # prints nothing to stderr), it also positively asserts search's own
+          # "(N documents from <label>)" summary line has N >= 1.
           JOIN_QUERY = "hooks"
-          for source, floor_hits in (("code", 1), ("platform", None)):
+          for source, preset, floor_hits in (("code", "claude-code", 1), ("platform", "claude-platform", None)):
               name = f"{source} join-rate+query"
-              args = [f"{SCRIPTS}/parse-claude-docs.py", "search", JOIN_QUERY, "--source", source, "--max-age", "0"]
+              args = [LOADER, "search", JOIN_QUERY, "--source", preset, "--max-age", "0"]
 
               def extract(out, err, floor_hits=floor_hits):
                   marker = check_output_markers(err)
@@ -286,7 +305,7 @@ jobs:
                       hits = sum(int(x) for x in re.findall(r"\((\d+) body hits, showing", out))
                       ok = hits >= floor_hits
                       return ok, f"join rate healthy; {hits} body hits for {JOIN_QUERY!r} (floor {floor_hits})", (None if ok else "threshold")
-                  pages = sum(int(x) for x in re.findall(r"\((\d+) pages from ", out))
+                  pages = sum(int(x) for x in re.findall(r"\((\d+) documents from ", out))
                   ok = pages >= 1
                   return ok, f"join rate healthy; {pages} pages found for {JOIN_QUERY!r} (floor 1)", (None if ok else "threshold")
               run_check(name, args, extract)
@@ -294,8 +313,8 @@ jobs:
           # representative query hit >= 1 (ai-sdk / firebase; code's "hooks" is
           # already covered by the join-rate+query check above)
           QUERY_CHECKS = [
-              ("ai-sdk streamText hit", [f"{SCRIPTS}/parse-ai-sdk.py", "search", "streamText", "--max-age", "0"]),
-              ("firebase Firestore hit", [f"{SCRIPTS}/parse-firebase.py", "search", "Firestore", "--top-n", "3", "--max-age", "0"]),
+              ("ai-sdk streamText hit", [LOADER, "search", "streamText", "--source", "ai-sdk", "--max-age", "0"]),
+              ("firebase Firestore hit", [LOADER, "search", "Firestore", "--source", "firebase", "--top-n", "3", "--max-age", "0"]),
           ]
           for name, args in QUERY_CHECKS:
               def extract(out, err):
