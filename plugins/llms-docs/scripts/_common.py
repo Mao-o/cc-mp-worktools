@@ -464,23 +464,20 @@ def normalize_doc_url(url: str) -> str:
     return u
 
 
-def build_url_to_full_index(docs, key: str = "source_url") -> dict:
-    """Map the normalised page URL → index in *docs* (from ``split_documents``).
+def build_url_to_full_index(docs) -> dict:
+    """Map normalised ``source_url`` → index in *docs* (from ``split_documents``).
 
-    *key* names the field holding the page URL: ``source_url`` in
-    ``parse-claude-docs.py``, ``url`` in ``parse-llms-txt.py``. Docs lacking
-    one are skipped silently. A URL that heads several pages maps to the
-    last of them.
+    Docs lacking a ``source_url`` are skipped silently.
     """
     out: dict = {}
     for i, d in enumerate(docs):
-        nu = normalize_doc_url(d.get(key, ""))
+        nu = normalize_doc_url(d.get("source_url", ""))
         if nu:
             out[nu] = i
     return out
 
 
-def build_unique_slugs(raw_urls: list[str]) -> dict[str, str]:
+def build_unique_slugs(raw_urls: list[str], *, avoid_dash: bool = False) -> dict[str, str]:
     """Map each *normalized* URL (keys are ``normalize_doc_url(u)`` for
     each ``u`` in *raw_urls*) to a display slug unique across all of them.
 
@@ -495,9 +492,10 @@ def build_unique_slugs(raw_urls: list[str]) -> dict[str, str]:
     would both display as ``[hooks]``, and passing either back in would
     hit the resolver's own ambiguous-slug error — making the
     advertised copy-and-paste fallback reference unusable for exactly the
-    pages that need it most. A slug never starts with ``-`` either (it grows
-    one more segment instead): put in place of ``<slug>`` in a command, it
-    would be read as an option.
+    pages that need it most. With *avoid_dash* a slug never starts with
+    ``-`` either (it grows one more segment instead): put in place of
+    ``<slug>`` in a command, it would be read as an option. Off for
+    ``parse-claude-docs.py``, whose listing stays as it was.
     """
     normalized = [normalize_doc_url(u) for u in raw_urls]
     all_segments = [u.rstrip("/").lstrip("/").split("/") for u in normalized]
@@ -506,7 +504,7 @@ def build_unique_slugs(raw_urls: list[str]) -> dict[str, str]:
         segments = all_segments[i]
         for n in range(1, len(segments) + 1):
             candidate = "/".join(segments[-n:])
-            if candidate.startswith("-"):
+            if avoid_dash and candidate.startswith("-"):
                 continue
             if not any(
                 j != i and "/".join(all_segments[j][-n:]) == candidate

@@ -44,7 +44,8 @@ CODE = {"url": FULL_URL, "split": "h1", "page_url": "line:Source: ", "index_url"
 SOURCES = {
     "code": CODE,
     "grouped": {**CODE, "index_group_variants": True},
-    "by-title": {**CODE, "index_join": "title"},
+    # title join: for a profile whose pages carry no URL of their own
+    "by-title": {**CODE, "index_join": "title", "page_url": "none"},
     "label": {**CODE, "label": "Example Docs", "anchor_style": "github"},
     "packed": {**CODE, "compact_pack": True},
     "pages": {k: v for k, v in CODE.items() if k not in ("rank_from", "index_join")},
@@ -66,7 +67,13 @@ class _Case(unittest.TestCase):
         self.calls: list = []
 
     def profile(self, name: str = "code") -> dict:
-        return generic._validate_profile(self.sources, name, SOURCES[name])
+        return self.validate(SOURCES[name], name)
+
+    def validate(self, raw: dict, name: str = "x") -> dict:
+        try:
+            return generic._validate_profile(self.sources, name, raw)
+        except SystemExit:  # a refused profile is a failure, not an error of the run
+            self.fail(f"profile {name} refused")
 
     def full_cache(self, name: str = "code") -> Path:
         return Path(generic._cache_path(self.tmp, self.profile(name)))
@@ -128,12 +135,18 @@ class ProfileValidationTest(_Case):
             "index_join must be one of": {**CODE, "index_join": "slug"},
             "index_group_variants must be true or false": {**CODE, "index_group_variants": "yes"},
             'rank_from "index" needs index_url': {k: v for k, v in CODE.items() if k != "index_url"},
-            'rank_from "index" needs "slug" in page_ref_forms': {**CODE, "page_ref_forms": ["int", "url"]},
+            'rank_from "index" needs "slug" and "url" in page_ref_forms':
+                {**CODE, "page_ref_forms": ["int", "url"]},
+            'needs "slug" and "url" in page_ref_forms (entries not joined to a page are listed by '
+            'URL slug; a URL listed twice is shown by its full URL)': {**CODE, "page_ref_forms": ["int", "slug"]},
+            'rank_from "index" with page_url needs index_join "url" (entries listed by URL slug '
+            "must match the pages' own URLs)": {**CODE, "index_join": "title"},
+            'rank_from "index" with page_url needs index_join "url"': {k: v for k, v in CODE.items()
+                                                                       if k != "index_join"},
             'index_join is only valid with rank_from "index"': SOURCES["pages"] | {"index_join": "title"},
             'index_group_variants is only valid with rank_from "index"':
                 SOURCES["pages"] | {"index_group_variants": True},
-            'index_join "url" needs page_url': {**CODE, "page_url": "none",
-                                                "page_ref_forms": ["int", "slug"]},
+            'index_join "url" needs page_url': {**CODE, "page_url": "none"},
             "join_rate_guard is redundant": {**CODE, "join_rate_guard": True},
         }
         for needle, raw in cases.items():
@@ -145,6 +158,11 @@ class ProfileValidationTest(_Case):
             with self.subTest(name):
                 p = self.profile(name)
                 self.assertEqual(p["rank_from"], "index")
+
+    def test_title_join_without_page_url_is_accepted(self):
+        """The refusal of title join + page_url keys on page_url only."""
+        p = self.validate({**CODE, "index_join": "title", "page_url": "none"})
+        self.assertEqual((p["index_join"], p["page_url"]), ("title", None))
 
     def test_split_auto_shares_the_index_keys(self):
         raw = {"url": FULL_URL, "split": "auto", "index_url": INDEX_URL,
@@ -212,6 +230,57 @@ class FetchIndexDocIdxJoinTest(_Case):
         self.assertIn("[en/hooks] Hooks", out)
         self.assertIn("[agent-sdk/hooks] Agent SDK Hooks", out)
         self.assertNotIn("[hooks]", out)
+
+
+class QueryVariantJoinTest(_Case):
+    """index_join "url": pages whose URLs differ only by the query
+    (``?surface=cli`` / ``?surface=api``) are different pages, each entry
+    joined to the page with its own query (as a URL page_ref chooses)."""
+
+    INDEX = ("- [Overview CLI](https://example.com/docs/x?surface=cli): cli zzq\n"
+             "- [Overview API](https://example.com/docs/x?surface=api): api zzq\n")
+    FULL = ("# Overview CLI\nSource: https://example.com/docs/x?surface=cli\n\n## C\ncli zzq body\n"
+            "# Overview API\nSource: https://example.com/docs/x?surface=api\n\n## A\napi zzq body\n")
+
+    def _corpora(self):
+        self.write(self.INDEX, self.FULL)
+        full, index = os.path.join(self.tmp, "f.txt"), os.path.join(self.tmp, "i.txt")
+        Path(full).write_text(self.FULL, encoding="utf-8")
+        Path(index).write_text(self.INDEX, encoding="utf-8")
+        return (("--cache-dir", self.tmp), ("--file", full, "--index-file", index))
+
+    def test_each_entry_lists_and_searches_its_own_page(self):
+        for corpus in self._corpora():
+            with self.subTest(corpus=corpus[0]):
+                code, out, err = self.run_g("fetch-index", corpus=corpus)
+                self.assertEqual(code, 0, err)
+                self.assertIn("[0] Overview CLI\n", out)
+                self.assertIn("[1] Overview API\n", out)
+                code, out, err = self.run_g("search", "zzq", corpus=corpus)
+                self.assertEqual(code, 0, err)
+                blocks = {b.split(" (index_score")[0]: b for b in re.split(r"\n(?=\[\d+\] )", out)}
+                self.assertIn("URL: https://example.com/docs/x?surface=cli", blocks["[0] Overview CLI"])
+                self.assertIn("cli zzq body", blocks["[0] Overview CLI"])
+                self.assertNotIn("api zzq body", blocks["[0] Overview CLI"])
+                self.assertIn("api zzq body", blocks["[1] Overview API"])
+        self.assertEqual(self.calls, [])
+
+    def test_other_query_or_repeated_url_takes_the_last_page(self):
+        """No page with the entry's query: the last page of that URL. Two
+        pages with the very same URL: the last (as the dedicated parser)."""
+        profile = self.profile()
+        docs = [{"title": t, "url": u} for t, u in (
+            ("A", "https://example.com/docs/x?surface=cli"), ("B", "https://example.com/docs/x?surface=api"),
+            ("C", "https://example.com/docs/y"), ("D", "https://example.com/docs/y.md"), ("E", None))]
+        entries = [{"url": u} for u in ("https://example.com/docs/x?surface=web",
+                                        "https://example.com/docs/x.md?surface=cli#top",
+                                        "https://example.com/docs/y/", "https://example.com/docs/z", "")]
+        try:
+            got = generic._entry_docs(entries, docs, profile)
+        except Exception as e:  # a crash is a failure, not an error of the run
+            self.fail(f"_entry_docs crashed: {e!r}")
+        # a page with no URL is joined to no entry, not even one whose URL is empty
+        self.assertEqual(got, [1, 0, 3, None, None])
 
 
 class SearchIndexDocIdxJoinTest(_Case):
@@ -397,6 +466,19 @@ class SearchFromIndexTest(_Case):
         self.assertIn("[1] Notes [body-only]", out)
         self.assertIn("    URL: https://example.com/en/notes\n", out)
 
+    def test_file_with_no_pages_exits_2(self):
+        """``--file`` that parses to 0 pages is a format failure (exit 2), as
+        for the other commands, not "llms-full.txt not cached yet"."""
+        full, index = os.path.join(self.tmp, "empty.txt"), os.path.join(self.tmp, "index.txt")
+        Path(full).write_text("no heading here\n", encoding="utf-8")
+        Path(index).write_text(SKILLS_HOOKS_INDEX, encoding="utf-8")
+        for command in (["fetch-index"], ["search-index", "hooks"]):
+            with self.subTest(command=command):
+                code, out, err = self.run_g(*command, corpus=("--file", full, "--index-file", index))
+                self.assertEqual(code, 2, out)
+                self.assertIn(f"0 entries parsed from {full}", err)
+                self.assertNotIn("not cached yet", out)
+
     def test_file_needs_index_file(self):
         full = os.path.join(self.tmp, "full.txt")
         Path(full).write_text(HOOKS_SKILLS_FULL, encoding="utf-8")
@@ -523,11 +605,31 @@ class RefRoundTripTest(_Case):
         self.assertEqual(self.calls, [])
 
     def test_slug_never_starts_with_a_dash(self):
-        slugs = _common.build_unique_slugs(["https://example.com/en/-dash", "https://example.com/-x",
-                                            "https://example.com/en/ok"])
-        self.assertEqual(slugs, {"https://example.com/en/-dash": "en/-dash",
-                                 "https://example.com/-x": "example.com/-x",
-                                 "https://example.com/en/ok": "ok"})
+        urls = ["https://example.com/en/-dash", "https://example.com/-x", "https://example.com/en/ok"]
+        self.assertEqual(_common.build_unique_slugs(urls, avoid_dash=True),
+                         {"https://example.com/en/-dash": "en/-dash",
+                          "https://example.com/-x": "example.com/-x",
+                          "https://example.com/en/ok": "ok"})
+        # off by default: the dedicated parser's listing is unchanged
+        self.assertEqual(_common.build_unique_slugs(urls),
+                         {"https://example.com/en/-dash": "-dash", "https://example.com/-x": "-x",
+                          "https://example.com/en/ok": "ok"})
+
+    def test_url_listed_twice_is_shown_and_opened_by_its_full_url(self):
+        """A URL the index lists twice has no unique slug: it is listed by
+        its full URL, which the url page_ref form opens."""
+        self.write("- [Hooks](https://example.com/en/hooks): zzcommon hooks\n"
+                   "- [Hooks again](https://example.com/en/hooks): zzcommon hooks again\n"
+                   "- [Skills](https://example.com/en/skills): zzcommon skills\n")
+        code, out, err = self.run_g("fetch-index")
+        self.assertEqual(code, 0, err)
+        self.assertIn("[https://example.com/en/hooks] Hooks\n", out)
+        next_line = next(ln[len("Next: "):] for ln in out.splitlines() if ln.startswith("Next: "))
+        self.full_cache().write_text(HOOKS_SKILLS_FULL, encoding="utf-8")
+        argv = shlex.split(next_line.replace("<slug>", "https://example.com/en/hooks"), comments=True)
+        code, out, err = self.run_argv(argv)
+        self.assertEqual(code, 0, err)
+        self.assertRegex(out, r'^Sections in \[0\] "Hooks"')
 
 
 class DefaultProfilesUnchangedTest(_Case):

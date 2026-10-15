@@ -57,7 +57,6 @@ from _common import (  # noqa: E402
     add_max_snippet_chars_arg,
     assert_parsed,
     build_unique_slugs,
-    build_url_to_full_index,
     cached_if_fresh,
     check_join_rate,
     corpus_hint_args,
@@ -352,11 +351,16 @@ def _validate_index_keys(path: str, name: str, raw: dict, profile: dict) -> None
     if rank_from == "index":
         if not profile["index_url"]:
             _bad(path, f'sources.{name}.rank_from "index" needs index_url (the llms.txt whose entries are ranked)')
-        if "slug" not in profile["page_ref_forms"]:
-            # an entry not joined to a page is listed by its URL slug, which
-            # has to be a page_ref the follow-up commands accept
-            _bad(path, f'sources.{name}.rank_from "index" needs "slug" in page_ref_forms '
-                       f"(entries not joined to a page are listed by URL slug)")
+        if not {"slug", "url"} <= set(profile["page_ref_forms"]):
+            # an entry not joined to a page is listed by its URL slug (by its
+            # full URL when the index lists that URL twice), which has to be
+            # a page_ref the follow-up commands accept
+            _bad(path, f'sources.{name}.rank_from "index" needs "slug" and "url" in page_ref_forms '
+                       f"(entries not joined to a page are listed by URL slug; a URL listed twice "
+                       f"is shown by its full URL)")
+        if index_join == "title" and profile["page_url"] is not None:
+            _bad(path, f'sources.{name}.rank_from "index" with page_url needs index_join "url" '
+                       f"(entries listed by URL slug must match the pages' own URLs)")
     else:
         for key, on in (("index_join", "index_join" in raw), ("index_group_variants", group)):
             if on:
@@ -1253,11 +1257,12 @@ def _cached_docs(args, profile: dict) -> list[dict] | None:
     if args.file is not None:
         if not os.path.exists(args.file):
             die(f"--file '{args.file}' does not exist. Drop --file to auto-fetch to the cache.")
-        path = args.file
-    else:
-        path = cached_if_fresh(_cache_path(args.cache_dir, profile), args.max_age, profile["url"])
-        if path is None:
-            return None
+        docs = resolve_split(load_lines(args.file), profile)[2]
+        assert_parsed(profile["name"], len(docs), args.file)
+        return docs
+    path = cached_if_fresh(_cache_path(args.cache_dir, profile), args.max_age, profile["url"])
+    if path is None:
+        return None
     return resolve_split(load_lines(path), profile)[2]
 
 
@@ -1265,15 +1270,27 @@ def _entry_docs(entries: list[dict], docs: list[dict] | None, profile: dict) -> 
     """For each index entry, the index of its page in *docs*, or ``None``.
 
     ``index_join: "url"``: the page with the same URL (``.md``, query,
-    fragment and a trailing ``/`` ignored; of pages sharing a URL, the last).
+    fragment and a trailing ``/`` ignored). Of pages sharing a URL, the last
+    one whose query is the entry's too, else the last: ``?surface=cli`` and
+    ``?surface=api`` are different pages, as for a URL ``page_ref``.
     ``"title"``: the page with the same title (as ``join_index_urls``
     compares them), when the title is unique among the entries and among the
     pages."""
     if not docs:
         return [None] * len(entries)
     if profile["index_join"] == "url":
-        by_url = build_url_to_full_index(docs, key="url")
-        return [by_url.get(normalize_doc_url(e["url"])) for e in entries]
+        by_url: dict = {}
+        for i, d in enumerate(docs):
+            nu = normalize_doc_url(d["url"] or "")
+            if nu:
+                by_url.setdefault(nu, []).append(i)
+        out = []
+        for e in entries:
+            pages = by_url.get(normalize_doc_url(e["url"]), [])
+            want = _ref_url_key_with_query(e["url"], None)
+            exact = [i for i in pages if _ref_url_key_with_query(docs[i]["url"], None) == want]
+            out.append(exact[-1] if exact else (pages[-1] if pages else None))
+        return out
     entry_count: dict = {}
     for e in entries:
         key = _title_key(e["title"])
@@ -1296,7 +1313,7 @@ def _entry_refs(entries: list[dict], doc_of: list) -> list[str]:
     differs, so a position would open another page. A slug is shell-quoted
     (only a URL with characters such as ``'`` or ``&`` in its path needs it),
     since it is meant to be put in place of ``<slug>`` in a command."""
-    slugs = build_unique_slugs([e["url"] for e in entries])
+    slugs = build_unique_slugs([e["url"] for e in entries], avoid_dash=True)
     return [str(idx) if idx is not None else shlex.quote(slugs.get(normalize_doc_url(e["url"]), "?"))
             for e, idx in zip(entries, doc_of)]
 

@@ -733,6 +733,23 @@ class FetchIndexDocIdxJoinTest(unittest.TestCase):
             os.path.exists(os.path.join(self.tmp, "claude-code-llms-full.txt"))
         )
 
+    def test_slug_starting_with_a_dash_is_listed_as_before(self):
+        """The generic loader grows a slug that starts with ``-``; this
+        parser's listing stays as it was (``[-foo]``)."""
+        Path(self.tmp, "claude-code-llms.txt").write_text(
+            "- [Foo](https://example.com/en/-foo): zz foo\n"
+            "- [Bar](https://example.com/-x): zz x\n",
+            encoding="utf-8",
+        )
+        for command in (["fetch-index"], ["search-index", "zz"]):
+            with self.subTest(command=command):
+                code, out, err = _loader.run_cli(parse_claude_docs, [
+                    "parse-claude-docs.py", *command, "--cache-dir", self.tmp,
+                ])
+                self.assertEqual(code, 0, err)
+                self.assertRegex(out, r"(?m)^\[-foo\] Foo")
+                self.assertRegex(out, r"(?m)^\[-x\] Bar")
+
     def test_shows_joined_full_text_doc_idx_when_full_text_already_cached(self):
         Path(self.tmp, "claude-code-llms.txt").write_text(
             "- [Skills](https://example.com/en/skills): Package reusable capabilities\n"
