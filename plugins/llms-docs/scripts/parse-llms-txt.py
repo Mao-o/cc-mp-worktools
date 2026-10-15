@@ -42,6 +42,7 @@ import os
 import re
 import shlex
 import sys
+from collections import Counter
 from urllib.parse import urljoin
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
@@ -1271,8 +1272,12 @@ def _entry_docs(entries: list[dict], docs: list[dict] | None, profile: dict) -> 
 
     ``index_join: "url"``: the page with the same URL (``.md``, query,
     fragment and a trailing ``/`` ignored). Of pages sharing a URL, the last
-    one whose query is the entry's too, else the last: ``?surface=cli`` and
-    ``?surface=api`` are different pages, as for a URL ``page_ref``.
+    one whose query is the entry's too: ``?surface=cli`` and ``?surface=api``
+    are different pages, as for a URL ``page_ref``. Else the last page with
+    no query (``api?id=strings``, an anchor of the one ``api`` page); else,
+    for an entry with no query, the last page; else none (``?surface=web``
+    is not the ``cli`` or ``api`` page, and joining it would show their
+    body under its title).
     ``"title"``: the page with the same title (as ``join_index_urls``
     compares them), when the title is unique among the entries and among the
     pages."""
@@ -1289,7 +1294,13 @@ def _entry_docs(entries: list[dict], docs: list[dict] | None, profile: dict) -> 
             pages = by_url.get(normalize_doc_url(e["url"]), [])
             want = _ref_url_key_with_query(e["url"], None)
             exact = [i for i in pages if _ref_url_key_with_query(docs[i]["url"], None) == want]
-            out.append(exact[-1] if exact else (pages[-1] if pages else None))
+            bare = [i for i in pages if "?" not in docs[i]["url"].split("#", 1)[0]]
+            if exact:
+                out.append(exact[-1])
+            elif bare:
+                out.append(bare[-1])
+            else:
+                out.append(pages[-1] if pages and "?" not in e["url"].split("#", 1)[0] else None)
         return out
     entry_count: dict = {}
     for e in entries:
@@ -1312,15 +1323,29 @@ def _entry_refs(entries: list[dict], doc_of: list) -> list[str]:
     ``llms.txt``: the page numbers follow ``llms-full.txt``, whose order
     differs, so a position would open another page. A slug is shell-quoted
     (only a URL with characters such as ``'`` or ``&`` in its path needs it),
-    since it is meant to be put in place of ``<slug>`` in a command."""
+    since it is meant to be put in place of ``<slug>`` in a command.
+
+    Entries whose URLs differ only by the query (``x?surface=cli`` /
+    ``x?surface=api``) share one slug, which would open the first of their
+    pages for each: such an entry with a query is shown by its full URL,
+    query included, which a URL ``page_ref`` resolves to the page with that
+    query (or, as for ``api?id=strings``, to the one page of that URL)."""
     slugs = build_unique_slugs([e["url"] for e in entries], avoid_dash=True)
-    return [str(idx) if idx is not None else shlex.quote(slugs.get(normalize_doc_url(e["url"]), "?"))
-            for e, idx in zip(entries, doc_of)]
+    shared = Counter(normalize_doc_url(e["url"]) for e in entries)
+
+    def _ref(e: dict) -> str:
+        nu = normalize_doc_url(e["url"])
+        if shared[nu] > 1 and "?" in e["url"].split("#", 1)[0]:
+            return shlex.quote(_ref_url_key_with_query(e["url"], None))
+        return shlex.quote(slugs.get(nu, "?"))
+    return [str(idx) if idx is not None else _ref(e) for e, idx in zip(entries, doc_of)]
 
 
 _SLUG_REF_NOTE = ("Note: llms-full.txt is not cached yet, so [ref] above is a URL slug, "
                   "not an integer doc_idx. Run 'search' once (or 'sections <slug>' directly) "
                   "to populate doc_idx numbering here too.")
+# With --file nothing is fetched: no entry matched one of its pages.
+_FILE_SLUG_REF_NOTE = "no entry matched a page of --file, so [ref] is a URL slug"
 
 
 def _fetch_index_from_index(args, profile: dict) -> None:
@@ -1363,12 +1388,16 @@ def _fetch_index_from_index(args, profile: dict) -> None:
     print()
     if joined:
         next_hint("sections", "<page_ref>", *(_source_hint_args(args) + corpus_hint_args(args)))
-        print("  (llms-full.txt will be fetched automatically on first use)")
+        if args.file is None:
+            print("  (llms-full.txt will be fetched automatically on first use)")
     else:
         next_hint("sections", "<slug>", *(_source_hint_args(args) + corpus_hint_args(args)))
-        print("  (llms-full.txt not cached yet, so the bracketed ref above is a")
-        print("   URL slug, not an integer doc_idx; run 'search' once to fetch")
-        print("   it and get numeric doc_idx here too)")
+        if args.file is not None:
+            print(f"  ({_FILE_SLUG_REF_NOTE})")
+        else:
+            print("  (llms-full.txt not cached yet, so the bracketed ref above is a")
+            print("   URL slug, not an integer doc_idx; run 'search' once to fetch")
+            print("   it and get numeric doc_idx here too)")
 
 
 def _search_index_from_index(args, profile: dict) -> None:
@@ -1399,7 +1428,7 @@ def _search_index_from_index(args, profile: dict) -> None:
     print(f"({len(scored)} results, {len(entries)} documents searched)")
     print()
     if not any(i is not None for i in doc_of):
-        print(_SLUG_REF_NOTE)
+        print(_SLUG_REF_NOTE if args.file is None else f"Note: {_FILE_SLUG_REF_NOTE}.")
         print()
     next_hint("search", '"<query>"', *(_source_hint_args(args) + corpus_hint_args(args)))
 

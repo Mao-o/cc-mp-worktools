@@ -487,6 +487,12 @@ def without_url_entry_lines(stdout: str) -> tuple[str, int]:
 
 
 def _generic_argv(corpus: str, argv: list, cache_dir: str, sources_file: str) -> list | None:
+    """The generic loader's argv for a legacy case. The Claude docs corpora
+    are read from the cache, as the old script reads them: the staged files
+    are copied to the generic cache names (``fetch-index`` / ``search-index``
+    with ``rank_from: "index"`` word their hints by where the pages come
+    from, and ``--file`` is not the old script's cache). ai-sdk is read as
+    ``--file``."""
     if corpus == "firebase":
         return None  # no per-page fetch mode in the generic loader yet
     argv = list(argv)
@@ -502,10 +508,15 @@ def _generic_argv(corpus: str, argv: list, cache_dir: str, sources_file: str) ->
             return None  # multi-source search is a later step
         name = f"claude-{source}"
         full, index = f"{name}-llms-full.txt", f"{name}-llms.txt"
-    out = [*argv, "--source", name, "--sources-file", sources_file,
-           "--file", os.path.join(cache_dir, full)]
-    if index:
-        out += ["--index-file", os.path.join(cache_dir, index)]
+    out = [*argv, "--source", name, "--sources-file", sources_file]
+    if not index:
+        return out + ["--file", os.path.join(cache_dir, full)]
+    g = _loader.load_script("parse-llms-txt.py")
+    profile = {"name": name, **GENERIC_PROFILES[name]}
+    for staged, target in ((full, g._cache_path(cache_dir, profile)),
+                           (index, g._index_cache_path(cache_dir, profile))):
+        if os.path.exists(os.path.join(cache_dir, staged)):
+            shutil.copyfile(os.path.join(cache_dir, staged), target)
     return out
 
 

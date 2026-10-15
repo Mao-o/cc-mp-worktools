@@ -21,22 +21,28 @@ All notable changes to this plugin will be documented here.
   分かれたときは、ほかのコマンドと同じく形式の変化として終了コード 2 で止める
 - `index_join`: 項目とページの対応づけ方。`title` (既定。タイトルが両側で 1 つだけのとき。`page_url` の
   無い profile 用) / `url` (ページ自身の URL と、`.md`・クエリ・`#…`・末尾の `/` を無視して比べる。同じ URL の
-  ページが複数あるときは、クエリまで一致するページを優先し、なければ最後のページ)。`url` のときは `search` が
+  ページが複数あるときは、クエリまで一致するページを優先し、なければクエリの無いページ (`api?id=strings` のような
+  1 ページ内の位置を指すクエリ)、それも無ければ項目にクエリが無いときだけ最後のページ。どのページともクエリが
+  合わない項目 (`?surface=web` で、ページは `cli` と `api` だけ) は対応づけない。別のクエリのページの本文を
+  その項目のタイトルで出さないため)。`url` のときは `search` が
   対応づけの割合を見て、50% 未満なら終了コード 2、80% 未満なら WARNING を出す (`join_rate_guard` は
   一緒に書けない)
 - `index_group_variants`: `fetch-index` で `X (Python)` / `X (Go)` のような項目の並びを 1 行にまとめ、
   `Variants:` の行を付ける
 - `rank_from: "index"` は `page_ref_forms` に `slug` と `url` が要る (一覧に出る URL の末尾を `sections` /
-  `content` に渡せるように。`llms.txt` に 2 回出る URL は完全な URL で出す)。`page_url` を書いた profile では
-  `index_join: "url"` が要る (`title` で対応づけると、未キャッシュ時に出す URL の末尾がページ自身の URL と
-  合わず開けないため)。`--file` のときは `--index-file` も要る (`--file` は通信しないため)
+  `content` に渡せるように。`llms.txt` に 2 回出る URL は完全な URL (クエリ込み) で出す。
+  `?surface=cli` と `?surface=api` のようにクエリだけ違う項目が同じ 1 ページに開かないため)。
+  `page_url` を書いた profile では `index_join: "url"` が要る (`title` で対応づけると、未キャッシュ時に出す URL の末尾がページ自身の URL と
+  合わず開けないため)。`--file` のときは `--index-file` も要る (`--file` は通信しないため)。`--file` のときは
+  `llms-full.txt` の取得の案内を出さず、対応づけが 0 件ならその旨だけを出す
 - URL の末尾を出すときは、`-` で始まらないように 1 段上のパスまで含め (`-` で始まると `<slug>` の位置で
   オプションと読まれるため。専用 parser の一覧は変えていない)、`'` や `&` を含むときは shell 用に引用する
 - キャッシュの鮮度の判定 (`--max-age` と、取得元の URL の照合) を `fetch_url` と共通の関数にした
 - 移行の照合テスト: Claude Code / Claude Platform の仮 profile に 3 つのキーを入れ、`fetch-index` /
   `search-index` / `search` の fixture のケース 10 件が専用 parser の出力と一致するようになった (手元の
   全キャッシュでも一致)。専用 parser の対応するテスト (一覧の番号と URL の末尾 6 件、`search-index` 3 件、
-  対応づけの割合 2 件) を汎用 loader 側に移した
+  対応づけの割合 2 件) を汎用 loader 側に移した。照合では汎用 loader も Claude docs の fixture を専用 parser と
+  同じくキャッシュから読む (`--file` では `fetch-index` の案内文が変わるため)
 
 ## [0.40.0] - 2026-10-15
 

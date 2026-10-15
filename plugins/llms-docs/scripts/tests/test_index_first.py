@@ -266,21 +266,240 @@ class QueryVariantJoinTest(_Case):
         self.assertEqual(self.calls, [])
 
     def test_other_query_or_repeated_url_takes_the_last_page(self):
-        """No page with the entry's query: the last page of that URL. Two
-        pages with the very same URL: the last (as the dedicated parser)."""
+        """The last page with the entry's query; else the last page with no
+        query (``api?id=…`` anchors of one ``api`` page); else, for an entry
+        with no query, the last page; else none (``?surface=web`` is not the
+        cli or api page). Two pages with the very same URL: the last (as the
+        dedicated parser)."""
         profile = self.profile()
         docs = [{"title": t, "url": u} for t, u in (
             ("A", "https://example.com/docs/x?surface=cli"), ("B", "https://example.com/docs/x?surface=api"),
-            ("C", "https://example.com/docs/y"), ("D", "https://example.com/docs/y.md"), ("E", None))]
+            ("C", "https://example.com/docs/y"), ("D", "https://example.com/docs/y.md"), ("E", None),
+            ("F", "https://example.com/docs/w?v=2"), ("G", "https://example.com/docs/w"),
+            ("H", "https://example.com/docs/w?v=3"))]
         entries = [{"url": u} for u in ("https://example.com/docs/x?surface=web",
                                         "https://example.com/docs/x.md?surface=cli#top",
-                                        "https://example.com/docs/y/", "https://example.com/docs/z", "")]
+                                        "https://example.com/docs/y/", "https://example.com/docs/z", "",
+                                        "https://example.com/docs/w?id=a", "https://example.com/docs/x")]
         try:
             got = generic._entry_docs(entries, docs, profile)
         except Exception as e:  # a crash is a failure, not an error of the run
             self.fail(f"_entry_docs crashed: {e!r}")
         # a page with no URL is joined to no entry, not even one whose URL is empty
-        self.assertEqual(got, [1, 0, 3, None, None])
+        self.assertEqual(got, [None, 0, 3, None, None, 6, 1])
+
+    def test_entry_whose_query_no_page_has_is_skipped(self):
+        """``?surface=web`` with pages for cli and api only: search skips the
+        entry (stderr) instead of showing the api body under its title."""
+        index = self.INDEX + "- [Overview Web](https://example.com/docs/x?surface=web): web zzq\n"
+        self.write(index, self.FULL)
+        full, idx = os.path.join(self.tmp, "f.txt"), os.path.join(self.tmp, "i.txt")
+        Path(full).write_text(self.FULL, encoding="utf-8")
+        Path(idx).write_text(index, encoding="utf-8")
+        for corpus in (("--cache-dir", self.tmp), ("--file", full, "--index-file", idx)):
+            with self.subTest(corpus=corpus[0]):
+                code, out, err = self.run_g("search", "zzq", corpus=corpus)
+                self.assertEqual(code, 0, err)
+                self.assertIn("(skip: no full-text for https://example.com/docs/x?surface=web)", err)
+                self.assertNotIn("Overview Web", out)
+                self.assertIn("(2 documents from", out)
+                code, out, err = self.run_g("fetch-index", corpus=corpus)
+                self.assertEqual(code, 0, err)
+                self.assertIn("[0] Overview CLI\n", out)
+                self.assertIn("[1] Overview API\n", out)
+                self.assertNotRegex(out, r"\[\d+\] Overview Web")
+
+    # pages for all three queries, CLI first: a ref that loses the query
+    # opens the CLI page for every entry
+    INDEX3 = ("- [Overview CLI](https://example.com/docs/x?surface=cli): cli zzq\n"
+              "- [Overview API](https://example.com/docs/x?surface=api): api zzq\n"
+              "- [Overview Web](https://example.com/docs/x?surface=web): web zzq\n")
+    FULL3 = ("# Overview CLI\nSource: https://example.com/docs/x?surface=cli\n\n## C\ncli zzq body\n"
+             "# Overview API\nSource: https://example.com/docs/x?surface=api\n\n## A\napi zzq body\n"
+             "# Overview Web\nSource: https://example.com/docs/x?surface=web\n\n## W\nweb zzq body\n")
+
+    def _listed(self, command: list, corpus) -> tuple[dict, str]:
+        """{title: ref} and the ``Next:`` line of a fetch-index / search-index run."""
+        code, out, err = self.run_g(*command, corpus=corpus)
+        self.assertEqual(code, 0, err)
+        refs = {m.group(2): m.group(1) for m in re.finditer(r"^\[(.+?)\] (Overview \w+)(?: \(score: \d+\))?$",
+                                                            out, re.M)}
+        nexts = [ln[len("Next: "):] for ln in out.splitlines() if ln.startswith("Next: ")]
+        self.assertEqual(len(nexts), 1, out)
+        return refs, nexts[0]
+
+    def _open(self, command: list, next_line: str, ref: str, extra: tuple = ()) -> str:
+        """Put *ref* in place of the placeholder of *next_line* as it reads,
+        split it by the shell rules, run it, return the output."""
+        placeholder = "<page_ref>" if "<page_ref>" in next_line else "<slug>"
+        if command[0] == "search-index":  # it points at search; open the ref with sections
+            next_line = f"{SCRIPT} sections {placeholder} " + next_line.split(" ", 3)[3]
+        try:
+            argv = shlex.split(next_line.replace(placeholder, ref), comments=True)
+        except ValueError as e:
+            self.fail(f"not a shell command: {e}")
+        code, out, err = self.run_argv(argv + list(extra))
+        self.assertEqual(code, 0, err)
+        return out
+
+    def test_uncached_query_variant_refs_open_their_own_page(self):
+        """No llms-full.txt cached: each ref (the full URL, query included,
+        shell-quoted) opens the page with the entry's query once the bodies
+        are there, cached or as ``--file``."""
+        full = os.path.join(self.tmp, "full3.txt")
+        Path(full).write_text(self.FULL3, encoding="utf-8")
+        want = {"Overview CLI": 0, "Overview API": 1, "Overview Web": 2}
+        for command in (["fetch-index"], ["search-index", "zzq"]):
+            for via in ("cache", "file"):
+                with self.subTest(command=command[0], via=via):
+                    if self.full_cache().exists():
+                        self.full_cache().unlink()
+                    self.write(self.INDEX3)
+                    refs, next_line = self._listed(command, ("--cache-dir", self.tmp))
+                    self.assertEqual(sorted(refs), sorted(want))
+                    for title, ref in refs.items():
+                        query = title.split()[1].lower()
+                        self.assertEqual(shlex.split(ref), [f"https://example.com/docs/x?surface={query}"])
+                    if via == "cache":
+                        self.write(None, self.FULL3)
+                    for title, ref in refs.items():
+                        out = self._open(command, next_line, ref, () if via == "cache" else ("--file", full))
+                        self.assertRegex(out, rf'^Sections in \[{want[title]}\] "{title}"')
+        self.assertEqual(self.full_fetches(), 0)
+
+    def test_joined_query_variant_refs_open_their_own_page(self):
+        """Cached and ``--file``: each page-number ref opens its entry's page."""
+        full, index = os.path.join(self.tmp, "f3.txt"), os.path.join(self.tmp, "i3.txt")
+        Path(full).write_text(self.FULL3, encoding="utf-8")
+        Path(index).write_text(self.INDEX3, encoding="utf-8")
+        self.write(self.INDEX3, self.FULL3)
+        want = {"Overview CLI": "0", "Overview API": "1", "Overview Web": "2"}
+        for corpus in (("--cache-dir", self.tmp), ("--file", full, "--index-file", index)):
+            for command in (["fetch-index"], ["search-index", "zzq"]):
+                with self.subTest(command=command[0], corpus=corpus[0]):
+                    refs, next_line = self._listed(command, corpus)
+                    self.assertEqual(refs, want)
+                    for title, ref in refs.items():
+                        self.assertRegex(self._open(command, next_line, ref),
+                                         rf'^Sections in \[{ref}\] "{title}"')
+        self.assertEqual(self.calls, [])
+
+    def test_anchor_queries_of_one_page_open_that_page(self):
+        """``api?id=strings`` / ``api?id=numbers`` (anchors in the one ``api``
+        page): uncached, the full-URL refs fall back to that page; cached,
+        both entries join it."""
+        index = ("- [Strings](https://example.com/api?id=strings): zzq strings\n"
+                 "- [Numbers](https://example.com/api?id=numbers): zzq numbers\n"
+                 "- [Intro](https://example.com/intro): zzq intro\n"
+                 "- [Guide](https://example.com/guide?tab=a): zzq guide\n")
+        full_text = ("# Intro\nSource: https://example.com/intro\n\n## I\nzzq intro body\n"
+                     "# API\nSource: https://example.com/api\n\n## Strings\nzzq strings body\n")
+        self.write(index)
+        code, out, err = self.run_g("fetch-index")
+        self.assertEqual(code, 0, err)
+        self.assertIn("['https://example.com/api?id=strings'] Strings\n", out)
+        self.assertIn("['https://example.com/api?id=numbers'] Numbers\n", out)
+        # a URL listed once keeps its slug, query or not
+        self.assertIn("[guide] Guide\n", out)
+        self.assertIn("[intro] Intro\n", out)
+        next_line = next(ln[len("Next: "):] for ln in out.splitlines() if ln.startswith("Next: "))
+        self.write(None, full_text)
+        for ref in ("'https://example.com/api?id=strings'", "'https://example.com/api?id=numbers'"):
+            with self.subTest(ref=ref):
+                self.assertRegex(self._open(["fetch-index"], next_line, ref), r'^Sections in \[1\] "API"')
+        code, out, err = self.run_g("fetch-index")
+        self.assertEqual(code, 0, err)
+        self.assertIn("[1] Strings\n", out)
+        self.assertIn("[1] Numbers\n", out)
+        code, out, err = self.run_g("search", "zzq strings")
+        self.assertEqual(code, 0, err)
+        self.assertIn("zzq strings body", out)
+        self.assertNotIn("skip: no full-text for https://example.com/api", err)
+
+    # lines copied verbatim from a real llms.txt (zod.dev): anchors of the
+    # api and basics pages, and the basics page itself
+    ZOD_INDEX = ("- [Primitives](https://zod.dev/api?id=primitives)\n"
+                 "- [Strings](https://zod.dev/api?id=strings)\n"
+                 "- [Basic usage](https://zod.dev/basics): Basic usage guide covering schema definition, "
+                 "parsing data, error handling, and type inference\n"
+                 "- [Defining a schema](https://zod.dev/basics?id=defining-a-schema)\n"
+                 "- [Parsing data](https://zod.dev/basics?id=parsing-data)\n")
+    ZOD_FULL = ("# Basic usage\nSource: https://zod.dev/basics\n\n## Defining a schema\nx\n"
+                "# Defining schemas\nSource: https://zod.dev/api\n\n## Primitives\nx\n")
+
+    def test_real_anchor_index_lines_round_trip(self):
+        """Uncached, cached and ``--file``: every ref opens the page of the
+        entry's URL (the query only picks a place in it)."""
+        page = {"https://zod.dev/api": "Defining schemas", "https://zod.dev/basics": "Basic usage"}
+        full, index = os.path.join(self.tmp, "zf.txt"), os.path.join(self.tmp, "zi.txt")
+        Path(full).write_text(self.ZOD_FULL, encoding="utf-8")
+        Path(index).write_text(self.ZOD_INDEX, encoding="utf-8")
+        entries = _common.parse_llms_index(self.ZOD_INDEX.splitlines())
+        for mode in ("uncached", "cached", "file"):
+            with self.subTest(mode=mode):
+                if self.full_cache().exists():
+                    self.full_cache().unlink()
+                self.write(self.ZOD_INDEX, self.ZOD_FULL if mode == "cached" else None)
+                corpus = ("--file", full, "--index-file", index) if mode == "file" else ("--cache-dir", self.tmp)
+                code, out, err = self.run_g("fetch-index", corpus=corpus)
+                self.assertEqual(code, 0, err)
+                refs = re.findall(r"^\[(.+?)\] ", out, re.M)
+                self.assertEqual(len(refs), len(entries), out)
+                if mode == "uncached":
+                    self.assertIn("[https://zod.dev/basics] Basic usage\n", out)
+                    self.assertIn("['https://zod.dev/basics?id=parsing-data'] Parsing data\n", out)
+                    self.write(None, self.ZOD_FULL)
+                else:
+                    self.assertTrue(all(r.isdigit() for r in refs), refs)
+                next_line = next(ln[len("Next: "):] for ln in out.splitlines() if ln.startswith("Next: "))
+                for ref, e in zip(refs, entries):
+                    title = page[_common.normalize_doc_url(e["url"])]
+                    self.assertRegex(self._open(["fetch-index"], next_line, ref), rf'^Sections in \[\d+\] "{title}"')
+        self.assertEqual(self.calls, [])
+
+
+class FileHintTest(_Case):
+    """With ``--file`` nothing is fetched: fetch-index / search-index say
+    neither that llms-full.txt will be fetched nor that it is not cached."""
+
+    def _corpus(self, full_text: str) -> tuple:
+        full, index = os.path.join(self.tmp, "full.txt"), os.path.join(self.tmp, "index.txt")
+        Path(full).write_text(full_text, encoding="utf-8")
+        Path(index).write_text(SKILLS_HOOKS_INDEX, encoding="utf-8")
+        return ("--file", full, "--index-file", index)
+
+    def test_joined_file_does_not_promise_a_fetch(self):
+        code, out, err = self.run_g("fetch-index", corpus=self._corpus(HOOKS_SKILLS_FULL))
+        self.assertEqual(code, 0, err)
+        self.assertIn("[0] Hooks", out)
+        self.assertNotIn("fetched automatically", out)
+        # the cache keeps it: the next full-text command does fetch it
+        self.write(SKILLS_HOOKS_INDEX, HOOKS_SKILLS_FULL)
+        code, out, err = self.run_g("fetch-index")
+        self.assertEqual(code, 0, err)
+        self.assertIn("  (llms-full.txt will be fetched automatically on first use)\n", out)
+
+    def test_unjoined_file_says_no_entry_matched(self):
+        other = "# Other\nSource: https://example.com/en/other\n\nbody\n"
+        corpus = self._corpus(other)
+        code, out, err = self.run_g("fetch-index", corpus=corpus)
+        self.assertEqual(code, 0, err)
+        self.assertIn("[hooks] Hooks", out)
+        self.assertIn("  (no entry matched a page of --file, so [ref] is a URL slug)\n", out)
+        self.assertNotIn("not cached", out)
+        code, out, err = self.run_g("search-index", "hooks", corpus=corpus)
+        self.assertEqual(code, 0, err)
+        self.assertIn("Note: no entry matched a page of --file, so [ref] is a URL slug.\n", out)
+        self.assertNotIn("not cached", out)
+        self.assertEqual(self.calls, [])
+        # the cache keeps the fetch advice
+        self.write(SKILLS_HOOKS_INDEX)
+        code, out, err = self.run_g("fetch-index")
+        self.assertEqual(code, 0, err)
+        self.assertIn("  (llms-full.txt not cached yet, so the bracketed ref above is a\n", out)
+        code, out, err = self.run_g("search-index", "hooks")
+        self.assertEqual(code, 0, err)
+        self.assertIn(generic._SLUG_REF_NOTE + "\n", out)
 
 
 class SearchIndexDocIdxJoinTest(_Case):
