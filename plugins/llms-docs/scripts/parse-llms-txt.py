@@ -12,6 +12,8 @@ name). It supports the page shapes seen in the wild (measured 2026-09-26 and
   split "frontmatter"  one page per YAML frontmatter block      (Next.js / Vite / Vitest /
                                                                  Cloudflare per-product files)
   split "line"         one page per line starting with a prefix (Drizzle: ``Source: <url>``)
+  split "auto"         each of ``split_candidates`` splits the file; the one whose pages
+                       carry the most URLs is used (a tie goes to the earlier one)
 
 Subcommands mirror the other loaders (``fetch-index`` / ``search-index`` /
 ``search-content`` / ``search`` / ``sections`` / ``content``) plus ``sources``
@@ -51,6 +53,7 @@ from _common import (  # noqa: E402
     add_max_chars_arg,
     add_max_snippet_chars_arg,
     assert_parsed,
+    check_join_rate,
     corpus_hint_args,
     die,
     die_ambiguous_page,
@@ -59,6 +62,7 @@ from _common import (  # noqa: E402
     full_corpus_extra_hits,
     load_lines,
     next_hint,
+    normalize_doc_url,
     parse_llms_index,
     retry_for_page_ref,
     search_content_in_body,
@@ -96,6 +100,7 @@ _PROFILE_KEYS = {
     "drop_lines", "skip_empty", "frontmatter_delimiter", "h1_needs_url", "index_url",
     "strip_trailing_headings", "min_heading_level", "protect_tables", "compact_pack",
     "untitled_warn_ratio", "label", "cache_name", "tags_key", "frontmatter_yaml_values",
+    "split_candidates", "join_rate_guard",
 }
 # Keys accepted only from the bundled presets. ``cache_name`` drops the URL
 # hash from the cache file name (to reuse the cache files of the dedicated
@@ -163,22 +168,31 @@ def _parse_drop_lines(path: str, name: str, value) -> list:
     return out
 
 
-def _validate_profile(path: str, name: str, raw) -> dict:
+def _validate_profile(path: str, name: str, raw, at: str | None = None) -> dict:
+    """Validate the profile *raw* of source *name*. *at* is where a problem
+    is reported (``sources.<at>``): the name, or one of its split candidates."""
+    at = at or name
     if not _NAME_RE.match(name):
         _bad(path, f"source name {name!r} must match {_NAME_RE.pattern}")
     if not isinstance(raw, dict):
-        _bad(path, f"sources.{name} must be an object")
+        _bad(path, f"sources.{at} must be an object")
     unknown = set(raw) - _PROFILE_KEYS
     if unknown:
-        _bad(path, f"sources.{name} has unknown keys: {', '.join(sorted(unknown))}")
+        _bad(path, f"sources.{at} has unknown keys: {', '.join(sorted(unknown))}")
+    if raw.get("split") == "auto" and at == name:
+        return _validate_auto_profile(path, name, raw)
+    if "split_candidates" in raw:
+        _bad(path, f'sources.{at}.split_candidates is only valid with split "auto"')
     url = raw.get("url")
     if not isinstance(url, str) or not re.match(r"^https?://\S+$", url):
-        _bad(path, f"sources.{name}.url must be an http(s) URL of the site's llms-full.txt")
+        _bad(path, f"sources.{at}.url must be an http(s) URL of the site's llms-full.txt")
     if not isinstance(raw.get("description", ""), str):
-        _bad(path, f"sources.{name}.description must be a string")
+        _bad(path, f"sources.{at}.description must be a string")
     split = raw.get("split")
     if split not in _SPLITS:
-        _bad(path, f"sources.{name}.split must be one of: {', '.join(_SPLITS)}")
+        # a candidate's split cannot be "auto" again
+        allowed = _SPLITS if at != name else (*_SPLITS, "auto")
+        _bad(path, f"sources.{at}.split must be one of: {', '.join(allowed)}")
     profile = {
         "name": name,
         "url": url,
@@ -187,57 +201,57 @@ def _validate_profile(path: str, name: str, raw) -> dict:
         "frontmatter_key": "title",
         "frontmatter_delimiter": "---",
         "line_prefix": None,
-        "page_url": _parse_page_url(path, name, raw.get("page_url")),
+        "page_url": _parse_page_url(path, at, raw.get("page_url")),
         "url_base": None,
-        "drop_lines": _parse_drop_lines(path, name, raw.get("drop_lines")),
+        "drop_lines": _parse_drop_lines(path, at, raw.get("drop_lines")),
         "skip_empty": raw.get("skip_empty", False),
         "origin": path,
     }
     if not isinstance(profile["skip_empty"], bool):
-        _bad(path, f"sources.{name}.skip_empty must be true or false")
+        _bad(path, f"sources.{at}.skip_empty must be true or false")
     if split == "frontmatter":
         key = raw.get("frontmatter_key", "title")
         if not isinstance(key, str) or not _FM_KEY_NAME_RE.match(key):
-            _bad(path, f"sources.{name}.frontmatter_key must be a YAML key name")
+            _bad(path, f"sources.{at}.frontmatter_key must be a YAML key name")
         profile["frontmatter_key"] = key
         delim = raw.get("frontmatter_delimiter", "---")
         if not isinstance(delim, str) or not _FM_DELIM_RE.match(delim):
-            _bad(path, f"sources.{name}.frontmatter_delimiter must be a line of 3 or more '-' or '+'")
+            _bad(path, f"sources.{at}.frontmatter_delimiter must be a line of 3 or more '-' or '+'")
         profile["frontmatter_delimiter"] = delim
     else:
         for key in ("frontmatter_key", "frontmatter_delimiter"):
             if key in raw:
-                _bad(path, f'sources.{name}.{key} is only valid with split "frontmatter"')
+                _bad(path, f'sources.{at}.{key} is only valid with split "frontmatter"')
     needs_url = raw.get("h1_needs_url", False)
     if not isinstance(needs_url, bool):
-        _bad(path, f"sources.{name}.h1_needs_url must be true or false")
+        _bad(path, f"sources.{at}.h1_needs_url must be true or false")
     if needs_url and split != "h1":
-        _bad(path, f'sources.{name}.h1_needs_url is only valid with split "h1"')
+        _bad(path, f'sources.{at}.h1_needs_url is only valid with split "h1"')
     if needs_url and not (profile["page_url"] and profile["page_url"][0] in ("line", "link")):
-        _bad(path, f'sources.{name}.h1_needs_url needs page_url "line:<prefix>" or "link:<link text>"')
+        _bad(path, f'sources.{at}.h1_needs_url needs page_url "line:<prefix>" or "link:<link text>"')
     profile["h1_needs_url"] = needs_url
     if split == "line":
         prefix = raw.get("line_prefix")
         if not isinstance(prefix, str) or not prefix.strip():
-            _bad(path, f'sources.{name}.line_prefix is required with split "line" (e.g. "Source:")')
+            _bad(path, f'sources.{at}.line_prefix is required with split "line" (e.g. "Source:")')
         profile["line_prefix"] = prefix
         if "page_url" not in raw:
             # The delimiter line carries the page URL (Drizzle's ``Source: <url>``).
             profile["page_url"] = ("line", prefix)
     elif "line_prefix" in raw:
-        _bad(path, f'sources.{name}.line_prefix is only valid with split "line"')
+        _bad(path, f'sources.{at}.line_prefix is only valid with split "line"')
     if profile["page_url"] and profile["page_url"][0] == "frontmatter" and split != "frontmatter":
-        _bad(path, f'sources.{name}.page_url "frontmatter:<key>" is only valid with split "frontmatter"')
+        _bad(path, f'sources.{at}.page_url "frontmatter:<key>" is only valid with split "frontmatter"')
     base = raw.get("url_base")
     if base is not None:
         if not isinstance(base, str) or not re.match(r"^https?://\S+$", base):
-            _bad(path, f"sources.{name}.url_base must be an http(s) URL")
+            _bad(path, f"sources.{at}.url_base must be an http(s) URL")
         profile["url_base"] = base
     index_url = raw.get("index_url")
     if index_url is not None and (not isinstance(index_url, str) or not re.match(r"^https?://\S+$", index_url)):
-        _bad(path, f"sources.{name}.index_url must be an http(s) URL of the llms.txt for the same docs as url (not a 2-level index)")
+        _bad(path, f"sources.{at}.index_url must be an http(s) URL of the llms.txt for the same docs as url (not a 2-level index)")
     profile["index_url"] = index_url
-    _validate_display_keys(path, name, raw, profile)
+    _validate_display_keys(path, at, raw, profile)
     return profile
 
 
@@ -289,6 +303,58 @@ def _validate_display_keys(path: str, name: str, raw: dict, profile: dict) -> No
     if yaml_values and profile["split"] != "frontmatter":
         _bad(path, f'sources.{name}.frontmatter_yaml_values is only valid with split "frontmatter"')
     profile["frontmatter_yaml_values"] = yaml_values
+    guard = _bool_key(path, name, raw, "join_rate_guard", False)
+    if guard and not profile["index_url"]:
+        _bad(path, f"sources.{name}.join_rate_guard needs index_url (the llms.txt whose page URLs are checked)")
+    if guard and profile["page_url"] is None:
+        _bad(path, f"sources.{name}.join_rate_guard needs page_url (the pages' own URLs are what the index is checked against)")
+    profile["join_rate_guard"] = guard
+
+
+# Keys that say how one split candidate reads the pages. With split "auto"
+# they go in each of ``split_candidates`` and not next to ``split``; every
+# other key is shared by the candidates.
+_CANDIDATE_KEYS = {
+    "split", "page_url", "frontmatter_key", "frontmatter_delimiter", "line_prefix", "h1_needs_url",
+    "tags_key", "frontmatter_yaml_values", "untitled_warn_ratio", "strip_trailing_headings",
+}
+
+
+def _validate_auto_profile(path: str, name: str, raw: dict) -> dict:
+    """``split: "auto"``: each of ``split_candidates`` (the per-candidate
+    keys, merged over the shared ones) is validated as a profile of its own.
+    The result is the first candidate's profile with ``split`` set to
+    ``"auto"`` and the validated candidates under ``split_candidates``;
+    ``resolve_split`` picks one per file."""
+    shared = {k: v for k, v in raw.items() if k not in ("split", "split_candidates")}
+    for key in sorted(_CANDIDATE_KEYS & set(shared)):
+        _bad(path, f'sources.{name}.{key} goes in each of split_candidates with split "auto"')
+    cands = raw.get("split_candidates")
+    if not isinstance(cands, list) or len(cands) < 2 or not all(isinstance(c, dict) for c in cands):
+        _bad(path, f'sources.{name}.split_candidates must be a list of 2 or more objects with split "auto"')
+    # the shared keys alone first, so that a bad one is reported next to
+    # split "auto" and not in a candidate; none of them depends on the split,
+    # and "line" (whose page URL is on its delimiter) satisfies the keys
+    # that need a page URL
+    _validate_profile(path, name, {**shared, "split": "line", "line_prefix": "Source: "})
+    profiles = []
+    for i, cand in enumerate(cands):
+        at = f"{name}.split_candidates[{i}]"
+        unknown = set(cand) - _PROFILE_KEYS
+        if unknown:
+            _bad(path, f"sources.{at} has unknown keys: {', '.join(sorted(unknown))}")
+        extra = set(cand) - _CANDIDATE_KEYS
+        if extra:
+            _bad(path, f"sources.{at} has keys shared by the candidates: {', '.join(sorted(extra))} "
+                       f"(write them next to split \"auto\")")
+        p = _validate_profile(path, name, {**shared, **cand}, at=at)
+        if p["page_url"] is None:
+            _bad(path, f'sources.{at} needs page_url (split "auto" keeps the candidate whose pages carry the most URLs)')
+        profiles.append(p)
+    profile = dict(profiles[0])
+    profile["split"] = "auto"
+    profile["split_candidates"] = profiles
+    return profile
 
 
 def resolve_sources_file(args) -> None:
@@ -811,7 +877,35 @@ def _strip_trailing_headings(body_lines: list[str]) -> list[str]:
     return body_lines[:end]
 
 
+def resolve_split(lines: list[str], profile: dict) -> tuple[int | None, dict, list[dict]]:
+    """Split *lines* by *profile*: ``(candidate index, profile used, docs)``.
+
+    For ``split: "auto"`` every one of ``split_candidates`` splits the file
+    and the one whose pages carry the most URLs wins (a tie goes to the
+    earlier candidate); the index and the candidate's profile are returned
+    so that the commands read the chosen candidate's keys. Each candidate
+    is a full split, so a file is split once per candidate. Otherwise the
+    index is ``None`` and *profile* itself is used.
+
+    Why URLs: the page shape that matches the file finds the page URLs
+    (a ``url:`` key in each frontmatter, a ``Source:`` line under each H1),
+    and the wrong one finds few or none. Counting the page delimiters
+    instead would be fooled by an H1 inside page bodies or by a
+    frontmatter example in a code sample."""
+    if profile["split"] != "auto":
+        return None, profile, split_documents(lines, profile)
+    best = None
+    for i, cand in enumerate(profile["split_candidates"]):
+        docs = split_documents(lines, cand)
+        with_url = sum(1 for d in docs if d["url"])
+        if best is None or with_url > best[0]:
+            best = (with_url, i, cand, docs)
+    return best[1], best[2], best[3]
+
+
 def split_documents(lines: list[str], profile: dict) -> list[dict]:
+    if profile["split"] == "auto":
+        return resolve_split(lines, profile)[2]
     docs = _SPLITTERS[profile["split"]](lines, profile)
     base = profile["url_base"]
     level = profile.get("min_heading_level")
@@ -872,13 +966,48 @@ def _load_docs(args) -> tuple[dict, str, list[dict]]:
         if not os.path.exists(args.file):
             die(f"--file '{args.file}' does not exist. Drop --file to auto-fetch to the cache.")
         path = args.file
-    docs = split_documents(load_lines(path), profile)
+    # with split "auto", the chosen candidate's profile is used from here on
+    _choice, profile, docs = resolve_split(load_lines(path), profile)
     assert_parsed(profile["name"], len(docs), path)
     if profile["index_url"]:
+        label = profile.get("label") or profile["name"]
         index_lines = _load_index_lines(args, profile)
         if index_lines is not None:
+            if profile["join_rate_guard"]:
+                # before join_index_urls: the URLs it copies from the index
+                # would match the index by construction
+                joinable, total = index_join_rate(docs, index_lines)
+                if total == 0:
+                    # check_join_rate returns silently on 0 entries; say the
+                    # guard did not run instead of passing it unseen
+                    print(f"WARNING: {label} join_rate_guard: the index has no absolute "
+                          "page entries; not checked", file=sys.stderr)
+                else:
+                    check_join_rate(f"{label} index↔full-text",
+                                    joinable, total, advice=_GUARD_ADVICE)
             join_index_urls(docs, index_lines)
+        elif profile["join_rate_guard"] and args.file is None:
+            # the fetch failed (``--file`` without ``--index-file`` reads no
+            # index by design, so that case stays quiet)
+            print(f"WARNING: {label} join_rate_guard: the index could not be read; not checked",
+                  file=sys.stderr)
     return profile, path, docs
+
+
+_GUARD_ADVICE = ("The profile may not match the file (check split / page_url: the pages' "
+                 "URLs are not the index's), or the upstream format changed. Retry with "
+                 "--max-age 0; if it persists, fix the profile or report an issue.")
+
+
+def index_join_rate(docs: list[dict], index_lines: list[str]) -> tuple[int, int]:
+    """``(joinable, total)``: how many of the ``llms.txt`` entries name the
+    URL of a page in *docs* (``.md``, query, fragment and a trailing slash
+    ignored on both sides), out of all entries. Entries that link another
+    ``llms.txt``-family file are not pages and are not counted."""
+    page_urls = {normalize_doc_url(d["url"]) for d in docs if d["url"]}
+    entries = [e for e in parse_llms_index(index_lines) if not _is_index_file_url(e["url"])]
+    joinable = sum(1 for e in entries if normalize_doc_url(e["url"]) in page_urls)
+    return joinable, len(entries)
 
 
 def _load_index_lines(args, profile: dict) -> list[str] | None:

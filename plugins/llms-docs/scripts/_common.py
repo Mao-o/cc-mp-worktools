@@ -2191,15 +2191,21 @@ def assert_parsed(label: str, count: int, path: str) -> None:
         sys.exit(2)
 
 
+_JOIN_RATE_ADVICE = ("The upstream format may have changed. "
+                     "Retry with --max-age 0; if it persists, report an issue.")
+
+
 def check_join_rate(label: str, joinable: int, total: int, *,
-                    warn_threshold: float = 0.8, fail_threshold: float = 0.5) -> None:
+                    warn_threshold: float = 0.8, fail_threshold: float = 0.5,
+                    advice: str | None = None) -> None:
     """Check the fraction of index entries that joined to a full-text doc.
 
     Below *fail_threshold* the join is broken badly enough to indicate an
     upstream format change rather than a handful of legitimately-missing
     pages — exit 2 (same failure class as ``assert_parsed``). Between
     *fail_threshold* and *warn_threshold*, print a WARNING and continue
-    (some pages can legitimately lack a full-text counterpart).
+    (some pages can legitimately lack a full-text counterpart). *advice*
+    replaces the sentences after "far below expected." in the error.
     """
     if total == 0:
         return
@@ -2207,8 +2213,7 @@ def check_join_rate(label: str, joinable: int, total: int, *,
     if ratio < fail_threshold:
         print(
             f"Error: {label} join rate is {ratio:.0%} ({joinable}/{total}), "
-            f"far below expected. The upstream format may have changed. "
-            f"Retry with --max-age 0; if it persists, report an issue.",
+            f"far below expected. {advice or _JOIN_RATE_ADVICE}",
             file=sys.stderr,
         )
         sys.exit(2)
