@@ -345,7 +345,8 @@ GENERIC_PROFILES = {
                         "strip_trailing_headings": True, "min_heading_level": 2, "label": "Claude Platform"},
     "ai-sdk": {"url": "https://ai-sdk.dev/llms-full.txt", "split": "frontmatter",
                "page_url": "frontmatter:url", "protect_tables": False, "compact_pack": True,
-               "untitled_warn_ratio": 0.10, "label": "AI SDK"},
+               "untitled_warn_ratio": 0.10, "label": "AI SDK", "tags_key": "tags",
+               "frontmatter_yaml_values": True},
 }
 
 # Cases whose generic-loader output already matches the golden (normalised
@@ -367,7 +368,32 @@ GENERIC_PARITY_EXPECTED: frozenset = frozenset({
     "as-sections",
     "as-content-heading",
     "as-search-zero",
+    # tags_key + frontmatter_yaml_values (tags lines and ranking, ``\"`` in titles)
+    "as-fetch-index-compact",
+    "as-search-content",
+    "as-content",
+    "as-search",
 })
+
+# Cases that match once the generic loader's ``    URL: …`` entry lines are
+# taken out of its output, and differ only by them: the ai-sdk profile reads
+# ``url:`` from the frontmatter (search / search-content show it, as the old
+# script does), but ``parse-ai-sdk.py`` prints no URL in fetch-index /
+# search-index. Whether the preset prints it there is decided with the
+# preset itself; until then these are checked with only those lines removed.
+GENERIC_PARITY_EXPECTED_BUT_URL_LINES: frozenset = frozenset({
+    "as-fetch-index",
+    "as-search-index",
+    "as-search-index-tags",
+})
+_URL_ENTRY_RE = re.compile(r"^    URL: \S+$")
+
+
+def without_url_entry_lines(stdout: str) -> tuple[str, int]:
+    """*stdout* without its ``    URL: <url>`` entry lines, and how many went."""
+    lines = stdout.split("\n")
+    kept = [line for line in lines if not _URL_ENTRY_RE.match(line)]
+    return "\n".join(kept), len(lines) - len(kept)
 
 
 def _generic_argv(corpus: str, argv: list, cache_dir: str, sources_file: str) -> list | None:
@@ -701,6 +727,20 @@ class GenericLoaderHarnessTest(unittest.TestCase):
                 self.assertEqual(run.code, record["exit"])
                 self.assertLessEqual(run.fetches, record["fetches"])
 
+    def test_cases_differing_only_by_url_lines_match_without_them(self):
+        self.assertFalse(GENERIC_PARITY_EXPECTED & GENERIC_PARITY_EXPECTED_BUT_URL_LINES)
+        for case_id in sorted(GENERIC_PARITY_EXPECTED_BUT_URL_LINES):
+            with self.subTest(case=case_id):
+                stdout, record = load_golden(case_id)
+                run = run_generic_case(case_id)
+                self.assertNotEqual(compare(stdout, run.stdout, record["stderr"], run.stderr), [])
+                stripped, removed = without_url_entry_lines(run.stdout)
+                self.assertGreater(removed, 0)
+                self.assertEqual(without_url_entry_lines(stdout)[1], 0)
+                self.assertEqual(compare(stdout, stripped, record["stderr"], run.stderr), [])
+                self.assertEqual(run.code, record["exit"])
+                self.assertLessEqual(run.fetches, record["fetches"])
+
 
 def platform_page_mismatches(full_text: Path, profile: dict) -> list[str]:
     """Pages of a claude-platform ``llms-full.txt`` where the generic loader
@@ -805,6 +845,16 @@ class CorpusParityGateTest(unittest.TestCase):
                 old = run_legacy_case(case_id, source_dir=self.cache)
                 new = run_generic_case(case_id, source_dir=self.cache)
                 self.assertEqual(compare(old.stdout, new.stdout, old.stderr, new.stderr), [])
+                self.assertEqual(new.code, old.code)
+
+    def test_url_line_cases_match_without_them_on_the_full_corpus(self):
+        for case_id in filter(self._cached, sorted(GENERIC_PARITY_EXPECTED_BUT_URL_LINES)):
+            with self.subTest(case=case_id):
+                old = run_legacy_case(case_id, source_dir=self.cache)
+                new = run_generic_case(case_id, source_dir=self.cache)
+                stripped, _removed = without_url_entry_lines(new.stdout)
+                self.assertEqual(without_url_entry_lines(old.stdout)[1], 0)
+                self.assertEqual(compare(old.stdout, stripped, old.stderr, new.stderr), [])
                 self.assertEqual(new.code, old.code)
 
     def test_platform_pages_match_on_the_full_corpus(self):
