@@ -858,7 +858,10 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
     is neither fresh nor a stale fallback: it is fetched again without its
     validators, and a failed fetch is reported as if there were no cache.
     A sidecar with no ``url`` (written by an older version) counts as a
-    match.
+    match. When the sidecar names another URL, the old body is removed and
+    the sidecar (naming *url*, without validators) is written before the new
+    body; failing either fails the fetch, so a body is never left behind
+    under a sidecar that names another URL.
 
     On transport failure:
       * If a cache file already exists (even a stale one past *max_age*),
@@ -1001,6 +1004,19 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
             parent = os.path.dirname(cache_path)
             if parent:
                 os.makedirs(parent, exist_ok=True)
+        if url_changed:
+            # The cache holds another URL's body (a preset's ``cache_name``
+            # file is shared by every URL the preset ever had). Remove that
+            # body, then name *url* in the sidecar, then write the body: a
+            # run stopped or failing between the writes never leaves a body
+            # under a sidecar naming another URL, which would be served for
+            # that URL. Either step failing fails the fetch (``OSError``,
+            # handled below, with no cache to fall back on).
+            try:
+                os.unlink(cache_path)
+            except FileNotFoundError:
+                pass
+            _save_fetch_meta(cache_path, None, None, _content_hash(data), url)
         _atomic_write(cache_path, data)
         try:
             _save_fetch_meta(

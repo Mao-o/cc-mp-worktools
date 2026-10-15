@@ -358,6 +358,102 @@
         "^(Copy page|Explain Code|Terminal window)\\s*$"
       ],
       "description": "Cloudflare Containers"
+    },
+    "claude-code": {
+      "url": "https://code.claude.com/docs/llms-full.txt",
+      "split": "h1",
+      "page_url": "line:Source: ",
+      "index_url": "https://code.claude.com/docs/llms.txt",
+      "label": "Claude Code",
+      "page_ref_forms": [
+        "int",
+        "url",
+        "slug"
+      ],
+      "anchor_style": "github",
+      "show_overflow": true,
+      "rank_from": "index",
+      "index_join": "url",
+      "index_group_variants": true,
+      "link_annotations": true,
+      "link_path_aliases": [
+        [
+          "/docs/en/",
+          "/en/"
+        ]
+      ],
+      "cache_name": "claude-code",
+      "description": "Claude Code (code.claude.com)"
+    },
+    "claude-platform": {
+      "url": "https://platform.claude.com/llms-full.txt",
+      "split": "frontmatter",
+      "page_url": "frontmatter:url",
+      "index_url": "https://platform.claude.com/llms.txt",
+      "strip_trailing_headings": true,
+      "min_heading_level": 2,
+      "label": "Claude Developer Platform",
+      "page_ref_forms": [
+        "int",
+        "url",
+        "slug"
+      ],
+      "anchor_style": "github",
+      "show_overflow": true,
+      "rank_from": "index",
+      "index_join": "url",
+      "index_group_variants": true,
+      "link_annotations": true,
+      "link_path_aliases": [
+        [
+          "/docs/en/",
+          "/en/"
+        ]
+      ],
+      "cache_name": "claude-platform",
+      "description": "Claude Developer Platform (platform.claude.com: Anthropic API / Agent SDK)"
+    },
+    "claude": {
+      "members": [
+        "claude-code",
+        "claude-platform"
+      ],
+      "description": "claude-code + claude-platform (search only)"
+    },
+    "ai-sdk": {
+      "url": "https://ai-sdk.dev/llms-full.txt",
+      "split": "frontmatter",
+      "page_url": "frontmatter:url",
+      "list_page_urls": false,
+      "page_ref_forms": [
+        "int",
+        "title"
+      ],
+      "protect_tables": false,
+      "compact_pack": true,
+      "label": "AI SDK",
+      "tags_key": "tags",
+      "frontmatter_yaml_values": true,
+      "cache_name": "ai-sdk",
+      "description": "AI SDK (Vercel AI SDK)"
+    },
+    "firebase": {
+      "body": "fetch",
+      "rank_from": "index",
+      "index_url": "https://firebase.google.com/docs/llms.txt",
+      "label": "Firebase",
+      "page_ref_forms": [
+        "int",
+        "url",
+        "slug"
+      ],
+      "page_url_strip_suffix": ".md.txt",
+      "anchor_style": "devsite",
+      "min_heading_level": 2,
+      "index_page_size": 100,
+      "cache_name": "firebase",
+      "page_cache_dir": "firebase-docs",
+      "description": "Firebase (llms.txt + per-page fetch)"
     }
   }
 }

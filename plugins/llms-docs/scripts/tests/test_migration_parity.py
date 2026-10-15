@@ -48,8 +48,8 @@ output the same, so this module pins it first:
 Regenerating the golden is a deliberate act: run this file as a script with
 ``--update-golden`` (only while the old scripts are the reference), and
 review the diff. ``--report-generic`` prints, per case, how far the generic
-loader with the provisional profiles in ``GENERIC_PROFILES`` is from the
-golden after normalisation.
+loader with the bundled presets (``PARITY_PRESETS``) is from the golden
+after normalisation.
 """
 
 import contextlib
@@ -407,34 +407,33 @@ def compare(expected: str, actual: str, expected_err: str = "", actual_err: str 
 
 
 # ---------------------------------------------------------------------------
-# Generic loader with provisional profiles (for later migration steps)
+# Generic loader with the bundled presets
 # ---------------------------------------------------------------------------
 
-_INDEX_FIRST = {"rank_from": "index", "index_join": "url", "index_group_variants": True}
-_LINKS = {"link_annotations": True, "link_path_aliases": [["/docs/en/", "/en/"]]}
-GENERIC_PROFILES = {
-    "claude-code": {"url": "https://code.claude.com/docs/llms-full.txt", "split": "h1",
-                    "page_url": "line:Source: ", "index_url": "https://code.claude.com/docs/llms.txt",
-                    "label": "Claude Code", "page_ref_forms": ["int", "url", "slug"],
-                    "anchor_style": "github", "show_overflow": True, **_INDEX_FIRST, **_LINKS},
-    "claude-platform": {"url": "https://platform.claude.com/llms-full.txt", "split": "frontmatter",
-                        "page_url": "frontmatter:url", "index_url": "https://platform.claude.com/llms.txt",
-                        "strip_trailing_headings": True, "min_heading_level": 2,
-                        "label": "Claude Developer Platform",
-                        "page_ref_forms": ["int", "url", "slug"],
-                        "anchor_style": "github", "show_overflow": True, **_INDEX_FIRST, **_LINKS},
-    "ai-sdk": {"url": "https://ai-sdk.dev/llms-full.txt", "split": "frontmatter",
-               "page_url": "frontmatter:url", "protect_tables": False, "compact_pack": True,
-               "untitled_warn_ratio": 0.10, "label": "AI SDK", "tags_key": "tags",
-               "frontmatter_yaml_values": True},
-    # ``--source both`` of the old script: search on both Claude docs sources
-    "claude": {"members": ["claude-code", "claude-platform"]},
-    # no llms-full.txt: the llms.txt entries are the pages, each fetched on demand
-    "firebase": {"body": "fetch", "rank_from": "index", "index_url": "https://firebase.google.com/docs/llms.txt",
-                 "label": "Firebase", "page_ref_forms": ["int", "url", "slug"],
-                 "page_url_strip_suffix": ".md.txt", "anchor_style": "devsite", "min_heading_level": 2,
-                 "index_page_size": 100},
-}
+# The presets that replace the old scripts (``claude`` is the ``members``
+# alias for ``--source both``; firebase is ``body: "fetch"``).
+PARITY_PRESETS = ("claude-code", "claude-platform", "claude", "ai-sdk", "firebase")
+# Keys only the bundled presets may carry: they name the cache files after
+# the old scripts' (``claude-code-llms-full.txt``, ``firebase-docs/`` …).
+_PRESET_ONLY = ("cache_name", "page_cache_dir")
+
+
+def _preset_raw() -> dict:
+    presets = Path(_loader.load_script("parse-llms-txt.py").PRESETS_FILE)
+    return json.loads(presets.read_text(encoding="utf-8"))["sources"]
+
+
+# The same presets as profiles a user's sources.json may hold (the
+# preset-only keys taken out), for the tests that write them into one. The
+# parity cases themselves run on the bundled presets (``run_generic_case``).
+GENERIC_PROFILES = {name: {k: v for k, v in _preset_raw()[name].items() if k not in _PRESET_ONLY}
+                    for name in PARITY_PRESETS}
+
+
+def preset_profile(name: str) -> dict:
+    """The validated bundled preset *name*."""
+    g = _loader.load_script("parse-llms-txt.py")
+    return g._read_sources_file(g.PRESETS_FILE)[name]
 
 # Cases whose generic-loader output already matches the golden (normalised
 # stdout, the first stderr line when stdout is empty, and exit code; no more
@@ -466,6 +465,14 @@ GENERIC_PARITY_EXPECTED: frozenset = frozenset({
     "as-search-content",
     "as-content",
     "as-search",
+    # the bundled ai-sdk preset: page_url for search / sections / content (as
+    # the old script), list_page_urls false (no ``URL:`` in fetch-index /
+    # search-index, as the old script) and page_ref_forms ["int", "title"]
+    # (a URL fragment is no page ref, as in the old script)
+    "as-fetch-index",
+    "as-search-index",
+    "as-search-index-tags",
+    "as-content-missing",
     # anchor_style "github" + show_overflow (the second on the fixture only).
     # cd-plat-search-content matches on the fixture too, but its made-up
     # query has no hit on the full corpus, where the old script's zero-hit
@@ -521,16 +528,11 @@ GENERIC_PARITY_EXPECTED: frozenset = frozenset({
 })
 
 # Cases that match once the generic loader's ``    URL: …`` entry lines are
-# taken out of its output, and differ only by them: the ai-sdk profile reads
-# ``url:`` from the frontmatter (search / search-content show it, as the old
-# script does), but ``parse-ai-sdk.py`` prints no URL in fetch-index /
-# search-index. Whether the preset prints it there is decided with the
-# preset itself; until then these are checked with only those lines removed.
-GENERIC_PARITY_EXPECTED_BUT_URL_LINES: frozenset = frozenset({
-    "as-fetch-index",
-    "as-search-index",
-    "as-search-index-tags",
-})
+# taken out of its output, and differ only by them. Empty since the ai-sdk
+# preset reads no page URL (``parse-ai-sdk.py`` prints none in fetch-index /
+# search-index): as-fetch-index / as-search-index / as-search-index-tags
+# moved to ``GENERIC_PARITY_EXPECTED``.
+GENERIC_PARITY_EXPECTED_BUT_URL_LINES: frozenset = frozenset()
 # Cases of ``GENERIC_PARITY_EXPECTED`` whose refs name pages (or headings)
 # only the fixture has: on the full corpus both scripts fail the same way,
 # which compares nothing, so ``CorpusParityGateTest`` leaves them out
@@ -559,6 +561,8 @@ FAILURE_PARITY_CASES: frozenset = frozenset({
     "cd-code-content-missing",
     "cd-code-corpus-content-url-missing",
     "cd-plat-corpus-sections-slug-ambiguous",
+    # a URL fragment of a page, not its title: no page in the old script
+    "as-content-missing",
     # a page that is not in the page cache, with the network off: the fetch
     # error (exit 1) on both sides
     "fb-content-dead",
@@ -574,29 +578,15 @@ def without_url_entry_lines(stdout: str) -> tuple[str, int]:
     return "\n".join(kept), len(lines) - len(kept)
 
 
-def _generic_argv(corpus: str, argv: list, cache_dir: str, sources_file: str) -> list | None:
-    """The generic loader's argv for a legacy case. The Claude docs corpora
-    are read from the cache, as the old script reads them: the staged files
-    are copied to the generic cache names (``fetch-index`` / ``search-index``
-    with ``rank_from: "index"`` word their hints by where the pages come
-    from, and ``--file`` is not the old script's cache). ai-sdk is read as
-    ``--file``. Firebase (``body: "fetch"``) is read from the cache too: its
-    index and its page cache directory are copied to the generic names (the
-    page files keep their names, which both loaders derive alike)."""
-    g = _loader.load_script("parse-llms-txt.py")
-    if corpus == "firebase":
-        profile = {"name": "firebase", **GENERIC_PROFILES["firebase"]}
-        index = os.path.join(cache_dir, "firebase-llms.txt")
-        if os.path.exists(index):
-            shutil.copyfile(index, g._index_cache_path(cache_dir, profile))
-        pages = os.path.join(cache_dir, "firebase-docs")
-        if os.path.isdir(pages):
-            shutil.copytree(pages, os.path.join(cache_dir, g._page_dir_name(profile)))
-        return [*argv, "--source", "firebase", "--sources-file", sources_file]
+def _generic_argv(corpus: str, argv: list, sources_file: str) -> list:
+    """The generic loader's argv for a legacy case: the old script's
+    ``--source`` (``code`` / ``platform`` / ``both``, default ``code``) as the
+    preset's name, and *sources_file* (an empty one, so that a user's own
+    sources.json cannot replace a preset). Nothing is copied: the presets'
+    ``cache_name`` / ``page_cache_dir`` name the old scripts' cache files,
+    so the generic loader reads the staged files where the old script does."""
     argv = list(argv)
-    if corpus == "ai-sdk":
-        name, full, index = "ai-sdk", "ai-sdk-llms-full.txt", None
-    else:
+    if corpus == "claude-docs":
         source = "code"
         if "--source" in argv:
             i = argv.index("--source")
@@ -604,30 +594,24 @@ def _generic_argv(corpus: str, argv: list, cache_dir: str, sources_file: str) ->
             del argv[i:i + 2]
         # ``--source both``: the ``claude`` alias of the two sources
         name = "claude" if source == "both" else f"claude-{source}"
-        index = True
-    out = [*argv, "--source", name, "--sources-file", sources_file]
-    if not index:
-        return out + ["--file", os.path.join(cache_dir, full)]
-    for member in GENERIC_PROFILES[name].get("members") or [name]:
-        profile = {"name": member, **GENERIC_PROFILES[member]}
-        for staged, target in ((f"{member}-llms-full.txt", g._cache_path(cache_dir, profile)),
-                               (f"{member}-llms.txt", g._index_cache_path(cache_dir, profile))):
-            if os.path.exists(os.path.join(cache_dir, staged)):
-                shutil.copyfile(os.path.join(cache_dir, staged), target)
-    return out
+    else:
+        name = corpus
+    return [*argv, "--source", name, "--sources-file", sources_file]
 
 
-def run_generic_case(case_id: str, *, source_dir: Path | None = None) -> _Run | None:
+def write_empty_sources(dest: str) -> str:
+    path = os.path.join(dest, "sources.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"sources": {}}, f)
+    return path
+
+
+def run_generic_case(case_id: str, *, source_dir: Path | None = None) -> _Run:
     _, corpus, argv = case_of(case_id)
     tmp = tempfile.mkdtemp(prefix="llms-parity-")
     try:
         stage_corpus(corpus, tmp, source_dir=source_dir)
-        sources = os.path.join(tmp, "sources.json")
-        with open(sources, "w", encoding="utf-8") as f:
-            json.dump({"sources": GENERIC_PROFILES}, f)
-        g_argv = _generic_argv(corpus, argv, tmp, sources)
-        if g_argv is None:
-            return None
+        g_argv = _generic_argv(corpus, argv, write_empty_sources(tmp))
         return run_script("parse-llms-txt.py", g_argv, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -974,6 +958,134 @@ class GenericLoaderHarnessTest(unittest.TestCase):
                 self.assertLessEqual(run.fetches, record["fetches"])
 
 
+class _Served:
+    """What ``urllib.request.urlopen`` returns in ``serve_fixture``."""
+
+    def __init__(self, data: bytes, url: str):
+        self._data, self.url, self.headers = data, url, {}
+
+    def read(self):
+        return self._data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def serve_fixture(corpus: str, calls: list):
+    """A fake ``urlopen`` that answers the old scripts' URLs with *corpus*'s
+    fixture files (the index, the full text, a Firebase page by its cache
+    file name) and fails on any other URL. Every call is recorded."""
+    cd = _loader.load_script("parse-claude-docs.py")
+    fb = _loader.load_script("parse-firebase.py")
+    files = {_loader.load_script("parse-ai-sdk.py").LLMS_TXT_URL: "ai-sdk-llms-full.txt",
+             fb.LLMS_TXT_URL: fb.INDEX_CACHE_NAME}
+    for src in cd.SOURCES.values():
+        files[src["index_url"]] = src["index_cache"]
+        files[src["full_url"]] = src["full_cache"]
+
+    def fake_urlopen(req, *a, **kw):
+        url = getattr(req, "full_url", req)
+        calls.append(url)
+        if url in files:
+            path = FIXTURES / corpus / files[url]
+        else:
+            path = FIXTURES / corpus / fb.PAGES_CACHE_SUBDIR / fb._url_to_cache_filename(url)
+        if not path.is_file():
+            raise OSError(f"parity harness: no fixture for {url}")
+        return _Served(path.read_bytes(), url)
+    return fake_urlopen
+
+
+def run_script_online(script: str, argv: list, cache_dir: str, corpus: str) -> _Run:
+    """``run_script`` with the network answering from *corpus*'s fixture."""
+    module = _loader.load_script(script)
+    calls: list = []
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("LLMS_DOCS_CACHE_DIR", "XDG_CACHE_HOME")}
+    with mock.patch.dict(os.environ, env, clear=True), \
+            mock.patch("urllib.request.urlopen", side_effect=serve_fixture(corpus, calls)):
+        code, out, err = _loader.run_cli(module, [script, *argv, "--cache-dir", cache_dir])
+    return _Run(code, _scrub(out, cache_dir), _scrub(err, cache_dir), len(calls))
+
+
+class PresetCacheSharingTest(unittest.TestCase):
+    """The bundled presets read and write the old scripts' cache files:
+    the same file names, fetched from the same URLs (the sidecar records the
+    URL, and a file whose sidecar names another URL is fetched again), so a
+    cache filled by either one is used by the other without a fetch."""
+
+    def test_cache_names_and_urls_are_the_old_scripts(self):
+        g = _loader.load_script("parse-llms-txt.py")
+        cd = _loader.load_script("parse-claude-docs.py")
+        ai = _loader.load_script("parse-ai-sdk.py")
+        fb = _loader.load_script("parse-firebase.py")
+        for name, key in (("claude-code", "code"), ("claude-platform", "platform")):
+            with self.subTest(name):
+                p, src = preset_profile(name), cd.SOURCES[key]
+                self.assertEqual((p["url"], os.path.basename(g._cache_path("/c", p))),
+                                 (src["full_url"], src["full_cache"]))
+                self.assertEqual((p["index_url"], os.path.basename(g._index_cache_path("/c", p))),
+                                 (src["index_url"], src["index_cache"]))
+        p = preset_profile("ai-sdk")
+        self.assertEqual((p["url"], os.path.basename(g._cache_path("/c", p))),
+                         (ai.LLMS_TXT_URL, ai.DEFAULT_CACHE_FILENAME))
+        p = preset_profile("firebase")
+        self.assertEqual((p["index_url"], os.path.basename(g._index_cache_path("/c", p))),
+                         (fb.LLMS_TXT_URL, fb.INDEX_CACHE_NAME))
+        self.assertEqual(g._page_dir_name(p), fb.PAGES_CACHE_SUBDIR)
+        self.assertEqual(preset_profile("claude")["members"], ("claude-code", "claude-platform"))
+
+    def test_every_case_fetches_no_more_than_the_old_script(self):
+        """On the staged cache of the old scripts: no fetch at all for the
+        Claude docs and ai-sdk (their files are all there), and for Firebase
+        exactly the pages the old script fetches (those not in its page cache)."""
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        for case_id in CASE_IDS:
+            with self.subTest(case=case_id):
+                run = run_generic_case(case_id)
+                self.assertEqual(run.fetches, manifest[case_id]["fetches"])
+                if not case_id.startswith("fb-"):
+                    self.assertEqual(run.fetches, 0)
+
+    # (corpus, argv of the old script, the preset) for a fill-then-read round
+    _ROUND_TRIPS = (
+        ("claude-docs", ["search", "snapshot restore"], "claude-code"),
+        ("claude-docs", ["search", "access token", "--source", "platform"], "claude-platform"),
+        ("ai-sdk", ["search", "stream shape"], "ai-sdk"),
+        ("firebase", ["sections", "14"], "firebase"),
+    )
+
+    def _generic(self, argv: list, name: str, tmp: str) -> list:
+        argv = [a for i, a in enumerate(argv)
+                if a != "--source" and (i == 0 or argv[i - 1] != "--source")]
+        return [*argv, "--source", name, "--sources-file", write_empty_sources(tmp)]
+
+    def test_a_cache_filled_by_one_is_read_by_the_other_without_a_fetch(self):
+        for corpus, argv, name in self._ROUND_TRIPS:
+            for first in ("old", "generic"):
+                with self.subTest(preset=name, filled_by=first):
+                    tmp = tempfile.mkdtemp(prefix="llms-parity-")
+                    try:
+                        old_argv, new_argv = argv, self._generic(argv, name, tmp)
+                        runs = {"old": (SCRIPTS[corpus], old_argv), "generic": ("parse-llms-txt.py", new_argv)}
+                        second = "generic" if first == "old" else "old"
+                        filled = run_script_online(*runs[first], tmp, corpus)
+                        self.assertEqual(filled.code, 0, filled.stderr)
+                        self.assertGreater(filled.fetches, 0)
+                        read = run_script(*runs[second], tmp)
+                        self.assertEqual(read.code, 0, read.stderr)
+                        self.assertEqual(read.fetches, 0, read.stderr)
+                        self.assertEqual(compare(filled.stdout, read.stdout, filled.stderr, read.stderr), [])
+                        # the sidecars name the URLs both use
+                        for meta in Path(tmp).rglob("*.meta.json"):
+                            self.assertTrue(json.loads(meta.read_text(encoding="utf-8"))["url"].startswith("https://"))
+                    finally:
+                        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def platform_page_mismatches(full_text: Path, profile: dict) -> list[str]:
     """Pages of a claude-platform ``llms-full.txt`` where the generic loader
     with *profile* differs from ``parse-claude-docs.py``: title, URL, body
@@ -1024,14 +1136,12 @@ class PlatformStructureParityTest(unittest.TestCase):
         tmp = tempfile.mkdtemp(prefix="llms-parity-")
         try:
             stage_corpus("claude-docs", tmp)
-            sources = os.path.join(tmp, "sources.json")
-            with open(sources, "w", encoding="utf-8") as f:
-                json.dump({"sources": GENERIC_PROFILES}, f)
+            sources = write_empty_sources(tmp)
             for i in range(n_pages):
                 argv = ["sections", str(i), *_P]
                 with self.subTest(page=i):
                     old = run_script(SCRIPTS["claude-docs"], argv, tmp)
-                    new = run_script("parse-llms-txt.py", _generic_argv("claude-docs", argv, tmp, sources), tmp)
+                    new = run_script("parse-llms-txt.py", _generic_argv("claude-docs", argv, sources), tmp)
                     self.assertEqual(old.code, 0, old.stderr)
                     self.assertEqual(new.code, 0, new.stderr)
                     self.assertEqual(compare(old.stdout, new.stdout, old.stderr, new.stderr), [])
@@ -1204,7 +1314,7 @@ class CorpusParityGateTest(unittest.TestCase):
                 continue
             lines = _common.load_lines(str(full))
             old_docs = old_mod.split_documents(lines)
-            profile = new_mod._validate_profile("sources.json", name, GENERIC_PROFILES[name])
+            profile = preset_profile(name)
             new_docs = new_mod.split_documents(lines, profile)
             self.assertEqual(len(new_docs), len(old_docs), name)
             self.assertEqual(profile["page_ref_forms"], ("int", "url", "slug"))
@@ -1238,7 +1348,7 @@ class CorpusParityGateTest(unittest.TestCase):
         new_mod = _loader.load_script("parse-llms-txt.py")
         import _common  # scripts/ is on sys.path (``_loader``)
         entries = _common.parse_llms_index(_common.load_lines(str(index)))
-        profile = new_mod._validate_profile("sources.json", "firebase", GENERIC_PROFILES["firebase"])
+        profile = preset_profile("firebase")
         args = mock.Mock(file=None, index_file=str(index), source="firebase", cache_dir="/c", max_age=None)
         _path, docs = new_mod._fetch_entry_docs(args, profile)
         self.assertEqual([d["url"] for d in docs], [e["url"] for e in entries])
@@ -1295,9 +1405,6 @@ if __name__ == "__main__":
         corpus_dir = Path(sys.argv[sys.argv.index("--corpus") + 1]) if "--corpus" in sys.argv else None
         for cid in CASE_IDS:
             r = run_generic_case(cid, source_dir=corpus_dir)
-            if r is None:
-                print(f"{cid}: (no generic equivalent yet)")
-                continue
             if corpus_dir is None:
                 stdout, record = load_golden(cid)
                 ref = _Run(record["exit"], stdout, record["stderr"], record["fetches"])

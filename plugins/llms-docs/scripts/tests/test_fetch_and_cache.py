@@ -1022,6 +1022,81 @@ class RecordedUrlTest(unittest.TestCase):
         self.assertEqual(result, self.cache_path)
         self.assertIn("using cached copy", err.getvalue())
 
+    def _served_offline(self, url):
+        """What ``fetch_url(url)`` serves with the network down: the cached
+        text, or ``None`` when it fails."""
+        with mock.patch("urllib.request.urlopen", side_effect=urllib.error.URLError("offline")), \
+                contextlib.redirect_stderr(io.StringIO()):
+            try:
+                path = _common.fetch_url(url, self.cache_path, user_agent="ua")
+            except SystemExit:
+                return None
+        with open(path) as f:
+            return f.read()
+
+    def test_a_write_failing_after_a_url_change_never_serves_one_urls_body_for_the_other(self):
+        """The cache holds OLD's body and sidecar; NEW is fetched and one of
+        the writes fails (the old body's removal, the sidecar, or the body).
+        The fetch fails, and afterwards neither URL is served the other's
+        body (before, a failed sidecar write left NEW's body under OLD's
+        sidecar, which a later request for OLD then served)."""
+        real_write = _common._atomic_write
+        real_unlink = os.unlink
+
+        def failing_write(which):
+            def write(path, data):
+                if path.endswith(".meta.json") == (which == "sidecar"):
+                    raise OSError(f"{which} not written")
+                return real_write(path, data)
+            return write
+
+        def failing_unlink(path, *a, **kw):
+            if path == self.cache_path:
+                raise PermissionError("old body not removed")
+            return real_unlink(path, *a, **kw)
+
+        failures = {
+            "sidecar": mock.patch.object(_common, "_atomic_write", side_effect=failing_write("sidecar")),
+            "body": mock.patch.object(_common, "_atomic_write", side_effect=failing_write("body")),
+            "old body removal": mock.patch.object(_common.os, "unlink", side_effect=failing_unlink),
+        }
+        for label, patch in failures.items():
+            with self.subTest(label):
+                with open(self.cache_path, "w") as f:
+                    f.write("old corpus")
+                self._write_meta(url=self.OLD)
+                with patch, mock.patch("urllib.request.urlopen",
+                                       return_value=_FakeResponse(b"new corpus", url=self.NEW)), \
+                        contextlib.redirect_stderr(io.StringIO()) as err:
+                    with self.assertRaises(SystemExit) as cm:
+                        _common.fetch_url(self.NEW, self.cache_path, user_agent="ua")
+                self.assertEqual(cm.exception.code, 1)
+                self.assertIn(f"Failed to fetch {self.NEW}", err.getvalue())
+                self.assertIn(self._served_offline(self.OLD), (None, "old corpus"))
+                self.assertIn(self._served_offline(self.NEW), (None, "new corpus"))
+
+    def test_a_url_change_writes_the_sidecar_before_the_body(self):
+        """The order itself: a run stopped between the two writes (no
+        exception to handle) leaves no body under the other URL's sidecar."""
+        self._write_meta(url=self.OLD)
+        seen = []
+        real_write = _common._atomic_write
+
+        def record(path, data):
+            meta = _common._load_fetch_meta(self.cache_path)
+            seen.append((os.path.basename(path), os.path.exists(self.cache_path), meta.get("url")))
+            return real_write(path, data)
+
+        with mock.patch.object(_common, "_atomic_write", side_effect=record), \
+                mock.patch("urllib.request.urlopen", return_value=_FakeResponse(b"new corpus", url=self.NEW)):
+            _common.fetch_url(self.NEW, self.cache_path, user_agent="ua")
+        name = os.path.basename(self.cache_path)
+        self.assertEqual(seen[:2], [(name + ".meta.json", False, self.OLD), (name, False, self.NEW)])
+        self.assertEqual(self._read(), "new corpus")
+        with open(self.cache_path + ".meta.json", encoding="utf-8") as f:
+            meta = json.load(f)
+        self.assertEqual((meta["url"], meta["content_hash"]), (self.NEW, _common._content_hash(b"new corpus")))
+
 
 class LoadLinesTest(unittest.TestCase):
     def test_invalid_utf8_is_replaced_not_raised(self):

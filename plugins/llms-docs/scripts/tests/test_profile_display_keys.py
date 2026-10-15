@@ -413,5 +413,76 @@ class CacheNameTest(unittest.TestCase):
                 self.assertIn("cache_name", err)
 
 
+class ListPageUrlsTest(_CliCase):
+    """``list_page_urls: false`` drops the ``URL:`` line from the page
+    listings (fetch-index / search-index) only; the other commands keep it,
+    and so do tags lines."""
+
+    URL_LINE = "    URL: https://example.com/alpha"
+
+    def test_default_lists_the_urls(self):
+        self.assertIs(_profile()["list_page_urls"], True)
+        for argv in (["fetch-index"], ["search-index", "alpha"]):
+            with self.subTest(argv=argv):
+                code, out, err = self.run_cli({}, *argv)
+                self.assertEqual(code, 0, err)
+                self.assertIn(self.URL_LINE, out.splitlines())
+
+    def test_false_drops_them_from_the_listings_only(self):
+        off = {"list_page_urls": False}
+        for argv in (["fetch-index"], ["search-index", "alpha"], ["search-index", "alpha", "--show-sections"]):
+            with self.subTest(argv=argv):
+                code, out, err = self.run_cli(off, *argv)
+                self.assertEqual(code, 0, err)
+                self.assertNotIn("URL: ", out)
+                self.assertIn("Alpha", out)
+                # the same output as the default, minus exactly the URL lines
+                _c, default, _e = self.run_cli({}, *argv)
+                self.assertEqual([line for line in default.splitlines() if not line.startswith("    URL: ")],
+                                 out.splitlines())
+        for argv in (["search", "setup"], ["search-content", "setup"]):
+            with self.subTest(argv=argv):
+                code, out, err = self.run_cli(off, *argv)
+                self.assertEqual(code, 0, err)
+                self.assertIn(self.URL_LINE, out.splitlines())
+        code, out, err = self.run_cli(off, "sections", "0")
+        self.assertEqual(code, 0, err)
+        self.assertIn("  URL: https://example.com/alpha", out.splitlines())
+
+    def test_tags_lines_stay(self):
+        corpus = "---\ntitle: Alpha\nurl: https://example.com/alpha\ntags: [one, two]\n---\n\nAlpha body.\n"
+        self.corpus.write_text(corpus, encoding="utf-8")
+        code, out, err = self.run_cli({"list_page_urls": False, "tags_key": "tags", "frontmatter_key": "title"},
+                                      "fetch-index")
+        self.assertEqual(code, 0, err)
+        self.assertIn("    tags: one, two", out.splitlines())
+        self.assertNotIn("URL: ", out)
+
+    def test_rejected_values(self):
+        cases = {
+            "not a bool": ({"list_page_urls": "no"}, "list_page_urls must be true or false"),
+            "with rank_from index": ({"list_page_urls": False, "rank_from": "index", "index_join": "url",
+                                      "index_url": "https://example.com/llms.txt",
+                                      "page_ref_forms": ["int", "url", "slug"]},
+                                     'list_page_urls is only valid with rank_from "pages"'),
+            # body "fetch" lists the llms.txt entries: the key is not one of its keys
+            "with body fetch": (None, "list_page_urls"),
+        }
+        for label, (raw, message) in cases.items():
+            with self.subTest(label):
+                if raw is None:
+                    profile = {"body": "fetch", "rank_from": "index", "index_url": "https://example.com/llms.txt",
+                               "page_ref_forms": ["int", "url", "slug"], "list_page_urls": False}
+                else:
+                    profile = {"url": URL, "split": "frontmatter", "page_url": "frontmatter:url", **raw}
+                with tempfile.TemporaryDirectory() as tmp:
+                    f = Path(tmp, "sources.json")
+                    f.write_text(json.dumps({"sources": {"x": profile}}), encoding="utf-8")
+                    code, _out, err = _loader.run_cli(
+                        generic, ["parse-llms-txt.py", "sources", "--sources-file", str(f)])
+                self.assertEqual(code, 1, err)
+                self.assertIn(message, err)
+
+
 if __name__ == "__main__":
     unittest.main()

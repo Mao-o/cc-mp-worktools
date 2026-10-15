@@ -2,6 +2,46 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.45.0] - 2026-10-16
+
+### 追加: 同梱 presets に `claude-code` / `claude-platform` / `claude` / `ai-sdk` / `firebase` (専用 3 script と同じ出力・同じキャッシュ)
+
+専用 parser 3 本を汎用 loader (`parse-llms-txt.py`) に統合する段階の 1 つ。0.36.0〜0.44.0 で足したキーを
+使い、専用 script と同じ出力になる preset を同梱した。skill (`researching-claude-docs` /
+`researching-ai-sdk` / `researching-firebase`) は、まだ専用 script を使う (切り替えは後の段階)。
+
+- `claude-code` / `claude-platform`: `llms.txt` の項目でランキングし、本文は `llms-full.txt` から URL で
+  対応づけて読む。`claude` は両方をまとめて `search` する別名 (`members`。旧 `--source both`)
+- `ai-sdk`: `search` / `search-content` / `sections` / `content` にはページ URL を出し、`fetch-index` /
+  `search-index` の一覧には出さない (旧 script と同じ)。ページ参照は番号とタイトルの部分一致だけ
+  (旧 script と同じ。URL の末尾は参照にならない)
+- `firebase`: `body: "fetch"` (`llms.txt` の各ページを必要なときに取得する)
+- キャッシュは専用 script と同じファイル (`claude-code-llms-full.txt` / `claude-platform-llms.txt` /
+  `ai-sdk-llms-full.txt` / `firebase-llms.txt` / `firebase-docs/` など) を、同じ URL から取得して読み書きする。
+  どちらかが取得したキャッシュは、もう一方が取得せずに使う
+- profile のキー `list_page_urls` (既定 `true`): `false` で、`fetch-index` / `search-index` のページの一覧に
+  `URL:` 行を出さない (`search` / `search-content` / `sections` / `content` には出す)。`rank_from: "index"`
+  とは一緒に書けない。書かなければ出力は変わらない
+- README の「取得先のホスト」に `code.claude.com` / `platform.claude.com` / `ai-sdk.dev` /
+  `firebase.google.com` を加えた
+
+### 修正: 取得 URL が変わったキャッシュの書き込みが途中で失敗すると、別の URL の本文を返すことがあった
+
+`.meta.json` に記録した URL と違う URL を取得したとき (`cache_name` を持つ preset の URL が変わったとき)、
+本文を書いたあとで `.meta.json` の書き込みに失敗すると、新しい URL の本文が古い URL の `.meta.json` の
+まま残り、次に古い URL を求めたときにその本文を返していた。今は古い本文を消し、新しい URL を記録した
+`.meta.json` を先に書いてから本文を書く。どちらかに失敗したら取得の失敗として扱う (既存キャッシュは
+使わない)。URL が変わっていないときの挙動は変わらない。旧 3 script も同じ関数を使うので、同じく直る
+(通常の出力は変わらない)。README と `researching-library-docs` の SKILL の「取得に失敗したら既存の
+キャッシュを使う」に、この例外を書き足した。
+
+- 移行の比較: ai-sdk の一覧 3 件と、URL の末尾を参照にしたときの失敗 1 件を一致に加えた。比較は同梱の
+  preset そのもので行い、旧 script のキャッシュのファイル名のまま読む (コピーしない)
+- テスト: 旧 script と preset のキャッシュのファイル名と取得 URL が一致すること、全ケースで取得の回数が
+  旧 script と同じ (Claude docs と ai-sdk は 0 回) であること、どちらかが取得したキャッシュをもう一方が
+  取得せずに読み同じ出力になること、URL が変わったときの書き込みの各段階の失敗のあとで、どちらの URL にも
+  他方の本文を返さないこと、`.meta.json` を本文より先に書くこと、`list_page_urls` の既定・`false`・拒否する値
+
 ## [0.44.0] - 2026-10-15
 
 ### 追加: 汎用 loader の `body: "fetch"` (`llms-full.txt` の無いサイトをページごとに取得して読む。書かなければ出力は変わらない)

@@ -659,6 +659,14 @@ class PresetsTest(unittest.TestCase):
         whole_text_llms_txt = {"agent-plugins"}
         for name, p in presets.items():
             with self.subTest(name):
+                if p.get("members"):
+                    # an alias of other presets for ``search`` (``claude``):
+                    # it fetches nothing itself
+                    self.assertIsNone(p["url"])
+                    self.assertTrue(set(p["members"]) <= set(presets) - {name}, p["members"])
+                    self.assertFalse(any(presets[m].get("members") for m in p["members"]))
+                    self.assertTrue(p["description"])
+                    continue
                 if p["body"] == "fetch":
                     # no llms-full.txt: the llms.txt lists every page, each
                     # fetched on its own (Firebase)
@@ -684,7 +692,8 @@ class PresetsTest(unittest.TestCase):
         presets = generic._read_sources_file(generic.PRESETS_FILE)
         # A body "fetch" preset has no url (its index_url is checked in
         # test_every_preset_is_valid_and_https).
-        with_index = {name: p for name, p in presets.items() if p["index_url"] and p["body"] != "fetch"}
+        with_index = {name: p for name, p in presets.items()
+                      if p.get("index_url") and p["body"] != "fetch"}
         self.assertTrue(with_index)
         for name, p in with_index.items():
             with self.subTest(name):
@@ -721,7 +730,11 @@ class PresetsTest(unittest.TestCase):
                 named |= {f"cloudflare-{slug}" for slug in re.findall(r"`([a-z0-9-]+)`", m.group(1))}
             else:
                 named |= set(re.findall(r"`([a-z0-9-]+)`", row))
-        presets = set(generic._read_sources_file(generic.PRESETS_FILE))
+        # The presets that take over the dedicated scripts are read by their
+        # own skills (researching-claude-docs / -ai-sdk / -firebase), not
+        # by this one
+        from test_migration_parity import PARITY_PRESETS
+        presets = set(generic._read_sources_file(generic.PRESETS_FILE)) - set(PARITY_PRESETS)
         self.assertEqual(presets - named, set(), "presets missing from the skill's Step 0 table")
         self.assertEqual(named - presets, set(), "skill names a source that is not a preset")
 

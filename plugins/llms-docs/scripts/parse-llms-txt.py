@@ -119,6 +119,7 @@ _PROFILE_KEYS = {
     "anchor_style", "show_overflow", "rank_from", "index_join", "index_group_variants",
     "link_annotations", "link_path_aliases", "members", "body", "page_cache_dir",
     "page_fetch_workers", "page_fetch_timeout", "search_content_warn_pages", "index_page_size",
+    "list_page_urls",
 }
 # A profile with ``members`` is an alias of several sources for ``search``;
 # it reads no file of its own, so it takes no other key but these.
@@ -498,6 +499,11 @@ def _validate_index_keys(path: str, name: str, raw: dict, profile: dict) -> None
     if index_join not in _INDEX_JOINS:
         _bad(path, f"sources.{name}.index_join must be one of: {', '.join(_INDEX_JOINS)}")
     group = _bool_key(path, name, raw, "index_group_variants", False)
+    list_urls = _bool_key(path, name, raw, "list_page_urls", True)
+    if rank_from == "index" and "list_page_urls" in raw:
+        # the index listings print the entries' own URLs, which their refs
+        # (URL slugs, full URLs) are made from
+        _bad(path, f'sources.{name}.list_page_urls is only valid with rank_from "pages" (the default)')
     if rank_from == "index":
         if not profile["index_url"]:
             _bad(path, f'sources.{name}.rank_from "index" needs index_url (the llms.txt whose entries are ranked)')
@@ -523,6 +529,7 @@ def _validate_index_keys(path: str, name: str, raw: dict, profile: dict) -> None
             _bad(path, f'sources.{name}.join_rate_guard is redundant with index_join "url" '
                        f"(search always checks the join rate then)")
     profile["rank_from"] = rank_from
+    profile["list_page_urls"] = list_urls
     profile["index_join"] = index_join
     profile["index_group_variants"] = group
 
@@ -2186,10 +2193,11 @@ def annotate_doc_links(content: str, resolve) -> str:
     return "\n".join(out)
 
 
-def _url_line(doc: dict) -> list[str]:
+def _url_line(doc: dict, *, url: bool = True) -> list[str]:
     """``    URL: …`` and, with ``tags_key``, ``    tags: a, b`` under a
-    result heading (each only when the page has one)."""
-    out = [f"    URL: {doc['url']}"] if doc["url"] else []
+    result heading (each only when the page has one; the URL not when *url*
+    is false: ``list_page_urls`` in the page listings)."""
+    out = [f"    URL: {doc['url']}"] if doc["url"] and url else []
     if doc.get("tags"):
         out.append(f"    tags: {', '.join(doc['tags'])}")
     return out
@@ -2278,7 +2286,8 @@ def cmd_fetch_index(args):
             print(title)
     else:
         for title, d in zip(titles, docs[offset:end]):
-            print_entry(title, description=d["description"], extra_lines=_url_line(d))
+            print_entry(title, description=d["description"],
+                        extra_lines=_url_line(d, url=profile["list_page_urls"]))
     print()
     if paged:
         _print_page_footer(offset, end, limit, len(docs), "documents")
@@ -2365,7 +2374,7 @@ def cmd_search_index(args):
               "or 'search-content' to search bodies directly")
     for score, idx, _entry in scored:
         d = docs[idx]
-        extra = _url_line(d)
+        extra = _url_line(d, url=profile["list_page_urls"])
         if args.show_sections:
             extra += [f"      - {h}" for h in headings[idx]]
         print_entry(f"[{idx}] {d['title'] or '(untitled)'} (score: {score})",
