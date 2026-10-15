@@ -193,6 +193,9 @@ CORPUS_CASES = [
     ("cd-code-corpus-search-content", "claude-docs", ["search-content", "PreToolUse matcher"]),
     ("cd-code-corpus-search-content-page", "claude-docs", ["search-content", "matcher", "--page-ref", "hooks"]),
     ("cd-plat-corpus-search-content", "claude-docs", ["search-content", "cache_control ttl", *_P]),
+    # link_annotations: the ``→ [doc_idx N]`` after in-body links on whole pages
+    ("cd-code-corpus-content-links", "claude-docs", ["content", "hooks", "--max-chars", "0"]),
+    ("cd-plat-corpus-content-links", "claude-docs", ["content", "prompt-caching", "--max-chars", "0", *_P]),
 ]
 
 
@@ -372,17 +375,18 @@ def compare(expected: str, actual: str, expected_err: str = "", actual_err: str 
 # ---------------------------------------------------------------------------
 
 _INDEX_FIRST = {"rank_from": "index", "index_join": "url", "index_group_variants": True}
+_LINKS = {"link_annotations": True, "link_path_aliases": [["/docs/en/", "/en/"]]}
 GENERIC_PROFILES = {
     "claude-code": {"url": "https://code.claude.com/docs/llms-full.txt", "split": "h1",
                     "page_url": "line:Source: ", "index_url": "https://code.claude.com/docs/llms.txt",
                     "label": "Claude Code", "page_ref_forms": ["int", "url", "slug"],
-                    "anchor_style": "github", "show_overflow": True, **_INDEX_FIRST},
+                    "anchor_style": "github", "show_overflow": True, **_INDEX_FIRST, **_LINKS},
     "claude-platform": {"url": "https://platform.claude.com/llms-full.txt", "split": "frontmatter",
                         "page_url": "frontmatter:url", "index_url": "https://platform.claude.com/llms.txt",
                         "strip_trailing_headings": True, "min_heading_level": 2,
                         "label": "Claude Developer Platform",
                         "page_ref_forms": ["int", "url", "slug"],
-                        "anchor_style": "github", "show_overflow": True, **_INDEX_FIRST},
+                        "anchor_style": "github", "show_overflow": True, **_INDEX_FIRST, **_LINKS},
     "ai-sdk": {"url": "https://ai-sdk.dev/llms-full.txt", "split": "frontmatter",
                "page_url": "frontmatter:url", "protect_tables": False, "compact_pack": True,
                "untitled_warn_ratio": 0.10, "label": "AI SDK", "tags_key": "tags",
@@ -440,6 +444,13 @@ GENERIC_PARITY_EXPECTED: frozenset = frozenset({
     "cd-plat-search-index",
     "cd-plat-search-index-variants",
     "cd-plat-search",
+    # link_annotations + link_path_aliases: ``→ [doc_idx N]`` after in-body
+    # links (cd-code-content-unclosed-fence still differs by the script name
+    # and the corpus options in its truncation hint)
+    "cd-code-content",
+    "cd-code-content-heading",
+    "cd-plat-content",
+    "cd-plat-content-nav-tail",
 })
 
 # Cases that match once the generic loader's ``    URL: …`` entry lines are
@@ -465,6 +476,9 @@ FIXTURE_ONLY_PARITY: frozenset = frozenset({
     "as-content-heading",          # heading "API Signature" of page 3
     "as-sections",                 # title "useCompletion": one page in the fixture, many in the corpus
     "cd-code-search-content-page", # slug "snapshotting"
+    "cd-code-content",             # slug "quillon-tag"
+    "cd-code-content-heading",     # heading "Roll out a hub" of slug "hub"
+    "cd-plat-content-nav-tail",    # slug "folding"
 })
 
 # Cases where the full-corpus gate compares a failure on purpose (the error

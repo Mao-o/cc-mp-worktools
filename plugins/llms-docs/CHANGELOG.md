@@ -2,6 +2,29 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.42.0] - 2026-10-15
+
+### 追加: 汎用 loader の `link_annotations` / `link_path_aliases` と `content --no-link-annotations` (既定のままなら出力は変わらない)
+
+専用 parser 3 本を汎用 loader (`parse-llms-txt.py`) に統合する段階の 1 つ。`parse-claude-docs.py` の
+`content` が本文のリンクに付けていた ` → [doc_idx N]` を、profile のキーで使えるようにした。書かなければ
+今までどおり何も付けない (同梱 presets の出力は変わらない。`presets.json` は変えていない)。
+
+- `link_annotations: true`: `content` の本文で、この source の別のページを指す Markdown リンク
+  (`(https://…)` と `(/…)`) の後ろに ` → [doc_idx N]` を付ける。書式は旧 parser と同じ。コードブロックの中、
+  表の行、ページ自身へのリンク、どのページでもない URL には付けない。`(/…)` はページ自身のホストで読む
+- リンクとページの対応づけは `index_join: "url"` の項目と同じ規則にした。`rank_from: "index"` の一覧に出る
+  番号と注釈の番号が一致し、クエリだけ違うページ (`?surface=cli` / `?surface=api`) では、リンクのクエリと
+  同じページを指す。どのページともクエリが合わないリンクには付けない。同じ URL のページが 2 つあるときは
+  (中身は同じ) 旧 parser と同じく後ろのページを指し、その URL のどちらのページの上でも自ページへのリンクとして扱う
+- `link_path_aliases`: `[["/docs/en/", "/en/"]]` のように、同じページを指す別のパスの接頭辞の組。
+  `(/…)` のリンクがそのままでは当たらないとき、両方向に置き換えて探す
+- `content --no-link-annotations`: 注釈をその回だけ止める
+- テスト: 旧 parser の注釈を先にテストで固定し (これまで 0 件)、同じテストを汎用 loader でも通した。
+  リンクの書き方 × 置かれ方 (本文 / インラインコード / コードブロック / 表) × `--file` とキャッシュ ×
+  ページ / 索引のランキングの全組み合わせで、付いた番号を `content` に渡すとリンク先のページが開くことを確かめる。
+  移行の比較 (旧 parser との一致) に `content` の 4 件を加えた
+
 ## [0.41.0] - 2026-10-15
 
 ### 追加: 汎用 loader の `rank_from` / `index_join` / `index_group_variants` (どれも既定のままなら出力は変わらない)

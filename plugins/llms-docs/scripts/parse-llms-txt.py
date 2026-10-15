@@ -111,6 +111,7 @@ _PROFILE_KEYS = {
     "untitled_warn_ratio", "label", "cache_name", "tags_key", "frontmatter_yaml_values",
     "split_candidates", "join_rate_guard", "page_ref_forms", "page_url_strip_suffix",
     "anchor_style", "show_overflow", "rank_from", "index_join", "index_group_variants",
+    "link_annotations", "link_path_aliases",
 }
 # Keys accepted only from the bundled presets. ``cache_name`` drops the URL
 # hash from the cache file name (to reuse the cache files of the dedicated
@@ -331,6 +332,30 @@ def _validate_display_keys(path: str, name: str, raw: dict, profile: dict) -> No
     _validate_hit_display_keys(path, name, raw, profile)
     _validate_page_ref_keys(path, name, raw, profile)
     _validate_index_keys(path, name, raw, profile)
+    _validate_link_keys(path, name, raw, profile)
+
+
+def _validate_link_keys(path: str, name: str, raw: dict, profile: dict) -> None:
+    """``link_annotations`` / ``link_path_aliases``: ``content`` appends
+    `` → [doc_idx N]`` after an in-body link to another page (off by default)."""
+    on = _bool_key(path, name, raw, "link_annotations", False)
+    if on:
+        if profile["page_url"] is None and not profile["index_url"]:
+            _bad(path, f"sources.{name}.link_annotations needs page_url or index_url "
+                       f"(links are matched against the pages' URLs)")
+    aliases = raw.get("link_path_aliases")
+    if aliases is not None:
+        if not on:
+            _bad(path, f"sources.{name}.link_path_aliases is only valid with link_annotations true")
+        if (not isinstance(aliases, list)
+                or not all(isinstance(pair, list) and len(pair) == 2 and pair[0] != pair[1]
+                           and all(isinstance(p, str) and p.startswith("/") and p.endswith("/")
+                                   for p in pair)
+                           for pair in aliases)):
+            _bad(path, f'sources.{name}.link_path_aliases must be a list of pairs of path prefixes '
+                       f'such as ["/docs/en/", "/en/"]')
+    profile["link_annotations"] = on
+    profile["link_path_aliases"] = tuple(tuple(pair) for pair in aliases or ())
 
 
 _RANK_FROM = ("pages", "index")
@@ -1290,21 +1315,8 @@ def _entry_docs(entries: list[dict], docs: list[dict] | None, profile: dict) -> 
             nu = normalize_doc_url(d["url"] or "")
             if nu:
                 by_url.setdefault(nu, []).append(i)
-        out = []
-        for e in entries:
-            pages = by_url.get(normalize_doc_url(e["url"]), [])
-            want = _ref_url_key_with_query(e["url"], None)
-            exact = [i for i in pages if _ref_url_key_with_query(docs[i]["url"], None) == want]
-            bare = [i for i in pages if "?" not in docs[i]["url"].split("#", 1)[0]]
-            if exact:
-                out.append(exact[-1])
-            elif bare:
-                out.append(bare[-1])
-            else:
-                # the first page, as a URL page_ref resolves it: the ref
-                # shown before llms-full.txt is cached opens the same page
-                out.append(pages[0] if pages and "?" not in e["url"].split("#", 1)[0] else None)
-        return out
+        return [_join_url_page(by_url.get(normalize_doc_url(e["url"]), []), docs, e["url"], None)
+                for e in entries]
     entry_count: dict = {}
     for e in entries:
         key = _title_key(e["title"])
@@ -1318,6 +1330,24 @@ def _entry_docs(entries: list[dict], docs: list[dict] | None, profile: dict) -> 
         pages = by_title.get(key, [])
         out.append(pages[0] if len(pages) == 1 and entry_count[key] == 1 else None)
     return out
+
+
+def _join_url_page(pages: list[int], docs: list[dict], url: str, suffix: str | None) -> int | None:
+    """Of the *pages* (indexes into *docs*) whose URL is *url* up to the
+    query, the one *url* is joined to (``_entry_docs``): the last one whose
+    query is *url*'s too, else the last with no query, else, for a *url*
+    with no query, the first; else ``None``. URLs are compared by
+    ``_ref_url_key`` (*suffix* removed)."""
+    want = _ref_url_key_with_query(url, suffix)
+    exact = [i for i in pages if _ref_url_key_with_query(docs[i]["url"], suffix) == want]
+    bare = [i for i in pages if "?" not in docs[i]["url"].split("#", 1)[0]]
+    if exact:
+        return exact[-1]
+    if bare:
+        return bare[-1]
+    # the first page, as a URL page_ref resolves it: the ref shown before
+    # llms-full.txt is cached opens the same page
+    return pages[0] if pages and "?" not in url.split("#", 1)[0] else None
 
 
 def _entry_refs(entries: list[dict], doc_of: list) -> list[str]:
@@ -1628,6 +1658,79 @@ def _anchor_for(profile: dict, doc: dict):
     return lambda title: section_url_anchor(url, title, style=style)
 
 
+# A Markdown link target in parentheses: an absolute URL or a root-relative
+# path (the pattern ``parse-claude-docs.py`` annotates).
+_DOC_LINK_RE = re.compile(r'\((https?://[^\s)]+|/[^\s)]+)\)')
+_ORIGIN_RE = re.compile(r"^https?://[^/?#]+")
+
+
+def _link_resolver(profile: dict, docs: list[dict], self_idx: int):
+    """``link target -> page index | None`` for the links on page *self_idx*,
+    under ``link_annotations``. A link is joined to a page as a
+    ``rank_from: "index"`` entry with the same URL is (``_join_url_page``),
+    so the number is the one the listings print for that page and opens the
+    page the link points at (of two pages one URL heads, which read the
+    same, the last, as ``parse-claude-docs.py`` annotates). A root-relative
+    path is read on the page's own host (the profile's ``url`` host for a
+    page with no absolute URL) and, failing that, under each
+    ``link_path_aliases`` pair (``/en/x`` for ``/docs/en/x`` and back; an
+    absolute URL names its page by itself). ``None`` for a link to no page,
+    to a page whose URL is this page's, or of another form (``beta``,
+    ``./beta``: relative to a path the corpus does not keep)."""
+    suffix = profile["page_url_strip_suffix"]
+    pages: dict = {}
+    for i, d in enumerate(docs):
+        if d["url"]:
+            pages.setdefault(_ref_url_key(d["url"], suffix), []).append(i)
+    own = docs[self_idx]["url"] or ""
+    origin = _ORIGIN_RE.match(own) or _ORIGIN_RE.match(profile["url"])
+    own_key = _ref_url_key_with_query(own, suffix)
+
+    def resolve(target: str) -> int | None:
+        if re.match(r"https?://", target):
+            urls = [target]
+        else:
+            urls = [origin.group(0) + target]
+            for a, b in profile["link_path_aliases"]:
+                for old, new in ((a, b), (b, a)):
+                    if target.startswith(old):
+                        urls.append(origin.group(0) + new + target[len(old):])
+        for url in urls:
+            found = pages.get(_ref_url_key(url, suffix))
+            if found:
+                idx = _join_url_page(found, docs, url, suffix)
+                # the page itself, or a copy of it under the same URL
+                if idx is None or _ref_url_key_with_query(docs[idx]["url"], suffix) == own_key:
+                    return None
+                return idx
+        return None
+
+    return resolve
+
+
+def annotate_doc_links(content: str, resolve) -> str:
+    """Append `` → [doc_idx N]`` after each Markdown link whose target
+    *resolve* maps to page N. Lines in code fences and table rows are left
+    as they are (the annotation would change code or break the table); the
+    output is that of ``parse-claude-docs.py``."""
+    out = []
+    fence = FenceTracker()
+    for line in content.split("\n"):
+        was_in_fence = fence.in_fence
+        fence.update(line)
+        stripped = line.strip()
+        if was_in_fence or fence.in_fence or (stripped.startswith("|") and stripped.endswith("|")):
+            out.append(line)
+            continue
+
+        def _repl(m: re.Match) -> str:
+            idx = resolve(m.group(1))
+            return m.group(0) if idx is None else f"{m.group(0)} → [doc_idx {idx}]"
+
+        out.append(_DOC_LINK_RE.sub(_repl, line))
+    return "\n".join(out)
+
+
 def _url_line(doc: dict) -> list[str]:
     """``    URL: …`` and, with ``tags_key``, ``    tags: a, b`` under a
     result heading (each only when the page has one)."""
@@ -1727,12 +1830,16 @@ def _page_ref_retry(args):
 
 
 def _page_view(args) -> PageView:
+    return _page_view_with_docs(args)[2]
+
+
+def _page_view_with_docs(args) -> tuple[dict, list[dict], PageView]:
     profile, path, docs = _load_docs(args)
     idx = _resolve_ref(profile, docs, args)
     d = docs[idx]
     header = [f"  URL: {d['url']}"] if d["url"] else []
     header.append(f"  (file: {path})")
-    return PageView(
+    return profile, docs, PageView(
         idx=idx,
         title=d["title"] or "(untitled)",
         body_lines=d["body_lines"],
@@ -1749,8 +1856,17 @@ def cmd_sections(args):
 
 
 def cmd_content(args):
-    render_content(_page_view(args), args, script=SCRIPT,
-                   hint_args=_source_hint_args(args) + corpus_hint_args(args))
+    profile, docs, page = _page_view_with_docs(args)
+    transform = None
+    if profile["link_annotations"] and not args.no_link_annotations:
+        resolve = _link_resolver(profile, docs, page.idx)
+
+        def transform(content: str) -> str:
+            return annotate_doc_links(content, resolve)
+
+    render_content(page, args, script=SCRIPT,
+                   hint_args=_source_hint_args(args) + corpus_hint_args(args),
+                   transform=transform)
 
 
 def _ranked(args, docs: list[dict], limit: int):
@@ -1991,6 +2107,9 @@ def main():
     add_max_chars_arg(p)
     p.add_argument("--no-subsection-hints", action="store_true",
                    help="Suppress the subsection hint block printed before/after content")
+    p.add_argument("--no-link-annotations", action="store_true",
+                   help="Suppress the '→ [doc_idx N]' annotations a profile with "
+                        "link_annotations adds after in-body links to its pages")
     p.set_defaults(func=cmd_content)
 
     p = sub.add_parser("search", help="Smart search: rank documents and drill into the top N bodies")
