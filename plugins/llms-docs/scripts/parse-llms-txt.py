@@ -970,21 +970,33 @@ def _load_docs(args) -> tuple[dict, str, list[dict]]:
     _choice, profile, docs = resolve_split(load_lines(path), profile)
     assert_parsed(profile["name"], len(docs), path)
     if profile["index_url"]:
+        label = profile.get("label") or profile["name"]
         index_lines = _load_index_lines(args, profile)
         if index_lines is not None:
             if profile["join_rate_guard"]:
                 # before join_index_urls: the URLs it copies from the index
                 # would match the index by construction
                 joinable, total = index_join_rate(docs, index_lines)
-                check_join_rate(f"{profile.get('label') or profile['name']} index↔full-text",
-                                joinable, total, advice=_JOIN_RATE_ADVICE)
+                if total == 0:
+                    # check_join_rate returns silently on 0 entries; say the
+                    # guard did not run instead of passing it unseen
+                    print(f"WARNING: {label} join_rate_guard: the index has no absolute "
+                          "page entries; not checked", file=sys.stderr)
+                else:
+                    check_join_rate(f"{label} index↔full-text",
+                                    joinable, total, advice=_GUARD_ADVICE)
             join_index_urls(docs, index_lines)
+        elif profile["join_rate_guard"] and args.file is None:
+            # the fetch failed (``--file`` without ``--index-file`` reads no
+            # index by design, so that case stays quiet)
+            print(f"WARNING: {label} join_rate_guard: the index could not be read; not checked",
+                  file=sys.stderr)
     return profile, path, docs
 
 
-_JOIN_RATE_ADVICE = ("The profile may not match the file (check split / page_url: the pages' "
-                     "URLs are not the index's), or the upstream format changed. Retry with "
-                     "--max-age 0; if it persists, fix the profile or report an issue.")
+_GUARD_ADVICE = ("The profile may not match the file (check split / page_url: the pages' "
+                 "URLs are not the index's), or the upstream format changed. Retry with "
+                 "--max-age 0; if it persists, fix the profile or report an issue.")
 
 
 def index_join_rate(docs: list[dict], index_lines: list[str]) -> tuple[int, int]:

@@ -23,6 +23,14 @@ All notable changes to this plugin will be documented here.
   ここで止まる。`index_url` と `page_url` が要る。止まったときの案内は、区切り方 (`split` / `page_url`)
   を見直すよう促す文にした (`_common.check_join_rate` に案内文の引数を足した。専用 parser の文言は
   変わらない)
+- `join_rate_guard` が見られないときは黙らずに stderr へ WARNING を出す (終了コードは 0 のまま):
+  `llms.txt` の取得に失敗したとき (`the index could not be read; not checked`) と、`llms.txt` に
+  絶対 URL のページ項目が 1 件も無いとき (相対リンクだけなど。`the index has no absolute page
+  entries; not checked`)。マージ前レビューの指摘で、どちらもガードが効かないまま終了コード 0 で
+  通っていた。汎用 loader 側の案内文の定数名を `_GUARD_ADVICE` に変えた (`_common` の同名定数と
+  文言が違い、取り違えやすかったため)
+- テスト: HTTP エラーを模したオブジェクトをテストの最後に閉じる。Python 3.14 では閉じ忘れが GC 時に
+  `ResourceWarning` を出し、そのタイミングで stderr を完全一致で比べる別のテストが落ちることがあった
 
 移植しなかったもの: `parse-claude-docs.py` の `URL:` 行からの URL の読み取りと、同じタイトルの短い
 H1 ページを次のページに畳む処理。手元の Claude docs の全キャッシュで、どちらも 1 件も起きていない

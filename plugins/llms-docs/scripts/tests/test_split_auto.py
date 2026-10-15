@@ -13,6 +13,7 @@ are passed with ``--file`` / ``--index-file``.
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import _loader  # noqa: F401  (side effect: adds scripts/ to sys.path)
@@ -318,6 +319,73 @@ class JoinRateGuardTest(_Files):
         code, _out, err = self.run_cli(self.GUARD_H1, ["fetch-index"],
                                        full=str(PARITY / "claude-platform-llms-full.txt"))
         self.assertEqual(code, 0, err)
+        self.assertNotIn("not checked", err)  # by design, not a failure to report
+
+    NO_ABSOLUTE = "WARNING: site join_rate_guard: the index has no absolute page entries; not checked"
+    UNREADABLE = "WARNING: site join_rate_guard: the index could not be read; not checked"
+
+    def _relative_index(self) -> str:
+        # the platform fixture's index with its links made relative: the
+        # index parser keeps only http(s) links, so no entry is left
+        text = (PARITY / "claude-platform-llms.txt").read_text(encoding="utf-8")
+        relative = text.replace("(https://platform.claude.com/", "(/")
+        self.assertNotEqual(relative, text)
+        return self.write("llms.txt", relative)
+
+    def test_an_index_without_absolute_entries_warns_that_it_was_not_checked(self):
+        # the platform file read by H1 is stopped with an absolute index
+        # (test above); with a relative-link index it cannot be checked
+        full = str(PARITY / "claude-platform-llms-full.txt")
+        index = self._relative_index()
+        code, out, err = self.run_cli(self.GUARD_H1, ["fetch-index"], full=full, index=index)
+        self.assertEqual(code, 0, err)
+        self.assertIn("Document Index", out)
+        self.assertEqual(err.strip(), self.NO_ABSOLUTE)
+        profile = {k: v for k, v in self.GUARD_H1.items() if k != "join_rate_guard"}
+        code, _out, err = self.run_cli(profile, ["fetch-index"], full=full, index=index)
+        self.assertEqual((code, err), (0, ""))
+
+    def _run_fetching(self, profile: dict, *, index_fails: bool):
+        """Run without ``--file``: the full text and the index are fetched
+        through a fake ``fetch_url`` (no network); the index fetch fails
+        when *index_fails*."""
+        full = str(PARITY / "claude-platform-llms-full.txt")
+        index = str(PARITY / "claude-platform-llms.txt")
+
+        def fake_fetch(url, _cache, **_kw):
+            if url == INDEX_URL:
+                if index_fails:
+                    raise generic.FetchError(url, OSError("HTTP Error 503"))
+                return index
+            return full
+
+        sources = self.write("sources.json", json.dumps({"sources": {"site": {"url": URL, **profile}}}))
+        with mock.patch.object(generic, "fetch_url", side_effect=fake_fetch):
+            try:
+                return _loader.run_cli(generic, ["parse-llms-txt.py", "fetch-index", "--source", "site",
+                                                 "--sources-file", sources,
+                                                 "--cache-dir", str(self.dir / "cache")])
+            except Exception as e:  # a leak would be an error, not a failure
+                self.fail(f"raised {e!r}")
+
+    def test_an_unreadable_index_warns_that_it_was_not_checked(self):
+        profile = {**FM, "index_url": INDEX_URL, "join_rate_guard": True}
+        code, out, err = self._run_fetching(profile, index_fails=True)
+        self.assertEqual(code, 0, err)
+        self.assertIn("Document Index", out)
+        self.assertIn("WARNING: could not fetch https://example.com/llms.txt", err)
+        self.assertIn(self.UNREADABLE, err.splitlines())
+        # without the guard only the fetch WARNING is printed
+        unguarded = {k: v for k, v in profile.items() if k != "join_rate_guard"}
+        code, _out, err = self._run_fetching(unguarded, index_fails=True)
+        self.assertEqual(code, 0, err)
+        self.assertIn("WARNING: could not fetch", err)
+        self.assertNotIn("join_rate_guard", err)
+        # a fetched index is checked (79%: a WARNING about the rate, not this one)
+        code, _out, err = self._run_fetching(profile, index_fails=False)
+        self.assertEqual(code, 0, err)
+        self.assertIn("join rate is 79% (11/14)", err)
+        self.assertNotIn("not checked", err)
 
     def test_auto_with_the_guard_picks_the_frontmatter_shape(self):
         profile = {"split": "auto", "split_candidates": [H1, FM], "index_url": INDEX_URL,

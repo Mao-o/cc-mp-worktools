@@ -337,7 +337,31 @@ class FetchUrlTest(unittest.TestCase):
 
 
 def _http_error(code: int, url: str = "https://example.com/x") -> urllib.error.HTTPError:
-    return urllib.error.HTTPError(url, code, f"HTTP {code}", {}, None)
+    e = urllib.error.HTTPError(url, code, f"HTTP {code}", {}, None)
+    _ERRORS.append(e)
+    return e
+
+
+# Closed at module teardown: an HTTPError left open is cleaned up by the GC
+# with a ResourceWarning (Python 3.14), and when that GC runs inside another
+# test that compares stderr exactly, the warning text lands in its stderr.
+_ERRORS: list[urllib.error.HTTPError] = []
+
+
+def tearDownModule():
+    for e in _ERRORS:
+        e.close()
+    _ERRORS.clear()
+
+
+class HttpErrorHelperTest(unittest.TestCase):
+    def test_errors_from_the_helper_are_closed_at_module_teardown(self):
+        # closing early is harmless: each error is used within the test
+        # that made it
+        e = _http_error(500)
+        self.assertFalse(e.fp.closed)
+        tearDownModule()
+        self.assertTrue(e.fp.closed)
 
 
 class GzipAndConditionalGetTest(unittest.TestCase):
