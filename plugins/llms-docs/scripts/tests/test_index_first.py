@@ -308,6 +308,13 @@ class QueryVariantJoinTest(_Case):
                 self.assertIn("[0] Overview CLI\n", out)
                 self.assertIn("[1] Overview API\n", out)
                 self.assertNotRegex(out, r"\[\d+\] Overview Web")
+                # its listed ref, put in the Next: line, opens no page (not the cli one)
+                refs, next_line = self._listed(["fetch-index"], corpus)
+                self.assertEqual(shlex.split(refs["Overview Web"]), ["https://example.com/docs/x?surface=web"])
+                argv = shlex.split(next_line.replace("<page_ref>", refs["Overview Web"]), comments=True)
+                code, out, err = self.run_argv(argv)
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn("No page found for URL: https://example.com/docs/x?surface=web", err)
 
     # pages for all three queries, CLI first: a ref that loses the query
     # opens the CLI page for every entry

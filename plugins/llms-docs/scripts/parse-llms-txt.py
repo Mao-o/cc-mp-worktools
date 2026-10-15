@@ -1501,7 +1501,8 @@ def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
     * ``int``: a document index
     * ``url``: a full ``http(s)://`` URL, compared normalised (see
       ``_ref_url_key``); of the pages with that URL, the first whose query
-      is the reference's too, else the first. No match ends the search
+      is the reference's too, else the first with no query, else (for a
+      reference with no query) the first. No match ends the search
       (``No page found for URL``): a URL names one page, and a later form
       (``title`` / ``url_substring``) would take a URL that is one letter
       short for the longer page it is a substring of
@@ -1533,11 +1534,21 @@ def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
                      if d["url"] and _ref_url_key(d["url"], strip_suffix) == target]
             if found:
                 # the page whose query is the reference's too; else the first
-                # page: one URL can head the same page twice in the upstream
-                # file, and the copies read the same
+                # page with no query (``api?id=strings`` is a place in the
+                # one ``api`` page); else, for a reference with no query, the
+                # first page: one URL can head the same page twice in the
+                # upstream file, and the copies read the same. A query no
+                # page has (``?surface=web`` with cli and api pages) names no
+                # page: opening another query's page would be silently wrong
                 raw = _ref_url_key_with_query(page_ref, strip_suffix)
                 exact = [i for i, u in found if _ref_url_key_with_query(u, strip_suffix) == raw]
-                return exact[0] if exact else found[0][0]
+                if exact:
+                    return exact[0]
+                bare = [i for i, u in found if "?" not in u.split("#", 1)[0]]
+                if bare:
+                    return bare[0]
+                if "?" not in page_ref.split("#", 1)[0]:
+                    return found[0][0]
             die(f"No page found for URL: {page_ref}")
         elif form == "slug":
             slug = page_ref.strip("/")

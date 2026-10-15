@@ -35,6 +35,11 @@ All notable changes to this plugin will be documented here.
   `page_url` を書いた profile では `index_join: "url"` が要る (`title` で対応づけると、未キャッシュ時に出す URL の末尾がページ自身の URL と
   合わず開けないため)。`--file` のときは `--index-file` も要る (`--file` は通信しないため)。`--file` のときは
   `llms-full.txt` の取得の案内を出さず、対応づけが 0 件ならその旨だけを出す
+- `page_ref_forms` の `url` で同じ URL のページが複数あるときの選び方を `index_join: "url"` とそろえた:
+  クエリまで一致するページ、なければクエリの無いページ、それも無ければ参照にクエリが無いときだけ先頭の
+  ページ。参照のクエリがどのページとも合わないとき (`?surface=web` で、ページは `cli` と `api` だけ) は、
+  別のクエリのページを開かずに `No page found for URL` で止める (一覧に出たその項目の URL を渡しても、
+  別のページに黙って届かないため)。クエリの無い参照の解決は変わらない
 - URL の末尾を出すときは、`-` で始まらないように 1 段上のパスまで含め (`-` で始まると `<slug>` の位置で
   オプションと読まれるため。専用 parser の一覧は変えていない)、`'` や `&` を含むときは shell 用に引用する
 - キャッシュの鮮度の判定 (`--max-age` と、取得元の URL の照合) を `fetch_url` と共通の関数にした
