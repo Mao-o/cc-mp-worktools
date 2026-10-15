@@ -23,7 +23,11 @@ to list the configured profiles. Every subcommand except ``sources`` requires
 Out of scope (use a dedicated loader or WebFetch): two-level indexes whose
 ``llms.txt`` only links to more ``llms.txt`` files (Cloudflare's root; its
 per-product ``/<product>/llms-full.txt`` files are supported), sites that
-publish one file per page. Only the profile's ``url`` (the
+publish one file per page without listing every page's absolute URL in
+their ``llms.txt``. A site that does list them, with no ``llms-full.txt``
+(Firebase), is read with ``body: "fetch"``: the ``llms.txt`` entries are the
+pages, and each page is fetched from its entry's URL when a command needs
+its body (see the per-page fetch engine below). Otherwise only the profile's ``url`` (the
 ``llms-full.txt``) and, when set, its ``index_url`` (the ``llms.txt``, used
 to give URL-less pages a URL by exact title) are fetched. With ``rank_from:
 "index"`` the ``llms.txt`` entries are what ``fetch-index`` / ``search-index``
@@ -36,6 +40,7 @@ for a page of another docs set still gets that entry's URL.
 """
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -69,6 +74,7 @@ from _common import (  # noqa: E402
     load_lines,
     next_hint,
     normalize_doc_url,
+    page_cache_filename,
     note_other_candidates,
     parse_llms_index,
     prefer_lang_exact,
@@ -111,7 +117,8 @@ _PROFILE_KEYS = {
     "untitled_warn_ratio", "label", "cache_name", "tags_key", "frontmatter_yaml_values",
     "split_candidates", "join_rate_guard", "page_ref_forms", "page_url_strip_suffix",
     "anchor_style", "show_overflow", "rank_from", "index_join", "index_group_variants",
-    "link_annotations", "link_path_aliases", "members",
+    "link_annotations", "link_path_aliases", "members", "body", "page_cache_dir",
+    "page_fetch_workers", "page_fetch_timeout", "search_content_warn_pages", "index_page_size",
 }
 # A profile with ``members`` is an alias of several sources for ``search``;
 # it reads no file of its own, so it takes no other key but these.
@@ -121,7 +128,21 @@ _MEMBERS_PROFILE_KEYS = {"members", "description"}
 # loaders), so a user profile must not set it: a user entry that reuses a
 # preset's name for another URL would otherwise read and overwrite the
 # preset's cache file, and two corpora would share one file.
-_PRESET_ONLY_KEYS = {"cache_name"}
+_PRESET_ONLY_KEYS = {"cache_name", "page_cache_dir"}
+# ``body: "fetch"`` (a site with no llms-full.txt, such as Firebase): the
+# llms.txt entries are the pages, and each page is fetched from its entry's
+# URL on demand. Only these keys apply then; the others describe how an
+# llms-full.txt is split and read.
+_BODIES = ("full", "fetch")
+_FETCH_PROFILE_KEYS = {
+    "body", "index_url", "description", "label", "cache_name", "min_heading_level",
+    "protect_tables", "compact_pack", "page_ref_forms", "page_url_strip_suffix", "anchor_style",
+    "show_overflow", "rank_from", "index_group_variants", "page_cache_dir", "page_fetch_workers",
+    "page_fetch_timeout", "search_content_warn_pages", "index_page_size",
+}
+# Keys of the per-page fetch itself (only with body "fetch").
+_FETCH_ONLY_KEYS = ("page_cache_dir", "page_fetch_workers", "page_fetch_timeout",
+                    "search_content_warn_pages")
 _MIN_HEADING_LEVELS = (1, 2)
 # What a page reference may be, tried in the order the profile lists them. The
 # default is the order before ``page_ref_forms`` existed.
@@ -204,6 +225,14 @@ def _validate_profile(path: str, name: str, raw, at: str | None = None) -> dict:
         _bad(path, f"sources.{at} has unknown keys: {', '.join(sorted(unknown))}")
     if "members" in raw and at == name:
         return _validate_members_profile(path, name, raw)
+    body = raw.get("body", "full")
+    if body not in _BODIES:
+        _bad(path, f"sources.{at}.body must be one of: {', '.join(_BODIES)}")
+    if body == "fetch":
+        return _validate_fetch_profile(path, name, raw)
+    for key in _FETCH_ONLY_KEYS:
+        if key in raw:
+            _bad(path, f'sources.{at}.{key} is only valid with body "fetch"')
     if raw.get("split") == "auto" and at == name:
         return _validate_auto_profile(path, name, raw)
     if "split_candidates" in raw:
@@ -276,8 +305,61 @@ def _validate_profile(path: str, name: str, raw, at: str | None = None) -> dict:
     if index_url is not None and (not isinstance(index_url, str) or not re.match(r"^https?://\S+$", index_url)):
         _bad(path, f"sources.{at}.index_url must be an http(s) URL of the llms.txt for the same docs as url (not a 2-level index)")
     profile["index_url"] = index_url
+    profile["body"] = "full"
     _validate_display_keys(path, at, raw, profile)
     return profile
+
+
+def _validate_fetch_profile(path: str, name: str, raw: dict) -> dict:
+    """``body: "fetch"``: no ``llms-full.txt``. The ``index_url`` entries are
+    the pages (ranked with ``rank_from: "index"``, numbered in ``llms.txt``
+    order) and a page is fetched from its entry's URL when a command needs
+    its body, into a page cache directory. ``url`` and the keys that say how
+    an ``llms-full.txt`` is split and read are refused."""
+    extra = set(raw) - _FETCH_PROFILE_KEYS
+    if extra:
+        _bad(path, f'sources.{name} has body "fetch" (no llms-full.txt; each page is fetched from '
+                   f"its llms.txt entry), so these keys do not apply: {', '.join(sorted(extra))}")
+    if raw.get("rank_from") != "index":
+        _bad(path, f'sources.{name}.body "fetch" needs rank_from "index" (the llms.txt entries are the pages)')
+    index_url = raw.get("index_url")
+    if not isinstance(index_url, str) or not re.match(r"^https?://\S+$", index_url):
+        _bad(path, f'sources.{name}.body "fetch" needs index_url: an http(s) URL of the llms.txt '
+                   f"that lists every page")
+    if not isinstance(raw.get("description", ""), str):
+        _bad(path, f"sources.{name}.description must be a string")
+    profile = {
+        "name": name, "url": None, "split": "fetch", "body": "fetch",
+        "description": raw.get("description", ""), "frontmatter_key": "title",
+        "frontmatter_delimiter": "---", "line_prefix": None, "page_url": None, "url_base": None,
+        "drop_lines": [], "skip_empty": False, "h1_needs_url": False, "index_url": index_url,
+        "origin": path,
+    }
+    _validate_display_keys(path, name, raw, profile)
+    page_dir = raw.get("page_cache_dir")
+    if page_dir is not None and (not isinstance(page_dir, str) or not _NAME_RE.match(page_dir)):
+        _bad(path, f"sources.{name}.page_cache_dir must match {_NAME_RE.pattern}")
+    profile["page_cache_dir"] = page_dir
+    # search fetches its candidates this many at a time, each with this
+    # timeout (seconds); search-content without --page-ref warns above
+    # this many pages
+    profile["page_fetch_workers"] = _int_key(path, name, raw, "page_fetch_workers", 8, 1, 32)
+    profile["page_fetch_timeout"] = _int_key(path, name, raw, "page_fetch_timeout", 30, 1, 600)
+    profile["search_content_warn_pages"] = _int_key(path, name, raw, "search_content_warn_pages", 30, 0)
+    return profile
+
+
+def _int_key(path: str, name: str, raw: dict, key: str, default, low: int, high: int | None = None):
+    """An integer key from *low* to *high* (``true`` is refused, though
+    ``bool`` is an ``int``); ``None`` when absent with no *default*."""
+    value = raw.get(key, default)
+    if value is None:
+        return None
+    if (isinstance(value, bool) or not isinstance(value, int) or value < low
+            or (high is not None and value > high)):
+        span = f"from {low} to {high}" if high is not None else f"of {low} or more"
+        _bad(path, f"sources.{name}.{key} must be an integer {span}")
+    return value
 
 
 def _validate_members_profile(path: str, name: str, raw: dict) -> dict:
@@ -329,6 +411,8 @@ def _validate_display_keys(path: str, name: str, raw: dict, profile: dict) -> No
     profile["strip_trailing_headings"] = _bool_key(path, name, raw, "strip_trailing_headings", False)
     profile["protect_tables"] = _bool_key(path, name, raw, "protect_tables", True)
     profile["compact_pack"] = _bool_key(path, name, raw, "compact_pack", False)
+    # fetch-index lists this many entries by default (--limit); 0 or absent = all
+    profile["index_page_size"] = _int_key(path, name, raw, "index_page_size", None, 0)
     level = raw.get("min_heading_level")
     # bool is an int subclass: ``true`` must not pass as 1
     if level is not None and (isinstance(level, bool) or level not in _MIN_HEADING_LEVELS):
@@ -579,6 +663,14 @@ def _read_sources_file(path: str) -> dict:
                 _bad(path, f"sources.{name}.cache_name {p['cache_name']!r} is also used by "
                            f"sources.{owners[p['cache_name']]} (one cache file per corpus)")
             owners[p["cache_name"]] = name
+    page_dirs: dict = {}
+    for name, p in profiles.items():
+        if p.get("body") == "fetch":
+            page_dir = _page_dir_name(p)
+            if page_dir in page_dirs:
+                _bad(path, f"sources.{name} caches its pages in {page_dir!r}, as "
+                           f"sources.{page_dirs[page_dir]} does (one page cache per corpus)")
+            page_dirs[page_dir] = name
     return profiles
 
 
@@ -1154,9 +1246,35 @@ def _index_cache_path(cache_dir: str, profile: dict) -> str:
     return os.path.join(cache_dir, f"generic-{profile['name']}-{digest}-llms.txt")
 
 
+def _page_dir_name(profile: dict) -> str:
+    """The page cache directory of a ``body: "fetch"`` profile, under the
+    cache dir: the preset's ``page_cache_dir``, else ``<cache_name>-pages``,
+    else ``generic-<name>-<hash of index_url>-pages`` (the URL is in the
+    name for the reason given in ``_cache_path``)."""
+    if profile.get("page_cache_dir"):
+        return profile["page_cache_dir"]
+    if profile.get("cache_name"):
+        return f"{profile['cache_name']}-pages"
+    digest = hashlib.sha256(profile["index_url"].encode("utf-8")).hexdigest()[:12]
+    return f"generic-{profile['name']}-{digest}-pages"
+
+
+def _page_cache_path(cache_dir: str, profile: dict, url: str) -> str:
+    """Cache file of the page at *url*: ``page_cache_filename`` (the rule of
+    ``parse-firebase.py``) with the host root of ``index_url`` as the prefix.
+    The file name carries a hash of the whole URL, and ``fetch_url`` refetches
+    a file whose sidecar names another URL, so a page never answers for
+    another one."""
+    origin = _ORIGIN_RE.match(profile["index_url"])
+    prefix = origin.group(0) + "/" if origin else ""
+    return os.path.join(cache_dir, _page_dir_name(profile), page_cache_filename(url, prefix))
+
+
 def _load_docs(args, profile: dict | None = None) -> tuple[dict, str, list[dict]]:
     """Resolve the profile (unless given), fetch (or read ``--file``), and split."""
     profile = profile or _get_profile(args)
+    if _fetches_pages(profile):
+        raise AssertionError("_load_docs on a body \"fetch\" profile (it has no llms-full.txt)")
     if args.file is None:
         path = fetch_url(
             profile["url"], _cache_path(args.cache_dir, profile),
@@ -1437,6 +1555,8 @@ def _entry_refs(entries: list[dict], doc_of: list) -> list[str]:
     return [str(idx) if idx is not None else _ref(e) for e, idx in zip(entries, doc_of)]
 
 
+_FETCH_ZERO_TIP = ("Tip: try broader keywords, or 'search-content \"<query>\"' (omit --page-ref to "
+                   "scan every page — slow on first run) to search page bodies directly")
 _SLUG_REF_NOTE = ("Note: llms-full.txt is not cached yet, so [ref] above is a URL slug, "
                   "not an integer doc_idx. Run 'search' once (or 'sections <slug>' directly) "
                   "to populate doc_idx numbering here too.")
@@ -1445,13 +1565,21 @@ _FILE_SLUG_REF_NOTE = "no entry matched a page of --file, so [ref] is a URL slug
 
 
 def _fetch_index_from_index(args, profile: dict) -> None:
-    index_path, entries = _load_index(args, profile)
-    docs = _cached_docs(args, profile)
-    if docs:
-        _warn_if_untitled_ratio_high(profile, docs, args.file or _cache_path(args.cache_dir, profile))
-    doc_of = _entry_docs(entries, docs, profile)
-    refs = _entry_refs(entries, doc_of)
-    joined = any(i is not None for i in doc_of)
+    fetch = _fetches_pages(profile)
+    if fetch:
+        # every entry is a page, numbered in llms.txt order; nothing but
+        # the index is read
+        index_path, entries = _fetch_entry_docs(args, profile)
+        refs = [str(i) for i in range(len(entries))]
+        joined = True
+    else:
+        index_path, entries = _load_index(args, profile)
+        docs = _cached_docs(args, profile)
+        if docs:
+            _warn_if_untitled_ratio_high(profile, docs, args.file or _cache_path(args.cache_dir, profile))
+        doc_of = _entry_docs(entries, docs, profile)
+        refs = _entry_refs(entries, doc_of)
+        joined = any(i is not None for i in doc_of)
     if profile["index_group_variants"]:
         items = group_index_variants(entries)
     else:
@@ -1469,8 +1597,9 @@ def _fetch_index_from_index(args, profile: dict) -> None:
             variants = ", ".join(f"{name} [{refs[i]}]" for i, name in item["variants"])
             lines.append((item["base"], item["desc"], [f"    Variants: {variants}"]))
             grouped += len(item["variants"])
+    offset, end, limit, paged = _page_window(args, profile, len(lines))
     if args.compact:
-        flat = [head + (f" — {extra[0].strip()}" if extra else "") for head, _desc, extra in lines]
+        flat = [head + (f" — {extra[0].strip()}" if extra else "") for head, _desc, extra in lines[offset:end]]
         if profile.get("compact_pack"):
             _print_packed(flat)
         else:
@@ -1478,13 +1607,17 @@ def _fetch_index_from_index(args, profile: dict) -> None:
                 print(line)
         print()
     else:
-        for head, desc, extra in lines:
+        for head, desc, extra in lines[offset:end]:
             print_entry(head, description=desc, extra_lines=extra)
-    print(f"({len(entries)} documents total, {len(lines)} entries shown — {grouped} documents grouped)")
+    if paged:
+        # a grouped line holds several documents: the window counts lines
+        _print_page_footer(offset, end, limit, len(lines), "entries" if grouped else "documents")
+    else:
+        print(f"({len(entries)} documents total, {len(lines)} entries shown — {grouped} documents grouped)")
     print()
     if joined:
         next_hint("sections", "<page_ref>", *(_source_hint_args(args) + corpus_hint_args(args)))
-        if args.file is None:
+        if args.file is None and not fetch:
             print("  (llms-full.txt will be fetched automatically on first use)")
     else:
         next_hint("sections", "<slug>", *(_source_hint_args(args) + corpus_hint_args(args)))
@@ -1497,14 +1630,27 @@ def _fetch_index_from_index(args, profile: dict) -> None:
 
 
 def _search_index_from_index(args, profile: dict) -> None:
-    index_path, entries = _load_index(args, profile)
-    if not args.query.strip():
-        die("query must not be empty")
-    docs = _cached_docs(args, profile)
-    if docs:
-        _warn_if_untitled_ratio_high(profile, docs, args.file or _cache_path(args.cache_dir, profile))
-    doc_of = _entry_docs(entries, docs, profile)
-    refs = _entry_refs(entries, doc_of)
+    fetch = _fetches_pages(profile)
+    if fetch:
+        # the entries are the pages: their numbers are the refs, and no
+        # page is fetched (so --show-sections has no headings to show)
+        index_path, entries = _fetch_entry_docs(args, profile)
+        if not args.query.strip():
+            die("query must not be empty")
+        docs, doc_of = None, list(range(len(entries)))
+        refs = [str(i) for i in doc_of]
+        if args.show_sections:
+            print("WARNING: --show-sections is ignored: this source fetches each page on demand "
+                  "and search-index reads only llms.txt (use 'sections <page_ref>')", file=sys.stderr)
+    else:
+        index_path, entries = _load_index(args, profile)
+        if not args.query.strip():
+            die("query must not be empty")
+        docs = _cached_docs(args, profile)
+        if docs:
+            _warn_if_untitled_ratio_high(profile, docs, args.file or _cache_path(args.cache_dir, profile))
+        doc_of = _entry_docs(entries, docs, profile)
+        refs = _entry_refs(entries, doc_of)
     scored = search_index_entries(entries, args.query, limit=args.limit)
     print(f'Search-index results for "{args.query}" '
           f"({_label(profile)}, source: {profile['name']}, index: {index_path})")
@@ -1513,11 +1659,12 @@ def _search_index_from_index(args, profile: dict) -> None:
     if not scored:
         print("No matching documents found.")
         print()
-        print("Tip: try broader keywords, 'search' for an automatic full-text fallback, "
+        print(_FETCH_ZERO_TIP if fetch else
+              "Tip: try broader keywords, 'search' for an automatic full-text fallback, "
               "or 'search-content' to search bodies directly")
     for score, i, entry in scored:
         extra = [f"    URL: {entry['url']}"]
-        if args.show_sections and doc_of[i] is not None:
+        if args.show_sections and not fetch and doc_of[i] is not None:
             extra += [f"      - {h}" for h in _headings(docs[doc_of[i]]["body_lines"])]
         print_entry(f"[{refs[i]}] {entry['title']} (score: {score})",
                     description=entry["description"], extra_lines=extra)
@@ -1550,6 +1697,241 @@ def _index_candidates(args, profile: dict, docs: list[dict]) -> list[dict]:
         results.append({"doc_idx": idx, "index_score": score, "body_hits": _body_hits(args, docs[idx]),
                         "body_only": False, "title": entry["title"], "url": entry["url"]})
     return results
+
+
+# ---------------------------------------------------------------------------
+# Per-page fetch engine (body "fetch")
+# ---------------------------------------------------------------------------
+
+def _fetches_pages(profile: dict) -> bool:
+    return profile.get("body") == "fetch"
+
+
+def _refuse_file(args, profile: dict) -> None:
+    """``--file`` is a local ``llms-full.txt``, which a ``body: "fetch"``
+    source does not have."""
+    if args.file is not None:
+        die(f"--source {args.source} has no llms-full.txt (body \"fetch\": each page is fetched "
+            f"from its llms.txt entry), so --file does not apply; pass a local copy of "
+            f"{profile['index_url']} with --index-file instead", code=2)
+
+
+def _fetch_entry_docs(args, profile: dict) -> tuple[str, list[dict]]:
+    """``(index path, pages)`` of a ``body: "fetch"`` source: one page per
+    ``llms.txt`` entry, numbered in ``llms.txt`` order (so the page numbers
+    are the entries' own, as ``parse-firebase.py`` numbers them). A page's
+    ``body_lines`` stays ``None`` until it is fetched."""
+    _refuse_file(args, profile)
+    index_path, entries = _load_index(args, profile)
+    level = 1 if profile["min_heading_level"] == 1 else None
+    return index_path, [{"title": e["title"], "url": e["url"], "description": e["description"],
+                         "body_lines": None, "min_level": level} for e in entries]
+
+
+def _fetch_page(args, profile: dict, url: str, *, timeout: int, raise_on_error: bool = False) -> str:
+    """Cache path of the page at *url*, fetched unless the page cache serves
+    it (``--max-age`` as for the other files)."""
+    return fetch_url(url, _page_cache_path(args.cache_dir, profile, url), user_agent=USER_AGENT,
+                     timeout=timeout, max_age=args.max_age, raise_on_error=raise_on_error)
+
+
+def _with_body(doc: dict, path: str) -> dict:
+    return dict(doc, body_lines=load_lines(path))
+
+
+def _fetch_pages_concurrently(args, profile: dict, indexed_urls) -> tuple[dict, list]:
+    """Fetch the ``(idx, url)`` pages ``page_fetch_workers`` at a time, each
+    with ``page_fetch_timeout``: ``({idx: cache path}, [(idx, url, error)])``.
+    A page that fails with no cache to fall back to is skipped, not fatal
+    (one dead link must not cost the other candidates). Threads: each fetch
+    waits on the network. Only ``search`` uses this, on its bounded ``--top-n``
+    candidates; ``search-content`` fetches one page at a time so that its
+    results print as each page completes (``_search_content_fetch``). A URL
+    that two entries share (``llms.txt`` lists it twice) is fetched once and
+    its result given to each of them."""
+    paths: dict = {}
+    skipped: list = []
+    idxs_of: dict = {}
+    for idx, url in indexed_urls:
+        idxs_of.setdefault(url, []).append(idx)
+
+    def fetch_one(url: str):
+        try:
+            return url, _fetch_page(args, profile, url, timeout=profile["page_fetch_timeout"],
+                                    raise_on_error=True), None
+        except FetchError as e:
+            return url, None, e.cause
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=profile["page_fetch_workers"]) as pool:
+        futures = [pool.submit(fetch_one, url) for url in idxs_of]
+        for future in concurrent.futures.as_completed(futures):
+            url, path, error = future.result()
+            for idx in idxs_of[url]:
+                if error is None:
+                    paths[idx] = path
+                else:
+                    skipped.append((idx, url, error))
+    # completion order is not reproducible: report in page order
+    skipped.sort(key=lambda s: s[0])
+    return paths, skipped
+
+
+def _print_skip(url: str, error) -> None:
+    print(f"(skip: fetch failed {url}: {error})", file=sys.stderr)
+
+
+def _skipped_line(count: int) -> None:
+    if count:
+        print(f"({count} documents skipped — fetch failed, see stderr)")
+
+
+def _fetch_search_results(args, profile: dict) -> tuple:
+    """``_search_results`` of a ``body: "fetch"`` source: the top ``--top-n``
+    entries by title/description, their pages fetched at once
+    (``_fetch_pages_concurrently``) and searched. Nothing else is fetched: no
+    candidate means no page fetch, and there is no full-corpus fallback (it
+    would fetch every page)."""
+    index_path, docs = _fetch_entry_docs(args, profile)
+    if not args.query.strip():
+        die("query must not be empty")
+    scored = search_index_entries(docs, args.query, limit=args.top_n)
+    paths, skipped = _fetch_pages_concurrently(args, profile, [(i, docs[i]["url"]) for _s, i, _e in scored])
+    for _idx, url, error in skipped:
+        _print_skip(url, error)
+    results = []
+    for score, i, entry in scored:
+        if i in paths:
+            results.append({"doc_idx": i, "index_score": score,
+                            "body_hits": _body_hits(args, _with_body(docs[i], paths[i])),
+                            "body_only": False, "title": entry["title"], "url": entry["url"]})
+    results.sort(key=lambda r: search_rank_key(r, include_changelog_priority=args.include_changelog_priority))
+    return profile, index_path, docs, results, True, len(skipped)
+
+
+def _search_content_fetch(args, profile: dict) -> None:
+    """``search-content`` of a ``body: "fetch"`` source: the ``--page-ref``
+    page, else every page, fetched one at a time in ``llms.txt`` order, each
+    page's hits printed (and flushed) as soon as it is searched. Not a thread
+    pool: over every page of the index (thousands) a pool prints nothing until
+    every fetch is done, and a few slow dead links can outlast the caller's
+    timeout before the first result shows. For the same reason the pages are
+    not ranked (``--include-changelog-priority`` has no effect): ranking needs
+    every page first. A page that cannot be fetched is skipped and counted."""
+    index_path, docs = _fetch_entry_docs(args, profile)
+    if not args.query.strip():
+        die("query must not be empty")
+    if args.page_ref is not None:
+        targets = [_resolve_ref(profile, docs, args)]
+    else:
+        targets = range(len(docs))
+        if len(docs) > profile["search_content_warn_pages"]:
+            print(f"WARNING: --page-ref not given. About to fetch and search all {len(docs)} pages "
+                  f"on demand (may be slow on first run; subsequent runs use cache). "
+                  f"Use --page-ref to restrict.", file=sys.stderr)
+    if args.include_changelog_priority:
+        print("WARNING: --include-changelog-priority has no effect here: pages are fetched and "
+              "printed one at a time in llms.txt order", file=sys.stderr)
+    print(f'Search-content results for "{args.query}" '
+          f"({_header_source(profile, index_path)}; {len(targets)} documents)")
+    print("=" * 60)
+    print()
+    total = matched = printed = 0
+    skipped = []
+    searched = []
+    shown = []
+    for idx in targets:
+        d = docs[idx]
+        try:
+            path = _fetch_page(args, profile, d["url"], timeout=profile["page_fetch_timeout"],
+                               raise_on_error=True)
+        except FetchError as e:
+            skipped.append(idx)
+            _print_skip(e.url, e.cause)
+            continue
+        searched.append(path)
+        hits = _body_hits(args, _with_body(d, path))
+        if hits["total_matches"] == 0:
+            continue
+        total += hits["total_matches"]
+        matched += 1
+        if printed >= args.limit:
+            continue
+        printed += 1
+        shown.append((idx, hits, ()))
+        print_page_hits(f"[{idx}] {d['title'] or '(untitled)'}", hits, noun="document",
+                        extra_lines=_url_line(d), anchor_for=_anchor_for(profile, d),
+                        show_overflow=profile["show_overflow"])
+        sys.stdout.flush()
+    if skipped and not searched:
+        # nothing was read: a zero-hit report would count no page and call
+        # the terms "not in this corpus" (as sections / content, exit 1)
+        what = (f"the --page-ref {args.page_ref} page" if args.page_ref is not None
+                else f"any of the {len(skipped)} pages")
+        die(f"could not fetch {what} (no cache either, see the skip lines above); nothing was searched")
+    if total == 0:
+        print("No matching content found.")
+        print()
+        print("Tip: use 'search-index' first, then pass the top page number to --page-ref")
+    else:
+        print(f"({total} hits across {matched}/{len(targets)} documents, showing top {printed})")
+    _skipped_line(len(skipped))
+    print()
+    if total == 0:
+        # only the pages fetched can be counted (from the page cache, not
+        # the network)
+        render_zero_hits(args.query, (load_lines(p) for p in searched), subcommand="search-content",
+                         hint_args=_source_hint_args(args) + corpus_hint_args(args),
+                         index_hint_args=_source_hint_args(args) + corpus_hint_args(args), scope="documents",
+                         restricted_to=args.page_ref, restricted_only=args.page_ref is not None)
+        return
+    render_next_content(hit_candidates(shown), hint_args=_source_hint_args(args) + corpus_hint_args(args),
+                        query=args.query)
+
+
+def _fetch_page_view(args, profile: dict) -> tuple[dict, list[dict], PageView]:
+    """``sections`` / ``content`` of a ``body: "fetch"`` source: the one page
+    ``page_ref`` names, fetched (exit 1 when that fails with no cache)."""
+    _index_path, docs = _fetch_entry_docs(args, profile)
+    idx = _resolve_ref(profile, docs, args)
+    d = docs[idx]
+    path = _fetch_page(args, profile, d["url"], timeout=120)
+    return profile, docs, PageView(
+        idx=idx,
+        title=d["title"] or "(untitled)",
+        body_lines=load_lines(path),
+        header_lines=[f"  URL: {d['url']}", f"  Cache: {path}"],
+        min_level=d["min_level"],
+        protect_tables=None if profile.get("protect_tables", True) else False,
+        meta={"source": d["url"] or None},
+    )
+
+
+def _zero_hit_texts(profile: dict, docs: list[dict]) -> tuple:
+    """``(texts, scope)`` that a zero-hit ``search`` counts the query terms
+    in: the page bodies, or for ``body: "fetch"`` (no page was fetched) the
+    entries' titles and descriptions."""
+    if _fetches_pages(profile):
+        return (f"{d['title']} {d['description']}" for d in docs), "index entries (title/description)"
+    return (d["body_lines"] for d in docs), "documents"
+
+
+def _page_window(args, profile: dict, total: int) -> tuple[int, int, int, bool]:
+    """``(offset, end, limit, paged)`` of ``fetch-index``: ``--offset`` /
+    ``--limit`` (``--limit`` defaults to the profile's ``index_page_size``;
+    0 or less = all). *paged* is false when every entry is listed from the
+    first, and the listing is then printed as before the options existed."""
+    offset = max(0, args.offset)
+    limit = args.limit if args.limit is not None else (profile.get("index_page_size") or 0)
+    end = total if limit <= 0 else min(offset + limit, total)
+    return offset, end, limit, offset > 0 or end < total
+
+
+def _print_page_footer(offset: int, end: int, limit: int, total: int, unit: str) -> None:
+    """The count line of a paged listing, and the options for the next page
+    (to add to the same command: a later ``--offset`` / ``--limit`` wins)."""
+    print(f"({max(end - offset, 0)} of {total} {unit} shown, offset={offset})")
+    if end < total:
+        print(f"  Next page: --offset {end} --limit {limit}")
 
 
 def _source_hint_args(args, source: str | None = None) -> tuple:
@@ -1829,7 +2211,7 @@ def cmd_sources(args):
             state = f"broken: {', '.join(missing)}" if missing else "search only"
             print(f"{name}  [{origin}, members, {state}]  {' + '.join(p['members'])}")
         else:
-            print(f"{name}  [{origin}, {p['split']}]  {p['url']}")
+            print(f"{name}  [{origin}, {p['split']}]  {p['url'] or p['index_url']}")
         if p["description"]:
             print(f"    {p['description']}")
     print()
@@ -1887,17 +2269,21 @@ def cmd_fetch_index(args):
     print(f"{profile.get('label') or profile['name']} llms-full.txt Document Index (file: {path})")
     print("=" * 60)
     print()
-    titles = [f"[{i}] {d['title'] or '(untitled)'}" for i, d in enumerate(docs)]
+    offset, end, limit, paged = _page_window(args, profile, len(docs))
+    titles = [f"[{i}] {d['title'] or '(untitled)'}" for i, d in enumerate(docs)][offset:end]
     if args.compact and profile.get("compact_pack"):
         _print_packed(titles)
     elif args.compact:
         for title in titles:
             print(title)
     else:
-        for title, d in zip(titles, docs):
+        for title, d in zip(titles, docs[offset:end]):
             print_entry(title, description=d["description"], extra_lines=_url_line(d))
     print()
-    print(f"({len(docs)} documents total)")
+    if paged:
+        _print_page_footer(offset, end, limit, len(docs), "documents")
+    else:
+        print(f"({len(docs)} documents total)")
     print()
     next_hint("sections", "<page_ref>", *(_source_hint_args(args) + corpus_hint_args(args)))
 
@@ -1912,7 +2298,10 @@ def _page_view(args) -> PageView:
 
 
 def _page_view_with_docs(args) -> tuple[dict, list[dict], PageView]:
-    profile, path, docs = _load_docs(args)
+    profile = _get_profile(args)
+    if _fetches_pages(profile):
+        return _fetch_page_view(args, profile)
+    profile, path, docs = _load_docs(args, profile)
     idx = _resolve_ref(profile, docs, args)
     d = docs[idx]
     header = [f"  URL: {d['url']}"] if d["url"] else []
@@ -1995,7 +2384,11 @@ def _body_hits(args, d: dict):
 
 
 def cmd_search_content(args):
-    profile, path, docs = _load_docs(args)
+    profile = _get_profile(args)
+    if _fetches_pages(profile):
+        _search_content_fetch(args, profile)
+        return
+    profile, path, docs = _load_docs(args, profile)
     if not args.query.strip():
         die("query must not be empty")
     targets = ([_resolve_ref(profile, docs, args)]
@@ -2046,8 +2439,11 @@ def cmd_search_content(args):
 
 def _search_results(args, profile: dict) -> tuple:
     """Rank and drill one source for ``search``: ``(profile, path, docs,
-    results, from_index)`` with *results* in display order. *profile* is the
-    one the split chose (``split: "auto"``)."""
+    results, from_index, skipped)`` with *results* in display order and
+    *skipped* the number of candidate pages that could not be fetched
+    (``body: "fetch"``). *profile* is the one the split chose (``split: "auto"``)."""
+    if _fetches_pages(profile):
+        return _fetch_search_results(args, profile)
     profile, path, docs = _load_docs(args, profile)
     _warn_if_untitled_ratio_high(profile, docs, path)
     if not args.query.strip():
@@ -2078,11 +2474,13 @@ def _search_results(args, profile: dict) -> tuple:
         results.append({"doc_idx": idx, "index_score": None, "body_hits": hits, "body_only": True,
                         "title": docs[idx]["title"] or "(untitled)", "url": None})
     results.sort(key=lambda r: search_rank_key(r, include_changelog_priority=args.include_changelog_priority))
-    return profile, path, docs, results, from_index
+    return profile, path, docs, results, from_index, 0
 
 
 def _print_body_only_notice(profile: dict, results: list[dict]) -> None:
-    if all(r["body_only"] for r in results):
+    # no results at all (body "fetch": every candidate failed to fetch) is
+    # not a list of body-only results
+    if results and all(r["body_only"] for r in results):
         ranked_on = "title/description/tags" if profile.get("tags_key") else "title/description"
         print(f"  (no {ranked_on} match — showing full-body search results instead)")
         print()
@@ -2107,31 +2505,38 @@ def cmd_search(args):
     if profile.get("members"):
         _search_members(args, profile)
         return
-    profile, path, docs, results, from_index = _search_results(args, profile)
+    profile, path, docs, results, from_index, skipped = _search_results(args, profile)
+    fetch = _fetches_pages(profile)
     print(f'Search results for "{args.query}" ({_header_source(profile, path)})')
     if from_index:
         print(f"  (index: {args.index_file or _index_cache_path(args.cache_dir, profile)})")
     else:
         print(f"  (top-{args.top_n} candidate docs drilled into bodies)")
+    if fetch:
+        print(f"  (top-{args.top_n} candidate pages fetched on demand)")
     print("=" * 60)
     print()
-    if not results:
+    if not results and not skipped:
         print("No matching documents found.")
         print()
-        print("Tip: try broader keywords or 'search-content' for a full-body scan")
+        print(_FETCH_ZERO_TIP if fetch else "Tip: try broader keywords or 'search-content' for a full-body scan")
         print()
-        render_zero_hits(args.query, (d["body_lines"] for d in docs),
+        texts, scope = _zero_hit_texts(profile, docs)
+        render_zero_hits(args.query, texts,
                          subcommand="search",
                          hint_args=_source_hint_args(args) + corpus_hint_args(args),
                          index_hint_args=_source_hint_args(args) + corpus_hint_args(args),
-                         scope="documents")
+                         scope=scope)
         return
     _print_body_only_notice(profile, results)
     _print_search_rows(profile, docs, results)
-    if from_index:
+    if fetch:
+        print(f"({len(results)} documents, ranked via index → body fetch)")
+    elif from_index:
         print(f"({len(results)} documents from {_label(profile)})")
     else:
         print(f"({len(results)} documents, ranked via index → body)")
+    _skipped_line(skipped)
     print()
     # The top index candidate keeps a Next: line even when appended pages
     # rank above it.
@@ -2168,7 +2573,7 @@ def _search_members(args, alias: dict) -> None:
     # The top index candidate (of the first member that has one) keeps a
     # Next: line even when appended pages rank above it.
     keep = None
-    for name, profile, _path, _docs, results, _from_index in runs:
+    for name, profile, _path, _docs, results, _from_index, skipped in runs:
         extra = ("--source", shlex.quote(name))
         ranked += [(r["doc_idx"], r["body_hits"], extra) for r in results]
         if keep is None:
@@ -2177,24 +2582,27 @@ def _search_members(args, alias: dict) -> None:
         print()
         if not results:
             print(f"  (no matching documents in {_label(profile)})")
+            _skipped_line(skipped)
             print()
             continue
         _print_body_only_notice(profile, results)
         _print_search_rows(profile, _docs, results, prefix=f"[{name}] ")
         print(f"({len(results)} documents from {_label(profile)})")
+        _skipped_line(skipped)
         print()
     if not ranked:
         print("No matching documents found.")
         print()
         print("Tip: try broader keywords, another --source, or 'search-content' for a full-body scan")
-        for name, profile, _path, docs, _results, _from_index in runs:
+        for name, profile, _path, docs, _results, _from_index, _skipped in runs:
             print()
             print(f"--- {_label(profile)} (--source {name}) ---")
-            render_zero_hits(args.query, (d["body_lines"] for d in docs),
+            texts, scope = _zero_hit_texts(profile, docs)
+            render_zero_hits(args.query, texts,
                              subcommand="search",
                              hint_args=_source_hint_args(args, name) + corpus_hint_args(args),
                              index_hint_args=_source_hint_args(args, name) + corpus_hint_args(args),
-                             scope="documents")
+                             scope=scope)
         return
     print(f"Note: page numbers are per source. For follow-up commands, pass the --source "
           f"<{'|'.join(names)}> shown in brackets.")
@@ -2226,6 +2634,18 @@ def _add_common(parser, *, source: bool = True) -> None:
     add_max_age_arg(parser)
 
 
+def _nonneg_int(text: str) -> int:
+    """argparse ``type`` of an integer option that must be 0 or more (a
+    negative ``--top-n`` would slice all but the last candidates)."""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: {text!r}") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be 0 or more, got {value}")
+    return value
+
+
 def main():
     parser = argparse.ArgumentParser(description="Progressive loader for any llms-full.txt described in sources.json")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2237,6 +2657,9 @@ def main():
     p = sub.add_parser("fetch-index", help="Fetch and print the document index")
     _add_common(p)
     p.add_argument("--compact", action="store_true", help="One title per line")
+    p.add_argument("--offset", type=int, default=0, help="Skip the first N entries (default: 0)")
+    p.add_argument("--limit", type=int, default=None,
+                   help="Max entries to show (default: the profile's index_page_size, else all; 0 = all)")
     p.set_defaults(func=cmd_fetch_index)
 
     p = sub.add_parser("search-index", help="Rank documents by keyword (title/description/headings)")
@@ -2277,7 +2700,8 @@ def main():
     p = sub.add_parser("search", help="Smart search: rank documents and drill into the top N bodies")
     p.add_argument("query", help="Space-separated keywords (AND search)")
     _add_common(p)
-    p.add_argument("--top-n", type=int, default=5, help="Candidate documents to drill into (default: 5)")
+    p.add_argument("--top-n", type=_nonneg_int, default=5,
+                   help="Candidate documents to drill into (default: 5)")
     p.add_argument("--max-hits", type=int, default=3, help="Max body hits per document (default: 3)")
     p.add_argument("--context", type=int, default=2, help="Context lines around each hit (default: 2)")
     add_max_snippet_chars_arg(p)

@@ -659,6 +659,14 @@ class PresetsTest(unittest.TestCase):
         whole_text_llms_txt = {"agent-plugins"}
         for name, p in presets.items():
             with self.subTest(name):
+                if p["body"] == "fetch":
+                    # no llms-full.txt: the llms.txt lists every page, each
+                    # fetched on its own (Firebase)
+                    self.assertIsNone(p["url"])
+                    self.assertTrue(p["index_url"].startswith("https://"), p["index_url"])
+                    self.assertTrue(p["index_url"].endswith("/llms.txt"), p["index_url"])
+                    self.assertTrue(p["description"])
+                    continue
                 self.assertTrue(p["url"].startswith("https://"), p["url"])
                 tail = "/llms.txt" if name in whole_text_llms_txt else "/llms-full.txt"
                 self.assertTrue(p["url"].endswith(tail), p["url"])
@@ -674,7 +682,9 @@ class PresetsTest(unittest.TestCase):
         # host. A site that moves is easy to half-update, and an old host that
         # redirects hides it.
         presets = generic._read_sources_file(generic.PRESETS_FILE)
-        with_index = {name: p for name, p in presets.items() if p["index_url"]}
+        # A body "fetch" preset has no url (its index_url is checked in
+        # test_every_preset_is_valid_and_https).
+        with_index = {name: p for name, p in presets.items() if p["index_url"] and p["body"] != "fetch"}
         self.assertTrue(with_index)
         for name, p in with_index.items():
             with self.subTest(name):

@@ -2,6 +2,58 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.44.0] - 2026-10-15
+
+### 追加: 汎用 loader の `body: "fetch"` (`llms-full.txt` の無いサイトをページごとに取得して読む。書かなければ出力は変わらない)
+
+専用 parser 3 本を汎用 loader (`parse-llms-txt.py`) に統合する段階の 1 つ。`parse-firebase.py` の読み方
+(`llms.txt` に全ページの `.md.txt` が並び、本文はページごとに取得する) を profile のキーで使えるようにした。
+同梱 presets は変えていない (Firebase の preset は後の段階で足す)。
+
+- `body: "fetch"`: `index_url` の `llms.txt` の項目がそのままページになる (ページ番号は `llms.txt` での
+  並び順)。`rank_from: "index"` と `index_url`、`page_ref_forms` の `"slug"` と `"url"` (`rank_from: "index"`
+  の条件) が要り、`url` と `llms-full.txt` の区切り方・読み方の
+  キー (`split` / `page_url` / `index_join` / `link_annotations` / `drop_lines` など) は書けない。
+  `--file` も使えない (手元の `llms.txt` は `--index-file` で渡す)
+- 本文はコマンドが必要としたときだけ取得する: `fetch-index` / `search-index` はページを取得しない、
+  `sections` / `content` は指定したページだけ、`search` は上位 `--top-n` 件の候補だけを
+  `page_fetch_workers` (既定 8) 件ずつ並行に、1 件 `page_fetch_timeout` (既定 30) 秒で取得する。
+  候補が 0 件なら何も取得せず、本文の全文検索への fallback はしない (全ページの取得になるため)。
+  `llms.txt` に同じ URL の項目が 2 つあっても、そのページは 1 回だけ取得する
+- 汎用 loader の `search --top-n` は 0 以上の整数だけを受け付ける (負の値は終了コード 2。以前は
+  `--top-n -1` で最後の 1 件を除くほぼ全候補を取得していた)
+- `search-content` は `--page-ref` のページ、無ければ全ページを `llms.txt` の順に 1 ページずつ取得し、
+  ページごとに結果をすぐ出す (並行にすると、全ページの取得が済むまで何も出ない)。ページ数が
+  `search_content_warn_pages` (既定 30) を超えると stderr に WARNING を出す。並べ替えないので
+  `--include-changelog-priority` は効かず、その旨を stderr に出す。1 ページも取得できなかったとき
+  (`--page-ref` のページの取得に失敗し cache も無いときなど) は、語が「この corpus に無い」とする
+  0 件の案内を出さず、取得できなかった旨を stderr に出して終了コード 1 にする (`sections` / `content` と同じ)
+- 取得できなかったページは stderr に `(skip: fetch failed …)` と出して飛ばし、
+  `(N documents skipped — fetch failed, see stderr)` の行で数を出す。ほかのページの本文で代えない。
+  次の実行では、まだ無いページだけを取得する
+- ページの cache: ファイル名は `parse-firebase.py` と同じ規則 (`_common.page_cache_filename` に移した。
+  旧 parser の出力とファイル名は変わらない) で、URL ごとに別のファイルになる。ディレクトリは同梱 presets
+  専用のキー `page_cache_dir`、無ければ `<cache_name>-pages`、それも無ければ
+  `generic-<source 名>-<index_url のハッシュ>-pages`。2 つの profile が同じディレクトリを使う設定はエラー
+- `index_page_size` (すべての profile) と `fetch-index --offset` / `--limit`: 一覧の範囲を選ぶ。範囲が
+  全件でないときは `(M of N documents shown, offset=K)` と、次の範囲を出す `  Next page: --offset … --limit …`
+  (同じコマンドに足して使う) を出す。全件を出すときの出力は今までどおり
+- 移行の比較 (旧 parser との一致) に `parse-firebase.py` の 12 件を加えた。手元のキャッシュでの比較
+  (`LLMS_DOCS_PARITY_CORPUS=1`) には、実ページの 6 件と、索引の全項目を番号・URL・末尾で引き直して
+  旧 parser と同じ項目に届き、ページの cache のファイル名も同じになることの確認を加えた
+- テスト: `test_parse_firebase.py` の 20 件を汎用 loader で流す。取得の回数 (一覧系は 0 回、候補 0 件の
+  `search` は 0 回、並行数が `page_fetch_workers` を超えない、`search-content` は前のページの結果を
+  出してから次のページを取得する)、取得の失敗、キャッシュの状態 (索引とページがある / ページだけある /
+  何も無い / `--index-file`) ごとに、出力された番号と `Next:` の行をそのまま実行すると名前どおりの
+  ページが開くことを確かめる。`search-content` を pipe につないで起動し、2 ページ目の取得を止めた
+  状態で 1 ページ目の結果が読めること (pipe はブロックバッファなので flush が要る)、`body: "fetch"` の
+  profile に書けるキーのそれぞれが出力を変えること (`min_heading_level: 1` で H1 が節になる、
+  `show_overflow` / `compact_pack` / `description` / `page_ref_forms` を含む)、README の形状表の
+  `body: fetch` の行がそのまま検証を通り、必須とした各キーを抜くと拒否されること、`researching-library-docs`
+  の SKILL のコマンド表のオプションが実在し、`fetch-index` の行が自分のオプションをすべて挙げることを確かめる
+- 手元のキャッシュでの比較 (`LLMS_DOCS_PARITY_CORPUS=1`) は、キャッシュの場所を loader と同じ規則
+  (`LLMS_DOCS_CACHE_DIR` / `XDG_CACHE_HOME` / `~/.cache/llms-docs`) で決める
+
 ## [0.43.0] - 2026-10-15
 
 ### 追加: 汎用 loader の `members` (複数の source をまとめて `search` する別名。書かなければ出力は変わらない)

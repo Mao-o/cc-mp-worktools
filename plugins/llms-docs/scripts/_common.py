@@ -517,6 +517,30 @@ def build_unique_slugs(raw_urls: list[str], *, avoid_dash: bool = False) -> dict
     return result
 
 
+def page_cache_filename(url: str, prefix: str) -> str:
+    """Cache file name of a page fetched on its own (``.md.txt``).
+
+    *prefix* (``https://firebase.google.com/``, the host root of the index)
+    is stripped, ``/`` becomes ``_`` for legibility (the result is a plain
+    file name, never a path), the readable part is cut to 180 characters
+    and the first 16 hex digits of the URL's sha1 are appended. The hash
+    keeps distinct URLs apart even when the readable parts are the same
+    (``…/auth/user.md.txt`` and ``…/auth_user.md.txt``, or a cut name, or
+    URLs that differ only by their query). A URL outside *prefix* is named
+    by the hash alone. The rule of ``parse-firebase.py``, whose page cache
+    the generic loader's ``body: "fetch"`` reuses: changing it would orphan
+    every cached page.
+    """
+    h = hashlib.sha1(url.encode()).hexdigest()[:16]
+    if url.startswith(prefix):
+        path = url[len(prefix):]
+        if path:
+            base = path[:-len(".md.txt")] if path.endswith(".md.txt") else path
+            safe = base.replace("/", "_")
+            return f"{safe[:180]}-{h}.md.txt"
+    return f"{h}.md.txt"
+
+
 _VARIANT_TITLE_RE = re.compile(r"^(.+?)\s*\(([^)]+)\)$")
 
 

@@ -264,8 +264,8 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 
 | キー | 必須 | 意味 |
 |---|---|---|
-| `url` | ○ | サイトの `llms-full.txt` (http / https)。取得するのはこれと `index_url` だけ |
-| `split` | ○ | ページの区切り方。`h1` = コードブロック外の H1 ごと / `frontmatter` = YAML frontmatter ごと / `line` = `line_prefix` で始まる行ごと / `auto` = `split_candidates` から選ぶ |
+| `url` | ○ (`body: fetch` では書かない) | サイトの `llms-full.txt` (http / https)。取得するのはこれと `index_url` だけ (`body: fetch` では `index_url` と、そこに並ぶ各ページ) |
+| `split` | ○ (`body: fetch` では書かない) | ページの区切り方。`h1` = コードブロック外の H1 ごと / `frontmatter` = YAML frontmatter ごと / `line` = `line_prefix` で始まる行ごと / `auto` = `split_candidates` から選ぶ |
 | `split_candidates` | `split: auto` で必須 | 区切り方の候補 (2 つ以上のオブジェクトのリスト)。ファイルを候補ごとに区切り、URL を持つページが最も多い候補を使う (同数なら先に書いた候補)。候補には区切り方に関わるキー (`split` / `page_url` / `frontmatter_key` / `frontmatter_delimiter` / `line_prefix` / `h1_needs_url` / `tags_key` / `frontmatter_yaml_values` / `untitled_warn_ratio` / `strip_trailing_headings`) だけを書き、ほかのキーは `split: auto` の横に書く (全候補に効く)。どの候補にも `page_url` が要る (`split: line` は区切り行の URL)。候補の数だけファイルを区切るので、大きなファイルでは遅くなる。例: `[{"split": "h1", "page_url": "line:Source: "}, {"split": "frontmatter", "page_url": "frontmatter:url"}]` |
 | `frontmatter_key` | | `split: frontmatter` のとき、ページの frontmatter に必ずあるキー (既定 `title`)。これが無い `---` の組は区切りとみなさない (本文の水平線を誤認しないため) |
 | `frontmatter_delimiter` | | `split: frontmatter` のとき、frontmatter を囲む行 (既定 `---`。`-` か `+` を 3 個以上)。Vercel は `-` 80 個 |
@@ -294,6 +294,12 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `link_annotations` | | `true` で、`content` の本文にある Markdown リンクのうち、この source の別のページを指すものの後ろに ` → [doc_idx N]` を付ける (`content N` でリンク先を開ける)。読むリンクは `(https://…)` と `(/…)` (ページ自身のホストで読む。ページに URL が無ければ `url` のホスト) で、`beta` や `./beta` のような相対リンクは読まない。URL は `.md`・`page_url_strip_suffix`・`#…`・末尾の `/` を無視して比べ、同じ URL のページが複数あるときの選び方は `index_join: url` と同じ (一覧に出る番号と一致する)。コードブロックの中、`\|` で始まり `\|` で終わる行 (表の行)、ページ自身の URL へのリンク、どのページでもない URL には付けない。`content --no-link-annotations` で 1 回だけ止められる。`page_url` か `index_url` が要る (`page_url` が無く `index_url` で URL を付ける profile は、`--file` のとき `--index-file` も渡さないと注釈が付かない。ページの URL が `/…` の相対のままになる profile (`url_base` が無い) も付かない)。URL が `#…` だけ違うページどうしは区別しない (旧 parser と同じく後ろのページを指す)。既定は付けない |
 | `link_path_aliases` | | `link_annotations` のとき、同じページを指す別のパスの接頭辞の組のリスト (例 `[["/docs/en/", "/en/"]]`)。`(/…)` のリンクがそのままではどのページにも当たらないとき、組の片方の接頭辞をもう片方に置き換えて探す (両方向)。完全な URL のリンクには使わない。接頭辞は `/` で始まり `/` で終わる |
 | `label` | | 結果のヘッダに出す表示名 |
+| `body` | | `full` (既定) = 本文は `url` の `llms-full.txt` から読む / `fetch` = `llms-full.txt` の無いサイト (Firebase) 用。`index_url` の `llms.txt` の項目がそのままページになり (ページ番号は `llms.txt` での並び順)、本文はコマンドが必要としたときに項目の URL から 1 ページずつ取得してページの cache に置く (`--max-age` は他のファイルと同じ)。`rank_from: index` と `index_url`、`page_ref_forms` の `slug` と `url` (`rank_from: index` の条件) が要り、`url` と、`llms-full.txt` の区切り方・読み方のキー (`split` / `page_url` / `index_join` / `link_annotations` / `drop_lines` など) は書けない。`fetch-index` / `search-index` は `llms.txt` だけを読み、ページを取得しない (`search-index --show-sections` は無視して stderr に知らせる)。`sections` / `content` は指定したページだけを取得する (失敗して cache も無ければ終了コード 1)。`search` は上位 `--top-n` 件の候補だけを `page_fetch_workers` 件ずつ並行に取得し、候補が 0 件なら何も取得しない。本文の全文検索への fallback はしない (全ページの取得になるため)。`search-content` は `--page-ref` のページ、無ければ全ページを `llms.txt` の順に 1 ページずつ取得し、ページごとに結果を出す (並行にすると全ページの取得が済むまで何も出ないため、並べ替えもしない。`--include-changelog-priority` は効かず stderr に知らせる)。取得に失敗したページは stderr に `(skip: fetch failed …)` と出して飛ばし、件数を `(N documents skipped — fetch failed, see stderr)` の行に出す (`llms.txt` に同じ URL の項目が 2 つあっても取得は 1 回)。`search-content` が 1 ページも取得できなかったとき (`--page-ref` のページの取得に失敗し cache も無いときなど) は 0 件の案内を出さず、終了コード 1。`--file` は使えない (手元の `llms.txt` は `--index-file` で渡す) |
+| `page_cache_dir` | | 同梱 presets 専用 (`sources.json` に書くとエラー)。`body: fetch` のページの cache を置くディレクトリ名 (キャッシュのディレクトリの下)。無ければ `<cache_name>-pages`、`cache_name` も無ければ `generic-<source 名>-<index_url のハッシュ>-pages`。ファイル名は URL からホストを除いて `/` を `_` に置き換え、180 字で切り、URL の sha1 の先頭 16 桁を付けたもの (`parse-firebase.py` と同じ。URL ごとに別のファイルになる) |
+| `page_fetch_workers` | | `body: fetch` の `search` が同時に取得するページ数 (1〜32。既定 8) |
+| `page_fetch_timeout` | | `body: fetch` の `search` / `search-content` が 1 ページの取得を待つ秒数 (1〜600。既定 30。`sections` / `content` は 120) |
+| `search_content_warn_pages` | | `body: fetch` で `--page-ref` の無い `search-content` が、ページ数がこれを超えると stderr に WARNING を出す (既定 30) |
+| `index_page_size` | | `fetch-index` が既定で出す項目数 (0 以上の整数。無いか 0 なら全件)。`fetch-index --offset N --limit M` で範囲を選べ (`--limit 0` は全件)、範囲が全件でないときは末尾に `(M of N documents shown, offset=K)` と、次の範囲を出す `  Next page: --offset … --limit …` (同じコマンドに足して使う) を出す。全件を出すときの出力は変わらない |
 | `cache_name` | | 同梱 presets 専用 (`sources.json` に書くとエラー)。キャッシュのファイル名を `<cache_name>-llms-full.txt` / `<cache_name>-llms.txt` にする |
 | `members` | | 2 つ以上の source 名のリスト (例 `["cloudflare-workers", "cloudflare-d1"]`)。この profile はファイルを読まない別名になり、`search --source <この名前>` が各 source を書いた順に検索する。結果は source ごとに `--- <label> (--source <source>) ---` の見出しの下に並び、各行の先頭に `[<source>]` が付く。ページ番号は source ごとなので、`Next:` の行はそのページの `--source` を持つ (別名のままではページを開けない)。`search` 以外のコマンドは終了コード 2 で止まり、選べる source を出す。`--file` / `--index-file` (1 つの source のファイル) とは一緒に使えない (終了コード 2)。どれか 1 つの source を読めない (キャッシュが無く取得にも失敗した、対応づけの割合が下限を下回った) ときは、何も出さずにその source のエラーで止まる。書けるキーは `members` と `description` だけ。別名 (`members` を持つ profile) と自分自身は書けない (`sources.json` で同梱 preset の source を別名に置き換えた場合も、その source を `members` に書いた別名はエラーになる)。存在しない source を書いた別名 (plugin の更新で同梱 preset の名前が変わった・無くなった場合を含む) は、その別名を `--source` に指定したときだけ、存在しない名前を出して止まる。ほかの source のコマンドはそのまま動き、`sources` の一覧ではその別名を `[user, members, broken: <存在しない名前>]` と出す |
 
@@ -312,11 +318,12 @@ source 名は `^[a-z0-9][a-z0-9-]*$` (キャッシュのファイル名になる
 | H1 で区切り、直後に `Source: <url>` 行 | `split: h1` + `page_url: "line:Source: "` (本文にも H1 があれば `h1_needs_url`) | Agent Skills / Bun / MCP / Ollama / ACP / Cline / Devin |
 | frontmatter を長い横線で囲む | `split: frontmatter` + `frontmatter_delimiter` | Vercel |
 | H1 で区切り URL なし | `split: h1` (見出しだけのページがあれば `skip_empty`) | Zod / Hono / Render / Codex / OpenAI Plugins・API docs / Factory |
+| `llms-full.txt` が無く、`llms.txt` が全ページ (ページごとの `.md.txt`) を並べる | `body: fetch` + `rank_from: index` + `index_url` + `page_ref_forms: ["int", "url", "slug"]` (+ `page_url_strip_suffix: ".md.txt"` / `anchor_style: devsite` / `min_heading_level: 2`) | Firebase |
 | frontmatter (`title:` / `description:`) で区切り URL なし | `split: frontmatter` (既定の `frontmatter_key: title`) | Agent Plugins |
 
 対象外: `llms.txt` が別の `llms.txt` へのリンク集になっている 2 段 index (Cloudflare のルート
-`/llms.txt`。製品別の `llms-full.txt` は上のとおり読める)、ページごとに別ファイルで公開する
-サイト、`llms.txt` の index と本文のタイトル以外での突き合わせ (`index_url` は完全一致のタイトルだけ)。URL を持たないページでは `URL:` 行と `# source:` 行を
+`/llms.txt`。製品別の `llms-full.txt` は上のとおり読める)、ページごとに別ファイルで公開し、
+`llms.txt` に全ページの絶対 URL が並ばないサイト (並ぶサイトは `body: fetch` で読める)、`llms.txt` の index と本文のタイトル以外での突き合わせ (`index_url` は完全一致のタイトルだけ)。URL を持たないページでは `URL:` 行と `# source:` 行を
 出さない。
 
 2 段 index は `index_url` にも書かない。別の `llms.txt` を指す項目は突き合わせから除くので、そのファイルの URL が
