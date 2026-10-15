@@ -2,6 +2,55 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.36.0] - 2026-10-15
+
+### 追加: 汎用 loader の profile に表示と構造のキー 7 つ (どれも既定 off)
+
+専用 parser 3 本を汎用 loader (`parse-llms-txt.py`) に統合する段階の 1 つ。キーはどれも既定では
+何もしないので、同梱 presets の出力は変わらない (`presets.json` は変えていない)。
+
+- `strip_trailing_headings`: ページ末尾に本文の無いまま並ぶ見出し行を除く。frontmatter 形式の
+  `llms-full.txt` には、ページ間にナビの見出し (`## Messages` など) が置かれ、前のページの末尾に
+  空の節として残るものがある。`drop_lines` の後に適用する。規則は `parse-claude-docs.py` と同じで、
+  コードブロックの状態は見ない
+- `min_heading_level` (`1` / `2`): 節として数える最も浅い見出し。`sections` / `content` / 本文検索
+  (`search` の全文検索への切り替えを含む) に効く。既定は今までどおり (`split: h1` は 2、ほかは 1)。
+  本文のコードブロック外に `# …` 行があるサイトでは、1 のままだとそれが節になる
+- `protect_tables` (既定 `true`): `false` で、`content` の節の切り出しを表の途中で止めることを許す
+  (`parse-ai-sdk.py` の挙動)。手元の Claude docs / AI SDK の全キャッシュ (約 2 万 1 千節) では、
+  `true` と `false` で切り出しが変わる節は 0 だった
+- `compact_pack`: `fetch-index --compact` を 1 行 80 桁以内に数件ずつ詰めて出す (`parse-ai-sdk.py` の形)
+- `untitled_warn_ratio` (`split: frontmatter` のみ): frontmatter に `title:` の無いページの割合が
+  これを超えたら、`fetch-index` / `search-index` / `search` で stderr に WARNING を出す。
+  本文の見出しで補ったタイトルも「無い」に数える
+- `label`: 結果のヘッダに出す表示名
+- `cache_name`: キャッシュのファイル名を `<cache_name>-llms-full.txt` / `<cache_name>-llms.txt` にする
+  (統合後も専用 parser のキャッシュを使い続けるため)。**同梱 presets でだけ受け付け**、利用者の
+  `sources.json` に書くとエラーにする。URL のハッシュを含まない名前なので、利用者が同じ名前の
+  profile を別の URL で書いたときに、preset のキャッシュを読み書きしないようにするため
+  (利用者の profile は今までどおり URL のハッシュ入りの名前を使う)。値は source 名と同じ規則
+  (`^[a-z0-9][a-z0-9-]*$`) で検証し、presets の中での重複もエラーにする。ファイル名から URL が
+  消える代わりに、キャッシュの `.meta.json` に取得 URL を記録し、記録した URL と取得しようとする URL が
+  違えば `--max-age` に関係なく再取得する。このとき前の URL の ETag / Last-Modified は送らず、取得に
+  失敗しても前の URL のキャッシュは返さない (別の corpus を返すことになるため、キャッシュが無いときと
+  同じくエラーにする)。URL を記録していない `.meta.json` (この版より前に書かれたもの) は一致とみなす。
+  `.meta.json` は全 script 共通の取得処理が書くので、専用 parser 3 本のキャッシュにも URL が記録されるが、
+  出力は変わらない
+
+確認:
+
+- 同梱 presets の全件を、変更前の版と今回の版に同じ入力 (手元のキャッシュと parity の fixture、
+  9 種のサブコマンド) で流し、378 回とも stdout・stderr・終了コードが一致した
+- `parse-claude-docs.py` の claude-platform のページ (fixture と手元の全 634 ページ) で、
+  `strip_trailing_headings` + `min_heading_level: 2` の profile のタイトル・URL・本文・節の一覧が
+  一致する。fixture では全ページの `sections <番号>` の出力も一致する。どちらかのキーを外すと
+  一致しなくなることもテストで固定した
+- マージ前レビューの指摘で、全文検索への切り替えを実際には通っていなかったテスト、末尾の H1 見出しを
+  除くこと、URL のハッシュから付くファイル名の値を固定していなかったテストを直した
+- parity harness の `GENERIC_PARITY_EXPECTED` には足していない。slug と URL でページを指す
+  `sections` のケースと `content` のケースは fixture では一致するが、手元の全キャッシュでは
+  ページ参照の解決 (slug / URL の形) とリンクの注釈が違い、一致しないため (後の段階で扱う)
+
 ## [0.35.6] - 2026-10-10
 
 ### テスト追加: 専用 parser 3 本の出力を固定する parity harness (挙動の変更なし)

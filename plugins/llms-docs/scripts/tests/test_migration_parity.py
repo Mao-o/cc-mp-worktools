@@ -341,9 +341,11 @@ GENERIC_PROFILES = {
     "claude-code": {"url": "https://code.claude.com/docs/llms-full.txt", "split": "h1",
                     "page_url": "line:Source: ", "index_url": "https://code.claude.com/docs/llms.txt"},
     "claude-platform": {"url": "https://platform.claude.com/llms-full.txt", "split": "frontmatter",
-                        "page_url": "frontmatter:url", "index_url": "https://platform.claude.com/llms.txt"},
+                        "page_url": "frontmatter:url", "index_url": "https://platform.claude.com/llms.txt",
+                        "strip_trailing_headings": True, "min_heading_level": 2, "label": "Claude Platform"},
     "ai-sdk": {"url": "https://ai-sdk.dev/llms-full.txt", "split": "frontmatter",
-               "page_url": "frontmatter:url"},
+               "page_url": "frontmatter:url", "protect_tables": False, "compact_pack": True,
+               "untitled_warn_ratio": 0.10, "label": "AI SDK"},
 }
 
 # Cases whose generic-loader output already matches the golden (normalised
@@ -700,6 +702,78 @@ class GenericLoaderHarnessTest(unittest.TestCase):
                 self.assertLessEqual(run.fetches, record["fetches"])
 
 
+def platform_page_mismatches(full_text: Path, profile: dict) -> list[str]:
+    """Pages of a claude-platform ``llms-full.txt`` where the generic loader
+    with *profile* differs from ``parse-claude-docs.py``: title, URL, body
+    lines, or the section list at each loader's heading floor (the old
+    script's pages always use H2; the generic loader's use ``min_level``).
+    Page refs are not involved, so this holds on the full corpus too."""
+    import _common
+    cd = _loader.load_script("parse-claude-docs.py")
+    g = _loader.load_script("parse-llms-txt.py")
+    lines = _common.load_lines(str(full_text))
+    old = cd.split_documents(lines)
+    new = g.split_documents(lines, g._validate_profile("sources.json", "claude-platform", profile))
+    if len(old) != len(new):
+        return [f"page count {len(old)} != {len(new)}"]
+    out = []
+    for i, (o, n) in enumerate(zip(old, new)):
+        for what, a, b in (("title", o["title"], n["title"]), ("url", o["source_url"], n["url"]),
+                           ("body", o["body_lines"], n["body_lines"]),
+                           ("sections", _common.extract_sections(o["body_lines"]),
+                            _common.extract_sections(n["body_lines"], min_level=n["min_level"] or 2))):
+            if a != b:
+                out.append(f"[{i}] {o['title']}: {what}")
+    return out
+
+
+class PlatformStructureParityTest(unittest.TestCase):
+    """``strip_trailing_headings`` + ``min_heading_level: 2`` reproduce the
+    old script's claude-platform pages and sections. The ``sections`` cases
+    by slug or URL (``cd-plat-sections`` / ``-dup-title``) and the
+    ``content`` case match on the fixture too, but not on the full corpus,
+    where the page refs resolve differently (slug / URL forms are a later
+    step) and links get ``→ [doc_idx N]`` notes (also later), so they are
+    not in ``GENERIC_PARITY_EXPECTED``; these checks go by page index."""
+
+    FULL = FIXTURES / "claude-docs" / "claude-platform-llms-full.txt"
+
+    def test_every_page_matches(self):
+        self.assertEqual(platform_page_mismatches(self.FULL, GENERIC_PROFILES["claude-platform"]), [])
+
+    def test_sections_by_index_match_for_every_page(self):
+        import _common
+        n_pages = len(_loader.load_script("parse-claude-docs.py").split_documents(
+            _common.load_lines(str(self.FULL))))
+        self.assertGreater(n_pages, 5)
+        tmp = tempfile.mkdtemp(prefix="llms-parity-")
+        try:
+            stage_corpus("claude-docs", tmp)
+            sources = os.path.join(tmp, "sources.json")
+            with open(sources, "w", encoding="utf-8") as f:
+                json.dump({"sources": GENERIC_PROFILES}, f)
+            for i in range(n_pages):
+                argv = ["sections", str(i), *_P]
+                with self.subTest(page=i):
+                    old = run_script(SCRIPTS["claude-docs"], argv, tmp)
+                    new = run_script("parse-llms-txt.py", _generic_argv("claude-docs", argv, tmp, sources), tmp)
+                    self.assertEqual(old.code, 0, old.stderr)
+                    self.assertEqual(new.code, 0, new.stderr)
+                    self.assertEqual(compare(old.stdout, new.stdout, old.stderr, new.stderr), [])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_each_key_is_needed(self):
+        # the fixture has navigation headings at page ends and ``# …`` lines
+        # outside fences, so dropping either key breaks some page
+        base = GENERIC_PROFILES["claude-platform"]
+        for key, what in (("strip_trailing_headings", ": body"), ("min_heading_level", ": sections")):
+            with self.subTest(key=key):
+                reduced = {k: v for k, v in base.items() if k != key}
+                mismatches = platform_page_mismatches(self.FULL, reduced)
+                self.assertTrue(any(m.endswith(what) for m in mismatches), mismatches)
+
+
 @unittest.skipUnless(os.environ.get(CORPUS_ENV) == "1",
                      f"local-only full-corpus gate ({CORPUS_ENV}=1)")
 class CorpusParityGateTest(unittest.TestCase):
@@ -732,6 +806,12 @@ class CorpusParityGateTest(unittest.TestCase):
                 new = run_generic_case(case_id, source_dir=self.cache)
                 self.assertEqual(compare(old.stdout, new.stdout, old.stderr, new.stderr), [])
                 self.assertEqual(new.code, old.code)
+
+    def test_platform_pages_match_on_the_full_corpus(self):
+        full = self.cache / "claude-platform-llms-full.txt"
+        if not full.exists():
+            self.skipTest(f"no {full}")
+        self.assertEqual(platform_page_mismatches(full, GENERIC_PROFILES["claude-platform"]), [])
 
 
 if __name__ == "__main__":

@@ -584,7 +584,7 @@ def _load_fetch_meta(cache_path: str) -> dict:
 
     Returns ``{}`` when there is no sidecar, it's unreadable/corrupt, it
     parses to valid JSON that isn't a ``dict`` (e.g. a list or bare string),
-    or its ``content_hash``/``etag``/``last_modified`` values aren't strings
+    or its ``content_hash``/``etag``/``last_modified``/``url`` values aren't strings
     — nothing guarantees the file wasn't hand-edited or written by some
     future version with a different shape. A non-string ``etag``/
     ``last_modified`` would otherwise reach ``fetch_url``'s request headers,
@@ -604,7 +604,7 @@ def _load_fetch_meta(cache_path: str) -> dict:
         return {}
     if not isinstance(meta, dict):
         return {}
-    for key in ("content_hash", "etag", "last_modified"):
+    for key in ("content_hash", "etag", "last_modified", "url"):
         if key in meta and not isinstance(meta[key], str):
             return {}
     return meta
@@ -615,9 +615,14 @@ def _content_hash(data: bytes) -> str:
 
 
 def _save_fetch_meta(cache_path: str, etag: str | None, last_modified: str | None,
-                      content_hash: str) -> None:
+                      content_hash: str, url: str | None = None) -> None:
     """Persist *etag*/*last_modified*/*content_hash* alongside *cache_path*
     for the next fetch's conditional GET.
+
+    *url* is the URL that was requested (not the redirect destination):
+    ``fetch_url`` compares it with the URL it is next asked for, so a cache
+    file whose name doesn't carry the URL (a preset's fixed ``cache_name``)
+    is fetched again when the profile's URL changes.
 
     *content_hash* (the sha256 of the exact bytes just written to
     *cache_path*) is always stored, independent of what the server sent,
@@ -634,6 +639,8 @@ def _save_fetch_meta(cache_path: str, etag: str | None, last_modified: str | Non
     silently ignored, or worse, matched by coincidence).
     """
     meta = {"content_hash": content_hash}
+    if url:
+        meta["url"] = url
     if etag:
         meta["etag"] = etag
     if last_modified:
@@ -642,12 +649,15 @@ def _save_fetch_meta(cache_path: str, etag: str | None, last_modified: str | Non
 
 
 def _handle_fetch_failure(url: str, cache_path: str, error: Exception,
-                           raise_on_error: bool) -> str:
+                           raise_on_error: bool, *, cache_usable: bool = True) -> str:
     """Shared tail of ``fetch_url``'s failure handling (stale-serve / exit /
     raise), factored out so both the ``HTTPError`` branch (304 aside) and
     the general transport-error branch apply it identically.
+
+    *cache_usable* false (the cache was fetched from another URL) skips the
+    stale copy: serving it would answer with another corpus.
     """
-    if os.path.exists(cache_path):
+    if cache_usable and os.path.exists(cache_path):
         age = time.time() - os.path.getmtime(cache_path)
         print(
             f"WARNING: fetch failed ({error}); using cached copy "
@@ -700,6 +710,13 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
     When *max_age* is given (seconds), re-fetches if the existing cache is
     older than that. ``max_age=None`` (default) keeps the original behaviour
     of using the cache indefinitely once it exists.
+
+    The sidecar records the requested *url*. When it holds a different URL
+    (a preset whose fixed ``cache_name`` now points elsewhere), the cache
+    is neither fresh nor a stale fallback: it is fetched again without its
+    validators, and a failed fetch is reported as if there were no cache.
+    A sidecar with no ``url`` (written by an older version) counts as a
+    match.
 
     On transport failure:
       * If a cache file already exists (even a stale one past *max_age*),
@@ -788,7 +805,11 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
     against the cache file's own bytes, not sent to any server.
     """
     cache_exists = os.path.exists(cache_path)
-    if cache_exists:
+    meta = _load_fetch_meta(cache_path) if cache_exists else {}
+    # A sidecar without ``url`` (written before it was recorded) counts as a
+    # match, so upgrading doesn't re-fetch every cache once.
+    url_changed = "url" in meta and meta["url"] != url
+    if cache_exists and not url_changed:
         if max_age is None:
             return cache_path
         age = time.time() - os.path.getmtime(cache_path)
@@ -796,8 +817,9 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
             return cache_path
 
     headers = {"User-Agent": user_agent, "Accept-Encoding": "gzip"}
-    if cache_exists:
-        meta = _load_fetch_meta(cache_path)
+    # The cache's validators describe the URL it was fetched from: never
+    # send them to another one.
+    if cache_exists and not url_changed:
         try:
             with open(cache_path, "rb") as f:
                 current_hash = _content_hash(f.read())
@@ -850,6 +872,7 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
                 None if redirected else etag,
                 None if redirected else last_modified,
                 _content_hash(data),
+                url,
             )
         except OSError as e:
             # The fetch itself already succeeded and cache_path is already
@@ -863,7 +886,7 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
             )
         return cache_path
     except urllib.error.HTTPError as e:
-        if e.code == 304 and cache_exists:
+        if e.code == 304 and cache_exists and not url_changed:
             try:
                 os.utime(cache_path, None)
             except OSError as utime_err:
@@ -877,10 +900,12 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
                     url, cache_path, utime_err, raise_on_error
                 )
             return cache_path
-        return _handle_fetch_failure(url, cache_path, e, raise_on_error)
+        return _handle_fetch_failure(url, cache_path, e, raise_on_error,
+                                     cache_usable=not url_changed)
     except (urllib.error.URLError, OSError, http.client.HTTPException,
             EOFError, zlib.error, ValueError) as e:
-        return _handle_fetch_failure(url, cache_path, e, raise_on_error)
+        return _handle_fetch_failure(url, cache_path, e, raise_on_error,
+                                     cache_usable=not url_changed)
 
 
 def load_lines(path: str):
