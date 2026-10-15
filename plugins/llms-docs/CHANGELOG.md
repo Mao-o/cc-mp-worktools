@@ -2,6 +2,45 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.38.0] - 2026-10-15
+
+### 追加: 汎用 loader の `split: "auto"` と `join_rate_guard` (どれも既定 off)
+
+専用 parser 3 本を汎用 loader (`parse-llms-txt.py`) に統合する段階の 1 つ (Claude docs の区切り方の
+自動判別と、区切り方の誤りの検出)。どちらも書かなければ何もしないので、同梱 presets の出力は変わらない
+(`presets.json` は変えていない)。
+
+- `split: "auto"` + `split_candidates`: ファイルを候補ごとに区切り、URL を持つページが最も多い候補を
+  使う (同数なら先に書いた候補)。`parse-claude-docs.py` が H1 + `Source:` 行と frontmatter + `url:` の
+  両方で区切って多いほうを採るのと同じ規則。候補には区切り方に関わるキーだけを書き、ほかのキーは
+  `split: "auto"` の横に書いて全候補に効かせる。どの候補にも `page_url` が要る。各コマンドは選ばれた
+  候補のキーで動く。候補の数だけファイルを区切るので、大きなファイルでは遅くなる (同梱 presets は
+  区切り方を固定で書く想定)
+- `join_rate_guard`: `index_url` の `llms.txt` の項目のうち、ページ自身の URL と一致するものの割合を
+  見て、50% 未満なら終了コード 2、80% 未満なら stderr に WARNING を出す (`parse-claude-docs.py` の
+  `search` と同じ閾値)。タイトルの突き合わせで `llms.txt` から付けた URL は数えない (数えると必ず
+  一致するため)。frontmatter 形式のファイルを `split: h1` で読むと URL を持つページが 0 になり、
+  ここで止まる。`index_url` と `page_url` が要る。止まったときの案内は、区切り方 (`split` / `page_url`)
+  を見直すよう促す文にした (`_common.check_join_rate` に案内文の引数を足した。専用 parser の文言は
+  変わらない)
+
+移植しなかったもの: `parse-claude-docs.py` の `URL:` 行からの URL の読み取りと、同じタイトルの短い
+H1 ページを次のページに畳む処理。手元の Claude docs の全キャッシュで、どちらも 1 件も起きていない
+(`URL:` 行 0 件、H1 で区切ったページ 230 件が畳まなくても一致)。
+
+確認:
+
+- `split: "auto"` の Claude docs 向けの候補で、`parse-claude-docs.py` と区切ったページのタイトル・URL・
+  本文が一致する (parity の fixture と手元の全キャッシュ: claude-code 230 ページ、claude-platform
+  634 ページ)。選ばれた候補 (code は H1、platform は frontmatter) もテストで固定した
+- 同梱 presets 35 件の実コーパス (`index_url` を持つ presets は `llms.txt` も) と parity の fixture を、
+  変更前の版と今回の版に 10 種のサブコマンドで流し、900 回とも stdout・stderr・終了コードが一致した
+- `parse-claude-docs.py` と、ランダムに組み立てた Claude docs 形式のファイル (形ごとに 1,000 件) で
+  区切りを比べた。差が出たのは、閉じないコードブロックの後の frontmatter、コードブロック内の
+  frontmatter の例、`URL:` 行、同じタイトルの H1 の連続、末尾に `#` の付いた H1 のときだけで、
+  どれも既知の違い。閉じないコードブロックの後の frontmatter を汎用 loader はページの区切りとして
+  読まない (コードブロックの中とみなす)。この挙動はテストで固定し、変えるかは別に決める
+
 ## [0.37.0] - 2026-10-15
 
 ### 追加: 汎用 loader の profile に frontmatter の値とタグのキー 2 つ (どれも既定 off)

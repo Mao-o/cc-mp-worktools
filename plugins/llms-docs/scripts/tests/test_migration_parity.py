@@ -814,6 +814,54 @@ class PlatformStructureParityTest(unittest.TestCase):
                 self.assertTrue(any(m.endswith(what) for m in mismatches), mismatches)
 
 
+# ``parse-claude-docs.py`` reads both Claude docs files with one splitter that
+# tries H1 + ``Source:`` and frontmatter + ``url:`` and keeps the one with
+# more URL-bearing pages (a tie goes to H1). ``split: "auto"`` with these
+# candidates is the same rule; the presets name their shape outright.
+CLAUDE_AUTO_PROFILE = {
+    "url": "https://example.com/llms-full.txt", "split": "auto", "min_heading_level": 2,
+    "split_candidates": [{"split": "h1", "page_url": "line:Source: "},
+                         {"split": "frontmatter", "page_url": "frontmatter:url",
+                          "strip_trailing_headings": True}],
+}
+
+
+def auto_split_mismatches(full_text: Path, want_split: str) -> list[str]:
+    """Pages where ``split: "auto"`` (``CLAUDE_AUTO_PROFILE``) differs from
+    ``parse-claude-docs.py``'s ``split_documents``: title, URL or body
+    lines, plus the candidate it chose when that is not *want_split*."""
+    import _common
+    cd = _loader.load_script("parse-claude-docs.py")
+    g = _loader.load_script("parse-llms-txt.py")
+    lines = _common.load_lines(str(full_text))
+    old = cd.split_documents(lines)
+    try:
+        profile = g._validate_profile("sources.json", "claude", CLAUDE_AUTO_PROFILE)
+    except SystemExit as e:
+        return [f"profile rejected (exit {e.code})"]
+    _choice, used, new = g.resolve_split(lines, profile)
+    out = [] if used["split"] == want_split else [f"chose {used['split']}"]
+    if len(old) != len(new):
+        return out + [f"page count {len(old)} != {len(new)}"]
+    for i, (o, n) in enumerate(zip(old, new)):
+        for what, a, b in (("title", o["title"], n["title"]), ("url", o["source_url"], n["url"]),
+                           ("body", o["body_lines"], n["body_lines"])):
+            if a != b:
+                out.append(f"[{i}] {o['title']}: {what}")
+    return out
+
+
+class SplitAutoParityTest(unittest.TestCase):
+    """``split: "auto"`` reproduces the old script's pages on both Claude
+    docs fixtures (the code one ends in a fence that is never closed)."""
+
+    def test_code_and_platform_pages_match(self):
+        for name, want in (("claude-code", "h1"), ("claude-platform", "frontmatter")):
+            with self.subTest(name):
+                full = FIXTURES / "claude-docs" / f"{name}-llms-full.txt"
+                self.assertEqual(auto_split_mismatches(full, want), [])
+
+
 @unittest.skipUnless(os.environ.get(CORPUS_ENV) == "1",
                      f"local-only full-corpus gate ({CORPUS_ENV}=1)")
 class CorpusParityGateTest(unittest.TestCase):
@@ -862,6 +910,14 @@ class CorpusParityGateTest(unittest.TestCase):
         if not full.exists():
             self.skipTest(f"no {full}")
         self.assertEqual(platform_page_mismatches(full, GENERIC_PROFILES["claude-platform"]), [])
+
+    def test_split_auto_pages_match_on_the_full_corpus(self):
+        for name, want in (("claude-code", "h1"), ("claude-platform", "frontmatter")):
+            full = self.cache / f"{name}-llms-full.txt"
+            if not full.exists():
+                continue
+            with self.subTest(name):
+                self.assertEqual(auto_split_mismatches(full, want), [])
 
 
 if __name__ == "__main__":
