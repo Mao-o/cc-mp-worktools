@@ -1097,6 +1097,29 @@ class SplitAutoParityTest(unittest.TestCase):
                 self.assertEqual(auto_split_mismatches(full, want), [])
 
 
+def corpus_cache_dir() -> Path:
+    """The local cache the full-corpus gates read: the loaders' own default
+    (``$LLMS_DOCS_CACHE_DIR`` / ``$XDG_CACHE_HOME/llms-docs`` /
+    ``~/.cache/llms-docs``), so a gate reads the cache the scripts fill."""
+    import _common
+    return Path(_common.default_cache_dir())
+
+
+class CorpusCacheDirTest(unittest.TestCase):
+
+    def test_the_gates_read_the_loaders_default_cache(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        for env, want in (({"LLMS_DOCS_CACHE_DIR": os.path.join(tmp, "own")}, os.path.join(tmp, "own")),
+                          ({"XDG_CACHE_HOME": tmp}, os.path.join(tmp, "llms-docs")),
+                          ({"HOME": tmp}, os.path.join(tmp, ".cache", "llms-docs"))):
+            with self.subTest(env=env):
+                clean = {k: v for k, v in os.environ.items()
+                         if k not in ("LLMS_DOCS_CACHE_DIR", "XDG_CACHE_HOME")}
+                with mock.patch.dict(os.environ, {**clean, **env}, clear=True):
+                    self.assertEqual(corpus_cache_dir(), Path(want))
+
+
 @unittest.skipUnless(os.environ.get(CORPUS_ENV) == "1",
                      f"local-only full-corpus gate ({CORPUS_ENV}=1)")
 class CorpusParityGateTest(unittest.TestCase):
@@ -1108,9 +1131,7 @@ class CorpusParityGateTest(unittest.TestCase):
     """
 
     def setUp(self):
-        self.cache = Path(os.environ.get("LLMS_DOCS_CACHE_DIR")
-                          or os.path.join(os.environ.get("XDG_CACHE_HOME")
-                                          or os.path.expanduser("~/.cache"), "llms-docs"))
+        self.cache = corpus_cache_dir()
 
     def _cached(self, case_id: str) -> bool:
         corpus = case_of(case_id)[1]

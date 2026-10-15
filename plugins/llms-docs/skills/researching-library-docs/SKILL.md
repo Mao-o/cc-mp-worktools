@@ -172,7 +172,7 @@ llms-full.txt にページ URL が無く、`llms.txt` とタイトルが一致�
 | `search-content` | `<query> [--page-ref REF] [--limit N] [--max-hits N] [--include-changelog-priority]` | 本文を横断検索 |
 | `sections` | `<page_ref>` | ページの見出し一覧 |
 | `content` | `<page_ref> [heading_path] [--max-chars N]` | 本文を表示 |
-| `fetch-index` | `[--compact]` | 全ページ一覧 (フォールバック) |
+| `fetch-index` | `[--compact] [--offset N] [--limit N]` | 全ページ一覧 (フォールバック) |
 | `sources` | | 使える source の一覧 (presets と利用者の sources.json) |
 
 スクリプトパス: `${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py`

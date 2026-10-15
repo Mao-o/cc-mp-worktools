@@ -1746,25 +1746,31 @@ def _fetch_pages_concurrently(args, profile: dict, indexed_urls) -> tuple[dict, 
     (one dead link must not cost the other candidates). Threads: each fetch
     waits on the network. Only ``search`` uses this, on its bounded ``--top-n``
     candidates; ``search-content`` fetches one page at a time so that its
-    results print as each page completes (``_search_content_fetch``)."""
+    results print as each page completes (``_search_content_fetch``). A URL
+    that two entries share (``llms.txt`` lists it twice) is fetched once and
+    its result given to each of them."""
     paths: dict = {}
     skipped: list = []
+    idxs_of: dict = {}
+    for idx, url in indexed_urls:
+        idxs_of.setdefault(url, []).append(idx)
 
-    def fetch_one(idx: int, url: str):
+    def fetch_one(url: str):
         try:
-            return idx, url, _fetch_page(args, profile, url, timeout=profile["page_fetch_timeout"],
-                                         raise_on_error=True), None
+            return url, _fetch_page(args, profile, url, timeout=profile["page_fetch_timeout"],
+                                    raise_on_error=True), None
         except FetchError as e:
-            return idx, url, None, e.cause
+            return url, None, e.cause
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=profile["page_fetch_workers"]) as pool:
-        futures = [pool.submit(fetch_one, idx, url) for idx, url in indexed_urls]
+        futures = [pool.submit(fetch_one, url) for url in idxs_of]
         for future in concurrent.futures.as_completed(futures):
-            idx, url, path, error = future.result()
-            if error is None:
-                paths[idx] = path
-            else:
-                skipped.append((idx, url, error))
+            url, path, error = future.result()
+            for idx in idxs_of[url]:
+                if error is None:
+                    paths[idx] = path
+                else:
+                    skipped.append((idx, url, error))
     # completion order is not reproducible: report in page order
     skipped.sort(key=lambda s: s[0])
     return paths, skipped
@@ -1856,6 +1862,12 @@ def _search_content_fetch(args, profile: dict) -> None:
                         extra_lines=_url_line(d), anchor_for=_anchor_for(profile, d),
                         show_overflow=profile["show_overflow"])
         sys.stdout.flush()
+    if skipped and not searched:
+        # nothing was read: a zero-hit report would count no page and call
+        # the terms "not in this corpus" (as sections / content, exit 1)
+        what = (f"the --page-ref {args.page_ref} page" if args.page_ref is not None
+                else f"any of the {len(skipped)} pages")
+        die(f"could not fetch {what} (no cache either, see the skip lines above); nothing was searched")
     if total == 0:
         print("No matching content found.")
         print()
@@ -2622,6 +2634,18 @@ def _add_common(parser, *, source: bool = True) -> None:
     add_max_age_arg(parser)
 
 
+def _nonneg_int(text: str) -> int:
+    """argparse ``type`` of an integer option that must be 0 or more (a
+    negative ``--top-n`` would slice all but the last candidates)."""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: {text!r}") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be 0 or more, got {value}")
+    return value
+
+
 def main():
     parser = argparse.ArgumentParser(description="Progressive loader for any llms-full.txt described in sources.json")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2676,7 +2700,8 @@ def main():
     p = sub.add_parser("search", help="Smart search: rank documents and drill into the top N bodies")
     p.add_argument("query", help="Space-separated keywords (AND search)")
     _add_common(p)
-    p.add_argument("--top-n", type=int, default=5, help="Candidate documents to drill into (default: 5)")
+    p.add_argument("--top-n", type=_nonneg_int, default=5,
+                   help="Candidate documents to drill into (default: 5)")
     p.add_argument("--max-hits", type=int, default=3, help="Max body hits per document (default: 3)")
     p.add_argument("--context", type=int, default=2, help="Context lines around each hit (default: 2)")
     add_max_snippet_chars_arg(p)

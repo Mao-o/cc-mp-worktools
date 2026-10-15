@@ -28,8 +28,11 @@ import contextlib
 import io
 import json
 import os
+import re
 import shlex
 import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -469,6 +472,76 @@ class FetchProfileValidationTest(unittest.TestCase):
             src.doCleanups()
         self.assertEqual(code, 0, err)
         self.assertIn(f"firebase  [user, fetch]  {INDEX_URL}", out)
+
+
+PLUGIN_DIR = Path(_loader.SCRIPTS_DIR).parent
+
+
+def _readme_fetch_shape() -> tuple:
+    """``(required, optional)`` keys of the ``body: fetch`` row of the README's
+    shape table, as ``{key: value}`` (a key written without a value gets a
+    placeholder URL): the part before `` (+ `` and the part inside it."""
+    rows = [line for line in (PLUGIN_DIR / "README.md").read_text(encoding="utf-8").splitlines()
+            if line.startswith("| ") and line.split(" | ")[1:2]
+            and line.split(" | ")[1].startswith("`body: fetch`")]
+    assert len(rows) == 1, rows
+    cell = rows[0].split(" | ")[1]
+    required, _sep, optional = cell.partition(" (+ ")
+
+    def keys(text: str) -> dict:
+        out = {}
+        for span in re.findall(r"`([^`]+)`", text):
+            key, _colon, value = span.partition(": ")
+            if not value:
+                out[key] = "https://docs.example.com/llms.txt"
+                continue
+            try:
+                out[key] = json.loads(value)
+            except ValueError:
+                out[key] = value
+        return out
+    return keys(required), keys(optional)
+
+
+class ReadmeFetchShapeTest(unittest.TestCase):
+    """The README's ``body: fetch`` shape row, as written, is a profile the
+    validator accepts, and every key it calls required is."""
+
+    def test_the_required_keys_are_a_valid_profile_and_each_is_needed(self):
+        required, optional = _readme_fetch_shape()
+        self.assertEqual(required.get("body"), "fetch")
+        _valid("sources.json", "docs", required)
+        _valid("sources.json", "docs", {**required, **optional})
+        for key in required:
+            with self.subTest(dropped=key):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+                    g._validate_profile("sources.json", "docs",
+                                        {k: v for k, v in required.items() if k != key})
+
+
+def _help_options(*argv: str) -> set:
+    run = subprocess.run([sys.executable, os.path.join(_loader.SCRIPTS_DIR, SCRIPT), *argv, "--help"],
+                         capture_output=True, text=True, timeout=60)
+    assert run.returncode == 0, run.stderr
+    return set(re.findall(r"(?<![\w-])(--[a-z][a-z-]*)", run.stdout))
+
+
+class SkillCommandTableTest(unittest.TestCase):
+    """The command table of the generic loader's SKILL.md names options the
+    commands have; ``fetch-index``'s row names all of its own (the paging
+    options included)."""
+
+    def test_documented_options_exist_and_fetch_index_lists_its_own(self):
+        text = (PLUGIN_DIR / "skills" / "researching-library-docs" / "SKILL.md").read_text(encoding="utf-8")
+        rows = dict(re.findall(r"^\| `([a-z-]+)` \| ([^|]*) \|", text, re.M))
+        common = _help_options("sections")
+        for cmd in ("search", "search-index", "search-content", "sections", "content", "fetch-index"):
+            with self.subTest(cmd=cmd):
+                documented = set(re.findall(r"--[a-z][a-z-]*", rows[cmd]))
+                self.assertLessEqual(documented, _help_options(cmd))
+        self.assertEqual(set(re.findall(r"--[a-z][a-z-]*", rows["fetch-index"])),
+                         _help_options("fetch-index") - common)
 
 
 class PageCacheNameTest(unittest.TestCase):
@@ -999,6 +1072,208 @@ class RoundTripTest(_FetchSource):
         self.assertNotIn("shown", out)
 
 
+class FetchProfileKeyEffectTest(_FetchSource):
+    """Each key of a ``body: "fetch"`` profile that the other classes do not
+    already exercise changes the output it is documented to change."""
+
+    def use(self, **keys) -> None:
+        self.profile = {**PROFILE, **keys}
+        self.setUp()
+
+    def test_min_heading_level_1_makes_h1_sections(self):
+        url = "https://firebase.google.com/docs/h1.md.txt"
+        body = "# Page title\n\nintro text\n\n# Second part\nzzzword here\n"
+        for level, h1 in ((1, True), (2, False)):
+            with self.subTest(min_heading_level=level):
+                self.use(min_heading_level=level)
+                self.seed(_index(("Page title", url, "d")), {url: body})
+                code, out, err = self.run_g("sections", "0")
+                self.assertEqual(code, 0, err)
+                self.assertEqual("[L1] Second part" in out, h1)
+                code, out, err = self.run_g("search-content", "zzzword", "--page-ref", "0")
+                self.assertEqual(code, 0, err)
+                self.assertEqual("Section: Second part  (x1)" in out, h1)
+                self.assertEqual("Section: (top)" in out, not h1)
+                code, out, err = self.run_g("search", "page title zzzword")
+                self.assertEqual(code, 0, err)
+                self.assertEqual("Section: Page title  (x1)" in out, h1)
+                if h1:
+                    # the printed Next: line opens the H1 section
+                    line = next(x for x in self.run_g("search-content", "zzzword", "--page-ref", "0")[1]
+                                .splitlines() if x.startswith("Next: "))
+                    c, o, e = self._run_words(shlex.split(line, comments=True)[1:])
+                    self.assertEqual(c, 0, e)
+                    self.assertIn("# heading_path: Second part", o)
+                    self.assertIn("zzzword here", o)
+
+    def test_show_overflow_lists_the_sections_past_max_hits(self):
+        url = "https://firebase.google.com/docs/two.md.txt"
+        body = "# Two\n\n## First\nwidget one\n\n## Second\nwidget two\n"
+        for keys, shown in (({"show_overflow": True}, True), ({}, False)):
+            with self.subTest(keys=keys):
+                self.use(**keys)
+                self.seed(_index(("Two widget", url, "d")), {url: body})
+                for argv in (("search-content", "widget", "--max-hits", "1"),
+                             ("search", "widget", "--max-hits", "1")):
+                    code, out, err = self.run_g(*argv)
+                    self.assertEqual(code, 0, err)
+                    self.assertEqual("Other sections with hits (not shown):" in out, shown, argv)
+                    self.assertEqual("      - Second  (x1)" in out, shown, argv)
+
+    def test_compact_pack_packs_the_compact_index(self):
+        for keys, packed in (({"compact_pack": True}, True), ({}, False)):
+            with self.subTest(keys=keys):
+                self.use(**keys)
+                self.seed(_index(*ROWS))
+                code, out, err = self.run_g("fetch-index", "--compact")
+                self.assertEqual(code, 0, err)
+                rows = [line for line in out.splitlines() if "Topic" in line]
+                self.assertEqual(len(rows) < len(ROWS), packed, rows)
+                self.assertEqual(sum(line.count("Topic") for line in rows), len(ROWS))
+
+    def test_description_is_listed_by_sources(self):
+        self.use(description="Pages fetched one by one")
+        code, out, err = self.run_g("sources", "--sources-file", self.sources, raw=True)
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"firebase  [user, fetch]  {INDEX_URL}\n    Pages fetched one by one\n", out)
+
+    def test_page_ref_forms_url_reaches_the_page_a_substring_cannot_tell_apart(self):
+        rows = [(t, u, d) for t, u, d, _b in TRICKY]
+        self.seed(_index(*rows), {u: b for _t, u, _d, b in TRICKY})
+        # both cli/targets.md.txt and cli.md.txt contain this prefix
+        ref = "https://firebase.google.com/docs/cli"
+        code, out, err = self.run_g("sections", ref)
+        self.assertEqual(code, 0, err)
+        self.assertIn('"CLI reference"', out.splitlines()[0])
+        # the slug form: the URL's last part without page_url_strip_suffix
+        code, out, err = self.run_g("sections", "multiprojects")
+        self.assertEqual(code, 0, err)
+        self.assertIn('"Configure projects"', out.splitlines()[0])
+
+
+class FetchSearchFixesTest(_FetchSource):
+
+    def test_a_url_listed_twice_is_fetched_once_for_both_candidates(self):
+        url = "https://firebase.google.com/docs/twice.md.txt"
+        self.seed(_index(("Widget guide", url, "widget"), ("Widget guide again", url, "widget")))
+        self.net.served[url] = _page("Widget guide", "widget text")
+        code, out, err = self.run_g("search", "widget")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.net.pages(), [url])
+        self.assertIn("[0] Widget guide (", out)
+        self.assertIn("[1] Widget guide again (", out)
+        # a failure is counted for each of them
+        self.setUp()
+        self.seed(_index(("Widget guide", url, "widget"), ("Widget guide again", url, "widget")))
+        code, out, err = self.run_g("search", "widget")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.net.pages(), [url])
+        self.assertIn("(2 documents skipped — fetch failed, see stderr)", out)
+
+    def test_top_n_must_not_be_negative(self):
+        self.seed(_index(*ROWS), {u: _page(t) for t, u, _d in ROWS})
+        for value in ("-1", "-5", "x"):
+            with self.subTest(value):
+                code, _out, err = self.run_g("search", "widget", "--top-n", value)
+                self.assertEqual(code, 2, err)
+                self.assertIn("argument --top-n", err)
+        self.assertIn("argument --top-n: invalid int value: 'x'", self.run_g("search", "w", "--top-n", "x")[2])
+        code, out, err = self.run_g("search", "widget", "--top-n", "0")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("[0] Topic", out)
+        code, out, err = self.run_g("search", "widget", "--top-n", "2")
+        self.assertEqual(code, 0, err)
+        self.assertIn("(2 documents, ranked via index → body fetch)", out)
+        self.assertEqual(self.net.calls, [])
+
+    def test_search_content_with_no_page_fetched_exits_1_without_a_zero_hit_report(self):
+        self.seed(_index(*ROWS[:2]))
+        for argv, what in ((("--page-ref", "1"), "the --page-ref 1 page"), ((), "any of the 2 pages")):
+            with self.subTest(argv):
+                code, out, err = self.run_g("search-content", "widget", *argv)
+                self.assertEqual(code, 1, out)
+                self.assertIn(f"Error: could not fetch {what}", err)
+                self.assertIn("(skip: fetch failed", err)
+                self.assertNotIn("not in this corpus", out)
+                self.assertNotIn("No matching content found", out)
+                self.assertNotIn("Why nothing matched", out)
+
+
+class SearchContentPipeTest(unittest.TestCase):
+    """``search-content`` on a pipe (as the Bash tool runs it): the first
+    page's results can be read while the second page is still being
+    fetched. A ``StringIO`` stdout cannot show this; a pipe is
+    block-buffered unless the loader flushes."""
+
+    def test_first_page_is_read_from_the_pipe_while_the_second_is_fetched(self):
+        import http.server
+        import queue
+        release, asked = threading.Event(), threading.Event()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path.startswith("/docs/p1"):
+                    asked.set()
+                    release.wait(60)
+                data = f"# Page {self.path}\n\n## Overview\nzzzpipe word\n".encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *a):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.addCleanup(release.set)
+        base = f"http://127.0.0.1:{server.server_address[1]}/docs"
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        sources = os.path.join(tmp, "sources.json")
+        with open(sources, "w", encoding="utf-8") as f:
+            json.dump({"sources": {"firebase": PROFILE}}, f)
+        p = _valid(sources, "firebase", PROFILE)
+        Path(g._index_cache_path(tmp, p)).write_text(
+            _index(("Pipe zero", f"{base}/p0.md.txt", "d"), ("Pipe one", f"{base}/p1.md.txt", "d")),
+            encoding="utf-8")
+        env = {k: v for k, v in os.environ.items()
+               if k.lower() not in ("pythonunbuffered", "http_proxy", "https_proxy", "all_proxy")}
+        env["NO_PROXY"] = env["no_proxy"] = "127.0.0.1,localhost"
+        with open(os.path.join(tmp, "stderr.txt"), "w", encoding="utf-8") as err_file:
+            proc = subprocess.Popen(
+                [sys.executable, os.path.join(_loader.SCRIPTS_DIR, SCRIPT), "search-content", "zzzpipe",
+                 "--source", "firebase", "--sources-file", sources, "--cache-dir", tmp],
+                stdout=subprocess.PIPE, stderr=err_file, text=True, env=env)
+
+        def reap():
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=30)
+            proc.stdout.close()
+        self.addCleanup(reap)
+        lines: queue.Queue = queue.Queue()
+        threading.Thread(target=lambda: [lines.put(x) for x in proc.stdout] and None, daemon=True).start()
+        seen = []
+        deadline = time.monotonic() + 15
+        # the process cannot end before page 1 is released, so a line read
+        # now was flushed to the pipe, not written out at exit
+        while time.monotonic() < deadline and not ("[0] Pipe zero\n" in seen and asked.is_set()):
+            try:
+                seen.append(lines.get(timeout=0.2))
+            except queue.Empty:
+                pass
+        self.assertTrue(asked.is_set(), f"page 1 was never requested: {seen}")
+        self.assertFalse(release.is_set())
+        self.assertIn("[0] Pipe zero\n", seen, "page 0's result was not readable while page 1 was pending")
+        release.set()
+        self.assertEqual(proc.wait(timeout=60), 0, Path(tmp, "stderr.txt").read_text(encoding="utf-8"))
+
+
 class FetchMembersTest(_FetchSource):
     """A ``body: "fetch"`` source in a ``members`` alias next to a full-text one."""
 
@@ -1046,7 +1321,7 @@ class CachedFirebaseRoundTripTest(unittest.TestCase):
     number in the index, opens with its own title and no fetch."""
 
     def test_every_cached_page_opens_by_its_number(self):
-        cache = Path(os.path.expanduser("~/.cache/llms-docs"))
+        cache = parity.corpus_cache_dir()
         if not (cache / "firebase-llms.txt").exists():
             self.skipTest("no firebase cache")
         import _common
