@@ -10,21 +10,25 @@ All notable changes to this plugin will be documented here.
 `search --source both` を、profile の別名で使えるようにした。`members` を持つ profile が無ければ今までどおり
 (同梱 presets の出力は変わらない。`presets.json` は変えていない)。
 
-- `{"members": ["claude-code", "claude-platform"]}`: その profile はファイルを読まない別名になり、
+- `{"members": ["cloudflare-workers", "cloudflare-d1"]}`: その profile はファイルを読まない別名になり、
   `search --source <別名>` が各 source を書いた順に検索する。結果は source ごとに
   `--- <label> (--source <source>) ---` の見出しの下に並び、各行の先頭に `[<source>]` が付く。
   ページ番号は source ごとなので、`Next:` の行はそのページの `--source` を持ち、そのまま実行すると
   その行のページが開く (0 件のときの案内も source ごと)。並び・本文のヒット・`Next:` に残す最上位の
   候補は旧 parser の `--source both` と同じ
 - `search` 以外のコマンドは別名を受け付けず、終了コード 2 で選べる source を出す。`--file` /
-  `--index-file` (1 つの source のファイル) とも一緒に使えない
+  `--index-file` (1 つの source のファイル) とも一緒に使えない (同じく終了コード 2)
 - どれか 1 つの source を読めない (キャッシュが無く取得にも失敗した、`llms.txt` との対応づけの割合が
   下限を下回った) ときは、残りの source だけを全部の結果のように出さず、何も出さずにその source の
   エラーで止まる。古いキャッシュは 1 つの source のときと同じく警告を出して使う
 - `members` には 2 つ以上の別々の source 名を書く。書けるキーは `members` と `description` だけ。
-  存在しない source、別名、自分自身は書けない。利用者の `sources.json` にも書ける (同梱 presets の
-  source を `members` に書いてよい)
-- `sources` の一覧では `<名前>  [user, members, search only]  a + b` と出す
+  別名と自分自身は書けない。利用者の `sources.json` にも書ける (同梱 presets の source を `members` に
+  書いてよい)
+- 存在しない source を書いた別名 (plugin の更新で同梱 preset の名前が変わった・無くなった場合を含む) は、
+  読み込みでは止めず、その別名を `--source` に指定したときだけ存在しない名前を出して止まる。利用者が
+  何も編集していないのに、ほかの source のコマンドまで全部止まることはない
+- `sources` の一覧では `<名前>  [user, members, search only]  a + b` と出す。存在しない source を書いた
+  別名は `[user, members, broken: <存在しない名前>]` と出す
 - テスト: `members` の検証と拒否、source の種類 (`llms.txt` でランキングする source どうし / ページで
   ランキングする source どうし / 混在) × キャッシュの状態 (すべてある / 無くて取得する / 片方だけある) の
   全組み合わせで、各見出しの下が `search --source <source>` 単独の結果と一致し、各行の番号と各 `Next:` の

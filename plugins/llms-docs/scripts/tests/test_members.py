@@ -254,8 +254,6 @@ class MembersValidationTest(unittest.TestCase):
             "not a name": ({"members": ["claude-code", "../x"]}, "source names"),
             "not a string": ({"members": ["claude-code", 3]}, "source names"),
             "itself": ({"members": ["claude-code", "x"]}, "must not name x itself"),
-            "unknown member": ({"members": ["claude-code", "no-such-source"]},
-                               "'no-such-source', which is not a configured source"),
             "member that is an alias": ({"members": ["claude-code", "claude"]},
                                         "'claude', which lists members itself"),
             "key of a file profile": ({"members": ["claude-code", "ai-sdk"], "url": CODE_FULL},
@@ -323,6 +321,70 @@ class MembersValidationTest(unittest.TestCase):
         self.assertIn("claude  [user, members, search only]  claude-code + claude-platform", out)
 
 
+class MembersMissingMemberTest(unittest.TestCase):
+    """A member that is not a configured source (a bundled preset renamed or
+    removed by a plugin update) stops only what uses that alias: loading
+    still works, every other source and ``sources`` still run, and a search
+    on the alias names the missing member."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="llms members missing ")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.sources = os.path.join(self.tmp, "sources.json")
+        with open(self.sources, "w", encoding="utf-8") as f:
+            json.dump({"sources": {"web": {"members": ["hono", "zod-renamed"]}}}, f)
+        self.page = os.path.join(self.tmp, "llms-full.txt")
+        with open(self.page, "w", encoding="utf-8") as f:
+            f.write("# Routing\n\nThe x router matches paths.\n\n# Middleware\n\nRuns before x handlers.\n")
+
+    def _run(self, argv: list):
+        argv = [SCRIPT, *argv, "--sources-file", self.sources]
+        if argv[1] != "sources":  # the only command without a cache
+            argv += ["--cache-dir", self.tmp]
+        calls: list = []
+        env = {k: v for k, v in os.environ.items() if k not in ("LLMS_DOCS_CACHE_DIR", "XDG_CACHE_HOME",
+                                                                g.SOURCES_ENV)}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch("urllib.request.urlopen", side_effect=_network(calls, parity.FIXTURES, down=True)):
+            try:
+                return _loader.run_cli(g, argv)
+            except Exception as e:
+                self.fail(f"crashed: {e!r}")
+
+    def test_other_source_still_searches(self):
+        code, out, err = self._run(["search", "x", "--source", "hono", "--file", self.page])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Routing", out)
+
+    def test_sources_marks_the_alias_broken(self):
+        code, out, err = self._run(["sources"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("web  [user, members, broken: zod-renamed]  hono + zod-renamed", out)
+        self.assertRegex(out, r"(?m)^hono  \[preset, ")
+
+    def test_search_on_the_alias_names_the_missing_member(self):
+        code, out, err = self._run(["search", "x", "--source", "web"])
+        self.assertNotEqual(code, 0)
+        self.assertEqual(out, "")
+        self.assertIn("--source web lists members that are not configured sources: zod-renamed", err)
+
+    def test_other_command_on_the_alias_names_the_missing_member(self):
+        code, out, err = self._run(["content", "1", "--source", "web"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("not configured sources: zod-renamed", err)
+
+    def test_load_accepts_a_missing_member(self):
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err):
+            try:
+                sources = g.load_sources(self.sources, explicit=True)
+            except SystemExit as e:
+                self.fail(f"load refused a missing member: exit {e.code}: {err.getvalue()}")
+            except Exception as e:  # a crash fails the assertion instead of erroring the run
+                self.fail(f"load crashed on a missing member: {e!r}")
+        self.assertEqual(sources["web"]["members"], ("hono", "zod-renamed"))
+
+
 class MembersRefusalTest(unittest.TestCase):
     def test_other_commands_refuse_an_alias_and_name_its_members(self):
         env = _Env(self)
@@ -343,7 +405,7 @@ class MembersRefusalTest(unittest.TestCase):
         for opt in ("--file", "--index-file"):
             with self.subTest(opt):
                 code, out, err, calls = env.run(["search", "kit", "--source", "claude", opt, env.sources])
-                self.assertEqual(code, 1)
+                self.assertEqual(code, 2)
                 self.assertEqual((out, calls), ("", []))
                 self.assertIn(f"{opt} is a file of one source, and --source claude names several", err)
 

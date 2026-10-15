@@ -283,8 +283,9 @@ def _validate_profile(path: str, name: str, raw, at: str | None = None) -> dict:
 def _validate_members_profile(path: str, name: str, raw: dict) -> dict:
     """``members``: *name* is an alias that ``search`` runs on each listed
     source in turn (the other commands read one source and refuse it). The
-    names are checked against the configured sources in ``load_sources``,
-    once the user file is laid over the presets."""
+    names are checked against the configured sources once the user file is
+    laid over the presets: a nested alias in ``load_sources``, a missing
+    member only when the alias is used (``_get_profile``)."""
     extra = set(raw) - _MEMBERS_PROFILE_KEYS
     if extra:
         _bad(path, f"sources.{name} lists members, so it reads no file of its own: "
@@ -303,14 +304,14 @@ def _validate_members_profile(path: str, name: str, raw: dict) -> dict:
 
 
 def _check_members(sources: dict) -> None:
-    """Every ``members`` entry names a configured source that is not an
-    alias itself (an alias of aliases is refused, not flattened)."""
+    """No ``members`` entry names a configured source that is an alias
+    itself (an alias of aliases is refused, not flattened). A member that is
+    not configured (a preset renamed or removed by an update) is left to
+    ``_get_profile``, so it stops only a search on that alias, not every
+    command."""
     for name, p in sources.items():
         for member in p.get("members") or ():
-            if member not in sources:
-                _bad(p["origin"], f"sources.{name}.members names {member!r}, which is not a "
-                                  f"configured source")
-            if sources[member].get("members"):
+            if member in sources and sources[member].get("members"):
                 _bad(p["origin"], f"sources.{name}.members names {member!r}, which lists members "
                                   f"itself ({sources[member]['origin']}); name the sources it lists instead")
 
@@ -581,6 +582,11 @@ def _read_sources_file(path: str) -> dict:
     return profiles
 
 
+def _missing_members(sources: dict, profile: dict) -> list[str]:
+    """The ``members`` of *profile* that are not configured sources."""
+    return [m for m in profile.get("members") or () if m not in sources]
+
+
 def _get_profile(args, *, members_ok: bool = False) -> dict:
     """The profile ``--source`` names. A ``members`` alias is only for
     ``search`` (*members_ok*), which gets it with ``member_profiles``; any
@@ -592,6 +598,11 @@ def _get_profile(args, *, members_ok: bool = False) -> dict:
     profile = sources[args.source]
     if profile.get("members"):
         names = profile["members"]
+        missing = _missing_members(sources, profile)
+        if missing:
+            die(f"--source {args.source} lists members that are not configured sources: "
+                f"{', '.join(missing)} (in {profile['origin']}; a bundled preset may have been "
+                f"renamed or removed). Configured: {', '.join(sorted(sources))}")
         if not members_ok:
             die(f"--source {args.source} names several sources ({', '.join(names)}); only 'search' "
                 f"reads several at once. Give '{args.command}' one of them: "
@@ -1542,7 +1553,7 @@ def _index_candidates(args, profile: dict, docs: list[dict]) -> list[dict]:
 
 
 def _source_hint_args(args, source: str | None = None) -> tuple:
-    """``--source`` is always required here, so it is always echoed. An
+    """``--source`` is echoed unless a ``members`` search leaves it to each page (below). An
     explicit sources file (``--sources-file`` or ``$LLMS_DOCS_SOURCES_FILE``)
     is echoed as ``--sources-file`` too: the hint may run in a shell without
     that env var, where the same name could resolve to a bundled preset —
@@ -1814,7 +1825,9 @@ def cmd_sources(args):
     for name, p in sorted(sources.items()):
         origin = "preset" if p["origin"] == PRESETS_FILE else "user"
         if p.get("members"):
-            print(f"{name}  [{origin}, members, search only]  {' + '.join(p['members'])}")
+            missing = _missing_members(sources, p)
+            state = f"broken: {', '.join(missing)}" if missing else "search only"
+            print(f"{name}  [{origin}, members, {state}]  {' + '.join(p['members'])}")
         else:
             print(f"{name}  [{origin}, {p['split']}]  {p['url']}")
         if p["description"]:
@@ -2144,7 +2157,7 @@ def _search_members(args, alias: dict) -> None:
     for opt, value in (("--file", args.file), ("--index-file", args.index_file)):
         if value is not None:
             die(f"{opt} is a file of one source, and --source {args.source} names several "
-                f"({', '.join(names)}): search one of them with {opt} (--source <name>)")
+                f"({', '.join(names)}): search one of them with {opt} (--source <name>)", code=2)
     args.members = names
     runs = [(member["name"], *_search_results(args, member)) for member in alias["member_profiles"]]
     labels = " + ".join(_label(run[1]) for run in runs)
