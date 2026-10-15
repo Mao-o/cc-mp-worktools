@@ -21,7 +21,7 @@ allowed-tools:
   - WebFetch
 metadata:
   author: mao
-  version: "3.4.0"
+  version: "4.0.0"
 ---
 
 # AI SDK ドキュメント調査
@@ -33,12 +33,12 @@ ai-sdk.dev/llms-full.txt を唯一の権威ある情報源として段階的に�
 
 ```bash
 # 1. キーワードで候補ドキュメント + 本文 hits を取得
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" search "<キーワード>"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" search "<キーワード>" --source ai-sdk
 # 2. 返ってきた [doc_idx] と heading_path を使って本文取得
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" content <doc_idx> "<heading_path>"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" content <doc_idx> "<heading_path>" --source ai-sdk
 ```
 
-迷ったら `search` から始める。詳細は下記「調査フロー」以降。
+迷ったら `search` から始める。`--source ai-sdk` は毎回付ける (省略できない)。詳細は下記「調査フロー」以降。
 `search` / `search-content` の末尾の `Next:` は上位ヒットの `doc_idx` と heading_path が埋まっている (そのまま実行できる)。
 
 ## 調査の進め方 (手数の目安)
@@ -46,8 +46,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" content <doc_idx> "<head
 - **論点が複数あるとき**は、最初に論点を番号付きで列挙し、1 つずつ順に処理して、論点ごとに結論
   (または「ドキュメントに記載なし」) を返す。複数の論点を 1 回の `search` に詰めない
 - 1 論点の基本は **`search` 1 回 → `content` 1〜2 回**。`search` の末尾の `Next:` 行は `doc_idx` と見出しが
-  埋まったコマンドなので、見出しを手で写さずそのまま実行する (先頭の `parse-ai-sdk.py` は
-  `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py"` に置き換える)
+  埋まったコマンドなので、見出しを手で写さずそのまま実行する (先頭の `parse-llms-txt.py` は
+  `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py"` に置き換える)
 - 同じ論点で `search` を **3 回外したら**、言い換えを続けない。`search-index` / `sections` で構造から当たるか、
   「ドキュメントに記載なし」として返す
 - **`--max-chars 0`** は、出力に `... (N chars truncated; ...)` が出て、既定の上限 (24000 字) で
@@ -61,11 +61,11 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" content <doc_idx> "<head
 general-purpose の subagent など、Skill ツールを使えない文脈では、公式ドキュメントを WebFetch する前に、
 同梱のスクリプトを直接実行する (WebFetch は要約モデル経由で field が抜ける)。
 
-1. パスは `${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py`。`${CLAUDE_PLUGIN_ROOT}` が空の環境では、plugin の展開先 (`~/.claude/plugins/` の下) を探す。
+1. パスは `${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py`。`${CLAUDE_PLUGIN_ROOT}` が空の環境では、plugin の展開先 (`~/.claude/plugins/` の下) を探す。
    ディレクトリを指定して追加した marketplace は展開先へコピーされず、その場で読まれるので、見つからなければ
    `claude plugin marketplace list` で `Source: Folder (<dir>)` と出る marketplace の `<dir>` の下の
-   `plugins/llms-docs/scripts/parse-ai-sdk.py` を探す
-2. `python3 <path> search "<キーワード>"` を実行し、出力末尾の `Next:` の先頭を `python3 <path>` に置き換えて本文を取る
+   `plugins/llms-docs/scripts/parse-llms-txt.py` を探す
+2. `python3 <path> search "<キーワード>" --source ai-sdk` を実行し、出力末尾の `Next:` の先頭を `python3 <path>` に置き換えて本文を取る
 
 ## v3 互換性
 
@@ -88,7 +88,7 @@ v3 で `search` が推奨入口に統一された。旧フローの `search-inde
 ### Step 1: キーワードで候補ドキュメント + 本文 hits を取得（推奨入口）
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" search "<キーワード>"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" search "<キーワード>" --source ai-sdk
 ```
 
 スペース区切りで複数キーワード（AND）。未取得なら自動でネットワークから取得する。
@@ -100,7 +100,7 @@ index の上位 N 件に本文ヒットが 1 件も無いときは、全文検�
 ### Step 2: 必要なセクションの本文を取得
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" content <page_ref> "<heading_path>"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" content <page_ref> "<heading_path>" --source ai-sdk
 ```
 
 `heading_path` を省略するとドキュメント全体を取得。**サブセクション一覧**と次の `content` 呼び出し例を、本文の前後両方（metadata header 直後 と 末尾）に自動出力する（`--no-subsection-hints` で抑制可）。本文は既定 24000 文字で切り詰められ (`--max-chars 0` で無制限)、超過時は `... (N chars truncated; narrow with ...)` を出す。子見出しの無い節や見出しの無いページ (絞る先が無い) では代わりに、仮置きの語 (節の見出しかページタイトル) を名指しする注記と `Next: ... search-content --page-ref N --context 0 -- <仮置きの語>` を出す (語は常に `--` の後ろに置くので、`--resume` のような語に差し替えても打てる)。そのまま実行でき、注記の語を探したい語に差し替えて使う。
@@ -108,13 +108,13 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" content <page_ref> "<hea
 ### 補助: セクション一覧を確認したいとき
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" sections <page_ref>
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" sections <page_ref> --source ai-sdk
 ```
 
 ### 補助: 特定ドキュメント内だけ本文検索したいとき
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" search-content "<キーワード>" --page-ref <ref>
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" search-content "<キーワード>" --page-ref <ref> --source ai-sdk
 ```
 
 ### フォールバック: 全ドキュメント一覧を確認
@@ -122,32 +122,39 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" search-content "<キー�
 `search` で見つからない場合のみ使用する。
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py" fetch-index --compact
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" fetch-index --compact --source ai-sdk
 ```
 
 ---
 
 ## page_ref の指定方法
 
-2 形式を受け付ける (claude-docs / firebase は URL slug / 完全 URL も含め 3 形式):
+4 形式を受け付け、上から順に試す:
 
 - **整数 index** (推奨): `42` — `search` / `search-index` の結果に表示される `[<doc_idx>]` の数字
-- **タイトル部分一致**: `"Event Callbacks"` — 一意に決まる場合のみ。曖昧な場合はエラーになる
+- **タイトル部分一致**: `"Event Callbacks"` — 一意に決まる場合のみ。曖昧な場合はエラーになる (候補ごとのコマンド付き)
+- **完全 URL**: `https://ai-sdk.dev/docs/ai-sdk-core/generating-text` — 各ページの frontmatter の `url:` (`sections` /
+  `content` / `search` / `search-content` が `URL:` 行に表示する) と正規化して一致するページ。末尾の `/` や `.md` は
+  無視する。一致するページが無ければ `No page found for URL` で exit 1
+- **URL の末尾 (slug)**: `generating-text`, `ai-sdk-core/generating-text` — URL がその段で終わるページ。複数あれば
+  候補ごとのコマンド付きで曖昧エラーになるので、長い slug か完全 URL を渡す
 
-AI SDK の各ページは frontmatter に `url:` を持ち、`sections` / `content` / `search` / `search-content` が表示する (`URL:` 行、`content` では `# source:` 行)。ただし page_ref としては解決しないので、URL / slug 形式は受け付けない (整数 index を使うこと)。表示された URL を貼ってしまったときは `No document found` で exit 1 になるが、その URL を `url:` に持つページがあれば、そのページを読む `content <index>` (`sections` / `search-content --page-ref` ならそのコマンド) の行を続けて出す。その行をそのまま実行する。持つページが無ければ、URL の最後の段から作った `search` の行を出す。URL の最後の段だけ (`prune-messages` など) を渡し、どのページのタイトルにも一致しなかったときも同様で、その最後の段を持つページのコマンドを出す。最後の段がタイトルの一部にも当たるとタイトルの一致が先に効き、そのページがそのまま開く (同じ最後の段を持つ別ページがあっても出ない。例 `acp`)。開いたページの `URL:` 行が目的のページかを確かめる。`url:` が無いページには行が付かない。
+タイトルの部分一致が先に効くので、slug がどれかのタイトルの一部にも当たると、そのタイトルのページが開く
+(同じ slug で終わる別ページがあっても開かない。例 `acp`)。開いたページの `URL:` 行が目的のページかを確かめる。
+どの形式にも当たらなければ `No document found for: <ref>` で exit 1。
 
 ## コマンドリファレンス
 
 | コマンド | 引数 | 説明 |
 |---------|------|------|
-| `search` | `<query> [--file F] [--top-n N] [--max-hits N] [--context N] [--max-snippet-chars N] [--include-changelog-priority]` | 推奨入口。title/desc/tags で top N 絞り込み + 本文 hits。並び順は全キーワードが揃うか → ページタイトルと見出し (祖先の見出しを含む) が全キーワードを語として含むか (キーワードが 1 語のときはページの順に使わない) → 本文 hits 数 → index score (changelog / release notes は既定で末尾、`--include-changelog-priority` で解除)。ページ内の節は、見出しが全キーワードを含む節の中で、自分の見出しがあって初めて全語が揃う節を、見出しを受け継ぐだけの子孫より先に出し、その後ヒット数の順 |
-| `search-index` | `<query> [--file F] [--limit N] [--show-sections]` | title/description/tags/見出しで候補だけ取得 |
-| `search-content` | `<query> [--file F] [--page-ref REF] [--limit N] [--context N] [--max-hits N] [--max-snippet-chars N] [--include-changelog-priority]` | 本文を横断キーワード検索、heading_path + スニペットを返す |
-| `fetch-index` | `[--file F] [--compact] [--cache-dir DIR]` | 全ドキュメント一覧を表示（フォールバック用） |
-| `sections` | `<page_ref> [--file F] [--cache-dir DIR]` | 指定ドキュメントの見出し一覧を表示 |
-| `content` | `<page_ref> [heading_path] [--file F] [--cache-dir DIR] [--max-chars N] [--no-subsection-hints]` | セクション本文を表示。前後にサブセクション一覧、既定 24000 文字で切り詰め |
+| `search` | `<query> --source ai-sdk [--file F] [--top-n N] [--max-hits N] [--context N] [--max-snippet-chars N] [--include-changelog-priority]` | 推奨入口。title/desc/tags で top N 絞り込み + 本文 hits。並び順は全キーワードが揃うか → ページタイトルと見出し (祖先の見出しを含む) が全キーワードを語として含むか (キーワードが 1 語のときはページの順に使わない) → 本文 hits 数 → index score (changelog / release notes は既定で末尾、`--include-changelog-priority` で解除)。ページ内の節は、見出しが全キーワードを含む節の中で、自分の見出しがあって初めて全語が揃う節を、見出しを受け継ぐだけの子孫より先に出し、その後ヒット数の順 |
+| `search-index` | `<query> --source ai-sdk [--file F] [--limit N] [--show-sections]` | title/description/tags/見出しで候補だけ取得 |
+| `search-content` | `<query> --source ai-sdk [--file F] [--page-ref REF] [--limit N] [--context N] [--max-hits N] [--max-snippet-chars N] [--include-changelog-priority]` | 本文を横断キーワード検索、heading_path + スニペットを返す |
+| `fetch-index` | `--source ai-sdk [--file F] [--compact] [--cache-dir DIR]` | 全ドキュメント一覧を表示（フォールバック用） |
+| `sections` | `<page_ref> --source ai-sdk [--file F] [--cache-dir DIR]` | 指定ドキュメントの見出し一覧を表示 |
+| `content` | `<page_ref> [heading_path] --source ai-sdk [--file F] [--cache-dir DIR] [--max-chars N] [--no-subsection-hints]` | セクション本文を表示。前後にサブセクション一覧、既定 24000 文字で切り詰め |
 
-スクリプトパス: `${CLAUDE_PLUGIN_ROOT}/scripts/parse-ai-sdk.py`
+スクリプトパス: `${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py` (同梱 presets の汎用 loader)。全コマンドに `--source ai-sdk` が要る。
 
 全サブコマンドで `--file <path>` を受け付け、省略時は `--cache-dir`/`ai-sdk-llms-full.txt` を auto-fetch / 再利用する。
 
@@ -192,9 +199,9 @@ AI SDK の各ページは frontmatter に `url:` を持ち、`sections` / `conte
 | ネットワーク失敗 | fetch timeout / connection error | 既存キャッシュがあれば WARNING を出して stale cache のまま継続 (exit 0)。無ければ Error で exit 1。復旧後に最新化したい場合は `--max-age 0` で強制再取得 |
 | キャッシュ破損 | パースエラー / 不正なインデックス | `--max-age 0` で強制再取得 (キャッシュディレクトリは既定 `~/.cache/llms-docs`、`--cache-dir` で確認・変更可) |
 | 結果ゼロ | `No matching ...` の下に `Why nothing matched:` (語ごとのドキュメント数) | 全語が 0 件なら言い換えを続けず、別の語・`search-index`・`fetch-index --compact` に切り替える。一部の語だけ 0 件ならその語を落とす。全語が corpus にあるのに 0 件 (同じセクションに揃わない) なら語を減らす。いずれも続けて出る `Next:` がそのまま実行できる |
-| URL を page_ref に渡した | `No document found for: <URL>` と `page_ref takes an integer index or a title substring.` | URL は引用元の表示用で page_ref には使えない。続けて出る、その URL を持つページのコマンド (整数 index) をそのまま実行する。持つページが無ければ続く `search` を使う |
-| URL の最後の段 (slug) を page_ref に渡した | `No document found for: prune-messages` と `A URL's last segment is not resolved; ...` | タイトルに一致しなかった `a-z0-9-` だけの 1 語が対象。最後の段がそれと等しい URL のページが 1 つなら、そのページのコマンド (整数 index。見出しとオプションは引き継ぐ) が続く。2 つ以上なら全部が並ぶので選んで実行する。無ければ slug の語から作った `search` を使う |
-| 曖昧な page_ref | `Ambiguous title substring '...'. Matches:` | 候補ごとに実行できるコマンドが付く。選んでそのまま実行する |
+| どのページの URL でもない URL を page_ref に渡した | `No page found for URL: <URL>` | URL の綴りを確かめる。分からなければ URL の最後の段の語で `search` する |
+| どの形式にも当たらない page_ref | `No document found for: <ref>` | 整数 index を `search` / `search-index` で調べ直す |
+| 曖昧な page_ref | `Ambiguous title substring '...'. Matches:` / `Ambiguous slug '...'. Matches:` | 候補ごとに実行できるコマンドが付く。選んでそのまま実行する (slug なら長い slug か完全 URL でもよい) |
 | heading が見つからない | `Error: heading '...' not found.` | `Closest sections:` の候補 (コマンド付き) を先に使う。全見出しは `Available sections:` に続く |
 | Python バージョン不足 | 起動直後に PEP 604 のユニオン型記法が原因の `TypeError: unsupported operand type(s) for ...` | `python3 --version` を確認し 3.11 以上を用意する (`mise use python@3.11` 等)。3.11 未満では動作しない |
 | スクリプトエラー (その他) | Python traceback | 下記 WebFetch フォールバックへ |

@@ -40,7 +40,9 @@ metadata:
 ドキュメントにない情報は「ドキュメントに記載なし」と明記すること。
 
 Claude Code / Claude API・AI SDK・Firebase は専用 skill (`researching-claude-docs` /
-`researching-ai-sdk` / `researching-firebase`) の対象で、この skill では扱わない。
+`researching-ai-sdk` / `researching-firebase`) の対象で、この skill では扱わない。script は同じ
+`parse-llms-txt.py` で、source 名 (`claude-code` / `claude-platform` / `claude` / `ai-sdk` / `firebase`) と
+読み方は各 skill にある。
 
 ## Step 0: source を決める
 

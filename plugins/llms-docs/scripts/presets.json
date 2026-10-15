@@ -427,7 +427,9 @@
       "list_page_urls": false,
       "page_ref_forms": [
         "int",
-        "title"
+        "title",
+        "url",
+        "slug"
       ],
       "protect_tables": false,
       "compact_pack": true,

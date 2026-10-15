@@ -7,13 +7,13 @@ Claude 公式ドキュメント、AI SDK 公式ドキュメント、Firebase 公
 
 | スキル | 対象 | 推奨エントリポイント |
 |--------|------|---------------------|
-| `researching-claude-docs` | Claude Code / Claude Developer Platform | `search` (URL-join 統合検索) → `content <page_ref> "<heading_path>"` |
-| `researching-ai-sdk` | Vercel AI SDK (ai-sdk.dev) | `search` (top N 候補 + 本文 hits) → `content <page_ref> "<heading_path>"` |
-| `researching-firebase` | Firebase (firebase.google.com) | `search` (top N on-demand fetch + 本文 hits) → `content <page_ref> "<heading_path>"` |
+| `researching-claude-docs` | Claude Code / Claude Developer Platform | `search --source claude-code` (URL-join 統合検索) → `content <page_ref> "<heading_path>" --source claude-code` (`claude-platform` / 両方の `search` は `claude`) |
+| `researching-ai-sdk` | Vercel AI SDK (ai-sdk.dev) | `search --source ai-sdk` (top N 候補 + 本文 hits) → `content <page_ref> "<heading_path>" --source ai-sdk` |
+| `researching-firebase` | Firebase (firebase.google.com) | `search --source firebase` (top N on-demand fetch + 本文 hits) → `content <page_ref> "<heading_path>" --source firebase` |
 | `researching-library-docs` | 同梱 presets のサイト (Next.js / Vite / Vitest / Drizzle / Zod / Hono / Bun / Vercel / Render / MCP / Codex / Ollama / Agent Skills / Agent Plugins / OpenAI Plugins・API docs / ACP / Cline / Factory / Devin / Cloudflare 製品別) と利用者の `sources.json` のサイト | `search --source <name>` → `content <page_ref> "<heading_path>" --source <name>` |
 
-3 script で `search` / `search-index` / `search-content` / `sections` / `content` / `fetch-index` の
-サブコマンド名・引数・`<page_ref>` 形式が統一されている (0.7.0)。
+4 skill とも同じ script (`scripts/parse-llms-txt.py`) を、source 名 (`--source`) を変えて使う (0.46.0)。
+サブコマンドは `search` / `search-index` / `search-content` / `sections` / `content` / `fetch-index` (と `sources`)。
 
 ### 命名メモ: `researching-claude-docs` が `claude` を含むのは意図的
 
@@ -35,30 +35,34 @@ Skill ツールが使えない文脈 (general-purpose の subagent など) で�
 同じ調査ができる。公式ドキュメントを WebFetch する前に、こちらを使う (WebFetch は要約モデル経由で
 field が抜ける)。
 
-1. スクリプトのパスを決める: `${CLAUDE_PLUGIN_ROOT}/scripts/<script>`。`${CLAUDE_PLUGIN_ROOT}` が空の
+1. スクリプトのパスを決める: `${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py`。`${CLAUDE_PLUGIN_ROOT}` が空の
    環境では、plugin の展開先 (`~/.claude/plugins/` の下) を探す。
    ディレクトリを指定して追加した marketplace は展開先へコピーされず、その場で読まれるので、見つからなければ
    `claude plugin marketplace list` で `Source: Folder (<dir>)` と出る marketplace の `<dir>` の下の
    `plugins/llms-docs/scripts/` を探す
-2. `python3 <path> search "<キーワード>"` を実行し、出力末尾の `Next:` の先頭の script 名を
+2. `python3 <path> search "<キーワード>" --source <name>` を実行し、出力末尾の `Next:` の先頭の script 名を
    `python3 <path>` に置き換えて、本文 (`content`) を取る
 
-| 調べる対象 | script | 備考 |
+全コマンドに `--source <name>` が必須 (既定の source は無い):
+
+| 調べる対象 | `--source` | 備考 |
 |---|---|---|
-| Claude Code / Claude Developer Platform | `parse-claude-docs.py` | `--source platform` / `--source both` |
-| AI SDK | `parse-ai-sdk.py` | |
-| Firebase | `parse-firebase.py` | |
-| 同梱 presets・利用者の `sources.json` のサイト | `parse-llms-txt.py` | 全コマンドに `--source <name>` が必須 |
+| Claude Code | `claude-code` | |
+| Claude Developer Platform | `claude-platform` | 両方をまとめた `search` は `claude` (`search` だけ) |
+| AI SDK | `ai-sdk` | |
+| Firebase | `firebase` | |
+| 同梱 presets・利用者の `sources.json` のサイト | `<name>` | `sources` で一覧 |
 
 調査の手数の目安 (1 論点は `search` 1 回 → `content` 1〜2 回、3 回外したら言い換えずに構造から当たる、
 `--max-chars 0` は上限で切れたと確かめてから) は各 skill の「調査の進め方」にある。
 
 ### エラー・0 件のあとの出力
 
-4 script とも、失敗や 0 件のあとに「次に打つコマンド」をそのまま出す (エラーと 0 件の exit code は
-変わらない。claude-docs で下の規則により 1 ページに解決した slug は、曖昧エラーではなく本文を返す):
+失敗や 0 件のあとに「次に打つコマンド」をそのまま出す (エラーと 0 件の exit code は
+変わらない。slug を受け付ける source で下の規則により 1 ページに解決した slug は、曖昧エラーではなく本文を返す):
 
-- **曖昧な page_ref**: 候補ごとに実行できるコマンドを付ける。claude-docs は slug が `<lang>/<slug>`
+- **曖昧な page_ref**: 候補ごとに実行できるコマンドを付ける。slug を受け付ける source (`claude-code` /
+  `claude-platform` / `ai-sdk` / `firebase`) は slug が `<lang>/<slug>`
   に完全一致するページが 1 件だけならそれに解決し、他の候補を stderr の `Note:` で、それを読むコマンド
   付きで知らせる (`hooks` は `en/hooks`。`en/agent-sdk/hooks` は別のページ)。候補のコマンドは
   `--max-chars` / `--limit` などの既定以外の値も引き継ぐ
@@ -79,17 +83,16 @@ field が抜ける)。
 | Skill | `skills/researching-claude-docs/SKILL.md` |
 | Skill | `skills/researching-ai-sdk/SKILL.md` |
 | Skill | `skills/researching-firebase/SKILL.md` |
-| Skill | `skills/researching-library-docs/SKILL.md` (`parse-llms-txt.py` を使う) |
-| Script | `scripts/parse-claude-docs.py` |
-| Script | `scripts/parse-ai-sdk.py` |
-| Script | `scripts/parse-firebase.py` |
-| Script | `scripts/parse-llms-txt.py` (任意サイトの `llms-full.txt`。skill は `researching-library-docs`) |
+| Skill | `skills/researching-library-docs/SKILL.md` |
+| Script | `scripts/parse-llms-txt.py` (4 skill 共通の loader。同梱 presets と利用者の `sources.json` のサイトを `--source` で選ぶ) |
+| Shim | `scripts/_shim.py` (0.45.0 までの専用 script 名で呼ばれたときに、引数を読み替えて `parse-llms-txt.py` を起動する。次のリリースで削除する) |
 | Data | `scripts/presets.json` (`parse-llms-txt.py` の同梱 profile) |
 | Dev tool | `scripts/check-preset-urls.py` (presets の `url` / `index_url` を HEAD で点検する。ネットワークに出るので suite には入れない) |
 | Shared | `scripts/_common.py` (FenceTracker / extract_sections / fetch_url ほか共通ヘルパー) |
 | Shared | `scripts/_commands.py` (`sections` / `content` / 検索結果・index 行の出力テンプレートと、検索後の `Next:` 行・0 件の診断。各 script は page を `PageView` に詰めて渡す) |
 | Docs | `docs/paths-and-fork-context.md` (`paths` 自動ロードと `context: fork` の実測) |
 | Docs | `docs/generic-llms-txt-source.md` (任意の `llms.txt` サイト対応のコスト見積り) |
+| Test | `scripts/tests/legacy/` (0.45.0 までの専用 script の実装。移行の比較の基準として shim の削除まで残す。実行時には使わない) |
 
 ## 前提条件
 
@@ -109,23 +112,23 @@ claude --plugin-dir ./plugins/llms-docs
 # python3 <script> の形式で呼び出す（直接実行 ./script.py は非対応）
 
 # search (推奨入口: 候補絞り込み + 本文 hits を 1 コマンド)
-python3 plugins/llms-docs/scripts/parse-claude-docs.py search "hook matcher"
-python3 plugins/llms-docs/scripts/parse-ai-sdk.py search "streamText onFinish"
-python3 plugins/llms-docs/scripts/parse-firebase.py search "Firestore query limit"
+python3 plugins/llms-docs/scripts/parse-llms-txt.py search "hook matcher" --source claude-code
+python3 plugins/llms-docs/scripts/parse-llms-txt.py search "streamText onFinish" --source ai-sdk
+python3 plugins/llms-docs/scripts/parse-llms-txt.py search "Firestore query limit" --source firebase
 
 # search-index (候補だけ取得したいとき; 軽量 llms.txt ベース)
-python3 plugins/llms-docs/scripts/parse-claude-docs.py search-index "hook matcher"
-python3 plugins/llms-docs/scripts/parse-ai-sdk.py search-index "streamText onFinish"
-python3 plugins/llms-docs/scripts/parse-firebase.py search-index "Firestore query limit"
+python3 plugins/llms-docs/scripts/parse-llms-txt.py search-index "hook matcher" --source claude-code
+python3 plugins/llms-docs/scripts/parse-llms-txt.py search-index "streamText onFinish" --source ai-sdk
+python3 plugins/llms-docs/scripts/parse-llms-txt.py search-index "Firestore query limit" --source firebase
 
 # search-content (特定ページ内だけ本文検索)
-python3 plugins/llms-docs/scripts/parse-claude-docs.py search-content "matcher PreToolUse" --page-ref hooks
-python3 plugins/llms-docs/scripts/parse-ai-sdk.py search-content "useChat onFinish" --page-ref 153
-python3 plugins/llms-docs/scripts/parse-firebase.py search-content "orderBy limit" --page-ref 2972
+python3 plugins/llms-docs/scripts/parse-llms-txt.py search-content "matcher PreToolUse" --page-ref hooks --source claude-code
+python3 plugins/llms-docs/scripts/parse-llms-txt.py search-content "useChat onFinish" --page-ref 153 --source ai-sdk
+python3 plugins/llms-docs/scripts/parse-llms-txt.py search-content "orderBy limit" --page-ref 2972 --source firebase
 
 # fetch-index (フォールバック)
-python3 plugins/llms-docs/scripts/parse-claude-docs.py fetch-index
-python3 plugins/llms-docs/scripts/parse-firebase.py fetch-index --limit 10
+python3 plugins/llms-docs/scripts/parse-llms-txt.py fetch-index --source claude-code
+python3 plugins/llms-docs/scripts/parse-llms-txt.py fetch-index --limit 10 --source firebase
 ```
 
 ## 回帰テストスイート
@@ -150,22 +153,22 @@ pytest scripts/tests/test_common.py::ParseLlmsIndexTest::test_colon_description_
 
 既定のキャッシュディレクトリは `~/.cache/llms-docs` (`$XDG_CACHE_HOME/llms-docs` があればそちら、`$LLMS_DOCS_CACHE_DIR` で完全上書き可)。`--cache-dir` で個別指定も可能。
 
-| スキル | キャッシュファイル (`<cache-dir>` 配下) |
+| source | キャッシュファイル (`<cache-dir>` 配下) |
 |--------|-------------------|
-| claude-docs (Code) | `claude-code-llms.txt`, `claude-code-llms-full.txt` |
-| claude-docs (Platform) | `claude-platform-llms.txt`, `claude-platform-llms-full.txt` |
-| ai-sdk | `ai-sdk-llms-full.txt` |
-| firebase | `firebase-llms.txt` (index), `firebase-docs/` (per-page) |
+| `claude-code` | `claude-code-llms.txt`, `claude-code-llms-full.txt` |
+| `claude-platform` | `claude-platform-llms.txt`, `claude-platform-llms-full.txt` |
+| `ai-sdk` | `ai-sdk-llms-full.txt` |
+| `firebase` | `firebase-llms.txt` (index), `firebase-docs/` (per-page) |
 | 任意サイト (`parse-llms-txt.py`、presets 含む。上の 4 行の preset は上の名前) | `generic-<source 名>-<url のハッシュ 12 桁>-llms-full.txt` (profile の URL を変えると別ファイルになる)。`cache_name` を持つ preset は `<cache_name>-llms-full.txt` / `<cache_name>-llms.txt` (URL を含まない名前なので、キャッシュの `.meta.json` に記録した取得 URL が profile の URL と違えば再取得する) |
 
-最新版が必要な場合は `--max-age 0` で強制再取得する（`rm` でも良いが、`fetch_url` は取得失敗時に既存キャッシュを stale なまま使い続けるフォールバックを持つため、`--max-age 0` の方が「取得できなければ既存キャッシュのまま」という安全側の挙動になる）。ただし `cache_name` を持つ preset (と専用 script) のキャッシュで、`.meta.json` に記録した取得 URL が今の URL と違うとき (preset の URL が変わったとき) は、取得できなければ既存キャッシュを使わずエラーにする (別の URL の内容を返さないため)。
+最新版が必要な場合は `--max-age 0` で強制再取得する（`rm` でも良いが、`fetch_url` は取得失敗時に既存キャッシュを stale なまま使い続けるフォールバックを持つため、`--max-age 0` の方が「取得できなければ既存キャッシュのまま」という安全側の挙動になる）。ただし `cache_name` を持つ preset のキャッシュで、`.meta.json` に記録した取得 URL が今の URL と違うとき (preset の URL が変わったとき) は、取得できなければ既存キャッシュを使わずエラーにする (別の URL の内容を返さないため)。
 
 ## 任意の llms-full.txt を読む
 
 `scripts/parse-llms-txt.py` は、profile に従って任意のサイトの `llms-full.txt` を読む
 (0.25.0)。サブコマンド (`search` / `search-index` / `search-content` / `sections` / `content` /
-`fetch-index`) と `<page_ref>` の形は 3 つの専用 script と同じで、加えて使える profile を
-一覧する `sources` がある。skill `researching-library-docs` (0.27.0) がこの script を使い、
+`fetch-index`) に加えて、使える profile を一覧する `sources` がある。0.46.0 から 4 skill すべてがこの
+script を使う。skill `researching-library-docs` (0.27.0) は
 description に同梱 presets のサイト名を並べて auto-invoke の対象にしている。presets に無い
 サイトを `sources.json` に足した場合は、skill を `/llms-docs:researching-library-docs <source> <質問>`
 で明示的に起動するか、CLI を直接呼ぶ。
@@ -207,7 +210,7 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading
 | `ai-sdk` | AI SDK (Vercel AI SDK) | あり (`search` / `sections` / `content` に出す。`fetch-index` / `search-index` の一覧には出さない) |
 | `firebase` | Firebase (`llms-full.txt` が無いので、`llms.txt` の各ページを必要なときに取得する。`body: fetch`) | あり (`.md.txt`) |
 
-`claude-code` / `claude-platform` / `claude` / `ai-sdk` / `firebase` は専用の 3 script (`parse-claude-docs.py` / `parse-ai-sdk.py` / `parse-firebase.py`) と同じ出力になるよう設定した preset で、キャッシュも専用 script と同じファイル (下の「キャッシュ」の表) を読み書きする。それぞれの skill (`researching-claude-docs` / `researching-ai-sdk` / `researching-firebase`) は、まだ専用 script を使う。
+`claude-code` / `claude-platform` / `claude` / `ai-sdk` / `firebase` は 0.45.0 までの専用 script と同じ出力になるよう設定した preset で、キャッシュも専用 script と同じファイル (下の「キャッシュ」の表) を読み書きする。それぞれの skill (`researching-claude-docs` / `researching-ai-sdk` / `researching-firebase`) が使う (0.46.0 から)。
 
 **取得先のホスト** (`scripts/presets.json` の `url` / `index_url` から出した一覧。ネットワークの出口を決める根拠にする。
 1 行に 1 ホスト、次のコードブロックはテストが読む):
@@ -241,8 +244,8 @@ zod.dev
 
 preset の追加・移転のたびにこの一覧を presets.json に合わせる (`presets.json` との集合の一致は suite が確かめる。
 ルートの README の Privacy 表はこの一覧を指しており、ホストを列挙していない)。
-専用の 3 skill の取得先 (`code.claude.com` / `platform.claude.com` / `ai-sdk.dev` / `firebase.google.com`) も、
-同じ取得先の preset があるので含む。
+`researching-claude-docs` / `researching-ai-sdk` / `researching-firebase` の取得先 (`code.claude.com` /
+`platform.claude.com` / `ai-sdk.dev` / `firebase.google.com`) も、それぞれの preset の取得先として含む。
 
 他の製品や他のサイトは、下の `sources.json` に profile を書けば読める。
 
@@ -305,7 +308,7 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `link_path_aliases` | | `link_annotations` のとき、同じページを指す別のパスの接頭辞の組のリスト (例 `[["/docs/en/", "/en/"]]`)。`(/…)` のリンクがそのままではどのページにも当たらないとき、組の片方の接頭辞をもう片方に置き換えて探す (両方向)。完全な URL のリンクには使わない。接頭辞は `/` で始まり `/` で終わる |
 | `label` | | 結果のヘッダに出す表示名 |
 | `body` | | `full` (既定) = 本文は `url` の `llms-full.txt` から読む / `fetch` = `llms-full.txt` の無いサイト (Firebase) 用。`index_url` の `llms.txt` の項目がそのままページになり (ページ番号は `llms.txt` での並び順)、本文はコマンドが必要としたときに項目の URL から 1 ページずつ取得してページの cache に置く (`--max-age` は他のファイルと同じ)。`rank_from: index` と `index_url`、`page_ref_forms` の `slug` と `url` (`rank_from: index` の条件) が要り、`url` と、`llms-full.txt` の区切り方・読み方のキー (`split` / `page_url` / `index_join` / `link_annotations` / `drop_lines` など) は書けない。`fetch-index` / `search-index` は `llms.txt` だけを読み、ページを取得しない (`search-index --show-sections` は無視して stderr に知らせる)。`sections` / `content` は指定したページだけを取得する (失敗して cache も無ければ終了コード 1)。`search` は上位 `--top-n` 件の候補だけを `page_fetch_workers` 件ずつ並行に取得し、候補が 0 件なら何も取得しない。本文の全文検索への fallback はしない (全ページの取得になるため)。`search-content` は `--page-ref` のページ、無ければ全ページを `llms.txt` の順に 1 ページずつ取得し、ページごとに結果を出す (並行にすると全ページの取得が済むまで何も出ないため、並べ替えもしない。`--include-changelog-priority` は効かず stderr に知らせる)。取得に失敗したページは stderr に `(skip: fetch failed …)` と出して飛ばし、件数を `(N documents skipped — fetch failed, see stderr)` の行に出す (`llms.txt` に同じ URL の項目が 2 つあっても取得は 1 回)。`search-content` が 1 ページも取得できなかったとき (`--page-ref` のページの取得に失敗し cache も無いときなど) は 0 件の案内を出さず、終了コード 1。`--file` は使えない (手元の `llms.txt` は `--index-file` で渡す) |
-| `page_cache_dir` | | 同梱 presets 専用 (`sources.json` に書くとエラー)。`body: fetch` のページの cache を置くディレクトリ名 (キャッシュのディレクトリの下)。無ければ `<cache_name>-pages`、`cache_name` も無ければ `generic-<source 名>-<index_url のハッシュ>-pages`。ファイル名は URL からホストを除いて `/` を `_` に置き換え、180 字で切り、URL の sha1 の先頭 16 桁を付けたもの (`parse-firebase.py` と同じ。URL ごとに別のファイルになる) |
+| `page_cache_dir` | | 同梱 presets 専用 (`sources.json` に書くとエラー)。`body: fetch` のページの cache を置くディレクトリ名 (キャッシュのディレクトリの下)。無ければ `<cache_name>-pages`、`cache_name` も無ければ `generic-<source 名>-<index_url のハッシュ>-pages`。ファイル名は URL からホストを除いて `/` を `_` に置き換え、180 字で切り、URL の sha1 の先頭 16 桁を付けたもの (0.45.0 までの Firebase 専用 script と同じ。URL ごとに別のファイルになる) |
 | `page_fetch_workers` | | `body: fetch` の `search` が同時に取得するページ数 (1〜32。既定 8) |
 | `page_fetch_timeout` | | `body: fetch` の `search` / `search-content` が 1 ページの取得を待つ秒数 (1〜600。既定 30。`sections` / `content` は 120) |
 | `search_content_warn_pages` | | `body: fetch` で `--page-ref` の無い `search-content` が、ページ数がこれを超えると stderr に WARNING を出す (既定 30) |
@@ -383,17 +386,19 @@ WebFetch との比較メモ: WebFetch は要約モデル経由のため field �
 
 ## 保守メモ
 
-`parse-claude-docs.py`、`parse-ai-sdk.py`、`parse-firebase.py` はドキュメント分割方式が
-根本的に異なるため独立したスクリプトとして管理している。特に `parse-firebase.py` は
-Firebase 側に `llms-full.txt` が存在しないため、index + per-page on-demand fetch 方式を
-採用している。そのため Firebase の `search` は top N 件 (default 5) を順次 fetch する
-ヒューリスティクスを持つ。`search-content` の `--page-ref` は単数指定 (省略時は全ページ
-横断、ただし重いので明示指定推奨)。バグ修正や機能改善を行う際は 3 本すべてを確認すること。
+Claude Code / Claude Developer Platform・AI SDK・Firebase は、0.45.0 まで別々の専用 script で読んでいた。
+0.46.0 から 4 skill とも `parse-llms-txt.py` を使い、違いは `presets.json` の profile のキーで表す
+(`rank_from: index` で `llms.txt` の項目をランキングする Claude docs、`body: fetch` でページごとに取得する
+Firebase など)。Firebase の `search` は top N 件 (default 5) だけを取得し、`search-content` の
+`--page-ref` 省略時は全ページを順に取得する (重いので明示指定推奨)。`<page_ref>` の形式は profile の
+`page_ref_forms` で決まる (Claude docs / Firebase は int / 完全 URL / slug、ai-sdk は int / タイトル部分一致 /
+完全 URL / slug)。`--file` を省略すると cache を auto-fetch する。
 
-3 script で API を 0.7.0 で揃えた: `search` / `search-index` / `search-content` /
-`sections` / `content` / `fetch-index` の 6 サブコマンドが共通、`<page_ref>` は
-int / URL slug / 完全 URL を受け付ける (ai-sdk は frontmatter の URL を表示するが page_ref には使えず、int / title 部分一致。表示された URL を貼ると exit 1 になるが、その URL のページを読む実行できる行を続けて出す)、
-`--file` flag は省略時に cache を auto-fetch する。
+専用 script の名前は、既存のコマンドが動き続けるよう 1 リリースだけ shim (`scripts/_shim.py`) として残る。
+shim は引数を読み替えて (`--source code` / `platform` / `both` を `claude-code` / `claude-platform` / `claude` に、
+`--index-limit` を `--top-n` に) `parse-llms-txt.py` を起動するだけで、出力・終了コードは
+`parse-llms-txt.py` のもの (`Next:` 行も `parse-llms-txt.py` を指す)。旧実装は移行の比較の基準として
+`scripts/tests/legacy/` にあり、shim と一緒に削除する。
 
 共通ロジック (code-fence scanner / section & content extraction / llms.txt index parser /
 HTTP fetch / エラーヘルパー / metadata header / Next hint / argparse skeleton /

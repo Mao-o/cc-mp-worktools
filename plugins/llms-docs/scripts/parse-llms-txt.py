@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Progressive loader for any site's ``llms-full.txt``, described by a profile.
 
-The three dedicated loaders (``parse-claude-docs.py`` / ``parse-ai-sdk.py`` /
-``parse-firebase.py``) hard-code one site each. This one reads the site from a
+The three dedicated loaders this replaced (``parse-claude-docs.py`` /
+``parse-ai-sdk.py`` / ``parse-firebase.py``, now shims that run this script
+with the ``claude-code`` / ``ai-sdk`` / ``firebase`` presets, see ``_shim.py``)
+hard-coded one site each. This one reads the site from a
 profile: the presets bundled in ``presets.json`` next to this script, overlaid
 by the user's ``sources.json`` (a user profile replaces a preset of the same
 name). It supports the page shapes seen in the wild (measured 2026-09-26 and
@@ -2077,7 +2079,9 @@ def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
             if len(found) > 1:
                 rows = [(i, d["title"] + (f" ({d['url']})" if d["url"] else "")) for i, d in found[:20]]
                 die_ambiguous_page(f"{field_name} substring", page_ref, rows, retry)
-    if "slug" in forms and not is_url:
+    # a profile that also takes a title (ai-sdk) cannot tell a slug from a
+    # title that matched nothing: "for slug" would misname the latter
+    if "slug" in forms and not is_url and not {"title", "url_substring"} & set(forms):
         die(f"No page found for slug: {page_ref}")
     die(f"No document found for: {page_ref}")
     return -1

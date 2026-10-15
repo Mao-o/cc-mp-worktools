@@ -31,8 +31,15 @@ preset を置き換える。
   落とし、別の corpus を指すコマンドになる
 - `sources.json` の検証漏れで、source 名がキャッシュディレクトリの外を指せる・不正な値で
   クラッシュする
-- 既存の 3 script (`parse-claude-docs.py` / `parse-ai-sdk.py` / `parse-firebase.py`) の出力が
-  変わる
+- 0.45.0 までの専用 script を置き換えた preset (`claude-code` / `claude-platform` / `claude` / `ai-sdk` /
+  `firebase`) の出力が、専用 script の実装 (`scripts/tests/legacy/`) の出力から変わる。ただし移行の比較
+  (`scripts/tests/test_migration_parity.py` の `normalize`) が除く行 (1 行目のヘッダの括弧と直後の
+  `(file: …)` などの行、`Next:` の script 名と既定の corpus・ファイルを指すオプション、末尾の件数行、
+  行頭の `Tip:` / `Note:`、単位の語 `page` / `document`、`URL:` / `url:` の大文字小文字) と、
+  `GENERIC_INTENDED_DIFF` に理由を書いた意図した差は除く
+- 旧 script 名の shim (`scripts/parse-claude-docs.py` / `parse-ai-sdk.py` / `parse-firebase.py`、実体は
+  `scripts/_shim.py`) が、引数の読み替え (`--source` の値と既定、`--index-limit`、省略形の展開) 以外の
+  ことをする、読み替えで別の source・別のオプションになる、`parse-llms-txt.py` 以外の出力を出す
 
 指摘しないもの (対象外として README に明記済み):
 
@@ -56,6 +63,6 @@ preset を置き換える。
 ### 優先度の目安
 
 - P1: 対応形状での誤分割・誤った URL、別 corpus を指すヒント、キャッシュ外への書き込み、
-  既存 3 script の出力の変化
+  専用 script を置き換えた preset の出力の変化 (上の除外を除く)、shim の読み替えの誤り
 - P2: エラーメッセージの誤り、`sources.json` の検証漏れ (クラッシュしないもの)
 - P3: 対応形状を広げる提案、可読性

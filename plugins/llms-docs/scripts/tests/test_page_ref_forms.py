@@ -456,10 +456,15 @@ class FormOrderTest(unittest.TestCase):
                          (None, "Error: No page found for URL: https://example.com/none\n"))
 
     def test_slug_failure_message_when_slug_is_a_form(self):
-        self.assertEqual(resolve("nothing", ("int", "slug", "title")),
+        self.assertEqual(resolve("nothing", ("int", "url", "slug")),
                          (None, "Error: No page found for slug: nothing\n"))
-        self.assertEqual(resolve("nothing", ("int", "title", "slug")),
-                         (None, "Error: No page found for slug: nothing\n"))
+        # with a title (or URL substring) form too, the ref may have been meant
+        # as either: the message names neither (ai-sdk: "int", "title", "url", "slug")
+        for forms in (("int", "slug", "title"), ("int", "title", "slug"),
+                      ("int", "title", "url", "slug"), ("int", "slug", "url_substring")):
+            with self.subTest(forms=forms):
+                self.assertEqual(resolve("nothing", forms),
+                                 (None, "Error: No document found for: nothing\n"))
 
 
 class CliTest(unittest.TestCase):

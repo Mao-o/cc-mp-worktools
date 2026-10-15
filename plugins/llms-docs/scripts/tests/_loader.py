@@ -27,13 +27,23 @@ from pathlib import Path
 from types import ModuleType
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+# The dedicated parsers' implementations. ``scripts/<name>`` of each is now a
+# shim that runs ``parse-llms-txt.py`` with the matching preset; the old code
+# stays here, until the shims are removed, as the reference the migration
+# parity tests (and the old scripts' own unit tests) run.
+LEGACY_DIR = Path(__file__).resolve().parent / "legacy"
+LEGACY_SCRIPTS = frozenset({"parse-claude-docs.py", "parse-ai-sdk.py", "parse-firebase.py"})
 
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 
 def load_script(filename: str) -> ModuleType:
-    """Import ``<scripts_dir>/<filename>`` (e.g. ``parse-claude-docs.py``).
+    """Import ``<scripts_dir>/<filename>`` (e.g. ``parse-llms-txt.py``).
+
+    The names in ``LEGACY_SCRIPTS`` load the old implementation from
+    ``LEGACY_DIR``, not the shim at ``scripts/<name>`` (the shims are tested
+    by running them, see ``test_legacy_shims.py``).
 
     Cached in ``sys.modules`` under a sanitized name so repeated calls
     within a test process return the same module object, mirroring normal
@@ -42,7 +52,7 @@ def load_script(filename: str) -> ModuleType:
     module_name = "_llms_docs_under_test_" + filename[:-3].replace("-", "_")
     if module_name in sys.modules:
         return sys.modules[module_name]
-    path = SCRIPTS_DIR / filename
+    path = (LEGACY_DIR if filename in LEGACY_SCRIPTS else SCRIPTS_DIR) / filename
     spec = importlib.util.spec_from_file_location(module_name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module

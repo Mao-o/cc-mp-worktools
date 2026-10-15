@@ -744,11 +744,11 @@ class SkillGuidanceTest(unittest.TestCase):
                     self.assertIn(needle, text)
 
     def test_failure_table_names_what_the_scripts_print(self):
-        # The strings the table quotes must be strings the scripts still print.
+        # The strings the table quotes must be strings the scripts still print
+        # (all four skills run parse-llms-txt.py).
         printed = "".join(
             (Path(_loader.SCRIPTS_DIR) / f).read_text(encoding="utf-8")
-            for f in ("_common.py", "_commands.py", "parse-claude-docs.py", "parse-ai-sdk.py",
-                      "parse-firebase.py", "parse-llms-txt.py"))
+            for f in ("_common.py", "_commands.py", "parse-llms-txt.py"))
         for quoted in ("Why nothing matched", "Closest sections:", "Available sections:",
                        "Ambiguous {kind}", "Note: '{page_ref}' also matches"):
             self.assertIn(quoted, printed)
