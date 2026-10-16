@@ -1022,6 +1022,13 @@ class UserFileProblemsForPresetsTest(unittest.TestCase):
                                               "mine": self.BAD}}, "claude")
         self.assertIsNone(sources)
         self.assertIn("sources.mine.split", err)
+        # a user-only member is not reported as replacing a bundled preset
+        sources, err = self.load({"sources": {"claude": {"members": ["claude-code", "mine"]},
+                                              "mine": self.MINE}}, "claude")
+        self.assertIsNotNone(sources, err)
+        self.assertEqual(len(self.warnings(err)), 1, err)
+        self.assertIn("sources.claude from", err)
+        self.assertNotIn("sources.mine", err)
 
     # -- the listing stays strict ------------------------------------------
 

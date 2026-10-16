@@ -255,7 +255,7 @@ preset の追加・移転のたびにこの一覧を presets.json に合わせ�
 presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE` >
 `$XDG_CONFIG_HOME/llms-docs/sources.json` > `~/.config/llms-docs/sources.json`
 (キャッシュを消しても profile が消えないよう、キャッシュとは別の設定ディレクトリに置く)。
-`--sources-file` か `$LLMS_DOCS_SOURCES_FILE` で明示したファイルが無いときはエラーにする。
+`--sources-file` か `$LLMS_DOCS_SOURCES_FILE` で明示したファイルが無いときは、`--source` が `sources.json` だけにある名前ならエラーにする (同梱 preset の名前なら下のとおり WARNING を出して続ける)。
 
 `sources.json` に誤りがあるとき、止めるのはその誤りを読むコマンドだけ:
 

@@ -677,7 +677,7 @@ def _caught(fn, *args):
         with contextlib.redirect_stderr(err):
             return fn(*args), None
     except SystemExit:
-        return None, err.getvalue().strip().removeprefix("Error: ")
+        return None, err.getvalue().strip().removeprefix("Error: ") or "invalid (no message)"
 
 
 def _used_names(want: str, raws: dict, presets: dict) -> list[str]:
