@@ -204,6 +204,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" fetch-index --compact 
 | 曖昧な page_ref | `Ambiguous title substring '...'. Matches:` / `Ambiguous slug '...'. Matches:` | 候補ごとに実行できるコマンドが付く。選んでそのまま実行する (slug なら長い slug か完全 URL でもよい) |
 | heading が見つからない | `Error: heading '...' not found.` | `Closest sections:` の候補 (コマンド付き) を先に使う。全見出しは `Available sections:` に続く |
 | Python バージョン不足 | 起動直後に PEP 604 のユニオン型記法が原因の `TypeError: unsupported operand type(s) for ...` | `python3 --version` を確認し 3.11 以上を用意する (`mise use python@3.11` 等)。3.11 未満では動作しない |
+| 利用者の `sources.json` の誤り / 上書き | `Error: <path>/sources.json: …`、または同じファイルを名指す `WARNING: …` | 利用者の `sources.json` の誤りか、同梱 preset の上書き。そのファイルを直す (README「任意の llms-full.txt を読む」の `sources.json` の節)。直せなければ下記 WebFetch フォールバックへ |
 | スクリプトエラー (その他) | Python traceback | 下記 WebFetch フォールバックへ |
 
 ### WebFetch フォールバック

@@ -200,6 +200,7 @@ llms-full.txt にページ URL が無く、`llms.txt` とタイトルが一致�
 | 曖昧な page_ref (`Ambiguous title substring` / `Ambiguous url substring`) | 候補ごとに実行できるコマンドが付く。選んでそのまま実行する |
 | `Error: heading '...' not found.` | `Closest sections:` の候補 (コマンド付き) を先に使う。全見出しは `Available sections:` に続く |
 | 起動直後の `TypeError: unsupported operand type(s)` | Python 3.11 以上が必要 |
+| `Error: <path>/sources.json: …`、または同じファイルを名指す `WARNING: …` | 利用者の `sources.json` の誤りか、同梱 preset の上書き。そのファイルを直す (README「任意の llms-full.txt を読む」の `sources.json` の節)。直せなければ下の WebFetch フォールバック |
 | その他のスクリプトエラー | 下の WebFetch フォールバック |
 
 ### WebFetch フォールバック

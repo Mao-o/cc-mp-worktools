@@ -395,7 +395,12 @@ class MembersRefusalTest(unittest.TestCase):
                 self.assertEqual(code, 2, err)
                 self.assertEqual(out, "")
                 self.assertEqual(calls, [])
-                self.assertEqual(err.splitlines()[0],
+                # this sources file redefines the presets claude / claude-code /
+                # claude-platform, so each replacement is named first
+                warned = [line for line in err.splitlines() if line.startswith("WARNING: ")]
+                self.assertEqual([w.split()[4] for w in warned],
+                                 ["sources.claude", "sources.claude-code", "sources.claude-platform"], err)
+                self.assertEqual(err.splitlines()[len(warned)],
                                  "Error: --source claude names several sources (claude-code, claude-platform); "
                                  f"only 'search' reads several at once. Give '{argv[0]}' one of them: "
                                  "--source claude-code / --source claude-platform")

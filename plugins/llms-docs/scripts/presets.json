@@ -431,6 +431,7 @@
         "url",
         "slug"
       ],
+      "untitled_warn_ratio": 0.1,
       "protect_tables": false,
       "compact_pack": true,
       "label": "AI SDK",

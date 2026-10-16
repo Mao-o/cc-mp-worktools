@@ -257,6 +257,21 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 (キャッシュを消しても profile が消えないよう、キャッシュとは別の設定ディレクトリに置く)。
 `--sources-file` か `$LLMS_DOCS_SOURCES_FILE` で明示したファイルが無いときはエラーにする。
 
+`sources.json` に誤りがあるとき、止めるのはその誤りを読むコマンドだけ:
+
+- `--source` が同梱 preset の名前 (`claude-code` / `ai-sdk` / `firebase` / `nextjs` など) で、`sources.json` が
+  その名前 (別名なら `members` の各 source も) を定義していなければ、ファイルの誤りでは止めない。明示した
+  ファイルが無い・JSON として読めない・形が `{"sources": {...}}` でないときは、stderr に
+  `WARNING: <パス>: <理由>; the file is not used, …` を 1 行出し、同梱 preset で続ける。ほかの profile の誤り
+  (未知のキー、`split` の書き忘れなど) は `WARNING: <パス>: sources.<名前>…; left out, …` を 1 行出し
+  (2 件以上なら件数を添える)、その profile だけを外して続ける。stdout は誤りの無いときと同じ
+- `sources.json` の profile が同梱 preset を置き換えていて、その preset を `--source` で使うときは、
+  `WARNING: --source <名前> reads sources.<名前> from <パス>, which replaces the bundled preset of that name`
+  を 1 行出す (置き換えたこと自体は正しい使い方。意図しない置き換えに気づけるように出す)
+- 次の場合は従来どおり `Error: <パス>: …` で止まる (exit 1): `--source` が `sources.json` だけにある名前の
+  とき、`sources.json` が同梱 preset の名前を定義していて、その定義が誤っているとき
+- `sources` (一覧) はファイルを確かめるためのコマンドなので、どの誤りでも `Error` で止まる
+
 ```json
 {
   "sources": {
@@ -314,7 +329,7 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `search_content_warn_pages` | | `body: fetch` で `--page-ref` の無い `search-content` が、ページ数がこれを超えると stderr に WARNING を出す (既定 30) |
 | `index_page_size` | | `fetch-index` が既定で出す項目数 (0 以上の整数。無いか 0 なら全件)。`fetch-index --offset N --limit M` で範囲を選べ (`--limit 0` は全件)、範囲が全件でないときは末尾に `(M of N documents shown, offset=K)` と、次の範囲を出す `  Next page: --offset … --limit …` (同じコマンドに足して使う) を出す。全件を出すときの出力は変わらない |
 | `cache_name` | | 同梱 presets 専用 (`sources.json` に書くとエラー)。キャッシュのファイル名を `<cache_name>-llms-full.txt` / `<cache_name>-llms.txt` にする |
-| `members` | | 2 つ以上の source 名のリスト (例 `["cloudflare-workers", "cloudflare-d1"]`)。この profile はファイルを読まない別名になり、`search --source <この名前>` が各 source を書いた順に検索する。結果は source ごとに `--- <label> (--source <source>) ---` の見出しの下に並び、各行の先頭に `[<source>]` が付く。ページ番号は source ごとなので、`Next:` の行はそのページの `--source` を持つ (別名のままではページを開けない)。`search` 以外のコマンドは終了コード 2 で止まり、選べる source を出す。`--file` / `--index-file` (1 つの source のファイル) とは一緒に使えない (終了コード 2)。どれか 1 つの source を読めない (キャッシュが無く取得にも失敗した、対応づけの割合が下限を下回った) ときは、何も出さずにその source のエラーで止まる。書けるキーは `members` と `description` だけ。別名 (`members` を持つ profile) と自分自身は書けない (`sources.json` で同梱 preset の source を別名に置き換えた場合も、その source を `members` に書いた別名はエラーになる)。存在しない source を書いた別名 (plugin の更新で同梱 preset の名前が変わった・無くなった場合を含む) は、その別名を `--source` に指定したときだけ、存在しない名前を出して止まる。ほかの source のコマンドはそのまま動き、`sources` の一覧ではその別名を `[user, members, broken: <存在しない名前>]` と出す |
+| `members` | | 2 つ以上の source 名のリスト (例 `["cloudflare-workers", "cloudflare-d1"]`)。この profile はファイルを読まない別名になり、`search --source <この名前>` が各 source を書いた順に検索する。結果は source ごとに `--- <label> (--source <source>) ---` の見出しの下に並び、各行の先頭に `[<source>]` が付く。ページ番号は source ごとなので、`Next:` の行はそのページの `--source` を持つ (別名のままではページを開けない)。`search` 以外のコマンドは終了コード 2 で止まり、選べる source を出す。`--file` / `--index-file` (1 つの source のファイル) とは一緒に使えない (終了コード 2)。どれか 1 つの source を読めない (キャッシュが無く取得にも失敗した、対応づけの割合が下限を下回った) ときは、何も出さずにその source のエラーで止まる。書けるキーは `members` と `description` だけ。別名 (`members` を持つ profile) と自分自身は書けない (`sources.json` で同梱 preset の source を別名に置き換えた場合も、その source を `members` に書いた別名はエラーになる。ただし `--source` がその別名を読まない同梱 preset のときは、上の「`sources.json` に誤りがあるとき」のとおり WARNING を出して別名を外す)。存在しない source を書いた別名 (plugin の更新で同梱 preset の名前が変わった・無くなった場合を含む) は、その別名を `--source` に指定したときだけ、存在しない名前を出して止まる。ほかの source のコマンドはそのまま動き、`sources` の一覧ではその別名を `[user, members, broken: <存在しない名前>]` と出す |
 
 source 名は `^[a-z0-9][a-z0-9-]*$` (キャッシュのファイル名になるため)。未知のキーや不正な値は
 エラーにする。profile を試すときは `--file <手元の llms-full.txt>` で取得せずに読める (`--file` のときは

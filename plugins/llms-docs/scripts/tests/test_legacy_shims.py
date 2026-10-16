@@ -72,6 +72,11 @@ class ConvertTest(unittest.TestCase):
          ["search", "--source", "claude-code", "q", "--in", "3"]),
         ("a flag abbreviated", "claude-docs", ["content", "3", "--no-l"],
          ["content", "--source", "claude-code", "3", "--no-link-annotations"]),
+        ("a flag then an abbreviation", "claude-docs",
+         ["search", "q", "--include-changelog-priority", "--sour", "both"],
+         ["search", "q", "--include-changelog-priority", "--source", "claude"]),
+        ("claude 3-char abbreviation", "claude-docs", ["search", "q", "--s", "both"],
+         ["search", "q", "--source", "claude"]),
         ("a value that looks like an option is a value", "claude-docs",
          ["search-content", "q", "--page-ref", "--source"],
          ["search-content", "--source", "claude-code", "q", "--page-ref", "--source"]),
@@ -261,6 +266,56 @@ class ShimRunTest(unittest.TestCase):
                 shim_args = _shim_argv(corpus, [*argv, "--cache-dir", staged.cache])[3:]
                 direct = parity._generic_argv(corpus, argv, "unused")[:-2] + ["--cache-dir", staged.cache]
                 self.assertEqual(staged.run(shim_args), staged.run(direct))
+
+
+def _ai_sdk_corpus(untitled: int, total: int = 10) -> str:
+    """*total* ai-sdk pages, the last *untitled* with an empty ``title:``."""
+    pages = []
+    for i in range(total):
+        title = "title:\n" if i >= total - untitled else f"title: Page {i}\n"
+        pages.append(f"---\n{title}description: D{i}\nurl: https://ai-sdk.dev/docs/p{i}\n---\n"
+                     f"# Heading {i}\n\nalpha body {i}.\n\n## Part {i}\n\ntext\n")
+    return "".join(pages)
+
+
+class UntitledWarningTest(unittest.TestCase):
+    """The ai-sdk preset warns when too many pages have no title, as the old
+    ``parse-ai-sdk.py`` did (``UNTITLED_WARN_RATIO`` 0.10, more than that
+    share, same text), on the commands that browse the whole corpus."""
+
+    COMMANDS = (["fetch-index"], ["search-index", "alpha"], ["search", "alpha"])
+
+    def run_both(self, untitled: int, command: list) -> tuple:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "llms-full.txt")
+            Path(path).write_text(_ai_sdk_corpus(untitled), encoding="utf-8")
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ("LLMS_DOCS_CACHE_DIR", "XDG_CACHE_HOME", "LLMS_DOCS_SOURCES_FILE")}
+            env.update(HOME=tmp, XDG_CONFIG_HOME=tmp)
+            argv = [*command, "--file", path]
+            with mock.patch.dict(os.environ, env, clear=True), \
+                    mock.patch("urllib.request.urlopen", side_effect=AssertionError("network")):
+                try:
+                    old = _loader.run_cli(_loader.load_script("parse-ai-sdk.py"), ["parse-ai-sdk.py", *argv])
+                    new = _loader.run_cli(_loader.load_script("parse-llms-txt.py"),
+                                          ["parse-llms-txt.py", *_shim_argv("ai-sdk", argv)[3:]])
+                except Exception as e:  # a crash fails the test instead of erroring the run
+                    self.fail(f"crash on {argv}: {e!r}")
+        def warnings(run):
+            return [line for line in run[2].splitlines() if line.startswith("WARNING: ")]
+        return old, new, warnings(old), warnings(new)
+
+    def test_the_warning_is_the_old_scripts(self):
+        # 1 of 10 is the threshold itself (not more than it): no warning; 2 of 10 warns
+        for untitled, warns in ((1, False), (2, True)):
+            for command in self.COMMANDS:
+                with self.subTest(untitled=untitled, command=command[0]):
+                    old, new, old_warn, new_warn = self.run_both(untitled, command)
+                    self.assertEqual((old[0], new[0]), (0, 0), (old[2], new[2]))
+                    self.assertEqual(new_warn, old_warn)
+                    self.assertEqual(bool(new_warn), warns, new[2])
+                    if warns:
+                        self.assertIn(f"{untitled}/10 documents (20%) have no title", new_warn[0])
 
 
 # A command an output recommends: a ``Next:`` line, the command in a

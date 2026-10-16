@@ -936,6 +936,12 @@ class GenericLoaderHarnessTest(unittest.TestCase):
     """The generic-loader side of the harness runs (parity itself is filled
     in step by step through ``GENERIC_PARITY_EXPECTED``)."""
 
+    def test_ai_sdk_tries_a_title_before_a_url_or_a_slug(self):
+        # the order is what keeps the references 0.45.0 opened on the same page
+        # (a title word that is also another page's URL end); the corpus gate
+        # checks it on the real file, this one in CI
+        self.assertEqual(preset_profile("ai-sdk")["page_ref_forms"], ("int", "title", "url", "slug"))
+
     def test_provisional_profiles_load_the_fixtures(self):
         for case_id in ("cd-code-fetch-index", "cd-plat-fetch-index", "as-fetch-index"):
             with self.subTest(case=case_id):
@@ -1090,6 +1096,8 @@ class PresetCacheSharingTest(unittest.TestCase):
             ("claude-platform", "show_overflow"): True,
             # the old script lets a content cut stop inside a table
             ("ai-sdk", "protect_tables"): False,
+            # the old script's UNTITLED_WARN_RATIO (warned above that share of untitled pages)
+            ("ai-sdk", "untitled_warn_ratio"): 0.1,
             # the old script's headers say "Firebase", not the source name
             ("firebase", "label"): "Firebase",
             # the old script reads h2 and below as sections
