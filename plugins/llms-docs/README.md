@@ -306,7 +306,7 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `h1_needs_url` | | `split: h1` で `true` のとき、`page_url` (`line:` / `link:`) の URL が見つからない H1 をページの区切りにせず、前のページの見出しとして残す (ページ本文の中で H1 を使うサイト向け) |
 | `strip_trailing_headings` | | `true` で、ページ末尾に本文の無いまま並ぶ見出し行 (ページ間に置かれたナビの見出し `## Messages` など) を除く。`drop_lines` の後に適用する。コードブロックの状態は見ない |
 | `min_heading_level` | | `sections` / `content` / 本文検索で節として数える最も浅い見出し (`1` か `2`)。既定は `split: h1` で `2`、ほかは `1`。本文にコードブロック外の `# …` 行があるサイトでは `2` にする |
-| `index_heading_level` | | `search-index` / `search` のランキングと `--show-sections` の一覧に使う見出しの最も深い段 (`2` か `3`。既定 `3`)。コードブロック外の見出しだけを読む。H3 はキーワード 1 語ごとに +1 するが、全キーワード一致の加点 (+10) には数えない (API を H3 で並べるページが関数名で見つかり、選択肢の H3 を並べるだけのページが、タイトルがその語そのもののページを押し出さないため)。`2` で H1 / H2 だけを読む (Claude docs / AI SDK / Firebase の preset。`rank_from: index` と `body: fetch` ではランキングに見出しを使わないので、`--show-sections` の一覧にだけ効く) |
+| `index_heading_level` | | `search-index` / `search` のランキングと `--show-sections` の一覧に使う見出しの最も深い段 (`2` か `3`。既定 `3`)。コードブロック外の見出しだけを読む。H3 はキーワード 1 語ごとに +1 するが、全キーワード一致の加点 (+10) には数えない (API を H3 で並べるページが関数名で見つかり、選択肢の H3 を並べるだけのページが、タイトルがその語そのもののページを押し出さないため)。`2` で H1 / H2 だけを読む (Claude docs / AI SDK / Firebase の preset。`rank_from: index` ではランキングに見出しを使わないので `--show-sections` の一覧にだけ効く。`body: fetch` ではどちらにも効かない (`--show-sections` を無視するため)) |
 | `protect_tables` | | `false` で、`content` の節の切り出しを表の途中で止めることを許す (既定 `true`) |
 | `compact_pack` | | `true` で、`fetch-index --compact` を 1 行 80 桁以内に数件ずつ詰めて出す |
 | `untitled_warn_ratio` | | `split: frontmatter` のとき、frontmatter に `title:` の無いページがこの割合 (0〜1) を超えたら、`fetch-index` / `search-index` / `search` で stderr に WARNING を出す (本文の見出しで補ったタイトルも「無い」に数える) |
@@ -459,7 +459,8 @@ description と、`researching-library-docs` の対応表・この README の pr
 tags・H1 / H2 で全キーワードが当たった候補より上には置かない (その最後の候補の直後に移す。全文検索で補った
 `[body-only]` の行は動かさない)。CLI のページが設定の選択肢を H3 で並べ、本文のヒットも多いとき、その選択肢の
 ページ (タイトルがその語そのもの) を 2 位に下げないため。一部のキーワードだけが当たった候補の上には残る
-(H3 がクエリをそのまま名指すことがあるため)。
+(H3 がクエリをそのまま名指すことがあるため)。Changelog / Release notes のページは、全キーワードが当たっても
+この基準にしない (末尾に置く並びを保つため。`--include-changelog-priority` を付けたときは基準にする)。
 
 `--show-sections` の一覧は `index_heading_level` の段までの見出しを並べる。既定の `3` では、同梱 presets
 (汎用ローダーの source。2026-10 時点の各サイトの `llms-full.txt` で計測) の見出しの行数は全体で H1 / H2 だけのときの約 1.7 倍

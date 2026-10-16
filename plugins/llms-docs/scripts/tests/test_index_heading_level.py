@@ -292,6 +292,27 @@ class ScoreEntryHeadingsExtraTest(unittest.TestCase):
         # an H2 match already gave the heading +1: H3 adds nothing more
         self.assertEqual(self.score(["lockfile"], headings=["Lockfile"], headings_extra=["Lockfile Control"]), 1)
 
+    def test_h3_substring_keeps_the_closed_compound_match(self):
+        """An H3 that contains the keyword as written must not switch off
+        the closed-compound match on the title / description / H1-H2."""
+        # title "status line" (+5), "customize" (+5), H3 (+1), bonus (+10)
+        self.assertEqual(_common.score_entry("Customize your status line", "", ["customize", "statusline"],
+                                             headings_extra=["statusline settings"]), 21)
+        # title exact (+10), H2 "Code Mode" (+1, the H3 adds nothing more), bonus (+10)
+        self.assertEqual(_common.score_entry("Intro", "", ["intro", "codemode"], headings=["Code Mode"],
+                                             headings_extra=["codemode options"]), 21)
+        self.assertEqual(_common.score_entry("Intro", "", ["codemode"], headings=["Code Mode"],
+                                             headings_extra=["codemode options"]), 1)
+        # the title compound still counts: 10 without the H3, 11 with it
+        self.assertEqual(_common.score_entry("Chat agent", "", ["ChatAgent"]), 10)
+        self.assertEqual(_common.score_entry("Chat agent", "", ["ChatAgent"], headings_extra=["ChatAgent class"]), 11)
+        # an H2 compound completes the bonus despite the H3
+        self.assertEqual(self.score(["statusline", "hooks"], headings=["Status line", "Hooks"],
+                                    headings_extra=["statusline command"]), 12)
+        # title compound (+10), description (+2), H3 (+1), bonus (+10)
+        self.assertEqual(_common.score_entry("Audit Logs", "Export audit data", ["auditLog", "export"],
+                                             headings_extra=["auditLog API"]), 23)
+
     def test_search_index_entries_passes_headings_extra(self):
         entries = [{"title": "Vi", "description": ""}, {"title": "Other", "description": ""}]
         scored = _common.search_index_entries(
@@ -454,7 +475,7 @@ class H3OnlyCandidateStaysBelowTest(_Cli):
     def test_the_cli_page_would_lead_on_body_hits_alone(self):
         """Positive control: without the demotion, search_rank_key puts the
         CLI page (more hits, a section named by the query) first."""
-        with mock.patch.object(generic, "_demote_h3_only", lambda results, _h3, _full: results):
+        with mock.patch.object(generic, "_demote_h3_only", lambda results, _h3, _full, **_kw: results):
             code, out, err = self.run_cmd("search", "testTimeout")
         self.assertEqual(code, 0, err)
         self.assertEqual(self.pages(out)[:1], [("1", "Command Line Interface")], out)
@@ -482,8 +503,8 @@ class H3OnlyCandidateStaysBelowTest(_Cli):
                          [("0", "testTimeout", "11"), ("1", "Command Line Interface", "1")])
 
 
-def _row(idx, *, body_only=False):
-    return {"doc_idx": idx, "body_only": body_only}
+def _row(idx, *, body_only=False, title=""):
+    return {"doc_idx": idx, "body_only": body_only, "title": title}
 
 
 class DemoteH3OnlyTest(unittest.TestCase):
@@ -520,6 +541,20 @@ class DemoteH3OnlyTest(unittest.TestCase):
             with self.subTest(label):
                 self.assertEqual(self.order(rows), want)
 
+    def test_a_changelog_page_is_not_the_anchor(self):
+        """search_rank_key puts a Changelog / Release notes page last; a full
+        match there must not pull an ordinary H3-only page below it. With
+        --include-changelog-priority it is an ordinary page again."""
+        for title in ("Conformance changelog", "Release Notes"):
+            rows = [_row(1, title="CLI Overview"), _row(3, title=title)]
+            with self.subTest(title=title):
+                self.assertEqual([r["doc_idx"] for r in generic._demote_h3_only(rows, {1}, {3})], [1, 3])
+                out = generic._demote_h3_only(rows, {1}, {3}, include_changelog_priority=True)
+                self.assertEqual([r["doc_idx"] for r in out], [3, 1])
+        # an ordinary full match after the changelog one is still the anchor
+        rows = [_row(1, title="CLI"), _row(4, title="Upgrade"), _row(3, title="Changelog")]
+        self.assertEqual([r["doc_idx"] for r in generic._demote_h3_only(rows, {1}, {3, 4})], [4, 1, 3])
+
     def test_ranked_marks_h3_only_and_full_match_pages(self):
         p = generic._validate_profile("sources.json", "x", {"url": URL, "split": "h1"})
         docs = [
@@ -544,6 +579,60 @@ class DemoteH3OnlyTest(unittest.TestCase):
         self.assertEqual(full, {1, 2, 3, 4})
         _s, _h, h3_only, _full = generic._ranked(args, {**p, "index_heading_level": 2}, docs, 5)
         self.assertEqual(h3_only, set())
+
+
+VITEST_CHANGELOG_AND_CLI = """\
+---
+url: /guide/changelog.md
+---
+
+# testTimeout changelog
+
+The default changed.
+
+---
+
+---
+url: /guide/cli.md
+---
+
+# Command Line Interface
+
+## Options
+
+### testTimeout
+
+Default testTimeout of a test in milliseconds (default: `5000`). The testTimeout applies per test.
+"""
+
+
+class ChangelogStaysLastTest(_Cli):
+    """``search``: a Changelog page whose title names the query stays last;
+    the H3-only CLI page is not moved below it. With
+    ``--include-changelog-priority`` the changelog is ranked as any page,
+    so the H3-only page goes below it."""
+
+    SOURCE = "vitest"
+    CORPUS = VITEST_CHANGELOG_AND_CLI
+
+    def pages(self, out):
+        return re.findall(r"(?m)^\[(\d+)\] (.+?) (?:\(index_score: \d+\)|\[body-only\])$", out)
+
+    def test_order(self):
+        for label, corpus in self.corpora().items():
+            for extra, want in (((), [("1", "Command Line Interface"), ("0", "testTimeout changelog")]),
+                                (("--include-changelog-priority",),
+                                 [("0", "testTimeout changelog"), ("1", "Command Line Interface")])):
+                with self.subTest(corpus=label, extra=extra):
+                    code, out, err = self.run_cmd("search", "testTimeout", *extra, corpus=corpus)
+                    self.assertEqual(code, 0, err)
+                    self.assertEqual(self.pages(out), want, out)
+                    nxt = next((ln for ln in out.splitlines() if ln.startswith("Next: ")), "")
+                    self.assertTrue(nxt, out)
+                    argv = shlex.split(nxt[len("Next: "):], comments=True)
+                    self.assertEqual(argv[:3], [SCRIPT, "content", want[0][0]], nxt)
+                    code, _opened, err = self.run_argv(argv)
+                    self.assertEqual(code, 0, err)
 
 
 class PresetLevelsTest(unittest.TestCase):

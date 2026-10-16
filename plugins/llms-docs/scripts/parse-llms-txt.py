@@ -76,6 +76,7 @@ from _common import (  # noqa: E402
     fetch_url,
     full_corpus_extra_hits,
     group_index_variants,
+    is_low_priority,
     load_lines,
     next_hint,
     normalize_doc_url,
@@ -2515,7 +2516,8 @@ def _ranked(args, profile: dict, docs: list[dict], limit: int):
     return scored, [[text for _level, text in r] for r in rows], h3_only, full_match
 
 
-def _demote_h3_only(results: list[dict], h3_only: set, full_match: set) -> list[dict]:
+def _demote_h3_only(results: list[dict], h3_only: set, full_match: set, *,
+                    include_changelog_priority: bool = False) -> list[dict]:
     """``search`` order for ``index_heading_level`` 3: a candidate that only
     an H3 brought in (*h3_only*) never stands above a candidate whose title,
     description, tags or H1 / H2 matched every keyword (*full_match*). Each
@@ -2528,9 +2530,14 @@ def _demote_h3_only(results: list[dict], h3_only: set, full_match: set) -> list[
     A candidate that matched only some of the keywords is not such a page,
     and an H3-only page may stay above it (the H3 can name the query
     exactly: ``GitHub Workflow`` against a page whose description says
-    "workflow")."""
+    "workflow").
+
+    A Changelog / Release notes page (``is_low_priority``) is not an anchor
+    unless *include_changelog_priority*: search_rank_key puts it last, and
+    moving an ordinary page below it would undo that order."""
     def matched(r):
-        return not r["body_only"] and r["doc_idx"] in full_match and r["doc_idx"] not in h3_only
+        return (not r["body_only"] and r["doc_idx"] in full_match and r["doc_idx"] not in h3_only
+                and (include_changelog_priority or not is_low_priority(r.get("title", ""))))
     last = max((i for i, r in enumerate(results) if matched(r)), default=-1)
     moved = [i for i in range(last) if not results[i]["body_only"] and results[i]["doc_idx"] in h3_only]
     if not moved:
@@ -2670,7 +2677,8 @@ def _search_results(args, profile: dict) -> tuple:
                         "title": docs[idx]["title"] or "(untitled)", "url": None})
     results.sort(key=lambda r: search_rank_key(r, include_changelog_priority=args.include_changelog_priority))
     # empty unless the profile's index reads H3: the order is then search_rank_key's
-    results = _demote_h3_only(results, h3_only, full_match)
+    results = _demote_h3_only(results, h3_only, full_match,
+                              include_changelog_priority=args.include_changelog_priority)
     return profile, path, docs, results, from_index, 0
 
 

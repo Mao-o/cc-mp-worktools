@@ -23,7 +23,12 @@ All notable changes to this plugin will be documented here.
     候補の直後に移す。`[body-only]` の行は動かさない)。Vitest の CLI のページは設定の選択肢をすべて H3 で並べ、
     本文のヒットも多いので、そのままでは `search testTimeout` で設定のページ `testTimeout` が 2 位に下がった。
     一部のキーワードだけが当たった候補の上には残る (`vi.mock hoisted` では、H2 が `hoisted` だけを名指す移行
-    ガイドより `Vi` が上)
+    ガイドより `Vi` が上)。Changelog / Release notes のページは全キーワードが当たってもこの基準にしない
+    (`search_rank_key` が末尾に置く並びを保つ。基準にすると、H3 だけの通常のページが changelog の下へ移った)。
+    `--include-changelog-priority` を付けたときは通常のページと同じく基準にする
+  - 続け書きの照合 (`statusline` が `Status line` に当たる) は、H3 がキーワードを書いたとおりに含んでいても
+    タイトル・description・H1 / H2 に対して行う。H3 に当たった時点で照合を飛ばすと、Cloudflare Agents の
+    `codemode` で `Code Mode` のページが、`ChatAgent` で `Chat agent` のページが結果から消える
   - `--show-sections` の一覧も H3 まで出る。同梱 presets の汎用ローダーの source で、見出しの行数は全体で約
     1.7 倍 (source ごとに 1.2〜2.5 倍)。1 ページで増えが大きい例は Vercel の
     `Framework environment variables` 3 → 243 行、Vitest の `Command Line Interface` 4 → 170 行
@@ -42,6 +47,8 @@ All notable changes to this plugin will be documented here.
 - **テスト**: 実データから切り出した Vitest / Bun の形で、H3 の関数名で `Vi` が見つかり、出力された `Next:`
   の行をそのまま実行すると `vi.mock` の節が開くこと (`--file` とキャッシュの両方)、H3 が全キーワード一致の
   加点を取らないこと、H3 だけの候補が全キーワード一致の候補の下にだけ下がること (並びの決定表)、
+  Changelog のページが下げ先の基準にならないこと (`--include-changelog-priority` の有無の両方)、H3 に語が
+  含まれても続け書きの照合が残ること、
   `index_heading_level` の拒否する値 (`1` / `4` / 真偽値 / 文字列 / `3.0` / `null`)、Claude docs / AI SDK /
   Firebase の preset が H3 を読まないことを足した
 

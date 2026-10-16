@@ -1304,7 +1304,10 @@ def score_entry(title: str, description: str, keywords,
             kw_score += 1
         extra_hit = not heading_hit and any(kw_norm in h for h in extra_norm)
 
-        if kw_score == 0 and not extra_hit:
+        # An H3 that contains the keyword as written does not skip the
+        # closed-compound match on the title / description / H1-H2: "codemode"
+        # in an H3 "codemode options" must still find the H2 "Code Mode".
+        if kw_score == 0:
             if kw_norm == "".join(title_words):
                 kw_score += 10
             elif _joins_words(kw_norm, title_words):
@@ -1313,7 +1316,9 @@ def score_entry(title: str, description: str, keywords,
                 kw_score += 2
             if any(_joins_words(kw_norm, h) for h in headings_words):
                 kw_score += 1
-            elif any(_joins_words(kw_norm, h) for h in extra_words):
+                # an H1 / H2 matched, so the H3 adds nothing more (as above)
+                extra_hit = False
+            elif not extra_hit and any(_joins_words(kw_norm, h) for h in extra_words):
                 extra_hit = True
 
         if kw_score > 0:
