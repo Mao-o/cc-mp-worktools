@@ -2,6 +2,49 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.47.0] - 2026-10-16
+
+### 変更: 汎用ローダーの索引が H3 の見出しも読む (`index_heading_level`)
+
+- **症状**: API を H3 で並べるページが、関数名で `search` / `search-index` に出なかった。Vitest で
+  `search "vi.mock hoisted"` を打つと移行ガイドの節 1 件だけが返り、`vi.mock` / `vi.hoisted` の正典である
+  `Vi` のページ (`## Mock Modules` / `### vi.mock`) が出なかった (`search-content` では 1 位)。
+  `search-index "vi.mock"` は 0 件だった
+- **原因**: 索引 (`search-index` / `search` のランキング) が読む見出しを H1 / H2 に限っていた
+- **修正**: profile キー `index_heading_level` (`2` か `3`、既定 `3`) を足し、既定で H1〜H3 を読む
+  (コードブロックの中は従来どおり読まない)。利用者の `sources.json` の profile も、キーを書かなければ `3` に
+  なる。Claude docs (`claude-code` / `claude-platform`。別名 `claude` はこの 2 つを読む) / AI SDK / Firebase の
+  preset は `2` にして、専用 script と同じ出力を保つ
+  - H3 はキーワード 1 語ごとに +1 するが、全キーワード一致の加点 (+10) には数えない。CLI のページが選択肢の
+    グループを H3 で並べる (`### Project Files & Lockfiles` / `### Installation Control`) と、加点まで取って
+    タイトルがその語そのものの `Lockfile` のページを上位から押し出したため
+  - `search` の並び: H3 だけで候補に入ったページ (タイトル・description・tags・H1 / H2 のどれにも当たらない
+    ページ) は、タイトル・description・tags・H1 / H2 で全キーワードが当たった候補より上に置かない (その最後の
+    候補の直後に移す。`[body-only]` の行は動かさない)。Vitest の CLI のページは設定の選択肢をすべて H3 で並べ、
+    本文のヒットも多いので、そのままでは `search testTimeout` で設定のページ `testTimeout` が 2 位に下がった。
+    一部のキーワードだけが当たった候補の上には残る (`vi.mock hoisted` では、H2 が `hoisted` だけを名指す移行
+    ガイドより `Vi` が上)
+  - `--show-sections` の一覧も H3 まで出る。同梱 presets の汎用ローダーの source で、見出しの行数は全体で約
+    1.7 倍 (source ごとに 1.2〜2.5 倍)。1 ページで増えが大きい例は Vercel の
+    `Framework environment variables` 3 → 243 行、Vitest の `Command Line Interface` 4 → 170 行
+- **全文検索での補完が走らなくなるケース**: H3 で候補になったページが全キーワードを 1 節に揃えると、全文検索の
+  補完 (`[body-only]` の行) が走らなくなり、結果の件数が減る (`vi.useFakeTimers` で 5 件 → `Vi` の 1 件)
+- **実データでの変化**: 実行前に期待するページを決めた 30 クエリと、各ページのタイトル・H2・H3・本文の語から
+  作った 1965 クエリ (Next.js / Vitest / Bun) で、修正前後の `search` を比べた
+  - 30 クエリ: 改善 6 件 (`vi.spyOn` 4 → 1 位、`vi.mock hoisted` 圏外 → 1 位、`configResolved` /
+    `transformIndexHtml` 2 → 1 位、Bun の `Lockfile` / `SQLite` 2 → 1 位)、退行 1 件、不変 23 件
+  - 1965 クエリ: 正典が 1 位 1379 → 1391 件、上位 5 件 1884 → 1914 件 (改善 62 件・悪化 21 件)
+  - 退行 (受け入れた代償): Durable Objects の `DO alarms` で `Alarms` が 1 → 2 位。`DO` がタイトルに当たらない
+    ので `Alarms` は全キーワード一致の候補ではなく、H3 (`### Use alarms for per-entity scheduled tasks`) で
+    候補に入った `Rules of Durable Objects` が本文のヒットで上に来る。Next.js の
+    `preferredRegion (deprecated) Vercel` (合成クエリ) で正典が 3 → 6 位 (上位 5 件の外) になる。H3 で候補の
+    顔ぶれが変わり、全文検索の補完の行が上に並ぶため
+- **テスト**: 実データから切り出した Vitest / Bun の形で、H3 の関数名で `Vi` が見つかり、出力された `Next:`
+  の行をそのまま実行すると `vi.mock` の節が開くこと (`--file` とキャッシュの両方)、H3 が全キーワード一致の
+  加点を取らないこと、H3 だけの候補が全キーワード一致の候補の下にだけ下がること (並びの決定表)、
+  `index_heading_level` の拒否する値 (`1` / `4` / 真偽値 / 文字列 / `3.0` / `null`)、Claude docs / AI SDK /
+  Firebase の preset が H3 を読まないことを足した
+
 ## [0.46.0] - 2026-10-16
 
 ### 変更: `researching-claude-docs` / `researching-ai-sdk` / `researching-firebase` が汎用 loader を使う

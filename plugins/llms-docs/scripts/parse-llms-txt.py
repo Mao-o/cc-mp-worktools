@@ -58,6 +58,7 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from _common import (  # noqa: E402
     FenceTracker,
     FetchError,
+    _norm,
     add_cache_dir_arg,
     add_heading_path_arg,
     add_include_changelog_priority_arg,
@@ -82,7 +83,9 @@ from _common import (  # noqa: E402
     note_other_candidates,
     parse_llms_index,
     prefer_lang_exact,
+    query_terms,
     retry_for_page_ref,
+    score_entry,
     search_content_in_body,
     search_content_rank_key,
     search_index_entries,
@@ -123,7 +126,7 @@ _PROFILE_KEYS = {
     "anchor_style", "show_overflow", "rank_from", "index_join", "index_group_variants",
     "link_annotations", "link_path_aliases", "members", "body", "page_cache_dir",
     "page_fetch_workers", "page_fetch_timeout", "search_content_warn_pages", "index_page_size",
-    "list_page_urls",
+    "list_page_urls", "index_heading_level",
 }
 # A profile with ``members`` is an alias of several sources for ``search``;
 # it reads no file of its own, so it takes no other key but these.
@@ -143,12 +146,17 @@ _FETCH_PROFILE_KEYS = {
     "body", "index_url", "description", "label", "cache_name", "min_heading_level",
     "protect_tables", "compact_pack", "page_ref_forms", "page_url_strip_suffix", "anchor_style",
     "show_overflow", "rank_from", "index_group_variants", "page_cache_dir", "page_fetch_workers",
-    "page_fetch_timeout", "search_content_warn_pages", "index_page_size",
+    "page_fetch_timeout", "search_content_warn_pages", "index_page_size", "index_heading_level",
 }
 # Keys of the per-page fetch itself (only with body "fetch").
 _FETCH_ONLY_KEYS = ("page_cache_dir", "page_fetch_workers", "page_fetch_timeout",
                     "search_content_warn_pages")
 _MIN_HEADING_LEVELS = (1, 2)
+# The deepest heading the index reads (the ranking of ``search-index`` /
+# ``search`` and ``--show-sections``). 3 by default: reference pages name each
+# API in an H3 (Vitest's ``Vi``: ``## Mock Modules`` / ``### vi.mock``).
+_INDEX_HEADING_LEVELS = (2, 3)
+_DEFAULT_INDEX_HEADING_LEVEL = 3
 # What a page reference may be, tried in the order the profile lists them. The
 # default is the order before ``page_ref_forms`` existed.
 _PAGE_REF_FORMS = ("int", "url", "slug", "title", "url_substring")
@@ -429,6 +437,11 @@ def _validate_display_keys(path: str, name: str, raw: dict, profile: dict) -> No
     if level is not None and (isinstance(level, bool) or level not in _MIN_HEADING_LEVELS):
         _bad(path, f"sources.{name}.min_heading_level must be 1 or 2")
     profile["min_heading_level"] = level
+    depth = raw.get("index_heading_level", _DEFAULT_INDEX_HEADING_LEVEL)
+    # ``2.0 == 2`` and ``True == 1``: only a plain int passes
+    if type(depth) is not int or depth not in _INDEX_HEADING_LEVELS:
+        _bad(path, f"sources.{name}.index_heading_level must be 2 or 3")
+    profile["index_heading_level"] = depth
     ratio = raw.get("untitled_warn_ratio")
     if ratio is not None:
         if isinstance(ratio, bool) or not isinstance(ratio, (int, float)) or not 0 <= ratio <= 1:
@@ -1785,7 +1798,8 @@ def _search_index_from_index(args, profile: dict) -> None:
     for score, i, entry in scored:
         extra = [f"    URL: {entry['url']}"]
         if args.show_sections and not fetch and doc_of[i] is not None:
-            extra += [f"      - {h}" for h in _headings(docs[doc_of[i]]["body_lines"])]
+            extra += [f"      - {h}" for h in _headings(docs[doc_of[i]]["body_lines"],
+                                                       profile["index_heading_level"])]
         print_entry(f"[{refs[i]}] {entry['title']} (score: {score})",
                     description=entry["description"], extra_lines=extra)
     print(f"({len(scored)} results, {len(entries)} documents searched)")
@@ -2204,7 +2218,8 @@ def _resolve_ref(profile: dict, docs: list[dict], args) -> int:
                              profile["page_ref_forms"], profile["page_url_strip_suffix"])
 
 
-def _headings(body_lines: list[str]) -> list[str]:
+def _heading_rows(body_lines: list[str], depth: int) -> list[tuple[int, str]]:
+    """``(level, text)`` of the headings from H1 to H<depth> outside code blocks."""
     fence = FenceTracker()
     out = []
     for line in body_lines:
@@ -2212,10 +2227,16 @@ def _headings(body_lines: list[str]) -> list[str]:
         fence.update(line)
         if was or fence.in_fence:
             continue
-        m = re.match(r"^(#{1,2})\s+(.+)", line)
+        m = re.match(r"^(#{1,%d})\s+(.+)" % depth, line)
         if m:
-            out.append(m.group(2).strip())
+            out.append((len(m.group(1)), m.group(2).strip()))
     return out
+
+
+def _headings(body_lines: list[str], depth: int) -> list[str]:
+    """The headings the index reads, as ``--show-sections`` lists them: H1 to
+    H<depth> (the profile's ``index_heading_level``) outside code blocks."""
+    return [text for _level, text in _heading_rows(body_lines, depth)]
 
 
 def _anchor_for(profile: dict, doc: dict):
@@ -2460,13 +2481,62 @@ def cmd_content(args):
                    transform=transform)
 
 
-def _ranked(args, docs: list[dict], limit: int):
+def _ranked(args, profile: dict, docs: list[dict], limit: int):
+    """Rank *docs* on title / description / tags / headings, and return each
+    page's headings for ``--show-sections``. H1 / H2 are ``headings``; H3
+    (``index_heading_level`` 3) are ``headings_extra``, which add the
+    per-keyword +1 but never complete the all-keyword bonus (``score_entry``):
+    a reference page names dozens of entries in H3, and letting them complete
+    the bonus pushed out the page whose title is one of the words exactly.
+
+    Returns ``(scored, headings, h3_only, full_match)`` for
+    ``_demote_h3_only``: *h3_only* = the ranked pages that only an H3 made
+    candidates (without the H3 they score 0); *full_match* = the ranked
+    pages whose title / description / tags / H1-H2 match every keyword."""
     entries = [{"title": d["title"] or "", "description": d["description"] or ""} for d in docs]
-    headings = [_headings(d["body_lines"]) for d in docs]
-    return search_index_entries(
+    rows = [_heading_rows(d["body_lines"], profile["index_heading_level"]) for d in docs]
+    major = [[text for level, text in r if level <= 2] for r in rows]
+    minor = [[text for level, text in r if level == 3] for r in rows]
+    scored = search_index_entries(
         entries, args.query, limit=limit,
-        get_extras=lambda _e, idx: {"tags": docs[idx].get("tags") or [], "headings": headings[idx]},
-    ), headings
+        get_extras=lambda _e, idx: {"tags": docs[idx].get("tags") or [], "headings": major[idx],
+                                    "headings_extra": minor[idx]},
+    )
+    # the keywords score_entry scores (one made only of "-" / "_" is skipped there)
+    keywords = [kw for kw in query_terms(args.query) if _norm(kw)]
+
+    def major_score(idx, entry, kws):
+        return score_entry(entry["title"], entry["description"], kws,
+                           tags=docs[idx].get("tags") or [], headings=major[idx])
+
+    h3_only = {idx for _score, idx, entry in scored if minor[idx] and major_score(idx, entry, keywords) == 0}
+    full_match = {idx for _score, idx, entry in scored
+                  if keywords and all(major_score(idx, entry, [kw]) > 0 for kw in keywords)}
+    return scored, [[text for _level, text in r] for r in rows], h3_only, full_match
+
+
+def _demote_h3_only(results: list[dict], h3_only: set, full_match: set) -> list[dict]:
+    """``search`` order for ``index_heading_level`` 3: a candidate that only
+    an H3 brought in (*h3_only*) never stands above a candidate whose title,
+    description, tags or H1 / H2 matched every keyword (*full_match*). Each
+    such row that is above the last of those moves to just below it, in its
+    own order; the body-only rows and everything else keep the
+    ``search_rank_key`` order. The ranking lets an H3 page in (an API
+    reference found by a function name), but its body hits must not push out
+    the page whose title names the query: Vitest's CLI page lists every
+    config option as an H3 and has more hits than the option's own page.
+    A candidate that matched only some of the keywords is not such a page,
+    and an H3-only page may stay above it (the H3 can name the query
+    exactly: ``GitHub Workflow`` against a page whose description says
+    "workflow")."""
+    def matched(r):
+        return not r["body_only"] and r["doc_idx"] in full_match and r["doc_idx"] not in h3_only
+    last = max((i for i, r in enumerate(results) if matched(r)), default=-1)
+    moved = [i for i in range(last) if not results[i]["body_only"] and results[i]["doc_idx"] in h3_only]
+    if not moved:
+        return results
+    kept = [results[i] for i in range(last + 1) if i not in moved]
+    return kept + [results[i] for i in moved] + results[last + 1:]
 
 
 def cmd_search_index(args):
@@ -2478,7 +2548,7 @@ def cmd_search_index(args):
     _warn_if_untitled_ratio_high(profile, docs, path)
     if not args.query.strip():
         die("query must not be empty")
-    scored, headings = _ranked(args, docs, args.limit)
+    scored, headings, _h3_only, _full_match = _ranked(args, profile, docs, args.limit)
     print(f'Search-index results for "{args.query}" ({_header_source(profile, path)})')
     print("=" * 60)
     print()
@@ -2573,11 +2643,12 @@ def _search_results(args, profile: dict) -> tuple:
     if not args.query.strip():
         die("query must not be empty")
     from_index = profile["rank_from"] == "index"
+    h3_only, full_match = set(), set()
     if from_index:
         # ranked on the llms.txt entries (their titles and URLs are shown)
         results = _index_candidates(args, profile, docs)
     else:
-        scored, _headings_unused = _ranked(args, docs, args.top_n)
+        scored, _headings_unused, h3_only, full_match = _ranked(args, profile, docs, args.top_n)
         results = [
             {"doc_idx": idx, "index_score": score, "body_hits": _body_hits(args, docs[idx]), "body_only": False,
              "title": docs[idx]["title"] or "(untitled)", "url": None}
@@ -2598,6 +2669,8 @@ def _search_results(args, profile: dict) -> tuple:
         results.append({"doc_idx": idx, "index_score": None, "body_hits": hits, "body_only": True,
                         "title": docs[idx]["title"] or "(untitled)", "url": None})
     results.sort(key=lambda r: search_rank_key(r, include_changelog_priority=args.include_changelog_priority))
+    # empty unless the profile's index reads H3: the order is then search_rank_key's
+    results = _demote_h3_only(results, h3_only, full_match)
     return profile, path, docs, results, from_index, 0
 
 
@@ -2790,7 +2863,8 @@ def main():
     p.add_argument("query", help="Space-separated keywords (AND search)")
     _add_common(p)
     p.add_argument("--limit", type=int, default=15, help="Max results (default: 15)")
-    p.add_argument("--show-sections", action="store_true", help="Show H1/H2 headings for each result")
+    p.add_argument("--show-sections", action="store_true", help="Show the headings the index reads for each result "
+                        "(H1-H3; H1/H2 with the profile's index_heading_level 2)")
     p.set_defaults(func=cmd_search_index)
 
     p = sub.add_parser("search-content", help="Keyword search across document bodies")

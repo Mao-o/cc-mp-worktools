@@ -1216,7 +1216,7 @@ def _joins_words(kw: str, words: list[str]) -> bool:
 
 
 def score_entry(title: str, description: str, keywords,
-                *, tags=None, headings=None) -> int:
+                *, tags=None, headings=None, headings_extra=None) -> int:
     """Score a single index entry against *keywords* (case-insensitive substring).
 
     Returns total score (0 means no match). Scoring weights:
@@ -1226,7 +1226,17 @@ def score_entry(title: str, description: str, keywords,
         tag match          :  +4 (if *tags* provided)
         description match  :  +2
         heading match      :  +1 (if *headings* provided)
+        extra heading match:  +1 (if *headings_extra* provided and no
+                                  heading in *headings* matched)
         all-keyword bonus  : +10 (when len(keywords) > 1)
+
+    *headings_extra* are minor headings (the generic loader's H3) that add
+    the per-keyword +1 but never count toward the all-keyword bonus: a
+    keyword matched only there does not count as matched. A reference page
+    names dozens of entries in H3; letting them complete the bonus scored
+    such a page 12 and pushed out the page whose title is one of the words
+    exactly (10-11). The +1 alone still finds the API page by a function
+    name.
 
     Both the keyword and every comparison field are normalized before
     matching — so a plural query still finds a singular title (and vice
@@ -1264,6 +1274,8 @@ def score_entry(title: str, description: str, keywords,
     title_words = title_norm.split()
     desc_words = desc_norm.split()
     headings_words = [h.split() for h in headings_norm]
+    extra_norm = [_norm_phrase(h) for h in (headings_extra or [])]
+    extra_words = [h.split() for h in extra_norm]
 
     total = 0
     matched_keywords = 0
@@ -1287,10 +1299,12 @@ def score_entry(title: str, description: str, keywords,
         if kw_norm in desc_norm:
             kw_score += 2
 
-        if any(kw_norm in h for h in headings_norm):
+        heading_hit = any(kw_norm in h for h in headings_norm)
+        if heading_hit:
             kw_score += 1
+        extra_hit = not heading_hit and any(kw_norm in h for h in extra_norm)
 
-        if kw_score == 0:
+        if kw_score == 0 and not extra_hit:
             if kw_norm == "".join(title_words):
                 kw_score += 10
             elif _joins_words(kw_norm, title_words):
@@ -1299,10 +1313,12 @@ def score_entry(title: str, description: str, keywords,
                 kw_score += 2
             if any(_joins_words(kw_norm, h) for h in headings_words):
                 kw_score += 1
+            elif any(_joins_words(kw_norm, h) for h in extra_words):
+                extra_hit = True
 
         if kw_score > 0:
             matched_keywords += 1
-        total += kw_score
+        total += kw_score + (1 if extra_hit else 0)
 
     if scorable_keywords > 1 and matched_keywords == scorable_keywords:
         total += 10
@@ -1360,7 +1376,8 @@ def search_index_entries(entries, query: str, *, limit: int = 15, get_extras=Non
 
     *query* is split into AND keywords by ``query_terms``. *get_extras*,
     when given, is called as ``get_extras(entry, idx)`` and must return a dict
-    that may contain 'tags' and/or 'headings' used for extra scoring signals.
+    that may contain 'tags', 'headings' and/or 'headings_extra' used for
+    extra scoring signals (see ``score_entry``).
 
     Returns a list of ``(score, idx, entry)`` tuples sorted by score desc,
     truncated to *limit*. Empty list if query has no tokens.
@@ -1378,6 +1395,7 @@ def search_index_entries(entries, query: str, *, limit: int = 15, get_extras=Non
             keywords,
             tags=extras.get("tags"),
             headings=extras.get("headings"),
+            headings_extra=extras.get("headings_extra"),
         )
         if score > 0:
             scored.append((score, idx, entry))
