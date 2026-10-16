@@ -22,10 +22,20 @@ def is_available(deadline: float | None = None) -> bool:
     return cursorcli.is_available(deadline)
 
 
-def run(prompt_text: str, *, cwd: str | None = None, timeout: float) -> base.Result:
-    """読み取り専用 (`--mode plan`) でプロンプトを 1 回実行し、結果を分類して返す。"""
+def run(
+    prompt_text: str,
+    *,
+    cwd: str | None = None,
+    timeout: float,
+    model: str | None = None,
+) -> base.Result:
+    """読み取り専用 (`--mode plan`) でプロンプトを 1 回実行し、結果を分類して返す。
+
+    `model` は cursor 固有の任意引数 (registry の共通 interface には含めない)。None なら
+    `--model` を渡さず、cursor 側の既定 (`auto`) で動く。
+    """
     return base.from_captured(
         subproc.run_captured(
-            cursorcli.readonly_argv(prompt_text), timeout_sec=timeout, cwd=cwd
+            cursorcli.readonly_argv(prompt_text, model), timeout_sec=timeout, cwd=cwd
         )
     )

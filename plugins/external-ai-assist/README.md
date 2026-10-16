@@ -628,6 +628,7 @@ timeout / レビュアー選択 / hook の無効化で待ち時間を縮める�
 | `EXTERNAL_AI_POST_REVIEW_BACKENDS` | `cursor` | 差分の送信先の候補 (カンマ区切り。`cursor` / `codex`)。**未設定なら cursor のみ = 0.11.0 と同じ**。未知の名前は無視して通知 (既定へ fallback しない) |
 | `EXTERNAL_AI_POST_REVIEW_STRATEGY` | 候補 1 つなら `fixed` / 2 つ以上なら `alternate` | 候補の試行順。`fixed` / `available` / `alternate` / `random` (`all` は提供しない)。解釈できない値は既定に倒す |
 | `EXTERNAL_AI_POST_REVIEW_TIMEOUT` | `300` | レビュー 1 回あたりの timeout (秒)。上限 `600` (超える指定は clamp)。**候補を複数書いてもこの合計を超えて待つことはない** (2 つ目以降は残り予算に収まるときだけ起動) |
+| `EXTERNAL_AI_POST_REVIEW_CURSOR_MODEL` | `composer-2.5` | cursor に `--model` で渡すモデル (0.13.0)。`auto` で cursor 側の既定に戻る。使える名前は `cursor-agent --list-models` で確認できる。使えない名前を書くと cursor が数秒で失敗し、毎回「失敗」と通知される。**既定のままレビューが毎回数秒で失敗する場合は、契約で `composer-2.5` が使えない可能性がある** (`auto` か一覧にある名前を指定する)。`-` で始まる値・空白を含む値は既定に倒す |
 | `EXTERNAL_AI_POST_REVIEW_MIN_LINES` | `0` (無効) | 送る diff の変更行数がこれ未満のターンはレビューを見送る (typo 修正で有料レビューを走らせない) |
 | `EXTERNAL_AI_POST_REVIEW_COOLDOWN_SEC` | `0` (無効) | 前回レビュー完了から N 秒未満のターンはレビューを見送る (セッション単位) |
 | `EXTERNAL_AI_POST_REVIEW_COMMIT` | `1` | Bash の中で作られた commit のレビュー (0.12.0)。`0` で commit レビューだけ切る (Stop の未 commit 差分レビューは残る)。`EXTERNAL_AI_POST_REVIEW=0` / `..._BASH_TRACKING=0` でも止まる |

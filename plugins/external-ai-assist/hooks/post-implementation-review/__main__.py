@@ -32,6 +32,7 @@ Stop は編集のあった全ターンで発火し、最大 `cursor.timeout_sec(
 |---|---|---|
 | `EXTERNAL_AI_POST_REVIEW` | `1` | この hook 自体の on/off |
 | `EXTERNAL_AI_POST_REVIEW_TIMEOUT` | `300` | cursor の timeout (上限 600) |
+| `EXTERNAL_AI_POST_REVIEW_CURSOR_MODEL` | `composer-2.5` | cursor の `--model` (0.13.0。`auto` で cursor 側の既定) |
 | `EXTERNAL_AI_POST_REVIEW_MIN_LINES` | `0` | 変更行数がこれ未満のターンは見送り |
 | `EXTERNAL_AI_POST_REVIEW_COOLDOWN_SEC` | `0` | 前回レビュー完了から N 秒は見送り |
 

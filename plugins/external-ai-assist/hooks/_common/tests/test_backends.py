@@ -175,6 +175,19 @@ class TestCursorBackend(FakeCliTestCase):
         self.assertEqual(len(args), 6, "プロンプトは最後の 1 引数")
         self.assertEqual(args[5], "PROMPT-BODY")
 
+    def test_run_passes_the_model_before_the_prompt(self):
+        argv_file = os.path.join(self._tmp.name, "cursor.argv")
+        self.fake(
+            "cursor",
+            _RECORD_ARGV.format(argv_file=shlex.quote(argv_file)) + "printf 'BODY\\n'\n",
+        )
+        result = backends.cursor.run("PROMPT-BODY", cwd=None, timeout=5, model="m-1")
+
+        self.assertTrue(result.is_ok)
+        args = self.read_argv(argv_file)
+        self.assertEqual(args[:5], ["agent", "--trust", "--print", "--mode", "plan"])
+        self.assertEqual(args[5:], ["--model=m-1", "PROMPT-BODY"])
+
     def test_run_classifies_failures(self):
         self.fake("cursor", "printf 'partial'\nexit 3\n")
         self.assertTrue(backends.cursor.run("p", cwd=None, timeout=5).is_failed)

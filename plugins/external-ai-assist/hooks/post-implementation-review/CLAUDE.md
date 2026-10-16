@@ -723,6 +723,7 @@ Stop は編集のあった全ターンで発火し、その間ブロックする
 | 環境変数 | 既定 | 効果 |
 |---|---|---|
 | `EXTERNAL_AI_POST_REVIEW_TIMEOUT` | `300` | cursor の timeout (上限 `cursor.MAX_TIMEOUT_SEC` = 600) |
+| `EXTERNAL_AI_POST_REVIEW_CURSOR_MODEL` | `composer-2.5` | cursor の `--model` (0.13.0)。下の「cursor のモデル」節 |
 | `EXTERNAL_AI_POST_REVIEW_MIN_LINES` | `0` | 送る diff の変更行数がこれ未満のターンは見送り |
 | `EXTERNAL_AI_POST_REVIEW_COOLDOWN_SEC` | `0` | 前回レビュー**完了**から N 秒未満のターンは見送り |
 
@@ -745,6 +746,30 @@ cooldown の起点 `last_review_at` は状態ファイルに持つ (= **セッ�
 完了時は所要時間・ファイル数・結果を `systemMessage` に出す (除外・繰り越し通知と同じ枠に
 まとめ、指摘ありのターンは既定で `hookSpecificOutput`、`MODE=block` なら `decision` と同居)。
 レビュー本文は入れない (方針は `_common/notify.py`)。
+
+### cursor のモデル (0.13.0)
+
+0.12.x までは `--model` を渡さず、cursor 側の既定 (`auto`) で動いていた。`auto` は
+1 ステップごとの思考が長く、`TIMEOUT_SEC` (300 秒) を毎回超えてレビューが一度も返らない
+作業ツリーがあった。超えた差分は「次ターンに持ち越し」になるので、毎ターン 5 分を
+使い続ける。実測 (2026-10-16, cursor-agent 2026.10.14, 9 ファイル・約 32KB の diff を
+本 hook と同じ prompt / flags で `--output-format stream-json` にして流した):
+
+| モデル | 所要 | ツール呼び出し | 結果 |
+|---|---|---|---|
+| `auto` (0.12.x の既定) | 477s | 59 | REVIEW_CLEAN |
+| `composer-2.5` (0.13.0 の既定) | 120s | 28 | 指摘 1 件 |
+| `auto` + prompt で探索を 5 回までに制限 | 327s | 5 | REVIEW_CLEAN |
+
+- `auto` は result イベントの 0.6 秒後に rc=0 で終了している = 「回答後に終了しない」
+  ハングではなく単に遅い。時間の内訳は思考が約 400 秒、ツール実行が約 11 秒
+- 探索回数を絞っても 300 秒を切らないので、prompt ではなくモデルを変える
+- 値は検証せずに渡す (使えるモデルは契約と cursor の版で変わる)。使えない名前は
+  cursor が約 3 秒で非 0 終了し、ほかの失敗と同じく `失敗` として通知される。
+  `-` で始まる値と空白を含む値だけは `cursor.model()` が既定に倒し、argv にも
+  `--model=<値>` の 1 トークンで載せる (フラグに見える値を作らない)
+- `--model=` は `READONLY_FLAGS` の後ろ・プロンプトの前に入る。explore-parallel の
+  PID 再利用ガードは `READONLY_FLAGS` がすべて含まれるかで照合するので影響しない
 
 ## 出力形式: hook error に見せない (0.8.0)
 

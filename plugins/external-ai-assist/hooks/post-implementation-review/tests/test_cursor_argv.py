@@ -63,9 +63,10 @@ class TestReviewArgv(unittest.TestCase):
         with open(argv_file, encoding="utf-8") as f:
             args = f.read().split("\0")[:-1]
         self.assertEqual(args[:5], ["agent", "--trust", "--print", "--mode", "plan"])
-        self.assertEqual(len(args), 6, "プロンプトは最後の 1 引数")
-        self.assertIn("## レビュー対象 git diff", args[5])
-        self.assertIn("DIFF-BODY", args[5])
+        self.assertEqual(args[5], f"--model={cursor.DEFAULT_MODEL}")
+        self.assertEqual(len(args), 7, "プロンプトは最後の 1 引数")
+        self.assertIn("## レビュー対象 git diff", args[6])
+        self.assertIn("DIFF-BODY", args[6])
 
 
 if __name__ == "__main__":
