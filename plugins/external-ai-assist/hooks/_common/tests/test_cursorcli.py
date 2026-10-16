@@ -141,6 +141,26 @@ class TestReadonlyArgv(CursorCliTestCase):
         self.assertIsNone(cursorcli.resolve())
         self.assertEqual(cursorcli.readonly_argv("PROMPT"), [*LEGACY_PREFIX, "PROMPT"])
 
+    def test_model_is_one_token_between_the_flags_and_the_prompt(self):
+        """`-` で始まる値も `=` でつなぐのでフラグにならず、プロンプトは末尾 1 引数のまま。"""
+        self.fake_cli("cursor")
+        self.assertEqual(
+            cursorcli.readonly_argv("PROMPT", "composer-2.5"),
+            [*LEGACY_PREFIX, "--model=composer-2.5", "PROMPT"],
+        )
+        self.assertEqual(
+            cursorcli.readonly_argv("PROMPT", "--force"),
+            [*LEGACY_PREFIX, "--model=--force", "PROMPT"],
+        )
+
+    def test_no_model_keeps_the_previous_launch_shape(self):
+        self.fake_cli("cursor")
+        for model in (None, ""):
+            with self.subTest(model=model):
+                self.assertEqual(
+                    cursorcli.readonly_argv("PROMPT", model), [*LEGACY_PREFIX, "PROMPT"]
+                )
+
     def test_readonly_flags_are_the_signature_source(self):
         """explore-parallel の PID 再利用ガードはこのフラグ列を署名に使う
         (`cursor.py::_SIGNATURE_TOKENS`)。環境で変わる argv[0] / サブコマンドは含めない。"""

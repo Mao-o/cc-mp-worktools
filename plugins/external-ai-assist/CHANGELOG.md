@@ -5,6 +5,33 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.13.0
+
+**`post-implementation-review` が cursor に渡すモデルを `composer-2.5` に変えた。cursor 側の既定 (`auto`) のままだと、差分レビューが 300 秒の timeout を毎回超えて一度も返らない作業ツリーがあった。挙動変更なので minor bump。**
+
+### 症状
+
+Stop の差分レビューと commit 単位レビューの両方が、毎回ちょうど「5分00秒 / cursor=失敗 → 結果を取得できず (timeout / 失敗)」で終わる。1 ファイル・約 3.7KB の小さな diff でも同じだった。失敗した差分は次ターンに持ち越されるので、次の Stop でもまた 5 分を使う。
+
+### 原因 (実測)
+
+同じ prompt と flags で、`--output-format stream-json` にして 9 ファイル・約 32KB の diff を流した (cursor-agent 2026.10.14):
+
+| モデル | 所要 | ツール呼び出し | 結果 |
+|---|---|---|---|
+| `auto` (0.12.6 の既定) | 477s | 59 | REVIEW_CLEAN |
+| `composer-2.5` (0.13.0 の既定) | 120s | 28 | 指摘 1 件 |
+| `auto` + prompt で探索を 5 回までに制限 | 327s | 5 | REVIEW_CLEAN |
+
+`auto` は result イベントの 0.6 秒後に正常終了しており、回答後に終わらないハングではない。時間の約 400 秒は思考で、ツール実行は約 11 秒。探索回数を絞っても 300 秒を切らないので、prompt ではなくモデルを変えた。
+
+> **更新後にレビューが毎回数秒で「失敗」になる場合**、使っている Cursor の契約で `composer-2.5` が使えない可能性がある (この経路では cursor の stderr を表示しない)。`EXTERNAL_AI_POST_REVIEW_CURSOR_MODEL=auto` で 0.12.6 までと同じモデルに戻るか、`cursor-agent --list-models` に出る別の名前を指定する。
+
+### 変更
+
+- `EXTERNAL_AI_POST_REVIEW_CURSOR_MODEL` を追加 (既定 `composer-2.5`)。`auto` で 0.12.6 までと同じ動きに戻る。値は検証せずに渡し、使えない名前なら cursor が約 3 秒で失敗して「失敗」と通知される。`-` で始まる値と空白を含む値は既定に倒す
+- `_common/cursorcli.readonly_argv` と `_common/backends/cursor.run` が任意の `model` を受け取る。`--model=<値>` の 1 トークンで `READONLY_FLAGS` の後ろ・プロンプトの前に入る。`model` を渡さない `explore-parallel` / `exitplan-review` の起動 argv は変わらない
+
 ## 0.12.6
 
 **テスト整理 (挙動の変更なし)。テストが起動する git の隔離を固め、`exitplan-review` の fake CLI の stdin テストが負荷で落ちる見込みを消した (patch bump)。** 製品コード・`hooks.json`・README は変えていない。

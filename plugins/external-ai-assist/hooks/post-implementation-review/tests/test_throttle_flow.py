@@ -293,6 +293,32 @@ class TestTimeoutSetting(HookTestCase):
         self.assertEqual(self.cursor.timeout_sec(), self.cursor.TIMEOUT_SEC)
 
 
+class TestModelSetting(HookTestCase):
+    """`EXTERNAL_AI_POST_REVIEW_CURSOR_MODEL` の解決規則と、cursor への渡し方。"""
+
+    def test_unset_uses_module_default(self):
+        self.assertEqual(self.cursor.model(), self.cursor.DEFAULT_MODEL)
+
+    def test_env_overrides_default(self):
+        os.environ["EXTERNAL_AI_POST_REVIEW_CURSOR_MODEL"] = "auto"
+        self.assertEqual(self.cursor.model(), "auto")
+
+    def test_flag_like_or_spaced_values_fall_back_to_default(self):
+        for value in ("--force", "-f", "a b", "   "):
+            with self.subTest(value=value):
+                os.environ["EXTERNAL_AI_POST_REVIEW_CURSOR_MODEL"] = value
+                self.assertEqual(self.cursor.model(), self.cursor.DEFAULT_MODEL)
+
+    def test_review_passes_the_resolved_model_to_the_backend(self):
+        os.environ["EXTERNAL_AI_POST_REVIEW_CURSOR_MODEL"] = "m-1"
+        backend = self.cursor.backends.cursor
+        with mock.patch.object(
+            backend, "run", return_value=self.cursor.backends.ok("REVIEW_CLEAN")
+        ) as run:
+            self.assertEqual(self.cursor.review("diff", cwd=self.repo), "REVIEW_CLEAN")
+        self.assertEqual(run.call_args.kwargs["model"], "m-1")
+
+
 class TestDisableSwitch(HookTestCase):
     """既存の無効化スイッチが 0.6.0 でも同じ意味であること。"""
 

@@ -177,16 +177,22 @@ def is_available(deadline: float | None = None) -> bool:
     return resolve(deadline) is not None
 
 
-def readonly_argv(prompt: str) -> list[str]:
+def readonly_argv(prompt: str, model: str | None = None) -> list[str]:
     """読み取り専用 (`--mode plan`) の print モードでプロンプトを 1 回実行する argv。
 
     検出できなかった場合は 0.10.0 までと同じ `cursor agent ...` に倒す (呼び出し側は
     `is_available()` で先に確認する契約なので通常は到達しない。ここで例外を投げると
     hook 側の fail-open 経路を通らずに落ちる形が増えるため、従来形を返す)。
+
+    `model` を渡すと `--model=<model>` を `READONLY_FLAGS` の後ろに足す。値を別の引数に
+    分けず `=` でつなぐのは、`-` で始まる値がフラグとして読まれないようにするため。
+    `READONLY_FLAGS` の並びとプロンプトが末尾 1 引数であることは変えない
+    (explore-parallel の PID 再利用ガードが `READONLY_FLAGS` を署名に使う)。
     """
     resolved = resolve()
     command, prefix = resolved if resolved else (BINARY, subcommand_for(BINARY))
-    return [command, *prefix, *READONLY_FLAGS, prompt]
+    model_flags = [f"--model={model}"] if model else []
+    return [command, *prefix, *READONLY_FLAGS, *model_flags, prompt]
 
 
 # --------------------------------------------------------------------------

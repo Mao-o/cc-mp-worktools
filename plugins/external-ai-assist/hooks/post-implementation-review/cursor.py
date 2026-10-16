@@ -34,6 +34,15 @@ MAX_OUTPUT_BYTES = 16000
 
 ENV_TIMEOUT = "EXTERNAL_AI_POST_REVIEW_TIMEOUT"
 
+#: cursor に渡すモデル (`--model`)。**0.13.0 で cursor 側の既定 (`auto`) から変更** (挙動変更)。
+#: `auto` は 1 ステップごとの思考が長く、9 ファイル・約 32KB の diff で 477 秒、
+#: 1 ファイル・約 3.7KB の diff でも `TIMEOUT_SEC` (300 秒) を毎回超えてレビューが一度も
+#: 返らなかった。同じ diff を `composer-2.5` で流すと 120 秒で返った (2026-10-16 実測、
+#: cursor-agent 2026.10.14)。`EXTERNAL_AI_POST_REVIEW_CURSOR_MODEL=auto` で従来どおり。
+DEFAULT_MODEL = "composer-2.5"
+
+ENV_MODEL = "EXTERNAL_AI_POST_REVIEW_CURSOR_MODEL"
+
 _PROMPT_FILE = Path(__file__).parent / "prompts" / "post-implementation-cursor.md"
 
 
@@ -58,6 +67,19 @@ def timeout_sec() -> float:
     return settings.duration(ENV_TIMEOUT, TIMEOUT_SEC, MAX_TIMEOUT_SEC)
 
 
+def model() -> str:
+    """実効モデル名。未設定・空白入り・`-` 始まりなら `DEFAULT_MODEL`。
+
+    値は検証せずそのまま cursor に渡す (使えるモデルは利用者の契約と cursor の版で変わる)。
+    使えない名前なら cursor が数秒で非 0 終了し、ほかの失敗と同じく `失敗` として通知される。
+    `-` 始まりを弾くのは、argv 上でフラグに見える値を作らないため。
+    """
+    value = settings.raw(ENV_MODEL)
+    if not value or value.startswith("-") or any(c.isspace() for c in value):
+        return DEFAULT_MODEL
+    return value
+
+
 def review(diff_text: str, *, cwd: str | None = None) -> str | None:
     """Cursor で差分をレビューし、整形済み結果を返す。失敗時は None。
 
@@ -74,6 +96,8 @@ def review(diff_text: str, *, cwd: str | None = None) -> str | None:
     full_prompt = (
         f"{template}\n\n---\n\n## レビュー対象 git diff\n\n```diff\n{diff_text}\n```"
     )
-    result = backends.cursor.run(full_prompt, cwd=cwd, timeout=timeout_sec())
+    result = backends.cursor.run(
+        full_prompt, cwd=cwd, timeout=timeout_sec(), model=model()
+    )
     result = result.truncated(MAX_OUTPUT_BYTES)
     return result.text if result.is_ok else None
