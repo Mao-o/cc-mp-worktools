@@ -467,12 +467,10 @@ GENERIC_PARITY_EXPECTED: frozenset = frozenset({
     "as-search",
     # the bundled ai-sdk preset: page_url for search / sections / content (as
     # the old script), list_page_urls false (no ``URL:`` in fetch-index /
-    # search-index, as the old script) and page_ref_forms ["int", "title"]
-    # (a URL fragment is no page ref, as in the old script)
+    # search-index, as the old script)
     "as-fetch-index",
     "as-search-index",
     "as-search-index-tags",
-    "as-content-missing",
     # anchor_style "github" + show_overflow (the second on the fixture only).
     # cd-plat-search-content matches on the fixture too, but its made-up
     # query has no hit on the full corpus, where the old script's zero-hit
@@ -561,12 +559,22 @@ FAILURE_PARITY_CASES: frozenset = frozenset({
     "cd-code-content-missing",
     "cd-code-corpus-content-url-missing",
     "cd-plat-corpus-sections-slug-ambiguous",
-    # a URL fragment of a page, not its title: no page in the old script
-    "as-content-missing",
     # a page that is not in the page cache, with the network off: the fetch
     # error (exit 1) on both sides
     "fb-content-dead",
 })
+
+# Cases where the generic loader is meant to differ from the old script: the
+# old script failed and its stderr named the command that reads the page
+# (``content … -- 8``); the bundled preset opens that page directly. Each
+# maps to the page the old script named.
+#   as-content-missing: the last segment of a page's URL (``stream-shape``)
+#     is a page ref of the ai-sdk preset (page_ref_forms "int", "title",
+#     "url", "slug": a title still wins, and only a ref no title holds is
+#     tried as a URL / slug)
+GENERIC_INTENDED_DIFF: dict = {
+    "as-content-missing": 8,
+}
 
 _URL_ENTRY_RE = re.compile(r"^    URL: \S+$")
 
@@ -604,6 +612,16 @@ def write_empty_sources(dest: str) -> str:
     with open(path, "w", encoding="utf-8") as f:
         json.dump({"sources": {}}, f)
     return path
+
+
+def _run_generic_argv(corpus: str, argv: list, *, source_dir: Path | None = None) -> _Run:
+    """The generic loader on the staged *corpus* with a legacy-style *argv*."""
+    tmp = tempfile.mkdtemp(prefix="llms-parity-")
+    try:
+        stage_corpus(corpus, tmp, source_dir=source_dir)
+        return run_script("parse-llms-txt.py", _generic_argv(corpus, argv, write_empty_sources(tmp)), tmp)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def run_generic_case(case_id: str, *, source_dir: Path | None = None) -> _Run:
@@ -918,6 +936,12 @@ class GenericLoaderHarnessTest(unittest.TestCase):
     """The generic-loader side of the harness runs (parity itself is filled
     in step by step through ``GENERIC_PARITY_EXPECTED``)."""
 
+    def test_ai_sdk_tries_a_title_before_a_url_or_a_slug(self):
+        # the order is what keeps the references 0.45.0 opened on the same page
+        # (a title word that is also another page's URL end); the corpus gate
+        # checks it on the real file, this one in CI
+        self.assertEqual(preset_profile("ai-sdk")["page_ref_forms"], ("int", "title", "url", "slug"))
+
     def test_provisional_profiles_load_the_fixtures(self):
         for case_id in ("cd-code-fetch-index", "cd-plat-fetch-index", "as-fetch-index"):
             with self.subTest(case=case_id):
@@ -942,6 +966,25 @@ class GenericLoaderHarnessTest(unittest.TestCase):
         self.assertFalse(set(corpus_ids) & set(CASE_IDS))
         self.assertLessEqual(FAILURE_PARITY_CASES,
                              (GENERIC_PARITY_EXPECTED - FIXTURE_ONLY_PARITY) | set(corpus_ids))
+
+    def test_intended_differences_open_the_page_the_old_script_named(self):
+        self.assertFalse(GENERIC_PARITY_EXPECTED & set(GENERIC_INTENDED_DIFF))
+        self.assertFalse(FAILURE_PARITY_CASES & set(GENERIC_INTENDED_DIFF))
+        for case_id, page in sorted(GENERIC_INTENDED_DIFF.items()):
+            with self.subTest(case=case_id):
+                _, record = load_golden(case_id)
+                self.assertEqual(record["exit"], 1)
+                # the old script named the page (its last stderr line is the command)
+                named = record["stderr"].rstrip("\n").splitlines()[-1].split()
+                self.assertEqual(named[-2:], ["--", str(page)], record["stderr"])
+                run = run_generic_case(case_id)
+                self.assertEqual(run.code, 0, run.stderr)
+                self.assertLessEqual(run.fetches, record["fetches"])
+                _, corpus, argv = case_of(case_id)
+                by_number = _run_generic_argv(corpus, [argv[0], str(page), *argv[2:]])
+                self.assertEqual(by_number.code, 0, by_number.stderr)
+                self.assertEqual(run.stdout, by_number.stdout)
+                self.assertEqual(run.stderr, by_number.stderr)
 
     def test_cases_differing_only_by_url_lines_match_without_them(self):
         self.assertFalse(GENERIC_PARITY_EXPECTED & GENERIC_PARITY_EXPECTED_BUT_URL_LINES)
@@ -1053,6 +1096,8 @@ class PresetCacheSharingTest(unittest.TestCase):
             ("claude-platform", "show_overflow"): True,
             # the old script lets a content cut stop inside a table
             ("ai-sdk", "protect_tables"): False,
+            # the old script's UNTITLED_WARN_RATIO (warned above that share of untitled pages)
+            ("ai-sdk", "untitled_warn_ratio"): 0.1,
             # the old script's headers say "Firebase", not the source name
             ("firebase", "label"): "Firebase",
             # the old script reads h2 and below as sections
@@ -1405,6 +1450,54 @@ class CorpusParityGateTest(unittest.TestCase):
                 resolved += old[0] == "ok"
         self.assertEqual(mismatches[:20], [])
         self.assertGreater(resolved, len(entries))
+
+    def test_every_ai_sdk_page_resolves_by_its_url_and_titles_as_before(self):
+        """Every AI SDK page, by its URL, its URL with ``.md`` and the last one
+        and two segments of its URL. The ai-sdk preset tries a URL / slug only
+        after the title (``GENERIC_INTENDED_DIFF``), so: a ref the old script
+        resolved (a title substring) reaches the same page; a ref it did not
+        resolve reaches the page whose URL it is or ends with, or fails (a
+        slug several pages end with is listed); and no ref reaches another
+        page than the old script's or than its own."""
+        full = self.cache / "ai-sdk-llms-full.txt"
+        if not full.exists():
+            self.skipTest(f"no {full}")
+        old_mod = _loader.load_script("parse-ai-sdk.py")
+        new_mod = _loader.load_script("parse-llms-txt.py")
+        import _common  # scripts/ is on sys.path (``_loader``)
+        lines = _common.load_lines(str(full))
+        old_docs = old_mod.split_documents(lines)
+        profile = preset_profile("ai-sdk")
+        docs = new_mod.split_documents(lines, profile)
+        self.assertEqual(len(docs), len(old_docs))
+        self.assertEqual(profile["page_ref_forms"], ("int", "title", "url", "slug"))
+
+        def call(fn, *a):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                try:
+                    return ("ok", fn(*a))
+                except SystemExit:
+                    return ("die", (err.getvalue().splitlines() or [""])[0])
+
+        wrong = []
+        by_url = 0
+        for i, doc in enumerate(docs):
+            if not doc["url"]:
+                continue
+            segs = doc["url"].rstrip("/").split("/")
+            for ref in (doc["url"], doc["url"].rstrip("/") + ".md", segs[-1], "/".join(segs[-2:])):
+                old = call(old_mod._resolve_page_ref, old_docs, ref, None)
+                new = call(new_mod._resolve_page_ref, docs, ref, None,
+                           profile["page_ref_forms"], profile["page_url_strip_suffix"])
+                if old[0] == "ok" and new != old:
+                    wrong.append(f"{ref!r}: old {old!r}, generic {new!r}")
+                elif old[0] != "ok" and new[0] == "ok" and new[1] != i:
+                    wrong.append(f"{ref!r}: page {i}, generic {new!r}")
+                by_url += old[0] != "ok" and new == ("ok", i) and ref.startswith("http")
+        self.assertEqual(wrong[:20], [])
+        # every page opens by its own URL (with and without .md)
+        self.assertEqual(by_url, 2 * sum(1 for d in docs if d["url"]))
 
     def test_platform_pages_match_on_the_full_corpus(self):
         full = self.cache / "claude-platform-llms-full.txt"

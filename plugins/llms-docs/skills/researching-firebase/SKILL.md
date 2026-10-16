@@ -36,7 +36,7 @@ paths:
   - "**/apphosting.yaml"
 metadata:
   author: mao
-  version: "2.2.0"
+  version: "3.0.0"
 ---
 
 # Firebase ドキュメント Progressive Loader
@@ -49,12 +49,12 @@ Firebase 公式ドキュメント (`firebase.google.com/docs`) を段階的に�
 
 ```bash
 # 1. キーワードで候補ページ + 本文 hits を取得 (初回は top N を on-demand fetch)
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" search "<キーワード>"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" search "<キーワード>" --source firebase
 # 2. 返ってきた [doc_idx] と heading_path を使って本文取得
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" content <doc_idx> "<heading_path>"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" content <doc_idx> "<heading_path>" --source firebase
 ```
 
-迷ったら `search` から始める。詳細は下記「調査フロー」以降。
+迷ったら `search` から始める。`--source firebase` は毎回付ける (省略できない)。詳細は下記「調査フロー」以降。
 `search` / `search-content` の末尾の `Next:` は上位ヒットの `doc_idx` と heading_path が埋まっている (そのまま実行できる)。
 
 ## 調査の進め方 (手数の目安)
@@ -62,8 +62,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" content <doc_idx> "<he
 - **論点が複数あるとき**は、最初に論点を番号付きで列挙し、1 つずつ順に処理して、論点ごとに結論
   (または「ドキュメントに記載なし」) を返す。複数の論点を 1 回の `search` に詰めない
 - 1 論点の基本は **`search` 1 回 → `content` 1〜2 回**。`search` の末尾の `Next:` 行は `doc_idx` と見出しが
-  埋まったコマンドなので、見出しを手で写さずそのまま実行する (先頭の `parse-firebase.py` は
-  `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py"` に置き換える)
+  埋まったコマンドなので、見出しを手で写さずそのまま実行する (先頭の `parse-llms-txt.py` は
+  `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py"` に置き換える)
 - 同じ論点で `search` を **3 回外したら**、言い換えを続けない。`search-index` / `sections` で構造から当たるか、
   「ドキュメントに記載なし」として返す
 - **`--max-chars 0`** は、出力に `... (N chars truncated; ...)` が出て、既定の上限 (24000 字) で
@@ -77,11 +77,11 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" content <doc_idx> "<he
 general-purpose の subagent など、Skill ツールを使えない文脈では、公式ドキュメントを WebFetch する前に、
 同梱のスクリプトを直接実行する (WebFetch は要約モデル経由で field が抜ける)。
 
-1. パスは `${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py`。`${CLAUDE_PLUGIN_ROOT}` が空の環境では、plugin の展開先 (`~/.claude/plugins/` の下) を探す。
+1. パスは `${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py`。`${CLAUDE_PLUGIN_ROOT}` が空の環境では、plugin の展開先 (`~/.claude/plugins/` の下) を探す。
    ディレクトリを指定して追加した marketplace は展開先へコピーされず、その場で読まれるので、見つからなければ
    `claude plugin marketplace list` で `Source: Folder (<dir>)` と出る marketplace の `<dir>` の下の
-   `plugins/llms-docs/scripts/parse-firebase.py` を探す
-2. `python3 <path> search "<キーワード>"` を実行し、出力末尾の `Next:` の先頭を `python3 <path>` に置き換えて本文を取る
+   `plugins/llms-docs/scripts/parse-llms-txt.py` を探す
+2. `python3 <path> search "<キーワード>" --source firebase` を実行し、出力末尾の `Next:` の先頭を `python3 <path>` に置き換えて本文を取る
 
 ## v2 互換性
 
@@ -114,7 +114,7 @@ v2 で `search` が推奨入口に統一された。旧フローの `search-inde
 ### Step 1: キーワードで候補ページ + 本文 hits を取得（推奨入口）
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" search "<キーワード>"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" search "<キーワード>" --source firebase
 ```
 
 スペース区切りで複数キーワード（AND）。
@@ -138,10 +138,10 @@ best-effort である点に注意。見出しタイトル自体に `/` を含む
 
 ```bash
 # 特定セクション (heading_path で指定)
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" content <page_ref> "<heading_path>"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" content <page_ref> "<heading_path>" --source firebase
 
 # ページ全体 (heading_path 省略)
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" content <page_ref>
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" content <page_ref> --source firebase
 ```
 
 **サブセクション一覧**と次の `content` 呼び出し例を、本文の前後両方 (metadata header 直後 と 末尾) に自動出力する (`--no-subsection-hints` で抑制可)。本文は既定 24000 文字で切り詰められ (`--max-chars 0` で無制限)、超過時は `... (N chars truncated; narrow with ...)` を出す。子見出しの無い節や見出しの無いページ (絞る先が無い) では代わりに、仮置きの語 (節の見出しかページタイトル) を名指しする注記と `Next: ... search-content --page-ref N --context 0 -- <仮置きの語>` を出す (語は常に `--` の後ろに置くので、`--resume` のような語に差し替えても打てる)。そのまま実行でき、注記の語を探したい語に差し替えて使う。
@@ -149,13 +149,13 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" content <page_ref>
 ### 補助: セクション一覧を確認したいとき
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" sections <page_ref>
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" sections <page_ref> --source firebase
 ```
 
 ### 補助: 特定ページ内だけ本文検索したいとき
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" search-content "<キーワード>" --page-ref <ref>
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" search-content "<キーワード>" --page-ref <ref> --source firebase
 ```
 
 `--page-ref` を省略すると全ページ横断 fetch (7000 ページ近い、初回は非常に重い) になるため、
@@ -167,10 +167,10 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" search-content "<キ�
 
 ```bash
 # 先頭 100 件
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" fetch-index
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" fetch-index --source firebase
 
 # 続きを表示
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" fetch-index --offset 100 --limit 100
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" fetch-index --offset 100 --limit 100 --source firebase
 ```
 
 `--limit 0` で全件表示できるが、7000 行近くなるため通常は避ける。
@@ -179,7 +179,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" fetch-index --offset 1
 
 ## page_ref の指定方法
 
-3 形式を受け付ける (claude-docs と統一。ai-sdk は URL を page_ref に使えず、整数 index とタイトル部分一致の 2 形式):
+3 形式を受け付ける (claude-docs と統一。ai-sdk はタイトル部分一致を加えた 4 形式):
 
 - **整数 index** (推奨): `42` — `search` / `search-index` の結果に表示される `[<doc_idx>]` の数字
 - **URL slug**: `"vector-search"` — Firebase docs の URL 末尾 path component。一意に決まる場合のみ
@@ -189,15 +189,15 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py" fetch-index --offset 1
 
 | コマンド | 引数 | 説明 |
 |---------|------|------|
-| `search` | `<query> [--top-n N] [--max-hits N] [--context N] [--max-snippet-chars N] [--include-changelog-priority]` | 推奨入口。title/desc 上位 N 件 fetch + 本文 hits。並び順は全キーワードが揃うか → ページタイトルと見出し (祖先の見出しを含む) が全キーワードを語として含むか (キーワードが 1 語のときはページの順に使わない) → 本文 hits 数 → index score (changelog / release notes は既定で末尾、`--include-changelog-priority` で解除)。ページ内の節は、見出しが全キーワードを含む節の中で、自分の見出しがあって初めて全語が揃う節を、見出しを受け継ぐだけの子孫より先に出し、その後ヒット数の順 |
-| `search-index` | `<query> [--limit N]` | title/description でキーワード検索（候補だけ取得） |
-| `search-content` | `<query> [--page-ref REF] [--limit N] [--context N] [--max-hits N] [--max-snippet-chars N]` | 指定ページ (省略時は全ページ) の本文を横断検索 |
-| `fetch-index` | `[--offset N] [--limit N]` | page index を paginated 表示（default --limit 100、フォールバック用） |
-| `sections` | `<page_ref>` | 指定ページの見出し一覧を表示 (該当ページを auto-fetch) |
-| `content` | `<page_ref> [heading_path] [--max-chars N] [--no-subsection-hints]` | セクション本文を表示 (該当ページを auto-fetch)。前後にサブセクション一覧、既定 24000 文字で切り詰め |
+| `search` | `<query> --source firebase [--top-n N] [--max-hits N] [--context N] [--max-snippet-chars N] [--include-changelog-priority]` | 推奨入口。title/desc 上位 N 件 fetch + 本文 hits。並び順は全キーワードが揃うか → ページタイトルと見出し (祖先の見出しを含む) が全キーワードを語として含むか (キーワードが 1 語のときはページの順に使わない) → 本文 hits 数 → index score (changelog / release notes は既定で末尾、`--include-changelog-priority` で解除)。ページ内の節は、見出しが全キーワードを含む節の中で、自分の見出しがあって初めて全語が揃う節を、見出しを受け継ぐだけの子孫より先に出し、その後ヒット数の順 |
+| `search-index` | `<query> --source firebase [--limit N]` | title/description でキーワード検索（候補だけ取得） |
+| `search-content` | `<query> --source firebase [--page-ref REF] [--limit N] [--context N] [--max-hits N] [--max-snippet-chars N]` | 指定ページ (省略時は全ページ) の本文を横断検索 |
+| `fetch-index` | `--source firebase [--offset N] [--limit N]` | page index を paginated 表示（default --limit 100、フォールバック用） |
+| `sections` | `<page_ref> --source firebase` | 指定ページの見出し一覧を表示 (該当ページを auto-fetch) |
+| `content` | `<page_ref> [heading_path] --source firebase [--max-chars N] [--no-subsection-hints]` | セクション本文を表示 (該当ページを auto-fetch)。前後にサブセクション一覧、既定 24000 文字で切り詰め |
 
 すべて `--cache-dir DIR` を受け付ける (default: `~/.cache/llms-docs`、`$XDG_CACHE_HOME` / `$LLMS_DOCS_CACHE_DIR` で上書き可)。
-スクリプトパス: `${CLAUDE_PLUGIN_ROOT}/scripts/parse-firebase.py`
+スクリプトパス: `${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py` (同梱 presets の汎用 loader)。全コマンドに `--source firebase` が要る。
 
 ### heading_path の指定方法
 
@@ -242,12 +242,13 @@ reference ページの多くは H2 のみのフラット構造、guide ページ
 |----------|------|------|
 | キャッシュ期限切れ | 7 日超のキャッシュ | 自動 re-fetch (既定 `--max-age 604800`) |
 | ネットワーク失敗 (単一ページ取得: `content`/`sections`) | fetch timeout / connection error | 既存キャッシュがあれば WARNING を出して stale cache のまま継続 (exit 0)。無ければ Error で exit 1。復旧後に最新化したい場合は `--max-age 0` で強制再取得 |
-| ネットワーク失敗 (複数ページ横断: `search`/`search-content`) | 候補ページの一部が dead link / timeout | 失敗したページのみ `(skip: fetch failed <url>: ...)` を stderr に出して読み飛ばし、残りの候補で検索を継続 (exit 0)。末尾に `N pages skipped` を表示。全ページ失敗した場合のみ結果 0 件になる |
+| ネットワーク失敗 (複数ページ横断: `search`/`search-content`) | 候補ページの一部が dead link / timeout | 失敗したページのみ `(skip: fetch failed <url>: ...)` を stderr に出して読み飛ばし、残りの候補で検索を継続 (exit 0)。末尾に `(N documents skipped — fetch failed, see stderr)` を表示。全ページ失敗した場合のみ結果 0 件になる |
 | キャッシュ破損 | パースエラー / 不正なインデックス | `--max-age 0` で強制再取得 (キャッシュディレクトリは既定 `~/.cache/llms-docs`、`--cache-dir` で確認・変更可) |
 | 結果ゼロ | `No matching ...` の下に `Why nothing matched:` (語ごとのページ数。`search` はタイトル / 説明の index、`search-content` は取得済みのページが対象) | 全語が 0 件なら言い換えを続けず、別の語・`search-index`・`fetch-index` に切り替える。一部の語だけ 0 件ならその語を落とす。全語があるのに 0 件 (同じセクションに揃わない) なら語を減らす。`--page-ref` で絞っていると数えるのはそのページだけなので、外して再実行する。いずれも続けて出る `Next:` がそのまま実行できる |
 | 曖昧な page_ref | `Ambiguous slug '...'. Matches:` | 候補ごとに実行できるコマンドが付く。選んでそのまま実行する |
 | heading が見つからない | `Error: heading '...' not found.` | `Closest sections:` の候補 (コマンド付き) を先に使う。全見出しは `Available sections:` に続く |
 | Python バージョン不足 | 起動直後に PEP 604 のユニオン型記法が原因の `TypeError: unsupported operand type(s) for ...` | `python3 --version` を確認し 3.11 以上を用意する (`mise use python@3.11` 等)。3.11 未満では動作しない |
+| 利用者の `sources.json` の誤り / 上書き | `Error: <path>/sources.json: …`、または同じファイルを名指す `WARNING: …` | `Error` と、`left out` / `not used` を含む `WARNING` は利用者の `sources.json` の誤りなので、そのファイルを直す (README「任意の llms-full.txt を読む」の `sources.json` の節)。`replaces the bundled preset` の `WARNING` は同梱 preset の上書きで、利用者が意図したものなら対処不要 (意図しないときだけ直す)。直せなければ下記 WebFetch フォールバックへ |
 | スクリプトエラー (その他) | Python traceback | 下記 WebFetch フォールバックへ |
 
 ### WebFetch フォールバック

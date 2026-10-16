@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared helpers for parse-ai-sdk.py / parse-claude-docs.py / parse-firebase.py.
+"""Shared helpers for parse-llms-txt.py (and, until the shims are removed, the old loaders under tests/legacy/).
 
 Imported as a sibling module from each ``parse-*.py``. Callers prepend the
 real script directory (``os.path.dirname(os.path.realpath(__file__))``) to

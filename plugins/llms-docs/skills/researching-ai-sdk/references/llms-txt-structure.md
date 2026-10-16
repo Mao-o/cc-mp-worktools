@@ -6,7 +6,7 @@
 約 150,000 行 / 5MB / 530 ドキュメントで構成される（2026-06-08 時点）。
 
 上流の `llms.txt` は ~2KB / 46 行のインデックスファイルに分離されており、本体は `llms-full.txt` に
-収録される構成へ変更された。`parse-ai-sdk.py` は `llms-full.txt` を直接 fetch する。
+収録される構成へ変更された。`parse-llms-txt.py --source ai-sdk` は `llms-full.txt` を直接 fetch する。
 
 ファイル先頭には `---` で始まらない contributing guide (TypeScript コード) ブロックが存在するが、
 `split_documents` は最初の `---` までを無視するため、ドキュメント分割には影響しない。

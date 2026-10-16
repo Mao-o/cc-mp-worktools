@@ -2,6 +2,73 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.46.0] - 2026-10-16
+
+### 変更: `researching-claude-docs` / `researching-ai-sdk` / `researching-firebase` が汎用 loader を使う
+
+専用 parser 3 本を汎用 loader (`parse-llms-txt.py`) に統合する段階の 1 つ。3 つの skill と README の
+コマンドを `parse-llms-txt.py <command> … --source <name>` に書き換えた (`claude-code` / `claude-platform` /
+両方をまとめた `search` の `claude` / `ai-sdk` / `firebase`)。`--source` は省略できない。
+
+- 専用 script の名前 (`parse-claude-docs.py` / `parse-ai-sdk.py` / `parse-firebase.py`) は、既存のコマンドが
+  動き続けるよう、引数を読み替えて `parse-llms-txt.py` を起動する shim になった (このリリースだけ残し、
+  次のリリースで削除する)。`--source code` / `platform` / `both` は `claude-code` / `claude-platform` /
+  `claude` に、`--source` が無ければ `claude-code` (ほかの 2 本は `ai-sdk` / `firebase`) に、`--index-limit` は
+  `--top-n` になる。専用 script が受け付けていたオプションの省略形 (`--sour both` など) は正式名に直して渡す
+  (汎用 loader ではオプションが多く、同じ省略形が曖昧になるため)。出力と終了コードは `parse-llms-txt.py`
+  のもので、`Next:` 行と打ち切り行 (`... narrow with …`) のコマンドも `parse-llms-txt.py` を指す
+- 専用 script の実装は `scripts/tests/legacy/` に移した。移行の比較の基準として、shim と一緒に削除する
+- `ai-sdk`: ページ参照に完全 URL と URL の末尾 (slug) を足した (`page_ref_forms` を `int` / `title` / `url` /
+  `slug` の順に)。`sections https://ai-sdk.dev/docs/…` や `content generating-text` が、そのページを開く。
+  タイトルの部分一致が先に効くので、0.45.0 で開けた参照は同じページを開く (手元の全コーパスで、全ページの
+  URL・`.md` 付きの URL・末尾 1 段・末尾 2 段を確かめた)。0.45.0 までは、URL や slug を渡すと exit 1 で、
+  そのページを読むコマンドを stderr に出していた
+- `ai-sdk`: `untitled_warn_ratio` を 0.1 にした。専用 script と同じく、タイトルの無いページが 1 割を超えると
+  `fetch-index` / `search-index` / `search` で `WARNING: N/M documents (…%) have no title in …` を出す
+  (0.45.0 の preset には無く、shim 経由では出なかった。閾値・比較 (超えたとき)・文面は専用 script と同じ)
+- 汎用 loader: `sources.json` の誤り。`--source` が同梱 preset の名前で、利用者の `sources.json` がその名前
+  (別名ならその `members`) を定義していないとき、ファイルが無い (明示したのに)・JSON として読めない・形が
+  違う・ほかの profile が不正、のどれでも止めず、stderr に `WARNING:` を 1 行 (ファイルのパスと理由) 出して
+  続ける (不正な profile だけを外す)。0.45.0 までは、Claude docs / AI SDK / Firebase の 3 skill は
+  `sources.json` を読まなかったので、利用者が別のサイトのために書いた profile の誤りで、この 3 つが止まらない
+  ようにした。`--source` が利用者だけの名前のとき、利用者が同梱 preset を定義し直していてその定義が誤って
+  いるとき、`sources` (一覧) では、従来どおり `Error` で止まる。利用者のファイルが正しいときの stdout は
+  変わらない
+- 汎用 loader: ページ参照がどの形式にも当たらないとき、profile が `slug` に加えて `title` か
+  `url_substring` を受け付けるなら、`No page found for slug: …` ではなく `No document found for: …` を出す
+  (タイトルとして渡した参照を slug と呼ばないため)。`slug` だけの profile (Claude docs / Firebase) は変わらない
+
+専用 script との既知の差 (出力の行。終了コードは同じ):
+
+- 0 件のとき、`claude-code` の `search` / `search-content` は、もう一方の source (`--source claude-platform`) を
+  案内する `Next:` 行を出さない (両方を探すのは `--source claude` の `search`)。`search` の 0 件で出ていた
+  `(no matching pages in Claude Code)` の行も無い
+- `--source claude` (旧 `--source both`) を `search` 以外に付けると、終了コード 2 で、選べる source を
+  1 行で出す (専用 script は source ごとに実行できるコマンドを列挙していた)
+- Firebase の `fetch-index --offset` が件数より大きいとき、件数の行は `(0 of N documents shown, …)` になる
+  (専用 script は負の件数を出していた)
+- Claude docs で `--file` に、もう一方の source のキャッシュのファイル名を渡しても止めない (専用 script は
+  ファイル名から source を推定して止めていた)
+- shim も `parse-llms-txt.py` と同じく利用者の `sources.json` を読む。同名の profile は preset を置き換え、
+  そのときは stderr に `WARNING: --source <名前> reads sources.<名前> from <パス>, …` を 1 行出す。
+  `sources.json` の誤りで止まるのは、その誤りを読むときだけ (下の「汎用 loader: `sources.json` の誤り」)
+
+- テスト: shim の引数の読み替え (省略形・`=` 付き・`--` の後ろ・旧 script に無いサブコマンド)、読み替え表が
+  専用 script の parser のオプションと一致し、汎用 loader のオプションでもあること、移行の比較の全ケースで
+  shim を通した出力が preset の出力と一致すること、出力が勧めるコマンド (`Next:` 行・打ち切り行・候補の
+  コマンド) がすべて `parse-llms-txt.py` を指し、shell の規則で分割してそのまま (プレースホルダは差し替えて)
+  実行すると exit 0 になること、shim を実プロセスで起動したときの出力と終了コード。移行の比較では ai-sdk の
+  slug の参照を、専用 script が案内したページを開く意図した差 (`GENERIC_INTENDED_DIFF`) に移し、手元の
+  全コーパスで流すテストに ai-sdk の全ページの参照を足した
+- テスト: ai-sdk の `page_ref_forms` の順序 (`int` / `title` / `url` / `slug`) を CI で走る suite でも固定した
+  (あるページのタイトルの一部で、別のページの URL の末尾でもある語は、タイトルのページを開く)。`sources.json`
+  の各状態 (無い・正しい・JSON でない・形が違う・ほかの profile が不正・同名で正しい・同名で不正) と
+  `--source` (同梱 preset / 利用者だけの名前 / 別名とその `members`) の全組み合わせ。タイトルの無いページが
+  多いとき、shim と専用 script が同じ警告を出すこと (閾値ちょうどでは出さないこと)。shim の省略形の
+  読み替えに 2 ケース (値を取らない flag の後ろの省略形、3 文字の省略形)
+- `AGENTS.md` のレビュー規則「既存 3 script の出力が変わる」を、移行の比較が除く行を除いた比較と、shim の
+  読み替えの誤りに改めた
+
 ## [0.45.0] - 2026-10-16
 
 ### 追加: 同梱 presets に `claude-code` / `claude-platform` / `claude` / `ai-sdk` / `firebase` (専用 3 script と同じ出力・同じキャッシュ)

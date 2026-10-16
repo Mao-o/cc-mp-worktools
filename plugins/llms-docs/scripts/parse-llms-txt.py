@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Progressive loader for any site's ``llms-full.txt``, described by a profile.
 
-The three dedicated loaders (``parse-claude-docs.py`` / ``parse-ai-sdk.py`` /
-``parse-firebase.py``) hard-code one site each. This one reads the site from a
+The three dedicated loaders this replaced (``parse-claude-docs.py`` /
+``parse-ai-sdk.py`` / ``parse-firebase.py``, now shims that run this script
+with the ``claude-code`` / ``ai-sdk`` / ``firebase`` presets, see ``_shim.py``)
+hard-coded one site each. This one reads the site from a
 profile: the presets bundled in ``presets.json`` next to this script, overlaid
 by the user's ``sources.json`` (a user profile replaces a preset of the same
 name). It supports the page shapes seen in the wild (measured 2026-09-26 and
@@ -41,7 +43,9 @@ for a page of another docs set still gets that entry's URL.
 
 import argparse
 import concurrent.futures
+import contextlib
 import hashlib
+import io
 import json
 import os
 import re
@@ -392,11 +396,17 @@ def _check_members(sources: dict) -> None:
     not configured (a preset renamed or removed by an update) is left to
     ``_get_profile``, so it stops only a search on that alias, not every
     command."""
-    for name, p in sources.items():
-        for member in p.get("members") or ():
-            if member in sources and sources[member].get("members"):
-                _bad(p["origin"], f"sources.{name}.members names {member!r}, which lists members "
-                                  f"itself ({sources[member]['origin']}); name the sources it lists instead")
+    for name in sources:
+        _check_alias(sources, name)
+
+
+def _check_alias(sources: dict, name: str) -> None:
+    """``_check_members`` for the one source *name*."""
+    p = sources[name]
+    for member in p.get("members") or ():
+        if member in sources and sources[member].get("members"):
+            _bad(p["origin"], f"sources.{name}.members names {member!r}, which lists members "
+                              f"itself ({sources[member]['origin']}); name the sources it lists instead")
 
 
 def _bool_key(path: str, name: str, raw: dict, key: str, default: bool) -> bool:
@@ -636,12 +646,21 @@ def resolve_sources_file(args) -> None:
         args.sources_file = default_sources_file()
 
 
-def load_sources(path: str, *, explicit: bool) -> dict:
+def load_sources(path: str, *, explicit: bool, want: str | None = None) -> dict:
     """Bundled presets overlaid by the user's *path* (a user profile replaces
     the preset of the same name). A missing *path* is fine when it is the
     config-dir default — the presets alone are then available — but an
-    explicitly given file must exist. Bad JSON / bad profile -> die."""
+    explicitly given file must exist. Bad JSON / bad profile -> die.
+
+    *want* is the ``--source`` the command reads. When it names a bundled
+    preset (``claude-code`` / ``ai-sdk`` / ``nextjs`` …), a problem in the
+    user's file that the profiles *want* reads do not have — the file is
+    missing or cannot be read, another profile is invalid — is one
+    ``WARNING`` line instead, and the rest is used: a mistake made for one
+    site must not stop the bundled ones (``_overlay_for_preset``)."""
     sources = _read_sources_file(PRESETS_FILE)
+    if want is not None and want in sources:
+        return _overlay_for_preset(sources, path, explicit, want)
     if os.path.exists(path):
         sources.update(_read_sources_file(path))
     elif explicit:
@@ -650,8 +669,91 @@ def load_sources(path: str, *, explicit: bool) -> dict:
     return sources
 
 
-def _read_sources_file(path: str) -> dict:
-    """Read and validate one sources file. Bad JSON / bad profile -> die."""
+def _caught(fn, *args):
+    """``fn(*args)`` with a ``die`` turned into its message:
+    ``(value, None)``, or ``(None, "<message without 'Error: '>")``."""
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err):
+            return fn(*args), None
+    except SystemExit:
+        return None, err.getvalue().strip().removeprefix("Error: ") or "invalid (no message)"
+
+
+def _used_names(want: str, raws: dict, presets: dict) -> list[str]:
+    """*want* and, when it is an alias (the user's definition if the file
+    has one, else the preset's), its members: the profiles it reads."""
+    raw = raws.get(want, presets[want])
+    members = raw.get("members") if isinstance(raw, dict) else None
+    if isinstance(members, (list, tuple)):
+        return [want, *(m for m in members if isinstance(m, str) and m != want)]
+    return [want]
+
+
+def _overlay_for_preset(presets: dict, path: str, explicit: bool, want: str) -> dict:
+    """``load_sources`` for a ``--source`` that is a bundled preset.
+
+    * no file at an explicitly given *path*, a file that is not JSON or not
+      ``{"sources": {...}}``: one ``WARNING``, the presets alone
+    * a profile *want* does not read that is invalid (or an unknown top-level
+      key): one ``WARNING``, that profile left out, the rest used
+    * a profile *want* reads (itself, or a member of the alias) that is
+      invalid: ``Error`` as before (the user meant to change that one)
+    * a profile *want* reads that replaces the preset of the same name:
+      used, with one ``WARNING`` naming the file
+    """
+    def note(msg: str) -> None:
+        print(f"WARNING: {msg}", file=sys.stderr)
+
+    if not os.path.exists(path):
+        if explicit:
+            note(f"no sources file at {path} (given by --sources-file or ${SOURCES_ENV}); "
+                 f"--source {want} uses the bundled preset ({README_HINT})")
+        return presets
+    data, problem = _caught(_load_sources_json, path)
+    if problem:
+        note(f"{problem}; the file is not used, and --source {want} uses the bundled preset")
+        return presets
+    raws = data["sources"]
+    used = _used_names(want, raws, presets)
+    problems: list[str] = []
+    unknown = set(data) - {"sources"}
+    if unknown:
+        problems.append(f"{path}: unknown top-level keys: {', '.join(sorted(unknown))} ({README_HINT})")
+    user: dict = {}
+    for name, raw in raws.items():
+        if name in used:
+            user[name] = _validate_profile(path, name, raw)
+            continue
+        profile, problem = _caught(_validate_profile, path, name, raw)
+        if problem:
+            problems.append(problem)
+        else:
+            user[name] = profile
+    _check_cache_owners(path, user)
+    sources = {**presets, **user}
+    for name in list(sources):
+        if name in used:
+            _check_alias(sources, name)
+            continue
+        _, problem = _caught(_check_alias, sources, name)
+        if problem:
+            problems.append(problem)
+            # an alias --source does not read: left out
+            sources.pop(name)
+    if problems:
+        more = f" (and {len(problems) - 1} more in that file)" if len(problems) > 1 else ""
+        note(f"{problems[0]}{more}; left out, since --source {want} does not read it")
+    for name in used:
+        if name in user and name in presets:
+            note(f"--source {want} reads sources.{name} from {path}, "
+                 f"which replaces the bundled preset of that name")
+    return sources
+
+
+def _load_sources_json(path: str) -> dict:
+    """The JSON of one sources file, of the shape ``{"sources": {...}}``.
+    Unreadable / bad JSON / another shape -> die."""
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
@@ -659,10 +761,22 @@ def _read_sources_file(path: str) -> dict:
         _bad(path, f"cannot read as JSON: {e}")
     if not isinstance(data, dict) or not isinstance(data.get("sources"), dict):
         _bad(path, 'top level must be {"sources": {"<name>": {...}}}')
+    return data
+
+
+def _read_sources_file(path: str) -> dict:
+    """Read and validate one sources file. Bad JSON / bad profile -> die."""
+    data = _load_sources_json(path)
     unknown = set(data) - {"sources"}
     if unknown:
         _bad(path, f"unknown top-level keys: {', '.join(sorted(unknown))}")
     profiles = {name: _validate_profile(path, name, raw) for name, raw in data["sources"].items()}
+    _check_cache_owners(path, profiles)
+    return profiles
+
+
+def _check_cache_owners(path: str, profiles: dict) -> None:
+    """One cache file and one page cache per corpus in *path*'s *profiles*."""
     owners: dict = {}
     for name, p in profiles.items():
         if p["cache_name"] is not None:
@@ -678,7 +792,6 @@ def _read_sources_file(path: str) -> dict:
                 _bad(path, f"sources.{name} caches its pages in {page_dir!r}, as "
                            f"sources.{page_dirs[page_dir]} does (one page cache per corpus)")
             page_dirs[page_dir] = name
-    return profiles
 
 
 def _missing_members(sources: dict, profile: dict) -> list[str]:
@@ -690,7 +803,7 @@ def _get_profile(args, *, members_ok: bool = False) -> dict:
     """The profile ``--source`` names. A ``members`` alias is only for
     ``search`` (*members_ok*), which gets it with ``member_profiles``; any
     other command exits 2 naming the sources to pick from."""
-    sources = load_sources(args.sources_file, explicit=args.sources_file_explicit)
+    sources = load_sources(args.sources_file, explicit=args.sources_file_explicit, want=args.source)
     if args.source not in sources:
         known = ", ".join(sorted(sources)) or "(none)"
         die(f"unknown --source {args.source!r}. Configured: {known}")
@@ -2077,7 +2190,9 @@ def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
             if len(found) > 1:
                 rows = [(i, d["title"] + (f" ({d['url']})" if d["url"] else "")) for i, d in found[:20]]
                 die_ambiguous_page(f"{field_name} substring", page_ref, rows, retry)
-    if "slug" in forms and not is_url:
+    # a profile that also takes a title (ai-sdk) cannot tell a slug from a
+    # title that matched nothing: "for slug" would misname the latter
+    if "slug" in forms and not is_url and not {"title", "url_substring"} & set(forms):
         die(f"No page found for slug: {page_ref}")
     die(f"No document found for: {page_ref}")
     return -1

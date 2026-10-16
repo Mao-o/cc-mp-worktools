@@ -14,11 +14,13 @@ No network: the pages are passed with ``--file``.
 import contextlib
 import io
 import json
+import os
 import shlex
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import _loader  # noqa: F401  (side effect: adds scripts/ to sys.path)
 
@@ -456,10 +458,15 @@ class FormOrderTest(unittest.TestCase):
                          (None, "Error: No page found for URL: https://example.com/none\n"))
 
     def test_slug_failure_message_when_slug_is_a_form(self):
-        self.assertEqual(resolve("nothing", ("int", "slug", "title")),
+        self.assertEqual(resolve("nothing", ("int", "url", "slug")),
                          (None, "Error: No page found for slug: nothing\n"))
-        self.assertEqual(resolve("nothing", ("int", "title", "slug")),
-                         (None, "Error: No page found for slug: nothing\n"))
+        # with a title (or URL substring) form too, the ref may have been meant
+        # as either: the message names neither (ai-sdk: "int", "title", "url", "slug")
+        for forms in (("int", "slug", "title"), ("int", "title", "slug"),
+                      ("int", "title", "url", "slug"), ("int", "slug", "url_substring")):
+            with self.subTest(forms=forms):
+                self.assertEqual(resolve("nothing", forms),
+                                 (None, "Error: No document found for: nothing\n"))
 
 
 class CliTest(unittest.TestCase):
@@ -587,6 +594,50 @@ class CliTest(unittest.TestCase):
                         self.fail(f"crashed: {e!r}")
                     self.assertIn(code, (0, 1), err)
                     self.assertNotIn("Traceback", err)
+
+
+class AiSdkPresetOrderTest(unittest.TestCase):
+    """The bundled ``ai-sdk`` preset tries a title before a URL or a slug
+    (``int``, ``title``, ``url``, ``slug``): a reference that is part of one
+    page's title and the URL end of another opens the titled page, as it did
+    before ``url`` and ``slug`` were added."""
+
+    CORPUS = (
+        "---\ntitle: Streaming Basics\ndescription: A\nurl: https://ai-sdk.dev/docs/intro\n---\n"
+        "# Streaming Basics\n\nBody A.\n\n## Part A\n\ntext\n"
+        "---\ntitle: Other Page\ndescription: B\nurl: https://ai-sdk.dev/docs/foundations/streaming\n---\n"
+        "# Other Page\n\nBody B.\n\n## Part B\n\ntext\n"
+    )
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        env = {k: v for k, v in os.environ.items() if k != generic.SOURCES_ENV}
+        env["XDG_CONFIG_HOME"] = self._tmp.name  # no user sources.json
+        self._env = mock.patch.dict(os.environ, env, clear=True)
+        self._env.start()
+        self.corpus = Path(self._tmp.name, "ai-sdk.txt")
+        self.corpus.write_text(self.CORPUS, encoding="utf-8")
+
+    def tearDown(self):
+        self._env.stop()
+        self._tmp.cleanup()
+
+    def opened(self, ref: str) -> str:
+        argv = [SCRIPT, "sections", ref, "--source", "ai-sdk", "--file", str(self.corpus)]
+        try:
+            code, out, err = _loader.run_cli(generic, argv)
+        except Exception as e:  # a crash is a failure of the test, not an error of the run
+            self.fail(f"{argv} crashed: {e!r}")
+        self.assertEqual(code, 0, err)
+        return out.splitlines()[0]
+
+    def test_a_title_word_that_is_also_another_pages_slug_opens_the_titled_page(self):
+        self.assertIn('[0] "Streaming Basics"', self.opened("streaming"))
+
+    def test_the_other_page_is_still_reached_by_its_slug_and_url(self):
+        for ref in ("foundations/streaming", "https://ai-sdk.dev/docs/foundations/streaming"):
+            with self.subTest(ref=ref):
+                self.assertIn('[1] "Other Page"', self.opened(ref))
 
 
 if __name__ == "__main__":

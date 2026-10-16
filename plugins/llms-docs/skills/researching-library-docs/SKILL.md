@@ -40,7 +40,9 @@ metadata:
 ドキュメントにない情報は「ドキュメントに記載なし」と明記すること。
 
 Claude Code / Claude API・AI SDK・Firebase は専用 skill (`researching-claude-docs` /
-`researching-ai-sdk` / `researching-firebase`) の対象で、この skill では扱わない。
+`researching-ai-sdk` / `researching-firebase`) の対象で、この skill では扱わない。script は同じ
+`parse-llms-txt.py` で、source 名 (`claude-code` / `claude-platform` / `claude` / `ai-sdk` / `firebase`) と
+読み方は各 skill にある。
 
 ## Step 0: source を決める
 
@@ -198,6 +200,7 @@ llms-full.txt にページ URL が無く、`llms.txt` とタイトルが一致�
 | 曖昧な page_ref (`Ambiguous title substring` / `Ambiguous url substring`) | 候補ごとに実行できるコマンドが付く。選んでそのまま実行する |
 | `Error: heading '...' not found.` | `Closest sections:` の候補 (コマンド付き) を先に使う。全見出しは `Available sections:` に続く |
 | 起動直後の `TypeError: unsupported operand type(s)` | Python 3.11 以上が必要 |
+| `Error: <path>/sources.json: …`、または同じファイルを名指す `WARNING: …` | `Error` と、`left out` / `not used` を含む `WARNING` は利用者の `sources.json` の誤りなので、そのファイルを直す (README「任意の llms-full.txt を読む」の `sources.json` の節)。`replaces the bundled preset` の `WARNING` は同梱 preset の上書きで、利用者が意図したものなら対処不要 (意図しないときだけ直す)。直せなければ下の WebFetch フォールバック |
 | その他のスクリプトエラー | 下の WebFetch フォールバック |
 
 ### WebFetch フォールバック

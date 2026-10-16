@@ -9,6 +9,8 @@ boilerplate lines (Cloudflare per-product files). No network access: every
 CLI test passes ``--file``.
 """
 
+import contextlib
+import io
 import json
 import os
 import re
@@ -829,6 +831,219 @@ TWO_LEVEL_INDEX = """\
 ## Learning tracks
 - [Model optimization](https://example.com/tracks/model-optimization.md): Fine-tune and optimize models.
 """
+
+
+class UserFileProblemsForPresetsTest(unittest.TestCase):
+    """A problem in the user's ``sources.json`` stops only what reads it.
+
+    Every cell of (state of the user's file) x (``--source`` is a bundled
+    preset / a name only the user's file defines). With a preset, a problem
+    the preset's profiles do not have is one ``WARNING`` line and the run goes
+    on; a user profile that replaces the preset is used, with one ``WARNING``
+    naming the file. A user name, and a broken redefinition of the preset,
+    stop with ``Error`` as before. ``sources`` (the listing) stays strict.
+    """
+
+    PRESET = "zod"
+    MINE = {"url": "https://example.com/llms-full.txt", "split": "h1"}
+    BAD = {"url": "https://example.com/llms-full.txt"}  # no split: invalid
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        env = {k: v for k, v in os.environ.items() if k != generic.SOURCES_ENV}
+        env["XDG_CONFIG_HOME"] = str(self.dir / "config")  # no default file
+        self._env = mock.patch.dict(os.environ, env, clear=True)
+        self._env.start()
+        self.corpus = self.dir / "corpus.txt"
+        self.corpus.write_text(H1_NO_URL, encoding="utf-8")
+        raw = json.loads(Path(generic.PRESETS_FILE).read_text(encoding="utf-8"))["sources"][self.PRESET]
+        self.same_as_preset = {k: v for k, v in raw.items() if k not in generic._PRESET_ONLY_KEYS}
+        self.baseline = self._baseline()
+
+    def tearDown(self):
+        self._env.stop()
+        self._tmp.cleanup()
+
+    def user_file(self, content) -> str:
+        path = self.dir / "user.json"
+        path.write_text(content if isinstance(content, str) else json.dumps(content), encoding="utf-8")
+        return str(path)
+
+    def run_sections(self, source: str, sources_file: str | None = None) -> tuple[int, str, str]:
+        argv = ["parse-llms-txt.py", "sections", "0", "--source", source, "--file", str(self.corpus)]
+        if sources_file is not None:
+            argv += ["--sources-file", sources_file]
+        try:
+            return _loader.run_cli(generic, argv)
+        except Exception as e:  # a crash is a failure of the cell, not an error of the run
+            self.fail(f"{argv} crashed: {e!r}")
+
+    def warnings(self, err: str) -> list[str]:
+        return [line for line in err.splitlines() if line.startswith("WARNING: ")]
+
+    def _baseline(self) -> str:
+        code, out, err = self.run_sections(self.PRESET)
+        self.assertEqual((code, err), (0, ""))
+        return out
+
+    def assert_preset_runs(self, sources_file, *needles, warned=True):
+        """The preset's own output, and one WARNING carrying *needles*."""
+        code, out, err = self.run_sections(self.PRESET, sources_file)
+        self.assertEqual(code, 0, err)
+        # the Next: lines carry an explicit --sources-file; the rest is the preset's
+        self.assertEqual(re.sub(r" --sources-file \S+", "", out), self.baseline)
+        if not warned:
+            self.assertEqual(err, "")
+            return
+        self.assertEqual(len(self.warnings(err)), 1, err)
+        self.assertEqual(err.count("\n"), 1, err)
+        for needle in needles:
+            self.assertIn(needle, err)
+
+    def assert_error(self, source, sources_file, *needles):
+        code, out, err = self.run_sections(source, sources_file)
+        self.assertEqual(code, 1, (out, err))
+        self.assertEqual(out, "")
+        self.assertTrue(err.startswith("Error: "), err)
+        self.assertEqual(self.warnings(err), [])
+        for needle in needles:
+            self.assertIn(needle, err)
+
+    # -- no file ------------------------------------------------------------
+
+    def test_no_file_at_the_default_path(self):
+        self.assert_preset_runs(None, warned=False)
+        self.assert_error("mine", None, "unknown --source 'mine'")
+
+    def test_no_file_at_an_explicit_path(self):
+        missing = str(self.dir / "absent.json")
+        self.assert_preset_runs(missing, missing, "no sources file", f"--source {self.PRESET}")
+        self.assert_error("mine", missing, "no sources file", missing)
+        with mock.patch.dict(os.environ, {generic.SOURCES_ENV: missing}):
+            self.assert_preset_runs(None, missing, "no sources file")
+
+    # -- a good file --------------------------------------------------------
+
+    def test_good_file_without_the_preset(self):
+        path = self.user_file({"sources": {"mine": self.MINE}})
+        self.assert_preset_runs(path, warned=False)
+        code, out, err = self.run_sections("mine", path)
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("--source mine", out)
+
+    # -- a broken file ------------------------------------------------------
+
+    def test_file_that_is_not_json(self):
+        path = self.user_file("{")
+        self.assert_preset_runs(path, path, "cannot read as JSON", "the file is not used")
+        self.assert_error("mine", path, path, "cannot read as JSON")
+
+    def test_file_of_another_shape(self):
+        for label, content in {"sources not an object": {"sources": []},
+                               "not an object": [1]}.items():
+            with self.subTest(label):
+                path = self.user_file(content)
+                self.assert_preset_runs(path, path, "top level must be")
+                self.assert_error("mine", path, "top level must be")
+
+    def test_another_profile_is_invalid(self):
+        path = self.user_file({"sources": {"mine": self.MINE, "foo": self.BAD}})
+        self.assert_preset_runs(path, path, "sources.foo.split", "left out")
+        self.assert_error("mine", path, path, "sources.foo.split")
+
+    def test_two_invalid_profiles_are_one_line(self):
+        path = self.user_file({"sources": {"foo": self.BAD, "bar": self.BAD}})
+        self.assert_preset_runs(path, "sources.foo.split", "and 1 more")
+
+    def test_an_unknown_top_level_key(self):
+        path = self.user_file({"sources": {"mine": self.MINE}, "extra": 1})
+        self.assert_preset_runs(path, "unknown top-level keys: extra")
+        self.assert_error("mine", path, "unknown top-level keys: extra")
+
+    def test_a_nested_alias_the_preset_does_not_read(self):
+        path = self.user_file({"sources": {"pair": {"members": ["claude", "mine"]}, "mine": self.MINE}})
+        self.assert_preset_runs(path, "sources.pair.members names 'claude'")
+        self.assert_error("pair", path, "sources.pair.members names 'claude'")
+        sources, _err = self.load({"sources": {"pair": {"members": ["claude", "mine"]}, "mine": self.MINE}},
+                                  self.PRESET)
+        self.assertIsNotNone(sources)
+        self.assertNotIn("pair", sources)  # left out, not kept half-checked
+        self.assertIn("mine", sources)
+
+    # -- the preset redefined ----------------------------------------------
+
+    def test_the_preset_replaced_by_a_good_profile(self):
+        path = self.user_file({"sources": {self.PRESET: self.same_as_preset, "mine": self.MINE}})
+        self.assert_preset_runs(path, f"sources.{self.PRESET} from {path}", "replaces the bundled preset")
+        # a user name does not read the replaced preset: no warning
+        code, _out, err = self.run_sections("mine", path)
+        self.assertEqual((code, err), (0, ""))
+
+    def test_the_preset_replaced_by_an_invalid_profile(self):
+        path = self.user_file({"sources": {self.PRESET: self.BAD, "mine": self.MINE}})
+        self.assert_error(self.PRESET, path, path, f"sources.{self.PRESET}.split")
+        self.assert_error("mine", path, path, f"sources.{self.PRESET}.split")
+
+    def test_the_preset_replaced_by_a_nested_alias(self):
+        path = self.user_file({"sources": {self.PRESET: {"members": ["claude", "nextjs"]}}})
+        self.assert_error(self.PRESET, path, f"sources.{self.PRESET}.members names 'claude'")
+
+    # -- an alias preset reads its members ----------------------------------
+
+    def load(self, content, want):
+        """``(sources, stderr)`` of ``load_sources``, or ``(None, stderr)`` when it exits."""
+        path = self.user_file(content)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            try:
+                return generic.load_sources(path, explicit=True, want=want), err.getvalue()
+            except SystemExit:
+                return None, err.getvalue()
+
+    def test_an_alias_preset_and_its_members(self):
+        member = {k: v for k, v in json.loads(Path(generic.PRESETS_FILE).read_text(encoding="utf-8"))
+                  ["sources"]["claude-code"].items() if k not in generic._PRESET_ONLY_KEYS}
+        sources, err = self.load({"sources": {"claude-code": self.BAD}}, "claude")
+        self.assertIsNone(sources)
+        self.assertIn("sources.claude-code.split", err)
+        sources, err = self.load({"sources": {"claude-code": member}}, "claude")
+        self.assertIsNotNone(sources, err)
+        self.assertEqual(sources["claude-code"]["origin"], str(self.dir / "user.json"))
+        self.assertEqual(len(self.warnings(err)), 1, err)
+        self.assertIn("--source claude reads sources.claude-code from", err)
+        sources, err = self.load({"sources": {"foo": self.BAD}}, "claude")
+        self.assertIsNotNone(sources, err)
+        self.assertEqual(sources["claude-code"]["origin"], generic.PRESETS_FILE)
+        self.assertNotIn("foo", sources)
+        self.assertEqual(len(self.warnings(err)), 1, err)
+        # the user's alias of the preset's name reads the members it lists
+        sources, err = self.load({"sources": {"claude": {"members": ["claude-code", "mine"]},
+                                              "mine": self.BAD}}, "claude")
+        self.assertIsNone(sources)
+        self.assertIn("sources.mine.split", err)
+        # a user-only member is not reported as replacing a bundled preset
+        sources, err = self.load({"sources": {"claude": {"members": ["claude-code", "mine"]},
+                                              "mine": self.MINE}}, "claude")
+        self.assertIsNotNone(sources, err)
+        self.assertEqual(len(self.warnings(err)), 1, err)
+        self.assertIn("sources.claude from", err)
+        self.assertNotIn("sources.mine", err)
+
+    # -- the listing stays strict ------------------------------------------
+
+    def test_the_listing_stops_on_any_problem(self):
+        for label, content in {"not json": "{", "another profile": {"sources": {"foo": self.BAD}},
+                               "preset replaced": {"sources": {self.PRESET: self.BAD}}}.items():
+            with self.subTest(label):
+                path = self.user_file(content)
+                code, _out, err = _loader.run_cli(generic, ["parse-llms-txt.py", "sources", "--sources-file", path])
+                self.assertEqual(code, 1)
+                self.assertTrue(err.startswith(f"Error: {path}: "), err)
+        path = self.user_file({"sources": {self.PRESET: self.same_as_preset}})
+        code, out, err = _loader.run_cli(generic, ["parse-llms-txt.py", "sources", "--sources-file", path])
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn(f"{self.PRESET}  [user, h1]", out)
 
 
 class IndexJoinTest(unittest.TestCase):
