@@ -26,6 +26,13 @@
   - `"$(...)"` や `` `...` `` の中の git
   - `for` / `case` などの制御構文で作業ディレクトリが変わる場合
 
+## インストール
+
+```
+/plugin marketplace add Mao-o/cc-mp-worktools
+/plugin install worktree-cwd-guard@mao-worktools
+```
+
 ## 動作する条件
 
 hook の入力に含まれる作業ディレクトリ (`cwd`) が **linked worktree の中**のときだけ動きます。
