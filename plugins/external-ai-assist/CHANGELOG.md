@@ -5,6 +5,27 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.15.0
+
+**`post-implementation-review` の Stop が、`/goal` の継続中の Stop もレビューするようにした。0.14.0 までは `stop_hook_active` が true の Stop を一律に skip していたため、`/goal` の 2 ターン目以降はゴールが片付くまで 1 回もレビューされなかった。レビューが走る Stop が増える挙動変更なので minor bump。**
+
+### 症状
+
+`/goal` は session スコープの Stop hook で、条件が未達のたびにターンを継続させる。nested `claude -p "/goal ..."` (CLI 2.1.306) で Stop の payload を記録すると、1 ターン目だけ `stop_hook_active: false`、2 ターン目以降はすべて `true` だった。この hook は true を「自分が継続させた後の Stop」とみなして skip していたので、ゴールの途中の編集はレビューされず、差分が最後にまとめて溜まっていた。
+
+### 変更
+
+- `stop_hook_active` が true でも、skip するのは次の 2 つだけにした
+  - `EXTERNAL_AI_POST_REVIEW_MODE` が `block` に解決されたとき (0.14.0 までと同じ一律の skip)
+  - 直前の Stop で**この hook が**ターンを継続させたとき (指摘を `additionalContext` か `decision: "block"` で返したとき)
+- 直前の Stop の継続の有無は state に 1 ビット (`continued_turn`) で持つ。毎回の Stop で読んで消すので、skip するのは継続させた次の Stop 1 回だけ。読めないときは skip 側に倒す
+- `additionalContext` も `decision: "block"` と同じくターンを継続させる (公式 Hooks reference) ので、既定の context mode でも自分の指摘の直後は skip する
+- block mode かの判定 (auto では `claude --version` の版数検出が走りうる) は、機能 off (`EXTERNAL_AI_POST_REVIEW=0`) と外部 AI CLI 未インストールの抜けより後に置いた。そうした利用者には、継続中の Stop で版数検出が走らない (0.14.0 と同じく即 return)
+
+### Added
+
+- plugin の icon (`assets/icon.png`) を足した。`claude plugin validate` の plugin directory checks が出す `ICON_MISSING` を解消する
+
 ## 0.14.0
 
 **`post-implementation-review` の Stop が、40 KB を超える差分を同じ Stop の中で塊ごとに送るようにした。0.13.0 までは 40 KB の 1 塊だけを送り、残りを次の Stop (= 利用者が次に発言して応答が終わったとき) へ繰り越していた。送信回数が変わる挙動変更なので minor bump。**

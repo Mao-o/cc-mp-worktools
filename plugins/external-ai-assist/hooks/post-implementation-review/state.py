@@ -138,6 +138,7 @@ def _empty_state() -> dict:
         "fingerprints": {},
         "last_review_at": 0.0,
         "last_backend": "",
+        "continued_turn": False,
     }
 
 
@@ -162,6 +163,8 @@ def _normalize(raw) -> dict:
     backend = raw.get("last_backend")
     if isinstance(backend, str):
         state["last_backend"] = backend
+    if raw.get("continued_turn") is True:
+        state["continued_turn"] = True
     return state
 
 
@@ -510,6 +513,43 @@ def mark_review_done(session_id: str) -> None:
     try:
         with _locked_state(session_id) as state:
             state["last_review_at"] = time.time()
+    except OSError:
+        pass
+
+
+def take_continued_turn(session_id: str) -> bool:
+    """このセッションの**直前の Stop** で、この hook がターンを継続させたか。読んだら消す。
+
+    Stop の再帰防止 (`stop_hook_active`) を「この hook 自身が継続させた直後の Stop」に
+    絞るための 1 ビット。`stop_hook_active` は継続させたのが誰でも true になる
+    (`/goal` の評価 hook による継続でも true — CLI 2.1.306 で実測) ので、それだけで
+    skip すると `/goal` の 2 ターン目以降が 1 回もレビューされない。
+
+    **Stop のたびに読んで消す**: skip の対象は「継続させた次の Stop」1 回だけ。消さずに
+    残すと、その後の `/goal` の継続でも skip が続く。中断などで継続後の Stop が来なかった
+    場合も、次の Stop で消える。
+
+    state ファイルが一度も無ければ False (開かない — `claim_pending` と同じ理由)。
+    読めない (OSError) ときは True を返す: 再帰防止を外す方向には倒さない
+    (0.14.0 までの「`stop_hook_active` なら常に skip」と同じ側)。
+    """
+    if not os.path.exists(_state_path(session_id)):
+        return False
+    try:
+        with _locked_state(session_id) as state:
+            value = state.get("continued_turn") is True
+            state["continued_turn"] = False
+            return value
+    except OSError:
+        return True
+
+
+def record_continued_turn(session_id: str) -> None:
+    """この Stop の出力がターンを継続させる (`decision: "block"` か
+    `additionalContext`) ときに呼ぶ。次の Stop の `take_continued_turn()` が読む。"""
+    try:
+        with _locked_state(session_id) as state:
+            state["continued_turn"] = True
     except OSError:
         pass
 

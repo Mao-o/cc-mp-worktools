@@ -337,8 +337,14 @@ class HookTestCase(unittest.TestCase):
         self.last_stderr = err.getvalue()
         return out.getvalue()
 
-    def stop(self, session_id: str, review_result: str | None) -> str:
-        """Stop hook を 1 回起動する。cursor.review() の戻り値を差し替える。"""
+    def stop(
+        self, session_id: str, review_result: str | None, *, stop_hook_active: bool = False
+    ) -> str:
+        """Stop hook を 1 回起動する。cursor.review() の戻り値を差し替える。
+
+        `stop_hook_active=True` は「どれかの Stop hook (`/goal` を含む) がターンを
+        継続させた後の Stop」を表す。
+        """
         calls: list[str] = []
         cwds: list[str | None] = []
 
@@ -350,7 +356,11 @@ class HookTestCase(unittest.TestCase):
         with mock.patch.object(self.cursor, "review", side_effect=fake_review):
             output = self.run_hook(
                 "stop",
-                {"session_id": session_id, "cwd": self.repo, "stop_hook_active": False},
+                {
+                    "session_id": session_id,
+                    "cwd": self.repo,
+                    "stop_hook_active": stop_hook_active,
+                },
             )
         self.review_calls = calls
         self.review_cwds = cwds
