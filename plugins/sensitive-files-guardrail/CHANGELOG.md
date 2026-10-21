@@ -23,6 +23,12 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.35.3
+
+icon と導入手順の追加 (挙動の変更なし、patch bump)。
+
+- plugin の icon (`assets/icon.png`) を足した。`claude plugin validate` の plugin directory checks が出す `ICON_MISSING` を解消する
+
 ## 0.35.2
 
 **テスト整理 (挙動の変更なし)。外側の env の `GIT_DIR` などがテストの git に漏れ、git の hook から suite を
