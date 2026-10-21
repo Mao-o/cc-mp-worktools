@@ -1,6 +1,26 @@
 # Changelog
 
-## 0.24.0
+## 0.24.1
+
+### Fixed: auto-switch の記録を書き戻せないとき、切り替えたのに「行いませんでした」と通知していた
+
+- 切替の記録 (`record_switch`) の書き戻しで握る例外が `OSError` だけだった。別の対象の記録に JSON の
+  `\ud800` のような孤立サロゲートがあると、記録は読めるが UTF-8 では書けず (`UnicodeEncodeError`)、
+  アカウントを切り替えた後にその例外が漏れて「自動切替 (auto-switch) は内部エラーのため行いませんでした」と
+  通知していた (実際には切り替わっている)。書き戻しの失敗は種類を問わず (`OSError` / `ValueError` /
+  `RecursionError`) 記録が書けなかっただけにし、通知は切り替えた事実と一致する。判定は変えない
+
+### Fixed: 文書と出力の「未設定」の説明を実際の扱いに揃える
+
+- builder の出力 (グローバル既定を覆い隠す警告・`--path` の覆い隠しの警告・継承中の `init` の拒否) とコメント、
+  `core/mode.py` の表が「未設定 = deny」と書いていたのを、実際の扱い (書込は deny、リモート read のみの
+  コマンドは警告) に揃えた。README の既知の制限の非互換の項に、`$HOME` の固定パスのグローバル既定があれば
+  それで検証され未設定の扱いにならないことを足した。判定は変わらない
+- `firebase use` の記録の単位を「作業ディレクトリごと」と書いていた README / DEVELOPMENT / `pin-env` の notes /
+  `project-accounts` skill / コメントを、firebase-tools の実装どおり project root (firebase.json のある
+  ディレクトリ。`--config` があればそのファイルのディレクトリ) ごとに揃えた。`pin-env` の出力の notes の文言が
+  変わる (案内するコマンドと判定は変わらない)
+- 回帰テストを足した (builder 3 経路の新しい文言、`record_switch` の書き戻し失敗、`pin-env` の notes)
 
 ### Changed: 利用者のリポジトリの tracked file を増やさない (`.gitignore` の重複追記 / signpost)
 

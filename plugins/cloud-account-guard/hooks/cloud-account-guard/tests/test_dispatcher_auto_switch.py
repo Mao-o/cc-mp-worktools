@@ -21,7 +21,7 @@ from unittest import mock
 
 import _testutil  # noqa: F401
 
-from core import auto_switch, budget  # noqa: E402
+from core import auto_switch, budget, cache  # noqa: E402
 from core.dispatcher import dispatch  # noqa: E402
 
 _ISOLATION = None
@@ -360,6 +360,23 @@ class TestConcurrentSessionGuard(AutoSwitchBase):
         with self._enabled():
             self._context(self._dispatch("gh pr create"))
         self.assertEqual(self.gh.active["github.com"], "Mao-o")
+
+    def test_record_that_can_be_read_but_not_written_back_does_not_hide_the_switch(self):
+        """別 target の記録に孤立サロゲート (`\\ud800`) があると、JSON としては読めるが
+        UTF-8 では書き戻せない。切り替えた後の記録の書き戻しで出る `UnicodeEncodeError` が
+        漏れると「自動切替は内部エラーのため行いませんでした」と通知されるが、アカウントは
+        実際には切り替わっている。通知は切り替えた事実と一致していなければならない。"""
+        guard = cache.service_state_path("github", ".autoswitch.json")
+        guard.write_text(
+            '{"other.example.com": {"value": "\\ud800", "project": "/x", "at_ns": 1}}',
+            encoding="utf-8",
+        )
+        self._write_accounts({"github": "Mao-o"})
+        with self._enabled():
+            context = self._context(self._dispatch("gh pr create --fill"))
+        self.assertEqual(self.gh.active["github.com"], "Mao-o", "前提: 実際に切り替わっている")
+        self.assertNotIn("内部エラー", context)
+        self.assertIn("github.com: work → Mao-o", context)
 
     def test_ping_pong_between_two_projects_is_stopped_on_the_second_flip(self):
         """別アカウントを期待する 2 プロジェクトが交互に切り替えない。"""

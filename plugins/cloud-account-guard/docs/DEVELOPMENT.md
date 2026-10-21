@@ -1052,8 +1052,10 @@ gh のアカウントを頻繁に切り替える運用で、不一致 deny の�
   リポジトリのルートから読み、worktree からも main checkout のファイルを使う
   (Claude Code の docs。CLI 2.1.284 の `-p` で、worktree のセッションの Bash と hook の
   両方にその値が届くことを実測)
-- firebase: `firebase use` / `firebase login:use` が作業ディレクトリごとに記録する
-  (CLI 自身の help に明記。web docs には保存場所の記載なし)
+- firebase: `firebase use` が project root (firebase.json のあるディレクトリ。`--config` があればそのファイルのディレクトリ) ごとに記録する
+  (firebase-tools 15.19.1 のソースで確認: `makeActiveProject(projectRoot, …)`、projectRoot は
+  `detectProjectRoot` が決める。CLI の help は "working directory" と書くが、実際の単位は project root。
+  web docs には保存場所の記載なし)。`firebase login:use` の単位はここでは確かめていない
 - gh: プロジェクトごとに安全に分けられる公式の方法が無い (`GH_TOKEN` を設定ファイルに
   平文で置く以外)。自動切替 (D29) を残す
 

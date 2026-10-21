@@ -279,6 +279,41 @@ class TestGuard(_TmpCacheDir):
                 )
                 self.assertIsNotNone(auto_switch.conflicting_switch("github", self.STEPS))
 
+    def test_record_write_back_failure_of_any_kind_is_swallowed(self):
+        """書き戻しの失敗は種類を問わず「記録が書けなかった」だけ (`record_switch` は
+        `apply_switch` の後に呼ばれるので、例外が抜けると切り替え済みなのに「行いませんでした」
+        と通知する)。OSError 以外の 2 種を、実際の入力 (孤立サロゲートの記録) と
+        差し替え (入れ子が深すぎる記録の `json.dumps`) の両方で確かめる。"""
+        path = cache.service_state_path("github", ".autoswitch.json")
+        path.write_text(
+            '{"other": {"value": "\\ud800", "project": "/x", "at_ns": 1}}', encoding="utf-8"
+        )
+        steps = [("github.com", "Mao-o", "work-user")]
+        try:
+            auto_switch.record_switch("github", steps, "/p")
+        except Exception as e:  # noqa: BLE001
+            self.fail(f"書き戻せない記録で record_switch が {type(e).__name__} を投げた")
+        for exc in (RecursionError, ValueError):
+            with self.subTest(exc=exc.__name__):
+                with mock.patch("core.auto_switch.json.dumps", side_effect=exc("x")):
+                    try:
+                        auto_switch.record_switch("github", steps, "/p")
+                    except Exception as e:  # noqa: BLE001
+                        self.fail(f"record_switch が {type(e).__name__} を投げた")
+
+    def test_attempt_reports_the_switch_even_if_the_record_cannot_be_written_back(self):
+        path = cache.service_state_path("fake", ".autoswitch.json")
+        path.write_text(
+            '{"other": {"value": "\\ud800", "project": "/x", "at_ns": 1}}', encoding="utf-8"
+        )
+        svc = _fake_service(verify=None)
+        try:
+            out = auto_switch.attempt(svc, "new", "/p")
+        except Exception as e:  # noqa: BLE001
+            self.fail(f"切り替えた後に attempt が {type(e).__name__} を投げた")
+        self.assertTrue(out.resolved)
+        self.assertEqual(out.switched, (("host", "old", "new"),))
+
     def test_record_is_not_removed_by_cache_invalidation(self):
         """記録は成功 cache の破棄 (`invalidate`) で消えてはいけない (切替の直前に呼ぶため)。"""
         auto_switch.record_switch("github", [("github.com", "Mao-o", "work-user")], "/other")

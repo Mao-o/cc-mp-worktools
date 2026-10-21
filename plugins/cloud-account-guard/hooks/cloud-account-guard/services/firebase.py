@@ -549,7 +549,7 @@ def _resolve(root: str, env=None, config: str | None = None) -> tuple[str, str |
 
 
 # プロジェクトごとの固定 (v0.19.0)。firebase-tools は `firebase use` の切替先を
-# ディレクトリごとに記録する (公式のディレクトリ単位の仕組み)。期待値が未登録でも、その
+# project root (firebase.json のあるディレクトリ) ごとに記録する (公式の project root 単位の仕組み)。期待値が未登録でも、その
 # ディレクトリで切替先が記録されていれば dispatcher は止めない。commit される
 # `.firebaserc` の `default` は数えない (チームで共有するファイルで、利用者がその
 # ディレクトリで選んだ値ではない。数えると firebase のほぼ全リポジトリで未登録の
@@ -647,7 +647,7 @@ _CONFIG_NOT_FOUND = (
 # 探す。README の既知の制限)。
 _SWITCH_IN_CONFIG_DIR = (
     "--config のファイルのあるディレクトリで、期待した project に切り替えてください"
-    " (切替先はディレクトリごとに記録され、--config 付きのコマンドはそのファイルのあるディレクトリ"
+    " (切替先は project root ごとに記録され、--config 付きのコマンドはそのファイルのあるディレクトリ"
     "から親へ探した切替先で動きます)"
 )
 # `--config` 付きのコマンドの deny と、`--project` の行き先を確かめられない deny で、期待値に

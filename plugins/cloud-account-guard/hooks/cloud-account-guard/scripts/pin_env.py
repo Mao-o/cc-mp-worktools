@@ -11,7 +11,7 @@
   構成名を先に勧めるのは、VCA がその構成の設定ファイルを直接読めて速いため
   (`CLOUDSDK_CORE_*` があると検証のたびに `gcloud config get-value` を起動する)
 - firebase: project を選ぶ環境変数が無い (公式 docs に記載なし)。`firebase use
-  <alias>` が作業ディレクトリごとに記録されるので、それを案内する
+  <alias>` が project root (firebase.json のあるディレクトリ) ごとに記録されるので、それを案内する
 
 置き場所は Claude Code が読む `.claude/settings.local.json` の `env`。git リポジトリの
 ルートから読まれ、worktree からは main checkout のルートのファイルが使われる
@@ -211,8 +211,9 @@ def plan_firebase(expected, project_dir: str) -> Plan:
     if expected is None:
         return Plan("firebase", problem="firebase の期待値が未設定です (accounts-init で設定)")
     notes = (
-        "firebase には project を選ぶ環境変数がありません。firebase use は作業ディレクトリごとに"
-        "記録されるので、このディレクトリで 1 回実行すれば次からも有効です",
+        "firebase には project を選ぶ環境変数がありません。firebase use は project root"
+        " (firebase.json のあるディレクトリ。--config があればそのファイルのディレクトリ) ごとに"
+        "記録されるので、1 回実行すれば同じ project root の中で次からも有効です",
         "別の worktree は別のディレクトリなので、そこでも最初に 1 回要ることがあります",
         "アカウントも firebase login:use <email> でこのディレクトリ用に選べます"
         " (VCA は firebase のアカウントは検証しません)",

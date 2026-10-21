@@ -337,7 +337,9 @@ class TestPlanFirebase(_TmpBase):
     def test_notes_say_it_is_per_directory_and_account_is_not_verified(self):
         plan = pin_env.plan_firebase("fb-dev", self._project({"default": "fb-dev"}))
         joined = "\n".join(plan.notes)
-        self.assertIn("作業ディレクトリごと", joined)
+        self.assertIn("project root", joined)
+        self.assertIn("firebase.json のあるディレクトリ", joined)
+        self.assertNotIn("作業ディレクトリごと", joined)
         self.assertIn("worktree", joined)
         self.assertIn("VCA は firebase のアカウントは検証しません", joined)
 

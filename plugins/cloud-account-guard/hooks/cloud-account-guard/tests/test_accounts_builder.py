@@ -3422,7 +3422,7 @@ class TestInheritedAncestorFile(BaseBuilder):
     のと同じ状況。修正前の builder は常に cwd 直下の新パスを対象にしていた
     ため、`set --commit` が**編集した service だけを含む子ファイル**を作り、
     dispatcher の遡及がその子ファイルで止まって、継承していた他 service が
-    一斉に未設定 (deny) になっていた。`remove` も継承 entry を「存在しません」
+    一斉に未設定の扱い (書込は deny、リモート read のみのコマンドは警告) になっていた。`remove` も継承 entry を「存在しません」
     と報告していた。
     """
 
@@ -3492,6 +3492,10 @@ class TestInheritedAncestorFile(BaseBuilder):
         self.assertIn("継承", err)
         self.assertIn("set", err)
         self.assertIn("--path", err)
+        # 拒否理由は実際の未設定の扱い (書込は deny、リモート read は警告) で書く。
+        # 「未設定 (deny)」のままだと README / 実挙動と食い違う。
+        self.assertIn("未設定の扱い (書込は deny、リモート read のみのコマンドは警告)", err)
+        self.assertNotIn("未設定 (deny)", err)
         self.assertFalse(self._child_new_path().exists())
         self.assertEqual(self._ancestor_data(), self.ANCESTOR_ENTRIES)
 
@@ -3515,8 +3519,8 @@ class TestInheritedAncestorFile(BaseBuilder):
     def test_path_warns_that_it_shadows_the_inherited_file(self):
         """`--path` は `init` が exit 2 で止めた shadowing を意図的に許す経路
         なので、**その代償をその場で必ず言う**。継承中のファイルを覆い隠すと、
-        指定先に書いていない service (ここでは github / aws) が一斉に未設定
-        (deny) になる。案内した先で黙って同じ事故を起こさせない。"""
+        指定先に書いていない service (ここでは github / aws) が一斉に未設定の扱い
+        (書込は deny、リモート read のみのコマンドは警告) になる。案内した先で黙って同じ事故を起こさせない。"""
         code, out, _err = self._run(
             [
                 "init", "--service", "gcloud", "--value", "p",
@@ -3528,7 +3532,10 @@ class TestInheritedAncestorFile(BaseBuilder):
         # symlink (macOS の /var → /private/var) を挟んでも一致するよう
         # 解決後のパスで照合する
         self.assertIn(str(self.ancestor_path.resolve()), out)
-        self.assertIn("deny", out)
+        self.assertIn(
+            "未設定の扱い。書込は deny、リモート read のみのコマンドは警告", out
+        )
+        self.assertNotIn("未設定 = deny", out)
 
     def test_path_pointing_at_resolved_file_does_not_warn(self):
         """解決結果と同じファイルを --path で名指ししただけなら shadowing は
@@ -3747,6 +3754,10 @@ class TestGlobalDefaultIsDisclosed(BaseBuilder):
         self.assertIn("継承されません", out)
         self.assertIn("2 キー", out)
         self.assertIn("aws", out)
+        self.assertIn(
+            "未設定の扱い。書込は deny、リモート read のみのコマンドは警告", out
+        )
+        self.assertNotIn("未設定 = deny", out)
 
     def test_no_warning_without_a_global_default(self):
         """negative control: グローバル既定が無ければ警告は出ない。"""

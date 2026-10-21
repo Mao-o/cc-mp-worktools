@@ -53,8 +53,8 @@ aws / gcloud / firebase のアカウントを、各 CLI の公式の仕組みで
   リポジトリのルートから読み、worktree からも main checkout のファイルを使う。
   commit されない個人設定
 - 固定の単位は**リポジトリ** (サブディレクトリや 1 つの worktree だけ別のアカウント、
-  はできない)。firebase だけはディレクトリ単位 (firebase-tools が作業ディレクトリ
-  ごとに記録する)
+  はできない)。firebase だけは project root 単位 (firebase-tools が firebase.json の
+  あるディレクトリごとに記録する。サブディレクトリで実行しても親の root に記録される)
 - 値を足す・変えると、保存した時点で起動中のセッションにも反映される。**キーを
   消しても起動中のセッションには残り、再起動するまで有効なまま**
 - 優先順位: コマンドの行頭に付けた値 (`AWS_PROFILE=x aws ...`) > settings の `env` >

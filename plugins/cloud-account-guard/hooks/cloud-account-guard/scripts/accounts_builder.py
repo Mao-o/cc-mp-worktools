@@ -111,7 +111,7 @@ stdout の値表示制御を builder 側で一元管理する。Agent Skill (`ac
   `accounts_file_new(cwd)` を対象にしていたため、祖先の accounts.local.json を
   継承している worktree / サブディレクトリで `set --commit` が**編集した
   service だけを含む子ファイル**を作り、dispatcher の遡及がその子ファイルで
-  止まって継承していた他 service が一斉に未設定 (deny) になっていた
+  止まって継承していた他 service が一斉に未設定の扱い (書込は deny、リモート read のみのコマンドは警告) になっていた
   (`remove` も継承 entry を「存在しません」と報告していた)。
   対象パスは dry-run / commit の両方で先頭に表示する (`_target_note()`)。
   `init` は継承中に cwd 直下へ新規作成しようとすると shadowing になるため
@@ -127,7 +127,7 @@ stdout の値表示制御を builder 側で一元管理する。Agent Skill (`ac
   弱めない: 切替先は期待値のアカウントに限られ、切替後に再検証して一致した
   ときだけ通す。対象ファイルが無いときは作らずに拒否する (`"$auto_switch"`
   だけのファイルはグローバル既定を覆い隠し、期待値を書いていない service が
-  すべて未設定 = deny になる)。
+  すべて未設定の扱い (書込は deny、リモート read のみのコマンドは警告) になる)。
 - **D16**: `pin-env` サブコマンド (v0.17.0) は**読み取り専用**。期待値から、
   プロジェクトごとの固定 (aws の `AWS_PROFILE` / gcloud の
   `CLOUDSDK_ACTIVE_CONFIG_NAME` 等を `.claude/settings.local.json` の `env` に書く、
@@ -254,7 +254,7 @@ def _resolve_target(
     従来の実装は、**祖先の accounts.local.json を継承している worktree /
     サブディレクトリで shadowing を起こしていた**: `set --commit` が編集した
     service だけを含む子ファイルを作り、dispatcher の遡及がその子ファイルで
-    止まるため、継承していた他 service が一斉に未設定 (deny) になる。
+    止まるため、継承していた他 service が一斉に未設定の扱い (書込は deny、リモート read のみのコマンドは警告) になる。
     `remove` も継承 entry を「存在しません」と報告していた。
 
     `--path` 指定時は探索を飛ばしてそのファイルを対象にする (worktree 専用
@@ -332,7 +332,7 @@ def _hook_reads_instead(target: _Target, project_dir: str) -> Path | None:
     ずれることがある。ずれの向きで結果が変わる:
 
     - 指定先が cwd に**近い**: 書いた瞬間から hook はそちらを読む = 現在有効な
-      設定を覆い隠す (指定先に記載しない service は未設定 = deny)。`init` が
+      設定を覆い隠す (指定先に記載しない service は未設定の扱い。書込は deny、リモート read のみのコマンドは警告)。`init` が
       exit 2 で止めている shadowing を、`--path` は意図的に許す形になるため、
       **その代償をその場で必ず言う**
     - 指定先が cwd から**遠い**: hook は近い方を読み続けるので、書いても効かない
@@ -412,7 +412,7 @@ def _global_default_note() -> str:
     (`paths.resolve_accounts_file_for_verification`)。builder はそこへ落ちない
     ため、この状態で新規作成すると**グローバル既定を覆い隠す**: 解決は
     「見つかった 1 ファイル」で終わり、key 単位のマージはしないので、
-    新しいファイルに書かなかった service は未設定 = deny になる。
+    新しいファイルに書かなかった service は未設定の扱い (書込は deny、リモート read のみのコマンドは警告) になる。
 
     これは v0.12.0 で塞いだ親遡及の shadowing (`_resolve_target` の docstring)
     と同じ形が 1 段上 (グローバル) で再発したもの。黙って進むと「無関係な
@@ -431,7 +431,7 @@ def _global_default_note() -> str:
     return (
         f"警告: hook は現在グローバル既定 {_p(global_path)} で検証しています。"
         f"このパスにファイルを作ると、{detail} は継承されません "
-        "(キー単位のマージはしません = 書かなかった service は未設定 = deny)。\n"
+        "(キー単位のマージはしません = 書かなかった service は未設定の扱い。書込は deny、リモート read のみのコマンドは警告)。\n"
         f"グローバル既定を編集するなら {_path_option(global_path)} を使い、"
         "プロジェクト側に持つなら必要な値を先にコピーしてください。"
     )
@@ -462,7 +462,7 @@ def _target_note(
             note += (
                 f"\n警告: hook が現在読むのは {_p(other)} です。--path はそれとは別の"
                 "ファイルを対象にするため、指定先が cwd に近ければ現在の設定を"
-                "覆い隠し (指定先に記載しない service は未設定 = deny)、遠ければ"
+                "覆い隠し (指定先に記載しない service は未設定の扱い。書込は deny、リモート read のみのコマンドは警告)、遠ければ"
                 "書いても読まれません。"
             )
         return note
@@ -914,7 +914,7 @@ def _cmd_init(
             f"error: accounts.local.json は祖先ディレクトリ {_p(target.anchor)} から"
             f"継承しています ({_p(target.path)})。"
             "init で cwd 直下に作ると継承中の設定を覆い隠し、"
-            "記載していない service が一斉に未設定 (deny) になるため拒否します。",
+            "記載していない service が一斉に未設定の扱い (書込は deny、リモート read のみのコマンドは警告) になるため拒否します。",
             file=stderr,
         )
         print(
@@ -1934,7 +1934,7 @@ def _cmd_auto_switch(
         return e.exit_code
 
     # `"$auto_switch"` だけのファイルを新しく作らない。作ると、そのファイルが
-    # グローバル既定を覆い隠し、期待値を書いていない service がすべて未設定 (deny)
+    # グローバル既定を覆い隠し、期待値を書いていない service がすべて未設定の扱い (書込は deny、リモート read のみのコマンドは警告)
     # になる (`_global_default_note` と同じ shadowing)。
     if not paths.may_hold_accounts(target.path):
         print(_auto_switch_missing_file_message(target), file=stderr)
