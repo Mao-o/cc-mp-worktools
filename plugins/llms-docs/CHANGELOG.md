@@ -2,6 +2,29 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.47.2] - 2026-10-22
+
+### 修正: llms.txt に 2 回載るページが検索結果に 2 行出る / `--file` だけの 0 件時に実行できない `search-index` の行を出す
+
+- **症状 1**: `rank_from: "index"` の source (claude-code など) で、llms.txt が同じページを 2 回載せていると
+  (別の見出しの下に再掲、`.md` の有無だけ違う URL など)、`search` と `search-index` が同じページを 2 行出し、
+  `--top-n` / `--limit` の枠を 1 つ使い潰した (旧 `parse-claude-docs.py` から引き継いだ挙動)
+- **修正 1**: 順位付けの後、上位の行と同じページを指す行を落としてから件数で切る。`search` はページ番号、
+  `search-index` は表示する ref (キャッシュ前は URL の slug) で同じページかを見る。空いた枠には次のページが入る。
+  タイトルが同じだけの別ページは 2 行のまま。full-text の無い項目は従来どおり 1 項目ずつ skip する
+- **症状 2**: `rank_from: "index"` の source で `--file` を渡し `--index-file` を渡さずに `search-content` が
+  0 件になると、`Next: ... search-index ...` の行を出したが、その行は llms.txt が無いため exit 1 で失敗した
+  (汎用 loader への移行時の退行。旧 script はこの組み合わせで行を出していなかった)
+- **修正 2**: `--file` があり `--index-file` が無く `rank_from: "index"` のときは、0 件時の説明に
+  `search-index` の行と案内を出さない (旧挙動)。`--index-file` を併せて渡したとき・キャッシュのとき・
+  `rank_from: "pages"` の source では従来どおり出す
+- README の `rank_from` の項に、`llms.txt` に 2 回載るページは上位の 1 行だけを出すことを書いた
+- `--file` だけの 0 件時の `search-content` の Tip も、実行できない `search-index` を勧めず `--index-file` が要ると書く
+- テスト: 重複したページの `search` / `search-index` (キャッシュあり・なし・`--file` + `--index-file`)、
+  full-text の無い項目、0 件時の `Next:` 行の往復 (source 2 種 × corpus の渡し方 × `search-content` /
+  `search` × `-` 始まり・機能語・記号だけを含む query)。クエリと URL の組み合わせ表のテストに
+  「1 ページ 1 行」の不変条件を足した。`search-content` の Tip の分岐を固定するテストを 1 件足した。実コーパスの比較ゲートの `search --source both` は、llms.txt に 2 回載るページに当たらない query に変えた。件数 1162 -> 1168
+
 ## [0.47.1] - 2026-10-22
 
 ### 修正: 複数 source の検索で補充する節の取り違え / 0 件時の `Next:` 行が `-` で始まる語で実行できない
