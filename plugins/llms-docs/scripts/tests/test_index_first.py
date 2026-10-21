@@ -879,6 +879,9 @@ class QueryDecisionTableTest(_Case):
       query, opens nothing (exit 1); an entry with a page opens it (exit 0)
     * I3: the three ways open the same page (or all fail) for each entry
     * I4: each ``search`` result shows the body of the page its entry opens
+    * I5: ``search-index`` and ``search`` list a page once: an entry whose
+      ref (``search-index``) or page (``search``) an entry ranked above it
+      already has is dropped, and every page is still listed
 
     Repeated pages (the same URL and query twice) are copies that read the
     same, as upstream repeats a page: which copy opens is not asserted.
@@ -927,10 +930,18 @@ class QueryDecisionTableTest(_Case):
         return None
 
     def _listed(self, command: list, corpus: tuple, n_entries: int) -> tuple[dict, str]:
+        """{entry title: ref} and the ``Next:`` line. ``fetch-index`` lists
+        every entry; ``search-index`` lists each ref once (I5), checked
+        against ``fetch-index`` by the caller."""
         code, out, err = self.run_g(*command, corpus=corpus)
         self.assertEqual(code, 0, err)
-        refs = {t: r for r, t in self.REF_RE.findall(out) if t.startswith("Entry ")}
-        self.assertEqual(sorted(refs), [f"Entry {k}" for k in range(n_entries)], out)
+        rows = [(t, r) for r, t in self.REF_RE.findall(out) if t.startswith("Entry ")]
+        refs = dict(rows)
+        if command[0] == "fetch-index":
+            self.assertEqual(sorted(refs), [f"Entry {k}" for k in range(n_entries)], out)
+        else:
+            self.assertEqual(len(refs), len(rows), out)
+            self.assertEqual(len(set(refs.values())), len(refs), f"a ref listed twice: {out}")
         nexts = [ln[len("Next: "):] for ln in out.splitlines() if ln.startswith("Next: ")]
         self.assertEqual(len(nexts), 1, out)
         next_line = nexts[0]
@@ -964,7 +975,7 @@ class QueryDecisionTableTest(_Case):
         for way in ("uncached", "cached", "file"):
             corpus = ("--file", full_path, "--index-file", index_path) if way == "file" \
                 else ("--cache-dir", self.tmp)
-            per_command = []
+            per_command, listed = [], []
             for command in (["fetch-index"], ["search-index", "zzq"]):
                 if self.full_cache().exists():
                     self.full_cache().unlink()
@@ -973,8 +984,15 @@ class QueryDecisionTableTest(_Case):
                 if way == "uncached":
                     self.assertFalse(any(r.isdigit() for r in refs.values()), refs)
                     self.write(None, full)  # the bodies get cached before the ref is used
+                listed.append(refs)
                 per_command.append({t: self._open(next_line, r) for t, r in refs.items()})
-            self.assertEqual(per_command[0], per_command[1], f"{way}: fetch-index vs search-index")
+            # I5: search-index drops only an entry whose ref it already lists
+            # (same ref as fetch-index shows), and keeps every ref
+            for t, r in listed[1].items():
+                self.assertEqual(r, listed[0][t], f"{way}: {t}")
+            self.assertEqual(set(listed[1].values()), set(listed[0].values()), f"{way}: {listed}")
+            self.assertEqual({t: per_command[0][t] for t in per_command[1]}, per_command[1],
+                             f"{way}: fetch-index vs search-index")
             got[way] = per_command[0]
         return got
 
@@ -983,13 +1001,16 @@ class QueryDecisionTableTest(_Case):
         self.write(index, full)
         code, out, err = self.run_g("search", "zzq", "--top-n", "10")
         self.assertEqual(code, 0, err)
-        shown = {}
+        shown, pages = {}, []
         for block in re.split(r"\n(?=\[\d+\] )", out):
-            m = re.match(r"\[\d+\] (Entry \d) \(index_score", block)
+            m = re.match(r"\[(\d+)\] (Entry \d) \(index_score", block)
             if m:
                 markers = set(re.findall(r"marker-(\w+)", block))
                 self.assertEqual(len(markers), 1, block)
-                shown[m.group(1)] = markers.pop()
+                shown[m.group(2)] = markers.pop()
+                pages.append(m.group(1))
+        # I5: a page is one row
+        self.assertEqual(len(set(pages)), len(pages), out)
         return shown
 
     def test_every_cell_keeps_the_invariants(self):
@@ -1012,9 +1033,151 @@ class QueryDecisionTableTest(_Case):
                         # I1 / I2: the expected page, or nothing
                         self.assertEqual(opened["cached"], want, f"{title} ({q or 'no query'})")
                     # I4: search shows each entry with the body of its page
+                    # (I5: an entry whose page an entry above it shows is not
+                    # shown, but every page is)
                     shown = self._search_bodies(index, full)
                     want_shown = {f"Entry {k}": self._expected(q, page_qs) for k, q in enumerate(entry_qs)}
-                    self.assertEqual(shown, {t: p for t, p in want_shown.items() if p is not None})
+                    for t, p in shown.items():
+                        self.assertEqual(p, want_shown[t], t)
+                    self.assertEqual(set(shown.values()), {p for p in want_shown.values() if p is not None})
+        self.assertEqual(self.full_fetches(), 0)
+
+
+class RepeatedEntryTest(_Case):
+    """``llms.txt`` lists some pages twice (under two headings, once with
+    ``.md``): ``search`` and ``search-index`` show such a page once, and the
+    copy does not take the place of the next page in ``--top-n`` /
+    ``--limit``. Two pages that only share a title are two rows."""
+
+    INDEX = ("- [Quickstart](https://example.com/docs/quickstart.md): zzq start here\n"
+             "- [Setup](https://example.com/docs/setup): zzq set up later\n"
+             "- [Quickstart guide](https://example.com/docs/quickstart): zzq start here again\n"
+             "- [Quickstart](https://example.com/docs/sdk/quickstart): zzq start the sdk\n"
+             "- [Other](https://example.com/docs/other): zzq other\n")
+    FULL = ("# Quickstart\nSource: https://example.com/docs/quickstart\n\n## Install\nzzq body-qs\n"
+            "# Setup\nSource: https://example.com/docs/setup\n\n## Steps\nzzq body-setup\n"
+            "# SDK Quickstart\nSource: https://example.com/docs/sdk/quickstart\n\n## Run\nzzq body-sdk\n"
+            "# Other\nSource: https://example.com/docs/other\n\n## More\nzzq body-other\n")
+    ROW_RE = re.compile(r"^\[(.+?)\] (.+?) \((?:index_)?score: \d+\)$", re.M)
+
+    def _rows(self, out: str) -> list:
+        return self.ROW_RE.findall(out)
+
+    def _corpus(self, way: str) -> tuple | None:
+        full, index = os.path.join(self.tmp, "full.txt"), os.path.join(self.tmp, "index.txt")
+        Path(full).write_text(self.FULL, encoding="utf-8")
+        Path(index).write_text(self.INDEX, encoding="utf-8")
+        return {"file": ("--file", full, "--index-file", index), "cached": None, "uncached": None}[way]
+
+    def test_search_shows_a_page_once_and_fills_its_slot(self):
+        self.write(self.INDEX, self.FULL)
+        code, out, err = self.run_g("search", "quickstart zzq", "--top-n", "3")
+        self.assertEqual(code, 0, err)
+        rows = self._rows(out)
+        # the copy ranked below "Quickstart" (same page) is dropped; the
+        # third slot goes to the next page; the SDK page shares only the title
+        self.assertEqual(rows, [("0", "Quickstart"), ("2", "Quickstart"), ("1", "Setup")], out)
+        self.assertNotIn("Quickstart guide", out)
+        nexts = [ln for ln in out.splitlines() if ln.startswith("Next: ") and " content " in ln]
+        self.assertEqual(len(nexts), len(set(nexts)), out)
+
+    def test_search_index_lists_a_page_once_in_every_way(self):
+        expected = {
+            "cached": [("0", "Quickstart"), ("2", "Quickstart"), ("1", "Setup")],
+            "file": [("0", "Quickstart"), ("2", "Quickstart"), ("1", "Setup")],
+            # by slug before llms-full.txt is cached: the two URLs of the
+            # page name one ref (its full URL, as for any URL listed twice)
+            "uncached": [("https://example.com/docs/quickstart", "Quickstart"), ("sdk/quickstart", "Quickstart"),
+                         ("setup", "Setup")],
+        }
+        for way, want in expected.items():
+            with self.subTest(way=way):
+                if self.full_cache().exists():
+                    self.full_cache().unlink()
+                self.write(self.INDEX, self.FULL if way == "cached" else None)
+                code, out, err = self.run_g("search-index", "quickstart zzq", "--limit", "3",
+                                            corpus=self._corpus(way))
+                self.assertEqual(code, 0, err)
+                self.assertEqual(self._rows(out), want, out)
+                self.assertIn("(3 results, 5 documents searched)", out)
+
+    def test_entries_with_no_page_are_not_one_page(self):
+        """Entries with no page are each skipped (on stderr) in their slot, as
+        before: having no page does not make them copies of each other."""
+        self.write("- [Gone one](https://example.com/docs/gone-1): zzq gone\n"
+                   "- [Gone two](https://example.com/docs/gone-2): zzq gone\n" + self.INDEX, self.FULL)
+        code, out, err = self.run_g("search", "zzq gone", "--top-n", "3")
+        self.assertEqual(code, 0, err)
+        self.assertIn("(skip: no full-text for https://example.com/docs/gone-1)", err)
+        self.assertIn("(skip: no full-text for https://example.com/docs/gone-2)", err)
+        self.assertEqual(self._rows(out), [("0", "Quickstart")], out)
+
+    def test_entries_of_one_page_are_kept_when_nothing_repeats(self):
+        """The control: with no repeated page, every entry is a row."""
+        index = "".join(ln + "\n" for ln in self.INDEX.splitlines() if "Quickstart guide" not in ln)
+        self.write(index, self.FULL)
+        code, out, err = self.run_g("search-index", "zzq", "--limit", "10")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self._rows(out)), 4, out)
+        code, out, err = self.run_g("search", "zzq", "--top-n", "10")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self._rows(out)), 4, out)
+
+
+class ZeroHitIndexHintTest(_Case):
+    """Every ``Next:`` line of a zero-hit report runs (exit 0), split by the
+    shell rules as printed, over the ways a corpus is given. With ``--file``
+    and no ``--index-file`` a ``rank_from: "index"`` source's ``search-index``
+    has no llms.txt to read (exit 1), so no ``search-index`` line is offered
+    then; in every other cell it is."""
+
+    INDEX = "- [Hooks](https://example.com/en/hooks): Configure zzq hooks\n"
+    FULL = "# Hooks\nSource: https://example.com/en/hooks\n\n## Matchers\nhook matchers zzq here\n"
+    # absent word / absent word starting with "-" / one present and one absent
+    # word (a retry with fewer words) / a function word / symbols only
+    QUERIES = ("zzzq", "-zzzq", "zzq zzzq", "-zzzq matchers", "the zzzq", "%%")
+
+    def _ways(self, source: str) -> dict:
+        full, index = os.path.join(self.tmp, "full.txt"), os.path.join(self.tmp, "index.txt")
+        Path(full).write_text(self.FULL, encoding="utf-8")
+        Path(index).write_text(self.INDEX, encoding="utf-8")
+        ways = {"cache-dir": ("--cache-dir", self.tmp), "file": ("--file", full),
+                "file+index-file": ("--file", full, "--index-file", index)}
+        if source == "pages":  # --index-file is only for rank_from "index"
+            del ways["file+index-file"]
+        return ways
+
+    def test_every_next_line_runs(self):
+        cells = 0
+        for source in ("code", "pages"):
+            self.write(self.INDEX, self.FULL, name=source)
+            for way, corpus in self._ways(source).items():
+                for command in ("search-content", "search"):
+                    if source == "code" and way == "file" and command == "search":
+                        continue  # search itself needs the llms.txt: it says so (exit 1)
+                    for query in self.QUERIES:
+                        with self.subTest(source=source, way=way, command=command, query=query):
+                            code, out, err = self.run_argv([SCRIPT, command, "--source", source,
+                                                            "--sources-file", self.sources, *corpus,
+                                                            "--", query])
+                            self.assertEqual(code, 0, err)
+                            if "No matching" not in out:
+                                continue
+                            cells += 1
+                            nexts = [ln[len("Next: "):] for ln in out.splitlines() if ln.startswith("Next: ")]
+                            index_lines = [ln for ln in nexts if " search-index " in ln]
+                            if source == "code" and way == "file":
+                                self.assertEqual(index_lines, [], out)
+                                self.assertNotIn("'search-index' (titles", out)
+                            elif query != "%%":  # a query of symbols has no terms to count
+                                self.assertEqual(len(index_lines), 1, out)
+                            for line in nexts:
+                                self.assertNotIn("<", line)
+                                argv = shlex.split(line, comments=True)
+                                got, run_out, run_err = self.run_argv(argv)
+                                self.assertEqual(got, 0, f"{line}\n{run_err}")
+                                self.assertTrue(run_out.startswith(("Search", "Search-")), run_out)
+        self.assertGreaterEqual(cells, 30)
         self.assertEqual(self.full_fetches(), 0)
 
 

@@ -1689,6 +1689,24 @@ def _entry_refs(entries: list[dict], doc_of: list) -> list[str]:
     return [str(idx) if idx is not None else _ref(e) for e, idx in zip(entries, doc_of)]
 
 
+def _ranked_entries(entries: list[dict], query: str, limit: int, keys: list) -> list:
+    """``search_index_entries`` of *entries*, one row per page: an entry
+    whose ``keys[i]`` an entry ranked above it already has (``llms.txt``
+    lists some pages twice, e.g. under two headings) is dropped before
+    *limit* is applied, so the copy neither repeats the row nor takes the
+    place of the next page. A key of ``None`` is never a duplicate."""
+    seen = set()
+    rows = []
+    for row in search_index_entries(entries, query, limit=len(entries)):
+        key = keys[row[1]]
+        if key is not None:
+            if key in seen:
+                continue
+            seen.add(key)
+        rows.append(row)
+    return rows[:limit]
+
+
 _FETCH_ZERO_TIP = ("Tip: try broader keywords, or 'search-content \"<query>\"' (omit --page-ref to "
                    "scan every page — slow on first run) to search page bodies directly")
 _SLUG_REF_NOTE = ("Note: llms-full.txt is not cached yet, so [ref] above is a URL slug, "
@@ -1785,7 +1803,8 @@ def _search_index_from_index(args, profile: dict) -> None:
             _warn_if_untitled_ratio_high(profile, docs, args.file or _cache_path(args.cache_dir, profile))
         doc_of = _entry_docs(entries, docs, profile)
         refs = _entry_refs(entries, doc_of)
-    scored = search_index_entries(entries, args.query, limit=args.limit)
+    # a page is one row (its ref names it, joined or not)
+    scored = _ranked_entries(entries, args.query, args.limit, refs)
     print(f'Search-index results for "{args.query}" '
           f"({_label(profile)}, source: {profile['name']}, index: {index_path})")
     print("=" * 60)
@@ -1824,7 +1843,8 @@ def _index_candidates(args, profile: dict, docs: list[dict]) -> list[dict]:
         check_join_rate(f"{_label(profile)} index↔full-text", joinable, len(entries),
                         advice=_GUARD_ADVICE)
     results = []
-    for score, i, entry in search_index_entries(entries, args.query, limit=args.top_n):
+    # one candidate per page; an entry with no page is skipped below
+    for score, i, entry in _ranked_entries(entries, args.query, args.top_n, doc_of):
         idx = doc_of[i]
         if idx is None:
             print(f"  (skip: no full-text for {entry['url']})", file=sys.stderr)
@@ -2016,7 +2036,8 @@ def _search_content_fetch(args, profile: dict) -> None:
         # the network)
         render_zero_hits(args.query, (load_lines(p) for p in searched), subcommand="search-content",
                          hint_args=_source_hint_args(args) + corpus_hint_args(args),
-                         index_hint_args=_source_hint_args(args) + corpus_hint_args(args), scope="documents",
+                         index_hint_args=(None if _no_index_hint(args, profile)
+                                          else _source_hint_args(args) + corpus_hint_args(args)), scope="documents",
                          restricted_to=args.page_ref, restricted_only=args.page_ref is not None)
         return
     render_next_content(hit_candidates(shown), hint_args=_source_hint_args(args) + corpus_hint_args(args),
@@ -2091,6 +2112,14 @@ def _source_hint_args(args, source: str | None = None) -> tuple:
     if getattr(args, "index_file", None) is not None:
         out += ["--index-file", shlex.quote(args.index_file)]
     return tuple(out)
+
+
+def _no_index_hint(args, profile: dict) -> bool:
+    """A zero-hit report (``render_zero_hits``) offers no ``search-index``
+    line (``index_hint_args=None``): with ``--file`` and no ``--index-file``,
+    a ``rank_from: "index"`` source's ``search-index`` has no llms.txt to
+    rank and exits 1 (``_load_index``), so the line would not run."""
+    return args.file is not None and args.index_file is None and profile["rank_from"] == "index"
 
 
 def _ref_url_key(url: str, suffix: str | None) -> str:
@@ -2628,7 +2657,8 @@ def cmd_search_content(args):
         render_zero_hits(args.query, (d["body_lines"] for d in docs),
                          subcommand="search-content",
                          hint_args=_source_hint_args(args) + corpus_hint_args(args),
-                         index_hint_args=_source_hint_args(args) + corpus_hint_args(args),
+                         index_hint_args=(None if _no_index_hint(args, profile)
+                                          else _source_hint_args(args) + corpus_hint_args(args)),
                          scope="documents", restricted_to=args.page_ref)
         return
     print(f"({total} hits across {matched} documents, showing top {printed})")
@@ -2730,7 +2760,8 @@ def cmd_search(args):
         render_zero_hits(args.query, texts,
                          subcommand="search",
                          hint_args=_source_hint_args(args) + corpus_hint_args(args),
-                         index_hint_args=_source_hint_args(args) + corpus_hint_args(args),
+                         index_hint_args=(None if _no_index_hint(args, profile)
+                                          else _source_hint_args(args) + corpus_hint_args(args)),
                          scope=scope)
         return
     _print_body_only_notice(profile, results)
@@ -2806,7 +2837,8 @@ def _search_members(args, alias: dict) -> None:
             render_zero_hits(args.query, texts,
                              subcommand="search",
                              hint_args=_source_hint_args(args, name) + corpus_hint_args(args),
-                             index_hint_args=_source_hint_args(args, name) + corpus_hint_args(args),
+                             index_hint_args=(None if _no_index_hint(args, profile)
+                                              else _source_hint_args(args, name) + corpus_hint_args(args)),
                              scope=scope)
         return
     print(f"Note: page numbers are per source. For follow-up commands, pass the --source "
