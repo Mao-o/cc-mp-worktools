@@ -97,6 +97,10 @@ STRATEGIES = (STRATEGY_FIXED, STRATEGY_AVAILABLE, STRATEGY_ALTERNATE, STRATEGY_R
 #: に `state.IN_FLIGHT_TTL_SEC` と hooks.json の予算が静かにずれる。
 MAX_TOTAL_TIMEOUT_SEC = max(r.MAX_TIMEOUT_SEC for r in REVIEWERS)
 
+#: 1 回のレビューが返す本文の長さの上限 (文字数。各 backend の `MAX_OUTPUT_BYTES` で切り詰める
+#: ので、その最大)。Stop が複数回に分けて送るときの指摘の合計の見積もりに使う (0.14.0)。
+MAX_OUTPUT_CHARS = max(r.MAX_OUTPUT_BYTES for r in REVIEWERS)
+
 #: 1 回の起動を timeout で打ち切るときの停止処理の最悪所要時間
 #: (SIGTERM 待ち / SIGKILL 待ち / 最後の wait = 3 × `KILL_GRACE_SEC`)。
 KILL_OVERHEAD_SEC = 3 * subproc.KILL_GRACE_SEC

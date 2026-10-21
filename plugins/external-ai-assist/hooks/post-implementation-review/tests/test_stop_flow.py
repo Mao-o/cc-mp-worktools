@@ -835,6 +835,37 @@ class TestByteBudgetFlow(HookTestCase):
         self.assertIn("1 ファイルは結果を取得できず (timeout / 失敗)。次ターンに持ち越し: b.py", message)
         self.assertIn("→ 指摘なし", message)
 
+    def test_findings_cap_holds_back_later_chunks(self):
+        """指摘の合計が上限を超えうる塊は送らずに繰り越す (Codex レビュー PR #128 の指摘)。
+
+        1 回目・2 回目が 16000 字ずつ指摘を返すと、3 回目は 32000 + 16000 > 32000 で送らない。
+        送ってから指摘を捨てると、返していない指摘の塊をレビュー済みにしてしまう。
+        """
+        for rel, seed in (("a.py", "a"), ("b.py", "b"), ("c.py", "c")):
+            self.edit(SESSION_A, rel, self._content(30, seed))
+        long_a = "- " + "a" * (self.entry.selection.MAX_OUTPUT_CHARS - 2)
+        long_b = "- " + "b" * (self.entry.selection.MAX_OUTPUT_CHARS - 2)
+        output = self.stop_timed(SESSION_A, [long_a, long_b, "REVIEW_CLEAN"])
+
+        self.assertEqual(len(self.review_calls), 2)
+        self.assertEqual(self.pending(SESSION_A), [os.path.join(self.repo, "c.py")])
+        self.assertEqual(self.reviewed(SESSION_A), ["a.py", "b.py"])
+        parsed = _parse_output(output)
+        self.assertLessEqual(
+            len(parsed["hookSpecificOutput"]["additionalContext"]),
+            self.entry.MAX_FINDINGS_CHARS + 1000,
+            "見出しと定型文を除いた指摘の合計が上限に収まる",
+        )
+        self.assertIn("この応答で返す指摘が多いため次の応答の終わりに繰り越し", parsed["systemMessage"])
+
+    def test_clean_chunks_do_not_use_the_findings_cap(self):
+        for rel, seed in (("a.py", "a"), ("b.py", "b"), ("c.py", "c")):
+            self.edit(SESSION_A, rel, self._content(30, seed))
+        long_a = "- " + "a" * (self.entry.selection.MAX_OUTPUT_CHARS - 2)
+        self.stop_timed(SESSION_A, [long_a, "REVIEW_CLEAN", "REVIEW_CLEAN"])
+        self.assertEqual(len(self.review_calls), 3)
+        self.assertEqual(self.pending(SESSION_A), [])
+
     def test_findings_from_several_chunks_are_delivered_together(self):
         self.edit(SESSION_A, "a.py", self._content(30))
         self.edit(SESSION_A, "b.py", self._content(30, "y"))

@@ -182,6 +182,13 @@ MAX_DIFF_BYTES = 40000
 # 繰り越しは「次ターンまで待つ」だけの遅延なので、1 ファイルはなるべく丸ごと送るため。
 MAX_FILE_DIFF_BYTES = 32000
 
+# 1 回の Stop が Claude の文脈に返す指摘の合計の上限 (文字数。0.14.0)。塊を複数回に分けて
+# 送ると指摘も回数分だけ積み上がるので、2 回目以降の送信は「ここまでの指摘 + 1 回の出力の
+# 上限 (`selection.MAX_OUTPUT_CHARS`)」がこれに収まるときだけ起動する。収まらない塊は送らずに
+# 繰り越す (送ってから捨てると、指摘を返さないままレビュー済みにしてしまう)。指摘なしの塊は
+# 枠を使わないので、clean が続く限り時間の上限まで送れる。0.13.0 までの 1 回分 (16000) の 2 倍。
+MAX_FINDINGS_CHARS = 32000
+
 # 1 回のレビューで diff を取るパス数の上限。溢れた分は捨てずに pending へ戻し、
 # 次の Stop でレビューする (silent truncation にしない)。
 MAX_REVIEW_PATHS = 60
@@ -1830,7 +1837,13 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
     started = _review_clock()
     sent: list[tuple[ReviewChunk, selection.Outcome]] = []
     unsent: list[ReviewChunk] = []
+    findings_chars = 0
+    held_for_findings = False
     for index, chunk in enumerate(chunks):
+        if index > 0 and findings_chars + selection.MAX_OUTPUT_CHARS > MAX_FINDINGS_CHARS:
+            unsent = chunks[index:]
+            held_for_findings = True
+            break
         outcome = selection.run_review(
             chunk.text,
             cwd=root,
@@ -1849,6 +1862,8 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
         sent.append((chunk, outcome))
         if outcome.backend:
             last = outcome.backend
+        if outcome.text and not is_clean_review(outcome.text):
+            findings_chars += len(outcome.text)
     elapsed = _review_clock() - started
     state.mark_review_done(session_id)
 
@@ -1888,7 +1903,13 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
             f"{len(failed_paths)} ファイルは結果を取得できず (timeout / 失敗)。"
             "次ターンに持ち越し: " + _list_names(_rel_names(root, failed_paths))
         )
-    if unsent_paths:
+    if unsent_paths and held_for_findings:
+        carried_notices.append(
+            f"{len(unsent_paths)} ファイルは、この応答で返す指摘が多いため次の応答の終わりに"
+            "繰り越し (レビュー済みにはしません。先に今回の指摘に対応してください): "
+            + _list_names(_rel_names(root, unsent_paths))
+        )
+    elif unsent_paths:
         remaining = -(-len(unsent) // len(sent))  # この Stop で送れた回数で割った切り上げ
         carried_notices.append(
             f"{len(unsent_paths)} ファイルは 1 回の応答終了あたりの待ち時間の上限 "
