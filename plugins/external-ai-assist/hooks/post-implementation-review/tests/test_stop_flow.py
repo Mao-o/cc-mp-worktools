@@ -1090,6 +1090,18 @@ class TestRecursionGuard(HookTestCase):
         self.stop(SESSION_A, "REVIEW_CLEAN", stop_hook_active=True)
         self._assert_skipped_and_kept("a.txt")
 
+    def test_disabled_feature_never_resolves_mode_on_continued_stop(self):
+        """機能 off の利用者には、継続中の Stop で mode 解決 (= 版数検出の subprocess) を走らせない。"""
+        os.environ["EXTERNAL_AI_POST_REVIEW"] = "0"
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        with mock.patch.object(
+            self.entry, "get_mode", side_effect=AssertionError("get_mode が呼ばれた")
+        ), mock.patch.object(
+            self.entry, "_claude_code_version", side_effect=AssertionError("版数検出が走った")
+        ):
+            self.stop(SESSION_A, "REVIEW_CLEAN", stop_hook_active=True)
+        self.assertNotReviewed()
+
     def test_block_decision_also_marks_the_next_stop(self):
         """`decision: "block"` もターンを継続させる。mode を戻した直後の Stop でも skip する。"""
         os.environ["EXTERNAL_AI_POST_REVIEW_MODE"] = "block"

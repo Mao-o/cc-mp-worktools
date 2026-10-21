@@ -742,6 +742,12 @@ v0.2.0 の `DEFAULT_MAX_REVIEWS = 2` は**セッション単位**の予算で、
 Stop でレビューされる — 意図した挙動)。つまり MAX=2 は事実上「ターンをまたいだ回数制限」
 としてしか効いておらず、ターンスコープ化で不要になったので撤廃した。
 
+`EXTERNAL_AI_POST_REVIEW_MAX=0` を無効化スイッチとして使っていた環境があるため、
+**`0` のときだけ**後方互換で無効化として解釈する (それ以外の値は無視)。
+新しい正規のスイッチは `EXTERNAL_AI_POST_REVIEW=0`。**撤廃済みの死んだ別名**なので
+`EXTERNAL_AI_POST_REVIEW` が設定されていればそちらが勝つ — exitplan-review の
+`EXTERNAL_AI_REVIEW_MAX` は現役の回数予算で AND で効き、扱いが違う (0.6.0)。
+
 ## 再帰防止の範囲 (0.15.0)
 
 `stop_hook_active` は「この Stop の前に**どれかの** Stop hook がターンを継続させた」ことしか
@@ -776,12 +782,6 @@ true で一律に skip していたので、`/goal` の 2 ターン目以降は�
 呼び出しが無いまま 8 回連続」で数える (公式 hooks-guide の "Stop hook hits the block cap" 節:
 "after it blocks eight times in a row with no tool call from Claude in between") ので、
 レビュー対象 (= 編集) のある継続ターンは数えなおしになる。
-
-`EXTERNAL_AI_POST_REVIEW_MAX=0` を無効化スイッチとして使っていた環境があるため、
-**`0` のときだけ**後方互換で無効化として解釈する (それ以外の値は無視)。
-新しい正規のスイッチは `EXTERNAL_AI_POST_REVIEW=0`。**撤廃済みの死んだ別名**なので
-`EXTERNAL_AI_POST_REVIEW` が設定されていればそちらが勝つ — exitplan-review の
-`EXTERNAL_AI_REVIEW_MAX` は現役の回数予算で AND で効き、扱いが違う (0.6.0)。
 
 ## レビューの頻度と待ち時間 (0.6.0)
 

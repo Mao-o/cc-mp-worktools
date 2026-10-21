@@ -1609,10 +1609,6 @@ def handle_stop(payload: dict) -> None:
     #   `additionalContext` も `decision: "block"` と同じくターンを継続させる
     #   (モジュール docstring「0.8.0 で入れた変更」) ので、context mode でもこれが要る
     continuing = bool(payload.get("stop_hook_active"))
-    if continuing and get_mode() == MODE_BLOCK:
-        log("stop_hook_active=True かつ block mode のためスキップ (再帰防止)")
-        return
-
     session_id = payload.get("session_id") or ""
     if not session_id:
         log("session_id が空")
@@ -1628,6 +1624,14 @@ def handle_stop(payload: dict) -> None:
     active = selection.available(chosen)
     if not active and not unknown_backends:
         log("利用可能な外部 AI backend が無い (未インストール)")
+        return
+
+    # block mode の継続中の Stop は一律に skip する (0.14.0 までと同じ)。`get_mode()` は
+    # auto のとき版数検出 (`claude --version` の subprocess、最大 3 秒) を走らせうるので、
+    # 機能 off / 未インストールの利用者にそのコストを払わせないよう、上の 2 つの抜けより
+    # **後**、`ensure_private_root` より前に置く。
+    if continuing and get_mode() == MODE_BLOCK:
+        log("stop_hook_active=True かつ block mode のためスキップ (再帰防止)")
         return
 
     # `stategc.gc_stale()` (直後) は state_root() 配下を列挙・削除・chmod するので、

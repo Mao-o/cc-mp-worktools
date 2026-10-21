@@ -20,6 +20,7 @@ version 据え置きで main に入った後続 commit はその version の節�
   - 直前の Stop で**この hook が**ターンを継続させたとき (指摘を `additionalContext` か `decision: "block"` で返したとき)
 - 直前の Stop の継続の有無は state に 1 ビット (`continued_turn`) で持つ。毎回の Stop で読んで消すので、skip するのは継続させた次の Stop 1 回だけ。読めないときは skip 側に倒す
 - `additionalContext` も `decision: "block"` と同じくターンを継続させる (公式 Hooks reference) ので、既定の context mode でも自分の指摘の直後は skip する
+- block mode かの判定 (auto では `claude --version` の版数検出が走りうる) は、機能 off (`EXTERNAL_AI_POST_REVIEW=0`) と外部 AI CLI 未インストールの抜けより後に置いた。そうした利用者には、継続中の Stop で版数検出が走らない (0.14.0 と同じく即 return)
 
 ### Added
 
