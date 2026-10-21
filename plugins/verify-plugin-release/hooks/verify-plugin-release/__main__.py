@@ -320,7 +320,8 @@ def _manual(argv: list[str]) -> int:
     ap.add_argument(
         "--strict-validate",
         action="store_true",
-        help="claude plugin validate の warning を FAIL にする (設定ファイルの strict_validate より優先)",
+        help="claude plugin validate の warning を FAIL にする (plugin directory checks の節は除く。"
+        "設定ファイルの strict_validate より優先)",
     )
     args = ap.parse_args(argv)
     try:
