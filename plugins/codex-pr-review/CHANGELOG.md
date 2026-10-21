@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1
+
+icon と導入手順の追加 (挙動の変更なし、patch bump)。
+
+- plugin の icon (`assets/icon.png`) を足した。`claude plugin validate` の plugin directory checks が出す `ICON_MISSING` を解消する
+- README に marketplace からのインストール手順の節を足した
+
 ## 0.1.0
 
 初版。手元のグローバル Skill として使っていた `iterating-pr-codex-reviews` を plugin に移した。

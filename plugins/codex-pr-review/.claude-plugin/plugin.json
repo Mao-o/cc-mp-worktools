@@ -1,6 +1,6 @@
 {
   "name": "codex-pr-review",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "GitHub PR に付く Codex (chatgpt-codex-connector) の自動レビューを待ち、指摘への対応と @codex review での再レビューを回す手順と、状態確認・再 trigger・安全 commit のスクリプトをまとめた Skill",
   "author": {
     "name": "Mao"
