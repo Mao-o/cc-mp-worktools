@@ -543,6 +543,9 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
 _GIT_CHECK_IGNORE_TIMEOUT_SEC = 5
 
 
+_GIT_REDIRECT_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
+
+
 def _git_ignored(anchor: Path, path: Path) -> bool | None:
     """`path` が git で ignore されるかを `git check-ignore -q` で判定する。
 
@@ -563,6 +566,8 @@ def _git_ignored(anchor: Path, path: Path) -> bool | None:
             capture_output=True,
             timeout=_GIT_CHECK_IGNORE_TIMEOUT_SEC,
             stdin=subprocess.DEVNULL,
+            # 外側が export した GIT_DIR などで、anchor ではない repo の規則を引かない
+            env={k: v for k, v in os.environ.items() if k not in _GIT_REDIRECT_ENV},
         )
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
@@ -640,7 +645,8 @@ def _ensure_project_claude_md(target: _Target, stdout: IO[str]) -> None:
         print(
             f"(skipped: {_p(md_path)} は git で ignore されていないため作りません。"
             "作るとリポジトリにコミットされうるファイルが増えます。"
-            "必要なら .git/info/exclude などで ignore してから再実行してください)",
+            "必要なら .git/info/exclude などで ignore してから "
+            "`init --commit` などの書き込みを再実行してください)",
             file=stdout,
         )
         return

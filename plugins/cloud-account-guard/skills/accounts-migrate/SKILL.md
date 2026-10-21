@@ -144,7 +144,7 @@ builder は以下の順でパスをスキャンし、統合する:
    出る)。生成先が git で ignore されていないときは、リポジトリにコミット
    されうるファイルを増やさないよう作らず、`(skipped: ... ignore されて
    いないため作りません ...)` の 1 行が出る。その場合は「作りたければ
-   `.git/info/exclude` などで ignore してから再実行する」とユーザーに伝える。
+   `.git/info/exclude` などで ignore してから `init --commit` などの書き込みを再実行する」とユーザーに伝える。
    これは将来のセッションで Claude が `accounts.local.json` を直接
    編集しようとして deny されたとき、同ディレクトリの CLAUDE.md を見て
    builder 経由の正規経路に辿り着けるようにするためのファイル。ユーザーに

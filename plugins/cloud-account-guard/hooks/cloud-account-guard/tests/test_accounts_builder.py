@@ -97,10 +97,18 @@ class BaseBuilder(unittest.TestCase):
 
         self._env_patcher = mock.patch.dict(
             os.environ,
-            {"CLAUDE_PROJECT_DIR": str(self.project_dir)},
+            {
+                "CLAUDE_PROJECT_DIR": str(self.project_dir),
+                # tmp が別の git repo の中にあっても、親を辿って repo と誤認しない
+                # (resolve するのは macOS の /var -> /private/var のため)。
+                "GIT_CEILING_DIRECTORIES": str(Path(self.tmp).resolve()),
+            },
         )
         self._env_patcher.start()
         self.addCleanup(self._env_patcher.stop)
+        # 外側の環境が export している git の向き先で判定が変わらないようにする。
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"):
+            os.environ.pop(name, None)
 
     def _cleanup(self):
         import shutil
@@ -1174,8 +1182,6 @@ class TestGitIgnoreAware(BaseBuilder):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
-        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"):
-            os.environ.pop(name, None)
         self._git("init", "-q")
 
     def _git(self, *args: str) -> str:
@@ -1273,9 +1279,33 @@ class TestGitIgnoreAware(BaseBuilder):
         self.assertTrue(self._new_path().exists())
         self.assertFalse((self.new_dir / "CLAUDE.md").exists())
         self.assertIn("git で ignore されていないため作りません", out)
+        # migrate は新パスだけが在ると何もしないので、signpost が作られる書き込みを案内する
+        self.assertIn("`init --commit` などの書き込みを再実行", out)
         self.assertNotIn("created:", out)
         self.assertEqual(self._untracked(), before)
         self.assertEqual(self._git("diff", "--", ".gitignore"), "")
+
+    def test_outer_git_dir_does_not_redirect_the_ignore_check(self):
+        """外側が別 repo を指す GIT_DIR を export していても、anchor の repo の規則で判定する。"""
+        self._gitignore().write_text(".claude/\n", encoding="utf-8")
+        other = Path(self.tmp) / "other"
+        other.mkdir()
+        subprocess.run(
+            ["git", "-C", str(other), "init", "-q"],
+            check=True,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+        )
+        with mock.patch.dict(
+            os.environ,
+            {"GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other)},
+        ):
+            code, out, _err = self._run(
+                ["init", "--service", "github", "--value", "Mao-o", "--commit"]
+            )
+        self.assertEqual(code, 0)
+        self.assertTrue((self.new_dir / "CLAUDE.md").exists())
+        self.assertIn("created:", out)
 
     def test_signpost_created_when_claude_dir_ignored(self):
         self._gitignore().write_text(".claude/\n", encoding="utf-8")
