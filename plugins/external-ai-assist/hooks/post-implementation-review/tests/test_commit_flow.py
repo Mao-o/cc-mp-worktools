@@ -1058,7 +1058,7 @@ class TestChainedWindow(CommitFlowTestCase):
         self.assertForeignNotSent()
         # W3 は窓ごと落とすのでパス単位の通知まで進まない。W3 を外すと、偽装した範囲の内容は
         # P6 (内容指紋) が「一致しない」と落とし、その通知に shared.py の名前が出る。
-        self.assertNotIn("shared.py", self.notice(output))
+        self.assertEqual(self.notice(output), "", "W3 は窓ごと落とし、通知を出さない")
 
 
 # ---------------------------------------------------------------------------
