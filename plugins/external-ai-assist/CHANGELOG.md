@@ -21,6 +21,10 @@ version 据え置きで main に入った後続 commit はその version の節�
 - 直前の Stop の継続の有無は state に 1 ビット (`continued_turn`) で持つ。毎回の Stop で読んで消すので、skip するのは継続させた次の Stop 1 回だけ。読めないときは skip 側に倒す
 - `additionalContext` も `decision: "block"` と同じくターンを継続させる (公式 Hooks reference) ので、既定の context mode でも自分の指摘の直後は skip する
 
+### Added
+
+- plugin の icon (`assets/icon.png`) を足した。`claude plugin validate` の plugin directory checks が出す `ICON_MISSING` を解消する
+
 ## 0.14.0
 
 **`post-implementation-review` の Stop が、40 KB を超える差分を同じ Stop の中で塊ごとに送るようにした。0.13.0 までは 40 KB の 1 塊だけを送り、残りを次の Stop (= 利用者が次に発言して応答が終わったとき) へ繰り越していた。送信回数が変わる挙動変更なので minor bump。**
