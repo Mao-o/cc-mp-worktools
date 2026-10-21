@@ -52,6 +52,11 @@ clone してきた repo が「この repo では差分を外部サービス X �
 「候補が速く失敗したとき」(未インストール / 即エラー / 利用上限) で、そこがこの機能の
 狙いでもある。全滅したターンは 0.11.0 と同じく**何も送らず pending に戻す**。
 
+0.14.0 から Stop は差分を 40 KB ずつ複数回に分けて送る (`__main__._run_review`)。
+この予算は**送信ごとではなく Stop 全体で 1 つ**で、2 回目以降の送信は第一候補も含めて
+同じ判定を通る (`run_review` の `started` / `gate_first`)。最悪ケースは上と同じ
+`worst_case_wall_sec()` のまま。
+
 ## 前回の backend の記録
 
 `alternate` のために state に **1 値だけ** 持つ (`state.last_backend`)。パス単位の
@@ -91,6 +96,10 @@ STRATEGIES = (STRATEGY_FIXED, STRATEGY_AVAILABLE, STRATEGY_ALTERNATE, STRATEGY_R
 #: 最大**から導出する — 特定 backend の定数を直に書くと、上限の違う backend が増えたとき
 #: に `state.IN_FLIGHT_TTL_SEC` と hooks.json の予算が静かにずれる。
 MAX_TOTAL_TIMEOUT_SEC = max(r.MAX_TIMEOUT_SEC for r in REVIEWERS)
+
+#: 1 回のレビューが返す本文の長さの上限 (文字数。各 backend の `MAX_OUTPUT_BYTES` で切り詰める
+#: ので、その最大)。Stop が複数回に分けて送るときの指摘の合計の見積もりに使う (0.14.0)。
+MAX_OUTPUT_CHARS = max(r.MAX_OUTPUT_BYTES for r in REVIEWERS)
 
 #: 1 回の起動を timeout で打ち切るときの停止処理の最悪所要時間
 #: (SIGTERM 待ち / SIGKILL 待ち / 最後の wait = 3 × `KILL_GRACE_SEC`)。
@@ -212,6 +221,8 @@ def run_review(
     log=None,
     manifest: str = "",
     now=time.monotonic,
+    started: float | None = None,
+    gate_first: bool = False,
 ) -> Outcome:
     """候補を順に試し、最初に結果を返した backend の本文を持つ Outcome を返す。
 
@@ -222,14 +233,23 @@ def run_review(
 
     `now` はテストが時計を差し替えるための注入点 (予算の打ち切りを実時間を使わずに
     検証する)。
+
+    `started` / `gate_first` は 1 回の Stop で差分を複数回に分けて送るときのため (0.14.0)。
+    `started` には **Stop が最初の送信を始めた時刻**を渡す。省略すると呼び出しごとに
+    起点が今に戻り、2 回目以降の送信のフォールバックが Stop 全体の予算を踏み越える
+    (= hook timeout の kill が先に来て claim を戻せなくなる)。`gate_first=True` は
+    第一候補も残り予算で判定する — 2 回目以降の送信では「第一候補だけは予算を見ずに
+    起動する」例外を使ってはいけない。どの候補も収まらなければ `attempts` が空の
+    Outcome を返す (= 何も起動していない)。
     """
     outcome = Outcome(strategy_name)
     candidates = order(chosen, strategy_name=strategy_name, last=last)
     outcome.order = [b.NAME for b in candidates]
 
-    started = now()
+    if started is None:
+        started = now()
     for index, backend in enumerate(candidates):
-        if index > 0 and not _fits_in_budget(backend, now() - started):
+        if (index > 0 or gate_first) and not _fits_in_budget(backend, now() - started):
             # 残り予算で起動すると Stop の hook timeout を踏み越えうる。踏み越えると
             # ハーネスの kill が先に来て claim を pending へ戻せなくなる (= このターンの
             # 変更が TTL まで沈黙する) ので、起動しない側に倒す

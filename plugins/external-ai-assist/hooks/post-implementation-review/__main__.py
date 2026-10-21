@@ -168,9 +168,11 @@ import selection  # noqa: E402
 import state  # noqa: E402
 import stategc  # noqa: E402
 
-# 1 回のレビューで cursor に渡す diff 合計の上限。ファイル (セクション) 単位で積み上げ、
-# 収まらないファイルは **送らずに pending へ戻す** (hash も記録しない)。結合後に末尾を切る
-# 方式だと、切り落とされたファイルが「レビュー済み」扱いになり以後再掲されなかった (0.4.1 まで)。
+# 1 回の送信で cursor に渡す diff 合計の上限。ファイル (セクション) 単位で積み上げる。
+# 結合後に末尾を切る方式だと、切り落とされたファイルが「レビュー済み」扱いになり以後
+# 再掲されなかった (0.4.1 まで)。Stop は収まらないファイルを次の塊に入れ、1 回の Stop の
+# 待ち時間の上限に収まる限り塊を順に送る (0.14.0。それまでは 1 塊だけ送り、残りを次の
+# Stop へ繰り越していた)。commit レビューは窓全体で 1 本のまま (収まらないファイルは送らない)。
 MAX_DIFF_BYTES = 40000
 
 # 1 ファイルの diff 上限。これを超えるファイルは先頭だけを `(truncated)` 付きで送り、
@@ -179,6 +181,13 @@ MAX_DIFF_BYTES = 40000
 # 合計の 80% にしているのは、切り詰めは「その diff の末尾を二度と見ない」恒久的な損失で、
 # 繰り越しは「次ターンまで待つ」だけの遅延なので、1 ファイルはなるべく丸ごと送るため。
 MAX_FILE_DIFF_BYTES = 32000
+
+# 1 回の Stop が Claude の文脈に返す指摘の合計の上限 (文字数。0.14.0)。塊を複数回に分けて
+# 送ると指摘も回数分だけ積み上がるので、2 回目以降の送信は「ここまでの指摘 + 1 回の出力の
+# 上限 (`selection.MAX_OUTPUT_CHARS`)」がこれに収まるときだけ起動する。収まらない塊は送らずに
+# 繰り越す (送ってから捨てると、指摘を返さないままレビュー済みにしてしまう)。指摘なしの塊は
+# 枠を使わないので、clean が続く限り時間の上限まで送れる。0.13.0 までの 1 回分 (16000) の 2 倍。
+MAX_FINDINGS_CHARS = 32000
 
 # 1 回のレビューで diff を取るパス数の上限。溢れた分は捨てずに pending へ戻し、
 # 次の Stop でレビューする (silent truncation にしない)。
@@ -1763,10 +1772,9 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
 
     batch = _collect_diffs(root, rels, state.reviewed_hashes(session_id))
     # 繰り越しは捨てずに pending へ戻す (次の Stop でレビューされる)。claim 順を保って 1 回で
-    # 積む: 予算超過 (rels の途中) → 時間切れ (rels の末尾) → 上限超過 (rels の外) の順
+    # 積む: 送れなかった塊 (rels の途中) → 時間切れ (rels の末尾) → 上限超過 (rels の外) の順。
+    # 送れなかった塊は送信を終えるまで決まらないので、積むのは各出口で行う
     carried = batch.deferred + overflow
-    if carried:
-        state.record_pending(session_id, carried)
     if batch.unretrievable:
         # HEAD 基準の diff が空だったパス。復元は試みない (`_collect_diffs` の
         # docstring「HEAD 基準の diff が空のパスは復元を試みない」参照)。pending
@@ -1782,12 +1790,6 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
             f"{len(batch.deferred_time)} ファイルは git diff の時間予算超過により"
             "次ターンに繰り越し: " + _list_names(_rel_names(root, batch.deferred_time))
         )
-    if batch.deferred_size:
-        notices.append(
-            f"{len(batch.deferred_size)} ファイルは diff 合計 {MAX_DIFF_BYTES // 1000} KB の"
-            "予算に収まらないため次ターンに繰り越し (レビュー済みにはしません): "
-            + _list_names(_rel_names(root, batch.deferred_size))
-        )
     if batch.truncated:
         notices.append(
             f"{len(batch.truncated)} ファイルは diff が {MAX_FILE_DIFF_BYTES // 1000} KB を"
@@ -1799,6 +1801,8 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
 
     if not batch.sections:
         log("レビュー対象の差分が無い (空 diff / 前回と同一 / 除外のみ) ため skip")
+        if carried:
+            state.record_pending(session_id, carried)
         state.complete_claim(session_id, claim_id, {})
         return _with_notices({}, notices)
 
@@ -1807,6 +1811,8 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
     changed_lines = _count_changed_lines(batch.sections)
     if min_lines > 0 and changed_lines < min_lines:
         # 消費せず pending に戻す (cursor 失敗時と同じ経路。hash も記録しない)
+        if carried:
+            state.record_pending(session_id, carried)
         state.restore_claim(session_id, claim_id, batch.submitted)
         notices.insert(
             0,
@@ -1816,55 +1822,124 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
         log(notices[0])
         return _with_notices({}, notices)
 
-    diff_text = "\n".join(batch.sections)
     chosen, unknown_backends = selection.configured()
     if unknown_backends:
         notices.append(_unknown_backends_notice(unknown_backends))
     strategy_name = selection.strategy(len(chosen))
+    chunks = batch.chunks()
     log(
-        f"差分レビューを実行 ({len(batch.submitted)} ファイル, {len(diff_text)} chars, "
+        f"差分レビューを実行 ({len(batch.submitted)} ファイル, {len(chunks)} 回に分割, "
         f"strategy={strategy_name}, 候補={', '.join(b.NAME for b in chosen)})"
     )
-    started = time.monotonic()
-    outcome = selection.run_review(
-        diff_text,
-        cwd=root,
-        chosen=chosen,
-        strategy_name=strategy_name,
-        last=state.last_backend(session_id),
-        log=log,
-        manifest=_sent_manifest(root, batch),
-    )
-    elapsed = time.monotonic() - started
+    last = state.last_backend(session_id)
+    # 待ち時間の上限は Stop 全体で 1 つ (`selection` モジュール docstring)。2 回目以降の
+    # 送信は第一候補も残り予算で判定し、収まらなければそこで打ち切って残りを繰り越す
+    started = _review_clock()
+    sent: list[tuple[ReviewChunk, selection.Outcome]] = []
+    unsent: list[ReviewChunk] = []
+    findings_chars = 0
+    held_for_findings = False
+    for index, chunk in enumerate(chunks):
+        if index > 0 and findings_chars + selection.MAX_OUTPUT_CHARS > MAX_FINDINGS_CHARS:
+            unsent = chunks[index:]
+            held_for_findings = True
+            break
+        outcome = selection.run_review(
+            chunk.text,
+            cwd=root,
+            chosen=chosen,
+            strategy_name=strategy_name,
+            last=last,
+            log=log,
+            manifest=_sent_manifest(root, chunk),
+            now=_review_clock,
+            started=started,
+            gate_first=index > 0,
+        )
+        if not outcome.attempts:
+            unsent = chunks[index:]
+            break
+        sent.append((chunk, outcome))
+        if outcome.backend:
+            last = outcome.backend
+        if outcome.text and not is_clean_review(outcome.text):
+            findings_chars += len(outcome.text)
+    elapsed = _review_clock() - started
     state.mark_review_done(session_id)
-    summary = (
-        f"差分レビュー完了 ({notify.format_elapsed(elapsed)}, "
-        f"{len(batch.submitted)} ファイル{_attempt_detail(outcome)})"
-    )
-    if outcome.skipped:
+
+    sent_files = sum(len(chunk.submitted) for chunk, _ in sent)
+    summary = f"差分レビュー完了 ({notify.format_elapsed(elapsed)}, {sent_files} ファイル"
+    if len(sent) == 1:
+        summary += _attempt_detail(sent[0][1]) + ")"
+    else:
+        summary += f", {len(sent)} 回に分けて送信: " + " / ".join(
+            _attempt_detail(outcome)[2:] for _, outcome in sent
+        ) + ")"
+    skipped = sorted({name for _, outcome in sent for name in outcome.skipped})
+    if skipped:
         notices.append(
-            f"{len(outcome.skipped)} 個の backend は残り時間が足りないため試していません: "
-            + _list_names(outcome.skipped)
+            f"{len(skipped)} 個の backend は残り時間が足りないため試していません: "
+            + _list_names(skipped)
         )
 
-    result = outcome.text
-    if not result:
+    succeeded = [(chunk, outcome) for chunk, outcome in sent if outcome.text]
+    if not succeeded:
         log("全 backend がレビュー結果を返さなかった (fail-open、pending に戻す)")
+        if carried:
+            state.record_pending(session_id, carried)
         state.restore_claim(session_id, claim_id, batch.submitted)
         notices.insert(0, f"{summary} → 結果を取得できず (timeout / 失敗)。次ターンに持ち越し")
         return _with_notices({}, notices)
 
-    # 結果を返した backend だけを記録する (`alternate` が次回「別の目」を選ぶため)
-    state.record_last_backend(session_id, outcome.backend)
+    # 結果を返さなかった塊と送れなかった塊は、レビュー済みにせず pending へ戻す。
+    # complete_claim より**前**に積む (pending にあるパスの指紋を complete_claim が残すため)
+    failed_paths = [p for chunk, outcome in sent if not outcome.text for p in chunk.submitted]
+    unsent_paths = [p for chunk in unsent for p in chunk.submitted]
+    if failed_paths or unsent_paths or carried:
+        state.record_pending(session_id, failed_paths + unsent_paths + carried)
+    carried_notices: list[str] = []
+    if failed_paths:
+        carried_notices.append(
+            f"{len(failed_paths)} ファイルは結果を取得できず (timeout / 失敗)。"
+            "次ターンに持ち越し: " + _list_names(_rel_names(root, failed_paths))
+        )
+    if unsent_paths and held_for_findings:
+        carried_notices.append(
+            f"{len(unsent_paths)} ファイルは、この応答で返す指摘が多いため次の応答の終わりに"
+            "繰り越し (レビュー済みにはしません。先に今回の指摘に対応してください): "
+            + _list_names(_rel_names(root, unsent_paths))
+        )
+    elif unsent_paths:
+        remaining = -(-len(unsent) // len(sent))  # この Stop で送れた回数で割った切り上げ
+        carried_notices.append(
+            f"{len(unsent_paths)} ファイルは 1 回の応答終了あたりの待ち時間の上限 "
+            f"({selection.MAX_TOTAL_TIMEOUT_SEC // 60} 分) に収まらないため次の応答の終わりに"
+            f"繰り越し (レビュー済みにはしません。あと約 {remaining} 回で送り終える見込み): "
+            + _list_names(_rel_names(root, unsent_paths))
+        )
+    for notice in carried_notices:
+        log(notice)
+    notices.extend(carried_notices)
 
-    if is_clean_review(result):
-        log(f"{outcome.backend}: REVIEW_CLEAN (block しない、レビュー済みとして確定)")
-        state.complete_claim(session_id, claim_id, batch.hashes)
+    # 結果を返した backend だけを記録する (`alternate` が次回「別の目」を選ぶため)
+    state.record_last_backend(session_id, succeeded[-1][1].backend)
+    hashes: dict[str, str] = {}
+    for chunk, _ in succeeded:
+        hashes.update(chunk.hashes)
+    findings = [
+        (outcome.text, outcome.backend)
+        for _, outcome in succeeded
+        if not is_clean_review(outcome.text)
+    ]
+
+    if not findings:
+        log("REVIEW_CLEAN (block しない、レビュー済みとして確定)")
+        state.complete_claim(session_id, claim_id, hashes)
         notices.insert(0, f"{summary} → 指摘なし")
         return _with_notices({}, notices)
 
-    reason = build_reason(result, outcome.backend)
-    state.complete_claim(session_id, claim_id, batch.hashes)
+    reason = _findings_reason(findings)
+    state.complete_claim(session_id, claim_id, hashes)
     _save_review_copy(session_id, reason)
     # 通知文はモードで分岐させる (hook が「したこと」だけを述べる)。block (明示、または
     # auto 解決で版数非対応と判定した場合) はハーネスが継続を保証するので「依頼しました」
@@ -1889,6 +1964,28 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
         },
         notices,
     )
+
+
+def _review_clock() -> float:
+    """Stop の待ち時間の上限を測る時計 (テストが差し替えて打ち切りを検証する)。"""
+    return time.monotonic()
+
+
+def _findings_reason(findings: list[tuple[str, str]]) -> str:
+    """指摘のあった送信の本文を 1 つの reason にまとめる。
+
+    1 回だけなら 0.13.0 までと同じ形。複数回のときは送信ごとに見出しを付ける — 塊ごとに
+    別の cursor が別のファイル群を見ているので、どの指摘がどの塊のものかを残す。
+    """
+    if len(findings) == 1:
+        text, backend = findings[0]
+        return build_reason(text, backend)
+    labels = ", ".join(dict.fromkeys(_BACKEND_LABELS.get(b, b) for _, b in findings))
+    body = "\n\n".join(
+        f"### {number}/{len(findings)}\n\n{text}"
+        for number, (text, _) in enumerate(findings, start=1)
+    )
+    return build_reason(body, labels)
 
 
 def _count_changed_lines(sections: list[str]) -> int:
@@ -1968,7 +2065,7 @@ def _attempt_detail(outcome: selection.Outcome) -> str:
     return f": {detail}"
 
 
-def _sent_manifest(root: str, batch: ReviewBatch) -> str:
+def _sent_manifest(root: str, batch: ReviewBatch | ReviewChunk) -> str:
     """hooklog に残す「何を送ったか」(パス名とバイト数のみ。内容は書かない)。
 
     どの backend へ何を送ったかを後から追えることは、この plugin の外部送信に対する
@@ -2109,7 +2206,10 @@ class ReviewBatch:
         self.submitted: list[str] = []  # 絶対パス
         self.hashes: dict[str, str] = {}
         self.deferred_time: list[str] = []  # 時間予算で未処理 (絶対パス)
-        self.deferred_size: list[str] = []  # 合計バイト予算で未送信 (絶対パス)
+        self.deferred_size: list[str] = []  # 合計バイト予算で未送信 (絶対パス。commit 経路のみ)
+        # sections / submitted と同じ並びで、各ファイルが何番目の塊で送られるか (Stop 経路)。
+        # commit 経路は塊に分けないので空のまま (= 全体で 1 塊)
+        self.chunk_of: list[int] = []
         self.truncated: list[tuple[str, int]] = []  # (rel, 切り詰め前の bytes)
         self.unretrievable: list[str] = []  # HEAD 基準の diff が空だった絶対パス (復元は試みない)
         self.deduplicated: list[str] = []  # Stop がレビュー済みの内容なので送らなかった rel (commit 経路)
@@ -2119,6 +2219,32 @@ class ReviewBatch:
     def deferred(self) -> list[str]:
         """pending へ戻す絶対パス (未レビュー)。claim 順 = バイト予算 (途中) → 時間切れ (末尾)。"""
         return self.deferred_size + self.deferred_time
+
+    def chunks(self) -> list[ReviewChunk]:
+        """送る単位 (各塊は diff 合計 MAX_DIFF_BYTES 以下) を塊の番号順に返す。"""
+        if not self.chunk_of:
+            return [ReviewChunk(self.sections, self.submitted, self.hashes)] if self.sections else []
+        count = max(self.chunk_of) + 1
+        parts = [ReviewChunk([], [], {}) for _ in range(count)]
+        for section, path, index in zip(self.sections, self.submitted, self.chunk_of):
+            part = parts[index]
+            part.sections.append(section)
+            part.submitted.append(path)
+            part.hashes[path] = self.hashes[path]
+        return parts
+
+
+class ReviewChunk:
+    """1 回の送信に載せる差分 (`ReviewBatch.chunks()` の要素)。"""
+
+    def __init__(self, sections: list[str], submitted: list[str], hashes: dict[str, str]) -> None:
+        self.sections = sections
+        self.submitted = submitted  # 絶対パス
+        self.hashes = hashes
+
+    @property
+    def text(self) -> str:
+        return "\n".join(self.sections)
 
 
 def _collect_diffs(
@@ -2170,9 +2296,11 @@ def _collect_diffs(
 
     - 1 ファイルが MAX_FILE_DIFF_BYTES を超える → 先頭だけを `(truncated)` 付きで送り、
       hash は全文で記録する (変わらない限り再掲しない。変われば切り詰めた形で再掲)
-    - 積み上げ合計が MAX_DIFF_BYTES を超えるファイル → 送らず deferred_size へ
-      (hash を記録しないので次ターンにそのまま再掲される)。後続の小さいファイルは
-      予算が残っていれば送る (first-fit)
+    - 積み上げ合計が MAX_DIFF_BYTES を超えるファイル → 次の塊に入れる (0.14.0)。
+      入れる先は「収まる最初の塊」(first-fit) なので、後続の小さいファイルは前の塊の
+      残りに入る。1 ファイルは MAX_FILE_DIFF_BYTES <= MAX_DIFF_BYTES に切り詰め済みなので
+      新しい塊には必ず収まる。どの塊をこの Stop で送れるかは `_run_review` が時間で決め、
+      送れなかった塊は hash を記録せず pending に戻す (次ターンにそのまま再掲される)
 
     COLLECT_BUDGET_SEC を超えた時点で打ち切り、未処理パスを deferred_time として返す。
     Stop 全体の hook timeout (690s) のうち cursor が上限 600s + kill 猶予 15s を使うため、
@@ -2183,7 +2311,7 @@ def _collect_diffs(
     has_head = gitscan.head_exists(root)
 
     batch = ReviewBatch()
-    used = 0
+    used: list[int] = []  # 塊ごとの積み上げバイト数
     deadline = time.monotonic() + COLLECT_BUDGET_SEC
 
     for index, rel in enumerate(rels):
@@ -2218,15 +2346,19 @@ def _collect_diffs(
         if full_size > MAX_FILE_DIFF_BYTES:
             text = _truncate_section(text, MAX_FILE_DIFF_BYTES)
         size = len(text.encode())
-        separator = 1 if batch.sections else 0  # "\n".join の区切り分
-        if used + separator + size > MAX_DIFF_BYTES:
-            batch.deferred_size.append(abs_path)
-            continue
+        for index, filled in enumerate(used):
+            separator = 1 if filled else 0  # "\n".join の区切り分
+            if filled + separator + size <= MAX_DIFF_BYTES:
+                used[index] = filled + separator + size
+                break
+        else:
+            index = len(used)
+            used.append(size)
 
         batch.sections.append(text)
         batch.submitted.append(abs_path)
         batch.hashes[abs_path] = digest
-        used += separator + size
+        batch.chunk_of.append(index)
         if full_size > MAX_FILE_DIFF_BYTES:
             batch.truncated.append((rel, full_size))
     return batch
