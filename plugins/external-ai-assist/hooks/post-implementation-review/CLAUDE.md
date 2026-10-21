@@ -929,7 +929,7 @@ pytest tests/                          # pytest でも動く (conftest.py で sy
 | glob に見えるファイル名で他セッションの差分が混入しない | `TestLiteralPathspecFlow` (git 単体は `test_gitscan.py::TestLiteralPathspec`) |
 | 予算に収まらないファイルをレビュー済みにしない / 巨大ファイルは切り詰めて hash 記録 / 40 KB 超は同じ Stop で塊ごとに送る / 待ち時間の上限で送れない塊の繰り越しと見込み回数 / 塊ごとの結果確定 (0.14.0) | `TestByteBudgetFlow` (単体は `test_review_set.py::TestByteBudget`、Stop 全体の時計は `test_selection.py::TestTotalWaitBudget`) |
 | HEAD 基準の diff が空のパス (同一ターン内 commit 等) は復元せず黙って消費せず通知する | `TestSameTurnCommitNotification` (別のローカルの書き手の commit を送らない regression は `test_other_local_writer_commit_is_not_leaked`、内容を変えなかった編集で無関係な履歴を送らない床は `test_noop_edit_does_not_send_an_unrelated_historical_diff`) |
-| しきい値・cooldown の見送りが pending を消費しない | `test_throttle_flow.py::TestMinLines` / `TestCooldown` |
+| しきい値・cooldown の見送りが pending を消費しない | `test_throttle_flow.py::TestMinLines` / `TestCooldown` (変更行数の数え方は純粋関数の表 `TestCountChangedLines`) |
 | レビュー完了を利用者に通知する (本文は混ぜない) | `test_throttle_flow.py::TestCompletionNotice` |
 | 指摘ありは既定 (`auto`) で `additionalContext`、`MODE=block` で旧 `decision:block` に戻せる | `test_throttle_flow.py::TestOutputMode` |
 | `auto` は版数非対応・不明なら自動で `block` に fail-closed する (マージ前レビューの指摘) | `test_throttle_flow.py::TestVersionAwareMode` |

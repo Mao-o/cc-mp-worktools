@@ -22,6 +22,67 @@ def _lines(count: int, tag: str = "x") -> str:
     return "".join(f"{tag}{i}\n" for i in range(count))
 
 
+class TestCountChangedLines(unittest.TestCase):
+    """`_count_changed_lines` の数え方 (純粋関数なので git repo は要らない)。
+
+    以前は `TestMinLines` に 4 件で置いていたが、git の repo を毎回作るだけで
+    判定は入力の文字列だけで決まるため、ケースの表にした。ラベルは元のテスト名。
+    """
+
+    CASES = {
+        # ヘッダ (`---` / `+++` / `@@`) は数えず、`+` / `-` の中身の行だけを数える
+        "counts_changed_lines_not_headers": (
+            ["--- a/x.py\n+++ b/x.py\n@@ -1 +1,2 @@\n-old\n+new\n+extra\n context\n"],
+            3,
+        ),
+        # `-- コメント` (SQL / Lua / Haskell) の削除は `--- コメント` になる。
+        # 接頭辞 `"--- "` / `"+++ "` で弾くとここが 0 行になり、コメントだけ消した
+        # ターンが `MIN_LINES` に引っかかって黙って skip される。接頭辞では中身の行と
+        # ファイルヘッダを原理的に区別できないので、最初の `@@` 以降だけを数える。
+        "comment_lines_with_space_are_counted": (
+            [
+                "diff --git a/q.sql b/q.sql\nindex 111..222 100644\n"
+                "--- a/q.sql\n+++ b/q.sql\n@@ -1,4 +1,3 @@\n"
+                "--- 旧コメント A\n"  # `-- 旧コメント A` の削除
+                "--- 旧コメント B\n"  # `-- 旧コメント B` の削除
+                "+++ 新コメント C\n"  # `++ 新コメント C` の追加
+                " unchanged\n"
+            ],
+            3,
+        ),
+        "multiple_hunks_and_no_hunk_sections/two_hunks": (
+            [
+                "--- a/x.py\n+++ b/x.py\n@@ -1,2 +1,2 @@\n-a\n+b\n"
+                "@@ -10,2 +10,2 @@\n-c\n+d\n"
+            ],
+            4,
+        ),
+        # binary 差分など hunk を持たない section は 0 行
+        "multiple_hunks_and_no_hunk_sections/binary": (
+            ["Binary files a/x.png and b/x.png differ\n"],
+            0,
+        ),
+        # `--` で始まる中身の行を消すと `---foo` になる。ヘッダと取り違えないこと。
+        # 取り違えると、CLI オプションの説明や SQL コメントだけを消した差分が 0 行と
+        # 数えられ、MIN_LINES に引っかかって実質的な変更が黙って skip される。
+        "content_lines_starting_with_dashes_are_counted": (
+            [
+                "--- a/x.sql\n+++ b/x.sql\n@@ -1,2 +1,2 @@\n"
+                "---- 旧コメント\n"
+                "-- 残る行\n"
+                "+++追加された行\n"
+            ],
+            3,
+        ),
+    }
+
+    def test_count_changed_lines(self):
+        entry = _testutil.load_entry()
+        for label, (sections, expected) in self.CASES.items():
+            with self.subTest(label):
+                self.assertEqual(entry._count_changed_lines(sections), expected)
+
+
 class TestMinLines(HookTestCase):
     """変更行数がしきい値未満のターンはレビューを見送る (typo 1 行で課金しない)。"""
 
@@ -64,58 +125,6 @@ class TestMinLines(HookTestCase):
         self.edit(SESSION, "a.py", "v1\n")
         self.stop(SESSION, "REVIEW_CLEAN")
         self.assertReviewed("a.py")
-
-    def test_counts_changed_lines_not_headers(self):
-        count = self.entry._count_changed_lines(
-            ["--- a/x.py\n+++ b/x.py\n@@ -1 +1,2 @@\n-old\n+new\n+extra\n context\n"]
-        )
-        self.assertEqual(count, 3)
-
-    def test_comment_lines_with_space_are_counted(self):
-        """`-- コメント` (SQL / Lua / Haskell) の削除は `--- コメント` になる。
-
-        接頭辞 `"--- "` / `"+++ "` で弾くとここが 0 行になり、コメントだけ消した
-        ターンが `MIN_LINES` に引っかかって黙って skip される。接頭辞では中身の行と
-        ファイルヘッダを原理的に区別できないので、最初の `@@` 以降だけを数える。
-        """
-        count = self.entry._count_changed_lines(
-            [
-                "diff --git a/q.sql b/q.sql\nindex 111..222 100644\n"
-                "--- a/q.sql\n+++ b/q.sql\n@@ -1,4 +1,3 @@\n"
-                "--- 旧コメント A\n"  # `-- 旧コメント A` の削除
-                "--- 旧コメント B\n"  # `-- 旧コメント B` の削除
-                "+++ 新コメント C\n"  # `++ 新コメント C` の追加
-                " unchanged\n"
-            ]
-        )
-        self.assertEqual(count, 3)
-
-    def test_multiple_hunks_and_no_hunk_sections(self):
-        two_hunks = (
-            "--- a/x.py\n+++ b/x.py\n@@ -1,2 +1,2 @@\n-a\n+b\n"
-            "@@ -10,2 +10,2 @@\n-c\n+d\n"
-        )
-        self.assertEqual(self.entry._count_changed_lines([two_hunks]), 4)
-        # binary 差分など hunk を持たない section は 0 行
-        self.assertEqual(
-            self.entry._count_changed_lines(["Binary files a/x.png and b/x.png differ\n"]), 0
-        )
-
-    def test_content_lines_starting_with_dashes_are_counted(self):
-        """`--` で始まる中身の行を消すと `---foo` になる。ヘッダと取り違えないこと。
-
-        取り違えると、CLI オプションの説明や SQL コメントだけを消した差分が 0 行と
-        数えられ、MIN_LINES に引っかかって実質的な変更が黙って skip される。
-        """
-        count = self.entry._count_changed_lines(
-            [
-                "--- a/x.sql\n+++ b/x.sql\n@@ -1,2 +1,2 @@\n"
-                "---- 旧コメント\n"
-                "-- 残る行\n"
-                "+++追加された行\n"
-            ]
-        )
-        self.assertEqual(count, 3)
 
     def test_min_lines_uses_the_corrected_count(self):
         """`--` 始まりの行だけを消したターンが「変更 0 行」扱いにならないこと。

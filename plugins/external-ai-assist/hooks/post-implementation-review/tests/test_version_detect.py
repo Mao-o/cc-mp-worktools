@@ -81,7 +81,11 @@ class TestVersionParsing(VersionDetectTestCase):
         """
         os.environ["CLAUDE_CODE_EXECPATH"] = "/opt/claude/versions/2.1.251-beta/claude"
         with mock.patch.object(self.entry.subprocess, "run", side_effect=FileNotFoundError()):
-            self.assertIsNone(self.entry._claude_code_version())
+            try:
+                version = self.entry._claude_code_version()
+            except OSError as exc:  # 例外が漏れる退行を ERROR ではなく FAIL として数える
+                self.fail(f"OSError が呼び出し側へ漏れた: {exc!r}")
+        self.assertIsNone(version)
 
     def test_execpath_without_version_component_falls_through_to_subprocess(self):
         """npm 配布のパスには版数ディレクトリが無い。"""
@@ -100,9 +104,17 @@ class TestVersionParsing(VersionDetectTestCase):
             self.assertEqual(self.entry._claude_code_version(), (2, 1, 251))
 
     def test_subprocess_not_on_path_returns_none(self):
-        """PATH に無い (`FileNotFoundError` は `OSError` のサブクラス)。"""
+        """PATH に無い (`FileNotFoundError` は `OSError` のサブクラス)。
+
+        env var 未設定 / EXECPATH 未設定 / subprocess 失敗のすべてが素通りして None になる
+        (setUp が 2 つの env var を外しているので、3 段すべてを通った結果)。
+        """
         with mock.patch.object(self.entry.subprocess, "run", side_effect=FileNotFoundError()):
-            self.assertIsNone(self.entry._claude_code_version())
+            try:
+                version = self.entry._claude_code_version()
+            except OSError as exc:  # 例外が漏れる退行を ERROR ではなく FAIL として数える
+                self.fail(f"OSError が呼び出し側へ漏れた: {exc!r}")
+        self.assertIsNone(version)
 
     def test_subprocess_timeout_returns_none(self):
         with mock.patch.object(
@@ -116,11 +128,6 @@ class TestVersionParsing(VersionDetectTestCase):
         with mock.patch.object(
             self.entry.subprocess, "run", return_value=_completed("command not found\n", 127)
         ):
-            self.assertIsNone(self.entry._claude_code_version())
-
-    def test_all_sources_fail_returns_none(self):
-        """env var 未設定 / EXECPATH 未設定 / subprocess 失敗 → すべて素通りして None。"""
-        with mock.patch.object(self.entry.subprocess, "run", side_effect=FileNotFoundError()):
             self.assertIsNone(self.entry._claude_code_version())
 
     def test_result_is_cached_within_process(self):
