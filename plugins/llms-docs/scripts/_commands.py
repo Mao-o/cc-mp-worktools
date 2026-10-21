@@ -295,13 +295,16 @@ def hit_candidates(ranked, *, limit: int = NEXT_CONTENT_LIMIT, keep=None) -> lis
         if kept is not None:
             picked = picked[:limit - 1] + [kept]
     if len(picked) < limit and picked:
-        top_ref = picked[0][0]
+        # Page numbers are per source, so the top page is its ref plus the
+        # per-page options (the --source): another source's page with the
+        # same number is a different page.
+        top = (picked[0][0], picked[0][2])
         # A repeated heading_path hits more than once, but every copy prints
         # the same command; offer it once.
         for c in spare:
             if len(picked) >= limit:
                 break
-            if c[0] == top_ref and all(c[1] != p[1] for p in picked if p[0] == top_ref):
+            if (c[0], c[2]) == top and all(c[1] != p[1] for p in picked if (p[0], p[2]) == top):
                 picked.append(c)
     return picked
 
@@ -368,6 +371,17 @@ def term_page_counts(texts, query: str) -> tuple:
     return [(t, counts[t]) for t in terms], checked
 
 
+def _query_hint(subcommand: str, query: str, hint_args: tuple) -> None:
+    """``Next:`` line that runs *subcommand* with *query* filled in. A query
+    that starts with "-" would be read as an option, so the options come
+    first and the query goes last after "--" (like ``content_command``);
+    other queries keep the plain form."""
+    if query.startswith("-"):
+        next_hint(subcommand, *hint_args, "--", shlex.quote(query))
+    else:
+        next_hint(subcommand, shlex.quote(query), *hint_args)
+
+
 def render_zero_hits(query: str, texts, *, subcommand: str, hint_args: tuple,
                      scope: str = "pages", restricted_to=None,
                      restricted_only: bool = False, alt_hint_args=None,
@@ -426,8 +440,8 @@ def render_zero_hits(query: str, texts, *, subcommand: str, hint_args: tuple,
         print(f"(--page-ref {restricted_to} limited the search to one page; "
               f"drop it to search the whole corpus.)")
     if reduced is not None and reduced != query.strip().lower():
-        next_hint(subcommand, shlex.quote(reduced), *hint_args)
+        _query_hint(subcommand, reduced, hint_args)
     if subcommand != "search-index" and index_hint_args is not None:
-        next_hint("search-index", shlex.quote(query), *index_hint_args)
+        _query_hint("search-index", query, index_hint_args)
     if alt_hint_args is not None:
-        next_hint(subcommand, shlex.quote(query), *alt_hint_args)
+        _query_hint(subcommand, query, alt_hint_args)

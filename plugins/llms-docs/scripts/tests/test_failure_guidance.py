@@ -11,6 +11,8 @@ Plus the rule that is specific to URL slugs (``hooks`` -> ``/en/hooks`` rather
 than ``/en/agent-sdk/hooks``), which only claude-docs has.
 """
 
+import contextlib
+import io
 import json
 import os
 import re
@@ -895,6 +897,61 @@ class HitCandidatesTest(unittest.TestCase):
     def test_heading_count_is_carried(self):
         ranked = [(2, {"results": [{"heading_path": "R/I", "heading_count": 2}]}, ())]
         self.assertEqual(_commands.hit_candidates(ranked), [(2, "R/I", (), 2)])
+
+    def test_spare_sections_come_only_from_the_top_page_of_its_own_source(self):
+        """Page numbers are per source: page 1 of another source is not the
+        top page, so its second section does not fill the room."""
+        ranked = [(1, self.hits("A"), ("--source", "code")),
+                  (1, self.hits("P", "P2"), ("--source", "platform"))]
+        got = _commands.hit_candidates(ranked)
+        self.assertEqual([(r, h, e) for r, h, e, _n in got],
+                         [(1, "A", ("--source", "code")), (1, "P", ("--source", "platform"))])
+
+    def test_same_heading_of_another_source_does_not_hide_the_top_pages_section(self):
+        ranked = [(1, self.hits("A", "X"), ("--source", "code")),
+                  (1, self.hits("X"), ("--source", "platform"))]
+        got = _commands.hit_candidates(ranked)
+        self.assertEqual([(h, e) for _r, h, e, _n in got],
+                         [("A", ("--source", "code")), ("X", ("--source", "platform")),
+                          ("X", ("--source", "code"))])
+
+    def test_repeated_heading_of_the_same_source_is_still_offered_once(self):
+        ranked = [(1, self.hits("A", "A", "A2"), ("--source", "code"))]
+        self.assertEqual([h for _r, h, _e, _n in _commands.hit_candidates(ranked)], ["A", "A2"])
+
+
+class ZeroHitsQueryHintTest(unittest.TestCase):
+    """The ``Next:`` lines of a zero-hit explanation carry the query; one that
+    starts with "-" goes last after "--" so argparse does not read it as an
+    option."""
+
+    def lines(self, query, texts, **kw):
+        buf = io.StringIO()
+        with mock.patch.object(_common.sys, "argv", ["parse-llms-txt.py"]), contextlib.redirect_stdout(buf):
+            _commands.render_zero_hits(query, texts, subcommand="search-content",
+                                       hint_args=("--source", "x"), **kw)
+        return [shlex.split(line, comments=True) for line in buf.getvalue().splitlines()
+                if line.startswith("Next: ")]
+
+    def test_dash_query_goes_after_double_dash_on_every_line(self):
+        # "-foo" is in the text, "zzzq" is not: the reduced query "-foo", the
+        # search-index line and the other-source line all carry a query
+        lines = self.lines("-foo zzzq", ["has -foo in it"], index_hint_args=("--source", "x"),
+                           alt_hint_args=("--source", "y"))
+        self.assertEqual([(a[2], a[3:]) for a in lines], [
+            ("search-content", ["--source", "x", "--", "-foo"]),
+            ("search-index", ["--source", "x", "--", "-foo zzzq"]),
+            ("search-content", ["--source", "y", "--", "-foo zzzq"]),
+        ])
+
+    def test_plain_query_keeps_the_query_before_the_options(self):
+        lines = self.lines("foo zzzq", ["has foo in it"], index_hint_args=("--source", "x"),
+                           alt_hint_args=("--source", "y"))
+        self.assertEqual([(a[2], a[3:]) for a in lines], [
+            ("search-content", ["foo", "--source", "x"]),
+            ("search-index", ["foo zzzq", "--source", "x"]),
+            ("search-content", ["foo zzzq", "--source", "y"]),
+        ])
 
 
 # A page whose headings look like options (a CLI reference: "## --help"),

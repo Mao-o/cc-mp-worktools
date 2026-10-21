@@ -991,11 +991,7 @@ class RoundTripTest(_FetchSource):
                     self.assertIn(code, (0, 1), err)
                     self.assertEqual(self.net.calls, [])
                     for line in out.splitlines():
-                        # the zero-hit "search-index <query>" line of the
-                        # shared renderer puts a query that starts with "-"
-                        # where argparse reads an option, for every source
-                        # (not this mode's); that one is not run
-                        if line.startswith("Next: ") and not shlex.split(line)[3].startswith("-"):
+                        if line.startswith("Next: "):
                             c, _o, e = self._run_line(line.replace("<page_ref>", "0"))
                             self.assertEqual(c, 0, f"{line}\n{e}")
 
