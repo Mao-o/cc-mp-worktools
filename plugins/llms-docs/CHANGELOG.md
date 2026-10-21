@@ -18,10 +18,12 @@ All notable changes to this plugin will be documented here.
 - **修正 2**: `--file` があり `--index-file` が無く `rank_from: "index"` のときは、0 件時の説明に
   `search-index` の行と案内を出さない (旧挙動)。`--index-file` を併せて渡したとき・キャッシュのとき・
   `rank_from: "pages"` の source では従来どおり出す
+- README の `rank_from` の項に、`llms.txt` に 2 回載るページは上位の 1 行だけを出すことを書いた
+- `--file` だけの 0 件時の `search-content` の Tip も、実行できない `search-index` を勧めず `--index-file` が要ると書く
 - テスト: 重複したページの `search` / `search-index` (キャッシュあり・なし・`--file` + `--index-file`)、
   full-text の無い項目、0 件時の `Next:` 行の往復 (source 2 種 × corpus の渡し方 × `search-content` /
   `search` × `-` 始まり・機能語・記号だけを含む query)。クエリと URL の組み合わせ表のテストに
-  「1 ページ 1 行」の不変条件を足した。件数 1162 -> 1167
+  「1 ページ 1 行」の不変条件を足した。`search-content` の Tip の分岐を固定するテストを 1 件足した。実コーパスの比較ゲートの `search --source both` は、llms.txt に 2 回載るページに当たらない query に変えた。件数 1162 -> 1168
 
 ## [0.47.1] - 2026-10-22
 

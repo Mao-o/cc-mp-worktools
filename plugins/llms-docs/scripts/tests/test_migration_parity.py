@@ -201,8 +201,12 @@ CORPUS_CASES = [
     # link_annotations: the ``→ [doc_idx N]`` after in-body links on whole pages
     ("cd-code-corpus-content-links", "claude-docs", ["content", "hooks", "--max-chars", "0"]),
     ("cd-plat-corpus-content-links", "claude-docs", ["content", "prompt-caching", "--max-chars", "0", *_P]),
-    # members: both sources with hits on the full corpus
-    ("cd-corpus-search-both", "claude-docs", ["search", "hooks", "--source", "both"]),
+    # members: both sources with hits on the full corpus. The query avoids the
+    # pages llms.txt lists twice ("hooks" has one): the generic loader shows
+    # one line per page since 0.47.2, the old script two, and that intended
+    # difference would hide behind the platform page-number shift that already
+    # fails this case on the current corpus
+    ("cd-corpus-search-both", "claude-docs", ["search", "settings", "--source", "both"]),
     # body "fetch": pages of the local page cache, by number / URL / slug, and the
     # last page of the paged index
     ("fb-corpus-sections-int", "firebase", ["sections", "2771"]),
@@ -480,6 +484,8 @@ GENERIC_PARITY_EXPECTED: frozenset = frozenset({
     "cd-code-search-content-page",
     # rank_from "index" + index_join "url" + index_group_variants: the
     # llms.txt entries are ranked and listed, joined to the pages by URL.
+    # (rank_from index: search / search-index match the old script only on a
+    # query that hits no page llms.txt lists twice; 0.47.2 shows one line per page)
     # cd-code-search-zero still differs: the old script adds a ``Next:`` line
     # for the other source (one source's zero-hit hint naming another source
     # is not ported; ``members`` covers searching both at once)

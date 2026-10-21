@@ -2652,7 +2652,10 @@ def cmd_search_content(args):
     if total == 0:
         print("No matching content found.")
         print()
-        print("Tip: try broader keywords or 'search-index' to find relevant documents first")
+        if _no_index_hint(args, profile):
+            print("Tip: try broader keywords (search-index also needs --index-file with --file)")
+        else:
+            print("Tip: try broader keywords or 'search-index' to find relevant documents first")
         print()
         render_zero_hits(args.query, (d["body_lines"] for d in docs),
                          subcommand="search-content",

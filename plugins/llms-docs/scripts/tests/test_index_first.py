@@ -1180,6 +1180,24 @@ class ZeroHitIndexHintTest(_Case):
         self.assertGreaterEqual(cells, 30)
         self.assertEqual(self.full_fetches(), 0)
 
+    def test_tip_names_search_index_only_where_it_runs(self):
+        """The ``Tip:`` line of a ``search-content`` zero-hit report follows the
+        same rule as the ``Next:`` lines: with ``--file`` and no ``--index-file``
+        it does not recommend ``search-index`` (which exits 1 there) and says
+        what it needs; elsewhere it recommends it."""
+        self.write(self.INDEX, self.FULL, name="code")
+        ways = self._ways("code")
+        tips = {}
+        for way, corpus in ways.items():
+            code, out, err = self.run_argv([SCRIPT, "search-content", "--source", "code",
+                                            "--sources-file", self.sources, *corpus, "--", "zzzq"])
+            self.assertEqual(code, 0, err)
+            tips[way] = [ln for ln in out.splitlines() if ln.startswith("Tip:")]
+            self.assertEqual(len(tips[way]), 1, out)
+        self.assertEqual(tips["file"], ["Tip: try broader keywords (search-index also needs --index-file with --file)"])
+        for way in ("cache-dir", "file+index-file"):
+            self.assertEqual(tips[way], ["Tip: try broader keywords or 'search-index' to find relevant documents first"], way)
+
 
 class DefaultProfilesUnchangedTest(_Case):
     """Without rank_from, the full-text ranking and listing are as before
