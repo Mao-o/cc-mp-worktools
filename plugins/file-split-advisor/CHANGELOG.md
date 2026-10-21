@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.2
+
+icon と導入手順の追加 (挙動の変更なし、patch bump)。
+
+- plugin の icon (`assets/icon.png`) を足した。`claude plugin validate` の plugin directory checks が出す `ICON_MISSING` を解消する
+
 ## 0.6.1
 
 ### Fixed
