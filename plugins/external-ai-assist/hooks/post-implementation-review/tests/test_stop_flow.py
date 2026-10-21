@@ -1010,22 +1010,125 @@ class TestNoOpStopCreatesNoStateFile(HookTestCase):
         self.assertTrue(os.path.exists(state_path))
 
 
-class TestGuards(HookTestCase):
-    """再帰防止・無効化スイッチ。"""
+FINDINGS = "1. **直接影響** — 何か壊れる"
 
-    def test_stop_hook_active_skips(self):
-        self.edit(SESSION_A, "a.txt", "v1\n")
-        with mock.patch.object(self.cursor, "review") as review:
-            self.run_hook(
-                "stop",
-                {"session_id": SESSION_A, "cwd": self.repo, "stop_hook_active": True},
-            )
-            review.assert_not_called()
+
+class TestRecursionGuard(HookTestCase):
+    """`stop_hook_active` で skip するのは「この hook が継続させた直後」と block mode だけ。
+
+    `/goal` は session スコープの Stop hook で、その継続中の Stop は全部
+    `stop_hook_active=True` で届く (CLI 2.1.306 で実測)。0.14.0 までは true で一律に
+    skip していたため、`/goal` の 2 ターン目以降がゴールの終わりまでレビューされなかった。
+    """
+
+    def _assert_skipped_and_kept(self, rel: str) -> None:
+        self.assertNotReviewed()
         self.assertIn(
-            os.path.join(self.repo, "a.txt"),
+            os.path.join(self.repo, rel),
             self.pending(SESSION_A),
             "再帰防止でスキップしても pending は温存されること",
         )
+
+    def test_goal_continuation_is_reviewed(self):
+        """他の Stop hook (`/goal`) が継続させた Stop はレビューする (既定の context mode)。"""
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN", stop_hook_active=True)
+        self.assertReviewed("a.txt")
+
+    def test_goal_continuation_is_reviewed_after_a_clean_review(self):
+        """指摘なし (systemMessage だけ) はターンを継続させないので、次の継続は他者のもの。"""
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("a.txt")
+        self.edit(SESSION_A, "a.txt", "v2\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN", stop_hook_active=True)
+        self.assertReviewed("a.txt")
+
+    def test_stop_right_after_own_findings_is_skipped(self):
+        """この hook が additionalContext で継続させた直後の Stop は skip する。"""
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        data = json.loads(self.stop(SESSION_A, FINDINGS))
+        self.assertIn("additionalContext", data["hookSpecificOutput"])
+        self.edit(SESSION_A, "a.txt", "v2\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN", stop_hook_active=True)
+        self._assert_skipped_and_kept("a.txt")
+
+    def test_skip_lasts_for_one_stop_only(self):
+        """skip した次の継続 (`/goal` による) はレビューする — 印は 1 回で消える。"""
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        self.stop(SESSION_A, FINDINGS)
+        self.edit(SESSION_A, "a.txt", "v2\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN", stop_hook_active=True)
+        self.assertNotReviewed()
+        self.stop(SESSION_A, "REVIEW_CLEAN", stop_hook_active=True)
+        self.assertReviewed("a.txt")
+
+    def test_mark_is_cleared_by_a_fresh_stop(self):
+        """継続後の Stop が (中断などで) 来ず、次が新しいターンの Stop だった場合も印は消える。"""
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        self.stop(SESSION_A, FINDINGS)
+        self.edit(SESSION_A, "a.txt", "v2\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("a.txt")
+        self.edit(SESSION_A, "a.txt", "v3\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN", stop_hook_active=True)
+        self.assertReviewed("a.txt")
+
+    def test_findings_on_a_continued_stop_mark_the_next_one(self):
+        """`/goal` の継続中に出した指摘の直後も skip する (印は継続中の Stop でも立つ)。"""
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        self.stop(SESSION_A, FINDINGS, stop_hook_active=True)
+        self.assertReviewed("a.txt")
+        self.edit(SESSION_A, "a.txt", "v2\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN", stop_hook_active=True)
+        self._assert_skipped_and_kept("a.txt")
+
+    def test_block_mode_skips_every_continued_stop(self):
+        """block mode は 0.14.0 までと同じく `stop_hook_active` で一律に skip する。"""
+        os.environ["EXTERNAL_AI_POST_REVIEW_MODE"] = "block"
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN", stop_hook_active=True)
+        self._assert_skipped_and_kept("a.txt")
+
+    def test_block_decision_also_marks_the_next_stop(self):
+        """`decision: "block"` もターンを継続させる。mode を戻した直後の Stop でも skip する。"""
+        os.environ["EXTERNAL_AI_POST_REVIEW_MODE"] = "block"
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        self.assertEqual(json.loads(self.stop(SESSION_A, FINDINGS))["decision"], "block")
+        os.environ["EXTERNAL_AI_POST_REVIEW_MODE"] = "context"
+        self.edit(SESSION_A, "a.txt", "v2\n")
+        self.stop(SESSION_A, "REVIEW_CLEAN", stop_hook_active=True)
+        self._assert_skipped_and_kept("a.txt")
+
+    def test_unreadable_mark_keeps_the_guard(self):
+        """印が読めない (OSError) ときは再帰防止を外さない側に倒す。"""
+        self.edit(SESSION_A, "a.txt", "v1\n")
+        with mock.patch.object(self.state, "_locked_state", side_effect=OSError("boom")):
+            try:
+                marked = self.state.take_continued_turn(SESSION_A)
+            except OSError as exc:
+                self.fail(f"OSError が漏れた: {exc}")
+        self.assertTrue(marked)
+
+    def test_unwritable_mark_does_not_raise(self):
+        """印を書けない (OSError) ときも hook を落とさない。"""
+        with mock.patch.object(self.state, "_locked_state", side_effect=OSError("boom")):
+            try:
+                self.state.record_continued_turn(SESSION_A)
+            except OSError as exc:
+                self.fail(f"OSError が漏れた: {exc}")
+
+    def test_no_state_file_means_no_mark(self):
+        """state ファイルが無いセッションでは印なし、かつファイルを作らない。"""
+        path = os.path.join(
+            self.tmpdir, "post-implementation-review", "state", f"{SESSION_B}.json"
+        )
+        self.assertFalse(self.state.take_continued_turn(SESSION_B))
+        self.assertFalse(os.path.exists(path))
+
+
+class TestGuards(HookTestCase):
+    """無効化スイッチ。"""
 
     def test_disable_switch(self):
         os.environ["EXTERNAL_AI_POST_REVIEW"] = "0"

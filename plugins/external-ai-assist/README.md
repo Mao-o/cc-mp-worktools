@@ -263,7 +263,11 @@ Claude の作業が一段落した時点 (Stop) で Cursor に差分レビュー
 動作:
 
 - **編集 0 件のターンは cursor を起動しない** (即 exit 0)
-- `stop_hook_active` が true なら skip (再帰防止の公式パターン)
+- 再帰防止: `stop_hook_active` が true の Stop は、**直前の Stop でこの hook 自身が
+  指摘を返してターンを継続させたとき**と、`EXTERNAL_AI_POST_REVIEW_MODE` が `block` に
+  解決されたときだけ skip する (0.15.0)。`/goal` などの他の Stop hook による継続中の Stop も
+  `stop_hook_active` は true で届く (CLI 2.1.306 で実測) ので、一律に skip すると `/goal` の
+  2 ターン目以降がゴールの終わりまでレビューされない
 - 前回レビュー時と diff が 1 バイトも変わっていないパスは載せない
 - 作業ツリー外の絶対パスは対象外。**root の配下にある入れ子の作業ツリー / git
   リポジトリ / submodule** (`git worktree add` したもの、サブディレクトリで `git init`

@@ -58,7 +58,8 @@ Claude Code のトランスクリプト上で**エラー扱い**として表示�
 > namely the `stop_hook_active` input and the 8-consecutive-continuation cap, but the
 > transcript labels it "Stop hook feedback" and no hook error notification is shown.
 
-つまり `stop_hook_active` の扱い (`handle_stop` 冒頭の再帰防止) も 8 回連続の上限も
+つまり `stop_hook_active` の扱い (`handle_stop` の再帰防止。0.15.0 から範囲を絞った —
+`handle_stop` 冒頭のコメント) も 8 回連続の上限も
 ハーネス側の同一機構であり、この変更で Claude の動作 (継続すること・reason を読むこと) は
 変わらない。変わるのは**表示だけ**。
 
@@ -1595,8 +1596,21 @@ def _already_reviewed(abs_paths: list[str], digest: str, reviewed: dict[str, str
 
 
 def handle_stop(payload: dict) -> None:
-    if payload.get("stop_hook_active"):
-        log("stop_hook_active=True によりスキップ (再帰防止)")
+    # 再帰防止 (0.15.0 で範囲を絞った)。`stop_hook_active` は「この Stop の前に
+    # **どれかの** Stop hook がターンを継続させた」ことしか示さない。`/goal` は
+    # session スコープの Stop hook なので、その継続中の Stop も全部 true で届く
+    # (CLI 2.1.306 の nested `claude -p "/goal ..."` で実測: 1 ターン目だけ false、
+    # 2 ターン目以降は true)。true で一律に skip すると、`/goal` の 2 ターン目以降が
+    # ゴールの終わりまで 1 回もレビューされない。
+    #
+    # skip するのは次の 2 つだけ:
+    # - mode が block のとき (0.14.0 までと同じく一律。下の state を読む前に判定する)
+    # - 直前の Stop で**この hook が**ターンを継続させたとき (`take_continued_turn`)。
+    #   `additionalContext` も `decision: "block"` と同じくターンを継続させる
+    #   (モジュール docstring「0.8.0 で入れた変更」) ので、context mode でもこれが要る
+    continuing = bool(payload.get("stop_hook_active"))
+    if continuing and get_mode() == MODE_BLOCK:
+        log("stop_hook_active=True かつ block mode のためスキップ (再帰防止)")
         return
 
     session_id = payload.get("session_id") or ""
@@ -1654,6 +1668,13 @@ def handle_stop(payload: dict) -> None:
         json.dump(_with_notices({}, [msg]), sys.stdout, ensure_ascii=False)
         return
 
+    # 継続の印は**毎回の Stop で読んで消す** (`stop_hook_active` が false の Stop でも)。
+    # 消すのを skip のときだけにすると、継続後の Stop が中断で来なかった場合に印が残り、
+    # 後の `/goal` の継続を 1 回取りこぼす。
+    if state.take_continued_turn(session_id) and continuing:
+        log("直前の Stop でこの hook がターンを継続させたためスキップ (再帰防止)")
+        return
+
     cwd = payload.get("cwd") or os.getcwd()
     root = gitscan.worktree_root(cwd)
     if not root:
@@ -1677,7 +1698,20 @@ def handle_stop(payload: dict) -> None:
         output = _review_claim(payload, session_id, root)
 
     if output:
+        if _continues_turn(output):
+            state.record_continued_turn(session_id)
         json.dump(output, sys.stdout, ensure_ascii=False)
+
+
+def _continues_turn(output: dict) -> bool:
+    """Stop の出力がターンを継続させる形か (`decision: "block"` か `additionalContext`)。
+
+    `systemMessage` だけの出力 (完了・見送りの通知) は継続させない。
+    """
+    if output.get("decision") == "block":
+        return True
+    specific = output.get("hookSpecificOutput")
+    return isinstance(specific, dict) and bool(specific.get("additionalContext"))
 
 
 def _cooldown_notice(session_id: str) -> str | None:

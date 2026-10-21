@@ -742,6 +742,41 @@ v0.2.0 の `DEFAULT_MAX_REVIEWS = 2` は**セッション単位**の予算で、
 Stop でレビューされる — 意図した挙動)。つまり MAX=2 は事実上「ターンをまたいだ回数制限」
 としてしか効いておらず、ターンスコープ化で不要になったので撤廃した。
 
+## 再帰防止の範囲 (0.15.0)
+
+`stop_hook_active` は「この Stop の前に**どれかの** Stop hook がターンを継続させた」ことしか
+示さない。`/goal` は session スコープの prompt-based Stop hook なので、その継続中の Stop も
+true で届く。実測 (nested `claude -p "/goal ..."`, CLI 2.1.306, 2026-10-22。Stop の payload を
+記録するだけの probe plugin を `--plugin-dir` で足し、1 ターンに 1 コマンドずつ 3 ターン回した):
+
+| ターン | `stop_hook_active` |
+|---|---|
+| 1 | false |
+| 2 | true |
+| 3 | true |
+
+他の Stop hook はどれも出力を返しておらず、継続させたのは `/goal` の評価だけ。0.14.0 までは
+true で一律に skip していたので、`/goal` の 2 ターン目以降はゴールの終わりまで 1 回も
+レビューされず、差分が最後にまとめて溜まっていた。
+
+0.15.0 から skip するのは次の 2 つだけ:
+
+- **mode が `block` に解決されたとき** (一律。0.14.0 までと同じ)
+- **直前の Stop でこの hook がターンを継続させたとき**。state の `continued_turn` に 1 ビットで
+  持つ。`decision: "block"` か `additionalContext` を返した Stop で立て、**毎回の Stop で読んで
+  消す** (`state.take_continued_turn`)。`additionalContext` もターンを継続させる
+  (「出力形式: hook error に見せない」節の逐語) ので、context mode でもこの印が要る
+
+印を消すのを skip のときだけにすると、継続後の Stop が中断で来なかった場合に印が残り、
+後の `/goal` の継続を取りこぼす。読めない (OSError) ときは skip 側に倒す (再帰防止を
+外さない)。印を書けなかったときは、次の継続をレビューしうる — その場合もハーネスの
+8 連続上限が止める。
+
+`/goal` の継続中にレビューしても 8 連続上限には近づかない: 上限は「間に Claude の tool
+呼び出しが無いまま 8 回連続」で数える (公式 hooks-guide の "Stop hook hits the block cap" 節:
+"after it blocks eight times in a row with no tool call from Claude in between") ので、
+レビュー対象 (= 編集) のある継続ターンは数えなおしになる。
+
 `EXTERNAL_AI_POST_REVIEW_MAX=0` を無効化スイッチとして使っていた環境があるため、
 **`0` のときだけ**後方互換で無効化として解釈する (それ以外の値は無視)。
 新しい正規のスイッチは `EXTERNAL_AI_POST_REVIEW=0`。**撤廃済みの死んだ別名**なので
@@ -877,6 +912,7 @@ pytest tests/                          # pytest でも動く (conftest.py で sy
 | 基準 | テスト |
 |---|---|
 | 編集 0 件のターンで cursor が起動しない | `TestNoEditsNoReview` |
+| `/goal` など他の Stop hook による継続中の Stop はレビューし、この hook が継続させた直後と block mode だけ skip する (0.15.0) | `TestRecursionGuard` |
 | セッション A の編集が B のレビュー対象に入らない | `TestSessionIsolation` |
 | REVIEW_CLEAN の後に再レビューされない | `TestReviewedPathsAreNotRepeated` |
 | cursor 失敗の後に再レビューされる | `TestCursorFailureRestoresPaths` |
