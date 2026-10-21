@@ -340,11 +340,49 @@ def _check_validate(
     if r.returncode != 0:
         rep.add(name, FAIL, last or f"exit {r.returncode}")
         return
-    warn_lines = [ln.strip() for ln in out.splitlines() if "warning" in ln.lower()]
+    counted, advisory = _split_directory_checks(out.splitlines())
+    warn_lines = [ln.strip() for ln in counted if "warning" in ln.lower()]
+    advisory_lines = [ln.strip() for ln in advisory if _is_advisory_finding(ln)]
     if warn_lines:
         rep.add(name, FAIL if cfg.strict_validate else WARN, warn_lines[0])
+    elif advisory_lines:
+        rep.add(name, WARN, f"plugin directory checks (公式カタログ向け。FAIL にしない): {advisory_lines[0]}")
     else:
         rep.add(name, PASS, "warning なしで passed")
+
+
+# `claude plugin validate` (2.1.306 以降) は manifest の検査とは別に、公式のプラグイン
+# ディレクトリ (カタログ) 向けの検査結果を次の節に出す。CLI 自身が「結果を変えない」と
+# 明記しているので、この節の warning は strict_validate でも FAIL に数えない。
+# 見出しか締めの行が見つからない (文言が変わった) ときは節として扱わず、従来どおり
+# 全行を数える (黙って全部 advisory に倒れないようにする)。
+_DIR_CHECKS_START = "Plugin directory checks for "
+_DIR_CHECKS_END = "These plugin directory checks do not change the result below"
+
+
+def _split_directory_checks(lines: list[str]) -> tuple[list[str], list[str]]:
+    """validate の出力を (数える行, plugin directory checks の節の行) に分ける。"""
+    counted: list[str] = []
+    advisory: list[str] = []
+    i = 0
+    while i < len(lines):
+        if lines[i].strip().startswith(_DIR_CHECKS_START):
+            end = next(
+                (j for j in range(i + 1, len(lines)) if lines[j].strip().startswith(_DIR_CHECKS_END)), None
+            )
+            if end is not None:
+                advisory.extend(lines[i : end + 1])
+                i = end + 1
+                continue
+        counted.append(lines[i])
+        i += 1
+    return counted, advisory
+
+
+def _is_advisory_finding(line: str) -> bool:
+    # 節の中の要約行 ("⚠ Found 1 plugin directory warning:" / "✘ Found 2 problems ...")
+    s = line.strip()
+    return "warning" in s.lower() or s.startswith("✘")
 
 
 def _check_workflows(root: Path, changed: list[str], rep: Report) -> None:

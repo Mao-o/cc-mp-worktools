@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0
+
+`claude plugin validate` の plugin directory checks を FAIL に数えないようにした (minor bump)。
+
+### Changed
+
+- `validate[<plugin>]` は、validate の出力のうち「Plugin directory checks for ...」から「These plugin directory
+  checks do not change the result below.」までの節を切り分け、その中の warning と提出を拒まれる問題 (`✘`) を
+  WARN で表示するだけにした。`strict_validate` / `--strict-validate` でも FAIL にしない。この節は公式の
+  プラグインディレクトリ (カタログ) に申請するとき向けの検査で、CLI 自身が結果を変えないと明記している。
+  CLI がこの区分に検査を足すたびに、カタログに申請しない plugin まで FAIL していた (2.1.306 の `ICON_MISSING` など)
+- manifest の warning (version / description / author など) は従来どおり数える (`strict_validate` で FAIL)
+- 節の見出しか締めの行が見つからない出力 (文言が変わった・節を出さない旧 CLI) では節として扱わず、従来どおり
+  すべての warning を数える。黙って全部が advisory に倒れないようにするため
+
 ## 0.2.4
 
 icon と導入手順の追加 (挙動の変更なし、patch bump)。

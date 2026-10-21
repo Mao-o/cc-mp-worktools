@@ -298,5 +298,104 @@ class GateTest(HermeticGitTestCase):
         self.assertEqual(st["validate[alpha2]"], gate.FAIL)
 
 
+# `claude plugin validate` 2.1.306 の実際の出力から切り出した fixture (パスはダミーに置換、
+# 長い説明行は省略)。manifest の warning は無く、plugin directory checks の節だけがある。
+_DIR_SECTION = """\
+Plugin directory checks for /repo/plugins/example. The plugin directory is the catalog that plugins are submitted to; this is a subset of what it runs.
+
+✘ Found 2 problems the plugin directory refuses a submission for:
+
+  ❯ README.md: README missing (README_MISSING). This plugin has no README.md.
+    Fix: Add a README.md to the plugin folder describing what the plugin does.
+  ❯ LICENSE: License missing (LICENSE_MISSING). This plugin has no LICENSE file and plugin.json has no `license`.
+    Fix: Add a LICENSE file to the plugin folder, or set `license` (an SPDX id) in plugin.json.
+
+⚠ Found 1 plugin directory warning:
+
+  ❯ .claude-plugin/plugin.json icon: No icon (ICON_MISSING). No icon found in the plugin.
+    Fix: Add a square PNG to the plugin folder at .claude-plugin/icon.png.
+
+These plugin directory checks do not change the result below. To fail on problems the directory refuses a submission for, run this command with --profile directory.
+
+The directory also runs a safety scan and a policy review that this command does not.
+"""
+_HEAD = "Validating plugin manifest: /repo/plugins/example/.claude-plugin/plugin.json\n\n"
+_MANIFEST_WARNINGS = """\
+⚠ Found 3 warnings:
+
+  ❯ version: No version specified. Consider adding a version following semver (e.g., "1.0.0")
+  ❯ description: No description provided. Adding a description helps users understand what your plugin does
+  ❯ author: No author information provided. Consider adding author details for plugin attribution
+
+"""
+DIR_ONLY = _HEAD + _DIR_SECTION + "\n✔ Validation passed\n"
+MANIFEST_AND_DIR = _HEAD + _MANIFEST_WARNINGS + _DIR_SECTION + "\n✔ Validation passed with warnings\n"
+
+
+class DirectoryChecksTest(unittest.TestCase):
+    """plugin directory checks (公式カタログ向け) の warning は FAIL に数えない。"""
+
+    def check(self, out: str, strict: bool = True) -> gate.Result:
+        rep = gate.Report()
+        done = subprocess.CompletedProcess(["claude"], 0, out, "")
+        with mock.patch.object(gate, "run", return_value=done):
+            gate._check_validate(Path("."), "plugins/example", "example", Config(strict_validate=strict), Deadline(30), rep, "claude")
+        self.assertEqual(len(rep.results), 1)
+        return rep.results[0]
+
+    def test_directory_warning_only_is_advisory_even_if_strict(self):
+        for strict in (True, False):
+            with self.subTest(strict=strict):
+                r = self.check(DIR_ONLY, strict)
+                self.assertEqual(r.status, gate.WARN)
+                self.assertIn("plugin directory checks", r.detail)
+                self.assertIn("Found 2 problems", r.detail)
+
+    def test_directory_warning_line_alone_is_shown(self):
+        # 節に ✘ が無く ⚠ だけのときも WARN で表示する
+        out = DIR_ONLY.replace("✘ Found 2 problems", "Found 2 problems")
+        r = self.check(out)
+        self.assertEqual(r.status, gate.WARN)
+        self.assertIn("Found 1 plugin directory warning", r.detail)
+
+    def test_problems_without_warning_are_shown(self):
+        out = DIR_ONLY.replace("⚠ Found 1 plugin directory warning:", "")
+        r = self.check(out)
+        self.assertEqual(r.status, gate.WARN)
+        self.assertIn("Found 2 problems", r.detail)
+
+    def test_manifest_warning_still_fails_when_strict(self):
+        r = self.check(MANIFEST_AND_DIR, strict=True)
+        self.assertEqual(r.status, gate.FAIL)
+        self.assertEqual(r.detail, "⚠ Found 3 warnings:")
+        r = self.check(MANIFEST_AND_DIR, strict=False)
+        self.assertEqual(r.status, gate.WARN)
+        self.assertEqual(r.detail, "⚠ Found 3 warnings:")
+
+    def test_warning_after_the_section_is_counted(self):
+        # 節の外 (締めの行より後) の warning は従来どおり数える
+        r = self.check(DIR_ONLY.replace("Validation passed", "Validation passed with warnings"))
+        self.assertEqual(r.status, gate.FAIL)
+        self.assertIn("passed with warnings", r.detail)
+
+    def test_unrecognized_section_falls_back_to_counting_everything(self):
+        cases = {
+            "heading renamed": DIR_ONLY.replace("Plugin directory checks for ", "Catalog checks for "),
+            "closing line renamed": DIR_ONLY.replace("These plugin directory checks do not change", "They do not change"),
+        }
+        for label, out in cases.items():
+            with self.subTest(label):
+                r = self.check(out)
+                self.assertEqual(r.status, gate.FAIL)
+                self.assertIn("plugin directory warning", r.detail)
+
+    def test_output_without_section_is_unchanged(self):
+        # 節を出さない旧 CLI の出力
+        r = self.check(_HEAD + _MANIFEST_WARNINGS + "✔ Validation passed with warnings\n")
+        self.assertEqual((r.status, r.detail), (gate.FAIL, "⚠ Found 3 warnings:"))
+        r = self.check(_HEAD + "✔ Validation passed\n")
+        self.assertEqual(r.status, gate.PASS)
+
+
 if __name__ == "__main__":
     unittest.main()

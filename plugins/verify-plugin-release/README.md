@@ -65,6 +65,9 @@ base と HEAD の差分を対象にします。base は `gh pr create` と同じ
   `python -m unittest discover tests` を実行します。Python 以外の plugin は
   `test_command` で指定してください。検出できなければ SKIP します
 - `claude` コマンドが PATH に無い環境では validate を SKIP します
+- `claude plugin validate` が出す「Plugin directory checks」の節 (公式のプラグインディレクトリに申請するとき向けの
+  検査。CLI 自身が結果を変えないと明記している) の warning は、`strict_validate` でも FAIL にせず WARN で表示します。
+  節の見出しか締めの行が見つからないときは節として扱わず、従来どおりすべての warning を数えます
 
 ## 止める / 止めないの判定
 
@@ -132,7 +135,7 @@ repo ごとに `<repo>/.claude/verify-plugin-release.json` を置けます (無�
 | キー | 既定 | 内容 |
 |---|---|---|
 | `single_plugin_per_pr` | `false` | `true` で、複数の plugin (または plugin と repo 直下のファイル) にまたがる PR を FAIL にする |
-| `strict_validate` | `false` | `true` で `claude plugin validate` の warning を FAIL にする |
+| `strict_validate` | `false` | `true` で `claude plugin validate` の warning を FAIL にする (plugin directory checks の節の warning は除く) |
 | `fetch` | `true` | 検査前に `git fetch origin <base>` する (15 秒で打ち切り、失敗したら手元の ref で検査) |
 | `timeout_seconds` | `90` | ゲート全体の制限時間。上限 110 |
 | `test_command` | `null` | `null` = Python unittest を自動検出 / `false` = テストを走らせない / `["make", "test"]` のような配列 = 変更した各 plugin のディレクトリで実行 |
@@ -157,7 +160,7 @@ python3 <plugin-root>/hooks/verify-plugin-release check [--base main] [--strict-
 ```
 
 終了コードは `0` = PASS / `1` = FAIL / `2` = ゲートを完了できなかった、です。
-`--strict-validate` は `claude plugin validate` の warning を FAIL にします (CI や独自のゲートから
+`--strict-validate` は `claude plugin validate` の warning (plugin directory checks の節は除く) を FAIL にします (CI や独自のゲートから
 呼ぶとき用。設定ファイルの `strict_validate` より優先)。
 
 ## 例
