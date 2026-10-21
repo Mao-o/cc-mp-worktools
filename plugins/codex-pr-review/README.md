@@ -12,6 +12,13 @@ GitHub の PR に付く **Codex の自動レビュー** (`chatgpt-codex-connecto
 | `pr-codex-trigger.sh <PR> [サマリ本文 or ファイル]` | 修正サマリと `@codex review` を**別々のコメント**で投稿する |
 | `pr-commit-safe.sh <メッセージファイル> [--keep]` | `git commit -F` のラッパー。commit メッセージの本文が Bash を検査する hook に引っかかる環境向け |
 
+## インストール
+
+```
+/plugin marketplace add Mao-o/cc-mp-worktools
+/plugin install codex-pr-review@mao-worktools
+```
+
 ## 前提
 
 - GitHub リポジトリに Codex の GitHub App が入っていて、PR に自動レビューが付くこと
