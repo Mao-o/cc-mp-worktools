@@ -13,7 +13,7 @@
   ここで外しても検出は消えない
 - 回帰テスト `test_the_positive_control_does_not_write_to_an_outer_repo` を追加: 床の後で本物の別 repo を指す
   `GIT_DIR` / `GIT_WORK_TREE` を足して陽性対照を流し、別 repo の commit 数が不変であることを確かめる。
-  変数の外し方を戻す・一部だけ外す変異のいずれも assertion の失敗で落ちる
+  外側の repo の refs と objects のどちらに書いても落ちる
 
 ## 0.3.0
 

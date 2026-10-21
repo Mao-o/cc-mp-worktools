@@ -430,16 +430,23 @@ class TestHelpersStopBackgroundMaintenance(unittest.TestCase):
                 subprocess.run(["git", *args], cwd=outer, env=clean, check=True, capture_output=True)
             before = git_in(clean, outer, ["rev-list", "--all", "--count"])
             self.assertEqual(before, (0, "1\n"), "前提: 外側の repo に commit が 1 件ある")
-            os.environ["GIT_DIR"] = os.path.join(outer, ".git")
-            os.environ["GIT_WORK_TREE"] = outer
+            git_dir = os.path.join(outer, ".git")
+            snap0 = sorted(str(p.relative_to(outer)) for p in Path(outer, ".git").rglob("*"))
+            os.environ.update({
+                "GIT_DIR": git_dir, "GIT_WORK_TREE": outer, "GIT_INDEX_FILE": os.path.join(git_dir, "index"),
+                "GIT_COMMON_DIR": git_dir, "GIT_OBJECT_DIRECTORY": os.path.join(git_dir, "objects"),
+            })
             try:
                 events = self._commit_without_the_stopping_settings(tmp)
             except subprocess.CalledProcessError as e:
                 # 外側の変数が一部残ると、対照の git 自身が失敗することがある。crash ではなく失敗として数える
                 self.fail(f"外側の repo を指す変数が対照の git に残っている: {e.cmd[1:3]}")
             after = git_in(clean, outer, ["rev-list", "--all", "--count"])
+            snap1 = sorted(str(p.relative_to(outer)) for p in Path(outer, ".git").rglob("*"))
         self.assertIn("commit", command_names(events), "前提: 対照の commit が trace に見える")
         self.assertEqual(after, before)
+        # refs の数は変わらなくても、objects だけに書く漏れ (GIT_OBJECT_DIRECTORY / GIT_COMMON_DIR) がある
+        self.assertEqual(snap1, snap0, "外側の repo の .git に書き込まれた")
 
     def test_repo_made_without_any_env_patch(self):
         self.assertEqual(self._spawned_while_making_a_marketplace(without_the_global_fixture=False), [])
