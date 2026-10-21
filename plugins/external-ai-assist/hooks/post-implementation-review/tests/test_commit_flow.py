@@ -276,10 +276,13 @@ class TestNonCommitReflogLines(CommitFlowTestCase):
         self._push_foreign(bare, branch)
 
         before = self.reflog_size()
-        self.window("tu_pull", lambda: self.git("pull", "-q", "--ff-only", "origin", branch))
+        output = self.window("tu_pull", lambda: self.git("pull", "-q", "--ff-only", "origin", branch))
         self.assertGreater(self.reflog_size(), before, "reflog が伸びていない (テストが空振り)")
         self.assertNothingSent()
         self.assertForeignNotSent()
+        # W2 の通知。窓の中に正規の編集が無いので、W2 を外しても P1 (記録の無いパス) が
+        # 同じ「送らない」結果を出す。W2 を外した窓は、この通知が出ないことで見分ける。
+        self.assertIn("commit 以外の ref 操作", self.notice(output))
 
     def test_merge_commit_sends_nothing(self):
         bare, branch = self._add_origin()
@@ -294,10 +297,13 @@ class TestNonCommitReflogLines(CommitFlowTestCase):
             self.git("merge", "-q", "--no-edit", f"origin/{branch}")
 
         before = self.reflog_size()
-        self.window("tu_merge", mutate)
+        output = self.window("tu_merge", mutate)
         self.assertGreater(self.reflog_size(), before, "reflog が伸びていない (テストが空振り)")
         self.assertNothingSent()
         self.assertForeignNotSent()
+        # W2 の通知。窓の中に正規の編集が無いので、W2 を外しても P1 (記録の無いパス) が
+        # 同じ「送らない」結果を出す。W2 を外した窓は、この通知が出ないことで見分ける。
+        self.assertIn("commit 以外の ref 操作", self.notice(output))
 
     def test_cherry_pick_sends_nothing(self):
         self.record_and_commit("shared.py", "base\n")
@@ -308,10 +314,13 @@ class TestNonCommitReflogLines(CommitFlowTestCase):
         self.git("checkout", "-q", main)
 
         before = self.reflog_size()
-        self.window("tu_cp", lambda: self.git("cherry-pick", "side"))
+        output = self.window("tu_cp", lambda: self.git("cherry-pick", "side"))
         self.assertGreater(self.reflog_size(), before, "reflog が伸びていない (テストが空振り)")
         self.assertNothingSent()
         self.assertForeignNotSent()
+        # W2 の通知。窓の中に正規の編集が無いので、W2 を外しても P1 (記録の無いパス) が
+        # 同じ「送らない」結果を出す。W2 を外した窓は、この通知が出ないことで見分ける。
+        self.assertIn("commit 以外の ref 操作", self.notice(output))
 
     def test_revert_sends_nothing(self):
         self.record_and_commit("shared.py", "base\n")
@@ -319,10 +328,13 @@ class TestNonCommitReflogLines(CommitFlowTestCase):
         self.commit("another writer's change")
 
         before = self.reflog_size()
-        self.window("tu_rev", lambda: self.git("revert", "--no-edit", "HEAD"))
+        output = self.window("tu_rev", lambda: self.git("revert", "--no-edit", "HEAD"))
         self.assertGreater(self.reflog_size(), before, "reflog が伸びていない (テストが空振り)")
         self.assertNothingSent()
         self.assertForeignNotSent()
+        # W2 の通知。窓の中に正規の編集が無いので、W2 を外しても P1 (記録の無いパス) が
+        # 同じ「送らない」結果を出す。W2 を外した窓は、この通知が出ないことで見分ける。
+        self.assertIn("commit 以外の ref 操作", self.notice(output))
 
     def test_mixed_window_sends_nothing(self):
         """**W2**: 同じ窓に merge と自分の commit が混ざったら、窓ごと何も送らない。
@@ -493,7 +505,10 @@ class TestFailClosed(CommitFlowTestCase):
         def tamper(_pre_size):
             os.remove(self.reflog_path())
 
-        self._tamper_window("tu_gone", tamper)
+        try:
+            self._tamper_window("tu_gone", tamper)
+        except OSError as exc:  # 例外が漏れる退行を ERROR ではなく FAIL として数える
+            self.fail(f"reflog が読めない窓で OSError が hook の外へ漏れた: {exc!r}")
         self.assertNothingSent()
 
     def test_shortened_reflog_sends_nothing(self):
@@ -501,8 +516,13 @@ class TestFailClosed(CommitFlowTestCase):
 
         単に末尾を切るだけだと追記そのものが消えてテストが空振りになる (mutation で
         検証済み)。「最後の 1 行 = このセッションの commit だけを残して短くする」形に
-        すると、`<old>` は pre の HEAD と一致したままなので、**バイト長の検査だけが
-        唯一の防波堤**になる。
+        すると、`<old>` は pre の HEAD と一致したままになる。
+
+        **バイト長の検査を外しても結果は変わらない (等価)**: 外すと pre の長さの位置へ
+        `seek` した先が EOF の外になり、空読みの検査 (「追記を parse できない」) が同じく
+        fail-closed にする。違うのは debug log の理由の文字列だけで、送信でも通知でも
+        区別できない。このテストは「短くなった reflog でも何も送らない」ことの床であって、
+        バイト長の検査だけを固定するものではない。
         """
         for i in range(6):
             self.git("commit", "-q", "--allow-empty", "-m", f"padding {i}")
@@ -542,13 +562,18 @@ class TestFailClosed(CommitFlowTestCase):
         self.assertForeignNotSent()
 
     def test_unparsable_line_sends_nothing(self):
+        """parse できない行を読み飛ばさず、窓ごと捨てること。
+
+        ゴミ行は正規の commit 行の**後ろ**に置く。先頭に置くと、次の正規の行が W3
+        (連鎖) で落ちるだけで、parse の検査を外しても結果が変わらない (空振り)。
+        """
         self._prepare()
 
         def tamper(pre_size):
             with open(self.reflog_path(), "rb") as f:
                 head, tail = f.read(pre_size), f.read()
             with open(self.reflog_path(), "wb") as f:
-                f.write(head + b"not a reflog line at all\n" + tail)
+                f.write(head + tail + b"not a reflog line at all\n")
 
         self._tamper_window("tu_garbage", tamper)
         self.assertNothingSent()
@@ -1028,9 +1053,12 @@ class TestChainedWindow(CommitFlowTestCase):
                     "\tcommit: forged\n"
                 )
 
-        self.window("tu_chain", mutate)
+        output = self.window("tu_chain", mutate)
         self.assertNothingSent()
         self.assertForeignNotSent()
+        # W3 は窓ごと落とすのでパス単位の通知まで進まない。W3 を外すと、偽装した範囲の内容は
+        # P6 (内容指紋) が「一致しない」と落とし、その通知に shared.py の名前が出る。
+        self.assertNotIn("shared.py", self.notice(output))
 
 
 # ---------------------------------------------------------------------------

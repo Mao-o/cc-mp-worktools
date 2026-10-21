@@ -5,9 +5,28 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
-## 0.15.0
+## 0.15.1
 
-**`post-implementation-review` の Stop が、`/goal` の継続中の Stop もレビューするようにした。0.14.0 までは `stop_hook_active` が true の Stop を一律に skip していたため、`/goal` の 2 ターン目以降はゴールが片付くまで 1 回もレビューされなかった。レビューが走る Stop が増える挙動変更なので minor bump。**
+**テスト整理 (挙動の変更なし)。`post-implementation-review` の suite の重複・包含を整理し、何も固定していなかったテスト 6 件を強くした (patch bump)。** 製品コード・`hooks.json`・README は変えていない。
+
+- 削除 (4 件): 同じ経路を同じ assert で固定する別のテストが残るものだけを消した。消すテストが殺していた変異は、残りのテストがすべて殺すことを使い捨てのコピーで確かめた
+  - `test_all_sources_fail_returns_none` (`test_subprocess_not_on_path_returns_none` と本体が同一。docstring の 1 文は残す側へ移した)
+  - `test_pull_bringing_foreign_commit_is_reported` (pull / merge 固有の分岐は無く、同じクラスの `test_same_turn_commit_is_reported_not_reviewed` が同じ経路と同じ 5 項目を固定する。専用の補助 2 つも消し、クラスの docstring の参照を直した)
+  - `test_review_header_names_the_backend_that_answered` (最後の assert は `assertBlocked()` が既に見ている)
+  - `test_ttl_exceeds_cursor_timeout` (`test_state` の `test_ttl_derives_from_cursor_timeout_ceiling` が同じ比較を含み、さらに上限も見る)
+- 統合 (4 件 → 1 件・5 ケース): `TestMinLines` にあった `_count_changed_lines` の数え方のテスト 4 件を、git の repo を作らない表駆動 + subTest の `TestCountChangedLines` にまとめた。元のテスト名はケースのラベルとして残した
+- 強化 (6 件): CLAUDE.md の表で W2 / W3 / parse の検査の担当とされているのに、その層を外しても落ちなかったテストを、その層だけが出す観測点で固定した。強化前のテストでは、下の変異が生き残ることを確かめてある
+  - `TestNonCommitReflogLines` の 4 件 (pull / merge / cherry-pick / revert): 「commit 以外の ref 操作」の通知を assert する。窓の中に正規の編集が無いので、W2 を外しても記録の無いパスの検査が同じ「送らない」結果を出していた
+  - `TestChainedWindow.test_forged_second_line_sends_nothing`: 通知にパス名が出ないことを assert する。W3 を外すと内容指紋の不一致の通知に出る
+  - `TestFailClosed.test_unparsable_line_sends_nothing`: ゴミ行を正規の行の後ろに置く。先頭に置くと次の正規の行が連鎖の検査で落ち、parse の検査を測れていなかった
+- 例外が呼び出し側へ漏れる退行 (`_claude_code_version` の `OSError`、読めない reflog の窓) を、ERROR ではなく assertion の FAIL で落とすようにした
+- `test_shortened_reflog_sends_nothing` の docstring を実態に合わせた。バイト長の検査を外しても空読みの検査が同じく fail-closed にするので、この検査単独は送信でも通知でも区別できない (等価変異)。テストは残す
+
+### 確認
+
+- 変異 35 件を、使い捨てのコピーで 1 件ずつ流した。削除したテストが殺していた 13 件 (version 検出の 2 / Stop の通知の 4 / 表示名の 2 / TTL の 2 / 行数の 3) は、残りのテストが assertion の失敗で落とす。強化した 6 件に対する 10 件 (4 件のテストそれぞれで W2 を外す・commit 以外の接頭辞を commit 扱いにする、W3 を外す、parse できない行を読み飛ばす) は、強化前の版では生き残り、強化後は assertion の失敗で落ちる。残りの 3 件 (混在窓の W2 / merge の接頭辞、conflict 解決後の merge) は強化の前後で落ちる
+- 内部バックログで未検証だった変異のうち、読めない reflog の例外と、P2 + P3' / P2 + P3' + P6 / P3' + P6 を同時に外す 3 件は assertion の失敗で落ちる (最後の 2 件は 17 件・11 件)。P2 単独、短くなった reflog の検査、読めない reflog を「無い」扱いにする変異、pre のスナップショット欠落と post の `BASH_TRACKING` の検査を外す変異の 5 件は、送信の有無では区別できない等価変異で、どのテストも落とさない (設計どおり)
+- 件数は 500 → 493 件`/goal` の継続中の Stop もレビューするようにした。0.14.0 までは `stop_hook_active` が true の Stop を一律に skip していたため、`/goal` の 2 ターン目以降はゴールが片付くまで 1 回もレビューされなかった。レビューが走る Stop が増える挙動変更なので minor bump。**
 
 ### 症状
 

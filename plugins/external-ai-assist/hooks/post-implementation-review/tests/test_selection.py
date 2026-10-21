@@ -122,11 +122,6 @@ class TestDefaultDestination(BackendFlowTestCase):
         """定数そのものを固定する (ここを広げる変更は必ずこのテストに当たる)。"""
         self.assertEqual(self.selection.DEFAULT_BACKENDS, ("cursor",))
 
-    def test_review_header_names_the_backend_that_answered(self):
-        self.edit(SESSION, "a.py", "v1\n")
-        data = self.assertBlocked(self.stop_both(SESSION, cursor_result=FINDINGS))
-        self.assertIn("## 実装直後レビュー結果 (Cursor, 差分レビュー)", data["reason"])
-
     def test_successful_backend_is_recorded(self):
         self.edit(SESSION, "a.py", "v1\n")
         self.stop_both(SESSION)

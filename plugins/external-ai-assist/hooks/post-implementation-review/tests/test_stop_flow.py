@@ -162,10 +162,6 @@ class TestInFlightRecovery(HookTestCase):
         self.stop(SESSION_A, "REVIEW_CLEAN")
         self.assertReviewed("a.txt")
 
-    def test_ttl_exceeds_cursor_timeout(self):
-        """TTL <= cursor の timeout だと走行中の in-flight を横取りする (正しさの制約)。"""
-        self.assertGreater(self.state.IN_FLIGHT_TTL_SEC, self.cursor.TIMEOUT_SEC)
-
 
 class TestBashAttribution(HookTestCase):
     """sed -i など Bash 経由でファイルを変更したターンでもレビューが走る。"""
@@ -1310,8 +1306,10 @@ class TestSameTurnCommitNotification(HookTestCase):
     人間の手動 commit) が push せずに同じパスへ commit すると、その内容が
     丸ごと外部へ送信されてしまうことがマージ前レビューで実演された
     (`test_other_local_writer_commit_is_not_leaked` が回帰テスト)。pull/merge
-    経由の混入は元から遮断できていたが (`test_pull_bringing_foreign_commit_is_reported`)、
-    これは別ベクトルだった。
+    経由の混入は元から遮断できていたが、これは別ベクトルだった (pull/merge で
+    入った commit も Stop 経路では同一ターン内 commit と同じ「取得できなかった」通知に
+    なる。専用の分岐は無く、`test_same_turn_commit_is_reported_not_reviewed` が
+    その経路を固定する)。
 
     安全な復元には編集時点の内容退避が要り、「PostToolUse を軽く保つ」という
     既存の設計と衝突するため、復元機構そのものを撤去し、常に「取得できない」と
@@ -1324,24 +1322,6 @@ class TestSameTurnCommitNotification(HookTestCase):
     根拠にすると、この場合も一致してしまう (編集前後で内容が変わっていないため) ので、
     無関係な履歴の差分を外部 AI CLI へ送ることになる。
     """
-
-    def _add_bare_origin(self) -> tuple[str, str]:
-        bare = _testutil.init_bare_origin(self._tmp.name)
-        _testutil.git(self.repo, "remote", "add", "origin", bare)
-        branch = _testutil.git(self.repo, "branch", "--show-current").stdout.strip()
-        _testutil.git(self.repo, "push", "-q", "origin", f"HEAD:refs/heads/{branch}")
-        _testutil.git(bare, "symbolic-ref", "HEAD", f"refs/heads/{branch}")
-        return bare, branch
-
-    def _push_foreign_commit(self, bare: str, branch: str) -> None:
-        clone = os.path.join(self._tmp.name, "clone")
-        _testutil.git(self._tmp.name, "clone", "-q", bare, "clone")
-        _testutil.git(clone, "config", "user.email", "other@example.com")
-        _testutil.git(clone, "config", "user.name", "other")
-        _testutil.write(clone, "foreign.txt", "from someone else\n")
-        _testutil.git(clone, "add", "-A")
-        _testutil.git(clone, "commit", "-qm", "foreign change")
-        _testutil.git(clone, "push", "-q", "origin", branch)
 
     def _establish_history(self) -> None:
         """レビュー履歴が既にあるセッションでも結果が変わらないことを示すための
@@ -1423,29 +1403,6 @@ class TestSameTurnCommitNotification(HookTestCase):
         self.assertIn("取得できませんでした", message)
         self.assertNotIn("someone else entirely", message)
         self.assertEqual(self.pending(SESSION_A), [])
-
-    def test_pull_bringing_foreign_commit_is_reported(self):
-        """pull/merge で他人の commit が混ざった場合も同じ経路で報告のみ
-        (この既知のベクトルは旧コードでも安全に扱えていた)。"""
-        bare, branch = self._add_bare_origin()
-        self._establish_history()
-
-        self.edit(SESSION_A, "a.py", "print(1)\n")
-        _testutil.git(self.repo, "add", "a.py")
-        _testutil.git(self.repo, "commit", "-qm", "self commit")
-        self._push_foreign_commit(bare, branch)
-        _testutil.git(self.repo, "fetch", "-q", "origin")
-        _testutil.git(self.repo, "merge", "-q", "--no-edit", f"origin/{branch}")
-
-        output = self.stop(SESSION_A, "REVIEW_CLEAN")
-        self.assertNotReviewed()
-        message = json.loads(output)["systemMessage"] if output else ""
-        self.assertIn("取得できませんでした", message)
-        self.assertIn("a.py", message)
-        self.assertNotIn("print(1)", message, "通知には内容を出さない")
-        self.assertEqual(
-            self.pending(SESSION_A), [], "報告済みのパスが pending に残り続けないこと"
-        )
 
     def test_first_ever_stop_with_committed_change_is_reported(self):
         """セッション初回の Stop でも、commit 済みで空になったパスを
