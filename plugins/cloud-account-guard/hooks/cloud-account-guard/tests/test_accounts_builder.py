@@ -106,6 +106,7 @@ class BaseBuilder(unittest.TestCase):
         )
         self._env_patcher.start()
         self.addCleanup(self._env_patcher.stop)
+        # module-level (`_testutil._isolate_git_discovery`) の保険。suite の外へコピーされても効くように。
         # 外側の環境が export している git の向き先で判定が変わらないようにする。
         for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"):
             os.environ.pop(name, None)
@@ -1306,6 +1307,37 @@ class TestGitIgnoreAware(BaseBuilder):
         self.assertEqual(code, 0)
         self.assertTrue((self.new_dir / "CLAUDE.md").exists())
         self.assertIn("created:", out)
+
+    def test_outer_git_redirect_does_not_hide_info_exclude(self):
+        """規則を `.git/info/exclude` だけに置く。作業ツリー側の `.gitignore` は無い。
+
+        `GIT_DIR` / `GIT_COMMON_DIR` が別 repo を指したまま git を呼ぶと、anchor の
+        `info/exclude` が読まれず「ignore されていない」と判定して signpost を作らない。
+        `.gitignore` に規則を置くと、作業ツリーが anchor のままなので読まれてしまい、
+        env の除外が外れても検出できない。
+        """
+        exclude = self.project_dir / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text(".claude/\n", encoding="utf-8")
+        self.assertFalse(self._gitignore().exists())
+        other = Path(self.tmp) / "other"
+        other.mkdir()
+        subprocess.run(
+            ["git", "-C", str(other), "init", "-q"],
+            check=True,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+        )
+        for name in ("GIT_DIR", "GIT_COMMON_DIR"):
+            with self.subTest(env=name):
+                shutil.rmtree(self.new_dir, ignore_errors=True)
+                with mock.patch.dict(os.environ, {name: str(other / ".git")}):
+                    code, out, _err = self._run(
+                        ["init", "--service", "github", "--value", "Mao-o", "--commit"]
+                    )
+                self.assertEqual(code, 0)
+                self.assertTrue((self.new_dir / "CLAUDE.md").exists())
+                self.assertIn("created:", out)
 
     def test_signpost_created_when_claude_dir_ignored(self):
         self._gitignore().write_text(".claude/\n", encoding="utf-8")

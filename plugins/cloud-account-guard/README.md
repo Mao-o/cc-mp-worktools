@@ -69,7 +69,7 @@ builder の `init --commit` / `migrate --commit` は同ディレクトリに
 削除しても plugin 本体の動作には影響しない。生成先が git で ignore されていない
 ときは作らない (v0.24.0 から。`.claude/` 配下の CLAUDE.md は Claude Code が読み込む
 ため、リポジトリにコミットされるとこの plugin を使っていない人のセッションにも
-混ざる)。作りたい場合は `.git/info/exclude` などで ignore してから再実行する。
+混ざる)。作りたい場合は `.git/info/exclude` などで ignore してから `init --commit` などの書き込みを再実行する。
 git の外では従来どおり作る。
 
 ## accounts.local.json の形式

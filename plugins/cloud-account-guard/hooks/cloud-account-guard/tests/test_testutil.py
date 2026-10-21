@@ -70,6 +70,48 @@ class TestStartIsolation(unittest.TestCase):
             isolation.stop()
 
 
+class TestIsolateGitDiscovery(unittest.TestCase):
+    """module-level の `_isolate_git_discovery` (import 時に 1 回走る) の固定。"""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        # 呼び出しが書き換える env と tempfile.tempdir をテスト後に戻す
+        env_patcher = mock.patch.dict(os.environ)
+        env_patcher.start()
+        self.addCleanup(env_patcher.stop)
+        tempdir_patcher = mock.patch.object(tempfile, "tempdir", tempfile.tempdir)
+        tempdir_patcher.start()
+        self.addCleanup(tempdir_patcher.stop)
+
+    def test_redirecting_git_env_is_dropped(self):
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"):
+            with self.subTest(env=name):
+                os.environ[name] = str(self.root / "elsewhere")
+                _testutil._isolate_git_discovery()
+                self.assertNotIn(name, os.environ)
+
+    def test_tempdir_inside_a_work_tree_moves_outside_the_repo(self):
+        (self.root / ".git").mkdir()
+        inside = self.root / "tmp"
+        inside.mkdir()
+        tempfile.tempdir = str(inside)
+        _testutil._isolate_git_discovery()
+        moved = Path(tempfile.gettempdir()).resolve()
+        self.assertNotEqual(moved, inside)
+        self.assertFalse(
+            any((d / ".git").exists() for d in (moved, *moved.parents)),
+            f"tempdir がまだ repo の中: {moved}",
+        )
+        self.assertEqual(os.environ["GIT_CEILING_DIRECTORIES"], str(moved))
+
+    def test_tempdir_outside_any_repo_is_kept(self):
+        tempfile.tempdir = str(self.root)
+        _testutil._isolate_git_discovery()
+        self.assertEqual(tempfile.tempdir, str(self.root))
+        self.assertEqual(os.environ["GIT_CEILING_DIRECTORIES"], str(self.root))
+
+
 class TestSanitizedEnv(unittest.TestCase):
     """`test_main` が子プロセス env を組むときに使う除去規則 (共有点)。"""
 
