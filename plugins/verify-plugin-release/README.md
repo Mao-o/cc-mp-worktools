@@ -20,6 +20,13 @@ Claude が普段の書き方で `gh pr create` / `gh pr ready` を実行した�
 - 環境変数 `VERIFY_PLUGIN_RELEASE_MODE` で止めずに通すこともできます
 - 最終的な品質保証は CI とレビューが担う前提です。この hook はその手前の早期警告です
 
+## インストール
+
+```
+/plugin marketplace add Mao-o/cc-mp-worktools
+/plugin install verify-plugin-release@mao-worktools
+```
+
 ## 動作する条件
 
 - Bash ツールで実行するコマンドに `gh pr create` (別名 `gh pr new`) または `gh pr ready` が含まれる

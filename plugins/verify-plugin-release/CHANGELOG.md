@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.4
+
+icon と導入手順の追加 (挙動の変更なし、patch bump)。
+
+- plugin の icon (`assets/icon.png`) を足した。`claude plugin validate` の plugin directory checks が出す `ICON_MISSING` を解消する
+- README に marketplace からのインストール手順の節を足した
+
 ## 0.2.3
 
 テスト整理 (挙動の変更なし)。テストの実行時間を約 33 秒から約 17 秒に縮めた。hook・`hooks.json`・README の
