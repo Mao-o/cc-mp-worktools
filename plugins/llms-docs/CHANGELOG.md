@@ -2,6 +2,27 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.47.1] - 2026-10-22
+
+### 修正: 複数 source の検索で補充する節の取り違え / 0 件時の `Next:` 行が `-` で始まる語で実行できない
+
+- **症状 1**: 複数 source をまとめて検索する `search --source <members を持つ別名>` (旧 `parse-claude-docs.py search
+  --source both`) で、空き枠を最上位ページの次の節で補充するとき、ページ番号が source ごとに重なるため、別
+  source の同じ番号のページを最上位ページと取り違えた。別 source のページの節が補充に入る、同じ見出しの節が
+  別 source の選択に隠される、のどちらかが起きた (出る `Next:` 行は実行できるので壊れはしない)
+- **修正 1**: `hit_candidates` が最上位ページを「ページ番号 + そのページの `--source`」で判定し、重複する見出しの
+  抑止も同じ組で見る
+- **症状 2**: 0 件時の説明 (`render_zero_hits`) が出す `Next:` 行 (`search-index` / 語を減らした再検索 / 別
+  source での再検索) は、query が `-` で始まると `--` を挟まず、argparse がオプションと読んで実行できなかった
+- **修正 2**: query が `-` で始まるときは、オプションを先に、query を `--` の後ろに置く。それ以外の query の行は
+  変えない。往復テスト (`test_awkward_queries_do_not_crash_or_fetch_beyond_the_candidates`) が除いていた
+  この行の除外を外した
+- **対象外**: query の差し込みを案内するプレースホルダの行 (`Next: ... search "<query>"` と
+  `content ... "<heading_path>"`) は、そのまま書いて出力が変わらない形のまま (旧 script の出力との比較と
+  golden の更新が要るため別件)
+- テスト: `hit_candidates` の別 source の 3 件、0 件時の `Next:` 行の `--` の位置 (3 種の行、`-` あり / なし)、
+  members の 0 件時の往復 (`-` / `--` 始まりの query) を追加。件数 1156 -> 1162
+
 ## [0.47.0] - 2026-10-16
 
 ### 変更: 汎用ローダーの索引が H3 の見出しも読む (`index_heading_level`)

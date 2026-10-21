@@ -549,6 +549,24 @@ class MembersFixtureCasesTest(MembersRoundTripTest):
             h_code, _out, h_err, h_calls = env.run(argv, full_argv=True)
             self.assertEqual((h_code, h_calls), (0, []), h_err)
 
+    def test_zero_hits_of_a_dash_query_run_as_printed(self):
+        """A query that starts with "-" puts the ``search-index`` line's query
+        after "--", so each member's line runs instead of failing in argparse."""
+        env = _Env(self)
+        for name in ("claude-code", "ai-sdk"):
+            env.stage(name)
+        for query in ("-zzzmembersnohit", "--zzzmembersnohit", "-zzzq zzzr"):
+            with self.subTest(query=query):
+                code, out, _err, _calls = env.run(["search", "--source", "mixed", "--", query])
+                self.assertEqual(code, 0)
+                hints = next_lines(out)
+                self.assertEqual(len(hints), 2, out)
+                for hint in hints:
+                    argv = shlex.split(hint, comments=True)
+                    self.assertEqual((argv[1], argv[-2:]), ("search-index", ["--", query]))
+                    h_code, _out, h_err, h_calls = env.run(argv, full_argv=True)
+                    self.assertEqual((h_code, h_calls), (0, []), h_err)
+
     def test_zero_hits_with_some_terms_present_suggest_a_search_per_member(self):
         """Terms each source has, never together: the zero-hit notes suggest a
         narrower ``search`` per member, on that member."""
