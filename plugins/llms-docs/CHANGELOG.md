@@ -24,6 +24,10 @@ All notable changes to this plugin will be documented here.
   members の 0 件時の往復 (`-` / `--` 始まりの query) を追加。件数 1156 -> 1162
 - README に marketplace からの導入手順 (`/plugin install llms-docs@mao-worktools`) の節を追加 (`claude plugin validate` の plugin directory warning の解消。挙動の変更なし)
 
+### Added
+
+- plugin の icon (`assets/icon.png`) を足した。`claude plugin validate` の plugin directory checks が出す `ICON_MISSING` を解消する
+
 ## [0.47.0] - 2026-10-16
 
 ### 変更: 汎用ローダーの索引が H3 の見出しも読む (`index_heading_level`)
