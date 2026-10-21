@@ -66,7 +66,11 @@ builder の `init --commit` / `migrate --commit` は同ディレクトリに
 セキュリティ系 hook が有効な環境で、Claude (LLM) からの直接アクセスが deny
 された場合でも、同ディレクトリの CLAUDE.md を覗くだけで builder 経由の正規
 経路に辿り着けるようにするための案内ファイル。既存 CLAUDE.md は上書きされず、
-削除しても plugin 本体の動作には影響しない。
+削除しても plugin 本体の動作には影響しない。生成先が git で ignore されていない
+ときは作らない (v0.24.0 から。`.claude/` 配下の CLAUDE.md は Claude Code が読み込む
+ため、リポジトリにコミットされるとこの plugin を使っていない人のセッションにも
+混ざる)。作りたい場合は `.git/info/exclude` などで ignore してから `init --commit` などの書き込みを再実行する。
+git の外では従来どおり作る。
 
 ## accounts.local.json の形式
 
@@ -108,7 +112,10 @@ python3 "${CLAUDE_PLUGIN_ROOT}/hooks/cloud-account-guard/scripts/accounts_builde
 
 ### `.gitignore`
 
-プロジェクトでは `accounts.local.json` を git 管理外にする:
+プロジェクトでは `accounts.local.json` を git 管理外にする。builder の `--commit` は
+`.gitignore` が既にあればそこへ追記するが、`*.local.json` などのパターン・
+`.git/info/exclude`・グローバルの excludesFile で既に ignore されているときは
+`.gitignore` を変えない (v0.24.0 から。判定は `git check-ignore`):
 
 ```gitignore
 # .gitignore

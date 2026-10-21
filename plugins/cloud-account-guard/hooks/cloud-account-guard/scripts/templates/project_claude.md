@@ -71,5 +71,7 @@ builder は **dispatcher (hook) が実際に読むファイル**を対象にし�
 
 このファイルは `accounts_builder.py` の `init` / `set` / `remove` / `migrate`
 の `--commit` 初回実行時に自動生成されます。既に存在する場合は上書きされません
-(ユーザー編集を尊重)。不要であれば削除して構いません — signpost が消えるだけで
-cloud-account-guard 本体の動作には影響しません。
+(ユーザー編集を尊重)。git で ignore されていない場所には生成されません
+(リポジトリにコミットされうるファイルを増やさないため)。不要であれば削除して
+構いません — signpost が消えるだけで cloud-account-guard 本体の動作には影響
+しません。

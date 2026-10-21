@@ -141,7 +141,11 @@ builder は以下の順でパスをスキャンし、統合する:
 6. **CLAUDE.md 自動同梱の確認** — `--commit` 成功時、builder は同ディレクトリに
    `CLAUDE.md` (Claude 向け signpost) を自動生成する (既存の場合はスキップ、
    stdout に `created:` または `(skipped: ... already exists)` の 1 行が
-   出る)。これは将来のセッションで Claude が `accounts.local.json` を直接
+   出る)。生成先が git で ignore されていないときは、リポジトリにコミット
+   されうるファイルを増やさないよう作らず、`(skipped: ... ignore されて
+   いないため作りません ...)` の 1 行が出る。その場合は「作りたければ
+   `.git/info/exclude` などで ignore してから `init --commit` などの書き込みを再実行する」とユーザーに伝える。
+   これは将来のセッションで Claude が `accounts.local.json` を直接
    編集しようとして deny されたとき、同ディレクトリの CLAUDE.md を見て
    builder 経由の正規経路に辿り着けるようにするためのファイル。ユーザーに
    「不要なら削除可、編集も可。cloud-account-guard の動作には影響しない」

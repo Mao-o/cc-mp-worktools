@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.24.0
+
+### Changed: 利用者のリポジトリの tracked file を増やさない (`.gitignore` の重複追記 / signpost)
+
+builder の `--commit` (init / set / remove / migrate / auto-switch) が、利用者のリポジトリに
+意図しない差分を作っていた。
+
+- `.gitignore` への `accounts.local.json` の追記を、`.gitignore` 内の同じ文字列の行ではなく
+  `git check-ignore` で判定する。`*.local.json` などのパターン・`.git/info/exclude`・グローバルの
+  excludesFile で既に ignore されていれば `.gitignore` を変えない。git の外などで判定できない
+  ときは従来どおり文字列で判定する
+- 同じディレクトリに置く Claude 向けの案内 (`CLAUDE.md`) は、生成先が git で ignore されて
+  いないときは作らず、理由を stdout に 1 行出す。`.claude/` 配下の CLAUDE.md は Claude Code が
+  読み込むため、コミットされるとこの plugin を使っていない人のセッションにも指示が混ざる。
+  作りたいときは `.git/info/exclude` などで ignore してから `init --commit` などの書き込みを再実行する。git の外では従来どおり作る
+- ignore 判定の `git` には、外側が export した `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` / `GIT_COMMON_DIR` を渡さない (別の repo の規則で判定しないため)
+- 変えないもの: 期待値ファイルの書き込み先と内容、`.gitignore` が無いときに作らないこと、
+  既存の CLAUDE.md を上書きしないこと、hook の判定
+
+### Added
+
+- plugin の icon (`assets/icon.png`) を足した。`claude plugin validate` の plugin directory checks が出す `ICON_MISSING` を解消する
+
 ## 0.23.0
 
 ### Changed: plugin 名を verify-cloud-account から cloud-account-guard に変える

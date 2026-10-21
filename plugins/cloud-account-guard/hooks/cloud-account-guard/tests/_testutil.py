@@ -26,6 +26,34 @@ if str(_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(_HOOKS_DIR))
 
 
+def _isolate_git_discovery() -> None:
+    """外側の環境が git の向き先を決めないようにする (テスト実行プロセスの間ずっと)。
+
+    - `GIT_DIR` などが export されていると、テスト内の git が別の repo を見る
+    - 一時 dir が git の作業ツリーの中にあると、「repo の外」を前提にしたテストが
+      親の repo を見つける。一時 dir 自体を探索の天井にして、その親へ遡らせない
+    """
+    import tempfile
+
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"):
+        os.environ.pop(name, None)
+    base = Path(tempfile.gettempdir()).resolve()
+    os.environ["GIT_CEILING_DIRECTORIES"] = str(base)
+    # production 側の「起動リポジトリ」探索は `.git` を親方向に辿る純 Python で、
+    # GIT_CEILING_DIRECTORIES の対象外。一時 dir が作業ツリーの中なら、repo の外にある
+    # /tmp へ逃がす (「repo の外」を前提にするテストのため)。
+    if any((d / ".git").exists() for d in (base, *base.parents)):
+        fallback = Path("/tmp").resolve()
+        if fallback.is_dir() and not any(
+            (d / ".git").exists() for d in (fallback, *fallback.parents)
+        ):
+            tempfile.tempdir = str(fallback)
+            os.environ["GIT_CEILING_DIRECTORIES"] = str(fallback)
+
+
+_isolate_git_discovery()
+
+
 # 実環境から漏れるとローカル読取 / モード解決の結果が変わる env。
 LEAKY_ENV_VARS = (
     "GH_TOKEN",

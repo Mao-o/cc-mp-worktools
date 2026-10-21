@@ -145,6 +145,7 @@ import argparse
 import json
 import os
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 from typing import IO, Any, NamedTuple
@@ -537,10 +538,55 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
     path.write_bytes(payload)
 
 
+# `git check-ignore` の待ち時間の上限。builder は hook の外 (skill の Bash) で動くが、
+# git がハングしたときに書き込み後の後処理で止まり続けないようにする。
+_GIT_CHECK_IGNORE_TIMEOUT_SEC = 5
+
+
+_GIT_REDIRECT_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
+
+
+def _git_ignored(anchor: Path, path: Path) -> bool | None:
+    """`path` が git で ignore されるかを `git check-ignore -q` で判定する。
+
+    .gitignore の文字列ではなく git 自身の判定を使うので、`*.local.json` のような
+    パターン・`.git/info/exclude`・グローバルの excludesFile による ignore も含む。
+
+    - True: ignore される (exit 0)
+    - False: ignore されない (exit 1。tracked のファイルもここに入る)
+    - None: 判定できない (git の外 / git が無い / timeout / その他のエラー)
+    """
+    try:
+        rel = path.relative_to(anchor).as_posix()
+    except ValueError:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(anchor), "check-ignore", "-q", "--", rel],
+            capture_output=True,
+            timeout=_GIT_CHECK_IGNORE_TIMEOUT_SEC,
+            stdin=subprocess.DEVNULL,
+            # 外側が export した GIT_DIR などで、anchor ではない repo の規則を引かない
+            env={k: v for k, v in os.environ.items() if k not in _GIT_REDIRECT_ENV},
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    return None
+
+
 def _ensure_gitignore_entry(target: _Target, stdout: IO[str]) -> None:
     """accounts.local.json を .gitignore に追加する (best-effort)。
 
-    既に該当エントリがあればスキップ。.gitignore が存在しなければ作成しない
+    git で既に ignore されていれば (`*.local.json` などのパターン・
+    `.git/info/exclude`・グローバルの excludesFile を含む) .gitignore を変えない。
+    .gitignore は利用者のリポジトリの tracked file であることが多く、ignore 済みの
+    パスを足すと意味の無い差分になる。git で判定できない (git の外など) ときは
+    従来どおり .gitignore 内の同じ行の有無で判定する。
+    .gitignore が存在しなければ作成しない
     (プロジェクトに .gitignore が無い環境で勝手に作ると意図しない副作用になる)。
 
     対象は **書き込んだファイルが属する project ディレクトリ** (`target.anchor`)
@@ -554,6 +600,8 @@ def _ensure_gitignore_entry(target: _Target, stdout: IO[str]) -> None:
     except ValueError:
         return
     if not os.path.exists(gitignore):
+        return
+    if _git_ignored(target.anchor, target.path):
         return
     try:
         content = gitignore.read_text(encoding="utf-8")
@@ -574,6 +622,10 @@ def _ensure_project_claude_md(target: _Target, stdout: IO[str]) -> None:
     (`CLAUDE.md`) を同梱する。
 
     - 既に CLAUDE.md が存在する場合は何もしない (ユーザー編集を尊重)
+    - 生成先が git で ignore されていない (`git check-ignore` が「されない」と
+      答えた) ときは作らない。`.claude/` 配下の CLAUDE.md は Claude Code が読み込む
+      ため、利用者のリポジトリにコミットされると、この plugin を使っていない人の
+      セッションにまで指示が混ざる。git の外など判定できないときは従来どおり作る
     - テンプレート読み込み・書き込みのいずれかが失敗しても警告を 1 行出すだけで
       builder 自体は成功させる (best-effort)
     - dispatcher 等が読みに来るパスではないため、ここで失敗しても plugin 本体
@@ -588,6 +640,15 @@ def _ensure_project_claude_md(target: _Target, stdout: IO[str]) -> None:
     md_path = target_dir / _PROJECT_CLAUDE_MD_FILENAME
     if os.path.exists(md_path):
         print(f"(skipped: {_p(md_path)} already exists)", file=stdout)
+        return
+    if _git_ignored(target.anchor, md_path) is False:
+        print(
+            f"(skipped: {_p(md_path)} は git で ignore されていないため作りません。"
+            "作るとリポジトリにコミットされうるファイルが増えます。"
+            "必要なら .git/info/exclude などで ignore してから "
+            "`init --commit` などの書き込みを再実行してください)",
+            file=stdout,
+        )
         return
     try:
         content = _PROJECT_CLAUDE_MD_TEMPLATE.read_text(encoding="utf-8")
