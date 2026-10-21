@@ -1118,9 +1118,9 @@ worktree 内に同名ファイルを置く必要は無い。
     としては辿らない**
   - **非互換**: repo の toplevel より上 (複数 repo を束ねる親ディレクトリ)、
     submodule から見た superproject、`$HOME` に置いた設定は継承されなくなる
-    (グローバル既定が無ければ未設定の扱い。書込は deny、リモート read のみのコマンドは警告。
-    `$HOME` の固定パス `~/.claude/cloud-account-guard/accounts.local.json` は
-    v0.13.0 からグローバル既定として読む)。**別の repo の中に
+    (`$HOME` の固定パス `~/.claude/cloud-account-guard/accounts.local.json`
+    (グローバル既定。v0.13.0 から。0.22.0 までは `~/.claude/verify-cloud-account/` 側) が
+    あればそれで検証する。無ければ未設定の扱い。書込は deny、リモート read のみのコマンドは警告)。**別の repo の中に
     置いた linked worktree から、その外側 repo の設定を継承していた場合も同じ**
     (worktree root で止まる)。各 repo の toplevel に複製するか `--path` で明示する
 - 親採用時は deny / warn メッセージに `accounts.local.json は親ディレクトリ

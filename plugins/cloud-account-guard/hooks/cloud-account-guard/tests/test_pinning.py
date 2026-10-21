@@ -251,6 +251,11 @@ class TestUnregisteredButPinned(_Base):
         with mock.patch("subprocess.run", side_effect=FileNotFoundError):
             result = dispatch("firebase deploy", str(self.project_dir))
         self.assertEqual(_decision(result), "deny")
+        # 固定の単位は firebase-tools の記録どおり project root (作業ディレクトリではない)
+        self.assertIn(
+            "project を project root (firebase.json のあるディレクトリ) ごとに固定するには、"
+            "そこで firebase use", _reason(result),
+        )
 
     def test_firebase_use_record_is_pinned(self):
         self._write_accounts({"github": "me"})

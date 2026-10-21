@@ -7,8 +7,11 @@
 - 切替の記録 (`record_switch`) の書き戻しで握る例外が `OSError` だけだった。別の対象の記録に JSON の
   `\ud800` のような孤立サロゲートがあると、記録は読めるが UTF-8 では書けず (`UnicodeEncodeError`)、
   アカウントを切り替えた後にその例外が漏れて「自動切替 (auto-switch) は内部エラーのため行いませんでした」と
-  通知していた (実際には切り替わっている)。書き戻しの失敗は種類を問わず (`OSError` / `ValueError` /
-  `RecursionError`) 記録が書けなかっただけにし、通知は切り替えた事実と一致する。判定は変えない
+  通知していた (実際には切り替わっている)。また、その記録が残る限り以後の記録がすべて書けず、
+  並行セッションのガード (別のプロジェクトが直前に別のアカウントへ切り替えていたら止める) が黙って
+  働かなくなっていた。書き戻しを ASCII (`ensure_ascii`) にし、孤立サロゲートはエスケープして書けるようにした
+  (読み戻しても同じ値)。それでも書けない失敗 (`OSError` / `ValueError` / `RecursionError`) は記録が
+  書けなかっただけにし、通知は切り替えた事実と一致する。判定は変えない
 
 ### Fixed: 文書と出力の「未設定」の説明を実際の扱いに揃える
 
@@ -19,8 +22,15 @@
 - `firebase use` の記録の単位を「作業ディレクトリごと」と書いていた README / DEVELOPMENT / `pin-env` の notes /
   `project-accounts` skill / コメントを、firebase-tools の実装どおり project root (firebase.json のある
   ディレクトリ。`--config` があればそのファイルのディレクトリ) ごとに揃えた。`pin-env` の出力の notes の文言が
-  変わる (案内するコマンドと判定は変わらない)
-- 回帰テストを足した (builder 3 経路の新しい文言、`record_switch` の書き戻し失敗、`pin-env` の notes)
+  変わる (案内するコマンドと判定は変わらない)。`firebase login:use` も同じく project root ごとに記録される
+  (firebase-tools 15.19.1 のソースで確認) ため、`pin-env` の notes と DEVELOPMENT の記述をそれに揃えた。
+  未登録の deny に添える firebase の固定の案内 (`PIN_HINT`) も「project root ごと」に揃えた
+- README の既知の制限の非互換の項で、グローバル既定の固定パスの版 (v0.13.0 から。0.22.0 までは旧名の
+  ディレクトリ側) を正した
+- 回帰テストを足した (builder 3 経路の新しい文言、`record_switch` の書き戻し失敗と書き戻した記録の中身、
+  孤立サロゲートの記録があっても 2 回目の切替が止まること、`pin-env` の notes)
+
+## 0.24.0
 
 ### Changed: 利用者のリポジトリの tracked file を増やさない (`.gitignore` の重複追記 / signpost)
 

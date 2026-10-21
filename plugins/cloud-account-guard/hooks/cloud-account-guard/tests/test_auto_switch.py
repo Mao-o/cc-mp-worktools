@@ -280,10 +280,10 @@ class TestGuard(_TmpCacheDir):
                 self.assertIsNotNone(auto_switch.conflicting_switch("github", self.STEPS))
 
     def test_record_write_back_failure_of_any_kind_is_swallowed(self):
-        """書き戻しの失敗は種類を問わず「記録が書けなかった」だけ (`record_switch` は
-        `apply_switch` の後に呼ばれるので、例外が抜けると切り替え済みなのに「行いませんでした」
-        と通知する)。OSError 以外の 2 種を、実際の入力 (孤立サロゲートの記録) と
-        差し替え (入れ子が深すぎる記録の `json.dumps`) の両方で確かめる。"""
+        """孤立サロゲートの記録は ASCII にエスケープして書き戻せ、今回の target も記録される。
+        それでも書けない失敗 (差し替えた `json.dumps` の RecursionError / ValueError) は
+        「記録が書けなかった」だけ (`record_switch` は `apply_switch` の後に呼ばれるので、
+        例外が抜けると切り替え済みなのに「行いませんでした」と通知する)。"""
         path = cache.service_state_path("github", ".autoswitch.json")
         path.write_text(
             '{"other": {"value": "\\ud800", "project": "/x", "at_ns": 1}}', encoding="utf-8"
@@ -293,6 +293,7 @@ class TestGuard(_TmpCacheDir):
             auto_switch.record_switch("github", steps, "/p")
         except Exception as e:  # noqa: BLE001
             self.fail(f"書き戻せない記録で record_switch が {type(e).__name__} を投げた")
+        self.assertEqual((cache.read_state(path) or {}).get("github.com", {}).get("value"), "work-user")
         for exc in (RecursionError, ValueError):
             with self.subTest(exc=exc.__name__):
                 with mock.patch("core.auto_switch.json.dumps", side_effect=exc("x")):

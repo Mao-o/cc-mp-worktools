@@ -215,7 +215,7 @@ def plan_firebase(expected, project_dir: str) -> Plan:
         " (firebase.json のあるディレクトリ。--config があればそのファイルのディレクトリ) ごとに"
         "記録されるので、1 回実行すれば同じ project root の中で次からも有効です",
         "別の worktree は別のディレクトリなので、そこでも最初に 1 回要ることがあります",
-        "アカウントも firebase login:use <email> でこのディレクトリ用に選べます"
+        "アカウントも firebase login:use <email> でこの project root 用に選べます"
         " (VCA は firebase のアカウントは検証しません)",
     )
     # 案内する `firebase use <x>` の行き先は `.firebaserc` の alias で決まる (下の
