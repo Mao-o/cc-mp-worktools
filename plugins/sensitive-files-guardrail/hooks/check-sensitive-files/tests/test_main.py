@@ -461,7 +461,7 @@ class TestMainInternalError(BaseMainTest):
         self.assertNotIn("/secret/path", err)
         self.assertNotIn("/secret/path", out)
 
-    def _run_with_broken_stdout(self, envelope: dict, exc: Exception,
+    def _run_with_broken_stdout(self, envelope: dict, exc: BaseException,
                                 *, partial: str = "") -> tuple[int, str, str]:
         """block 出力の ``write_stdout`` が失敗する状況を注入する。
 
@@ -514,6 +514,23 @@ class TestMainInternalError(BaseMainTest):
         self.assertEqual(rc, 1)
         self.assertEqual(out, '{"decision": "bl')  # 追記なし (連結 JSON にならない)
         self.assertIn("internal_error: OSError", err)
+
+    def test_interrupted_emit_leaves_no_continued_marker(self):
+        """送出中の中断 (``KeyboardInterrupt`` は ``Exception`` ではない) でも印を残さない。
+
+        ``except Exception`` に狭めると中断で印が残り、次の継続中の Stop を
+        1 回黙って skip する。
+        """
+        (self.repo / ".env").write_text("KEY=v\n")
+        env = {"cwd": str(self.repo), "session_id": "sess-kbi"}
+        with self.assertRaises(KeyboardInterrupt):
+            self._run_with_broken_stdout(env, KeyboardInterrupt())
+        self.assertFalse(
+            (
+                self.home_dir / ".claude" / "sensitive-files-guardrail"
+                / "stop-continued" / "sess-kbi"
+            ).exists()
+        )
 
     def test_failed_emit_does_not_ack_the_session(self):
         """送出に失敗したターンは ack しない → 次ターンで再 block (順序の回帰)。
@@ -1185,12 +1202,24 @@ class TestMainRecursionGuard(BaseMainTest):
         self.assertIn("stop_ack_unavailable: continued_take:", err)
 
     def test_unwritable_home_does_not_recurse(self):
-        # 印も報告済み集合も書けない HOME: 自分の block による継続で再 block しない
+        # 印を立てられない HOME: 自分の block による継続で再 block しない。
+        # chmod は Windows と root では書込みを止められないので使わず、印の作成
+        # (``Path.touch``) を失敗させる。印は不在のまま (take は FileNotFound =
+        # 「印なし」) なので、継続中の Stop を skip するのは record 失敗の分岐だけ
         (self.repo / ".env").write_text("KEY=v\n")
-        os.chmod(self.home_dir, 0o555)
-        self.addCleanup(os.chmod, self.home_dir, 0o755)
+        with mock.patch.object(Path, "touch", side_effect=PermissionError("denied")):
+            self.assertTrue(self._blocked(self._stop(continuing=False)))
+            self.assertFalse(self._marker().exists())
+            # 新しい機密ファイルがあっても (報告済み集合では黙らない)、継続中は出さない
+            (self.repo / ".env.local").write_text("KEY=v\n")
+            rc, out, err = _run_main({
+                "cwd": str(self.repo), "session_id": self.SID,
+                "stop_hook_active": True,
+            })
+        self.assertEqual((rc, out), (0, ""))
+        self.assertIn("stop_ack_unavailable: continued_save:", err)
+        # 継続でない Stop では出す (skip は継続中の Stop に限る)
         self.assertTrue(self._blocked(self._stop(continuing=False)))
-        self.assertEqual(self._stop(continuing=True), "")
 
 
 # 0.26.0 (予算導入前) の ``_build_reason(tracked=[".env"],

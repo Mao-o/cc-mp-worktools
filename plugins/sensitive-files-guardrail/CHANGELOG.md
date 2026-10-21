@@ -51,7 +51,7 @@ commit 52113a1 で完了)。
 - テスト: `TestMainRecursionGuard` (7 件) と `TestContinuedMarker` (10 件) を足し、
   「`stop_hook_active=true` なら常に黙る」を固定していたテストを、別の hook による
   継続では報告することを確かめる形に書き換えた。送出に失敗したターンで印が残らない
-  ことも固定した。check 220 → **237**
+  ことも固定した (中断 `KeyboardInterrupt` でも印が残らないこと、印を立てられない HOME は OS・権限に依存せず再現する)。check 220 → **238**
 
 ## 0.35.3
 
