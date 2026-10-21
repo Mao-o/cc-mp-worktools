@@ -711,46 +711,143 @@ class TestLiteralPathspecFlow(HookTestCase):
 
 
 class TestByteBudgetFlow(HookTestCase):
-    """予算に収まらないファイルは pending に戻り hash 未記録、巨大単一ファイルは truncated。"""
+    """40 KB を超える差分は塊に分けて送り、待ち時間の上限に収まらない塊だけを繰り越す (0.14.0)。
+
+    塊に収まらないファイルは pending に戻り hash 未記録、巨大単一ファイルは truncated。
+    """
 
     def _content(self, kib: int, seed: str = "x") -> str:
         return _testutil.content_kib(kib, seed)
 
-    def test_second_30kb_file_is_reviewed_next_turn(self):
+    def stop_timed(self, session_id: str, results, seconds_per_review: float = 0.0) -> str:
+        """1 回の送信ごとに Stop の時計を `seconds_per_review` 秒進めて Stop を起動する。
+
+        `results` は送信順の `cursor.review()` の戻り値 (足りなければ最後の値を使い回す)。
+        """
+        clock = [0.0]
+        calls: list[str] = []
+        answers = list(results)
+
+        def fake_review(diff_text: str, *, cwd: str | None = None):
+            calls.append(diff_text)
+            clock[0] += seconds_per_review
+            return answers.pop(0) if len(answers) > 1 else answers[0]
+
+        with mock.patch.object(self.entry, "_review_clock", side_effect=lambda: clock[0]), \
+                mock.patch.object(self.cursor, "review", side_effect=fake_review):
+            output = self.run_hook(
+                "stop",
+                {"session_id": session_id, "cwd": self.repo, "stop_hook_active": False},
+            )
+        self.review_calls = calls
+        return output
+
+    def reviewed(self, session_id: str) -> list[str]:
+        state_path = os.path.join(
+            self.tmpdir, "post-implementation-review", "state", f"{session_id}.json"
+        )
+        with open(state_path) as f:
+            return sorted(os.path.basename(p) for p in json.load(f)["reviewed"])
+
+    def test_files_beyond_40kb_are_sent_in_the_same_stop(self):
+        """ticket bjk7: 2 つ目の塊を次の Stop まで待たせない。"""
         self.edit(SESSION_A, "a.py", self._content(30))
         self.edit(SESSION_A, "b.py", self._content(30, "y"))
         output = self.stop(SESSION_A, "REVIEW_CLEAN")
 
-        self.assertReviewed("a.py")
-        self.assertNotIn("b.py", self.review_calls[0])
-        self.assertLessEqual(len(self.review_calls[0].encode()), self.entry.MAX_DIFF_BYTES)
-        self.assertEqual(self.pending(SESSION_A), [os.path.join(self.repo, "b.py")])
+        self.assertEqual(len(self.review_calls), 2, "塊ごとに 1 回ずつ送る")
+        self.assertIn("a.py", self.review_calls[0])
+        self.assertIn("b.py", self.review_calls[1])
+        for diff in self.review_calls:
+            self.assertLessEqual(len(diff.encode()), self.entry.MAX_DIFF_BYTES)
+        self.assertEqual(self.pending(SESSION_A), [])
+        self.assertEqual(self.reviewed(SESSION_A), ["a.py", "b.py"])
         message = _parse_output(output)["systemMessage"]
-        self.assertIn("予算に収まらないため次ターンに繰り越し", message)
-        self.assertIn("b.py", message)
+        self.assertIn("2 ファイル, 2 回に分けて送信: cursor=完了 / cursor=完了", message)
+        self.assertNotIn("繰り越し", message)
+
+    def test_chunks_beyond_the_wait_limit_are_carried_with_an_estimate(self):
+        """既定 timeout 300 秒・1 回 120 秒なら 3 回目 (240 秒時点) まで送り、4 回目は繰り越す。
+
+        240 + 300 + 15 <= 600 / 360 + 300 + 15 > 600。
+        """
+        for rel, seed in (("a.py", "a"), ("b.py", "b"), ("c.py", "c"), ("d.py", "d")):
+            self.edit(SESSION_A, rel, self._content(30, seed))
+        output = self.stop_timed(SESSION_A, ["REVIEW_CLEAN"], seconds_per_review=120)
+
+        self.assertEqual(len(self.review_calls), 3)
+        self.assertEqual(self.pending(SESSION_A), [os.path.join(self.repo, "d.py")])
+        self.assertEqual(self.reviewed(SESSION_A), ["a.py", "b.py", "c.py"])
+        message = _parse_output(output)["systemMessage"]
+        self.assertIn("1 ファイルは 1 回の応答終了あたりの待ち時間の上限 (10 分)", message)
+        self.assertIn("あと約 1 回で送り終える見込み", message)
+        self.assertIn("d.py", message)
 
         self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("d.py")
+        self.assertEqual(self.pending(SESSION_A), [])
+
+    def test_long_timeout_sends_only_the_first_chunk(self):
+        """timeout を上限 (600 秒) にすると 2 回目は起動しない (600 + 15 > 600)。"""
+        os.environ["EXTERNAL_AI_POST_REVIEW_TIMEOUT"] = "600"
+        self.edit(SESSION_A, "a.py", self._content(30))
+        self.edit(SESSION_A, "b.py", self._content(30, "y"))
+        self.stop_timed(SESSION_A, ["REVIEW_CLEAN"])
+
+        self.assertReviewed("a.py")
+        self.assertNotIn("b.py", self.review_calls[0])
+        self.assertEqual(self.pending(SESSION_A), [os.path.join(self.repo, "b.py")])
+
+        self.stop_timed(SESSION_A, ["REVIEW_CLEAN"])
         self.assertReviewed("b.py")
         self.assertNotIn("a.py", self.review_calls[0], "a.py は hash 記録済みで再掲されない")
         self.assertEqual(self.pending(SESSION_A), [])
 
     def test_deferred_file_is_not_starved_by_new_edits(self):
         """繰り越したファイルは次ターンの先頭に来る (新しい編集に追い越され続けない)。"""
+        os.environ["EXTERNAL_AI_POST_REVIEW_TIMEOUT"] = "600"  # 1 Stop 1 塊にする
         self.edit(SESSION_A, "a.py", self._content(30))
         self.edit(SESSION_A, "z.py", self._content(30, "y"))
-        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.stop_timed(SESSION_A, ["REVIEW_CLEAN"])
         self.assertReviewed("a.py")
 
         # 次ターンでアルファベット順で先に来る大きな編集を足しても z.py が先
         self.edit(SESSION_A, "b.py", self._content(30, "w"))
-        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.stop_timed(SESSION_A, ["REVIEW_CLEAN"])
         self.assertReviewed("z.py")
         self.assertNotIn("b.py", self.review_calls[0])
         self.assertEqual(self.pending(SESSION_A), [os.path.join(self.repo, "b.py")])
 
-        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.stop_timed(SESSION_A, ["REVIEW_CLEAN"])
         self.assertReviewed("b.py")
         self.assertEqual(self.pending(SESSION_A), [])
+
+    def test_failed_chunk_goes_back_to_pending_and_others_are_recorded(self):
+        self.edit(SESSION_A, "a.py", self._content(30))
+        self.edit(SESSION_A, "b.py", self._content(30, "y"))
+        output = self.stop_timed(SESSION_A, ["REVIEW_CLEAN", None])
+
+        self.assertEqual(len(self.review_calls), 2)
+        self.assertEqual(self.reviewed(SESSION_A), ["a.py"], "失敗した塊は hash を記録しない")
+        self.assertEqual(self.pending(SESSION_A), [os.path.join(self.repo, "b.py")])
+        message = _parse_output(output)["systemMessage"]
+        self.assertIn("cursor=完了 / cursor=失敗", message)
+        self.assertIn("1 ファイルは結果を取得できず (timeout / 失敗)。次ターンに持ち越し: b.py", message)
+        self.assertIn("→ 指摘なし", message)
+
+    def test_findings_from_several_chunks_are_delivered_together(self):
+        self.edit(SESSION_A, "a.py", self._content(30))
+        self.edit(SESSION_A, "b.py", self._content(30, "y"))
+        self.edit(SESSION_A, "c.py", self._content(30, "w"))
+        output = self.stop_timed(SESSION_A, ["- 指摘 A", "REVIEW_CLEAN", "- 指摘 C"])
+
+        parsed = _parse_output(output)
+        context = parsed["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("### 1/2\n\n- 指摘 A", context)
+        self.assertIn("### 2/2\n\n- 指摘 C", context)
+        self.assertEqual(context.count("## 実装直後レビュー結果 (Cursor, 差分レビュー)"), 1)
+        self.assertEqual(self.reviewed(SESSION_A), ["a.py", "b.py", "c.py"])
+        self.assertIn("→ 指摘あり", parsed["systemMessage"])
 
     def test_single_50kb_file_is_truncated_and_marked_reviewed(self):
         self.edit(SESSION_A, "huge.py", self._content(50))
@@ -775,21 +872,22 @@ class TestByteBudgetFlow(HookTestCase):
         self.assertReviewed("huge.py")
 
     def test_carry_over_keeps_claim_order_across_overflow_and_budget(self):
-        """予算超過 (rels の途中) が上限超過 (rels の外) より先に pending へ戻る。"""
+        """送れなかった塊 (rels の途中) が上限超過 (rels の外) より先に pending へ戻る。"""
+        os.environ["EXTERNAL_AI_POST_REVIEW_TIMEOUT"] = "600"  # 1 Stop 1 塊にする
         self.entry.MAX_REVIEW_PATHS = 2
         self.edit(SESSION_A, "a.py", self._content(30))
         self.edit(SESSION_A, "b.py", self._content(30, "y"))
         self.edit(SESSION_A, "c.py", self._content(30, "w"))  # 上限超過で overflow
-        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.stop_timed(SESSION_A, ["REVIEW_CLEAN"])
         self.assertReviewed("a.py")
         self.assertEqual(
             [os.path.basename(p) for p in self.pending(SESSION_A)], ["b.py", "c.py"]
         )
 
-        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.stop_timed(SESSION_A, ["REVIEW_CLEAN"])
         self.assertReviewed("b.py")
         self.assertNotIn("c.py", self.review_calls[0])
-        self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.stop_timed(SESSION_A, ["REVIEW_CLEAN"])
         self.assertReviewed("c.py")
         self.assertEqual(self.pending(SESSION_A), [])
 

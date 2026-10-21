@@ -390,6 +390,58 @@ class TestTotalWaitBudget(unittest.TestCase):
             cursor.MAX_TIMEOUT_SEC + 3 * subproc.KILL_GRACE_SEC,
         )
 
+    def test_later_send_gates_the_first_backend_on_the_stop_clock(self):
+        """2 回目以降の送信 (0.14.0) は第一候補も Stop 全体の残り予算で判定する。
+
+        `started` を渡さないと起点が呼び出しごとに今へ戻り、塊を送るたびに 600 秒を
+        使い直せてしまう (= hook timeout の kill が後始末より先に来る)。
+        """
+        only = _FakeBackend("cursor", 300, "FINDINGS")
+        outcome = self.selection.run_review(
+            "DIFF",
+            cwd=None,
+            chosen=[only],
+            strategy_name=self.selection.STRATEGY_FIXED,
+            now=lambda: 290.0,
+            started=0.0,
+            gate_first=True,
+        )
+        # 290 + 300 + 15 > 600
+        self.assertEqual(only.calls, [], "Stop の残り予算を超えるのに起動した")
+        self.assertEqual(outcome.attempts, [], "何も起動していないことを attempts で返す")
+        self.assertEqual(outcome.skipped, ["cursor"])
+
+    def test_later_send_runs_when_the_stop_clock_allows(self):
+        only = _FakeBackend("cursor", 300, "FINDINGS")
+        outcome = self.selection.run_review(
+            "DIFF",
+            cwd=None,
+            chosen=[only],
+            strategy_name=self.selection.STRATEGY_FIXED,
+            now=lambda: 285.0,
+            started=0.0,
+            gate_first=True,
+        )
+        self.assertEqual(outcome.backend, "cursor")
+
+    def test_fallback_in_a_later_send_uses_the_stop_clock(self):
+        """2 回目以降の送信のフォールバックも、送信ごとではなく Stop の起点から測る。"""
+        first = _FakeBackend("cursor", 100, None)
+        second = _FakeBackend("codex", 300, "FINDINGS")
+        outcome = self.selection.run_review(
+            "DIFF",
+            cwd=None,
+            chosen=[first, second],
+            strategy_name=self.selection.STRATEGY_FIXED,
+            now=lambda: 300.0,
+            started=0.0,
+            gate_first=True,
+        )
+        # cursor: 300 + 100 + 15 <= 600 で起動、codex: 300 + 300 + 15 > 600 で起動しない
+        self.assertEqual(len(first.calls), 1)
+        self.assertEqual(second.calls, [])
+        self.assertEqual(outcome.skipped, ["codex"])
+
     def test_all_backends_share_the_same_timeout_ceiling(self):
         """上限が backend ごとに違うと TTL と hook 予算が選択次第で動く。"""
         ceilings = {r.NAME: r.MAX_TIMEOUT_SEC for r in self.selection.REVIEWERS}

@@ -196,7 +196,8 @@ REVIEW_CLEAN でパスを戻すと、毎ターン同じファイルを再レビ�
 | 作業ツリー外 / ディレクトリ / **入れ子の作業ツリー・git リポジトリ・submodule の中** | 戻さない | 記録しない | なし |
 | **除外** (exclusion.py に当たる) | 戻さない (恒久) | 記録しない | ファイル名 + 理由 |
 | 上限 (`MAX_REVIEW_PATHS`) / 時間予算 (`COLLECT_BUDGET_SEC`) の繰り越し | **戻す** | 記録しない | ファイル名 |
-| 合計予算 (`MAX_DIFF_BYTES`) に収まらない | **戻す** | 記録しない | ファイル名 |
+| 1 回の Stop の待ち時間の上限に収まらず送れなかった塊 (0.14.0) | **戻す** | 記録しない | ファイル名 + 残りの見込み回数 |
+| 塊を送ったが結果が返らなかった (他の塊は返った) | **戻す** | 記録しない | ファイル名 |
 | 1 ファイル上限 (`MAX_FILE_DIFF_BYTES`) 超過 → 先頭のみ送信 | 戻さない | **記録する** (全文の hash) | ファイル名 + バイト数 |
 
 ## 外部に送らないファイルと予算 (0.5.0)
@@ -218,13 +219,39 @@ rev-parse 2秒×2 (worktree_root + head_exists) + ls-files (symlink) 10秒
 
 **予算** は `_collect_diffs` がファイル単位で積む。0.4.1 までは結合後に末尾を切っていたため、
 切り落とされたファイルの hash まで記録され「Cursor が見ていないのにレビュー済み」になっていた。
-収まらないファイルは送らず pending に戻す (hash なし)。1 ファイルが `MAX_FILE_DIFF_BYTES` を
-超える場合だけ先頭を `(truncated)` 付きで送り、その時だけ hash (全文で計算) を記録する。
+1 ファイルが `MAX_FILE_DIFF_BYTES` を超える場合だけ先頭を `(truncated)` 付きで送り、その時だけ
+hash (全文で計算) を記録する。
 
-**順序は claim 順** (`_resolve_paths` はソートしない)。繰り越したパスは claim 順 (予算超過 →
-時間切れ → `MAX_REVIEW_PATHS` の overflow) で 1 回の `record_pending` により空の pending に最初に
-積まれるので次ターンの先頭に来る。`MAX_FILE_DIFF_BYTES <= MAX_DIFF_BYTES` により先頭のファイルは
-必ず収まるため、繰り越しが永久に続くことはない
+**40 KB を超える分は塊に分けて同じ Stop の中で送る (0.14.0)。** 0.13.0 までは 1 塊だけを送り、
+残りを次の Stop へ繰り越していた。Stop は利用者が次に発言して応答が終わるまで来ないので、
+23 ファイル・約 172 KB の実装では完了報告の時点で 17 ファイルが未レビューのまま「指摘なし」と
+並び、見終えるのにさらに 4 回の Stop が要った (bd bjk7)。
+
+- 詰め方は first-fit (収まる最初の塊に入れる)。新しい塊には 1 ファイルが必ず収まる
+- 塊は**順に**送る。待ち時間の上限 (`selection.MAX_TOTAL_TIMEOUT_SEC` + kill 猶予) は
+  **Stop 全体で 1 つ**で、2 回目以降の送信は第一候補も含めて「Stop の起点からの経過 +
+  その backend の timeout + 猶予」が上限に収まるときだけ起動する (`run_review` の
+  `started` / `gate_first`)。`worst_case_wall_sec()` と hooks.json の Stop timeout の
+  予算計算は変わらない。既定 timeout 300 秒・1 回 120 秒なら 3 回 (0 / 120 / 240 秒) 送れる。
+  timeout を上限 600 秒にすると 1 回だけになる (= 0.13.0 と同じ)
+- 結果は塊ごとに確定する。返った塊は hash を記録し、返らなかった塊と送れなかった塊は
+  pending へ戻す。**1 つも返らなければ** 0.13.0 と同じく `restore_claim` で全部戻す。
+  指摘は送信ごとの見出し (`### 1/2`) を付けて 1 つの reason にまとめる
+- 並列には送らない。cursor lock の下で子プロセスは常に 1 つという前提 (「ロックは 2 種類」節) と
+  `subproc` の停止処理を崩さず、外部サービスへの同時負荷も増やさないため
+- 種類 (ソース / テスト / docs) による並べ替えはしない。claim 順が崩れると下の
+  「繰り越しが永久に続かない」論拠が成り立たなくなり、塊を複数送れるようになったことで
+  並べ替えの動機 (中心のファイルが 1 塊に入らない) もほぼ消えた
+- 「今すぐ残りをレビューさせる」コマンドは作っていない。通知は、次の応答の終わりに続きを
+  送ることと、この Stop で送れた回数から見た残りの見込み回数だけを出す
+- commit レビュー (`_collect_commit_diffs`) は窓全体で 1 本のまま。収まらないファイルは
+  送らない (PostToolUse(Bash) の予算は別に固定している)
+
+**順序は claim 順** (`_resolve_paths` はソートしない)。繰り越したパスは claim 順 (送れなかった /
+結果が返らなかった塊 → 時間切れ → `MAX_REVIEW_PATHS` の overflow) で 1 回の `record_pending`
+により空の pending に最初に積まれるので次ターンの先頭に来る。1 塊目は待ち時間の判定を受けずに
+必ず送られ、`MAX_FILE_DIFF_BYTES <= MAX_DIFF_BYTES` により先頭のファイルは 1 塊目に必ず
+収まるため、繰り越しが永久に続くことはない
 (`tests/test_stop_flow.py::TestByteBudgetFlow::test_deferred_file_is_not_starved_by_new_edits`)。
 `MAX_PENDING_PATHS` の上限超過は末尾 (新しい編集) から落とし、先頭の繰り越し分を守る。
 
@@ -278,7 +305,8 @@ cursor 側から導出している (`tests/test_state.py::test_ttl_derives_from_
   `backends.select()` が落として通知に回す (既定の全件へ fallback しない)
 - **時間の境界**: 2 つ目以降は「その backend の `timeout_sec()` + 停止猶予
   (`3 × KILL_GRACE_SEC`)」が `MAX_TOTAL_TIMEOUT_SEC` (= 全 backend の上限の最大) の
-  残り予算に収まるときだけ起動する。**第一候補だけは残り予算を見ずに起動する**ので、
+  残り予算に収まるときだけ起動する。**1 回目の送信の第一候補だけは残り予算を見ずに起動する**
+  (2 回目以降の送信は第一候補も判定する。0.14.0 の塊送信) ので、
   1 回の Stop の最悪待ち時間は `worst_case_wall_sec()` = 615 秒 — 0.11.0 の cursor 単体
   と同じ値で、`hooks.json` の Stop timeout 690 秒の予算計算は変わっていない
   (`tests/test_review_set.py::TestTimeoutBudgets`)
@@ -858,7 +886,7 @@ pytest tests/                          # pytest でも動く (conftest.py で sy
 | コードフェンス付き REVIEW_CLEAN (+ 前置き) を指摘扱いしない | `TestFencedCleanSentinel` (判定規則の網羅は `hooks/_common/tests/test_sentinel.py`) |
 | 機密・非コードファイルの差分を外部に送らない (恒久除外 + 通知) | `TestExclusion` (判定規則の網羅は `tests/test_exclusion.py`) |
 | glob に見えるファイル名で他セッションの差分が混入しない | `TestLiteralPathspecFlow` (git 単体は `test_gitscan.py::TestLiteralPathspec`) |
-| 予算に収まらないファイルをレビュー済みにしない / 巨大ファイルは切り詰めて hash 記録 | `TestByteBudgetFlow` (単体は `test_review_set.py::TestByteBudget`) |
+| 予算に収まらないファイルをレビュー済みにしない / 巨大ファイルは切り詰めて hash 記録 / 40 KB 超は同じ Stop で塊ごとに送る / 待ち時間の上限で送れない塊の繰り越しと見込み回数 / 塊ごとの結果確定 (0.14.0) | `TestByteBudgetFlow` (単体は `test_review_set.py::TestByteBudget`、Stop 全体の時計は `test_selection.py::TestTotalWaitBudget`) |
 | HEAD 基準の diff が空のパス (同一ターン内 commit 等) は復元せず黙って消費せず通知する | `TestSameTurnCommitNotification` (別のローカルの書き手の commit を送らない regression は `test_other_local_writer_commit_is_not_leaked`、内容を変えなかった編集で無関係な履歴を送らない床は `test_noop_edit_does_not_send_an_unrelated_historical_diff`) |
 | しきい値・cooldown の見送りが pending を消費しない | `test_throttle_flow.py::TestMinLines` / `TestCooldown` |
 | レビュー完了を利用者に通知する (本文は混ぜない) | `test_throttle_flow.py::TestCompletionNotice` |

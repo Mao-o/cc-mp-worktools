@@ -340,30 +340,32 @@ class TestByteBudget(ReviewSetTestCase):
         """kib KiB ちょうどの新規ファイルを書く (1 行 64 バイト。行境界の切り詰めが効く diff)。"""
         return write(self.repo, rel, _testutil.content_kib(kib, seed))
 
-    def test_file_that_does_not_fit_is_deferred_without_hash(self):
+    def test_file_that_does_not_fit_goes_to_the_next_chunk(self):
+        """収まらないファイルは送らずに捨てるのではなく次の塊に入れる (0.14.0)。"""
         self._big("a.py", 30)
         self._big("b.py", 30, seed="y")
         batch = self.entry._collect_diffs(self.repo, ["a.py", "b.py"], {})
 
-        self.assertEqual(batch.submitted, [os.path.join(self.repo, "a.py")])
-        self.assertEqual(list(batch.hashes), [os.path.join(self.repo, "a.py")])
-        self.assertEqual(batch.deferred_size, [os.path.join(self.repo, "b.py")])
-        self.assertEqual(batch.deferred, batch.deferred_size)
-        self.assertEqual(batch.truncated, [], "30 KB はファイル上限内なので丸ごと送る")
-        self.assertLessEqual(
-            len("\n".join(batch.sections).encode()), self.entry.MAX_DIFF_BYTES
+        chunks = batch.chunks()
+        self.assertEqual(
+            [[os.path.basename(p) for p in c.submitted] for c in chunks], [["a.py"], ["b.py"]]
         )
+        self.assertEqual(list(chunks[1].hashes), [os.path.join(self.repo, "b.py")])
+        self.assertEqual(batch.deferred, [], "塊に分けたファイルは収集の時点では繰り越さない")
+        self.assertEqual(batch.truncated, [], "30 KB はファイル上限内なので丸ごと送る")
+        for chunk in chunks:
+            self.assertLessEqual(len(chunk.text.encode()), self.entry.MAX_DIFF_BYTES)
 
-    def test_smaller_later_file_still_fits(self):
-        """収まらないファイルを飛ばしても、残り予算に入る後続ファイルは送る (first-fit)。"""
+    def test_smaller_later_file_fills_an_earlier_chunk(self):
+        """後続の小さいファイルは前の塊の残りに入る (first-fit)。"""
         self._big("a.py", 30)
         self._big("b.py", 30, seed="y")
         write(self.repo, "c.py", "tiny\n")
         batch = self.entry._collect_diffs(self.repo, ["a.py", "b.py", "c.py"], {})
         self.assertEqual(
-            [os.path.basename(p) for p in batch.submitted], ["a.py", "c.py"]
+            [[os.path.basename(p) for p in c.submitted] for c in batch.chunks()],
+            [["a.py", "c.py"], ["b.py"]],
         )
-        self.assertEqual([os.path.basename(p) for p in batch.deferred_size], ["b.py"])
 
     def test_single_huge_file_is_truncated_and_hashed(self):
         self._big("huge.py", 50)
