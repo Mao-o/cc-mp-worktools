@@ -368,6 +368,35 @@ class TestHelpersStopBackgroundMaintenance(unittest.TestCase):
         self.assertIn("commit", command_names(events), "前提: trace が取れている (空の床にしない)")
         return spawned_maintenance(events)
 
+    def _commit_without_the_stopping_settings(self, tmp: str) -> list[dict]:
+        """陽性対照の本体。止める設定の無い repo で commit し、trace の event を返す。
+
+        git は、外側の repo を指す変数 (`OUTER_REPO_ENV_NAMES`) を env から外して起動する。床
+        (`isolate_git_config`) が外し損ねても、この起動は外側の repo に commit を書かない (床が外し損ねたことは
+        `TestTheIsolatedEnvStopsNothing` が見るので、ここで外しても検出は消えない)。
+        """
+        os.environ.update(
+            {
+                "GIT_CONFIG_COUNT": "2",
+                "GIT_CONFIG_KEY_0": "maintenance.autoDetach",
+                "GIT_CONFIG_VALUE_0": "false",
+                "GIT_CONFIG_KEY_1": "gc.autoDetach",
+                "GIT_CONFIG_VALUE_1": "false",
+            }
+        )
+        trace = os.path.join(tmp, "trace2.jsonl")
+        os.environ["GIT_TRACE2_EVENT"] = trace
+        env = {k: v for k, v in os.environ.items() if k not in OUTER_REPO_ENV_NAMES}
+        repo = os.path.join(tmp, "repo")
+        os.makedirs(repo)
+        for args in (
+            ["init", "-q", "-b", "main"],
+            ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false",
+             "commit", "--allow-empty", "-qm", "x"],
+        ):
+            subprocess.run(["git", *args], cwd=repo, env=env, check=True, capture_output=True)
+        return trace_events(trace)
+
     def test_the_trace_sees_maintenance_when_nothing_stops_it(self):
         """陽性対照: 止める設定が無い commit では、maintenance の起動が trace に見えること。
 
@@ -377,28 +406,40 @@ class TestHelpersStopBackgroundMaintenance(unittest.TestCase):
         """
         with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
             isolate_git_config(tmp)
-            os.environ.update(
-                {
-                    "GIT_CONFIG_COUNT": "2",
-                    "GIT_CONFIG_KEY_0": "maintenance.autoDetach",
-                    "GIT_CONFIG_VALUE_0": "false",
-                    "GIT_CONFIG_KEY_1": "gc.autoDetach",
-                    "GIT_CONFIG_VALUE_1": "false",
-                }
-            )
-            trace = os.path.join(tmp, "trace2.jsonl")
-            os.environ["GIT_TRACE2_EVENT"] = trace
-            repo = os.path.join(tmp, "repo")
-            os.makedirs(repo)
+            events = self._commit_without_the_stopping_settings(tmp)
+        self.assertIn("commit", command_names(events), "前提: trace が取れている (空の床にしない)")
+        self.assertNotEqual(spawned_maintenance(events), [])
+
+    def test_the_positive_control_does_not_write_to_an_outer_repo(self):
+        """床が外側の repo を指す変数を外し損ねても、陽性対照の commit は外側の repo に書かれないこと。
+
+        git の hook の中から suite を流すと、外側の env に `GIT_DIR` などが入る。床を作った後で外側の本物の
+        repo を指す変数を足して (床の外し損ねの再現)、陽性対照を流す。外側の repo の commit が増えず、
+        対照自身の commit は trace に見えること。
+        """
+        with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
+            isolate_git_config(tmp)
+            outer = os.path.join(tmp, "outer")
+            os.makedirs(outer)
+            clean = {k: v for k, v in os.environ.items() if k not in OUTER_REPO_ENV_NAMES}
             for args in (
                 ["init", "-q", "-b", "main"],
                 ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false",
-                 "commit", "--allow-empty", "-qm", "x"],
+                 "commit", "--allow-empty", "-qm", "outer"],
             ):
-                subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
-            events = trace_events(trace)
-        self.assertIn("commit", command_names(events), "前提: trace が取れている (空の床にしない)")
-        self.assertNotEqual(spawned_maintenance(events), [])
+                subprocess.run(["git", *args], cwd=outer, env=clean, check=True, capture_output=True)
+            before = git_in(clean, outer, ["rev-list", "--all", "--count"])
+            self.assertEqual(before, (0, "1\n"), "前提: 外側の repo に commit が 1 件ある")
+            os.environ["GIT_DIR"] = os.path.join(outer, ".git")
+            os.environ["GIT_WORK_TREE"] = outer
+            try:
+                events = self._commit_without_the_stopping_settings(tmp)
+            except subprocess.CalledProcessError as e:
+                # 外側の変数が一部残ると、対照の git 自身が失敗することがある。crash ではなく失敗として数える
+                self.fail(f"外側の repo を指す変数が対照の git に残っている: {e.cmd[1:3]}")
+            after = git_in(clean, outer, ["rev-list", "--all", "--count"])
+        self.assertIn("commit", command_names(events), "前提: 対照の commit が trace に見える")
+        self.assertEqual(after, before)
 
     def test_repo_made_without_any_env_patch(self):
         self.assertEqual(self._spawned_while_making_a_marketplace(without_the_global_fixture=False), [])
