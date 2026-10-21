@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.1
+
+テストの整理 (挙動の変更なし。patch bump)。
+
+### Changed
+
+- `test_hermetic_env.py` の陽性対照 (止める設定が無い commit で maintenance の起動が trace に見えることを確かめる
+  テスト) が起動する git から、外側の repo を指す変数 (`GIT_DIR` / `GIT_WORK_TREE` など 10 個) を外した。
+  床 (`isolate_git_config`) がこれらを外し損ねる退行があると、git の hook の中から suite を流したときに
+  外側の repo へ commit が書き込まれていた。床の外し損ねは `TestTheIsolatedEnvStopsNothing` が別に検出するので、
+  ここで外しても検出は消えない
+- 回帰テスト `test_the_positive_control_does_not_write_to_an_outer_repo` を追加: 床の後で本物の別 repo を指す
+  `GIT_DIR` / `GIT_WORK_TREE` を足して陽性対照を流し、別 repo の commit 数が不変であることを確かめる。
+  外側の repo の refs と objects のどちらに書いても落ちる
+
 ## 0.3.0
 
 `claude plugin validate` の plugin directory checks を FAIL に数えないようにした (minor bump)。
