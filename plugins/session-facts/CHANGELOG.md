@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.3
+
+icon と導入手順の追加 (挙動の変更なし、patch bump)。
+
+- plugin の icon (`assets/icon.png`) を足した。`claude plugin validate` の plugin directory checks が出す `ICON_MISSING` を解消する
+
 ## 0.12.2
 
 **テスト整理 (挙動の変更なし)。テストが作る git repo で、背景へ切り離される自動 maintenance を止めた (patch bump)。** 製品コード・`hooks.json`・README の挙動は変わらない。
