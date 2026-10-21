@@ -319,7 +319,7 @@ aws / gcloud / firebase には CLI 自身に公式の仕組みがあるので、
 | aws | `AWS_PROFILE` | `.claude/settings.local.json` の `env` | そのリポジトリ (全 worktree 共通) |
 | gcloud | `CLOUDSDK_ACTIVE_CONFIG_NAME` (名前付き構成)。一致する構成が無ければ `CLOUDSDK_CORE_PROJECT` / `CLOUDSDK_CORE_ACCOUNT` | 同上 | 同上 |
 | kubectl | `KUBECONFIG` (そのリポジトリ用の kubeconfig。skill と `pin-env` は未対応なので手で書く) | 同上 | 同上 |
-| firebase | `firebase use <alias>` (アカウントは `firebase login:use <email>`) | firebase-tools が作業ディレクトリごとに記録 | そのディレクトリ |
+| firebase | `firebase use <alias>` (アカウントは `firebase login:use <email>`) | firebase-tools が project root (firebase.json のあるディレクトリ。`--config` があればそのファイルのディレクトリ) ごとに記録 | その project root |
 | gh | プロジェクトごとに安全に分けられる公式の方法が無い | — | [自動切替](#自動切替-auto-switch--v0160) (マシン全体) を使う |
 
 ```jsonc
@@ -362,7 +362,8 @@ settings.local.json は書かない)、書く前に確認してから設定す�
   するかは自分で選ぶ。固定してもログインはしない (SSO のトークンが切れていれば
   `aws sso login --profile <profile>`)
 - **firebase**: project を選ぶ環境変数が無い (公式 docs に記載なし)。`firebase use`
-  の記録は作業ディレクトリごとなので、別の worktree では最初に 1 回要ることがある。
+  の記録は project root (firebase.json のあるディレクトリ) ごとなので、別の worktree では最初に 1 回要ることがある。
+  firebase.json の無いサブディレクトリで実行すると親の project root に記録され、兄弟のディレクトリにも効く。
   VCA は firebase のアカウントは検証しない。`firebase use` は引数を `.firebaserc` の
   alias として先に解決するので、`pin-env` はこのディレクトリの `.firebaserc` で期待した
   project に解決される alias を案内し、無ければ期待値の project ID で案内する (v0.17.1)。
@@ -708,7 +709,7 @@ firebase-tools は configstore の切替先が無いと、`.firebaserc` の alia
 にする (firebase-tools と同じ。v0.18.0)。`firebase use` の cwd と、ローカル設定から解決する
 ときの起点がそこに移る (`firebase use` にも同じ `--config` を付ける。ローカル設定の切替先は、
 firebase-tools と同じく symlink を解かないそのパスの親方向だけを探す)。firebase-tools は
-`firebase use` の切替先をディレクトリごとに記録し、`--config` 付きのコマンドはそのファイルの
+`firebase use` の切替先を project root ごとに記録し、`--config` 付きのコマンドはそのファイルの
 あるディレクトリから親へ探した切替先で動く。そのディレクトリがプロジェクトのディレクトリと
 別で、そこに切替先が記録されていると、プロジェクトのディレクトリで切り替えても変わらない。
 このため `--config` 付きのコマンドの deny は、切替をコマンドの形で案内せず、そのファイルの
@@ -1117,7 +1118,9 @@ worktree 内に同名ファイルを置く必要は無い。
     としては辿らない**
   - **非互換**: repo の toplevel より上 (複数 repo を束ねる親ディレクトリ)、
     submodule から見た superproject、`$HOME` に置いた設定は継承されなくなる
-    (未設定の扱い。書込は deny、リモート read のみのコマンドは警告)。**別の repo の中に
+    (`$HOME` の固定パス `~/.claude/cloud-account-guard/accounts.local.json`
+    (グローバル既定。v0.13.0 から。0.22.0 までは `~/.claude/verify-cloud-account/` 側) が
+    あればそれで検証する。無ければ未設定の扱い。書込は deny、リモート read のみのコマンドは警告)。**別の repo の中に
     置いた linked worktree から、その外側 repo の設定を継承していた場合も同じ**
     (worktree root で止まる)。各 repo の toplevel に複製するか `--path` で明示する
 - 親採用時は deny / warn メッセージに `accounts.local.json は親ディレクトリ

@@ -2718,7 +2718,7 @@ class TestAccountSwitchInvalidation(BaseWithTmpProject):
                 self.assertEqual(v.call_count, 1)
 
     def test_switch_invalidates_even_without_accounts_file(self):
-        """accounts 未設定 (deny) の状態でも切替コマンドは cache を破棄する
+        """accounts 未設定 (書込は deny) の状態でも切替コマンドは cache を破棄する
         (設定追加 → 切替 → write の順でも古い成功が残らない)。"""
         from core import cache
 

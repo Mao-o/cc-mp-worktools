@@ -259,7 +259,17 @@ def conflicting_switch(
 def record_switch(
     service_name: str, steps, project_dir: str, now_ns: int | None = None
 ) -> None:
-    """自動切替した対象を記録する (ベストエフォート。書けなくても判定は変えない)。"""
+    """自動切替した対象を記録する (ベストエフォート。書けなくても判定は変えない)。
+
+    書き戻しは `ensure_ascii` (既定) で ASCII にする。JSON の `\\ud800` のような孤立
+    サロゲートを含む entry は読めるが、`ensure_ascii=False` では UTF-8 で書けず
+    (`UnicodeEncodeError`)、以後の記録がすべて書けなくなって並行セッションのガード
+    (`conflicting_switch`) が黙って働かなくなる。エスケープすれば書け、読み戻しても同じ値になる。
+
+    それでも書けないとき (OSError、入れ子が深すぎる記録の `json.dumps` の `RecursionError`
+    など) は記録が書けなかっただけにする。呼び出しは `apply_switch` の後なので、例外が
+    `attempt` の外まで抜けると、切り替え済みなのに「自動切替は行いませんでした」と通知する。
+    """
     path = _guard_path(service_name)
     if path is None:
         return
@@ -268,8 +278,8 @@ def record_switch(
     for target, _current, want in steps:
         records[target] = {"value": want, "project": project_dir, "at_ns": now}
     try:
-        cache.write_state(path, json.dumps(records, ensure_ascii=False))
-    except OSError:
+        cache.write_state(path, json.dumps(records))
+    except (OSError, ValueError, RecursionError):
         pass
 
 

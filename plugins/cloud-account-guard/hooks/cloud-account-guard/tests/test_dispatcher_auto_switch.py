@@ -21,7 +21,7 @@ from unittest import mock
 
 import _testutil  # noqa: F401
 
-from core import auto_switch, budget  # noqa: E402
+from core import auto_switch, budget, cache  # noqa: E402
 from core.dispatcher import dispatch  # noqa: E402
 
 _ISOLATION = None
@@ -361,8 +361,49 @@ class TestConcurrentSessionGuard(AutoSwitchBase):
             self._context(self._dispatch("gh pr create"))
         self.assertEqual(self.gh.active["github.com"], "Mao-o")
 
+    def test_record_that_can_be_read_but_not_written_back_does_not_hide_the_switch(self):
+        """別 target の記録に孤立サロゲート (`\\ud800`) があると、JSON としては読めるが
+        そのまま UTF-8 では書き戻せない。切り替えた後の記録の書き戻しで例外
+        (`UnicodeEncodeError`) が漏れると「自動切替は内部エラーのため行いませんでした」と通知されるが、アカウントは
+        実際には切り替わっている。通知は切り替えた事実と一致していなければならない。"""
+        guard = cache.service_state_path("github", ".autoswitch.json")
+        guard.write_text(
+            '{"other.example.com": {"value": "\\ud800", "project": "/x", "at_ns": 1}}',
+            encoding="utf-8",
+        )
+        self._write_accounts({"github": "Mao-o"})
+        with self._enabled():
+            context = self._context(self._dispatch("gh pr create --fill"))
+        self.assertEqual(self.gh.active["github.com"], "Mao-o", "前提: 実際に切り替わっている")
+        self.assertNotIn("内部エラー", context)
+        self.assertIn("github.com: work → Mao-o", context)
+
     def test_ping_pong_between_two_projects_is_stopped_on_the_second_flip(self):
         """別アカウントを期待する 2 プロジェクトが交互に切り替えない。"""
+        other = Path(self.tmp) / "other"
+        (other / ".claude" / "cloud-account-guard").mkdir(parents=True)
+        (other / ".claude" / "cloud-account-guard" / "accounts.local.json").write_text(
+            json.dumps({"github": "work"}), encoding="utf-8"
+        )
+        self._write_accounts({"github": "Mao-o"})
+        with self._enabled():
+            self._context(self._dispatch("gh pr create"))  # work → Mao-o
+            with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(other)}), \
+                    mock.patch("subprocess.run", side_effect=self.gh):
+                result = dispatch("gh pr create", str(other))
+        reason = self._deny_reason(result)
+        self.assertIn(str(self.project_dir), reason)
+        self.assertEqual(self.gh.active["github.com"], "Mao-o", "2 回目の切替で戻している")
+
+    def test_ping_pong_is_stopped_even_with_a_record_that_has_a_lone_surrogate(self):
+        """別 target の記録に孤立サロゲート (`\\ud800`) があっても、記録は書き戻せて
+        ガードが働き続ける (UTF-8 で書こうとして毎回失敗すると記録が増えず、2 回目の
+        切替が黙って通る)。"""
+        guard = cache.service_state_path("github", ".autoswitch.json")
+        guard.write_text(
+            '{"other.example.com": {"value": "\\ud800", "project": "/x", "at_ns": 1}}',
+            encoding="utf-8",
+        )
         other = Path(self.tmp) / "other"
         (other / ".claude" / "cloud-account-guard").mkdir(parents=True)
         (other / ".claude" / "cloud-account-guard" / "accounts.local.json").write_text(

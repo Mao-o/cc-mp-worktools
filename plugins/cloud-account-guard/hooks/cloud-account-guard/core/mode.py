@@ -11,7 +11,7 @@
 
 | mode | 挙動 |
 |---|---|
-| `enforce` (既定) | 従来どおり。不一致・未設定・競合はすべて deny |
+| `enforce` (既定) | 従来どおり。不一致・未設定・競合を deny (リモート read だけの QUERY tier は、不一致・未設定なら警告して通す。core/tiers.py) |
 | `warn` | 検証は走らせ、deny 相当の結果を `additionalContext` (通知のみ) で返す |
 | `off` | 検証そのものを行わない (CLI も起動しない) |
 

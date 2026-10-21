@@ -334,10 +334,14 @@ class TestPlanFirebase(_TmpBase):
         self.assertIn("project ID は 2 個あり", joined)  # mm-shadowed は除かれている
         self.assertNotIn("accounts-show", joined)
 
-    def test_notes_say_it_is_per_directory_and_account_is_not_verified(self):
+    def test_notes_say_it_is_per_project_root_and_account_is_not_verified(self):
         plan = pin_env.plan_firebase("fb-dev", self._project({"default": "fb-dev"}))
         joined = "\n".join(plan.notes)
-        self.assertIn("作業ディレクトリごと", joined)
+        self.assertIn("project root", joined)
+        self.assertIn("firebase.json のあるディレクトリ", joined)
+        self.assertNotIn("作業ディレクトリごと", joined)
+        self.assertIn("firebase login:use <email> でこの project root 用に選べます", joined)
+        self.assertNotIn("このディレクトリ用", joined)
         self.assertIn("worktree", joined)
         self.assertIn("VCA は firebase のアカウントは検証しません", joined)
 
