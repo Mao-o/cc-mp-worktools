@@ -94,6 +94,13 @@ field が抜ける)。
 | Docs | `docs/generic-llms-txt-source.md` (任意の `llms.txt` サイト対応のコスト見積り) |
 | Test | `scripts/tests/legacy/` (0.45.0 までの専用 script の実装。移行の比較の基準として shim の削除まで残す。実行時には使わない) |
 
+## インストール
+
+```
+/plugin marketplace add Mao-o/cc-mp-worktools
+/plugin install llms-docs@mao-worktools
+```
+
 ## 前提条件
 
 - `python3` (**3.11+ 必須**) — `parse-*.py` は PEP 604 記法 (`list[X]` / `X | None`) を定義時に評価するため、3.11 未満 (例: macOS 標準の `/usr/bin/python3` = 3.9 系) では起動直後に `TypeError: unsupported operand type(s) for ...` で失敗する。marketplace 横断方針により 3.9 互換 shim は追加しない — `mise use python@3.11` 等で新しい `python3` を用意すること。`scripts/_common.py` の `from __future__ import annotations` は既存のまま (3.9 互換化が目的ではない)

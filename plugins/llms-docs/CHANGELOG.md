@@ -22,6 +22,7 @@ All notable changes to this plugin will be documented here.
   golden の更新が要るため別件)
 - テスト: `hit_candidates` の別 source の 3 件、0 件時の `Next:` 行の `--` の位置 (3 種の行、`-` あり / なし)、
   members の 0 件時の往復 (`-` / `--` 始まりの query) を追加。件数 1156 -> 1162
+- README に marketplace からの導入手順 (`/plugin install llms-docs@mao-worktools`) の節を追加 (`claude plugin validate` の plugin directory warning の解消。挙動の変更なし)
 
 ## [0.47.0] - 2026-10-16
 
