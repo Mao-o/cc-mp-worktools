@@ -195,7 +195,8 @@ basename / command 文字列を絶対に渡さない**。渡してよいのは�
   消えるので、追加時は「その記録が無いと docs のどの主張が嘘になるか」を
   書けるかで判断する
 - Stop hook の once-only state (`~/.claude/sensitive-files-guardrail/stop-ack/`)
-  も平文 path を持たず sha256 digest のみ (0.19.0)
+  も平文 path を持たず sha256 digest のみ (0.19.0)。再帰防止の印
+  (`stop-continued/<session_id>`、0.36.0) は中身の無い空ファイル
 - `permissionDecisionReason` も同じ原則: 値は出さず、鍵名・型・status・長さ・
   basename までに留める (`docs/DESIGN.md` の設計原則 2)
 - `hookSpecificOutput.additionalContext` (0.33.0) は **lenient allow の開示専用**

@@ -461,7 +461,7 @@ class TestMainInternalError(BaseMainTest):
         self.assertNotIn("/secret/path", err)
         self.assertNotIn("/secret/path", out)
 
-    def _run_with_broken_stdout(self, envelope: dict, exc: Exception,
+    def _run_with_broken_stdout(self, envelope: dict, exc: BaseException,
                                 *, partial: str = "") -> tuple[int, str, str]:
         """block 出力の ``write_stdout`` が失敗する状況を注入する。
 
@@ -515,6 +515,23 @@ class TestMainInternalError(BaseMainTest):
         self.assertEqual(out, '{"decision": "bl')  # 追記なし (連結 JSON にならない)
         self.assertIn("internal_error: OSError", err)
 
+    def test_interrupted_emit_leaves_no_continued_marker(self):
+        """送出中の中断 (``KeyboardInterrupt`` は ``Exception`` ではない) でも印を残さない。
+
+        ``except Exception`` に狭めると中断で印が残り、次の継続中の Stop を
+        1 回黙って skip する。
+        """
+        (self.repo / ".env").write_text("KEY=v\n")
+        env = {"cwd": str(self.repo), "session_id": "sess-kbi"}
+        with self.assertRaises(KeyboardInterrupt):
+            self._run_with_broken_stdout(env, KeyboardInterrupt())
+        self.assertFalse(
+            (
+                self.home_dir / ".claude" / "sensitive-files-guardrail"
+                / "stop-continued" / "sess-kbi"
+            ).exists()
+        )
+
     def test_failed_emit_does_not_ack_the_session(self):
         """送出に失敗したターンは ack しない → 次ターンで再 block (順序の回帰)。
 
@@ -525,8 +542,17 @@ class TestMainInternalError(BaseMainTest):
         env = {"cwd": str(self.repo), "session_id": "sess-emit-fail"}
         rc1, out1, _ = self._run_with_broken_stdout(env, OSError("stdout closed"))
         self.assertEqual((rc1, out1), (1, ""))
-        rc2, out2, err2 = _run_main(env)
+        # 送出できなかった block は継続を生まないので、継続の印も残さない (0.36.0)
+        self.assertFalse(
+            (
+                self.home_dir / ".claude" / "sensitive-files-guardrail"
+                / "stop-continued" / "sess-emit-fail"
+            ).exists()
+        )
+        # 出力に失敗した後の継続中の Stop でも block が出る (印で skip しない)
+        rc2, out2, err2 = _run_main({**env, "stop_hook_active": True})
         self.assertEqual(rc2, 0)
+        self.assertTrue(out2.strip(), "送出失敗後の継続中の Stop で block が出ない")
         self.assertEqual(json.loads(out2)["decision"], "block")
         self.assertNotIn("internal_error", err2)
 
@@ -1068,15 +1094,132 @@ class TestMainSessionAck(BaseMainTest):
         self.assertEqual(out, "")
         self.assertNotIn("local_patterns_header_invalid", err)
 
-    def test_stop_hook_active_still_wins(self):
+    def test_stop_hook_active_from_another_hook_still_reports(self):
+        # 0.36.0: この hook が直前に block していない継続 (``/goal`` など) では
+        # ``stop_hook_active=true`` でも報告する (0.35 までは一律に skip していた)
         self._track(".env")
         env = {
             "cwd": str(self.repo),
             "session_id": "sess-8",
             "stop_hook_active": True,
         }
-        self.assertEqual(_run_main(env)[1], "")
-        self.assertFalse(self._state_dir().exists())
+        self.assertTrue(self._blocked(_run_main(env)[1]))
+        self.assertTrue((self._state_dir() / "sess-8").is_file())
+
+
+class TestMainRecursionGuard(BaseMainTest):
+    """0.36.0: ``stop_hook_active`` で skip するのは「直前の Stop でこの hook が
+    block を返した」ときだけ。
+
+    ``/goal`` の継続中の Stop は 2 ターン目以降 ``stop_hook_active=true`` で届く
+    (CLI 2.1.306 で実測)。0.35 までは true で一律に skip していたので、ゴールの
+    終わりまで報告が出なかった。各テストは「新しい機密ファイルを足す」ことで、
+    報告済み集合 (once-only) による沈黙と再帰防止による沈黙を区別する。
+    """
+
+    SID = "sess-rg"
+
+    def _marker(self) -> Path:
+        return (
+            self.home_dir / ".claude" / "sensitive-files-guardrail"
+            / "stop-continued" / self.SID
+        )
+
+    def _stop(self, *, continuing: bool, cwd: str | None = None) -> str:
+        rc, out, _ = _run_main({
+            "cwd": cwd if cwd is not None else str(self.repo),
+            "session_id": self.SID,
+            "stop_hook_active": continuing,
+        })
+        self.assertEqual(rc, 0)
+        return out
+
+    @staticmethod
+    def _blocked(out: str) -> bool:
+        return bool(out.strip()) and json.loads(out)["decision"] == "block"
+
+    def test_skip_right_after_own_block_then_report_on_goal_continuation(self):
+        (self.repo / ".env").write_text("KEY=v\n")
+        self.assertTrue(self._blocked(self._stop(continuing=False)))
+        self.assertTrue(self._marker().is_file())
+        # この hook の block による継続: 新しいファイルがあっても skip (再帰しない)
+        (self.repo / ".env.local").write_text("KEY=v\n")
+        self.assertEqual(self._stop(continuing=True), "")
+        self.assertFalse(self._marker().exists())
+        # 次は /goal による継続: 印は消えているので報告する
+        out = self._stop(continuing=True)
+        self.assertTrue(self._blocked(out))
+        self.assertIn(".env.local", json.loads(out)["reason"])
+        # その block による継続の Stop はまた skip
+        (self.repo / ".env.production").write_text("KEY=v\n")
+        self.assertEqual(self._stop(continuing=True), "")
+
+    def test_marker_consumed_on_non_continuing_stop(self):
+        # block 後の Stop が中断などで来ず、次が新しいターンの Stop (false) だった
+        # 場合も印は消える。残すと後の /goal の継続を 1 回取りこぼす
+        (self.repo / ".env").write_text("KEY=v\n")
+        self.assertTrue(self._blocked(self._stop(continuing=False)))
+        self.assertEqual(self._stop(continuing=False), "")  # 報告済み集合で沈黙
+        self.assertFalse(self._marker().exists())
+        (self.repo / ".env.local").write_text("KEY=v\n")
+        self.assertTrue(self._blocked(self._stop(continuing=True)))
+
+    def test_marker_consumed_before_early_returns(self):
+        # cwd が git 管理外の Stop でも印は消える (早期 return より前で読む)
+        (self.repo / ".env").write_text("KEY=v\n")
+        self.assertTrue(self._blocked(self._stop(continuing=False)))
+        non_git = Path(self.tmp) / "not-a-repo"
+        non_git.mkdir()
+        self.assertEqual(self._stop(continuing=False, cwd=str(non_git)), "")
+        self.assertFalse(self._marker().exists())
+        (self.repo / ".env.local").write_text("KEY=v\n")
+        self.assertTrue(self._blocked(self._stop(continuing=True)))
+
+    def test_no_marker_when_nothing_reported(self):
+        (self.repo / "README.md").write_text("# hi\n")
+        self.assertEqual(self._stop(continuing=False), "")
+        self.assertFalse(self._marker().exists())
+
+    def test_invalid_session_id_keeps_blanket_skip(self):
+        # 印を持てない (session_id が不正) ときは 0.35 までと同じく一律に skip
+        (self.repo / ".env").write_text("KEY=v\n")
+        rc, out, _ = _run_main({
+            "cwd": str(self.repo), "session_id": "../evil",
+            "stop_hook_active": True,
+        })
+        self.assertEqual((rc, out), (0, ""))
+        self.assertFalse((self.home_dir / ".claude").exists())
+
+    def test_marker_take_failure_skips_continuing_stop(self):
+        # 印を消せない (ここではディレクトリ) ときは再帰防止側 = skip に倒す
+        (self.repo / ".env").write_text("KEY=v\n")
+        self._marker().mkdir(parents=True)
+        rc, out, err = _run_main({
+            "cwd": str(self.repo), "session_id": self.SID,
+            "stop_hook_active": True,
+        })
+        self.assertEqual((rc, out), (0, ""))
+        self.assertIn("stop_ack_unavailable: continued_take:", err)
+
+    def test_unwritable_home_does_not_recurse(self):
+        # 印を立てられない HOME: 自分の block による継続で再 block しない。
+        # chmod は Windows と root では書込みを止められないので使わず、印の作成
+        # (``Path.touch``) を失敗させる。印は不在のまま (take は FileNotFound =
+        # 「印なし」) なので、継続中の Stop を skip するのは record 失敗の分岐だけ
+        (self.repo / ".env").write_text("KEY=v\n")
+        with mock.patch.object(Path, "touch", side_effect=PermissionError("denied")):
+            self.assertTrue(self._blocked(self._stop(continuing=False)))
+            self.assertFalse(self._marker().exists())
+            # 新しい機密ファイルがあっても (報告済み集合では黙らない)、継続中は出さない
+            (self.repo / ".env.local").write_text("KEY=v\n")
+            rc, out, err = _run_main({
+                "cwd": str(self.repo), "session_id": self.SID,
+                "stop_hook_active": True,
+            })
+        self.assertEqual((rc, out), (0, ""))
+        self.assertIn("stop_ack_unavailable: continued_save:", err)
+        # 継続でない Stop では出す (skip は継続中の Stop に限る)
+        self.assertTrue(self._blocked(self._stop(continuing=False)))
 
 
 # 0.26.0 (予算導入前) の ``_build_reason(tracked=[".env"],

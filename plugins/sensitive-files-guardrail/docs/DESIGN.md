@@ -1272,7 +1272,9 @@ reason の byte 予算 (`core.output.MAX_REASON_BYTES` = 3KB) の扱い:
 
 | ケース | 判定 |
 |---|---|
-| `stop_hook_active=true` | exit 0 (ループ防止) |
+| `stop_hook_active=true` かつ直前の Stop でこの hook が block した (0.36.0) | exit 0 (ループ防止) |
+| `stop_hook_active=true` かつ `session_id` が無い / 不正 | exit 0 (ループ防止。印を持てないので 0.35 までと同じく一律) |
+| `stop_hook_active=true` だが直前の Stop でこの hook は block していない (`/goal` などの継続、0.36.0) | 通常どおり判定する (下の行) |
 | cwd が git 管理下でない | exit 0 |
 | tracked でパターン一致 | `decision: block` (`.gitignore` 済みでも) |
 | untracked でパターン一致 + `.gitignore` 未登録 | `decision: block` |
@@ -1284,6 +1286,37 @@ reason の byte 予算 (`core.output.MAX_REASON_BYTES` = 3KB) の扱い:
 | 時間予算 (12s) 超過 + 検出 0 件 (0.32.0) | **exit 0 + stderr `git_budget_exceeded` / `scan_incomplete` + `systemMessage`** (block しない)。「機密なし」の沈黙と区別できないため必ず見せる |
 | 時間予算 (12s) 超過 + 検出 1 件以上 (0.32.0) | `decision: block` (従来どおり) + reason 冒頭に「一覧は不完全です」 |
 | 時間予算 (12s) 超過 + 検出集合 ⊆ 同一 session で報告済みの集合 (0.32.0) | **exit 0 + stderr `scan_incomplete` + `systemMessage`** (block しない)。拾えたのは部分集合なので、黙ると「完走して新規なし」の沈黙と区別できない |
+
+#### 再帰防止の範囲 (0.36.0)
+
+`stop_hook_active` は「この Stop の前に**どれかの** Stop hook がターンを継続させた」
+ことしか示さない。`/goal` は session スコープの Stop hook でターンを継続させるので、
+その 2 ターン目以降の Stop も true で届く (nested `claude -p "/goal ..."`、CLI 2.1.306
+で実測: 1 ターン目 false、2・3 ターン目 true。どの Stop hook も出力を返さず、継続
+させたのは `/goal` だけ)。0.35 までは true で一律に exit 0 していたため、ゴールの
+終わりまで Stop の報告が 1 回も出なかった。
+
+0.36.0 から skip するのは次の 2 つだけ:
+
+- **直前の Stop でこの hook が block を返したとき**。block を送出する直前に
+  `~/.claude/sensitive-files-guardrail/stop-continued/<session_id>` (空ファイル) を
+  立て (送出に失敗したら `discard_continued` で消す)、**毎回の Stop で読んで消す**
+  (`stop_ack.take_continued` / `record_continued`)。`stop_hook_active` が false の Stop や、cwd が git 管理外で
+  早期 return する Stop でも消す — 消すのを skip のときだけにすると、block 後の
+  Stop が中断で来なかった場合に印が残り、後の `/goal` の継続を取りこぼす。
+  印を消せない (OSError) ときは skip 側に倒す (再帰防止を外さない)。印を立て
+  られないときは stderr に `stop_ack_unavailable: continued_save:<Exc>` を出し、
+  この Stop が `stop_hook_active=true` なら block を出さずに skip する (0.35 と同じ側。
+  印が無いと次の Stop で自分の継続を見分けられず、報告済み集合も書けない HOME では
+  同じ集合で block を繰り返すため)
+- **`session_id` が無い / 不正なとき** (印を持てないので 0.35 までと同じく一律)
+
+保護そのもの (Read / Bash / Edit / Write / Grep) は PreToolUse 側にあり、この変更は
+Stop の報告が出るタイミングだけを変える。報告済み集合 (once-only) はそのまま効くので、
+`/goal` の継続中に同じ集合で毎ターン block することはない (報告済み集合を HOME に
+保存できる場合。継続の印を立てられないときは、stop_hook_active=true の Stop で
+0.35 と同じく skip する。stop-ack だけを保存できない環境では、/goal の継続中に
+同じ集合が 1 ターンおきに再報告されうる)。
 
 #### session 単位の once-only (0.19.0)
 
