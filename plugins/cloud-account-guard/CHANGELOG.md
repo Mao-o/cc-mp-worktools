@@ -18,6 +18,10 @@ builder の `--commit` (init / set / remove / migrate / auto-switch) が、利�
 - 変えないもの: 期待値ファイルの書き込み先と内容、`.gitignore` が無いときに作らないこと、
   既存の CLAUDE.md を上書きしないこと、hook の判定
 
+### Added
+
+- plugin の icon (`assets/icon.png`) を足した。`claude plugin validate` の plugin directory checks が出す `ICON_MISSING` を解消する
+
 ## 0.23.0
 
 ### Changed: plugin 名を verify-cloud-account から cloud-account-guard に変える
