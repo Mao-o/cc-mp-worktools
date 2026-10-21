@@ -22,6 +22,7 @@ import json
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -1147,6 +1148,234 @@ class TestGitignore(BaseBuilder):
         self.assertEqual(code, 0)
         content = self._gitignore().read_text(encoding="utf-8")
         self.assertIn(".claude/cloud-account-guard/accounts.local.json", content)
+
+
+_ACCOUNTS_REL = ".claude/cloud-account-guard/accounts.local.json"
+_SIGNPOST_REL = ".claude/cloud-account-guard/CLAUDE.md"
+
+
+@unittest.skipUnless(shutil.which("git"), "git が無い環境")
+class TestGitIgnoreAware(BaseBuilder):
+    """.gitignore の追記と signpost (CLAUDE.md) の生成を、git の ignore 判定で決める。
+
+    - 既に ignore 済み (`*.local.json` などのパターン・`.git/info/exclude`・
+      グローバルの excludesFile) なら .gitignore を変えない
+    - signpost は、生成先が git で ignore されていないときは作らない
+      (利用者のリポジトリにコミットされうるファイルを増やさない)
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.global_config = Path(self.tmp) / "gitconfig"
+        self.global_config.write_text("", encoding="utf-8")
+        patcher = mock.patch.dict(
+            os.environ,
+            {"GIT_CONFIG_GLOBAL": str(self.global_config), "GIT_CONFIG_NOSYSTEM": "1"},
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"):
+            os.environ.pop(name, None)
+        self._git("init", "-q")
+
+    def _git(self, *args: str) -> str:
+        result = subprocess.run(
+            ["git", "-C", str(self.project_dir), *args],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        )
+        if result.returncode != 0:
+            self.fail(f"git {args} が失敗した: {result.stderr}")
+        return result.stdout
+
+    def _gitignore(self) -> Path:
+        return self.project_dir / ".gitignore"
+
+    def _untracked(self) -> list[str]:
+        out = self._git("status", "--porcelain", "--untracked-files=all")
+        return [line[3:] for line in out.splitlines() if line.startswith("?? ")]
+
+    # --- .gitignore への追記 (accounts.local.json) ---
+
+    def test_pattern_already_ignoring_leaves_gitignore_unchanged(self):
+        """`*.local.json` で ignore 済みなら、同じ文字列の行が無くても追記しない。"""
+        self._gitignore().write_text("*.local.json\n", encoding="utf-8")
+        code, out, _err = self._run(
+            ["init", "--service", "github", "--value", "Mao-o", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(self._gitignore().read_text(encoding="utf-8"), "*.local.json\n")
+        self.assertNotIn("updated:", out)
+
+    def test_migrate_with_pattern_already_ignoring_leaves_gitignore_unchanged(self):
+        """報告された経路: 旧パスからの migrate --commit でも .gitignore を変えない。"""
+        self._gitignore().write_text("*.local.json\n", encoding="utf-8")
+        self._deprecated_path().write_text(json.dumps({"github": "u"}), encoding="utf-8")
+        code, out, _err = self._run(["migrate", "--commit"])
+        self.assertEqual(code, 0)
+        self.assertTrue(self._new_path().exists())
+        self.assertEqual(self._gitignore().read_text(encoding="utf-8"), "*.local.json\n")
+        self.assertNotIn("updated:", out)
+
+    def test_info_exclude_counts_as_ignored(self):
+        self._gitignore().write_text("node_modules/\n", encoding="utf-8")
+        exclude = self.project_dir / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text(f"{_ACCOUNTS_REL}\n", encoding="utf-8")
+        code, out, _err = self._run(
+            ["init", "--service", "github", "--value", "Mao-o", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(self._gitignore().read_text(encoding="utf-8"), "node_modules/\n")
+        self.assertNotIn("updated:", out)
+
+    def test_global_excludes_file_counts_as_ignored(self):
+        self._gitignore().write_text("node_modules/\n", encoding="utf-8")
+        excludes = Path(self.tmp) / "global-excludes"
+        excludes.write_text("*.local.json\n", encoding="utf-8")
+        self.global_config.write_text(
+            f"[core]\n\texcludesFile = {excludes.as_posix()}\n", encoding="utf-8"
+        )
+        code, out, _err = self._run(
+            ["init", "--service", "github", "--value", "Mao-o", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(self._gitignore().read_text(encoding="utf-8"), "node_modules/\n")
+        self.assertNotIn("updated:", out)
+
+    def test_not_ignored_in_a_repo_still_appends(self):
+        self._gitignore().write_text("node_modules/\n", encoding="utf-8")
+        code, out, _err = self._run(
+            ["init", "--service", "github", "--value", "Mao-o", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            self._gitignore().read_text(encoding="utf-8"),
+            f"node_modules/\n{_ACCOUNTS_REL}\n",
+        )
+        self.assertIn("updated:", out)
+        self.assertNotIn(_ACCOUNTS_REL, self._untracked())
+
+    # --- signpost (CLAUDE.md) ---
+
+    def test_signpost_not_created_when_not_ignored(self):
+        """報告された経路: `*.local.json` だけが ignore され `.claude/` は ignore されない。
+
+        migrate --commit のあと、未追跡のファイルを 1 つも増やさず、.gitignore も変えない。
+        """
+        self._gitignore().write_text("*.local.json\n", encoding="utf-8")
+        self._git("add", ".gitignore")
+        self._deprecated_path().write_text(json.dumps({"github": "u"}), encoding="utf-8")
+        before = self._untracked()
+        code, out, _err = self._run(["migrate", "--commit"])
+        self.assertEqual(code, 0)
+        self.assertTrue(self._new_path().exists())
+        self.assertFalse((self.new_dir / "CLAUDE.md").exists())
+        self.assertIn("git で ignore されていないため作りません", out)
+        self.assertNotIn("created:", out)
+        self.assertEqual(self._untracked(), before)
+        self.assertEqual(self._git("diff", "--", ".gitignore"), "")
+
+    def test_signpost_created_when_claude_dir_ignored(self):
+        self._gitignore().write_text(".claude/\n", encoding="utf-8")
+        code, out, _err = self._run(
+            ["init", "--service", "github", "--value", "Mao-o", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue((self.new_dir / "CLAUDE.md").exists())
+        self.assertIn("created:", out)
+        self.assertNotIn(_SIGNPOST_REL, self._untracked())
+
+    def test_signpost_created_when_its_directory_is_ignored(self):
+        """ディレクトリのパターン (末尾 `/`) でも、まだ無い CLAUDE.md を ignore 済みと判定する。"""
+        self._gitignore().write_text(".claude/cloud-account-guard/\n", encoding="utf-8")
+        code, out, _err = self._run(
+            ["init", "--service", "github", "--value", "Mao-o", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue((self.new_dir / "CLAUDE.md").exists())
+        self.assertIn("created:", out)
+        self.assertNotIn(_SIGNPOST_REL, self._untracked())
+
+    def test_signpost_not_created_when_repo_has_no_gitignore(self):
+        """git リポジトリの中で何も ignore していなければ作らない (.gitignore も作らない)。"""
+        code, out, _err = self._run(
+            ["init", "--service", "github", "--value", "Mao-o", "--commit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertFalse((self.new_dir / "CLAUDE.md").exists())
+        self.assertFalse(self._gitignore().exists())
+        self.assertIn("git で ignore されていないため作りません", out)
+
+
+class TestGitIgnoredUndetermined(BaseBuilder):
+    """git で判定できない (git が無い / timeout / git の外) ときは従来どおりに振る舞う。"""
+
+    def test_git_missing_keeps_the_old_behavior(self):
+        gitignore = self.project_dir / ".gitignore"
+        gitignore.write_text("*.local.json\n", encoding="utf-8")
+        with mock.patch.object(builder.subprocess, "run", side_effect=FileNotFoundError("git")):
+            try:
+                code, out, _err = self._run(
+                    ["init", "--service", "github", "--value", "Mao-o", "--commit"]
+                )
+            except OSError as e:
+                self.fail(f"git が無いときに例外が漏れた: {e!r}")
+        self.assertEqual(code, 0)
+        self.assertTrue((self.new_dir / "CLAUDE.md").exists())
+        self.assertEqual(
+            gitignore.read_text(encoding="utf-8"), f"*.local.json\n{_ACCOUNTS_REL}\n"
+        )
+        self.assertIn("created:", out)
+
+    def test_exceptions_are_undetermined(self):
+        for exc in (
+            FileNotFoundError("git"),
+            PermissionError("git"),
+            builder.subprocess.TimeoutExpired(["git"], 5),
+            ValueError("embedded null byte"),
+        ):
+            with self.subTest(exc=type(exc).__name__):
+                with mock.patch.object(builder.subprocess, "run", side_effect=exc):
+                    try:
+                        got = builder._git_ignored(self.project_dir, self.project_dir / "x")
+                    except Exception as e:  # noqa: BLE001 - 漏れた例外は FAIL として数える
+                        self.fail(f"例外が漏れた: {e!r}")
+                self.assertIsNone(got)
+
+    def test_exit_codes(self):
+        for code, expected in ((0, True), (1, False), (128, None), (2, None)):
+            with self.subTest(code=code):
+                with mock.patch.object(
+                    builder.subprocess, "run", return_value=_fake_run(returncode=code)
+                ):
+                    got = builder._git_ignored(self.project_dir, self.project_dir / "x")
+                self.assertIs(got, expected)
+
+    def test_path_outside_anchor_is_undetermined(self):
+        with mock.patch.object(builder.subprocess, "run") as run:
+            got = builder._git_ignored(self.project_dir, Path(self.tmp) / "elsewhere")
+        self.assertIsNone(got)
+        run.assert_not_called()
+
+    @unittest.skipUnless(shutil.which("git"), "git が無い環境")
+    def test_outside_a_repo_is_undetermined(self):
+        with mock.patch.dict(
+            os.environ, {"GIT_CEILING_DIRECTORIES": str(Path(self.tmp).resolve())}
+        ):
+            got = builder._git_ignored(self.project_dir, self.project_dir / "x")
+        self.assertIsNone(got)
+
+    def test_check_ignore_gets_the_relative_path_after_double_dash(self):
+        with mock.patch.object(
+            builder.subprocess, "run", return_value=_fake_run(returncode=1)
+        ) as run:
+            builder._git_ignored(self.project_dir, self.project_dir / ".claude" / "-x")
+        self.assertEqual(
+            run.call_args.args[0],
+            ["git", "-C", str(self.project_dir), "check-ignore", "-q", "--", ".claude/-x"],
+        )
 
 
 class TestParseValue(unittest.TestCase):

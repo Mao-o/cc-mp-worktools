@@ -1656,6 +1656,23 @@ ENOENT / ENOTDIR / EBADF / ELOOP 以外の stat の失敗を例外にし、例�
   旧版は `.firebaserc` から解決した値を出し、firebase-tools と違う project を期待値として
   書かせうる形だった
 
+### 0.24.0 (利用者のリポジトリの tracked file を増やさない)
+
+**D34: ignore の判定は git に任せる** — `.gitignore` への追記は、対象が既に
+ignore されているかを `git check-ignore -q` で判定する。`.gitignore` 内の同じ文字列の
+行で判定していたため、`*.local.json` などのパターン・`.git/info/exclude`・グローバルの
+excludesFile で既に ignore 済みでも追記し、共有の `.gitignore` に意味の無い差分を
+作っていた。git で判定できない (git の外 / git が無い / timeout) ときは従来の文字列の
+判定に戻す。
+
+**D35: signpost は ignore される場所にだけ作る** — `.claude/` 配下の CLAUDE.md は
+Claude Code が読み込むため、コミットされると plugin を使っていない人のセッションにも
+指示が混ざる。生成をやめる・警告だけにする案もあったが、前者は案内の経路を失い、
+後者は未追跡ファイルを増やすという問題自体が残る。`git check-ignore` が「ignore
+されない」と答えたときだけ作らず、理由を stdout に 1 行出す。判定できないとき (git の外
+など) はコミットされる経路が無いので従来どおり作る。signpost のパスを `.gitignore` に
+足す案は、D34 と同じく共有の `.gitignore` に plugin 固有の行を残すので採らない。
+
 ## 既知の制限
 
 利用者から見える制限は README の「既知の制限」が正本。実装者向けに補足すると、

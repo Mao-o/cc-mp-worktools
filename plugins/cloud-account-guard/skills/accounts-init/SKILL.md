@@ -143,6 +143,8 @@ cloud-account-guard plugin の accounts.local.json を builder スクリプト
 6. 書き込まれたパス (stdout 冒頭の `対象:` 行) をユーザーに伝える。
    builder は commit 時に `.gitignore` へのエントリ追加も
    自動で行う (stdout に `updated: ... (... を追加)` の行が出る)。
+   `*.local.json` などで既に git の ignore 対象なら `.gitignore` は変えない
+   (その場合 `updated:` の行は出ない)。
    `.gitignore` 自体がプロジェクトに存在しない場合だけ自動追加されない
    (builder は `.gitignore` を新規作成しない) ため、その場合のみ手動追加を
    促す。
@@ -150,7 +152,11 @@ cloud-account-guard plugin の accounts.local.json を builder スクリプト
 7. **CLAUDE.md 自動同梱の確認** — `--commit` 成功時、builder は同ディレクトリに
    `CLAUDE.md` (Claude 向け signpost) を自動生成する (既存の場合はスキップ、
    stdout に `created:` または `(skipped: ... already exists)` の 1 行が
-   出る)。これは将来のセッションで Claude が `accounts.local.json` を直接
+   出る)。生成先が git で ignore されていないときは、リポジトリにコミット
+   されうるファイルを増やさないよう作らず、`(skipped: ... ignore されて
+   いないため作りません ...)` の 1 行が出る。その場合は「作りたければ
+   `.git/info/exclude` などで ignore してから再実行する」とユーザーに伝える。
+   これは将来のセッションで Claude が `accounts.local.json` を直接
    編集しようとして deny されたとき、同ディレクトリの CLAUDE.md を見て
    builder 経由の正規経路に辿り着けるようにするためのファイル。ユーザーに
    「不要なら削除可、編集も可。cloud-account-guard の動作には影響しない」
