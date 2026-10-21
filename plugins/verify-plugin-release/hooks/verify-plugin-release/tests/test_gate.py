@@ -351,6 +351,20 @@ class DirectoryChecksTest(unittest.TestCase):
                 self.assertIn("plugin directory checks", r.detail)
                 self.assertIn("Found 2 problems", r.detail)
 
+    def test_unclosed_heading_does_not_swallow_manifest_warnings(self):
+        # 何も見つからなかった節は締めの行を出さない。後ろの節の締めの行まで探すと間の manifest の warning を飲む
+        clean = "Plugin directory checks for /repo/plugins/a. x\n\n✔ These checks found nothing to report\n\n"
+        out = _HEAD + clean + _MANIFEST_WARNINGS + _DIR_SECTION + "\n✔ Validation passed\n"
+        r = self.check(out, strict=True)
+        self.assertEqual((r.status, r.detail), (gate.FAIL, "⚠ Found 3 warnings:"))
+
+    def test_second_section_after_clean_one_is_still_advisory(self):
+        clean = "Plugin directory checks for /repo/plugins/a. x\n\n✔ These checks found nothing to report\n\n"
+        out = _HEAD + clean + _DIR_SECTION + "\n✔ Validation passed\n"
+        r = self.check(out, strict=True)
+        self.assertEqual(r.status, gate.WARN)
+        self.assertIn("plugin directory checks", r.detail)
+
     def test_directory_warning_line_alone_is_shown(self):
         # 節に ✘ が無く ⚠ だけのときも WARN で表示する
         out = DIR_ONLY.replace("✘ Found 2 problems", "Found 2 problems")

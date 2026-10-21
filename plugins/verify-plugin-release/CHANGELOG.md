@@ -11,6 +11,9 @@
   WARN で表示するだけにした。`strict_validate` / `--strict-validate` でも FAIL にしない。この節は公式の
   プラグインディレクトリ (カタログ) に申請するとき向けの検査で、CLI 自身が結果を変えないと明記している。
   CLI がこの区分に検査を足すたびに、カタログに申請しない plugin まで FAIL していた (2.1.306 の `ICON_MISSING` など)
+  節の中が `✘` だけのときは、これまで PASS (無出力) だったが WARN で表示するようになる
+- 見出しの後に締めの行が無い節 (何も見つからなかった節) は、次の見出しで探索を打ち切る。後ろの節の締めの行まで
+  巻き込んで、間にある manifest の warning を advisory に入れてしまわないようにするため
 - manifest の warning (version / description / author など) は従来どおり数える (`strict_validate` で FAIL)
 - 節の見出しか締めの行が見つからない出力 (文言が変わった・節を出さない旧 CLI) では節として扱わず、従来どおり
   すべての warning を数える。黙って全部が advisory に倒れないようにするため

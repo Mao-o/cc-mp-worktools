@@ -28,7 +28,7 @@ class Config:
     # 1 つの PR で複数の plugin (または plugin と repo 直下のファイル) を
     # 同時に変更していたら FAIL にする。
     single_plugin_per_pr: bool = False
-    # `claude plugin validate` の warning を FAIL として扱う (既定は WARN)。
+    # `claude plugin validate` の warning を FAIL として扱う (既定は WARN。plugin directory checks の節は除く)。
     strict_validate: bool = False
     # base branch を検査前に `git fetch` する。
     fetch: bool = True

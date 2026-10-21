@@ -367,9 +367,16 @@ def _split_directory_checks(lines: list[str]) -> tuple[list[str], list[str]]:
     i = 0
     while i < len(lines):
         if lines[i].strip().startswith(_DIR_CHECKS_START):
-            end = next(
-                (j for j in range(i + 1, len(lines)) if lines[j].strip().startswith(_DIR_CHECKS_END)), None
-            )
+            # 何も見つからなかった節は締めの行を出さない。次の見出しに当たったら探索を打ち切る
+            # (後ろの節の締めの行まで届くと、間の manifest の warning を advisory に飲む)
+            end = None
+            for j in range(i + 1, len(lines)):
+                s = lines[j].strip()
+                if s.startswith(_DIR_CHECKS_START):
+                    break
+                if s.startswith(_DIR_CHECKS_END):
+                    end = j
+                    break
             if end is not None:
                 advisory.extend(lines[i : end + 1])
                 i = end + 1
