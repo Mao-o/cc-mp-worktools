@@ -287,5 +287,69 @@ class TestGc(BaseStopAck):
         self.assertFalse(stale_state.exists())
 
 
+class TestContinuedMarker(BaseStopAck):
+    """0.36.0: 再帰防止の 1 ビット (直前の Stop でこの hook が block を返したか)。"""
+
+    def _marker_dir(self) -> Path:
+        return self.home / ".claude" / "sensitive-files-guardrail" / "stop-continued"
+
+    def test_absent_is_false(self):
+        self.assertFalse(stop_ack.take_continued("s1"))
+
+    def test_record_then_take_once(self):
+        stop_ack.record_continued("s1")
+        self.assertTrue((self._marker_dir() / "s1").is_file())
+        self.assertTrue(stop_ack.take_continued("s1"))
+        # 読んだら消える: 次の Stop では False
+        self.assertFalse(stop_ack.take_continued("s1"))
+        self.assertFalse((self._marker_dir() / "s1").exists())
+
+    def test_session_scoped(self):
+        stop_ack.record_continued("s1")
+        self.assertFalse(stop_ack.take_continued("s2"))
+        self.assertTrue(stop_ack.take_continued("s1"))
+
+    def test_separate_from_ack_state(self):
+        # 報告済み集合と同じ名前のファイルにしない (load_acked を壊さない)
+        stop_ack.save_acked("s1", {"a" * 64})
+        stop_ack.record_continued("s1")
+        self.assertEqual(stop_ack.load_acked("s1"), {"a" * 64})
+        self.assertTrue(stop_ack.take_continued("s1"))
+        self.assertEqual(stop_ack.load_acked("s1"), {"a" * 64})
+
+    def test_take_failure_leans_to_skip_and_warns(self):
+        # 消せない印 (ここではディレクトリ) は再帰防止側 = True に倒す
+        (self._marker_dir() / "s1").mkdir(parents=True)
+        calls: list[str] = []
+        self.assertTrue(stop_ack.take_continued("s1", warn=calls.append))
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].startswith("continued_take:"), calls)
+
+    def test_take_absent_does_not_warn(self):
+        calls: list[str] = []
+        stop_ack.take_continued("s1", warn=calls.append)
+        self.assertEqual(calls, [])
+
+    def test_record_failure_warns(self):
+        # 置き場の親がファイルで mkdir できない
+        parent = self.home / ".claude" / "sensitive-files-guardrail"
+        parent.mkdir(parents=True)
+        (parent / "stop-continued").write_text("not a dir")
+        calls: list[str] = []
+        stop_ack.record_continued("s1", warn=calls.append)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].startswith("continued_save:"), calls)
+
+    def test_record_gcs_stale_markers(self):
+        self._marker_dir().mkdir(parents=True)
+        old = self._marker_dir() / "old"
+        old.write_text("")
+        stamp = time.time() - 8 * _DAY
+        os.utime(old, (stamp, stamp))
+        stop_ack.record_continued("cur")
+        self.assertFalse(old.exists())
+        self.assertTrue((self._marker_dir() / "cur").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

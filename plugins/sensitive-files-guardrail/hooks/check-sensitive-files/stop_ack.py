@@ -41,6 +41,12 @@ from typing import Callable, Iterable
 
 _STATE_SUBPATH = Path(".claude") / "sensitive-files-guardrail" / "stop-ack"
 
+# 「直前の Stop でこの hook が block を返した (= ターンを継続させた)」印の置き場
+# (0.36.0)。1 session 1 個の空ファイル。報告済み集合 (``stop-ack``) とは別の
+# ディレクトリに置く: 同じディレクトリだと session_id の文字種 (``.`` を許す) と
+# 名前が衝突しうるため。
+_CONTINUED_SUBPATH = Path(".claude") / "sensitive-files-guardrail" / "stop-continued"
+
 # session_id に許す文字種 (ファイル名にそのまま使うため)。Claude Code の
 # session_id は UUID だが hook input は外部入力なので、path 区切り / ``..`` /
 # dotfile を弾く (先頭は英数字のみ)。
@@ -225,3 +231,64 @@ def _gc_stale(state_dir: Path, keep: str, now: float | None = None) -> None:
                 entry.unlink()
         except OSError:
             continue
+
+
+# --------------------------------------------------------------------------
+# 再帰防止の 1 ビット (0.36.0)
+# --------------------------------------------------------------------------
+#
+# ``stop_hook_active`` は「この Stop の前に**どれかの** Stop hook がターンを継続
+# させた」ことしか示さない。``/goal`` は session スコープの Stop hook でターンを
+# 継続させるので、その 2 ターン目以降の Stop も true で届く (CLI 2.1.306 の nested
+# ``claude -p "/goal ..."`` で実測: 1 ターン目だけ false)。true で一律に skip すると、
+# ゴールの終わりまで Stop の報告が 1 回も出ない。そこで skip するのは「直前の Stop で
+# **この hook が** block を返した」ときだけにし、その事実を session ごとの印で持つ。
+
+
+def _continued_file(session_id: str) -> Path:
+    return Path.home() / _CONTINUED_SUBPATH / session_id
+
+
+def take_continued(
+    session_id: str, warn: Callable[[str], None] | None = None
+) -> bool:
+    """直前の Stop でこの hook が block を返したか。読んだら印を消す。
+
+    **Stop のたびに呼ぶ** (``stop_hook_active`` が false の Stop でも)。skip の
+    対象は「block した次の Stop」1 回だけで、印を残すと後の ``/goal`` の継続でも
+    skip が続く。中断などで block 後の Stop が来なかった場合も、次の Stop で消える。
+
+    印が無ければ False。消せない (``FileNotFoundError`` 以外の OSError) ときは
+    True を返し ``warn`` に ``continued_take:<ExcName>`` を渡す: 再帰防止を外す
+    方向には倒さない (0.35 までの「``stop_hook_active`` なら常に skip」と同じ側)。
+    """
+    try:
+        _continued_file(session_id).unlink()
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        if warn is not None:
+            warn(f"continued_take:{type(e).__name__}")
+        return True
+    return True
+
+
+def record_continued(
+    session_id: str, warn: Callable[[str], None] | None = None
+) -> None:
+    """この Stop で block を返したときに呼ぶ。次の Stop の ``take_continued`` が読む。
+
+    書けなければ ``warn`` に ``continued_save:<ExcName>`` を渡すだけ (best-effort)。
+    その場合も、報告済み集合 (``save_acked``) が保存できていれば次の Stop は同じ
+    集合では block しない。書込み後に古い印を GC する (``_gc_stale`` と同じ規則。
+    空ファイルは state 形として扱われる)。
+    """
+    marker = _continued_file(session_id)
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+    except OSError as e:
+        if warn is not None:
+            warn(f"continued_save:{type(e).__name__}")
+        return
+    _gc_stale(marker.parent, keep=session_id)

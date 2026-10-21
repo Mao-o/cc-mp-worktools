@@ -500,9 +500,14 @@ realpath で正規化した絶対パス + status」の sha256 digest で記録�
 tracked な `.npmrc` でも判定に使うのは作業ツリー上の中身なので、index /
 history に認証行が残ったまま worktree 側から消した状態では報告が止まる。
 
-**注意**: 同一ターン内の 2 回目以降の `Stop` は `stop_hook_active=true` で素通り
+**注意**: この hook が block した直後の `Stop` (`stop_hook_active=true`) は素通り
 する (無限ループ防止)。**block が見えたら必ず対応する**。無視して次のターンに
-進むと、同じ集合については以降チェックが出ない。
+進むと、同じ集合については以降チェックが出ない。0.36.0 から、別の Stop hook
+(`/goal` など) が継続させたターンの `Stop` では素通りせず、新しい機密ファイルを
+報告する (`/goal` の 2 ターン目以降も `stop_hook_active=true` で届くため、0.35 まで
+はゴールの終わりまで報告が出なかった)。「直前の Stop でこの hook が block した」
+ことは `~/.claude/sensitive-files-guardrail/stop-continued/<session_id>` の空
+ファイルで持つ。`session_id` が無い / 不正なときは従来どおり一律に素通りする。
 
 > **沈黙は「直った」ことを意味しない (0.31.0 で reason に明記)**。block が出なく
 > なるのは「同じ集合を報告済み」だからで、hook は対処が有効だったかを再確認して

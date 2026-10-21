@@ -2,9 +2,10 @@
 """Stop hook: 機密ファイルパターンが残っていないか検出する。
 
 tracked / untracked の両方を検査し、``.gitignore`` 済みでも **tracked は block**
-(``git rm --cached`` が必要なため)。同一ターン内の 2 回目以降の Stop は
-``stop_hook_active=true`` でスキップするため、**block が見えたら必ず対応する**
-必要がある。
+(``git rm --cached`` が必要なため)。この hook が block した直後の Stop
+(``stop_hook_active=true``) はスキップするため、**block が見えたら必ず対応する**
+必要がある。0.36.0 から、別の Stop hook (``/goal`` など) による継続中の Stop では
+スキップしない (``stop_ack.take_continued``)。
 
 0.19.0 (内部バックログ): **session 単位の once-only 化**。報告済みの
 (status, path) 集合を ``stop_ack`` で HOME 側に記録し、次の Stop で集合が
@@ -63,8 +64,10 @@ from checker import (  # noqa: E402
 from stop_ack import (  # noqa: E402
     digest_entries,
     load_acked,
+    record_continued,
     sanitize_session_id,
     save_acked,
+    take_continued,
 )
 
 
@@ -73,6 +76,8 @@ def _warn_stop_ack(detail: str) -> None:
 
     判定は「状態なし」= 従来通り block に倒れるので hook の結果は変わらない。
     detail は ``load:<ExcName>`` / ``save:<ExcName>`` の固定形 (パスを含まない)。
+    0.36.0 から継続の印の ``continued_take:<ExcName>`` (消せない → 再帰防止側 =
+    skip に倒す) / ``continued_save:<ExcName>`` (立てられない) も同じ行で出す。
     """
     sys.stderr.write(f"[check-sensitive-files] stop_ack_unavailable: {detail}\n")
 
@@ -884,8 +889,21 @@ def _main_impl() -> int:
         _warn_envelope_unreadable("not_an_object")
         return 0
 
-    # 同一ターン内の 2 回目以降はブロックしない (ループ防止)
-    if hook_input.get("stop_hook_active", False):
+    # 再帰防止 (0.36.0 で範囲を絞った)。``stop_hook_active`` は「この Stop の前に
+    # **どれかの** Stop hook がターンを継続させた」ことしか示さない。``/goal`` の
+    # 継続中の Stop も true で届く (CLI 2.1.306 の nested ``claude -p "/goal ..."``
+    # で実測) ため、true で一律に skip するとゴールの終わりまで報告が出ない。
+    # skip するのは次の 2 つだけ:
+    # - 直前の Stop で**この hook が** block を返したとき (``take_continued``)。
+    #   印は ``stop_hook_active`` が false の Stop でも毎回読んで消す (残すと後の
+    #   ``/goal`` の継続でも skip が続く)。cwd が無い等の早期 return より前に置く
+    # - ``session_id`` が無い / 不正で印を持てないとき (0.35 までと同じく一律)
+    continuing = bool(hook_input.get("stop_hook_active", False))
+    session_id = sanitize_session_id(hook_input.get("session_id"))
+    if session_id is None:
+        if continuing:
+            return 0
+    elif take_continued(session_id, warn=_warn_stop_ack) and continuing:
         return 0
 
     cwd = hook_input.get("cwd", "")
@@ -923,7 +941,7 @@ def _main_impl() -> int:
 
     # 0.19.0: session 単位の once-only。報告済み集合に新規が無ければ黙る。
     # session_id が無い / 不正なら state を使わず従来通り毎回 block する。
-    session_id = sanitize_session_id(hook_input.get("session_id"))
+    # (session_id は冒頭の再帰防止で検証済み)
     # digest は repo root + root 相対 path (表示は cwd 相対のまま、Codex R2 P2-2)
     digests = digest_entries(sensitive, scope=toplevel, prefix=prefix)
     acked: set[str] = set()
@@ -976,7 +994,10 @@ def _main_impl() -> int:
     # 先に保存すると、送出に失敗したターンでも digest が ack 済みになり、次の
     # ターン以降 ``digests <= acked`` で早期 return して同一 session では二度と
     # block が出なくなる。送出できなかったターンは ack しない = 次ターンで再 block。
+    # 継続の印も同じく送出の成功後に立てる (0.36.0)。block はターンを継続させる
+    # ので、次の Stop (``stop_hook_active=true``) はこの印を見て skip する。
     if session_id is not None:
+        record_continued(session_id, warn=_warn_stop_ack)
         save_acked(session_id, acked | digests, warn=_warn_stop_ack)
     return 0
 

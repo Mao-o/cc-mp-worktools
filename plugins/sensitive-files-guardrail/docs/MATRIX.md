@@ -739,7 +739,9 @@ handler と、`glob` は **Bash の operand glob と同じ三態** (deny /
 | ケース | 全 mode (Stop は permission_mode を使わない) |
 |---|---|
 | stdin が空 / 非 JSON / dict でない (0.32.0) | **exit 0 + stderr `envelope_unreadable: <kind>`** (fail-open。Stop は block しない)。`<kind>` は `empty` / `not_json` / `not_an_object` / `EOFError`。`OSError` はこの経路に来ず下の catch-all (`internal_error` + `systemMessage`) に回る |
-| `stop_hook_active=true` | exit 0 (ループ防止) |
+| `stop_hook_active=true` かつ直前の Stop でこの hook が block した (0.36.0) | exit 0 (ループ防止) |
+| `stop_hook_active=true` かつ `session_id` が無い / 不正 | exit 0 (ループ防止。印を持てないので 0.35 までと同じく一律) |
+| `stop_hook_active=true` だが直前の Stop でこの hook は block していない (`/goal` などの継続、0.36.0) | 通常どおり判定する (下の行) |
 | cwd が git 管理下でない | exit 0 |
 | tracked でパターン一致 | `decision: block` (`.gitignore` 済みでも) |
 | untracked でパターン一致 + `.gitignore` 未登録 | `decision: block` |
