@@ -525,8 +525,17 @@ class TestMainInternalError(BaseMainTest):
         env = {"cwd": str(self.repo), "session_id": "sess-emit-fail"}
         rc1, out1, _ = self._run_with_broken_stdout(env, OSError("stdout closed"))
         self.assertEqual((rc1, out1), (1, ""))
-        rc2, out2, err2 = _run_main(env)
+        # 送出できなかった block は継続を生まないので、継続の印も残さない (0.36.0)
+        self.assertFalse(
+            (
+                self.home_dir / ".claude" / "sensitive-files-guardrail"
+                / "stop-continued" / "sess-emit-fail"
+            ).exists()
+        )
+        # 出力に失敗した後の継続中の Stop でも block が出る (印で skip しない)
+        rc2, out2, err2 = _run_main({**env, "stop_hook_active": True})
         self.assertEqual(rc2, 0)
+        self.assertTrue(out2.strip(), "送出失敗後の継続中の Stop で block が出ない")
         self.assertEqual(json.loads(out2)["decision"], "block")
         self.assertNotIn("internal_error", err2)
 
@@ -1174,6 +1183,14 @@ class TestMainRecursionGuard(BaseMainTest):
         })
         self.assertEqual((rc, out), (0, ""))
         self.assertIn("stop_ack_unavailable: continued_take:", err)
+
+    def test_unwritable_home_does_not_recurse(self):
+        # 印も報告済み集合も書けない HOME: 自分の block による継続で再 block しない
+        (self.repo / ".env").write_text("KEY=v\n")
+        os.chmod(self.home_dir, 0o555)
+        self.addCleanup(os.chmod, self.home_dir, 0o755)
+        self.assertTrue(self._blocked(self._stop(continuing=False)))
+        self.assertEqual(self._stop(continuing=True), "")
 
 
 # 0.26.0 (予算導入前) の ``_build_reason(tracked=[".env"],

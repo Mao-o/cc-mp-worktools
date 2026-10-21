@@ -507,7 +507,8 @@ history に認証行が残ったまま worktree 側から消した状態では�
 報告する (`/goal` の 2 ターン目以降も `stop_hook_active=true` で届くため、0.35 まで
 はゴールの終わりまで報告が出なかった)。「直前の Stop でこの hook が block した」
 ことは `~/.claude/sensitive-files-guardrail/stop-continued/<session_id>` の空
-ファイルで持つ。`session_id` が無い / 不正なときは従来どおり一律に素通りする。
+ファイルで持つ。`session_id` が無い / 不正なときや、この印を HOME に書けないときは
+従来どおり `stop_hook_active=true` の `Stop` を一律に素通りする。
 
 > **沈黙は「直った」ことを意味しない (0.31.0 で reason に明記)**。block が出なく
 > なるのは「同じ集合を報告済み」だからで、hook は対処が有効だったかを再確認して

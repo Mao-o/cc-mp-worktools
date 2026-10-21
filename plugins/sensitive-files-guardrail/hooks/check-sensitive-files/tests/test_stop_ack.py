@@ -336,9 +336,25 @@ class TestContinuedMarker(BaseStopAck):
         parent.mkdir(parents=True)
         (parent / "stop-continued").write_text("not a dir")
         calls: list[str] = []
-        stop_ack.record_continued("s1", warn=calls.append)
+        self.assertIs(stop_ack.record_continued("s1", warn=calls.append), False)
         self.assertEqual(len(calls), 1)
         self.assertTrue(calls[0].startswith("continued_save:"), calls)
+
+    def test_record_success_returns_true(self):
+        self.assertIs(stop_ack.record_continued("s1"), True)
+        self.assertTrue((self._marker_dir() / "s1").is_file())
+
+    def test_discard_removes_marker_and_tolerates_failure(self):
+        stop_ack.record_continued("s1")
+        stop_ack.discard_continued("s1")
+        self.assertFalse((self._marker_dir() / "s1").exists())
+        # 不在でも、消せない形 (ディレクトリ) でも例外を出さない
+        (self._marker_dir() / "s2").mkdir()
+        for sid in ("s1", "s2"):
+            try:
+                stop_ack.discard_continued(sid)
+            except OSError as e:
+                self.fail(f"discard_continued({sid!r}) raised {e!r}")
 
     def test_record_gcs_stale_markers(self):
         self._marker_dir().mkdir(parents=True)

@@ -32,18 +32,26 @@ commit 52113a1 で完了)。
   ことしか示さない。`/goal` の 2 ターン目以降の Stop も true で届く (CLI 2.1.306 で
   実測) ため、0.35 までは true で一律に skip していた Stop の報告が、ゴールの終わり
   まで 1 回も出なかった
-- block の送出に成功した後に `~/.claude/sensitive-files-guardrail/stop-continued/<session_id>`
-  (空ファイル) を立て、次の Stop で読んで消す。skip するのは、この印があり
-  `stop_hook_active=true` の Stop だけ。印は `stop_hook_active` が false の Stop や
-  cwd が git 管理外の Stop でも消す (残すと後の `/goal` の継続を取りこぼす)。
+- block を送出する直前に `~/.claude/sensitive-files-guardrail/stop-continued/<session_id>`
+  (空ファイル) を立て、次の Stop で読んで消す。送出に失敗したら印を消す (残すと次の
+  継続中の Stop を 1 回黙って skip し、届かなかった報告を取りこぼす)。skip するのは、
+  この印があり `stop_hook_active=true` の Stop だけ。印は `stop_hook_active` が false の
+  Stop や cwd が git 管理外の Stop でも消す (残すと後の `/goal` の継続を取りこぼす)。
   印を消せないときは skip 側に倒す。古い印は 7 日で GC する (stop-ack と同じ規則)
+- 印を立てられない (HOME に書けない等) ときは、`stop_hook_active=true` の Stop で
+  0.35 と同じく skip する (自分の継続を見分けられず、報告済み集合も書けない HOME では
+  同じ集合で block を繰り返すため)
 - `session_id` が無い / 不正なときは印を持てないので、従来どおり
   `stop_hook_active=true` で一律に skip する
 - 保護そのもの (PreToolUse) は変わらない。報告済み集合 (once-only、0.19.0) も
-  そのまま効くので、同じ集合で毎ターン block することはない
-- テスト: `TestMainRecursionGuard` (6 件) と `TestContinuedMarker` (8 件) を足し、
+  そのまま効くので、同じ集合で毎ターン block することはない (報告済み集合を HOME に
+  保存できる場合。継続の印を立てられないときは、stop_hook_active=true の Stop で
+  0.35 と同じく skip する。stop-ack だけを保存できない環境では、/goal の継続中に
+  同じ集合が 1 ターンおきに再報告されうる)
+- テスト: `TestMainRecursionGuard` (7 件) と `TestContinuedMarker` (10 件) を足し、
   「`stop_hook_active=true` なら常に黙る」を固定していたテストを、別の hook による
-  継続では報告することを確かめる形に書き換えた。check 220 → **234**
+  継続では報告することを確かめる形に書き換えた。送出に失敗したターンで印が残らない
+  ことも固定した。check 220 → **237**
 
 ## 0.35.3
 

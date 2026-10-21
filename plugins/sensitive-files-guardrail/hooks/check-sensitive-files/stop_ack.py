@@ -275,13 +275,15 @@ def take_continued(
 
 def record_continued(
     session_id: str, warn: Callable[[str], None] | None = None
-) -> None:
-    """この Stop で block を返したときに呼ぶ。次の Stop の ``take_continued`` が読む。
+) -> bool:
+    """block を送出する**直前**に呼ぶ。次の Stop の ``take_continued`` が読む。
 
-    書けなければ ``warn`` に ``continued_save:<ExcName>`` を渡すだけ (best-effort)。
-    その場合も、報告済み集合 (``save_acked``) が保存できていれば次の Stop は同じ
-    集合では block しない。書込み後に古い印を GC する (``_gc_stale`` と同じ規則。
-    空ファイルは state 形として扱われる)。
+    印を立てられたら True。書けなければ ``warn`` に ``continued_save:<ExcName>``
+    を渡して False を返す。呼び出し側は False のとき、この Stop が継続中
+    (``stop_hook_active=true``) なら block を出さない: 印が無いと次の Stop で
+    自分の継続を見分けられず、報告済み集合も書けない HOME では同じ集合で block を
+    繰り返す (0.35 までの「継続中は skip」と同じ側に倒す)。書込み後に古い印を GC
+    する (``_gc_stale`` と同じ規則。空ファイルは state 形として扱われる)。
     """
     marker = _continued_file(session_id)
     try:
@@ -290,5 +292,18 @@ def record_continued(
     except OSError as e:
         if warn is not None:
             warn(f"continued_save:{type(e).__name__}")
-        return
+        return False
     _gc_stale(marker.parent, keep=session_id)
+    return True
+
+
+def discard_continued(session_id: str) -> None:
+    """``record_continued`` で立てた印を消す (best-effort、失敗は黙殺)。
+
+    block の送出に失敗したときに呼ぶ。印が残ると、次の継続中の Stop を 1 回黙って
+    skip し、届かなかった報告を取りこぼす。
+    """
+    try:
+        _continued_file(session_id).unlink()
+    except OSError:
+        pass
