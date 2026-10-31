@@ -6,13 +6,14 @@
 複数セッションが動くと、一行も編集していないセッションが隣のセッションの編集を
 5〜10 分かけてレビューしてしまうため。
 
-3 つの phase を 1 エントリポイントで捌く (hooks.json から `--phase` で振り分け):
+4 つの phase を 1 エントリポイントで捌く (hooks.json から `--phase` で振り分け):
 
 | phase | hook | 役割 |
 |---|---|---|
 | `pre-tool` | PreToolUse(Bash) | Bash 実行前の `git status` スナップショットを保存 |
 | `post-tool` | PostToolUse(Write/Edit/NotebookEdit, Bash) | 変更パスを pending に積む |
 | `stop` | Stop | pending を claim してレビュー、結果を配信 |
+| `mid-turn` | PostToolUse の背景 (`asyncRewake`) | 既定オフ (0.16.0)。pending の diff が閾値を超えたら応答の途中でレビュー (`handle_mid_turn`) |
 
 Bash にも張るのは、`sed -i` / フォーマッタ / スクリプト生成による変更を
 Write/Edit だけ見ていると取りこぼすため。実行前後の `git status` を突き合わせれば
@@ -147,6 +148,7 @@ if os.name != "posix":
     sys.exit(0)
 
 import hashlib
+import io
 import json
 import re
 import stat
@@ -231,6 +233,11 @@ ENV_COMMIT = "EXTERNAL_AI_POST_REVIEW_COMMIT"
 ENV_MIN_LINES = "EXTERNAL_AI_POST_REVIEW_MIN_LINES"
 ENV_COOLDOWN = "EXTERNAL_AI_POST_REVIEW_COOLDOWN_SEC"
 ENV_MODE = "EXTERNAL_AI_POST_REVIEW_MODE"
+#: 応答の途中のレビュー (0.16.0)。**既定オフ** (外部 AI CLI の起動回数が増えるため、
+#: オンにするかは利用者が決める)。`handle_mid_turn` の docstring
+ENV_MIDTURN = "EXTERNAL_AI_POST_REVIEW_MIDTURN"
+#: 応答の途中のレビューを始める pending の diff の合計バイト数 (既定は 1 回の送信の上限)
+ENV_MIDTURN_BYTES = "EXTERNAL_AI_POST_REVIEW_MIDTURN_BYTES"
 
 MODE_CONTEXT = "context"
 MODE_BLOCK = "block"
@@ -436,6 +443,17 @@ def commit_review_enabled() -> bool:
     return settings.flag(ENV_COMMIT, default=True)
 
 
+def midturn_enabled() -> bool:
+    """`EXTERNAL_AI_POST_REVIEW_MIDTURN=1` のときだけ応答の途中のレビューを行う (既定オフ)。"""
+    return settings.flag(ENV_MIDTURN, default=False)
+
+
+def midturn_threshold() -> int:
+    """応答の途中のレビューを始める diff の合計バイト数。0・不正な値は既定に倒す
+    (0 を「編集のたびに送る」と読むと、打ち間違いで外部 AI CLI の起動が毎回になる)。"""
+    return settings.count(ENV_MIDTURN_BYTES, MAX_DIFF_BYTES) or MAX_DIFF_BYTES
+
+
 def diff_hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
@@ -455,6 +473,7 @@ _STATUS_LABELS = {
 #: PostToolUse(Bash) は「その Bash の中で作られた commit」を見る (0.12.0)。
 SCOPE_DIFF = "差分レビュー"
 SCOPE_COMMIT = "commit レビュー"
+SCOPE_MIDTURN = "差分レビュー, 応答の途中"
 
 
 def build_reason(
@@ -1695,16 +1714,72 @@ def handle_stop(payload: dict) -> None:
 
     # cursor lock を先に取る。取れなければ claim もしないので pending は温存される。
     # state lock は claim_pending() の内側で完結し、cursor 実行中は保持しない。
-    with state.cursor_lock(root) as acquired:
-        if not acquired:
-            log("同一作業ツリーで別セッションがレビュー中のため skip (pending は温存)")
-            return
-        output = _review_claim(payload, session_id, root)
+    output = _stop_review_under_lock(payload, session_id, root)
+    if output is None and midturn_enabled():
+        if state.midturn_running(session_id):
+            # ロックの持ち主はこのセッションの応答の途中のレビュー。残りを引き継がせる。
+            # 依頼を書いた**後に**もう一度ロックを試す: 持ち主が依頼を見る前にロックを
+            # 放していた場合は、ここで取れて自分で見る (`handle_mid_turn` の競合の場合分け)
+            state.request_stop_handoff(session_id)
+            output = _stop_review_under_lock(payload, session_id, root)
+            if output is None:
+                log(NOTICE_HANDED_OFF)
+                output = _with_notices({}, [NOTICE_HANDED_OFF])
+        else:
+            # 印が無い: 持ち主は別のセッションか、印を下ろし終えた応答の途中のレビュー。
+            # 後者ならもうロックを放しているので、依頼は書かずにもう 1 回だけ試す
+            output = _stop_review_under_lock(payload, session_id, root)
+    if output is None:
+        log("同一作業ツリーで別セッションがレビュー中のため skip (pending は温存)")
+        return
+    if midturn_enabled():
+        output = _with_midturn_notices(session_id, output)
 
     if output:
         if _continues_turn(output):
             state.record_continued_turn(session_id)
         json.dump(output, sys.stdout, ensure_ascii=False)
+
+
+def _stop_review_under_lock(payload: dict, session_id: str, root: str) -> dict | None:
+    """cursor lock を取れたら Stop のレビューを行い出力を返す。取れなければ None。
+
+    取れなかったときは claim もしないので pending は温存される。state lock は
+    `claim_pending()` の内側で完結し、cursor 実行中は保持しない。
+    """
+    with state.cursor_lock(root) as acquired:
+        if not acquired:
+            return None
+        if midturn_enabled():
+            # 自分で残りを見るので、出ていた引き継ぎの依頼は消す (残すと、次の応答の途中の
+            # レビューが閾値に関係なく 1 回余分に走る)
+            state.take_stop_handoff(session_id)
+        return _review_claim(payload, session_id, root)
+
+
+#: Stop が残りを応答の途中のレビューに引き継いだときの通知
+NOTICE_HANDED_OFF = (
+    "応答の途中のレビューが実行中のため、残りの変更はそのレビューの後に続けて送ります "
+    "(指摘があれば届き次第 Claude に渡します)"
+)
+
+_NOTICE_PREFIX = "[post-implementation-review] "
+
+
+def _with_midturn_notices(session_id: str, output: dict) -> dict:
+    """応答の途中のレビューが残した要約を、この Stop の `systemMessage` の先頭に足す。
+
+    背景 hook の `systemMessage` は利用者に表示されない (公式 docs の async 節) ので、
+    除外・繰り越し・完了の通知は Stop が代わりに出す。
+    """
+    stored = state.take_midturn_notices(session_id)
+    if not stored:
+        return output
+    lines = [f"応答の途中のレビュー: {text}" for text in stored]
+    existing = output.get("systemMessage")
+    if isinstance(existing, str) and existing:
+        lines.append(existing.removeprefix(_NOTICE_PREFIX))
+    return _with_notices(output, lines)
 
 
 def _continues_turn(output: dict) -> bool:
@@ -1747,7 +1822,9 @@ def _cooldown_notice(session_id: str) -> str | None:
     )
 
 
-def _review_claim(payload: dict, session_id: str, root: str) -> dict:
+def _review_claim(
+    payload: dict, session_id: str, root: str, scope: str = SCOPE_DIFF
+) -> dict:
     """claim を取り、**何が起きても握りっぱなしにしない**ことを保証する薄い外枠。
 
     claim を取った後で例外が出ると、in-flight にエントリが残ったまま hook が死ぬ。
@@ -1770,7 +1847,7 @@ def _review_claim(payload: dict, session_id: str, root: str) -> dict:
         return {}
     claim_id, claimed = claim
     try:
-        return _run_review(session_id, root, claim_id, claimed)
+        return _run_review(session_id, root, claim_id, claimed, scope)
     except Exception as e:
         log(f"レビュー中に例外 (claim を pending へ戻す): {e}")
         state.restore_claim(session_id, claim_id, claimed)
@@ -1783,7 +1860,13 @@ def _review_claim(payload: dict, session_id: str, root: str) -> dict:
         )
 
 
-def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -> dict:
+def _run_review(
+    session_id: str,
+    root: str,
+    claim_id: str,
+    claimed: list[str],
+    scope: str = SCOPE_DIFF,
+) -> dict:
     """除外 → diff 収集 → cursor → 状態確定。stdout に出す JSON (無ければ {}) を返す。
 
     利用者向けの通知 (除外・繰り越し・切り詰め) は `systemMessage` にまとめる (block 時は
@@ -1976,7 +2059,7 @@ def _run_review(session_id: str, root: str, claim_id: str, claimed: list[str]) -
         notices.insert(0, f"{summary} → 指摘なし")
         return _with_notices({}, notices)
 
-    reason = _findings_reason(findings)
+    reason = _findings_reason(findings, scope)
     state.complete_claim(session_id, claim_id, hashes)
     _save_review_copy(session_id, reason)
     # 通知文はモードで分岐させる (hook が「したこと」だけを述べる)。block (明示、または
@@ -2009,7 +2092,7 @@ def _review_clock() -> float:
     return time.monotonic()
 
 
-def _findings_reason(findings: list[tuple[str, str]]) -> str:
+def _findings_reason(findings: list[tuple[str, str]], scope: str = SCOPE_DIFF) -> str:
     """指摘のあった送信の本文を 1 つの reason にまとめる。
 
     1 回だけなら 0.13.0 までと同じ形。複数回のときは送信ごとに見出しを付ける — 塊ごとに
@@ -2017,13 +2100,13 @@ def _findings_reason(findings: list[tuple[str, str]]) -> str:
     """
     if len(findings) == 1:
         text, backend = findings[0]
-        return build_reason(text, backend)
+        return build_reason(text, backend, scope)
     labels = ", ".join(dict.fromkeys(_BACKEND_LABELS.get(b, b) for _, b in findings))
     body = "\n\n".join(
         f"### {number}/{len(findings)}\n\n{text}"
         for number, (text, _) in enumerate(findings, start=1)
     )
-    return build_reason(body, labels)
+    return build_reason(body, labels, scope)
 
 
 def _count_changed_lines(sections: list[str]) -> int:
@@ -2439,6 +2522,154 @@ def _save_review_copy(session_id: str, reason: str) -> None:
 # --------------------------------------------------------------------------
 
 
+# --------------------------------------------------------------------------
+# 応答の途中のレビュー (0.16.0。既定オフ)
+# --------------------------------------------------------------------------
+
+#: 応答の途中のレビューが Claude を起こすときの exit code (公式 docs: `asyncRewake` は
+#: exit 2 で Claude を起こし、stderr を system reminder として見せる)
+REWAKE_EXIT_CODE = 2
+
+
+def handle_mid_turn(payload: dict) -> tuple[int, str]:
+    """PostToolUse の背景 hook (`asyncRewake`)。pending の diff が閾値を超えたら、
+    応答の終わりを待たずにその分をレビューに出す。返り値は (exit code, Claude に見せる文)。
+
+    1 回の応答の中で大量に書くと Stop 1 回に差分が溜まり、Stop が塊を順に送る間
+    (最大約 10 分) 利用者を待たせる。応答の途中に区切りを作れば、Stop は残りだけを扱う。
+
+    **送る範囲は Stop と同じ**: claim → `_run_review` の経路をそのまま使うので、
+    除外・予算・塊分け・hash による重複抑止・失敗時の復元はすべて Stop と共通。
+    増えるのは「いつ送るか」だけで、「何を送るか」は変わらない。
+
+    **配送**: 指摘があれば exit 2 + stderr で返す (`asyncRewake`。応答の途中なら次の
+    区切りで、応答が終わった後なら Claude をその場で起こして渡す)。`async` を選ばない
+    のは、出力が「次の会話ターン」に配られ、応答が先に終わると次のユーザー操作まで
+    届かないため。指摘なし・見送りは exit 0 で何も返さない。要約 (除外・繰り越しを
+    含む) は背景 hook の `systemMessage` が利用者に表示されないので、state に積んで
+    次の Stop の `systemMessage` に出す (`_with_midturn_notices`)。
+
+    **Stop と並走させない**: 閾値の 1 回目の判定はロックの外で測る (読み取りだけ。
+    閾値未満ならロックを取らずに抜けるので、同じ Bash の commit レビューを止めない)。
+    閾値以上なら `midturn_at` を立ててから cursor lock (作業ツリー単位) を非ブロッキングで
+    取り、ロックの下で測り直してから claim する。印はロックを取りに行く前に立て、
+    引き継ぎの依頼を読み終えた後に 1 箇所 (finally) で下ろす。Stop がロックを取れず、
+    印が立っていれば、Stop は `stop_handoff` を立ててから**もう一度**ロックを試す。
+    印が立っていなければ、依頼は書かずにもう一度だけロックを試す。応答の途中のレビューは、
+    ロックを**放した後に**依頼を読んで消し、依頼があれば再びロックを試して残りの pending を
+    (閾値に関係なく) 送る:
+
+    | 順序 | 結果 |
+    |---|---|
+    | 依頼 → (こちらが依頼を読む) → 再試行 | 両方が取りに行き、取れた側が残りを見る |
+    | (こちらが依頼を読み終えた) → 依頼 → 再試行 | こちらはロックを放し終えているので、Stop の再試行が取れる |
+
+    残りの pending が誰にも見られずに次の応答まで残るのは、ロックを別のセッションが
+    握っていた場合 (0.15.x までの Stop と同じ) と、同じセッションの応答の途中のレビューが
+    並列に 2 つ以上走り、片方が先に印を下ろした場合 (印は 1 つの時刻で、数を数えない)。
+    前者で印が立っていると、Stop は引き継ぎの通知を出すが、実際に見るのは次の応答の
+    途中のレビューか次の Stop になる。
+
+    **既定オフ**: 1 回の応答の中で外部 AI CLI を起動する回数が増える (閾値を超える
+    たびに 1 回) ので、`EXTERNAL_AI_POST_REVIEW_MIDTURN=1` で利用者が選ぶ。オフの
+    ときは state も git も触らずに抜ける。
+    """
+    if not midturn_enabled() or not review_enabled():
+        return 0, ""
+    if not selection.any_available(_per_tool_deadline()):
+        return 0, ""
+    if not _private_root_ok():
+        return 0, ""
+    session_id = payload.get("session_id") or ""
+    if not session_id:
+        return 0, ""
+    root = gitscan.worktree_root(payload.get("cwd") or os.getcwd())
+    if not root:
+        return 0, ""
+    cooled = _cooldown_notice(session_id)
+    if cooled:
+        log(cooled)
+        return 0, ""
+
+    # 1 回目の計測はロックの外 (読み取りだけ。claim しない)。閾値未満でロックを握ると、
+    # 同じ Bash の PostToolUse で並列に走る commit レビューがその間見送られる
+    threshold = midturn_threshold()
+    size = _pending_diff_bytes(session_id, root)
+    if size < threshold:
+        log(f"応答の途中のレビュー: pending の diff {size} bytes < {threshold} のため見送り")
+        return 0, ""
+
+    outputs: list[dict] = []
+    # 印は**ロックを取りに行く前に**立て、引き継ぎを読み終えるまで下ろさない。ロックを
+    # 取った直後・印を立てる前、印を下ろした後・ロックを放す前の窓に Stop が来ると、
+    # Stop は持ち主を別のセッションと見なして黙って skip してしまう
+    state.set_midturn_running(session_id, True)
+    try:
+        with state.cursor_lock(root) as acquired:
+            if not acquired:
+                log("応答の途中のレビュー: 別のレビューが実行中のため見送り")
+            else:
+                # ロックの下で測り直す (ロックを待つ間に Stop が送り終えていることがある)
+                size = _pending_diff_bytes(session_id, root)
+                if size >= threshold:
+                    log(f"応答の途中のレビューを実行 (pending の diff {size} bytes >= {threshold})")
+                    outputs.append(_review_claim(payload, session_id, root, SCOPE_MIDTURN))
+                else:
+                    log(
+                        f"応答の途中のレビュー: pending の diff {size} bytes < {threshold} "
+                        "のため見送り"
+                    )
+
+        # Stop から残りを引き継いだか。ロックを**放した後に**読む (docstring の場合分け)。
+        # ロックを取れなかったときも読む (依頼が残っていれば、ロックを取れた側が見る)
+        if state.take_stop_handoff(session_id):
+            with state.cursor_lock(root) as acquired:
+                if acquired:
+                    log("応答の途中のレビュー: Stop から引き継いだ残りを送る")
+                    outputs.append(_review_claim(payload, session_id, root))
+                else:
+                    log("応答の途中のレビュー: 引き継ぎはロックを取った側が行う")
+    finally:
+        state.set_midturn_running(session_id, False)
+    return _midturn_delivery(session_id, outputs)
+
+
+def _pending_diff_bytes(session_id: str, root: str) -> int:
+    """claim せずに、今 Stop が来たら送る diff の合計バイト数を測る。
+
+    Stop と同じ `_resolve_paths` / `_collect_diffs` を通すので、除外・レビュー済み
+    (hash 一致)・空 diff は数えない (= 閾値は「送る量」で判定する)。
+    """
+    paths = state.pending_paths(session_id)
+    if not paths:
+        return 0
+    rels, _overflow, _excluded = _resolve_paths(root, paths, exclusion.load_policy())
+    batch = _collect_diffs(root, rels, state.reviewed_hashes(session_id))
+    return sum(len(section.encode()) for section in batch.sections)
+
+
+def _midturn_delivery(session_id: str, outputs: list[dict]) -> tuple[int, str]:
+    """`_review_claim` の出力 (Stop の形) を、背景 hook の配送に組み替える。
+
+    指摘 (`additionalContext` か `reason`。どちらになるかは mode 次第) があれば
+    exit 2 + その本文。`systemMessage` は次の Stop に回す。
+    """
+    reasons: list[str] = []
+    for output in outputs:
+        message = output.get("systemMessage")
+        if isinstance(message, str) and message:
+            state.add_midturn_notice(session_id, message.removeprefix(_NOTICE_PREFIX))
+        specific = output.get("hookSpecificOutput")
+        reason = output.get("reason") or (
+            specific.get("additionalContext") if isinstance(specific, dict) else None
+        )
+        if isinstance(reason, str) and reason:
+            reasons.append(reason)
+    if not reasons:
+        return 0, ""
+    return REWAKE_EXIT_CODE, "\n\n".join(reasons)
+
+
 def parse_phase(argv: list[str]) -> str:
     if "--phase" in argv:
         idx = argv.index("--phase")
@@ -2447,15 +2678,16 @@ def parse_phase(argv: list[str]) -> str:
     return "stop"
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> int:
+    """hook 1 回分を処理し、プロセスの exit code を返す (`mid-turn` の指摘ありだけが 2)。"""
     phase = parse_phase(argv if argv is not None else sys.argv[1:])
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError) as e:
         log(f"stdin JSON パース失敗: {e}")
-        return
+        return 0
     if not isinstance(payload, dict):
-        return
+        return 0
 
     if phase == "pre-tool":
         handle_pre_tool(payload)
@@ -2463,14 +2695,47 @@ def main(argv: list[str] | None = None) -> None:
         output = handle_post_tool(payload)
         if output:
             json.dump(output, sys.stdout, ensure_ascii=False)
+    elif phase == "mid-turn":
+        return _run_mid_turn(payload)
     else:
         handle_stop(payload)
+    return 0
+
+
+def _run_mid_turn(payload: dict) -> int:
+    """`handle_mid_turn` を、stderr を Claude に見せる指摘だけにして走らせる。
+
+    `asyncRewake` は exit 2 のとき **stderr を** system reminder として Claude に見せる
+    (公式 docs)。途中の debug log が混ざらないよう、処理中の stderr は預かっておき、
+    指摘を返すときは本文だけを、それ以外のときは預かった log を書き出す。
+    """
+    real = sys.stderr
+    held = io.StringIO()
+    sys.stderr = held
+    code, text = 0, ""
+    try:
+        code, text = handle_mid_turn(payload)
+    finally:
+        sys.stderr = real
+        # 例外で抜けるときも預かった log を書き出す (外枠の fatal だけでは経緯が残らない)
+        if not (code == REWAKE_EXIT_CODE and text):
+            real.write(held.getvalue())
+    if code == REWAKE_EXIT_CODE and text:
+        real.write(text + "\n")
+        return code
+    return 0
+
+
+def _run_as_script() -> int:
+    """スクリプトとして起動されたときの外枠。例外では Claude Code を止めない (fail-open)。"""
+    try:
+        return main()
+    except SystemExit:
+        return 0
+    except Exception as e:  # hook が例外で Claude Code を止めないよう fail-open
+        log(f"fatal: {e}")
+        return 0
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except SystemExit:
-        pass
-    except Exception as e:  # hook が例外で Claude Code を止めないよう fail-open
-        log(f"fatal: {e}")
+    sys.exit(_run_as_script())

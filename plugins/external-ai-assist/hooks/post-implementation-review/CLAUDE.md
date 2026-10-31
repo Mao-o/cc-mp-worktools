@@ -60,6 +60,7 @@ post-implementation-review/
 | `pre-tool` | `PreToolUse(Bash)` | Bash 実行前の `git status` スナップショットと **HEAD reflog の窓の起点** (0.12.0) を `tool_use_id` キーで保存 |
 | `post-tool` | `PostToolUse(Write/Edit/NotebookEdit)` / `PostToolUse(Bash)` | 変更パスを `session_id` キーの `pending` に積む。Bash では加えて **窓の中の commit をレビューして配信** (0.12.0) |
 | `stop` | `Stop` | `pending` を claim してレビュー、結果を配信 (**未 commit の差分専任**) |
+| `mid-turn` | `PostToolUse(Write\|Edit\|NotebookEdit\|Bash)` の背景 (`asyncRewake`) | **既定オフ** (0.16.0)。pending の diff が閾値を超えたら応答の途中で claim してレビュー (「応答の途中のレビュー」節) |
 
 `hooks.json` の `PostToolUse` は **matcher を 2 つに割ってある** (0.12.0):
 編集系 (`Write|Edit|NotebookEdit`) は git を一切呼ばないので timeout 10 秒のまま、
@@ -648,6 +649,82 @@ try の外で走り、state 整理だけを `_quiet()` が個別に握り潰す�
 指摘ごと捨てる** (cooldown だけ消費する) 形になっていた (マージ前レビューの指摘)。
 床テストは `TestDeliveryAfterReview`。
 
+## 応答の途中のレビュー (0.16.0。既定オフ)
+
+40 KB / 1 回の送信の予算は「1 回の応答の差分は小さい」前提で決めたが、通常の依頼 1 件で
+長く自走する応答が増えた (23 ファイル・約 172 KB を書く間 Stop が一度も来なかった実例)。
+0.14.0 で Stop の中で塊ごとに送るようにした分、Stop の待ち時間は最大約 10 分に伸び、待つ間に
+次の発言をすると途中で止まる。そこで応答の途中に区切りを作る: `PostToolUse` の背景 hook
+(`--phase mid-turn`) が pending の diff の合計を測り、閾値以上なら claim してレビューに出す。
+実装は `__main__.handle_mid_turn` (docstring に競合の場合分け)。
+
+| 決めること | 決定 | 理由 |
+|---|---|---|
+| 有効化 | `EXTERNAL_AI_POST_REVIEW_MIDTURN=1` (**既定オフ**) | 外部 AI CLI の起動回数が増える。オンにするかは方針判断として残す。オフでは設定を読んで即 return (state も git も触らない。Stop の出力も 0.15.x と同じ) |
+| 閾値 | `EXTERNAL_AI_POST_REVIEW_MIDTURN_BYTES` (既定 `MAX_DIFF_BYTES` = 40000)。`>=` で発火 | 1 回の送信の上限と同じにして「1 塊たまったら送る」。測るのは Stop と同じ `_resolve_paths` + `_collect_diffs` を通した量 (除外・レビュー済み hash・空 diff は数えない)。0 は「毎回送る」ではなく既定に倒す |
+| claim の単位 | Stop と同じ `claim_pending` (その時点の pending 全部) → `_run_review` | 送る範囲・失敗時の復元・hash の記録を Stop と完全に共有する。**送る時刻だけが変わり、送る範囲は変わらない** |
+| 並走制御 | 閾値の 1 回目の判定はロックの外 (読み取りだけ)。閾値以上のときだけ Stop と同じ cursor lock (作業ツリー単位) を非ブロッキングで取り、ロックの下で測り直してから claim する | 子プロセスは常に 1 つという前提 (「ロックは 2 種類」節) を崩さない。閾値未満の計測でロックを握ると、同じ Bash の PostToolUse で並列に走る commit レビューが `NOTICE_LOCK_HELD` で見送られる (窓は 1 回きり)。取れなければ送らない (次の編集で再判定) |
+| 配送 | `asyncRewake`。指摘ありは exit 2 + stderr (本文だけ)、それ以外は exit 0 で無出力 | `async` は出力を「次の会話ターン」に配り、セッションが idle なら次のユーザー操作まで待つ (公式 docs "Run hooks in the background")。応答が先に終わると届かない。`asyncRewake` の exit 2 は idle でも Claude を起こす。timeout が強制されるのも、上限のある処理としては都合がよい |
+| 要約の表示 | state の `midturn_notices` に積み、次の Stop の `systemMessage` の先頭に「応答の途中のレビュー: …」で出す | 背景 hook の `systemMessage` は利用者に表示されない (公式 docs)。除外は恒久 (pending に戻らない) なので、運ばないと通知が黙って消える |
+
+### Stop との引き継ぎ
+
+応答の途中のレビューが走っている間に応答が終わると、Stop はロックを取れない。0.15.x の
+ままだと黙って skip し、残りの pending は次の応答の終わりまで誰も見ない。そこで:
+
+1. 応答の途中のレビューは、閾値以上と測ったら**ロックを取りに行く前に** `midturn_at` を立て、
+   1 回目のロック区間・ロックを放した後の引き継ぎの読み出し・引き継いだ分のレビューを終えるまで
+   下ろさない (下ろすのは外側の finally の 1 箇所だけ)。閾値未満なら立てない (ロックも取らない)
+2. Stop はロックを取れず、`midturn_running()` が真なら `stop_handoff` を立て、**もう一度**
+   ロックを試す。取れれば自分で見る (依頼は消す)。取れなければ「残りはそのレビューの後に続けて
+   送ります」と通知して終わる (ターンは継続させない)。`midturn_running()` が偽なら、依頼は書かずに
+   もう 1 回だけロックを試す。それでも取れなければ 0.15.x と同じ無言の skip
+3. 応答の途中のレビューは、ロックを**放した後に** `stop_handoff` を読んで消し、立っていれば
+   再びロックを試して残りを (閾値に関係なく) 送る。1 回目のロックが取れなかったときも読む
+
+0.16.0 の最初の形は、印をロックを取った**後に**立て、ロックを放す**前に**下ろしていた。
+そのため「ロックを取った直後・印を立てる前」と「印を下ろした後・ロックを放す前」の 2 つの窓に
+Stop が来ると、Stop は持ち主を別のセッションと見なして黙って skip し、残りが次の応答まで
+誰にも見られなかった (マージ前レビューの指摘)。印でロック区間を外側から覆う形にして、
+どちらの窓も「Stop が印を見て依頼する」か「Stop の再試行がロックを取る」のどちらかに落とす
+(`tests/test_midturn_flow.py::TestNoConcurrencyWithStop` の `test_window_*`)。
+
+同じセッションの中で、依頼を書く (Stop) / 読む (こちら) の前後がどちらでも、どちらかが
+ロックを取りに行き、取れた側が残りを見る。Stop がロックを取れたときは出ていた依頼を消す
+(残すと次の応答の途中のレビューが閾値を無視して 1 回余分に走る)。残りが次の応答まで
+残りうるのは次の場合で、言い切れる保証はここまで:
+
+- ロックの持ち主が**別のセッション**のとき (0.15.x と同じ)。このとき印が立っていれば、Stop は
+  引き継ぎの通知を出すが、実際に残りを見るのは次の応答の途中のレビューか次の Stop になる
+- 同じセッションの応答の途中のレビューが並列に 2 つ以上走り、片方が先に印を下ろしたとき
+  (印は時刻 1 つで、数を数えない)
+
+1 回の起動で最大 2 回レビューする (閾値超えの分 + 引き継いだ残り) ので、hooks.json の timeout は
+2 回分 (版数検出 + git + `worst_case_wall_sec()` を 2 回 + 閾値の判定の git) に収める
+(`tests/test_midturn_flow.py::TestRegistration`)。`midturn_at` の失効 (`MIDTURN_STALE_SEC`) も
+in-flight の TTL の 2 倍。
+
+### 限界
+
+- `claude -p` では teardown で背景 hook が kill される (公式 docs: outcome `cancelled`)。
+  claim は in-flight の TTL 後に後続の Stop が回収する
+- `asyncRewake` を解さない CLI で背景にならない場合、閾値を超えた編集のツール結果がレビューの
+  間待たされる (対応版数は実機で未確認)
+- 閾値以上の応答の途中のレビューがロックを握っている間の Bash の commit レビューは、他セッションの
+  レビュー中と同じく見送る (`NOTICE_LOCK_HELD`。窓は 1 回きり)。閾値未満の計測はロックを取らない
+  ので、この見送りは起きない
+- 背景で走る `git diff` は index の stat 情報を書き戻すことがあり (refresh)、同じ時刻に Claude が
+  打つ `git add` / `git commit` と `index.lock` でぶつかりうる (Stop も同じ git を呼ぶが、応答の
+  途中のレビューは Claude のツール呼び出しと時間が重なる)。plumbing の呼び方に変えるのは別の課題
+- 計測は、同じツール呼び出しの同期 hook が pending に積む前に走りうるので、その呼び出しの分は
+  1 手遅れて次の判定に入る
+- 背景 hook が kill されると `midturn_at` が `MIDTURN_STALE_SEC` の間残り、その間に来た Stop が
+  ロックを取れなければ、実際には誰も引き継がないのに `NOTICE_HANDED_OFF` を出しうる
+- サブエージェントのツール呼び出しで発火した背景 hook の exit 2 が、親とサブエージェントの
+  どちらを起こすかは公式 docs に記述が無く、実機でも未確認
+- 同じ PostToolUse の同期 hook (pending に積む側) と並列に起動するので、直前の編集がまだ
+  pending に無い状態で測ることがある。次の編集か Stop が拾うので取りこぼしにはならない
+
 ## 実機で確認した前提 (CLI 2.1.233, 2026-08-16)
 
 推測で組むと壊れる箇所なので、nested `claude -p --plugin-dir` で payload を実測した。
@@ -969,6 +1046,7 @@ pytest tests/                          # pytest でも動く (conftest.py で sy
 | **linked worktree の commit をその worktree の reflog で拾う** | `test_commit_flow.py::TestLinkedWorktree` |
 | **全 backend 失敗時、送った側の pending は触らないが、重複抑止パスは settle する (混在 batch) / 別 repo への commit では窓が伸びない** | `test_commit_flow.py::TestStateOnFailure` / `TestCommitInAnotherRepo` |
 | **state 整理はレビューした commit 基準 (待ち時間中に同じパスが commit されたら外さない / 無関係な commit では巻き込まない)** | `test_commit_flow.py::TestSettleAgainstReviewedCommit` |
+| **応答の途中のレビュー (0.16.0)**: 既定オフ / 閾値 (境界・0・除外とレビュー済みは数えない) を超えたときだけ背景でレビュー / 指摘は exit 2 + 本文だけの stderr / 要約は次の Stop / cursor lock で Stop と並走しない・Stop からの引き継ぎ / 登録形と timeout | `test_midturn_flow.py` |
 | commit レビューを含む PostToolUse(Bash) の hook timeout 予算 | `test_review_set.py::TestTimeoutBudgets::test_post_tool_bash_budget_covers_commit_review` |
 | env 未設定なら 0.5.0 と同じ挙動 | 各クラスの `test_unset_*` (基底クラスが `EXTERNAL_AI_` を接頭辞で一掃する) |
 | テストが作る git repo (push 先の bare repo を含む) と hook が起動する git で、自動 gc / maintenance が止まっている (tearDown の `Directory not empty` を防ぐ) | `test_hermetic_env.py` |
