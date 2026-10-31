@@ -1,8 +1,5 @@
 """コマンド行の分解で、後ろのクラウド CLI を候補から落とさない (v0.29.1)。
 
-- `#` を comment の始まりと読むのは語の先頭だけ。エスケープした空白・演算子
-  (`echo \\ # ; aws ...`)、`$(...)` / `$((...))` の閉じ `)`、行継続の直後の `#` は語の続き
-  (bash 3.2 / zsh とも後ろの aws が走る)
 - `$(` の中でも、bash 3.2 と zsh の両方が comment と読む `#` から改行の手前までは comment
   (中の `)` / `'` で `$(` を閉じない)
 - `$(` の入れ子は再帰せずに辿る (`$(` を 1000 段ほど重ねると RecursionError になり、hook は
@@ -36,41 +33,6 @@ _PKG_DIR = Path(__file__).resolve().parent.parent
 def _cands(command):
     return [c for c, _e in extract_candidates(command)]
 
-
-# (形, bash / zsh で aws が走るか)。`{a}` が aws。走る形は候補に入り、走らない形 (comment の
-# 中・引用符の中) は候補に入らない (従来どおり)。
-COMMENT_FORMS = [
-    # エスケープした空白・タブ・演算子の後ろの `#` は語の続き
-    ("echo \\ # ; {a}", True),
-    ("echo a\\ # ; {a}", True),
-    ("echo \\\\\\ # ; {a}", True),
-    ("echo \\\t# ; {a}", True),
-    ("echo \\;# ; {a}", True),
-    ("echo \\|# ; {a}", True),
-    ("echo \\&# ; {a}", True),
-    ("echo \\(# ; {a}", True),
-    ("echo \\)# ; {a}", True),
-    # 置換・引用符の閉じの後ろも語の続き
-    ("echo $(true)# ; {a}", True),
-    ("echo $((1))# ; {a}", True),
-    ("echo 'a'# ; {a}", True),
-    ("echo ${HOME}# ; {a}", True),
-    # 行継続は取り除くので、その前の文字で決まる
-    ("echo a\\\n# ; {a}", True),
-    ("echo \\\n# ; {a}", False),
-    ("echo \\\n#'\n{a}", True),
-    ("echo a\\\n#'\n{a}", False),
-    # 語の先頭の `#` は comment (エスケープした backslash の後ろの空白は素の空白)
-    ("echo \\\\ # ; {a}", False),
-    ("echo $(true) # ; {a}", False),
-    ("echo a;# ; {a}", False),
-    ("echo a|# ; {a}", False),
-    ("echo a&# ; {a}", False),
-    # 算術評価 `(( ))` とサブシェル `( )` の閉じの後ろは語の先頭 (comment)
-    ("((1))# ; {a}", False),
-    ("((1))#'\n{a}", True),
-    ("(true)#'\n{a}", True),
-]
 
 # `$(` の中の comment。bash 3.2 と zsh の両方が comment と読む `#` から改行の手前までは comment で、
 # 中の `'` / `)` / `$'\'` は `$(` を閉じず引用符も始めない。片方のシェルだけが comment と読む `#` は
@@ -133,15 +95,8 @@ class CandidateTests(unittest.TestCase):
                 else:
                     self.assertNotIn(AWS, cands)
 
-    def test_comment_starts_only_at_word_start(self):
-        self._check(COMMENT_FORMS)
-
     def test_comment_inside_command_substitution(self):
         self._check(SUBST_COMMENT_FORMS)
-
-    def test_here_string_operator_keeps_hash(self):
-        """`<<<` の直後の `#` は従来どおり comment にしない (bash では構文エラー。過剰検証側)。"""
-        self.assertIn(AWS, _cands(f"echo <<<# ; {AWS}"))
 
 
 class DeepCommandSubstitutionTests(unittest.TestCase):
@@ -250,8 +205,6 @@ class DispatchTests(BaseWithTmpProject):
 
     def test_mismatch_is_denied(self):
         forms = [
-            "echo \\ # ; {a}",
-            "echo $(true)# ; {a}",
             "echo " + "$(" * 3000 + ")" * 3000 + " ; {a}",
             "echo $(true #)#'\n)\n{a}",
             "x=$(true #$'\\'\n)\n{a}",

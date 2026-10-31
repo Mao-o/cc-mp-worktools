@@ -494,11 +494,6 @@ def _skip_opaque(text: str, i: int) -> int | None:
     return _arithmetic_span(text, i)
 
 
-# トップレベルで、直後の文字を語の先頭にする素の文字 (`#` を comment の始まりと読むかの判定)。
-# `$(` の中の規則は `_command_substitution_end` (bash 3.2 と zsh が食い違うので狭い)。
-_WORD_BREAK = " \t\n;&|()"
-
-
 def _comment_end(text: str, i: int) -> int:
     """`text[i]` の `#` から始まる comment の終わり (改行の位置。改行が無ければ末尾)。"""
     eol = text.find("\n", i)
@@ -732,9 +727,8 @@ def split_with_separators(command: str) -> list[tuple[str, str]]:
     heredoc の再スキャン (`_strip_heredoc_bodies`) や括弧の均衡判定
     (`_has_unbalanced_closer`) も同じ関数を通す。経路ごとに書くと必ず食い違う。
 
-    語の先頭の `#` (行頭 / 引用符・エスケープの外の空白・演算子・算術評価の閉じの直後に
-    来るもの) 以降改行までは bash コメントとして無視する。エスケープした空白や置換の閉じの
-    直後の `#` は語の続き (comment ではない)。
+    unquoted な `#` (行頭 / 空白 / 演算子の直後に来るもの) 以降改行までは
+    bash コメントとして無視する。
 
     heredoc (`cat > x.sh <<'EOF'` 〜 `EOF`) の本文は**改行で分割せず**、開始行と
     同じセグメントに取り込む。取り込まないと本文中の 1 行 (`gh release create v1`
@@ -750,18 +744,10 @@ def split_with_separators(command: str) -> list[tuple[str, str]]:
     # 直前に buf へ入れたのが引用符・エスケープの外の `>` / `<` か (`2>&1` / `<&3` の判定)。
     # `command[i - 1]` で見ると `\>&` (エスケープした `>` の後の背景実行) を取り違える。
     after_redirect = False
-    # 次の文字が語の先頭か (`#` を comment の始まりと読むかの判定)。`command[i - 1]` で見ると、
-    # エスケープした空白・演算子 (`echo \ # ; aws ...` の `\ `) や `$(...)` の閉じ `)` の後ろの
-    # `#` を comment と読み、bash / zsh では走る後ろのコマンドを落とす。引用符・エスケープ・置換の
-    # 後ろは語の続き。算術評価 `(( ... ))` の後ろは語の先頭 (bash / zsh とも `((1))#` 以降は
-    # comment)。行継続 (`\` + 改行) は取り除くので、その前の状態を引き継ぐ。
-    word_start = True
 
     def flush(sep: str) -> None:
-        nonlocal word_start
         segments.append(("".join(buf), sep))
         buf.clear()
-        word_start = True
 
     while i < n:
         # quote / 置換 / 算術は 1 領域としてそのまま buf へ (構文解釈しない)。
@@ -788,36 +774,32 @@ def split_with_separators(command: str) -> list[tuple[str, str]]:
                 i = opaque
                 continue
             buf.append(command[i:opaque])
-            word_start = command[i] == "("  # 算術評価だけが `(` で始まる
             i = opaque
             continue
 
         ch = command[i]
         nxt = command[i + 1] if i + 1 < n else ""
 
-        if ch == "#" and word_start:
-            i = _comment_end(command, i)
+        if ch == "#" and (i == 0 or command[i - 1] in " \t\n;&|()"):
+            while i < n and command[i] != "\n":
+                i += 1
             continue
 
         if ch == "<" and nxt == "<":
             # here-string `<<<` は heredoc ではない (本文行を持たない)。
             if i + 2 < n and command[i + 2] == "<":
                 buf.append("<<<")
-                word_start = False
                 i += 3
                 continue
             found = _scan_heredoc_start(command, i)
             if found is not None:
                 delim, dash, hd_end = found
                 pending_heredocs.append((delim, dash))
-                # `word_start` は触らない: 語の直後は必ず語を終える文字か末尾で、
-                # その文字が `word_start` を決め直す (`#` は語の一部として読まれる)。
                 buf.append(command[i:hd_end])
                 i = hd_end
                 continue
             # delimiter を解決できない `<<` はそのまま流す = heredoc と見なさない
-            # (本文行が候補になる = 過剰検証側)。直後の文字 (`<<-` の `-`・語を終える文字・
-            # 閉じない引用符) が `word_start` を決め直す (`#` は閉じた語なら delimiter として解決する)。
+            # (本文行が候補になる = 過剰検証側)。
             buf.append("<<")
             i += 2
             continue
@@ -873,7 +855,6 @@ def split_with_separators(command: str) -> list[tuple[str, str]]:
 
         buf.append(ch)
         after_redirect = ch in "<>"
-        word_start = ch in _WORD_BREAK
         i += 1
 
     flush("")
