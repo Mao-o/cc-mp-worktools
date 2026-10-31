@@ -362,17 +362,18 @@ class TestNoConcurrencyWithStop(MidTurnTestCase):
         """印を立ててからロックを取るまでに Stop が送り終えたら、残りが閾値未満なら送らない。"""
         self.big_edit(SESSION_A)
         seen: dict = {}
-        real_set = self.state.set_midturn_running
+        real_begin = self.state.begin_midturn
 
-        def set_running(sid, running):
-            real_set(sid, running)
-            if running and "stop" not in seen:
+        def begin(sid):
+            run_id = real_begin(sid)
+            if "stop" not in seen:
                 # 印は立った・ロックはまだ: ここで Stop が来てロックを取る
                 seen["stop"] = self.stop(SESSION_A, "REVIEW_CLEAN")
                 seen["stop_calls"] = list(self.review_calls)
                 self.edit(SESSION_A, "small.txt", "x\n")
+            return run_id
 
-        with mock.patch.object(self.state, "set_midturn_running", side_effect=set_running):
+        with mock.patch.object(self.state, "begin_midturn", side_effect=begin):
             self.mid_turn(SESSION_A, "REVIEW_CLEAN")
         self.assertEqual(len(seen["stop_calls"]), 2, "Stop が自分でロックを取って 2 塊を送る")
         self.assertEqual(self.midturn_calls, [], "測り直すと閾値未満")
@@ -406,16 +407,16 @@ class TestNoConcurrencyWithStop(MidTurnTestCase):
         """印を下ろした直後に Stop が来たら、ロックはもう放されていて Stop が自分で見る。"""
         self.big_edit(SESSION_A)
         seen: dict = {}
-        real_set = self.state.set_midturn_running
+        real_end = self.state.end_midturn
 
-        def set_running(sid, running):
-            real_set(sid, running)
-            if not running and "stop" not in seen:
+        def end(sid, run_id):
+            real_end(sid, run_id)
+            if "stop" not in seen:
                 self.edit(SESSION_A, "rest.txt", "rest\n")
                 seen["stop"] = self.stop(SESSION_A, "REVIEW_CLEAN")
                 seen["stop_calls"] = list(self.review_calls)
 
-        with mock.patch.object(self.state, "set_midturn_running", side_effect=set_running):
+        with mock.patch.object(self.state, "end_midturn", side_effect=end):
             self.mid_turn(SESSION_A, "REVIEW_CLEAN")
         self.assertEqual(len(self.midturn_calls), 2)
         self.assertIn("stop_calls", seen, "印が下ろされていない")
@@ -429,12 +430,12 @@ class TestNoConcurrencyWithStop(MidTurnTestCase):
         self.edit(SESSION_A, "rest.txt", "rest\n")
         stack = contextlib.ExitStack()
         self.assertTrue(stack.enter_context(self.state.cursor_lock(self.repo)))
-        self.state.set_midturn_running(SESSION_A, True)
+        owner = self.state.begin_midturn(SESSION_A)
         real_running = self.state.midturn_running
 
         def running(sid):
             # 持ち主が終わる: 印を下ろす → ロックを放す → 依頼を読む (無い)
-            self.state.set_midturn_running(sid, False)
+            self.state.end_midturn(sid, owner)
             stack.close()
             self.assertFalse(self.state.take_stop_handoff(sid))
             return real_running(sid)
@@ -448,7 +449,7 @@ class TestNoConcurrencyWithStop(MidTurnTestCase):
     def test_stop_retry_reviews_itself_when_lock_was_released(self):
         """依頼を書いた後の再試行でロックが取れたら、Stop が自分で残りを見る。"""
         self.edit(SESSION_A, "a.txt", "a\n")
-        self.state.set_midturn_running(SESSION_A, True)
+        self.state.begin_midturn(SESSION_A)
         real = self.entry._stop_review_under_lock
         attempts: list[int] = []
 
@@ -538,11 +539,152 @@ class TestNoConcurrencyWithStop(MidTurnTestCase):
 
     def test_stale_running_flag_is_ignored(self):
         self.edit(SESSION_A, "a.txt", "a\n")
-        self.state.set_midturn_running(SESSION_A, True)
         old = time.time() - self.state.MIDTURN_STALE_SEC - 5
         with mock.patch.object(self.state.time, "time", return_value=old):
-            self.state.set_midturn_running(SESSION_A, True)
+            self.state.begin_midturn(SESSION_A)
         self.assertFalse(self.state.midturn_running(SESSION_A))
+
+
+class TestParallelMidTurnRunsInOneSession(MidTurnTestCase):
+    """同じセッションで応答の途中のレビューが 2 本並列に走っても、先に終わった方が、
+    もう一方の実行中の印を下ろさない (印は実行ごとに持つ)。
+
+    ロックを持つ X がレビューしている間に、ロックを取れなかった Y が印を立てて下ろす。
+    その後に来た Stop は、X がまだレビュー中なので引き継ぎに入ること。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        patcher = mock.patch.dict(os.environ, ON)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_y_failing_the_lock_does_not_end_the_stop_handoff(self):
+        self.big_edit(SESSION_A)
+        seen: dict = {}
+
+        def during(n: int) -> None:
+            if n != 1:
+                return
+            # Y: 閾値以上の pending があり、ロックは X が握っているので取れずに終わる
+            self.big_edit(SESSION_A, "more")
+            y_code, _, _ = self.mid_turn(SESSION_A, "REVIEW_CLEAN")
+            seen["y_code"] = y_code
+            seen["y_calls"] = list(self.midturn_calls)
+            seen["running_after_y"] = self.state.midturn_running(SESSION_A)
+            self.edit(SESSION_A, "rest.txt", "rest of the response\n")
+            seen["stop_output"] = self.stop(SESSION_A, FINDING)
+            seen["stop_calls"] = list(self.review_calls)
+
+        code, _, _ = self.mid_turn(SESSION_A, "REVIEW_CLEAN", inside=during)
+        self.assertIn("stop_calls", seen, "X のレビューの最中に Y と Stop を挟めていない")
+        self.assertEqual((seen["y_code"], seen["y_calls"]), (0, []), "Y はロックを取れず何も送らない")
+        self.assertTrue(seen["running_after_y"], "Y が終わっても X の印は残る")
+        self.assertEqual(seen["stop_calls"], [], "Stop はレビューを並走させない")
+        message = self.assertNotBlocked(seen["stop_output"])
+        self.assertIn(self.entry.NOTICE_HANDED_OFF, message, "Stop が黙って skip した")
+        self.assertEqual(code, 0)
+        sent = "".join(self.midturn_calls)
+        for name in ("big-1.txt", "more-1.txt", "more-2.txt", "rest.txt"):
+            self.assertIn(name, sent, f"{name} が誰にも送られていない")
+        self.assertEqual(self.pending(SESSION_A), [], "引き継いだ X が残りを送り切る")
+        self.assertFalse(self.raw_state(SESSION_A)["stop_handoff"])
+        self.assertFalse(self.state.midturn_running(SESSION_A))
+
+    def test_stop_after_x_released_the_lock_reviews_itself_despite_y(self):
+        """X がロックを放した後・印を下ろす前に Y が終わっても、Stop はロックを取れて自分で見る。"""
+        self.big_edit(SESSION_A)
+        seen: dict = {}
+        real_take = self.state.take_stop_handoff
+
+        def take(sid):
+            if "stop" not in seen:
+                y = self.state.begin_midturn(sid)
+                self.state.end_midturn(sid, y)
+                self.edit(SESSION_A, "rest.txt", "rest\n")
+                seen["stop"] = self.stop(SESSION_A, "REVIEW_CLEAN")
+                seen["stop_calls"] = list(self.review_calls)
+            return real_take(sid)
+
+        with mock.patch.object(self.state, "take_stop_handoff", side_effect=take):
+            self.mid_turn(SESSION_A, "REVIEW_CLEAN")
+        self.assertEqual(len(seen["stop_calls"]), 1, "ロックは空いているので Stop が自分で見る")
+        self.assertIn("rest.txt", seen["stop_calls"][0])
+        self.assertNotIn(self.entry.NOTICE_HANDED_OFF, self.assertNotBlocked(seen["stop"]))
+        self.assertEqual(self.pending(SESSION_A), [])
+
+    def test_the_mark_is_released_even_when_the_review_raises(self):
+        """finally が自分の id を下ろす (例外で抜けても印を残さない)。"""
+        self.big_edit(SESSION_A)
+        other = self.state.begin_midturn(SESSION_A)
+        with mock.patch.object(self.entry, "_review_claim", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                self.mid_turn(SESSION_A, "REVIEW_CLEAN")
+        self.assertTrue(self.state.midturn_running(SESSION_A), "他の実行の印は残る")
+        self.state.end_midturn(SESSION_A, other)
+        self.assertFalse(self.state.midturn_running(SESSION_A), "自分の印は例外でも下りている")
+
+
+class TestMidTurnRunMarks(MidTurnTestCase):
+    """実行ごとの印 (`begin_midturn` / `end_midturn` / `midturn_running`) の単体。"""
+
+    def test_each_run_owns_its_mark(self):
+        x = self.state.begin_midturn(SESSION_A)
+        y = self.state.begin_midturn(SESSION_A)
+        self.assertNotEqual(x, y)
+        self.state.end_midturn(SESSION_A, y)
+        self.assertTrue(self.state.midturn_running(SESSION_A), "y が下ろしても x が残る")
+        self.state.end_midturn(SESSION_A, y)
+        self.assertTrue(self.state.midturn_running(SESSION_A), "同じ id の 2 回目は何もしない")
+        self.state.end_midturn(SESSION_A, "no-such-run")
+        self.assertTrue(self.state.midturn_running(SESSION_A), "知らない id は何も消さない")
+        self.state.end_midturn(SESSION_A, x)
+        self.assertFalse(self.state.midturn_running(SESSION_A))
+
+    def test_the_first_to_start_can_finish_last(self):
+        x = self.state.begin_midturn(SESSION_A)
+        y = self.state.begin_midturn(SESSION_A)
+        self.state.end_midturn(SESSION_A, x)
+        self.assertTrue(self.state.midturn_running(SESSION_A), "x が先に終わっても y が残る")
+        self.state.end_midturn(SESSION_A, y)
+        self.assertFalse(self.state.midturn_running(SESSION_A))
+
+    def test_a_stale_mark_does_not_hide_a_live_one(self):
+        old = time.time() - self.state.MIDTURN_STALE_SEC - 5
+        with mock.patch.object(self.state.time, "time", return_value=old):
+            self.state.begin_midturn(SESSION_A)
+        self.assertFalse(self.state.midturn_running(SESSION_A))
+        live = self.state.begin_midturn(SESSION_A)
+        self.assertTrue(self.state.midturn_running(SESSION_A))
+        self.assertEqual(list(self.raw_state(SESSION_A)["midturn_runs"]), [live], "失効した印は掃除される")
+
+    def test_marks_are_per_session(self):
+        self.state.begin_midturn(SESSION_A)
+        self.assertFalse(self.state.midturn_running(SESSION_B))
+
+    def test_a_broken_marks_field_is_ignored(self):
+        self.state.begin_midturn(SESSION_A)
+        path = os.path.join(self.tmpdir, "post-implementation-review", "state", f"{SESSION_A}.json")
+        for broken in ([], "x", {"r": "now"}, {"r": None}):
+            with self.subTest(broken=broken):
+                with open(path, "w") as f:
+                    json.dump({"v": 1, "midturn_runs": broken}, f)
+                try:
+                    running = self.state.midturn_running(SESSION_A)
+                    self.state.end_midturn(SESSION_A, self.state.begin_midturn(SESSION_A))
+                except Exception as e:  # noqa: BLE001 - 例外の漏れは検出として数える
+                    self.fail(f"壊れた欄で例外が漏れた: {e!r}")
+                self.assertFalse(running)
+
+    def test_a_live_mark_after_a_stale_one_still_counts(self):
+        """失効した印が先頭にあっても、後ろの生きた印を見落とさない。"""
+        path = os.path.join(self.tmpdir, "post-implementation-review", "state", f"{SESSION_A}.json")
+        self.state.begin_midturn(SESSION_A)
+        now = time.time()
+        with open(path, "w") as f:
+            json.dump({"v": 1, "midturn_runs": {"old": now - self.state.MIDTURN_STALE_SEC - 5,
+                                                "live": now}}, f)
+        self.assertTrue(self.state.midturn_running(SESSION_A))
 
 
 class TestRegistration(unittest.TestCase):

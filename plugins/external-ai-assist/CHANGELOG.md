@@ -5,6 +5,20 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.16.1
+
+**応答の途中のレビューが同じセッションで 2 本並列に走ったときの Stop の取りこぼしを直し、テストの陽性対照が外側の repo に書き込まないようにした。挙動の修正とテストの修正のみで、patch bump。**
+
+### 修正
+
+- 応答の途中のレビューの「実行中」の印を、時刻 1 つから実行ごとの id に変えた (state の `midturn_runs`)。同じセッションで閾値以上の応答の途中のレビューが 2 本並列に走り、ロックを取れなかった方が先に終わると、その方が印を下ろして、ロックを持つ方がまだレビュー中でも Stop が「別セッションがレビュー中」として黙って skip していた (残りの差分は次の応答の終わりまで残った)。各実行は自分の id の印だけを下ろし、1 本でも残っていれば Stop は引き継ぎに入る。失効 (`MIDTURN_STALE_SEC`) は実行ごとに見る。`CLAUDE.md` の「残りうる条件」から、この条件を外した
+- テスト (`test_hermetic_env.py`) の陽性対照 (`test_a_commit_that_stops_nothing_spawns_maintenance`) が、git の init / config / add / commit を env なしで起動していた。床の `isolate_git_config` が外側の `GIT_DIR` などを外し損ねる退行があると、hook の中から suite を流したときに外側の repo へ commit が書かれた。起動する git の env から `OUTER_LEAKS` を外すようにした
+
+### テスト
+
+- 並列の 2 本 (ロックを取れなかった方が先に終わる) の後に Stop が来たとき、Stop が引き継ぎに入り、ロックを持つ側が残り (後から足した分を含む) を送り切ることを固定した。印を下ろす前後に別の実行が挟まる場合と、印の単体 (自分の id だけを下ろす・知らない id は何もしない・失効した印は掃除される・壊れた欄は無視) も固定した
+- 陽性対照が外側の repo に書かないことを、外側の `.git` のファイル単位の前後比較で固定した (refs の数だけだと、`GIT_COMMON_DIR` / `GIT_OBJECT_DIRECTORY` が objects にだけ書く漏れを見落とす)。`OUTER_LEAKS` の 16 個を全部足した回と、1 つずつ足した回で流すので、除外から 1 要素が抜けた退行はその要素の回で落ちる
+
 ## 0.16.0
 
 **`post-implementation-review` に応答の途中のレビューを足した (既定オフ)。`EXTERNAL_AI_POST_REVIEW_MIDTURN=1` にすると、pending の diff が閾値 (既定 40000 バイト) を超えた時点で、応答の終わりを待たずにその分を背景でレビューに出す。hook の登録が増える機能追加なので minor bump。**

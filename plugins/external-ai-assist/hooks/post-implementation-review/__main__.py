@@ -2551,9 +2551,9 @@ def handle_mid_turn(payload: dict) -> tuple[int, str]:
 
     **Stop と並走させない**: 閾値の 1 回目の判定はロックの外で測る (読み取りだけ。
     閾値未満ならロックを取らずに抜けるので、同じ Bash の commit レビューを止めない)。
-    閾値以上なら `midturn_at` を立ててから cursor lock (作業ツリー単位) を非ブロッキングで
+    閾値以上なら実行ごとの印 (`midturn_runs`) を立ててから cursor lock (作業ツリー単位) を非ブロッキングで
     取り、ロックの下で測り直してから claim する。印はロックを取りに行く前に立て、
-    引き継ぎの依頼を読み終えた後に 1 箇所 (finally) で下ろす。Stop がロックを取れず、
+    引き継ぎの依頼を読み終えた後に 1 箇所 (finally) で、**自分の印だけ**を下ろす。Stop がロックを取れず、
     印が立っていれば、Stop は `stop_handoff` を立ててから**もう一度**ロックを試す。
     印が立っていなければ、依頼は書かずにもう一度だけロックを試す。応答の途中のレビューは、
     ロックを**放した後に**依頼を読んで消し、依頼があれば再びロックを試して残りの pending を
@@ -2565,10 +2565,10 @@ def handle_mid_turn(payload: dict) -> tuple[int, str]:
     | (こちらが依頼を読み終えた) → 依頼 → 再試行 | こちらはロックを放し終えているので、Stop の再試行が取れる |
 
     残りの pending が誰にも見られずに次の応答まで残るのは、ロックを別のセッションが
-    握っていた場合 (0.15.x までの Stop と同じ) と、同じセッションの応答の途中のレビューが
-    並列に 2 つ以上走り、片方が先に印を下ろした場合 (印は 1 つの時刻で、数を数えない)。
-    前者で印が立っていると、Stop は引き継ぎの通知を出すが、実際に見るのは次の応答の
-    途中のレビューか次の Stop になる。
+    握っていた場合 (0.15.x までの Stop と同じ)。このとき印が立っていると、Stop は引き継ぎの
+    通知を出すが、実際に見るのは次の応答の途中のレビューか次の Stop になる。同じセッションの
+    応答の途中のレビューが並列に 2 つ以上走っても、印は実行ごとに持つので、先に終わった方が
+    もう一方の印を下ろすことはない (ロックを持つ方が終わるまで、Stop は引き継ぎに入る)。
 
     **既定オフ**: 1 回の応答の中で外部 AI CLI を起動する回数が増える (閾値を超える
     たびに 1 回) ので、`EXTERNAL_AI_POST_REVIEW_MIDTURN=1` で利用者が選ぶ。オフの
@@ -2603,7 +2603,7 @@ def handle_mid_turn(payload: dict) -> tuple[int, str]:
     # 印は**ロックを取りに行く前に**立て、引き継ぎを読み終えるまで下ろさない。ロックを
     # 取った直後・印を立てる前、印を下ろした後・ロックを放す前の窓に Stop が来ると、
     # Stop は持ち主を別のセッションと見なして黙って skip してしまう
-    state.set_midturn_running(session_id, True)
+    run_id = state.begin_midturn(session_id)
     try:
         with state.cursor_lock(root) as acquired:
             if not acquired:
@@ -2630,7 +2630,7 @@ def handle_mid_turn(payload: dict) -> tuple[int, str]:
                 else:
                     log("応答の途中のレビュー: 引き継ぎはロックを取った側が行う")
     finally:
-        state.set_midturn_running(session_id, False)
+        state.end_midturn(session_id, run_id)
     return _midturn_delivery(session_id, outputs)
 
 
