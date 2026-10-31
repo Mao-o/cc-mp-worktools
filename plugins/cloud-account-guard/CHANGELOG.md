@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.26.1
+
+### Fixed: project のディレクトリが symlink の下にあるとき、CLI の無い firebase のコマンドを firebase-tools と別の project で照合して allow していた
+
+- `--config` の無い firebase のコマンドで、hook は project root (firebase.json のあるディレクトリ) を
+  project のディレクトリの論理パス (`CLAUDE_PROJECT_DIR` のまま) から探し、CLI が無いときは configstore の
+  切替先も論理パス → 実体のパスの順で引いていた。firebase-tools は Node の `process.cwd()` (symlink を解いた
+  実体のパス) から探すので、論理パスのキー (symlink を通る `--config` で `firebase use` すると書かれる) や、
+  論理の親にだけある firebase.json の `.firebaserc` を見ない。修正前は、project のディレクトリを symlink
+  (`L` → `R`) にし、configstore の `L` のキーにだけ期待した project の alias を置き、`R/.firebaserc` の
+  `default` を別の project にすると、CLI の無い `firebase deploy` が allow になっていた (firebase-tools は
+  `default` の project で動く)。論理の親にだけ firebase.json があり、そこの `.firebaserc` の `default` が
+  期待値のときも同じく allow になっていた
+- project root を実体のパスから探し (`_project_root`)、configstore はその root の親方向だけで引く
+  (論理パスでの探索と実体のパスへの fallback をなくした。`--config` 付きのコマンドは 0.18.0 から同じ)。
+  `firebase use` の cwd、`.firebaserc` の読み先、期待値が未登録のときの固定の判定 (`is_pinned`)、builder の
+  現在値 (`get_active_account`) と `pin-env` の `.firebaserc` の確認も同じ root を使う。論理パスと実体の
+  パスが同じ通常の構成では、判定も出力も変わらない (旧版との出力比較で確認)
+- allow 側にも動く変更がある: project のディレクトリが、firebase.json のある root の下 (の子) を指す
+  symlink のとき、旧版は論理パスの親に firebase.json が無いため project dir を root にして deny (現在値を
+  取得できない / 不一致) していた。0.26.1 は firebase-tools と同じ実体のパスの root で照合するので、その
+  root の切替先が期待値なら allow になる (`pin-env` の `firebase use` の行き先の確認も同じ root の
+  `.firebaserc` で解決する)。firebase-tools 15.19.1 の `detectProjectRoot` (`options.cwd || process.cwd()`)
+  と `command.js:218` の `configstoreProject(options.projectRoot || process.cwd())` と一致することを確かめた
+
+### Fixed: `pin-env` の書き込み先の判定が、外側で export された `GIT_DIR` などで別の repo を指していた
+
+- `settings_local_target` (`pin-env` が示す `.claude/settings.local.json` の書き込み先) は、外側の
+  `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` / `GIT_COMMON_DIR` を引き継いだまま git を呼んでいた。
+  修正前は、別の repo を指す `GIT_DIR` を export した状態では、project のディレクトリの repo ではなくその repo の
+  ルートを書き込み先として示し、git の外のディレクトリでも「git の外」と言わずにその repo を示していた。
+  Claude Code はセッションのプロジェクトのディレクトリから決まる repo のファイルを読むとみなし
+  (外側の `GIT_DIR` に従うかは未実測。外れた場合は固定が効かず hook が deny するだけで、fail closed)、
+  これらを外して git を呼ぶ (`.gitignore` の判定
+  (`_git_ignored`) は 0.24.0 から同じ)。外す変数の一覧は `core/paths.py` の `GIT_REDIRECT_ENV` /
+  `git_env()` にまとめ、2 つの呼び出しで共有する
+
 ## 0.26.0
 
 ### Changed: `pin-env` は firebase の project ID が複数あるとき、確認を通った候補のコマンドを全部出す

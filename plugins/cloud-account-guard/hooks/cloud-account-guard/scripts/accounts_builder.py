@@ -554,9 +554,6 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
 _GIT_CHECK_IGNORE_TIMEOUT_SEC = 5
 
 
-_GIT_REDIRECT_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
-
-
 def _git_ignored(anchor: Path, path: Path) -> bool | None:
     """`path` が git で ignore されるかを `git check-ignore -q` で判定する。
 
@@ -578,7 +575,7 @@ def _git_ignored(anchor: Path, path: Path) -> bool | None:
             timeout=_GIT_CHECK_IGNORE_TIMEOUT_SEC,
             stdin=subprocess.DEVNULL,
             # 外側が export した GIT_DIR などで、anchor ではない repo の規則を引かない
-            env={k: v for k, v in os.environ.items() if k not in _GIT_REDIRECT_ENV},
+            env=paths.git_env(),
         )
     except (OSError, subprocess.SubprocessError, ValueError):
         return None

@@ -551,7 +551,7 @@ class TestFirebase(unittest.TestCase):
         切替先で照合して deny する (false-allow 防止)。"""
         with tempfile.TemporaryDirectory() as d:
             self._write_firebaserc(d, {"default": "proj-dev", "prod": "proj-prod"})
-            self._write_configstore({os.path.abspath(d): "prod"})
+            self._write_configstore({os.path.realpath(d): "prod"})
             with mock.patch("subprocess.run", side_effect=FileNotFoundError):
                 err = firebase.verify("proj-dev", d)
         self.assertIsNotNone(err)
@@ -561,7 +561,7 @@ class TestFirebase(unittest.TestCase):
         """同じ状況で期待が切替先 (proj-prod) なら allow (永久 deny 防止)。"""
         with tempfile.TemporaryDirectory() as d:
             self._write_firebaserc(d, {"default": "proj-dev", "prod": "proj-prod"})
-            self._write_configstore({os.path.abspath(d): "prod"})
+            self._write_configstore({os.path.realpath(d): "prod"})
             with mock.patch("subprocess.run", side_effect=FileNotFoundError):
                 self.assertIsNone(firebase.verify("proj-prod", d))
 
@@ -570,7 +570,7 @@ class TestFirebase(unittest.TestCase):
         project ID) をそのまま現在値にする。"""
         with tempfile.TemporaryDirectory() as d:
             self._write_firebaserc(d, {"default": "proj-dev"})
-            self._write_configstore({os.path.abspath(d): "proj-prod"})
+            self._write_configstore({os.path.realpath(d): "proj-prod"})
             with mock.patch(
                 "subprocess.run",
                 return_value=_fake_run(stdout="", stderr="Error: auth\n", returncode=1),
@@ -585,7 +585,7 @@ class TestFirebase(unittest.TestCase):
             sub = Path(d) / "apps" / "web"
             sub.mkdir(parents=True)
             self._write_firebaserc(str(sub), {"default": "proj-dev", "prod": "proj-prod"})
-            self._write_configstore({os.path.abspath(d): "prod"})
+            self._write_configstore({os.path.realpath(d): "prod"})
             with mock.patch("subprocess.run", side_effect=FileNotFoundError):
                 self.assertIsNone(firebase.verify("proj-prod", str(sub)))
 
@@ -605,7 +605,7 @@ class TestFirebase(unittest.TestCase):
             path = Path(xdg) / "configstore" / "firebase-tools.json"
             path.parent.mkdir(parents=True)
             path.write_text(
-                json.dumps({"activeProjects": {os.path.abspath(d): "prod"}}),
+                json.dumps({"activeProjects": {os.path.realpath(d): "prod"}}),
                 encoding="utf-8",
             )
             with mock.patch("subprocess.run", side_effect=FileNotFoundError):
@@ -665,7 +665,7 @@ class TestFirebase(unittest.TestCase):
             sub.mkdir(parents=True)
             (repo / "firebase.json").write_text("{}", encoding="utf-8")
             self._write_firebaserc(str(repo), {"default": "proj-dev", "prod": "proj-prod"})
-            self._write_configstore({os.path.abspath(repo): "prod"})
+            self._write_configstore({os.path.realpath(repo): "prod"})
             with mock.patch("subprocess.run", side_effect=FileNotFoundError):
                 self.assertIsNone(firebase.verify("proj-prod", str(sub)))
                 err = firebase.verify("proj-dev", str(sub))
@@ -687,7 +687,7 @@ class TestFirebase(unittest.TestCase):
                 "subprocess.run", return_value=_fake_run(stdout="proj-prod\n")
             ) as m:
                 self.assertIsNone(firebase.verify("proj-prod", str(sub)))
-            self.assertEqual(m.call_args.kwargs.get("cwd"), os.path.abspath(repo))
+            self.assertEqual(m.call_args.kwargs.get("cwd"), os.path.realpath(repo))
 
     def test_cli_cwd_is_project_dir_without_firebase_json(self):
         with tempfile.TemporaryDirectory() as d:
@@ -695,7 +695,7 @@ class TestFirebase(unittest.TestCase):
                 "subprocess.run", return_value=_fake_run(stdout="proj\n")
             ) as m:
                 self.assertIsNone(firebase.verify("proj", d))
-            self.assertEqual(m.call_args.kwargs.get("cwd"), os.path.abspath(d))
+            self.assertEqual(m.call_args.kwargs.get("cwd"), os.path.realpath(d))
 
     def test_cli_cwd_missing_project_dir_is_treated_as_cli_unavailable(self):
         """project_dir が存在しないと subprocess.run(cwd=...) が OSError を投げる。
@@ -800,7 +800,7 @@ class _FirebasercFixture(unittest.TestCase):
         path = self._xdg / "configstore" / "firebase-tools.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps({"activeProjects": {os.path.abspath(root): alias_or_project}}),
+            json.dumps({"activeProjects": {os.path.realpath(root): alias_or_project}}),
             encoding="utf-8",
         )
 
@@ -1071,7 +1071,8 @@ class TestDenyNamesAnUnconfirmedFirebaserc(_FirebasercFixture):
         if content is not None:
             data = content if isinstance(content, bytes) else content.encode("utf-8")
             (root / ".firebaserc").write_bytes(data)
-        return str(root)
+        # `_from_local_detail` を直接呼ぶテストがあるので、`_project_root` が返す形 (実体のパス) にする。
+        return os.path.realpath(root)
 
     def _deny(self, expected, root, *, cli_missing, context=None):
         if cli_missing:
@@ -1452,6 +1453,90 @@ class TestFirebaseConfigOption(_FirebasercFixture):
                 self.assertIn("--config のファイルが見つからない", err)
                 self.assertNotIn("firebase use", err)
                 m.assert_not_called()
+
+
+class TestSymlinkedProjectDirWithoutConfig(_FirebasercFixture):
+    """`--config` の無いコマンドは、project_dir の symlink を解いた実体のパスから root と切替先を探す (v0.26.1)。
+
+    firebase-tools は Node の `process.cwd()` (実体のパス) から firebase.json と configstore の
+    切替先を探し、論理パスのキー (symlink を通る `--config` で `firebase use` したときに書かれる)
+    は見ない。旧版は CLI が無いとき論理パスから先に探し、そのキーの project で照合して allow していた。
+    """
+
+    _RC = '{"projects": {"default": "wrong-project", "prod": "right-project"}}'
+
+    def setUp(self):
+        super().setUp()
+        self.real = os.path.realpath(self._project(self._RC, name="R"))
+        self.link = str(self.tmp / "L")
+        os.symlink(self.real, self.link)
+
+    def _store(self, keys: dict) -> None:
+        path = self._xdg / "configstore" / "firebase-tools.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"activeProjects": keys}), encoding="utf-8")
+
+    def _verify_without_cli(self, expected, project_dir: str):
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError), mock.patch(
+            "services.firebase.shutil.which", return_value="/usr/bin/firebase"
+        ):
+            return firebase.verify(expected, project_dir)
+
+    def test_logical_key_is_not_used(self):
+        self._store({self.link: "prod"})
+        for expected in ("right-project", {"prod": "right-project"}):
+            with self.subTest(expected=expected):
+                err = self._verify_without_cli(expected, self.link)
+                self.assertIsNotNone(err, "firebase-tools が見ない論理パスのキーで allow した")
+                self.assertIn("現在=wrong-project", err)
+        self.assertFalse(firebase.is_pinned(dict(os.environ), self.link))
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+            self.assertEqual(firebase.get_active_account(self.link), "wrong-project")
+
+    def test_physical_key_wins_over_the_logical_one(self):
+        self._store({self.link: "prod", self.real: "default"})
+        err = self._verify_without_cli("right-project", self.link)
+        self.assertIsNotNone(err)
+        self.assertIn("現在=wrong-project", err)
+
+    def test_physical_key_is_used(self):
+        self._store({self.real: "prod"})
+        self.assertIsNone(self._verify_without_cli("right-project", self.link))
+        self.assertTrue(firebase.is_pinned(dict(os.environ), self.link))
+
+    def test_project_root_is_searched_from_the_physical_directory(self):
+        """論理の親にだけ firebase.json があるとき、その `.firebaserc` を使わない。"""
+        parent = Path(self._project('{"projects": {"default": "right-project"}}', name="P"))
+        elsewhere = self.tmp / "X"
+        elsewhere.mkdir()
+        (elsewhere / ".firebaserc").write_text(
+            '{"projects": {"default": "wrong-project"}}', encoding="utf-8"
+        )
+        link = parent / "L"
+        os.symlink(elsewhere, link)
+        err = self._verify_without_cli("right-project", str(link))
+        self.assertIsNotNone(err, "firebase-tools が見ない論理の親の .firebaserc で allow した")
+        self.assertIn("現在=wrong-project", err)
+        with mock.patch("subprocess.run", return_value=_fake_run(stdout="wrong-project\n")) as m:
+            self.assertIsNotNone(firebase.verify("right-project", str(link)))
+        self.assertEqual(m.call_args.kwargs.get("cwd"), os.path.realpath(elsewhere))
+
+    def test_plain_directory_is_unchanged(self):
+        """対照: 論理パスと実体パスが同じ構成では、切替先の有無で判定が従来どおり変わる。"""
+        for keys, allowed in (
+            ({}, False),
+            ({self.real: "prod"}, True),
+            ({os.path.dirname(self.real): "prod"}, True),
+            ({self.real: "default"}, False),
+        ):
+            with self.subTest(keys=keys):
+                self._store(keys)
+                err = self._verify_without_cli("right-project", self.real)
+                if allowed:
+                    self.assertIsNone(err)
+                else:
+                    self.assertIsNotNone(err)
+                    self.assertIn("現在=wrong-project", err)
 
 
 class TestGuidanceReachesTheExpectedProject(_FirebasercFixture):

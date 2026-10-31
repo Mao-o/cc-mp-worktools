@@ -743,6 +743,46 @@ class TestSettingsLocalTarget(_TmpBase):
                 )
                 self.assertNotIn("git リポジトリの外", note)
 
+    def test_outer_git_redirect_env_does_not_move_the_target(self):
+        """外側が別の repo を指す GIT_DIR などを export していても、project_dir の repo で決める (v0.26.1)。
+
+        `_testutil` はモジュールの読み込み時に GIT_DIR などを外すので、env はここで明示して入れる。
+        """
+        repo = _init_repo(self.tmp / "repo")
+        worktree = self.tmp / "wt"
+        _git(repo, "worktree", "add", "-q", str(worktree), "-b", "wt")
+        plain = self.tmp / "plain"
+        plain.mkdir()
+        other = _init_repo(self.tmp / "other")
+        outer = {
+            "GIT_DIR": str(other / ".git"),
+            "GIT_WORK_TREE": str(other),
+            "GIT_INDEX_FILE": str(other / ".git" / "index"),
+            "GIT_COMMON_DIR": str(other / ".git"),
+        }
+        expected_file = (repo / ".claude" / "settings.local.json").resolve()
+        # GIT_INDEX_FILE は rev-parse の出力を変えないので subTest にしない。
+        # 外していることは test_paths の TestGitEnv で固定。末尾の全部入りのケースには含める。
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+            env = {name: outer[name]}
+            if name == "GIT_WORK_TREE":
+                env["GIT_DIR"] = outer["GIT_DIR"]  # GIT_WORK_TREE は GIT_DIR と組で効く
+            with self.subTest(env=sorted(env)), mock.patch.dict(os.environ, env):
+                path, note = pin_env.settings_local_target(str(repo))
+                self.assertIsNotNone(path, note)
+                self.assertEqual(path.resolve(), expected_file)
+                self.assertNotIn("main checkout", note)
+                path, note = pin_env.settings_local_target(str(worktree))
+                self.assertIsNotNone(path, note)
+                self.assertEqual(path.resolve(), expected_file)
+                self.assertIn("main checkout", note)
+                path, note = pin_env.settings_local_target(str(plain))
+                self.assertIsNone(path, "git の外なのに外側の repo のルートを書き込み先にした")
+                self.assertIn("git リポジトリの外", note)
+        with mock.patch.dict(os.environ, outer):
+            path, _note = pin_env.settings_local_target(str(repo))
+        self.assertEqual(path.resolve(), expected_file)
+
     def test_repository_at_home_is_not_guessed(self):
         repo = _init_repo(self.tmp / "home-repo")
         with mock.patch.object(Path, "home", staticmethod(lambda: repo)):

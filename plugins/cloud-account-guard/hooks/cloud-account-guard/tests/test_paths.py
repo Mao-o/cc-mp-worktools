@@ -867,3 +867,18 @@ class TestWindowsAbsoluteGitdir(unittest.TestCase):
 
     def test_unc_path_is_not_joined_onto_directory(self):
         self._resolve("//server/share/repo/.git/worktrees/wt")
+
+
+class TestGitEnv(unittest.TestCase):
+    """`git_env` は `git -C <dir>` の向き先を変える env だけを外す (v0.26.1)。"""
+
+    def test_drops_each_redirect_variable_and_keeps_the_rest(self):
+        names = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
+        for name in names:
+            with self.subTest(name=name), mock.patch.dict(
+                os.environ, {name: "/elsewhere", "GIT_CEILING_DIRECTORIES": "/c", "KEEP_ME": "1"}
+            ):
+                env = paths.git_env()
+                self.assertNotIn(name, env)
+                self.assertEqual(env.get("GIT_CEILING_DIRECTORIES"), "/c")
+                self.assertEqual(env.get("KEEP_ME"), "1")

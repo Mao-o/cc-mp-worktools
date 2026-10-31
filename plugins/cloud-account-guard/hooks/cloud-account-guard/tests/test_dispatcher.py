@@ -479,7 +479,7 @@ class TestFirebaseResolutionOrderE2E(BaseWithTmpProject):
         store.parent.mkdir(parents=True, exist_ok=True)
         store.write_text(
             json.dumps(
-                {"activeProjects": {os.path.abspath(self.project_dir): alias_or_project}}
+                {"activeProjects": {os.path.realpath(self.project_dir): alias_or_project}}
             ),
             encoding="utf-8",
         )
@@ -513,7 +513,7 @@ class TestFirebaseResolutionOrderE2E(BaseWithTmpProject):
         store.parent.mkdir(parents=True, exist_ok=True)
         store.write_text(
             '{"activeProjects": {%s: "wrong-project"%s}}'
-            % (json.dumps(os.path.abspath(self.project_dir)), " " * (300 * 1024)),
+            % (json.dumps(os.path.realpath(self.project_dir)), " " * (300 * 1024)),
             encoding="utf-8",
         )
         with mock.patch("subprocess.run", side_effect=FileNotFoundError), \

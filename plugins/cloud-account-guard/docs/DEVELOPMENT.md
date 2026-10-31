@@ -1375,7 +1375,7 @@ verify() は CLI が出した現在値 (前後の空白を除いた値) と期�
   相対パスの形でずれていたのは CLI のある経路だけ
 - CLI が無いときのローカル設定の解決は、`--config` 付きのコマンドでは configstore の切替先を
   root (firebase-tools の projectRoot そのもの) の親方向だけで探し、実体のパスでは探さない
-  (`_from_configstore` の `exact`)。projectRoot は `path.resolve(cwd, config)` の dirname
+  (0.26.0 までの `_from_configstore` の `exact`)。projectRoot は `path.resolve(cwd, config)` の dirname
   (字句的で、symlink を解かない) で、firebase-tools はそのパスの親方向だけを探す。`--config` の
   パスが symlink を通る形 (symlink を通る絶対パス・symlink のディレクトリを通る相対パス
   `linkdir/firebase.json`) では projectRoot が symlink を通るパスになり、firebase-tools は
@@ -1383,10 +1383,19 @@ verify() は CLI が出した現在値 (前後の空白を除いた値) と期�
   パスなのでそこに書く) を見ない。hook は実体のパスでも探していたので、そのキーで照合して
   allow しえた (v0.7.3 からの実体のパスの fallback と、`--config` の root の組み合わせ。
   firebase-tools 15.24.0 の applyRC を node で呼んで実測。マージ前レビューの指摘)。CLI のある
-  経路は同じ `--config` を CLI に渡すので一致する。`--config` の無いコマンドは従来どおり
-  両方で探す (root を実体のパスにして fallback をなくす根本の案は、builder の呼び出しも変わる
-  ので採らない)。この形では、案内どおりそのディレクトリで切り替えても効かないことがある
-  (README の既知の制限。効く形のコマンドは案内しない)
+  経路は同じ `--config` を CLI に渡すので一致する。この形では、案内どおりそのディレクトリで
+  切り替えても効かないことがある (README の既知の制限。効く形のコマンドは案内しない)
+- `--config` の無いコマンドは、0.26.0 まで論理パス (project_dir のまま) から root を探し、
+  configstore も論理パス → 実体のパスの順で引いていた。firebase-tools は `process.cwd()`
+  (実体のパス) から探すので、論理パスのキー (symlink を通る `--config` で `firebase use` すると
+  書かれる) や、論理の親にだけある firebase.json の `.firebaserc` を見ない。CLI の無い経路で
+  hook だけがそれらを拾い、別の project で照合して allow しえた。0.26.1 で `_project_root` の
+  起点を実体のパスにし、configstore は root の親方向だけで探す (論理パスの探索と実体のパスの
+  fallback をなくし、`exact` も不要になった)。builder (`get_active_account` / `is_pinned` /
+  `resolve_target` / `firebaserc_reads_like_cli`) も同じ root を使う。旧版との出力比較では、
+  論理パスと実体パスが同じ構成の出力は変わらず、変わったのは symlink の下の構成だけで、どれも
+  firebase-tools と揃う向き (論理パスのキーだけ・両方のキー・symlink が firebase.json のある
+  root の子を指す・論理の親にだけ firebase.json がある、の 4 形)
 - `--config` 付きのコマンドの deny は、切替をコマンドの形で案内しない
   (`_SWITCH_IN_CONFIG_DIR`)。firebase-tools は `firebase use` の切替先を project root
   (use.js の `makeActiveProject(options.projectRoot)`) ごとに記録し、`--config` 付きのコマンドは

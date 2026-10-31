@@ -18,6 +18,8 @@ accounts.local.json の "firebase" は 2 形式を受け付ける:
    ヘルプ) は、CLI と同じローカル設定ファイルから同じ規則で解決する:
    `firebase.json` を親方向に探した project root (無ければ project_dir) を起点に、
    configstore の activeProjects (親方向に探索) を `.firebaserc` の alias で解決
+   (project root は project_dir の symlink を解いた実体のパスから探す。Node の
+   `process.cwd()` と同じで、configstore も論理パスのキーは見ない。v0.26.1)
    → 無ければ `.firebaserc` の alias が 1 つならその値 → `default`。
    configstore を読むのは、`npx firebase ...` 等で hook の PATH に `firebase` が
    無い環境でも `firebase use` の切替を見落とさないため (`.firebaserc` だけを
@@ -29,7 +31,7 @@ accounts.local.json の "firebase" は 2 形式を受け付ける:
 コマンドの `--config` / `-c` は project root を指定したファイルのあるディレクトリに移す
 (firebase-tools の detectProjectRoot と同じ。相対パスは project_dir を symlink を解いた実体の
 パスにしてから解決する)。1. の cwd と 2. の起点はそこになる。2. の configstore は、そのパスの
-親方向だけを探す (実体のパスは試さない。firebase-tools と同じ)。
+親方向だけを探す (そのパスの symlink は解かない。firebase-tools と同じ)。
 """
 from __future__ import annotations
 
@@ -205,8 +207,14 @@ def _project_root(project_dir: str) -> str:
 
     見つかればそのディレクトリ、無ければ project_dir (CLI は cwd) を返す。
     `.firebaserc` (loadRC) と configstore 探索の起点として使う。
+
+    起点は project_dir の symlink を解いた実体のパス: firebase-tools は Node の
+    `process.cwd()` (実体のパス) から探す。論理パス (`CLAUDE_PROJECT_DIR` が symlink を通る
+    とき) から探すと、firebase-tools が見ない親ディレクトリの firebase.json や、configstore の
+    論理パスのキー (symlink を通る `--config` で `firebase use` したときに書かれる) を拾い、
+    firebase-tools と別の project で照合して allow しうる (v0.26.1)。
     """
-    start = os.path.abspath(project_dir)
+    start = os.path.realpath(project_dir)
     cur = start
     while True:
         if os.path.isfile(os.path.join(cur, "firebase.json")):
@@ -224,7 +232,7 @@ def _config_file(project_dir: str, config: str) -> str | None:
     (`path.resolve(cwd, config)`)、そのファイルのあるディレクトリを project root にする。
     ファイルが無ければコマンドを始めずにエラーで終わる。hook はコマンドの作業ディレクトリを
     知らないので、このモジュールの他の箇所 (`_project_root`) と同じく project_dir を CLI の
-    作業ディレクトリとみなす。ただし symlink は解いた実体のパスから解決する: Node の
+    作業ディレクトリとみなす。symlink は解いた実体のパスから解決する (`_project_root` と同じ): Node の
     `process.cwd()` は実体のパスを返すので、論理パスから解決すると root が論理パスになり、CLI に
     渡す `--config` で configstore の切替先 (`firebase use` が実体のパスで記録したもの) を引き
     当て損ねる。絶対パスの config は join で前半が捨てられ、そのまま使われる (Node と同じ)。
@@ -373,7 +381,7 @@ def _configstore_path(env=None) -> Path | None:
     return Path(base) / "configstore" / "firebase-tools.json"
 
 
-def _from_configstore(root: str, env=None, exact: bool = False) -> str | None:
+def _from_configstore(root: str, env=None) -> str | None:
     """configstore の activeProjects から `firebase use` の切替先 (alias または project ID) を返す。
 
     切替先が無いときは ""。configstore が大きすぎる (`cli_config.MAX_FILE_BYTES` を超える) ときは
@@ -381,15 +389,16 @@ def _from_configstore(root: str, env=None, exact: bool = False) -> str | None:
     いても `.firebaserc` の `default` で照合して allow してしまう (v0.25.0)。読めない・壊れた
     configstore は従来どおり ""。
 
-    firebase-tools の configstoreProject と同じく root から親方向に探索する
-    (論理パスと実体パスの両方を試す)。このファイルには認証トークンも含まれるため、
-    JSON として読んだ後 activeProjects 以外は使わず、内容をメッセージに出さない。
+    firebase-tools の configstoreProject と同じく root から親方向にだけ探索する。このファイルには
+    認証トークンも含まれるため、JSON として読んだ後 activeProjects 以外は使わず、内容をメッセージに
+    出さない。
 
-    exact (`--config` 付きのコマンド) のときは root からだけ探し、実体パスは試さない。root は
-    firebase-tools の projectRoot そのもの (`path.resolve(cwd, config)` の dirname。symlink を
-    解かない) で、firebase-tools もそのパスの親方向だけを探す。実体パスでも探すと、
-    `--config` のパスが symlink を通るとき、firebase-tools が見ない切替先 (`firebase use` が
-    実体のパスで記録したもの) を拾い、別の project で照合して allow しうる。
+    root は firebase-tools の projectRoot そのもの: `--config` の無いコマンドでは実体のパスから
+    探した root (`_project_root`)、`--config` 付きのコマンドではそのファイルのあるディレクトリ
+    (`path.resolve(cwd, config)` の dirname。symlink を解かない)。root と別のパス (論理パスや、
+    root の symlink を解いたパス) でも探すと、firebase-tools が見ない切替先を拾い、別の project で
+    照合して allow しうる (`--config` 付きは v0.18.0、`--config` の無いコマンドは v0.26.1 で、
+    もう一方のパスで探すのをやめた)。
     """
     try:
         path = _configstore_path(env)
@@ -403,21 +412,15 @@ def _from_configstore(root: str, env=None, exact: bool = False) -> str | None:
     active = data.get("activeProjects") if isinstance(data, dict) else None
     if not isinstance(active, dict):
         return ""
-    starts = [os.path.abspath(root)]
-    real = os.path.realpath(root)
-    if not exact and real not in starts:
-        starts.append(real)
-    for start in starts:
-        cur = start
-        while True:
-            value = active.get(cur)
-            if isinstance(value, str) and value:
-                return value
-            parent = os.path.dirname(cur)
-            if parent == cur:
-                break
-            cur = parent
-    return ""
+    cur = os.path.abspath(root)
+    while True:
+        value = active.get(cur)
+        if isinstance(value, str) and value:
+            return value
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return ""
+        cur = parent
 
 
 def _cjson_decomment(text: str) -> str:
@@ -512,7 +515,7 @@ def _from_local_detail(
     (alias に無ければ project ID そのもの) → alias が 1 つならその値 → `default`。
     root は project root (`firebase.json` のある root、無ければ project_dir。`--config` 付きの
     コマンドではそのファイルのあるディレクトリ)。config_file は `--config` のファイルの絶対パス
-    (`--config` 付きのコマンドのとき。configstore は `_from_configstore` の exact で探す)。
+    (`--config` 付きのコマンドのとき)。configstore はどちらも root から探す (`_from_configstore`)。
 
     `.firebaserc` を firebase-tools と同じ内容に読めると確かめられなければ "" (解決しない)。
     alias の行き先を取り違えると、firebase-tools と違う project を現在値として照合してしまう。
@@ -522,14 +525,13 @@ def _from_local_detail(
     configstore が大きすぎて切替先の有無を確かめられないときも "" (v0.25.0)。
     呼び出し側は現在値を取得できないとして deny する。
     """
-    exact = config_file is not None
-    config_path = config_file if exact else os.path.join(root, "firebase.json")
+    config_path = config_file if config_file is not None else os.path.join(root, "firebase.json")
     if _firebase_json_blocks_local(config_path):
         return "", False
     projects = _read_firebaserc(root)
     if projects is None:
         return "", True
-    switched = _from_configstore(root, env, exact)
+    switched = _from_configstore(root, env)
     if switched is None:
         # configstore が大きすぎて切替先の有無を確かめられない (v0.25.0)
         return "", False
@@ -885,7 +887,7 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
     示せる形のものだけにし (`shell_word.shown` / `shell_word.shown_all`)、期待値に示せない値が
     あれば出所を言う文を添える (`_config_switch_guide`)。CLI から現在値を取れない
     ときのローカル設定の解決は、configstore を root (firebase-tools の projectRoot) からだけ
-    探す (`_from_configstore` の exact)。
+    探す (`_from_configstore`。`--config` の無いコマンドも同じ)。
     """
     # 期待値の形を先に検証する (不正な設定のために CLI を叩かない)。
     valid: list = []
