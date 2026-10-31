@@ -386,14 +386,17 @@ class _DollarMemo:
     `$(` の中では、閉じない扱いの `${` の中の `(` / `)` を `$(` が数えるので、`$(` の閉じる位置が
     ずれて検証が減る側に倒れうる (入れ子が 64 段近いときだけ。0.28.0 は `${` を常に 1 文字ずつ
     読んでいたので、それより悪くはならない)。
+
+    `brace` は走査中のパラメータ展開 `${...}` の段数 (その中の `$(` では comment を読まない)。
     """
 
-    __slots__ = ("text", "ends", "depth")
+    __slots__ = ("text", "ends", "depth", "brace")
 
     def __init__(self) -> None:
         self.text: str | None = None
         self.ends: dict[int, int | None] = {}
         self.depth = 0
+        self.brace = 0
 
 
 _DOLLAR_MEMO = _DollarMemo()
@@ -501,6 +504,7 @@ def _skip_opaque(text: str, i: int) -> int | None:
         if text[i + 1] == "(":
             return _command_substitution_end(text, i, memo)
         memo.depth += 1
+        memo.brace += 1
         try:
             # パラメータ展開 `${...}`。中の `&` / `;` / `|` は演算子ではない
             # (`${x:-a&b}` を単独の `&` で切ると、後ろの option が別セグメントに移って
@@ -514,9 +518,21 @@ def _skip_opaque(text: str, i: int) -> int | None:
             )
         finally:
             memo.depth -= 1
+            memo.brace -= 1
         memo.ends[i] = end
         return end
     return _arithmetic_span(text, i)
+
+
+# トップレベルで、直後の文字を語の先頭にする素の文字 (`#` を comment の始まりと読むかの判定)。
+# `$(` の中の規則は `_command_substitution_end` (bash 3.2 と zsh が食い違うので狭い)。
+_WORD_BREAK = " \t\n;&|()"
+
+
+def _comment_end(text: str, i: int) -> int:
+    """`text[i]` の `#` から始まる comment の終わり (改行の位置。改行が無ければ末尾)。"""
+    eol = text.find("\n", i)
+    return len(text) if eol == -1 else eol
 
 
 def _command_substitution_end(text: str, i: int, memo: _DollarMemo) -> int:
@@ -534,11 +550,34 @@ def _command_substitution_end(text: str, i: int, memo: _DollarMemo) -> int:
     starts = [i]
     parens = [1]
     memo.depth = base + 1
+    # `#` から改行の手前までを comment として飛ばす (中の `)` / `'` / `$'\'` で `$(` を閉じたり
+    # 引用符を始めたりしない。`x=$(true # don't` + 改行 + `)` の後ろのコマンドは bash 3.2 / zsh
+    # とも走る)。comment と読むのは bash 3.2 と zsh の**両方**が comment と読む `#` だけ:
+    #   - 素の空白・タブ・改行の直後と、トップレベルの `$(` の先頭
+    #   - パラメータ展開 `${...}` の中では読まない (bash 3.2 は `${x:-$( #)}` の `#` を comment に
+    #     しない。zsh は `$(echo ${ #)}` の `#` を comment にしない)
+    #   - 行末が `\` の comment は読まない (bash 3.2 は `\` + 改行で comment を次の行まで続け、
+    #     zsh は改行で閉じる)
+    # 片方のシェルだけが comment と読む形 (`;` / `&` / `|` / `(` / `)`・算術評価の閉じ・入れ子の
+    # `$(` の先頭の直後は zsh だけ、エスケープした空白の直後は bash 3.2 だけ) は、0.29.0 と同じく
+    # comment にしない。どちらに倒しても、もう一方のシェルで走るコマンドを見失う形があり、
+    # 0.29.0 で候補に出ていたものを落とさない側に揃える。
+    comments = memo.brace == 0
+    # `$(` の先頭。ここに来る `$(` は、トップレベルのものか `${...}` の中のもの (comments が偽) だけ
+    # (`$(` の中の `$(` はこの走査が積んで辿る)。
+    word_start = True
+    brace_until = -1  # 1 文字ずつ読んでいる `${...}` の終わり (その中では comment を読まない)
     try:
         j = i + 2
         while j < n:
+            if text[j] == "#" and word_start and comments and j >= brace_until:
+                end = _comment_end(text, j)
+                if text[end - 1] != "\\":
+                    j = end
+                    continue
             if text[j] == "$" and j + 1 < n and text[j + 1] == "(":
                 cached = memo.ends.get(j, _UNSET)
+                word_start = False  # 入れ子の `$(` の先頭と、置換の閉じの後ろ
                 if cached is not _UNSET:
                     j = cached  # type: ignore[assignment]
                     continue
@@ -557,10 +596,15 @@ def _command_substitution_end(text: str, i: int, memo: _DollarMemo) -> int:
                 # (`echo $(echo ${x:-)}` + 改行 + `aws ...` の aws は走る)。`)` を含む
                 # `${...}` は 1 領域にせず、1 文字ずつ読んで `)` を数える (閉じる位置が
                 # 早い側。zsh で `$(` の中にある部分は分割が増える側に出る)。
+                brace_until = max(brace_until, inner)
                 inner = None
             if inner is not None and inner > j:
+                if not (text[j] == "\\" and text[j + 1] == "\n"):
+                    # 行継続 (`\` + 改行) はその前の状態を引き継ぐ。
+                    word_start = False
                 j = inner
                 continue
+            word_start = text[j] in " \t\n"
             if text[j] == "(":
                 parens[-1] += 1
             elif text[j] == ")":
@@ -782,8 +826,7 @@ def split_with_separators(command: str) -> list[tuple[str, str]]:
         nxt = command[i + 1] if i + 1 < n else ""
 
         if ch == "#" and word_start:
-            while i < n and command[i] != "\n":
-                i += 1
+            i = _comment_end(command, i)
             continue
 
         if ch == "<" and nxt == "<":
@@ -804,7 +847,7 @@ def split_with_separators(command: str) -> list[tuple[str, str]]:
                 continue
             # delimiter を解決できない `<<` はそのまま流す = heredoc と見なさない
             # (本文行が候補になる = 過剰検証側)。直後の文字 (`<<-` の `-`・語を終える文字・
-            # 閉じない引用符) が `word_start` を決め直す (`#` が来れば delimiter として解決する)。
+            # 閉じない引用符) が `word_start` を決め直す (`#` は閉じた語なら delimiter として解決する)。
             buf.append("<<")
             i += 2
             continue
@@ -860,7 +903,7 @@ def split_with_separators(command: str) -> list[tuple[str, str]]:
 
         buf.append(ch)
         after_redirect = ch in "<>"
-        word_start = ch in " \t\n;&|()"
+        word_start = ch in _WORD_BREAK
         i += 1
 
     flush("")
@@ -876,6 +919,12 @@ def _scan_value_end(cmd: str, start: int) -> int | None:
     while i < n:
         ch = cmd[i]
         if ch == "\\" and not in_sq and i + 1 < n:
+            i += 2
+            continue
+        if ch == "$" and not in_sq and i + 1 < n and cmd[i + 1] == "$":
+            # `$$` (PID)。2 つ目の `$` を ANSI-C 引用符の始まりと読まない (`X=$$'a\' aws ...` の
+            # aws は bash 3.2 で走る。`$'a\' aws ...` と読むと値が末尾まで続き、aws を見失う)。
+            # トップレベルの `_skip_opaque` と同じ扱い。
             i += 2
             continue
         if ch == "$" and not in_sq and not in_dq and i + 1 < n and cmd[i + 1] == "'":

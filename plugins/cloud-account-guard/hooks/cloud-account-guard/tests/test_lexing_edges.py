@@ -4,6 +4,8 @@
   (`echo \\ # ; aws ...`)、`$(...)` / `$((...))` の閉じ `)`、行継続の直後の `#` は語の続き
   (bash 3.2 / zsh とも後ろの aws が走る)
 - ANSI-C 引用符 `$'...'` の中の `\\'` は引用符を閉じない (`echo $'a\\'b'; aws ...` の aws は走る)
+- `$(` の中でも語の先頭の `#` から改行の手前までは comment (中の `)` / `'` で `$(` を閉じない)
+- 代入の値の `$$'` の 2 つ目の `$` は ANSI-C 引用符の始まりではない
 - `$(` の入れ子は再帰せずに辿る (`$(` を 1000 段ほど重ねると RecursionError になり、hook は
   内部エラーとして検証をスキップしていた)
 
@@ -91,6 +93,62 @@ ANSI_C_FORMS = [
     ("echo \\$'a; {a}", False),
 ]
 
+# `$(` の中の comment。bash 3.2 と zsh の両方が comment と読む `#` から改行の手前までは comment で、
+# 中の `'` / `)` / `$'\'` は `$(` を閉じず引用符も始めない。片方のシェルだけが comment と読む `#` は
+# comment にしない (0.29.0 と同じ)。右の注記は aws が走るシェル。
+SUBST_COMMENT_FORMS = [
+    # マージ前レビューの指摘の形
+    ("echo $(true #)#'\n)\n{a}", True),  # bash / zsh
+    ("x=$(true #$'\\'\n)\n{a}", True),  # bash / zsh
+    ("x=$(true # don't\n)\n{a}", True),  # bash / zsh (0.29.0 も落としていた)
+    ("x=$( #(\n)\n{a}", True),  # bash / zsh (comment の中の `(` を数えない)
+    ("x=$(echo $( #(\n)); {a}", True),  # bash / zsh
+    # 両方が comment と読む: トップレベルの `$(` の先頭・素の空白・タブ・改行の直後
+    ("x=$(#'\n)\n{a}", True),  # bash / zsh
+    ("x=$(true #'\n)\n{a}", True),  # bash / zsh
+    ("x=$(true\t#'\n)\n{a}", True),  # bash / zsh
+    ("x=$(true\n#'\n)\n{a}", True),  # bash / zsh
+    ("x=$(echo \\\n#'\n)\n{a}", True),  # bash / zsh (行継続は前の状態を引き継ぐ)
+    # zsh だけが comment と読む: `;` / `&` / `|` / `(` / `)`・算術評価の閉じ・入れ子の `$(` の先頭の直後
+    ("x=$(true;#)\n{a}", True),  # bash
+    ("x=$(true&#)\n{a}", True),  # bash
+    ("x=$(true|#)\n{a}", True),  # bash
+    ("x=$( (#)\n)\n{a}", True),  # bash
+    ("x=$( (true)#)\n{a}", True),  # bash
+    ("x=$( ((1))#)\n{a}", True),  # bash
+    ("x=$(echo $(#)\n)\n{a}", True),  # bash
+    ("x=$(echo a$(#)\n)\n{a}", True),  # bash
+    # zsh だけが comment と読む: パラメータ展開の中 (`$(` の中の `${` を 1 文字ずつ読む形も)
+    ("echo ${x:-$( #)}\n{a}", True),  # bash
+    ("echo ${x:-$(#)}\n{a}", True),  # bash
+    ("x=$(${ #)});{a}", True),  # zsh
+    # bash 3.2 だけが comment と読む: エスケープした空白の直後、行末が `\` の comment
+    # (bash 3.2 は `\` + 改行で comment を次の行まで続ける)
+    ("x=$(echo \\ #)\n{a}", True),  # zsh
+    ("x=$(true #a\\\n)\n)\n{a}", True),  # bash
+    ("x=$(true #\\\n)\n{a}", True),  # zsh
+    ("x=$(true #'\\\n'\n)\n{a}", True),  # bash (改行で閉じる comment と読むと `'` から引用符が始まる)
+    # どちらも comment と読まない: 素の文字・引用符・入れ子の置換の閉じ・行継続の直後
+    ("x=$(echo a#)\n{a}", True),  # bash / zsh
+    ("x=$(echo 'a'#)\n{a}", True),  # bash / zsh
+    ("x=$(echo $(true)#)\n{a}", True),  # bash / zsh
+    ("x=$(echo ${y $(true)#)\n{a}", True),  # bash (閉じない `${` の中で先に求めた `$(` の後ろ)
+    ("x=$(echo a\\\n#)\n{a}", True),  # bash / zsh
+    # comment で閉じない `$(` の後ろは置換の中 (どちらでも走らない)
+    ("x=$(true #)\n; {a}", False),
+    ("x=$(true #) ; {a}", False),
+]
+
+# 代入の値の `$$` (PID) の後ろの `$'` は ANSI-C 引用符ではない (bash 3.2 では aws が走る。
+# zsh は `$'` と読んで走らない。走る側に合わせる)。
+ENV_PID_FORMS = [
+    "X=$$'a\\' {a}",
+    "AWS_PROFILE=$$'a\\' {a}",
+    "X=$$'a\\' {a}; echo \"'\"",
+    "X=a$$'b\\' {a}",
+    "X=$$$'a\\'b' {a}",  # bash / zsh (`$$` の後ろの `$'a\'b'` は ANSI-C 引用符)
+]
+
 
 class CandidateTests(unittest.TestCase):
     def _check(self, forms):
@@ -108,6 +166,20 @@ class CandidateTests(unittest.TestCase):
 
     def test_comment_starts_only_at_word_start(self):
         self._check(COMMENT_FORMS)
+
+    def test_comment_inside_command_substitution(self):
+        self._check(SUBST_COMMENT_FORMS)
+
+    def test_env_value_with_pid_before_quote(self):
+        """`X=$$'a\\' aws ...` の 2 つ目の `$` を ANSI-C 引用符の始まりと読まない。"""
+        for form in ENV_PID_FORMS:
+            command = form.replace("{a}", AWS)
+            with self.subTest(command=command):
+                try:
+                    cands = _cands(command)
+                except Exception as e:  # noqa: BLE001
+                    self.fail(f"例外: {e!r}")
+                self.assertEqual(cands[0], AWS)
 
     def test_here_string_operator_keeps_hash(self):
         """`<<<` の直後の `#` は従来どおり comment にしない (bash では構文エラー。過剰検証側)。"""
@@ -208,6 +280,7 @@ class DeepCommandSubstitutionTests(unittest.TestCase):
             with self.subTest(text=text[:20]):
                 command_parser._skip_opaque(text, 0)
                 self.assertEqual(command_parser._DOLLAR_MEMO.depth, 0)
+                self.assertEqual(command_parser._DOLLAR_MEMO.brace, 0)
 
     def test_open_substitutions_count_toward_the_nesting_limit(self):
         """開いている `$(` の段数も `${` の深さに数える (再帰版と同じ境界)。
@@ -253,6 +326,12 @@ class DispatchTests(BaseWithTmpProject):
             "echo $'a\\'b'; {a}",
             "X=$'a\\'b c' {a}",
             "echo " + "$(" * 3000 + ")" * 3000 + " ; {a}",
+            "X=$$'a\\' {a}",
+            "AWS_PROFILE=$$'a\\' {a}",
+            "X=$$'a\\' {a}; echo \"'\"",
+            "echo $(true #)#'\n)\n{a}",
+            "x=$(true #$'\\'\n)\n{a}",
+            "x=$(true # don't\n)\n{a}",
         ]
         for form in forms:
             command = form.replace("{a}", AWS)
