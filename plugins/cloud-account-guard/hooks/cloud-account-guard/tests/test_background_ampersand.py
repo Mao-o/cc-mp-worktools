@@ -211,6 +211,42 @@ class SplitTests(unittest.TestCase):
             ["aws s3 rm ${B:-a&b} --profile p"],
         )
 
+    def test_paren_in_expansion_closes_command_substitution(self):
+        """`$(` の中の `${...}` にある `)` で `$(` が閉じる (bash 3.2。後ろの CLI は走る)。
+
+        `${...}` を 1 領域として飛ばすと `$(` が閉じず、後ろの CLI が `$(` の中に隠れる。
+        `(` しか無い `${x:-(}` は 1 領域のまま (zsh では `$(` が `)` で閉じて後ろが走る)。
+        """
+        for head in ("echo $(echo ${x:-)}", "echo $(echo ${#)}", "echo $(echo \nE\n${x:-)}{"):
+            for sep in ("\n", "; ", " & "):
+                command = f"{head}{sep}aws s3 rm s3://b/x"
+                with self.subTest(command=command):
+                    cands = [c for c, _e in extract_candidates(command)]
+                    self.assertIn("aws s3 rm s3://b/x", cands)
+        cands = [c for c, _e in extract_candidates("echo $(echo ${x:-(}); aws s3 rm s3://b/x")]
+        self.assertIn("aws s3 rm s3://b/x", cands)
+
+    def test_paren_in_expansion_near_nesting_limit(self):
+        """深さの上限 (64) 前後の `$(` の入れ子でも、後ろの CLI を見失わない (0.28.0 は拾えていた)。"""
+        for k in (10, 62, 63, 64, 65):
+            head = "echo $(echo " + "$(echo " * k + "${z:-(}" + ")" * k + " ${y:-)})"
+            for sep in ("\n", "; "):
+                command = f"{head}{sep}aws s3 rm s3://b/x\ncase a in a) echo;; esac"
+                with self.subTest(k=k, sep=sep):
+                    self.assertIn("aws s3 rm s3://b/x", self._cands_within(5, command))
+
+    def test_nesting_limit_is_not_too_small(self):
+        """入れ子 20 段を中に持つ `${B:-a&b ...}` も 1 領域のまま (`&` で切らない)。
+
+        `&` は外側の `${` の直下に置く (上限を超えた `${` は閉じていない扱いになり、
+        1 文字ずつ読み直す側は内側の閉じた `${` を 1 領域にするので、`&` が奥にあると
+        上限が小さくても結果が変わらない)。
+        """
+        for chain in ("${x:-" * 20 + "}" * 20, "${x:-$(echo " * 10 + ")}" * 10):
+            command = "aws s3 rm ${B:-a&b" + chain + "} --profile p"
+            with self.subTest(command=command[:40]):
+                self.assertEqual([c for c, _e in extract_candidates(command)], [command])
+
     def test_memo_is_per_text(self):
         """終端の memo を別の text に使い回さない (同じ位置の `${` の終端は text ごとに違う)。"""
         self.assertEqual(
@@ -311,6 +347,18 @@ class DispatchTests(BaseWithTmpProject):
                 with self.subTest(command=command):
                     decision, _reason, v = self._decide(command, svc, "不一致")
                     self.assertTrue(v.called, f"検証されていない: {command}")
+                    self.assertEqual(decision, "deny", command)
+
+    def test_cli_after_paren_in_expansion_is_verified_and_denied(self):
+        """`$(echo ${x:-)}` (bash 3.2 は `)` で `$(` を閉じる) の後ろの CLI も検証する。"""
+        heads = ["echo $(echo ${x:-)}", "echo $(echo ${#)}"]
+        heads.append("echo $(echo " + "$(echo " * 63 + "${z:-(}" + ")" * 63 + " ${y:-)})")
+        for sep in ("\n", "; "):
+            for head in heads:
+                command = f"{head}{sep}aws s3 rm s3://b/x"
+                with self.subTest(command=command[:60]):
+                    decision, _reason, v = self._decide(command, "aws", "不一致")
+                    self.assertTrue(v.called, f"検証されていない: {command!r}")
                     self.assertEqual(decision, "deny", command)
 
     def test_cli_after_brace_forms_is_verified_and_denied(self):
