@@ -35,13 +35,11 @@ including the edge cases a parser has to get right:
   ``page`` / ``document`` in pages the ``content`` cases print, so the
   comparator's exclusions are exercised on page bodies too.
 
-To regenerate (from ``scripts/tests``)::
-
-    python3 fixtures/parity/build_fixtures.py
-    python3 test_migration_parity.py --update-golden
-
-then review the diff of both directories. The golden is what the old
-scripts print for these fixtures, so it is regenerated together with them.
+These fixtures are frozen together with the golden and are not rewritten.
+The golden is what the old scripts printed for them, and those scripts were
+removed in 0.48.0, so it cannot be recorded again: a changed fixture would
+have no golden to be compared with. A new case goes into the tests of the
+generic loader that run on a bundled preset instead.
 """
 
 import hashlib

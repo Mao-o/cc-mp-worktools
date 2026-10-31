@@ -1308,14 +1308,14 @@ def _drop_boilerplate(body_lines: list[str], patterns: list) -> list[str]:
     return out
 
 
-def _promote_heading_lines(body_lines: list[str], rx) -> tuple[list[str], set]:
+def _promote_heading_lines(body_lines: list[str], rx) -> list[str]:
     """``heading_line_pattern``: each line outside a code block that *rx*
     matches as a whole (without its line break) becomes ``## <group>``.
-    Returns the new body and the titles made so (they have no anchor on the
-    page: ``_anchor_for`` gives them none). A title the group leaves empty or
-    one that holds a line break keeps the line as it was."""
+    The anchor of such a heading is made like any other (the rendered page
+    gives each release line an id). A title the group leaves empty or one
+    that holds a line break keeps the line as it was."""
     fence = FenceTracker()
-    out, made = [], set()
+    out = []
     for line in body_lines:
         was_in = fence.in_fence
         fence.update(line)
@@ -1323,10 +1323,9 @@ def _promote_heading_lines(body_lines: list[str], rx) -> tuple[list[str], set]:
         title = (m.group(1) or "").strip() if m else ""
         if title and "\n" not in title:
             out.append(f"## {title}\n")
-            made.add(title)
         else:
             out.append(line)
-    return out, made
+    return out
 
 
 def _strip_trailing_headings(body_lines: list[str]) -> list[str]:
@@ -1391,7 +1390,7 @@ def split_documents(lines: list[str], profile: dict) -> list[dict]:
         if profile.get("strip_trailing_headings"):
             d["body_lines"] = _strip_trailing_headings(d["body_lines"])
         if profile.get("heading_line_pattern") is not None:
-            d["body_lines"], d["line_headings"] = _promote_heading_lines(
+            d["body_lines"] = _promote_heading_lines(
                 d["body_lines"], profile["heading_line_pattern"])
         if level is not None:
             # ``None`` is the H2 floor everywhere downstream (PageView, body
@@ -2366,10 +2365,7 @@ def _anchor_for(profile: dict, doc: dict):
     if style is None or not re.match(r"https?://", doc["url"] or ""):
         return None
     url = _ref_url_key_with_query(doc["url"], profile["page_url_strip_suffix"])
-    # a heading made from a body line (``heading_line_pattern``) is no
-    # heading of the page, so it has no anchor there
-    made = doc.get("line_headings") or set()
-    return lambda title: "" if title in made else section_url_anchor(url, title, style=style)
+    return lambda title: section_url_anchor(url, title, style=style)
 
 
 # A Markdown link target in parentheses: an absolute URL or a root-relative

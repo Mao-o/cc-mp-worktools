@@ -9,8 +9,8 @@ here as the reference the bundled presets (``claude-code`` /
 * ``fixtures/parity/<corpus>/`` holds synthetic cache directories written by
   ``fixtures/parity/build_fixtures.py`` (made-up pages and product names
   that reproduce the shape of the upstream files, including the edge cases
-  listed in ``CORPORA``; no upstream text is copied — its module docstring
-  says how to regenerate them). A run copies one into a temp dir and passes it as
+  listed in ``CORPORA``; no upstream text is copied — they are frozen with
+  the golden, see its module docstring). A run copies one into a temp dir and passes it as
   ``--cache-dir``, so no network is touched: ``urllib.request.urlopen`` is
   patched to fail and every call is counted (the count is part of the
   golden, so a change that fetches more than the old script did shows up).

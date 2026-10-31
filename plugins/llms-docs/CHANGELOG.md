@@ -16,6 +16,10 @@ All notable changes to this plugin will be documented here.
   比べる相手が無くなったので、直さずに残す (終了コードは同じ): Claude docs の join rate が 50% 未満のときの
   `Error` の後半の案内、`assert_parsed` の名前 (`claude-docs full-text` → `claude-code`、`firebase index` →
   `Firebase index`)、`--file` が無いときの文面の後半、空の `page_ref` の文面
+- 既知の差 (直さずに残す。内部バックログで扱う): `claude-platform` preset では、`url:` が無く `title:` だけを
+  持つ frontmatter の形のブロックもページの区切りになる。旧実装は区切らなかった (旧テスト
+  `test_frontmatter_without_url_is_not_a_boundary` は削除した)。手元のキャッシュの 826 ページに `url:` の無い
+  ページは 0 件
 - **症状**: `researching-claude-docs` で Claude Code の changelog
   (`https://code.claude.com/docs/en/changelog`) を検索すると、hit がすべて見出しの無い節 `(top)` に属し、
   その記述がどの版で入った・直ったかが分からなかった。`llms-full.txt` 上の changelog は版を `## 2.1.310` の
@@ -25,9 +29,13 @@ All notable changes to this plugin will be documented here.
   外で行全体が一致する本文の行を、グループを題にした H2 として読む。`claude-code` preset に
   `^\*\*(\d+\.\d+\.\d+)\*\*\s*$` を入れた。changelog の hit は `Section: 2.1.133` のように版を名指し、
   `sections` は版を並べ、`Next: … content 5 2.1.133` でその版だけを読める。`content` の本文では、その行が
-  `## 2.1.133` と出る。ページ上にこの見出しの anchor は無いので、`Section:` 行に anchor を付けない。
+  `## 2.1.133` と出る。`Section:` 行には、ほかの見出しと同じ規則で anchor が付く
+  (`[…/changelog#2-1-133]`。公開中のページは版ごとに `id="2-1-133"` の形の anchor を持つ)。
   手元のキャッシュで同梱 presets の全ページを変更前の版と比べ、変わったのは changelog の 1 ページ
   (430 行) だけだった
+- changelog では、複数語の検索の全語一致が「ページ全体」ではなく「版ごと」になる。語が別々の版に散って
+  いる記述は `[partial match]` に回る (手元のキャッシュの `search-content` で `hooks PreToolUse` の changelog の
+  hit は 254 → 100)
 - テスト: 旧 script の専用テスト (`test_parse_claude_docs.py` 61 件 / `test_parse_ai_sdk.py` 63 件 /
   `test_parse_firebase.py` 20 件) と shim のテスト (`test_legacy_shims.py`) を削除した。汎用 loader 側に
   同じ観点のテストが無かったものは、同梱 preset で走るテストとして移した (`test_claude_docs_preset.py` /
@@ -46,8 +54,11 @@ All notable changes to this plugin will be documented here.
   claude-platform の長い frontmatter を旧 script が区切れず、実キャッシュで常に失敗していた
 - テスト: `heading_line_pattern` の行の書き換え (行全体の一致・改行・fence の中・空のグループ)、値の検査、
   `body: fetch` で拒むこと、実データから切り出した changelog で hit が版を名指し、`Next:` 行を出力のまま
-  実行するとその版に届く往復 (キャッシュと `--file` + `--index-file`)、作った見出しに anchor が無く本物の
-  見出しには付くこと
+  実行するとその版に届く往復 (キャッシュと `--file` + `--index-file`)、作った見出しにも本物の見出しにも
+  anchor が付き、`search` (index で順位を付ける経路) と `search-content` で同じ版に同じ anchor が付くこと、
+  `strip_trailing_headings` の後に適用されること
+- テスト: 移行の比較の fixture を作るスクリプトの docstring が、削除した再生成の手順を案内していたのを直した
+  (fixture は golden と組で凍結し、書き換えない)
 
 ## [0.47.3] - 2026-11-01
 

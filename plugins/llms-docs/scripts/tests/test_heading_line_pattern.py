@@ -5,8 +5,9 @@ The Claude Code changelog page heads each release with a bold line
 belong to one section ``(top)`` and nothing said which release a line came
 from. The ``claude-code`` preset reads those lines as ``## 2.1.310``: a hit
 names its release, ``sections`` lists the releases, and the ``Next:`` line,
-run as printed, reads that release. The page has no anchor for a made
-heading, so the ``Section:`` line of one carries none.
+run as printed, reads that release. The rendered page gives each release
+line an id (``#2-1-310``), so the ``Section:`` line of a made heading carries
+its anchor like any other.
 """
 
 import json
@@ -74,11 +75,17 @@ def _profile(raw: dict) -> dict:
     return generic._validate_profile("sources.json", "site", raw)
 
 
-def _split(text: str, pattern) -> list:
-    raw = {"url": "https://example.com/llms-full.txt", "split": "h1", "page_url": "line:Source: "}
+def _split(text: str, pattern, **extra) -> list:
+    raw = {"url": "https://example.com/llms-full.txt", "split": "h1", "page_url": "line:Source: ", **extra}
     if pattern is not None:
         raw["heading_line_pattern"] = pattern
     return generic.split_documents(text.splitlines(keepends=True), _profile(raw))
+
+
+def _h2(doc: dict) -> list:
+    """The ``## <title>`` lines of a page's body, in order (the fixtures of
+    ``SplitTest`` have no real H2 besides the made ones unless named)."""
+    return [ln for ln in doc["body_lines"] if ln.startswith("## ")]
 
 
 class SplitTest(unittest.TestCase):
@@ -89,7 +96,6 @@ class SplitTest(unittest.TestCase):
         changed = [(a, b) for a, b in zip(old["body_lines"], new["body_lines"]) if a != b]
         self.assertEqual(changed, [("**2.1.310**\n", "## 2.1.310\n"), ("**2.1.154**\n", "## 2.1.154\n"),
                                    ("**2.1.133**\n", "## 2.1.133\n")])
-        self.assertEqual(new.get("line_headings"), {"2.1.310", "2.1.154", "2.1.133"})
 
     def test_a_line_inside_a_code_block_stays(self):
         [new] = _split(CHANGELOG, PRESET_PATTERN)
@@ -100,29 +106,37 @@ class SplitTest(unittest.TestCase):
         text = (f"# P\nSource: {URL}\n\nsee **2.1.1** for more\n**2.1.2** and text\n"
                 " **2.1.3**\n**2.1.4**  \n**2.1.5**\r\n")
         [new] = _split(text, PRESET_PATTERN)
-        self.assertEqual(new.get("line_headings"), {"2.1.4", "2.1.5"})
+        self.assertEqual(_h2(new), ["## 2.1.4\n", "## 2.1.5\n"])
         self.assertIn("see **2.1.1** for more\n", new["body_lines"])
         self.assertIn("**2.1.2** and text\n", new["body_lines"])
         self.assertIn(" **2.1.3**\n", new["body_lines"])
         # without ^ / $ in the pattern, a line holding more than the match stays
         [new] = _split(f"# P\nSource: {URL}\n\nsee **7** here\n**8**\n", r"\*\*(\d+)\*\*")
-        self.assertEqual(new.get("line_headings"), {"8"})
+        self.assertEqual(_h2(new), ["## 8\n"])
         self.assertIn("see **7** here\n", new["body_lines"])
 
     def test_the_line_break_is_not_part_of_the_match(self):
         # a pattern ending in ``$`` without ``\s*`` still matches a line
         # that ends in a line break (``\n`` or ``\r\n``)
         [new] = _split(f"# P\nSource: {URL}\n\n**7**\n**8**\r\n**9**", r"^\*\*(\d+)\*\*$")
-        self.assertEqual(new.get("line_headings"), {"7", "8", "9"})
+        self.assertEqual(_h2(new), ["## 7\n", "## 8\n", "## 9\n"])
 
     def test_an_empty_group_keeps_the_line(self):
         [new] = _split(f"# P\nSource: {URL}\n\n**x**\n", r"^\*\*(\s*)x\*\*$")
-        self.assertEqual(new.get("line_headings"), set())
+        self.assertEqual(_h2(new), [])
         self.assertIn("**x**\n", new["body_lines"])
+
+    def test_promoted_after_the_trailing_headings_are_stripped(self):
+        # README: ``heading_line_pattern`` applies after
+        # ``strip_trailing_headings``, so a release line ending the page is
+        # not stripped as a dangling heading
+        [new] = _split(f"# P\nSource: {URL}\n\nsome text\n\n**1.2.3**\n", r"^\*\*(\d+\.\d+\.\d+)\*\*$",
+                       strip_trailing_headings=True)
+        self.assertEqual(_h2(new), ["## 1.2.3\n"])
 
     def test_off_by_default_and_in_every_other_preset(self):
         [new] = _split(CHANGELOG, None)
-        self.assertNotIn("line_headings", new)
+        self.assertEqual(_h2(new), ["## Older releases\n"])
         presets = generic._read_sources_file(generic.PRESETS_FILE)
         with_key = sorted(n for n, p in presets.items() if p.get("heading_line_pattern") is not None)
         self.assertEqual(with_key, ["claude-code"])
@@ -195,8 +209,8 @@ class PresetRoundTripTest(unittest.TestCase):
                 code, out, err = _loader.run_cli(generic, [SCRIPT, "search-content", *corpus,
                                                            "--", "worktree.baseRef"])
                 self.assertEqual(code, 0, err)
-                self.assertIn("    Section: 2.1.154  (x1)\n", out)
-                self.assertIn("    Section: 2.1.133  (x1)\n", out)
+                self.assertIn(f"    Section: 2.1.154  (x1)  [{URL}#2-1-154]\n", out)
+                self.assertIn(f"    Section: 2.1.133  (x1)  [{URL}#2-1-133]\n", out)
                 self.assertNotIn("(top)", out)
                 nexts = [ln[len("Next: "):] for ln in out.splitlines() if ln.startswith("Next: ")]
                 self.assertEqual(len(nexts), 2, out)
@@ -210,17 +224,31 @@ class PresetRoundTripTest(unittest.TestCase):
                     self.assertIn(text, got)
                     self.assertNotIn("2.1.310", got)
 
-    def test_a_made_heading_has_no_anchor_and_a_real_one_keeps_it(self):
+    def test_a_made_heading_has_the_anchor_of_the_page_and_a_real_one_keeps_it(self):
+        # the rendered changelog page has an id per release (``id="2-1-310"``)
         for label, corpus in self.corpora().items():
             with self.subTest(corpus=label):
                 code, out, err = _loader.run_cli(generic, [SCRIPT, "search-content", *corpus,
                                                            "--", "Monitor"])
                 self.assertEqual(code, 0, err)
-                self.assertIn("    Section: 2.1.310  (x1)\n", out)
+                self.assertIn(f"    Section: 2.1.310  (x1)  [{URL}#2-1-310]\n", out)
                 code, out, err = _loader.run_cli(generic, [SCRIPT, "search-content", *corpus,
                                                            "--", "GitHub"])
                 self.assertEqual(code, 0, err)
                 self.assertIn(f"    Section: Older releases  (x1)  [{URL}#older-releases]\n", out)
+
+    def test_search_and_search_content_give_a_release_the_same_anchor(self):
+        # ``search`` ranks on the index row (its URL), ``search-content`` on
+        # the page: the same release line carries the same anchor on both
+        for label, corpus in self.corpora().items():
+            for command in ("search", "search-content"):
+                with self.subTest(corpus=label, command=command):
+                    code, out, err = _loader.run_cli(generic, [SCRIPT, command, *corpus,
+                                                               "--", "changelog Monitor"])
+                    self.assertEqual(code, 0, err)
+                    if command == "search":
+                        self.assertIn("(index_score: ", out)  # ranked on the index row
+                    self.assertIn(f"    Section: 2.1.310  (x1)  keywords: monitor  [{URL}#2-1-310]\n", out)
 
     def test_sections_lists_the_releases_and_each_reads_its_own(self):
         for label, corpus in self.corpora().items():
