@@ -18,6 +18,12 @@
   `firebase use` の cwd、`.firebaserc` の読み先、期待値が未登録のときの固定の判定 (`is_pinned`)、builder の
   現在値 (`get_active_account`) と `pin-env` の `.firebaserc` の確認も同じ root を使う。論理パスと実体の
   パスが同じ通常の構成では、判定も出力も変わらない (旧版との出力比較で確認)
+- allow 側にも動く変更がある: project のディレクトリが、firebase.json のある root の下 (の子) を指す
+  symlink のとき、旧版は論理パスの親に firebase.json が無いため project dir を root にして deny (現在値を
+  取得できない / 不一致) していた。0.26.1 は firebase-tools と同じ実体のパスの root で照合するので、その
+  root の切替先が期待値なら allow になる (`pin-env` の `firebase use` の行き先の確認も同じ root の
+  `.firebaserc` で解決する)。firebase-tools 15.19.1 の `detectProjectRoot` (`options.cwd || process.cwd()`)
+  と `command.js:218` の `configstoreProject(options.projectRoot || process.cwd())` と一致することを確かめた
 
 ### Fixed: `pin-env` の書き込み先の判定が、外側で export された `GIT_DIR` などで別の repo を指していた
 
@@ -25,8 +31,9 @@
   `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` / `GIT_COMMON_DIR` を引き継いだまま git を呼んでいた。
   修正前は、別の repo を指す `GIT_DIR` を export した状態では、project のディレクトリの repo ではなくその repo の
   ルートを書き込み先として示し、git の外のディレクトリでも「git の外」と言わずにその repo を示していた。
-  Claude Code が読むのはセッションのプロジェクトのディレクトリから決まる repo のファイルで、builder を
-  起動した shell の `GIT_DIR` は関係しないので、これらを外して git を呼ぶ (`.gitignore` の判定
+  Claude Code はセッションのプロジェクトのディレクトリから決まる repo のファイルを読むとみなし
+  (外側の `GIT_DIR` に従うかは未実測。外れた場合は固定が効かず hook が deny するだけで、fail closed)、
+  これらを外して git を呼ぶ (`.gitignore` の判定
   (`_git_ignored`) は 0.24.0 から同じ)。外す変数の一覧は `core/paths.py` の `GIT_REDIRECT_ENV` /
   `git_env()` にまとめ、2 つの呼び出しで共有する
 

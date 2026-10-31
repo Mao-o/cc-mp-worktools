@@ -693,7 +693,8 @@ project ID を 1 行出力) を読む。その cwd は `firebase.json` を親方
 project root (無ければ project dir) に固定し、hook / builder プロセスの cwd は
 継承しない (builder を project の外から起動しても無関係な project を報告しない)。
 project root は project dir の symlink を解いた実体のパスから探す (firebase-tools が見る
-`process.cwd()` と同じ。ローカル設定の configstore も実体のパスのキーだけを引く。v0.26.1)。
+`process.cwd()` と同じ。`--config` の無いコマンド。configstore もその root のキーだけを引く。
+v0.26.1。`--config` が symlink を通るときは root が論理パスのまま。0.18.0)。
 CLI から取れないとき (hook の PATH に無い / 実行不可 / 非ゼロ終了 / 出力が空 /
 複数行) は CLI と同じローカル設定から同じ規則で解決する (起点は同じ project root):
 configstore の切替先を `.firebaserc` の alias で解決 → 無ければ `.firebaserc` の

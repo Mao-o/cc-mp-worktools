@@ -761,7 +761,9 @@ class TestSettingsLocalTarget(_TmpBase):
             "GIT_COMMON_DIR": str(other / ".git"),
         }
         expected_file = (repo / ".claude" / "settings.local.json").resolve()
-        for name in outer:
+        # GIT_INDEX_FILE は rev-parse の出力を変えないので subTest にしない。
+        # 外していることは test_paths の TestGitEnv で固定。末尾の全部入りのケースには含める。
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
             env = {name: outer[name]}
             if name == "GIT_WORK_TREE":
                 env["GIT_DIR"] = outer["GIT_DIR"]  # GIT_WORK_TREE は GIT_DIR と組で効く
