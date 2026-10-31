@@ -11,6 +11,7 @@ import io
 import json
 import os
 import pathlib
+import sys
 import time
 import unittest
 from unittest import mock
@@ -625,6 +626,102 @@ class TestParallelMidTurnRunsInOneSession(MidTurnTestCase):
         self.assertFalse(self.state.midturn_running(SESSION_A), "自分の印は例外でも下りている")
 
 
+class TestStopDuringTheHandedOffReview(MidTurnTestCase):
+    """引き継いだ残りを送っている最中 (2 回目のロック区間) に Stop が来ても、依頼を残さない (0.17.0)。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        patcher = mock.patch.dict(os.environ, ON)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _two_stops(self, seen: dict):
+        """1 塊目の最中に 1 回目の Stop、引き継いだ分 (3 回目の送信) の最中に 2 回目の Stop。"""
+
+        def during(n: int) -> None:
+            if n == 1:
+                self.edit(SESSION_A, "rest.txt", "rest\n")
+                seen["stop1"] = self.stop(SESSION_A, "REVIEW_CLEAN")
+            elif n == 3:
+                self.edit(SESSION_A, "rest2.txt", "rest two\n")
+                seen["stop2"] = self.stop(SESSION_A, "REVIEW_CLEAN")
+                seen["stop2_calls"] = list(self.review_calls)
+
+        return during
+
+    def test_the_second_request_is_served_in_the_same_run(self):
+        """DoD: Stop 時点の差分が同じ応答の中でレビューされ、stop_handoff が残らない。"""
+        self.big_edit(SESSION_A)
+        seen: dict = {}
+        code, err, _ = self.mid_turn(
+            SESSION_A, ["REVIEW_CLEAN", "REVIEW_CLEAN", "REVIEW_CLEAN", FINDING],
+            inside=self._two_stops(seen),
+        )
+        self.assertEqual(seen["stop2_calls"], [], "Stop はレビューを並走させない")
+        self.assertIn(self.entry.NOTICE_HANDED_OFF, self.assertNotBlocked(seen["stop2"]))
+        self.assertEqual(len(self.midturn_calls), 4, "2 塊 + 引き継ぎ 2 回")
+        self.assertIn("rest.txt", self.midturn_calls[2])
+        self.assertIn("rest2.txt", self.midturn_calls[3])
+        self.assertNotIn("rest.txt\n", self.midturn_calls[3])
+        self.assertEqual(self.pending(SESSION_A), [])
+        self.assertFalse(self.raw_state(SESSION_A)["stop_handoff"])
+        self.assertEqual(code, self.entry.REWAKE_EXIT_CODE)
+        self.assertIn(FINDING, err)
+        self.assertFalse(self.state.midturn_running(SESSION_A))
+
+    def test_stop_right_after_the_last_check_reviews_itself(self):
+        """最後の読み出し (依頼なし) の直後・印を下ろす前に Stop が来たら、Stop が自分で見る。"""
+        self.big_edit(SESSION_A)
+        seen: dict = {}
+        real_take = self.state.take_stop_handoff
+
+        def take(sid):
+            value = real_take(sid)
+            if not value and "fired" not in seen:
+                seen["fired"] = True  # Stop の中の読み出しでは発火させない
+                self.assertTrue(self.state.midturn_running(sid), "印はまだ立っている")
+                self.edit(SESSION_A, "rest.txt", "rest\n")
+                seen["stop"] = self.stop(SESSION_A, "REVIEW_CLEAN")
+                seen["stop_calls"] = list(self.review_calls)
+            return value
+
+        with mock.patch.object(self.state, "take_stop_handoff", side_effect=take):
+            self.mid_turn(SESSION_A, "REVIEW_CLEAN")
+        self.assertEqual(len(seen["stop_calls"]), 1, "ロックは空いているので Stop が自分で見る")
+        self.assertIn("rest.txt", seen["stop_calls"][0])
+        self.assertNotIn(self.entry.NOTICE_HANDED_OFF, self.assertNotBlocked(seen["stop"]))
+        self.assertFalse(self.raw_state(SESSION_A)["stop_handoff"])
+        self.assertEqual(self.pending(SESSION_A), [])
+
+    def test_no_room_puts_the_request_back_for_the_next_review(self):
+        """もう 1 回送ると hook の timeout に掛かりうるなら送らず、依頼を書き戻して次に任せる。"""
+        self.big_edit(SESSION_A)
+        seen: dict = {}
+        with mock.patch.object(self.entry, "_midturn_has_room", side_effect=[True, False]):
+            self.mid_turn(SESSION_A, "REVIEW_CLEAN", inside=self._two_stops(seen))
+        self.assertEqual(len(self.midturn_calls), 3, "2 回目の引き継ぎは送らない")
+        self.assertEqual(self.pending(SESSION_A), [os.path.join(self.repo, "rest2.txt")])
+        self.assertTrue(self.raw_state(SESSION_A)["stop_handoff"], "依頼は書き戻す")
+
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("rest2.txt")
+        self.assertIn(self.entry.NOTICE_HANDOFF_DEFERRED, self.assertNotBlocked(output))
+        self.assertFalse(self.raw_state(SESSION_A)["stop_handoff"])
+
+    def test_room_is_measured_against_the_hook_timeout(self):
+        worst = self.entry._midturn_review_worst_sec()
+        limit = self.entry.MIDTURN_HOOK_TIMEOUT_SEC
+        for label, elapsed, expected in (
+            ("余裕あり", limit - worst - 1, True),
+            ("ちょうど", limit - worst, False),
+            ("超過", limit, False),
+        ):
+            with self.subTest(label), mock.patch.object(
+                self.entry, "_midturn_clock", return_value=100.0 + elapsed
+            ):
+                self.assertIs(self.entry._midturn_has_room(100.0), expected)
+
+
 class TestMidTurnRunMarks(MidTurnTestCase):
     """実行ごとの印 (`begin_midturn` / `end_midturn` / `midturn_running`) の単体。"""
 
@@ -725,6 +822,11 @@ class TestRegistration(unittest.TestCase):
         # 閾値の判定 (git のみ) + 閾値超えの分 + Stop から引き継いだ残り
         worst = entry.PER_TOOL_PROBE_BUDGET_SEC + git_per_review + 2 * per_review
         self.assertLess(worst, hook["timeout"])
+        # 引き継ぎを繰り返すかの判定 (`_midturn_has_room`) は同じ値で測る
+        self.assertEqual(entry._midturn_review_worst_sec(), per_review)
+        self.assertEqual(entry.MIDTURN_HOOK_TIMEOUT_SEC, hook["timeout"])
+        # 印の失効は、kill されずに走り続けうる最長 (hook の timeout) より長い
+        self.assertGreater(sys.modules["state"].MIDTURN_STALE_SEC, hook["timeout"])
 
 
 if __name__ == "__main__":

@@ -11,7 +11,16 @@
                            pending = {}              reviewed[path] = hash
 
     cursor 失敗時: restore_claim() で pending へ戻す (未レビューのため)
-    kill された時: in-flight が残る -> TTL 超過を後続 Stop が pending へ回収
+    kill された時: in-flight が残る -> TTL 超過か、claim した hook の終了 (pid) を
+                   後続の claim が見て pending へ回収
+
+**塊ごとの結果の退避 (0.17.0)**: 1 回の claim を塊に分けて送るとき、塊が返るたびに
+その塊の hash と指摘を in-flight の entry (`results`) に積む (`record_chunk_result`)。
+最後まで送り終えれば complete / restore が entry ごと消す。途中で kill されると entry が
+残り、後続の claim は**結果の返った塊のパスだけを** entry に残して (`orphan`) 残りを
+pending へ戻す。退避した指摘は、後続のレビューが自分の結果を出す直前に
+`take_orphaned_results` が読み、その時点で初めて hash を記録する (配る前に記録すると、
+返していない指摘の塊をレビュー済みにしてしまう)。
 
 **削除ではなく in-flight 予約にする理由**: 割り込みでユーザーが次メッセージを送ると
 Stop hook はプロセスごと落ちる。単純な drain (読み出し + 削除) だとその瞬間にパスが
@@ -91,8 +100,8 @@ MAX_FINGERPRINT_ENTRIES = MAX_PENDING_PATHS
 
 # 応答の途中のレビュー (0.16.0) が実行中だと見なす上限。flag を下ろす前に hook が
 # kill されても (asyncRewake の timeout)、この時間を過ぎれば「実行中」とは扱わない。
-# 1 回の起動で最大 2 回レビューする (閾値超えの分 + Stop から引き継いだ残り) ので
-# in-flight の TTL の 2 倍にする
+# 1 回の起動は hook の timeout (hooks.json の 1500 秒。閾値超えの分 + Stop から引き継いだ残りの
+# 2 回分) で kill されるので、それより長い in-flight の TTL の 2 倍にする
 MIDTURN_STALE_SEC = 2 * IN_FLIGHT_TTL_SEC
 
 # 応答の途中のレビューが Stop の通知に回す行の保持数 (古いものから落とす)
@@ -252,6 +261,12 @@ def claim_pending(session_id: str) -> tuple[str, list[str]] | None:
     セッション数だけ溜め込んでいた実測 (19 セッション分) の主因だった。
     ファイルが既に存在するセッションは今までどおり開いて処理する
     (TTL 回収や claim が必要な可能性があるため)。
+
+    回収の条件は 2 つ (0.17.0 で 2 つ目を足した): claim から TTL を超えた、または claim した
+    hook のプロセス (`pid`) がもう居ない。後者は割り込みで kill されたレビューを TTL
+    (約 15 分) 待たずに次の Stop で送り直すため。pid が無い entry (0.16.x までの形) と、
+    生死を判定できない pid は TTL だけで回収する (生きている claim を横取りしない側に倒す)。
+    結果の返った塊がある entry は、そのパスだけを残して `orphan` にする (モジュール docstring)。
     """
     if not os.path.exists(_state_path(session_id)):
         return None
@@ -262,21 +277,171 @@ def claim_pending(session_id: str) -> tuple[str, list[str]] | None:
                 if not isinstance(entry, dict):
                     del state["in_flight"][cid]
                     continue
-                if now - float(entry.get("at") or 0) > IN_FLIGHT_TTL_SEC:
-                    for p in entry.get("paths") or []:
+                if entry.get("orphan") is True:
+                    continue  # 回収済み。`take_orphaned_results` が配る
+                expired = now - float(entry.get("at") or 0) > IN_FLIGHT_TTL_SEC
+                if not (expired or _owner_gone(entry.get("pid"))):
+                    continue
+                results = _entry_results(entry)
+                covered: dict[str, str] = {}
+                for result in results:
+                    covered.update(result["hashes"])
+                for p in entry.get("paths") or []:
+                    if p not in covered:
                         state["pending"].setdefault(p, now)
+                if not results:
                     del state["in_flight"][cid]
+                    continue
+                # 結果の返った塊のパスは、指摘を配るまで in-flight に置く (claim されない =
+                # 再送しない。`recorded_paths` からも見える)。`prior` は回収した時点の hash で、
+                # 配るまでに別のレビューがそのパスの新しい hash を記録していたら上書きしない
+                entry["orphan"] = True
+                entry["paths"] = list(covered)
+                entry["prior"] = {p: state["reviewed"].get(p) for p in covered}
 
             if not state["pending"]:
                 return None
 
             paths = list(state["pending"].keys())
             claim_id = uuid.uuid4().hex
-            state["in_flight"][claim_id] = {"at": now, "paths": paths}
+            state["in_flight"][claim_id] = {"at": now, "paths": paths, "pid": _owner_pid()}
             state["pending"] = {}
             return claim_id, paths
     except OSError:
         return None
+
+
+def _owner_pid() -> int:
+    """claim した hook のプロセス id (テストが差し替える)。"""
+    return os.getpid()
+
+
+def _owner_gone(pid) -> bool:
+    """claim した hook がもう居ないと**言い切れる**か。言い切れなければ False (TTL に任せる)。
+
+    `os.kill(pid, 0)` は signal を送らずに存在だけを確かめる。0 以下の pid は process group
+    などを指すので試さない。権限が無い (他の利用者のプロセス) ときは生きている側に倒す。
+    pid が再利用されていると生きていると判定するが、そのときは TTL で回収される。
+    """
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    if pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _entry_results(entry: dict) -> list[dict]:
+    """in-flight の entry に退避した塊の結果のうち、形の正しいものだけ。"""
+    raw = entry.get("results")
+    if not isinstance(raw, list):
+        return []
+    results = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        hashes = item.get("hashes")
+        text = item.get("text")
+        backend = item.get("backend")
+        if not isinstance(hashes, dict) or not isinstance(text, str):
+            continue
+        clean = {p: h for p, h in hashes.items() if isinstance(p, str) and isinstance(h, str)}
+        if not clean:
+            continue
+        results.append(
+            {"hashes": clean, "text": text, "backend": backend if isinstance(backend, str) else ""}
+        )
+    return results
+
+
+def record_chunk_result(
+    session_id: str, claim_id: str, hashes: dict[str, str], text: str, backend: str
+) -> None:
+    """塊の結果が返るたびに、その塊の hash と指摘 (指摘なしは空文字) を claim の entry に積む。
+
+    hash は**ここでは記録しない** (`reviewed` に入れるのは、指摘を配る complete か
+    `take_orphaned_results`)。entry が無い (回収された・壊れた) ときは何もしない。
+    """
+    if not hashes:
+        return
+    try:
+        with _locked_state(session_id) as state:
+            entry = state["in_flight"].get(claim_id)
+            if not isinstance(entry, dict) or entry.get("orphan") is True:
+                return
+            results = entry.get("results")
+            if not isinstance(results, list):
+                results = []
+            results.append({"hashes": dict(hashes), "text": text, "backend": backend})
+            entry["results"] = results
+    except OSError:
+        pass
+
+
+def orphaned_findings_chars(session_id: str) -> int:
+    """回収済み (`orphan`) の entry に残る指摘の合計文字数 (読み取りだけ)。
+
+    後続のレビューは、これを自分の指摘と合わせて返すので、指摘の上限の判定に足す。
+    """
+    if not os.path.exists(_state_path(session_id)):
+        return 0
+    try:
+        with _locked_state(session_id) as state:
+            return sum(
+                len(result["text"])
+                for entry in state["in_flight"].values()
+                if isinstance(entry, dict) and entry.get("orphan") is True
+                for result in _entry_results(entry)
+            )
+    except OSError:
+        return 0
+
+
+def take_orphaned_results(session_id: str) -> list[tuple[str, str]]:
+    """回収済みの entry を消し、退避していた hash を記録して、指摘 (本文, backend) を返す。
+
+    呼び出し側は返した指摘を**その出力で必ず配る**。hash はここで初めて記録する (配る前に
+    記録しない)。回収した後に別のレビューがそのパスの新しい hash を記録していたら (`prior`
+    と違えば) 上書きしない (古い hash で上書きすると、新しい内容を一度余分に送り直す)。
+    """
+    if not os.path.exists(_state_path(session_id)):
+        return []
+    try:
+        with _locked_state(session_id) as state:
+            findings: list[tuple[str, str]] = []
+            reviewed = state["reviewed"]
+            for cid, entry in list(state["in_flight"].items()):
+                if not isinstance(entry, dict) or entry.get("orphan") is not True:
+                    continue
+                del state["in_flight"][cid]
+                prior = entry.get("prior")
+                if not isinstance(prior, dict):
+                    prior = {}
+                for result in _entry_results(entry):
+                    for path, digest in result["hashes"].items():
+                        if reviewed.get(path) == prior.get(path):
+                            reviewed.pop(path, None)  # 挿入順を更新して LRU として使う
+                            reviewed[path] = digest
+                    if result["text"]:
+                        findings.append((result["text"], result["backend"]))
+                live = set(state["pending"])
+                for other in state["in_flight"].values():
+                    if isinstance(other, dict):
+                        live.update(p for p in (other.get("paths") or []) if isinstance(p, str))
+                for path in entry.get("paths") or []:
+                    if isinstance(path, str) and path not in live:
+                        state["fingerprints"].pop(path, None)
+            if len(reviewed) > MAX_REVIEWED_ENTRIES:
+                for stale in list(reviewed)[: len(reviewed) - MAX_REVIEWED_ENTRIES]:
+                    del reviewed[stale]
+            return findings
+    except OSError:
+        return []
 
 
 def complete_claim(session_id: str, claim_id: str, hashes: dict[str, str]) -> None:
