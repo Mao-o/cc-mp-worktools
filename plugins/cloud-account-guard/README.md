@@ -722,10 +722,12 @@ firebase-tools と同じく symlink を解かないそのパスの親方向だ�
 `firebase use` の切替先を project root ごとに記録し、`--config` 付きのコマンドはそのファイルの
 あるディレクトリから親へ探した切替先で動く。そのディレクトリがプロジェクトのディレクトリと
 別で、そこに切替先が記録されていると、プロジェクトのディレクトリで切り替えても変わらない。
-このため `--config` 付きのコマンドの deny は、切替をコマンドの形で案内せず、そのファイルの
-あるディレクトリで切り替えるよう文で案内する (案内どおりに切り替えても同じ deny を繰り返さない
-ように。ただし `--config` のパスが symlink を通るときは、そのディレクトリで切り替えても効かない
-ことがある。firebase-tools は symlink を解かないパスで切替先を探すため。[既知の制限](#既知の制限))。
+このため `--config` 付きのコマンドの deny は、同じ `--config` を CLI 名の直後に付けた切替
+(`firebase --config <そのファイルの絶対パス> use <期待値>`) を案内する (v0.27.0。firebase.json で
+ない名前のファイルや、symlink を通るパスでも効く形)。パスか期待値が案内に使える形でないときは、
+そのファイルのあるディレクトリで切り替えるよう文で案内する (0.18.0〜0.26.1 はいつもこの文。
+`--config` のパスが symlink を通るときは、そのディレクトリで切り替えても効かないことがある。
+firebase-tools は symlink を解かないパスで切替先を探すため。[既知の制限](#既知の制限))。
 この deny の先頭行に示す現在値 (`現在=`) と期待値 (`期待=`。現在値を取得できない deny も示す)
 も、[値を文面に示す形](#期待値へ向かう切替コマンドは許可-self-remediation) のものだけを示す (`firebase use` に入れる形より広い。
 ドメイン付きの project ID や日本語の名前も示す。外れていれば「表示しない値」)。期待値に示さない
@@ -810,12 +812,22 @@ deny される remediation loop を防ぐため、**accounts.local.json の期�
 `--v=...` / `--request-timeout=...`、`firebase` は `--non-interactive` / `--debug` /
 `--json`、`gh` はオプションの順序・`=` 形・短縮形すべて。
 
-**切替の着地先を変えるオプションは対象外** (許可オプションの allow-list で、コマンドの
-allow-list ではない)。`gcloud config set project <期待値> --configuration other` は
-非アクティブな configuration に書き、`kubectl config use-context <期待値>
---kubeconfig=/tmp/kc` は別ファイルに書くため、実行後もアクティブな値は期待値にならない。
-これらは従来どおり通常検証に落ちる (現在値が期待値と一致していれば allow、
-[連結](#切替と書込を同一コマンドに連結した形は-deny--v0150) されていれば deny)。
+**切替の着地先を変える context option も、切替先が期待値なら同じ扱いになる (v0.27.0)。**
+gcloud の `--configuration`、kubectl の `--kubeconfig`、firebase の `--config` / `-c` は、
+その option で選んだ構成 / ファイル / project root の状態を書き換える。これらを付けたコマンドの
+deny は同じ option を付けた切替を案内するので (`gcloud config set project <期待値>
+--configuration <構成>` / `kubectl config use-context <期待値> --kubeconfig <ファイル>` /
+`firebase --config <ファイル> use <期待値>`)、その形を期待値への切替として通す。0.26.1 までは
+末尾に付けた形は通常検証に落ちて、案内どおりにしても往復が閉じなかった (CLI 名の直後に付けた形は
+以前から通っていた)。切替先は期待値に限られ、その構成 / ファイルを使うコマンドも使わない
+コマンドも実行時に照合されるので、新しい誤 allow は開かない。
+
+**それ以外のオプションは対象外** (許可オプションの allow-list で、コマンドの allow-list では
+ない)。`gcloud config set project <期待値> --flags-file f.yaml` (任意の flag を注入できる)、
+`kubectl config use-context <期待値> --context other` (照合先を差し替える)、
+`firebase use <期待値> --project other` などは従来どおり通常検証に落ちる (現在値が期待値と
+一致していれば allow、[連結](#切替と書込を同一コマンドに連結した形は-deny--v0150) されて
+いれば deny)。
 
 **案内された切替 / ログインコマンドは案内された形のまま単独で実行すること。** 元のコマンド
 を同じコマンド行に連結すると (`gh auth switch ... && gh pr create` 等)、そちらが切替**前**
@@ -1065,6 +1077,9 @@ dispatcher は以下の順に accounts.local.json を探す:
 **新旧両方存在する場合は fail-closed で deny** する。どちらが正本か曖昧な状態で
 検証を通すと、どの設定が効いているか不透明になる。
 `/cloud-account-guard:accounts-migrate` で統合するか、不要な方を手動削除する。
+`migrate --commit` は旧パスを消さないので、消すまでこの deny は続く。skill は統合の後に
+旧パスを消すかを確認し、承認されたら `migrate --commit --remove-old` で消す (v0.27.0。
+builder は、新パスが書いた内容のとおりで、旧パスが統合したときから変わっていないときだけ消す)。
 
 **stat できない配置パスは「ある (が読めない)」に数える** (v0.19.1)。途中のディレクトリに
 権限が無い・長すぎる名前を指す symlink・symlink のループなどで、そこにファイルがあるかどうかを
@@ -1430,11 +1445,12 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   同じ理由で、単独 `&` で区切られた行は 1 セグメントに畳まれるため、
   `gh pr create & aws s3 cp a s3://b` では **aws 側が検証対象にならない**
   (v0.14.0 以前と同じ挙動)
-- 期待値への切替と認識する形に**着地先を変えるオプション**
-  (`--configuration` / `--kubeconfig` / `--config` 等) を足したものは、
-  従来どおり通常検証に落ちる。実行後もアクティブな値は期待値にならないため
-  「期待値へ切り替えた」と扱えない
-  ([self-remediation](#期待値へ向かう切替コマンドは許可-self-remediation))
+- 期待値への切替と認識する形に、着地先を変える context option
+  (`--configuration` / `--kubeconfig` / `--config`) 以外のオプション
+  (`--flags-file` / `--context` / `--project` 等) を足したものは、従来どおり通常検証に
+  落ちる ([self-remediation](#期待値へ向かう切替コマンドは許可-self-remediation))。
+  gcloud の `--configuration` を付けた切替が指定した構成に書くことは gcloud の仕様からの
+  推論で、実機の gcloud では確かめていない (v0.27.0)
 - **60 秒 (`IN_FLIGHT_SEC`) を超える対話 login** (`gh auth login --web` /
   `aws sso login` 等のブラウザ認証) の最中に、同一 service の並行検証 (並列 Bash
   呼出) があった場合、その検証が login 前の状態で成功すると entry が書かれ、login

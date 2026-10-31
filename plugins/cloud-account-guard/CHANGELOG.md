@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.27.0
+
+### Changed: `--kubeconfig` / `--configuration` / `--config` を付けたコマンドの deny が、同じ option を付けた切替を案内し、案内どおりにすると通る
+
+- context を変える option を付けたコマンド (kubectl の `--kubeconfig`、gcloud の `--configuration`、
+  firebase の `--config` / `-c`) は、その option で選んだファイル / 構成 / project root の状態で動く。
+  0.26.1 までの deny は option の無い切替 (`kubectl config use-context <期待値>` /
+  `gcloud config set project <期待値>`) を案内するか、firebase では切替をコマンドの形で案内せず
+  文で案内していた。案内どおりに切り替えても既定の kubeconfig / アクティブな構成 / プロジェクトの
+  ディレクトリに書くだけなので、元のコマンドを再実行すると同じ deny に戻っていた。同じ option を
+  末尾に付けた切替は deny、CLI 名の直後に付けた形だけが通り、揃っていなかった
+- deny は同じ option を付けた切替を案内する: `kubectl config use-context <期待値> --kubeconfig <ファイル>`、
+  `gcloud config set <project|account> <期待値> --configuration <構成>`、
+  `firebase --config <ファイルの絶対パス> use <期待値>` (dict の期待値は alias ごとの行)。パスや構成名が
+  案内に使える形でないとき (空白・`~` 始まり・glob の文字を含むなど) は、コマンドの形では案内せず文で
+  案内する (firebase は 0.18.0 からの文)
+- **判定表の変更**: これらの option を末尾に付けた期待値への切替 (`firebase use <期待値> -c <path>` など)
+  を、CLI 名の直後に付けた形と同じく self-remediation として通す (0.26.1 までは通常検証に落ちていた)。
+  切替と書込の連結 (`<期待値への切替 + その option> && <書込>`) も止めない。切替先は期待値に限られ、
+  続くコマンドは実行時に照合されるので、新しい誤 allow は開かない。期待値以外への切替、`--context` /
+  `--project` / `--flags-file` などほかの option を付けた切替は従来どおり。firebase の
+  期待値が未登録のときの固定の操作 (`firebase use <x>`) の判定は変えていない
+- 確かめ方: firebase は、firebase.json でない名前のファイルと symlink を通るパスでも
+  `firebase --config <path> use <x>` (CLI 名の直後の形) が効くことを以前のレーンで実測した結果に
+  基づく。kubectl の `--kubeconfig` と gcloud の `--configuration` を付けた切替が、それぞれ指定した
+  ファイル / 構成に書くことは各 CLI の global option の仕様からの推論で、実機では確かめていない
+  (テストは CLI を偽物に置き換えた往復で固定する)
+
+### Added: `migrate --remove-old` と、accounts-migrate skill での旧パスの削除の確認
+
+- `migrate --commit` は旧パスを残し、旧パスが残る限り hook は複数のパスの競合で gh などを deny する。
+  skill の案内は「不要なら手動削除」だけだったので、統合を正しく終えた直後に、プラグイン自身が
+  作った状態で作業が止まっていた (`rm <旧パス> && gh ...` と 1 行に書くと、hook が行全体を止めるので
+  rm も実行されない)
+- builder の `migrate` に `--remove-old` を足した。`--commit` と一緒に付けると、統合を書いた後に
+  旧パスを消す (`--dry-run` と一緒なら消す対象を表示するだけ)。消すのは、新パスを読み直した内容が
+  書いた内容と一致し、旧パスが統合したときから変わっておらず、通常のファイル (symlink は link だけ)
+  のときだけ。消せなかった旧パスがあると exit 1 で理由と `rm` の行を出す。フラグを付けない
+  `migrate --commit` は従来どおり旧パスを残す
+- accounts-migrate skill の手順 5 で、旧パスを消すかを AskUserQuestion で確認し、承認されたら
+  `migrate --commit --remove-old` を単独のコマンドとして実行するようにした。dispatcher の判定
+  (複数パスの競合で deny) は変えていない。deny の文面に `--remove-old` と skill を案内する文を足した
+
 ## 0.26.1
 
 ### Fixed: project のディレクトリが symlink の下にあるとき、CLI の無い firebase のコマンドを firebase-tools と別の project で照合して allow していた

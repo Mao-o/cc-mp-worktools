@@ -356,14 +356,40 @@ def _env_guidance(env_var: str, flag: str, value: str | None) -> str:
     return f"{head}{flag} {value} を付けて実行してください"
 
 
-def _check_key(key: str, label: str, expected: str, get_value, env=None) -> str | None:
+# `--configuration` の構成名が案内に使える形でないときの文 (コマンドの形をとらない。
+# REMEDIATION_PATTERNS にも `shell_word.UNSAFE` の文にも当たらない)。
+_CONFIGURATION_BY_HAND = (
+    "--configuration の構成名は案内に使える形ではないため、コマンドの形では案内しません。"
+    "同じ --configuration を付けて、期待値に設定してください"
+)
+
+
+def _config_set(key: str, value: str, configuration) -> str | None:
+    """`gcloud config set <key> <value>` の案内。構成名が案内に使える形でなければ None。
+
+    `--configuration X` 付きのコマンドは構成 X の値で動くので、切替にも同じ option を付ける
+    (v0.27.0)。付けないとアクティブな構成に書き、案内どおりにしても元のコマンドは同じ deny に
+    戻る。
+    """
+    if configuration is None:
+        return f"gcloud config set {key} {value}"
+    name = shell_word.arg(configuration)
+    if name is None:
+        return None
+    return f"gcloud config set {key} {value} --configuration {name}"
+
+
+def _check_key(
+    key: str, label: str, expected: str, get_value, env=None, configuration=None
+) -> str | None:
     """`key` (project / account) の現在値を期待値と照合する。
 
     `get_value` は `(value, error)` を返す getter。env は検証に使う完全 env
     (None なら hook プロセスの環境)。値が環境変数で決まっているときは env の直し方と
     `--<key>` を案内し、そうでなければ `--<key>`・ディレクトリごとの固定・
     `gcloud config set <key> <期待値>` (マシン全体の既定) を案内する。コマンドの形の
-    案内は期待値が許容形のときだけ出す。
+    案内は期待値が許容形のときだけ出す。configuration (候補コマンドの `--configuration`) が
+    あれば、`gcloud config set` にも同じ option を付ける (`_config_set`)。
     """
     current, err = get_value(key)
     if err:
@@ -373,16 +399,23 @@ def _check_key(key: str, label: str, expected: str, get_value, env=None) -> str 
     e = os.environ if env is None else env
     env_var = _CORE_PROPERTY_ENV_VARS[key]
     from_env = env_var in e
+    switch = None if value is None else _config_set(key, value, configuration)
     if current is None:
         head = f"GCP: アクティブ{label}が設定されていません。"
         if from_env:
             return f"{head}{_env_guidance(env_var, flag, value)}。"
         if value is None:
             return f"{head}{_CHECK_BY_HAND}。"
+        if configuration is not None:
+            tail = (
+                f"{switch} を実行してください。" if switch is not None
+                else f"{_CONFIGURATION_BY_HAND}。"
+            )
+            return f"{head}{flag} {value} を付けて実行するか、{tail}"
         return (
             f"{head}{flag} {value} を付けて実行するか、ディレクトリごとに固定してください "
             "(/cloud-account-guard:project-accounts)。マシン全体の既定にするなら "
-            f"gcloud config set {key} {value} を実行してください。"
+            f"{switch} を実行してください。"
         )
     if current != expected:
         head = (
@@ -393,25 +426,31 @@ def _check_key(key: str, label: str, expected: str, get_value, env=None) -> str 
             return f"{head} — {_env_guidance(env_var, flag, value)}"
         if value is None:
             return f"{head} — {_CHECK_BY_HAND}"
+        if switch is None:
+            return f"{head} — {_CONFIGURATION_BY_HAND} (この実行だけなら {flag} {value} を付ける)"
         return (
-            f"{head} — 切り替え: gcloud config set {key} {value} "
+            f"{head} — 切り替え: {switch} "
             f"(この実行だけなら {flag} {value} を付ける)"
         )
     return None
 
 
-def _check_project(expected: str, get_value, override=None, env=None) -> str | None:
+def _check_project(
+    expected: str, get_value, override=None, env=None, configuration=None
+) -> str | None:
     """期待値と現在値を照合する。`get_value` は `(value, error)` を返す getter。"""
     if override is not None:
         return _flag_mismatch("プロジェクト", "--project", override, expected)
-    return _check_key("project", "プロジェクト", expected, get_value, env)
+    return _check_key("project", "プロジェクト", expected, get_value, env, configuration)
 
 
-def _check_account(expected: str, get_value, override=None, env=None) -> str | None:
+def _check_account(
+    expected: str, get_value, override=None, env=None, configuration=None
+) -> str | None:
     """期待値と現在値を照合する。`get_value` は `(value, error)` を返す getter。"""
     if override is not None:
         return _flag_mismatch("アカウント", "--account", override, expected)
-    return _check_key("account", "アカウント", expected, get_value, env)
+    return _check_key("account", "アカウント", expected, get_value, env, configuration)
 
 
 def get_active_account(project_dir: str) -> dict[str, str | None] | None:
@@ -618,6 +657,7 @@ def _verify_against(expected, ctx: dict, get_value, env=None) -> str | None:
     """期待値を現在値 getter と照合する (取得元は CLI / ローカル設定のどちらでも同じ)。"""
     project_override = ctx.get("project")
     account_override = ctx.get("account")
+    configuration = ctx.get("configuration")
 
     if isinstance(expected, dict):
         project_want = expected.get("project")
@@ -630,7 +670,9 @@ def _verify_against(expected, ctx: dict, get_value, env=None) -> str | None:
                     f"(現在: {type(project_want).__name__})。"
                 )
             else:
-                err = _check_project(project_want, get_value, project_override, env)
+                err = _check_project(
+                    project_want, get_value, project_override, env, configuration
+                )
                 if err:
                     errors.append(err)
         if account_want:
@@ -640,7 +682,9 @@ def _verify_against(expected, ctx: dict, get_value, env=None) -> str | None:
                     f"(現在: {type(account_want).__name__})。"
                 )
             else:
-                err = _check_account(account_want, get_value, account_override, env)
+                err = _check_account(
+                    account_want, get_value, account_override, env, configuration
+                )
                 if err:
                     errors.append(err)
         if not errors:
@@ -653,7 +697,7 @@ def _verify_against(expected, ctx: dict, get_value, env=None) -> str | None:
         # verify() は先に `_expected_shape_error()` で弾くので通常ここには来ない。
         return _expected_shape_error(expected)
 
-    return _check_project(expected, get_value, project_override, env)
+    return _check_project(expected, get_value, project_override, env, configuration)
 
 
 _CONFIG_SET_RE = re.compile(
@@ -667,13 +711,21 @@ _CONFIG_SET_RE = re.compile(
 # dispatcher が別途 verify に渡す) と一致し続けるので、実行後の状態が期待値に
 # なることを option 無審査の形と同じ根拠で主張できる。
 #
-# **`--configuration` / `--flags-file` は入れない** — 前者は非アクティブな
-# configuration を名指しして書くのでアクティブ値が期待値にならず、後者は
-# ファイル経由で任意の flag を注入できる (allow-list の意味が消える)。
-# `--project` / `--account` も入れない (照合先を差し替える context option)。
+# **`--flags-file` は入れない** — ファイル経由で任意の flag を注入できる
+# (allow-list の意味が消える)。`--project` / `--account` も入れない (照合先を
+# 差し替える context option)。`--configuration` は装飾ではないが、self-remediation に
+# 限って剥がす (下の `_LANDING_OPTIONS_WITH_VALUE`)。inert 判定 (`changes_identity`) では
+# 剥がさない。
 _DECORATION_FLAGS = frozenset({"--quiet", "-q", "--no-user-output-enabled"})
 _DECORATION_OPTIONS_WITH_VALUE = frozenset({"--verbosity", "--format"})
 _DECORATION_OPTIONS = _DECORATION_FLAGS | _DECORATION_OPTIONS_WITH_VALUE
+# 切替に限って剥がす context option (v0.27.0)。`--configuration X` は構成 X に書くので
+# アクティブな構成の値は変わらないが、切替先は期待値に限られ (X の値を期待値に寄せるだけ)、
+# X を使うコマンドもアクティブな構成を使うコマンドも実行時に照合されるので、新しい誤 allow は
+# 開かない。先頭に置いた形 (`gcloud --configuration X config set ...`) は dispatcher が global
+# option として剥がしてから判定するので 0.26.1 までも通っていた。deny が案内する末尾の形も同じに
+# 扱う。
+_LANDING_OPTIONS_WITH_VALUE = frozenset({"--configuration"})
 
 
 def is_self_remediation(candidate: str, expected) -> bool:
@@ -681,12 +733,14 @@ def is_self_remediation(candidate: str, expected) -> bool:
 
     str 期待値は project のみ照合 (verify と同じ解釈)。dict 期待値は set 対象
     キー (project / account) の期待値と照合する。装飾 option
-    (`--quiet` / `--verbosity=` / `--format=` / `--no-user-output-enabled`) は
-    剥がしてから照合し、**それ以外の option が付いていたら保守的に False**
-    (通常検証に落とす)。
+    (`--quiet` / `--verbosity=` / `--format=` / `--no-user-output-enabled`) と
+    `--configuration` (v0.27.0) は剥がしてから照合し、**それ以外の option が付いていたら
+    保守的に False** (通常検証に落とす)。
     """
     normalized = cli_options.strip_allowed_options(
-        candidate, _DECORATION_FLAGS, _DECORATION_OPTIONS_WITH_VALUE
+        candidate,
+        _DECORATION_FLAGS,
+        _DECORATION_OPTIONS_WITH_VALUE | _LANDING_OPTIONS_WITH_VALUE,
     )
     if normalized is None:
         return False

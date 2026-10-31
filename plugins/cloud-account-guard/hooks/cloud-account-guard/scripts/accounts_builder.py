@@ -1845,27 +1845,109 @@ def _cmd_migrate(
             for kind, path in source_paths.items()
             if kind != "new"
         ]
+        if retained and args.remove_old:
+            return _remove_old_sources(retained, sources, new_path, merged, stdout, stderr)
         if retained:
             print(
                 "\n旧パスは保持されています (安全のため自動削除しません)。"
-                "不要なら手動削除してください:",
+                "不要なら手動削除するか、--remove-old を付けて migrate --commit を"
+                "再実行してください:",
                 file=stdout,
             )
-            for _kind, path in retained:
-                # パスはシェルの 1 語にする (途中のディレクトリ名はリポジトリが決められる)。
-                # 制御文字を含むパスは、`shlex.quote` が改行をそのまま残す (偽の行を差し込める)
-                # ので、コマンドの形では案内しない (dispatcher の同じ案内と同じ分岐)。
-                quoted = _quoted_for_command(path)
-                if quoted is not None:
-                    print(f"  rm {quoted}", file=stdout)
-                else:
-                    print(
-                        f"  {_p(path)} {shell_word.NOT_COMMAND_FORM_REMOVE}",
-                        file=stdout,
-                    )
+            _print_rm_lines(retained, stdout)
     else:
+        if args.remove_old:
+            retained = [path for kind, path in source_paths.items() if kind != "new"]
+            if retained:
+                print(
+                    "\n(--remove-old: --commit で書き込んだ後、次の旧パスを削除します)",
+                    file=stdout,
+                )
+                for path in retained:
+                    print(f"  - {_p(path)}", file=stdout)
         print("\n(dry-run; pass --commit to write)", file=stdout)
 
+    return 0
+
+
+def _print_rm_lines(retained: list[tuple[str, Path]], out: IO[str]) -> None:
+    """旧パスを手で消すための `rm` の行。"""
+    for _kind, path in retained:
+        # パスはシェルの 1 語にする (途中のディレクトリ名はリポジトリが決められる)。
+        # 制御文字を含むパスは、`shlex.quote` が改行をそのまま残す (偽の行を差し込める)
+        # ので、コマンドの形では案内しない (dispatcher の同じ案内と同じ分岐)。
+        quoted = _quoted_for_command(path)
+        if quoted is not None:
+            print(f"  rm {quoted}", file=out)
+        else:
+            print(
+                f"  {_p(path)} {shell_word.NOT_COMMAND_FORM_REMOVE}",
+                file=out,
+            )
+
+
+def _remove_old_sources(
+    retained: list[tuple[str, Path]],
+    sources: dict[str, dict[str, Any]],
+    new_path: Path,
+    merged: dict[str, Any],
+    stdout: IO[str],
+    stderr: IO[str],
+) -> int:
+    """`migrate --commit --remove-old`: 統合を書いた後に旧パスを削除する (v0.27.0)。
+
+    旧パスが残ると hook は複数パスの競合 (D4) で deny し続けるので、利用者が手で消すまで
+    作業が止まっていた (内部バックログ)。削除は明示フラグのときだけ行い (skill が削除の
+    確認を取ってから付ける)、次をすべて満たす旧パスだけを消す:
+
+    - 新パスを読み直した内容が書いた内容と一致する (書込が実際に残っている)
+    - 旧パスを読み直した内容が、統合の判定に使った内容と一致する (判定の後で書き換わって
+      いない。一致しなければ、その値は新パスに入っていない可能性がある)
+    - 通常のファイル (またはそれを指す symlink。symlink は link だけを消す)
+
+    消せなかった旧パスがあれば exit 1 にし、`rm` の行で手での削除を案内する (新パスは
+    書き込み済み)。
+    """
+    try:
+        if _load_existing(new_path) != merged:
+            raise _BuilderError(f"{_p(new_path)} の内容が書き込んだ内容と一致しません")
+    except _BuilderError as e:
+        print(f"error: {e}。旧パスは削除しません。", file=stderr)
+        print("旧パスを確かめてから手動で削除してください:", file=stderr)
+        _print_rm_lines(retained, stderr)
+        return 1
+
+    removed: list[Path] = []
+    kept: list[tuple[str, Path, str]] = []
+    for kind, path in retained:
+        if not os.path.isfile(path):
+            kept.append((kind, path, "通常のファイルではないため"))
+            continue
+        try:
+            unchanged = _load_existing(path) == sources[kind]
+        except _BuilderError:
+            unchanged = False
+        if not unchanged:
+            kept.append((kind, path, "統合した後に内容が変わったため"))
+            continue
+        try:
+            os.unlink(path)
+        except OSError as e:
+            kept.append((kind, path, f"削除できなかったため ({e.strerror or type(e).__name__})"))
+            continue
+        removed.append(path)
+
+    if removed:
+        print("\n旧パスを削除しました:", file=stdout)
+        for path in removed:
+            print(f"  - {_p(path)}", file=stdout)
+    if kept:
+        print("error: 次の旧パスは削除しませんでした (新パスへの書き込みは済んでいます):", file=stderr)
+        for _kind, path, why in kept:
+            print(f"  - {_p(path)} ({why})", file=stderr)
+        print("確かめてから手動で削除するか、migrate を再実行してください:", file=stderr)
+        _print_rm_lines([(kind, path) for kind, path, _why in kept], stderr)
+        return 1
     return 0
 
 
@@ -2200,6 +2282,11 @@ def _build_parser() -> argparse.ArgumentParser:
     mx_migrate.add_argument("--commit", action="store_true")
     _add_path_arg(p_migrate)
     p_migrate.add_argument("--show-values", action="store_true")
+    p_migrate.add_argument(
+        "--remove-old",
+        action="store_true",
+        help="--commit で書き込んだ後、統合した旧パスを削除する (dry-run では削除する対象を表示する)",
+    )
 
     p_set = sub.add_parser(
         "set", help="既存 service entry を更新 (無ければ新規追加)"

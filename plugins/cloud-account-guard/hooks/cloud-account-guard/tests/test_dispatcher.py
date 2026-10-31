@@ -745,19 +745,48 @@ class _FirebaseConfigFixture(BaseWithTmpProject):
 
 
 class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
-    """`--config` 付きのコマンドの deny は、切替をコマンドの形で案内しない (v0.18.0)。
+    """`--config` 付きのコマンドの deny は、同じ `--config` を付けた切替を案内する (v0.27.0)。
 
     firebase-tools は `firebase use` の切替先を project root ごとに記録し、`--config` 付きの
-    コマンドはそのファイルのあるディレクトリから親方向に探した切替先で動く。そのディレクトリが
-    プロジェクトのディレクトリと別で、そこに切替先が記録されていると、案内していた
-    `firebase use <期待値>` (プロジェクトのディレクトリのキーに書く) では変わらず、案内どおりに
-    しても同じ deny を繰り返していた (マージ前レビューの指摘)。往復で確かめる: deny の理由に
-    切替コマンドも単独実行の注記も無い → そのディレクトリで切り替える (その形は hook を通る。
-    切り替えた結果は configstore のそのディレクトリの実体のパスのキーを書き換えて再現する) →
-    同じコマンドが通る。CLI がある (configstore を読む firebase-tools の代わり) / 無い (ローカル
-    設定の解決) の両方。末尾に `-c` を付けた切替 (`firebase use <x> -c <path>`) は
-    self-remediation に当たらず通常検証に落ちる (このクラスでは扱わない)。
+    コマンドはそのファイルのあるディレクトリから親方向に探した切替先で動く。`--config` の無い
+    `firebase use <期待値>` (プロジェクトのディレクトリのキーに書く) では変わらないので、0.18.0 から
+    0.26.1 までは切替をコマンドの形で案内せず、文で案内していた。0.27.0 は
+    `firebase --config <ファイルの絶対パス> use <期待値>` を案内する。往復で確かめる: deny の理由の
+    切替行を加工せずに hook に通す (通る。CLI は呼ばない) → 行を shell の規則で分割した `--config`
+    の値のディレクトリに切替先を記録して firebase-tools の書込を再現する → 同じコマンドが通る。
+    CLI がある (configstore を読む firebase-tools の代わり) / 無い (ローカル設定の解決) の両方。
+    パスか期待値が案内に使える形でないときは 0.18.0 からの文で案内する。
     """
+
+    _SWITCH_LINE = re.compile(r"firebase --config \S+ use \S+(?:  # → \S+)?")
+
+    def _guided_switches(self, reason: str) -> list[str]:
+        lines = self._SWITCH_LINE.findall(reason)
+        self.assertTrue(lines, reason)
+        return lines
+
+    def _run_switch(self, line: str, config_file: Path | None = None) -> None:
+        """案内された行を加工せずに hook に通し (通ること)、firebase-tools の書込を再現する。"""
+        config_file = config_file or self.sub / "firebase.json"
+        with mock.patch("subprocess.run") as run:
+            self.assertIsNone(dispatch(line, str(self.project_dir)), line)
+        run.assert_not_called()
+        tokens = shlex.split(line, comments=True)
+        self.assertEqual(tokens[:2], ["firebase", "--config"])
+        self.assertEqual(tokens[3], "use")
+        # 行の `--config` は、元のコマンドの `--config` が指すファイルそのもの
+        config = Path(tokens[2])
+        self.assertTrue(config.is_absolute(), line)
+        self.assertEqual(os.path.realpath(config), os.path.realpath(config_file))
+        project = line.split("# → ")[1] if "# → " in line else tokens[4]
+        self._record_more({config.parent: project})
+
+    def _record_more(self, active: dict) -> None:
+        current = {}
+        if self._store.exists():
+            current = json.loads(self._store.read_text(encoding="utf-8"))["activeProjects"]
+        current.update({os.path.realpath(d): p for d, p in active.items()})
+        self._store.write_text(json.dumps({"activeProjects": current}), encoding="utf-8")
 
     def test_switching_in_the_config_directory_lets_the_command_through(self):
         switched = {self.project_dir: "right-project", self.sub: "wrong-project"}
@@ -769,17 +798,16 @@ class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
                 switched,
                 "現在=wrong-project",
             ),
-            # どこにも切替先が無い。期待値は示す (0.17.1 の案内 `firebase use <期待値>` も名前を
-            # 出していた)。末尾の「。」まで見て、「のいずれか」が dict にだけ付くことも確かめる
+            # どこにも切替先が無い (ログインしてから切り替える案内)
             "nothing recorded": (
                 "right-project",
                 {},
-                "現在のプロジェクトを取得できません。期待=right-project。",
+                "現在のプロジェクトを取得できません。firebase login && firebase --config ",
             ),
             "dict, nothing recorded": (
                 {"default": "right-project", "staging": "staging-project"},
                 {},
-                "現在のプロジェクトを取得できません。期待=right-project, staging-project のいずれか。",
+                "現在のプロジェクトを取得できません。firebase login の後、以下のいずれかで",
             ),
             # 空文字・null の entry は期待値に数えない (`期待=` に示さず、出所の文も添えない)
             "dict with ignored entries": (
@@ -790,7 +818,7 @@ class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
             "dict with ignored entries, nothing recorded": (
                 {"default": "right-project", "staging": "staging-project", "old": "", "tbd": None},
                 {},
-                "現在のプロジェクトを取得できません。期待=right-project, staging-project のいずれか。",
+                "現在のプロジェクトを取得できません。firebase login の後、以下のいずれかで",
             ),
         }
         for with_cli in (True, False):
@@ -804,20 +832,80 @@ class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
                     self.assertEqual(out["permissionDecision"], "deny")
                     reason = out["permissionDecisionReason"]
                     self.assertIn(marker, reason)
-                    self.assertIn(self._GUIDE, reason)
+                    self.assertNotIn(self._GUIDE, reason)
                     self.assertNotIn(self._SOURCE, reason)  # 期待値はすべて許容形
-                    self.assertNotIn("firebase use", reason)
-                    self.assertNotIn("firebase login", reason)
-                    self.assertNotIn(self._NOTE, reason)
-                    # 案内どおり sub のディレクトリで切り替える: hook は期待値への切替として通し、
-                    # firebase-tools は sub の実体のパスのキーに書く (configstore を書き換えて再現)
-                    with mock.patch("subprocess.run") as run:
-                        self.assertIsNone(
-                            dispatch("cd sub && firebase use right-project", str(self.project_dir))
-                        )
-                    run.assert_not_called()
-                    self._record({**recorded, self.sub: "right-project"})
+                    # 切替をコマンドで案内するので「単独で実行」の注記が付く
+                    self.assertIn(self._NOTE, reason)
+                    # 空文字・null の entry は案内行にもならない
+                    self.assertNotIn("# → \n", reason)
+                    lines = self._guided_switches(reason)
+                    self._run_switch(lines[0])
                     self.assertIsNone(self._dispatch(with_cli))
+
+    def test_text_derived_switch_forms_pass_the_hook(self):
+        """文から読める形 (末尾に `-c` / `--config` を付けた切替、先頭に付けた切替) も、
+        期待値への切替として hook を通る (v0.27.0。0.26.1 までは末尾の形が通常検証に落ち、
+        切り替える前の状態で deny されていた)。期待値以外への切替は従来どおり検証に回る。"""
+        self._write_accounts({"firebase": "right-project"})
+        self._record({self.sub: "wrong-project"})
+        for command in (
+            "firebase use right-project -c sub/firebase.json",
+            "firebase use right-project --config sub/firebase.json",
+            "firebase use right-project --config=sub/firebase.json",
+            "firebase use right-project -csub/firebase.json",
+            "firebase -c sub/firebase.json use right-project",
+            "firebase use right-project -c sub/firebase.json --non-interactive",
+        ):
+            with self.subTest(command=command), mock.patch("subprocess.run") as run:
+                self.assertIsNone(dispatch(command, str(self.project_dir)))
+                run.assert_not_called()
+        for command in (
+            "firebase use wrong-project -c sub/firebase.json",
+            "firebase use right-project -c sub/firebase.json --project other",
+        ):
+            with self.subTest(command=command):
+                result = self._dispatch(True, command)
+                self.assertIsNotNone(result, command)
+                self.assertEqual(result["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_expected_id_shadowed_in_the_config_directory_falls_back_to_the_sentence(self):
+        """`--config` のディレクトリの `.firebaserc` で、期待値と同じ名前の alias が別の project を
+        指すときは、`firebase --config <path> use <期待値>` は期待した project に着かないので案内
+        しない (語は `--config` のディレクトリの `.firebaserc` で選ぶ。プロジェクトのディレクトリの
+        `.firebaserc` ではない)。"""
+        (self.sub / ".firebaserc").write_text(
+            json.dumps({"projects": {"right-project": "elsewhere"}}), encoding="utf-8"
+        )
+        self._write_accounts({"firebase": "right-project"})
+        for recorded in ({self.sub: "wrong-project"}, {}):
+            for with_cli in (True, False):
+                with self.subTest(recorded=bool(recorded), with_cli=with_cli):
+                    self._record(recorded)
+                    reason = self._dispatch(with_cli)["hookSpecificOutput"][
+                        "permissionDecisionReason"
+                    ]
+                    self.assertIn(self._GUIDE, reason)
+                    self.assertNotIn("firebase --config", reason)
+
+    def test_config_path_not_usable_in_a_command_falls_back_to_the_sentence(self):
+        """`--config` のパスが案内に使える形 (`shell_word.PATH`) でないとき (空白を含む) は、
+        コマンドの形で案内せず 0.18.0 からの文で案内する (注記も付けない)。"""
+        spaced = self.project_dir / "a dir"
+        spaced.mkdir()
+        (spaced / "firebase.json").write_text("{}", encoding="utf-8")
+        self._write_accounts({"firebase": "right-project"})
+        for recorded in ({spaced: "wrong-project"}, {}):
+            for with_cli in (True, False):
+                with self.subTest(recorded=bool(recorded), with_cli=with_cli):
+                    self._record(recorded)
+                    out = self._dispatch(with_cli, "firebase deploy -c 'a dir/firebase.json'")[
+                        "hookSpecificOutput"
+                    ]
+                    self.assertEqual(out["permissionDecision"], "deny")
+                    reason = out["permissionDecisionReason"]
+                    self.assertIn(self._GUIDE, reason)
+                    self.assertNotIn("firebase --config", reason)
+                    self.assertNotIn(self._NOTE, reason)
 
     def test_config_file_in_the_project_directory(self):
         """`-c` のファイルがプロジェクトのディレクトリにある形 (設定ファイルを root に並べる) でも、
@@ -834,18 +922,10 @@ class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
                 out = self._dispatch(with_cli, command)["hookSpecificOutput"]
                 self.assertEqual(out["permissionDecision"], "deny")
                 reason = out["permissionDecisionReason"]
-                self.assertIn(self._GUIDE, reason)
-                claims = "プロジェクトのディレクトリで切り替えても変わりません" in reason
-                with mock.patch("subprocess.run") as run:
-                    self.assertIsNone(dispatch("firebase use right-project", str(self.project_dir)))
-                run.assert_not_called()
-                self._record({self.project_dir: "right-project"})  # firebase use が書くキー
-                passes = self._dispatch(with_cli, command) is None
-                self.assertTrue(passes)
-                self.assertFalse(
-                    claims and passes,
-                    "deny は「プロジェクトのディレクトリで切り替えても変わらない」と言うが、切り替えると通る",
-                )
+                self.assertNotIn("プロジェクトのディレクトリで切り替えても変わりません", reason)
+                lines = self._guided_switches(reason)
+                self._run_switch(lines[0], self.project_dir / "firebase.prod.json")
+                self.assertIsNone(self._dispatch(with_cli, command))
 
     def test_no_note_when_an_expected_value_is_not_in_the_allowed_shape(self):
         """期待値が許容形から外れるときは、先頭行の `期待=` にその値を示さず (`(表示しない値)`)、
@@ -858,22 +938,41 @@ class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
         添える (`test_masked_expected_value_points_to_the_file`)。
         """
         self._record({self.sub: "wrong-project"})
-        for expected in (
-            "x; firebase use evil",
-            {"default": "right-project", "evil": "x; firebase use evil"},
-        ):
-            for with_cli in (True, False):
-                with self.subTest(expected=expected, with_cli=with_cli):
-                    self._write_accounts({"firebase": expected})
-                    out = self._dispatch(with_cli)["hookSpecificOutput"]
-                    self.assertEqual(out["permissionDecision"], "deny")
-                    reason = out["permissionDecisionReason"]
-                    self.assertIn(self._GUIDE, reason)
-                    self.assertIn("(表示しない値)", reason)
-                    self.assertIn(self._SOURCE, reason)
-                    self.assertNotIn("x; firebase use evil", reason)
-                    self.assertNotIn(shell_word.UNSAFE, reason)
-                    self.assertNotIn(self._NOTE, reason)
+        for with_cli in (True, False):
+            with self.subTest(with_cli=with_cli):
+                self._write_accounts({"firebase": "x; firebase use evil"})
+                out = self._dispatch(with_cli)["hookSpecificOutput"]
+                self.assertEqual(out["permissionDecision"], "deny")
+                reason = out["permissionDecisionReason"]
+                self.assertIn(self._GUIDE, reason)
+                self.assertIn("(表示しない値)", reason)
+                self.assertIn(self._SOURCE, reason)
+                self.assertNotIn("x; firebase use evil", reason)
+                self.assertNotIn(shell_word.UNSAFE, reason)
+                self.assertNotIn(self._NOTE, reason)
+
+    def test_dict_with_an_entry_not_in_the_allowed_shape_guides_the_rest(self):
+        """dict の一部の entry だけが許容形から外れるときは、残りの entry の切替を `--config` 付きで
+        案内し、外れた entry は `--config` の無い deny と同じ行 (`_SKIPPED_LINE`。UNSAFE の文) で
+        手での確認を促す (v0.27.0)。UNSAFE の文があるので注記は付かない (`--config` の無い deny と
+        同じ契約)。外れた値は文面に出さない。"""
+        self._record({self.sub: "wrong-project"})
+        self._write_accounts(
+            {"firebase": {"default": "right-project", "evil": "x; firebase use evil"}}
+        )
+        for with_cli in (True, False):
+            with self.subTest(with_cli=with_cli):
+                self._record({self.sub: "wrong-project"})
+                out = self._dispatch(with_cli)["hookSpecificOutput"]
+                self.assertEqual(out["permissionDecision"], "deny")
+                reason = out["permissionDecisionReason"]
+                self.assertIn(shell_word.UNSAFE, reason)
+                self.assertNotIn("x; firebase use evil", reason)
+                self.assertNotIn(self._NOTE, reason)
+                lines = self._guided_switches(reason)
+                self.assertEqual(len(lines), 1, lines)
+                self._run_switch(lines[0])
+                self.assertIsNone(self._dispatch(with_cli))
 
     def test_masked_expected_value_points_to_the_file(self):
         """期待値に許容形から外れる値があるときは、出所の文 (accounts.local.json の "firebase") を
@@ -939,13 +1038,14 @@ class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
                             self.assertIn(f"期待={name}", reason)
                             self.assertNotIn(self._SOURCE, reason)
 
-    def test_no_note_from_a_current_value_shaped_like_a_command(self):
-        """現在値が許容形から外れるときも、先頭行の `現在=` にその値を示さず、注記を付けない。
+    def test_current_value_shaped_like_a_command_is_not_shown(self):
+        """現在値が許容形から外れるときも、先頭行の `現在=` にその値を示さない。
 
         CLI が無いとき (npx 等)、現在値はリポジトリの `.firebaserc` から解決され、形を確かめて
         いない。値が切替コマンドの形だと、示しただけで注記の判定に当たり、案内していない
         コマンド (`.firebaserc` が書いたもの) に「単独で実行」の注記が付いていた (マージ前
-        レビューの指摘)。
+        レビューの指摘)。0.27.0 からこの deny は期待値への切替をコマンドで案内するので注記は付く
+        (付く理由は案内した切替で、現在値ではない)。
         """
         for current in ("x firebase use evil", "x\nfirebase use evil", "x firebase login"):
             for expected in ("right-project", {"default": "right-project", "b": "b-project"}):
@@ -958,11 +1058,13 @@ class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
                     out = self._dispatch(with_cli=False)["hookSpecificOutput"]
                     self.assertEqual(out["permissionDecision"], "deny")
                     reason = out["permissionDecisionReason"]
-                    self.assertIn(self._GUIDE, reason)
                     self.assertIn("現在=(表示しない値)", reason)
                     self.assertNotIn(self._SOURCE, reason)  # 出所の文は期待値のときだけ
                     self.assertNotIn(current, reason)
-                    self.assertNotIn(self._NOTE, reason)
+                    self.assertRegex(
+                        self._guided_switches(reason)[0],
+                        r" use right-project(?:  # → right-project)?$",
+                    )
 
 
 class TestFirebaseCurrentValueShownWithoutConfig(_FirebaseConfigFixture):
@@ -1034,6 +1136,224 @@ class TestFirebaseConfigThroughASymlinkWithoutCli(_FirebaseConfigFixture):
                 )
                 reason = result["hookSpecificOutput"]["permissionDecisionReason"]
                 self.assertIn("現在=wrong-project", reason)
+
+    def test_guided_switch_closes_the_round_trip(self):
+        """symlink を通る `--config` でも、deny が案内する切替 (`firebase --config <path> use <x>`)
+        で往復が閉じる (v0.27.0)。firebase-tools はその行の `--config` のパスを symlink を解かずに
+        project root にして切替先を書く (内部バックログの実測)。その書込 (configstore の、行の
+        パスの dirname のキー) を再現し、元のコマンドが通ることを見る。0.26.1 までの文の案内
+        (そのディレクトリに cd して切り替える) は実体のパスのキーに書くので、この 2 形では効かない。
+        """
+        self._write_accounts({"firebase": "right-project"})
+        for name, command in {
+            "A abs path through a symlink": f"firebase deploy --config {self.link}/sub/firebase.json",
+            "B rel path through a symlinked dir": "firebase deploy --config linkdir/firebase.json",
+        }.items():
+            with self.subTest(name):
+                self._store.parent.mkdir(parents=True, exist_ok=True)
+                self._store.write_text(json.dumps({"activeProjects": {}}), encoding="utf-8")
+                reason = self._dispatch(with_cli=False, command=command)[
+                    "hookSpecificOutput"
+                ]["permissionDecisionReason"]
+                match = re.search(r"firebase --config \S+ use \S+", reason)
+                self.assertIsNotNone(match, reason)
+                line = match.group(0)
+                with mock.patch("subprocess.run") as run:
+                    self.assertIsNone(dispatch(line, str(self.project_dir)), line)
+                run.assert_not_called()
+                tokens = shlex.split(line, comments=True)
+                self.assertEqual(tokens[3:], ["use", "right-project"])
+                # firebase-tools は symlink を解かないパスのキーに書く
+                root = os.path.dirname(tokens[2])
+                self.assertNotEqual(root, os.path.realpath(root))
+                self._store.write_text(
+                    json.dumps({"activeProjects": {root: "right-project"}}), encoding="utf-8"
+                )
+                self.assertIsNone(self._dispatch(with_cli=False, command=command), command)
+
+
+class TestContextOptionSwitchRoundTrip(BaseWithTmpProject):
+    """kubectl の `--kubeconfig` / gcloud の `--configuration` を付けたコマンドの deny は、同じ
+    option を付けた切替を案内し、往復が閉じる (v0.27.0)。
+
+    0.26.1 までは option の無い切替 (既定の kubeconfig / アクティブな構成に書く) を案内し、
+    案内どおりにしても元のコマンドは同じ deny に戻っていた。往復で確かめる: deny の理由の切替行を
+    加工せずに hook に通す (CLI は呼ばない) → 行を shell の規則で分割し、その option の指す
+    ファイル / 構成の状態を書き換えて CLI の書込を再現する → 元のコマンドが通る。CLI は偽物
+    (状態の dict を読む)。gcloud の `--configuration` の書込先は gcloud の公式の仕様からの推論
+    (このレーンでは実機の gcloud を起動していない)。
+    """
+
+    _NOTE = "案内された形のまま単独で実行してください"
+
+    def setUp(self):
+        super().setUp()
+        self.kc = self.project_dir / "kc.yaml"
+        gdir = Path(self.tmp) / "gcloud-empty"
+        gdir.mkdir()
+        env = {k: v for k, v in os.environ.items() if not k.startswith("CLOUDSDK_")}
+        env.update({"CLOUDSDK_CONFIG": str(gdir)})
+        env.pop("KUBECONFIG", None)
+        patcher = mock.patch.dict(os.environ, env, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.state: dict = {}
+        import subprocess as _sp
+        self._real_run = _sp.run
+
+    def _fake_run(self, argv, **kwargs):
+        def opt(name):
+            return argv[argv.index(name) + 1] if name in argv else None
+        if argv[:3] == ["kubectl", "config", "current-context"]:
+            current = self.state.get(("kubectl", opt("--kubeconfig")))
+            return SimpleNamespace(stdout=(current or "") + "\n", stderr="", returncode=0)
+        if argv[:3] == ["gcloud", "config", "get-value"]:
+            current = self.state.get(("gcloud", opt("--configuration"), argv[3]))
+            return SimpleNamespace(stdout=(current or "") + "\n", stderr="", returncode=0)
+        return self._real_run(argv, **kwargs)
+
+    def _dispatch(self, command):
+        with self.isolated_cache(), mock.patch("subprocess.run", side_effect=self._fake_run):
+            return dispatch(command, str(self.project_dir))
+
+    def _apply(self, line: str) -> None:
+        """案内行の実行を再現する (CLI が書く先を、行の option から決める)。"""
+        tokens = shlex.split(line, comments=True)
+        if tokens[:3] == ["kubectl", "config", "use-context"]:
+            kc = tokens[tokens.index("--kubeconfig") + 1] if "--kubeconfig" in tokens else None
+            self.state[("kubectl", kc)] = tokens[3]
+        elif tokens[:3] == ["gcloud", "config", "set"]:
+            cfg = (
+                tokens[tokens.index("--configuration") + 1]
+                if "--configuration" in tokens else None
+            )
+            self.state[("gcloud", cfg, tokens[3])] = tokens[4]
+        else:
+            self.fail(f"想定外の案内行: {line}")
+
+    def _round_trip(self, command: str, pattern: str, option_value: str | None) -> None:
+        result = self._dispatch(command)
+        self.assertIsNotNone(result, command)
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        reason = out["permissionDecisionReason"]
+        self.assertIn(self._NOTE, reason)
+        lines = re.findall(pattern, reason)
+        self.assertTrue(lines, reason)
+        for line in lines:
+            with mock.patch("subprocess.run") as run:
+                self.assertIsNone(dispatch(line, str(self.project_dir)), line)
+            run.assert_not_called()
+            tokens = shlex.split(line, comments=True)
+            if option_value is not None:
+                # 行の option は元のコマンドの option と同じ対象を指す
+                self.assertIn(option_value, tokens)
+            self._apply(line)
+        self.assertIsNone(self._dispatch(command), f"案内どおりにしても通らない: {command}")
+
+    def test_kubectl_kubeconfig_round_trip(self):
+        self._write_accounts({"kubectl": "ctx"})
+        kc = str(self.kc)
+        commands = {
+            "leading": (f"kubectl --kubeconfig {kc} apply -f x.yaml", kc),
+            "trailing": (f"kubectl apply -f x.yaml --kubeconfig {kc}", kc),
+            "equals": (f"kubectl apply -f x.yaml --kubeconfig={kc}", kc),
+            "relative": ("kubectl apply -f x.yaml --kubeconfig k.yaml", "k.yaml"),
+            "dot relative": ("kubectl apply -f x.yaml --kubeconfig ./k.yaml", "./k.yaml"),
+            "no option": ("kubectl apply -f x.yaml", None),
+        }
+        for situation in ("mismatch", "unset"):
+            for name, (command, value) in commands.items():
+                with self.subTest(name, situation=situation):
+                    self.state = {("kubectl", None): "default-ctx"}
+                    if value is not None:
+                        self.state[("kubectl", value)] = (
+                            "other" if situation == "mismatch" else None
+                        )
+                    elif situation == "unset":
+                        self.state[("kubectl", None)] = None
+                    self._round_trip(
+                        command, r"kubectl config use-context ctx(?: --kubeconfig \S+)?", value
+                    )
+                    if value is not None:
+                        # 既定の kubeconfig は書き換えていない
+                        self.assertEqual(self.state[("kubectl", None)], "default-ctx")
+
+    def test_kubectl_unusable_kubeconfig_path_falls_back_to_the_sentence(self):
+        self._write_accounts({"kubectl": "ctx"})
+        for path in ("'a b.yaml'", "~/k.yaml", "'k*.yaml'"):
+            raw = shlex.split(path)[0]
+            for situation in ("mismatch", "unset"):
+                with self.subTest(path=path, situation=situation):
+                    self.state = {("kubectl", raw): "other" if situation == "mismatch" else None}
+                    out = self._dispatch(f"kubectl apply -f x.yaml --kubeconfig {path}")[
+                        "hookSpecificOutput"
+                    ]
+                    self.assertEqual(out["permissionDecision"], "deny")
+                    reason = out["permissionDecisionReason"]
+                    self.assertIn("同じ --kubeconfig を付けて", reason)
+                    self.assertNotIn("kubectl config use-context", reason)
+                    self.assertNotIn(self._NOTE, reason)
+
+    def test_gcloud_configuration_round_trip(self):
+        cases = {
+            "scalar": ("my-proj", {"project": "wrong"}),
+            "dict": (
+                {"project": "my-proj", "account": "me@example.com"},
+                {"project": "wrong", "account": "other@example.com"},
+            ),
+        }
+        commands = {
+            "leading": "gcloud --configuration work run deploy svc",
+            "trailing": "gcloud run deploy svc --configuration work",
+            "equals": "gcloud run deploy svc --configuration=work",
+        }
+        for situation in ("mismatch", "unset"):
+            for case, (expected, current) in cases.items():
+                for name, command in commands.items():
+                    with self.subTest(name, case=case, situation=situation):
+                        self._write_accounts({"gcloud": expected})
+                        self.state = {
+                            ("gcloud", None, "project"): "active-proj",
+                            ("gcloud", None, "account"): "active@example.com",
+                        }
+                        for key, value in current.items():
+                            self.state[("gcloud", "work", key)] = (
+                                value if situation == "mismatch" else None
+                            )
+                        self._round_trip(
+                            command,
+                            r"gcloud config set (?:project|account) \S+ --configuration \S+",
+                            "work",
+                        )
+                        # アクティブな構成は書き換えていない
+                        self.assertEqual(self.state[("gcloud", None, "project")], "active-proj")
+
+    def test_gcloud_unusable_configuration_name_falls_back_to_the_sentence(self):
+        self._write_accounts({"gcloud": "my-proj"})
+        for situation in ("mismatch", "unset"):
+            with self.subTest(situation=situation):
+                self.state = {
+                    ("gcloud", "a b", "project"): "wrong" if situation == "mismatch" else None
+                }
+                out = self._dispatch("gcloud run deploy svc --configuration 'a b'")[
+                    "hookSpecificOutput"
+                ]
+                self.assertEqual(out["permissionDecision"], "deny")
+                reason = out["permissionDecisionReason"]
+                self.assertIn("同じ --configuration を付けて", reason)
+                self.assertNotIn("gcloud config set", reason)
+                self.assertNotIn(self._NOTE, reason)
+
+    def test_gcloud_without_configuration_is_unchanged(self):
+        """`--configuration` の無いコマンドの案内は従来どおり (option を付けない)。"""
+        self._write_accounts({"gcloud": "my-proj"})
+        self.state = {("gcloud", None, "project"): "wrong"}
+        reason = self._dispatch("gcloud run deploy svc")["hookSpecificOutput"][
+            "permissionDecisionReason"
+        ]
+        self.assertIn("切り替え: gcloud config set project my-proj (この実行だけなら", reason)
+        self.assertNotIn("--configuration", reason)
 
 
 class TestSelfRemediationFlow(BaseWithTmpProject):
@@ -3037,15 +3357,31 @@ class TestChainedSwitchAndWrite(BaseWithTmpProject):
                 result, _v = self._assert_no_chain_deny(command, service)
                 self.assertIsNone(result, f"新規に deny された: {command}")
 
-    def test_switch_with_landing_spot_options_is_still_denied(self):
-        """着地先を変える option 付きは「期待値への切替」と言えないので deny 側に
-        残す (blanket な option 許容にしない)。"""
-        self._write_accounts({"gcloud": "my-proj", "kubectl": "ctx"})
+    def test_switch_with_landing_spot_options_follows_the_target(self):
+        """着地先を変える context option (`--configuration` / `--kubeconfig` / `--config`) を
+        付けた切替は、切替先が期待値なら「期待値への切替」として連結を止めない (v0.27.0。判定表の
+        変更: 0.26.1 までは deny。先頭に置いた形は 0.26.1 までも止めていなかった)。切替は指定した
+        構成 / ファイルを期待値に寄せるだけで、続く書込はその場で照合される。切替先が期待値で
+        なければ従来どおり deny。照合先を差し替える option (`--context`) は剥がさない。"""
+        self._write_accounts({"gcloud": "my-proj", "kubectl": "ctx", "firebase": "proj-dev"})
         for command, service in (
             ("gcloud config set project my-proj --configuration other"
              " && gcloud run deploy svc", "gcloud"),
             ("kubectl config use-context ctx --kubeconfig=/tmp/kc"
              " && kubectl apply -f y.yaml", "kubectl"),
+            ("firebase use proj-dev -c sub/firebase.json && firebase deploy", "firebase"),
+        ):
+            with self.subTest(command=command):
+                result, _v = self._assert_no_chain_deny(command, service)
+                self.assertIsNone(result, f"新規に deny された: {command}")
+        for command, service in (
+            ("gcloud config set project other --configuration other"
+             " && gcloud run deploy svc", "gcloud"),
+            ("kubectl config use-context other --kubeconfig=/tmp/kc"
+             " && kubectl apply -f y.yaml", "kubectl"),
+            ("kubectl config use-context ctx --context other"
+             " && kubectl apply -f y.yaml", "kubectl"),
+            ("firebase use other -c sub/firebase.json && firebase deploy", "firebase"),
         ):
             with self.subTest(command=command):
                 self._assert_chain_denied(command, service)

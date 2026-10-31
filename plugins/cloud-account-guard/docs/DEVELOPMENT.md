@@ -247,8 +247,13 @@ service ごとに走査し、次の並びを deny する:
   anchored (`\s*$`) の厳しさが表に出なかった。v0.15.0 で**同じ述語が deny を抑止する
   唯一の出口**になったので、案内形に `--quiet` を 1 つ足しただけで deny になる。
   許容は「**着地先を変えない**」と言える option だけの allow-list
-  (`--configuration` / `--kubeconfig` / `--config` / `--project` は着地先か照合先を
-  変えるので入れない)。blanket な option 許容にはしない
+  (`--project` / `--context` は照合先を変えるので入れない)。blanket な option 許容には
+  しない。v0.27.0 で、着地先を変える context option (`--configuration` / `--kubeconfig` /
+  `--config` / `-c`) は self-remediation に限って剥がすようにした (`_LANDING_OPTIONS_WITH_VALUE`。
+  deny がその option を付けた切替を案内するため。inert 判定と firebase の `is_pin_action` には
+  広げない)。根拠: 切替先は期待値に限られ、その option で選んだ構成 / ファイルの状態を期待値に
+  寄せるだけで、続くコマンドはどの構成 / ファイルを使うものも実行時に照合される。CLI 名の直後に
+  置いた形は global option として剥がされて以前から通っていたので、末尾の形を揃えただけでもある
 - **判定に CLI を呼ばない** (cache / self-remediation / verify より**前**で deny する)。
   現在値が何であっても切替後の状態は検証できないので verify の結果で判定が変わる
   余地がなく、確実に deny になるコマンドで実時間予算 (`core/budget.py`) を使うと、
@@ -656,7 +661,7 @@ builder の stdout は Claude が読む。アカウント ID / project 名 / use
 
 旧パス → 新パスの統合を builder が提供する。新パス優先で旧パスの追加キーをマージし、
 値衝突時は自動マージせず deny + 手動解決要求。`--commit` でも旧ファイルは自動削除
-しない (安全側)。
+しない (安全側。明示フラグ `--remove-old` を付けたときだけ消す。0.27.0)。
 
 ### 0.3.1 (プロジェクト側 signpost の同梱)
 
@@ -1448,7 +1453,9 @@ verify() は CLI が出した現在値 (前後の空白を除いた値) と期�
 - 末尾に `--config` を付けた切替 (`firebase use <期待値> -c <path>`) は self-remediation
   に当たらず通常検証に落ちる (そのディレクトリの切替先が期待値と違うあいだは deny。安全側。
   `is_self_remediation` の剥がす option を広げるのは判定表の変更なので、kubectl の
-  `--kubeconfig` / gcloud の `--configuration` と合わせて別に扱う。内部バックログ)
+  `--kubeconfig` / gcloud の `--configuration` と合わせて別に扱う。内部バックログ)。
+  **0.27.0 で扱った** (下の「0.27.0」の節。deny は `firebase --config <path> use <期待値>` を
+  案内し、末尾の形も self-remediation に当たる)
 - 値を静的に解決できない (`$VAR` 等) ときは、他の context option と同じく既定の root で
   照合する (`cli_options.find_context_options`。0.17.1 までと同じ)
 - 確認: detectProjectRoot と `_config_file` を 11 の形 (相対・絶対・`..` を含むもの・
@@ -1717,6 +1724,49 @@ cache の状態ファイルのうち成功 cache の entry と epoch は、hook 
 にする。書くのは数十バイトの JSON だけで、256 KiB のままだと target の数だけ 3.9 の最悪ケースが
 積み上がる。auto-switch の記録は切替した対象ごとに増え、hook 1 回に 1 度しか読まないので
 256 KiB のまま読む。
+
+### 0.27.0 (context option 付きの deny の往復 / migrate 後の旧パス)
+
+**context option を付けたコマンドの deny は、同じ option を付けた切替を案内する**
+
+- `--kubeconfig X` / `--configuration X` / `--config X` を付けたコマンドは、X の状態で動く。
+  0.26.1 までの deny は option の無い切替 (既定の kubeconfig / アクティブな構成 / プロジェクトの
+  ディレクトリの切替先に書く) を案内するか (kubectl / gcloud)、文で案内していた (firebase。0.18.0)。
+  案内どおりにしても元のコマンドは同じ deny に戻り、同じ option を末尾に付けた切替は
+  self-remediation に当たらず deny、CLI 名の直後に付けた形だけが通っていた (揃っていない)
+- 案内: kubectl `kubectl config use-context <期待値> --kubeconfig <X>`、gcloud
+  `gcloud config set <key> <期待値> --configuration <X>`、firebase
+  `firebase --config <X の絶対パス> use <期待値>`。値が案内に使える形でなければ文で案内する
+  (パスは `shell_word.PATH`。`~` 始まり・空白・glob の文字は外す。`~` はシェルが展開するが hook の
+  値は展開前なので、クォートして案内すると別のファイルを指す)。firebase は CLI 名の直後に置き、
+  パスは `_config_file` が解決した絶対パスにする (firebase.json でない名前・symlink を通るパスでも
+  効くのはこの形。内部バックログの実測。作業ディレクトリにも依らない)。kubectl のパスは書かれた
+  まま (相対パスは元のコマンドと同じ作業ディレクトリで解決される)
+- 判定表の変更: `is_self_remediation` が `_LANDING_OPTIONS_WITH_VALUE` (kubectl `--kubeconfig`、
+  gcloud `--configuration`、firebase `--config` / `-c`) を剥がす。末尾の形の deny → allow。連結規則
+  (`_is_expected_switch`) も同じ述語なので、`<期待値への切替 + その option> && <書込>` は止めない。
+  誤 allow を開かない理由: 切替先は期待値に限られ、X の状態を期待値に寄せるだけ。続く書込は
+  X を使うものも使わないものも、その場の状態で照合される (X を使う書込は切替前の X で照合されるので、
+  起きうるのは誤 deny だけ)。CLI 名の直後の形は以前から同じ扱い
+- 推論のまま残したもの: gcloud の `--configuration X` を付けた `config set` が構成 X に書くこと
+  (gcloud の global flag の仕様からの推論。このレーンでは実機の gcloud を起動していない)。
+  kubectl の `--kubeconfig` も同じく推論 (kubectl の global flag)。firebase は内部バックログの実測
+- 往復テスト: `tests/test_dispatcher.py` の `TestFirebaseConfigSwitchGuidance` /
+  `TestFirebaseConfigThroughASymlinkWithoutCli` / `TestContextOptionSwitchRoundTrip`。deny の切替行を
+  加工せずに hook に通し、行を shell の規則で分割した option の指す先の状態を書き換え、元の
+  コマンドが通ることを見る
+
+**migrate の `--remove-old`**
+
+- `migrate --commit` は旧パスを残し (安全側。D5)、旧パスが残る限り dispatcher は複数パスの競合
+  (D4) で deny する。skill の案内は「不要なら手動削除」だけで、エージェントは消さずに終わりやすく、
+  次のクラウド CLI で初めて deny に気づいていた
+- dispatcher の判定は変えない (「新パスが旧パスを包含していれば警告に留める」案は採らない。
+  D4 の fail-closed を弱める方向で、包含の判定を hook が毎回行うことになる)。代わりに builder に
+  明示フラグ `--remove-old` を足し、skill が削除の確認 (AskUserQuestion) を取ってから付ける
+- 消す条件: 新パスを読み直した内容が書いた内容と一致し、旧パスを読み直した内容が統合の判定に
+  使った内容と一致し、通常のファイル (symlink は link だけ消す) であること。消せなかった旧パスは
+  exit 1 と `rm` の行で手での削除を案内する
 
 ## 既知の制限
 

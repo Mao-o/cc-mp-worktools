@@ -133,10 +133,28 @@ builder は以下の順でパスをスキャンし、統合する:
    python3 "${CLAUDE_PLUGIN_ROOT}/hooks/cloud-account-guard/scripts/accounts_builder.py" migrate --commit
    ```
 
-5. stdout に「旧パスは保持されています」と出る。ユーザーに以下を伝える:
-   - 新パス (`.claude/cloud-account-guard/accounts.local.json`) に統合完了
-   - 旧パスは**自動削除されない** (安全側のため)
-   - 不要なら手動削除する (`rm .claude/accounts.local.json` など)
+5. **旧パスの削除を確認する** — stdout に「旧パスは保持されています」と出る
+   (`--commit` だけでは旧パスを消さない)。**旧パスが残ると、hook は複数のパスの
+   競合で gh などのコマンドを deny し続ける**ので、ここで止めずに必ず次を確認する。
+   `AskUserQuestion`:
+   - question: 「統合は完了しました。旧パスが残っていると cloud-account-guard が
+     クラウド CLI を止め続けます。旧パスを削除しますか?」(stdout に並んだ旧パスを
+     質問文に含める)
+   - options: `旧パスを削除する (Recommended)` / `残す (自分で削除する)`
+   - 「削除する」→ 次を**単独のコマンドとして**実行する (`--path` を付けて統合した
+     ときは同じ `--path` を付ける):
+
+     ```bash
+     python3 "${CLAUDE_PLUGIN_ROOT}/hooks/cloud-account-guard/scripts/accounts_builder.py" migrate --commit --remove-old
+     ```
+
+     builder は統合をもう一度確かめて書き (内容は step 4 と同じ)、新パスが書いた
+     内容のとおりで、旧パスが統合したときから変わっていないときだけ旧パスを消す。
+     消せなかった旧パスがあると exit 1 で理由と `rm` の行を出すので、その旨と
+     行をユーザーに伝える。
+   - 「残す」→ stdout の `rm` の行を示し、消すまで hook が止め続けることを伝える。
+     `rm <旧パス> && gh ...` のようにクラウド CLI と同じ行に書くと、hook は行
+     全体を止めるので rm も実行されない。消すときは単独のコマンドで行う
 
 6. **CLAUDE.md 自動同梱の確認** — `--commit` 成功時、builder は同ディレクトリに
    `CLAUDE.md` (Claude 向け signpost) を自動生成する (既存の場合はスキップ、
