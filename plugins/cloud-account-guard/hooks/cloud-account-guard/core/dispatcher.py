@@ -621,11 +621,16 @@ def _format_conflicts(conflicts: list[tuple[str, Path]]) -> str:
         lines.append(f"  - {shell_word.escape_controls(path)} ({kind})")
     lines.append("どれか 1 つに統合してください:")
     lines.append("  " + _MIGRATE_HINT)
-    # migrate --commit は旧ファイルを残すため、その後の手動削除を案内しないと
+    # migrate --commit は旧ファイルを残すため、その後の削除を案内しないと
     # `len(found) >= 2` の deny が解消されず remediation loop になる (R4)。
+    # `--remove-old` (v0.27.0) は builder が統合と同時に消す形 (文面の案内だけ。判定は変えない)。
     legacy_paths = [path for kind, path in conflicts if kind != "new"]
     if legacy_paths:
-        lines.append("  migrate --commit 完了後、以下の旧ファイルを手動で削除してください:")
+        lines.append(
+            "  migrate --commit 完了後、以下の旧ファイルを削除してください"
+            " (migrate --commit --remove-old なら統合と同時に削除します。"
+            "/cloud-account-guard:accounts-migrate は削除の確認まで行います):"
+        )
         for path in legacy_paths:
             # パスはシェルの 1 語にする。サブディレクトリで作業していると、途中の
             # ディレクトリ名はリポジトリが決められる (`;` や空白を含みうる)。

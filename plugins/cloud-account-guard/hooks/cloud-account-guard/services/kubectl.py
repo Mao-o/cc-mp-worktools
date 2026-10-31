@@ -189,16 +189,32 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
             return f"{head} — --context を外してください ({check_by_hand})"
         return f"{head} — --context を外すか --context {target} を指定してください"
 
-    current, err = _run_current_context(env, ctx.get("kubeconfig"))
+    kubeconfig = ctx.get("kubeconfig")
+    current, err = _run_current_context(env, kubeconfig)
     if err:
         return err
+
+    # `--kubeconfig X` 付きのコマンドは X の current-context で動くので、切替にも同じ
+    # option を付ける (v0.27.0)。付けないと既定の kubeconfig に書き、案内どおりにしても
+    # 元のコマンドは同じ deny に戻る。パスが案内に使える形 (`shell_word.PATH`) でなければ
+    # コマンドの形では案内せず、文で言う (`_KUBECONFIG_BY_HAND`)。
+    switch = None
+    if target is not None:
+        if kubeconfig is None:
+            switch = f"kubectl config use-context {target}"
+        else:
+            kc = shell_word.arg(kubeconfig, shell_word.PATH)
+            if kc is not None:
+                switch = f"kubectl config use-context {target} --kubeconfig {kc}"
 
     if current is None:
         if target is None:
             return f"kubectl: アクティブコンテキストが設定されていません。{check_by_hand}。"
+        if switch is None:
+            return f"kubectl: アクティブコンテキストが設定されていません。{_KUBECONFIG_BY_HAND}。"
         return (
             f"kubectl: アクティブコンテキストが設定されていません。"
-            f"kubectl config use-context {target} を実行してください。"
+            f"{switch} を実行してください。"
         )
 
     if current != expected:
@@ -208,9 +224,19 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
         )
         if target is None:
             return f"{head} — {check_by_hand}"
-        return f"{head} — 切り替え: kubectl config use-context {target}"
+        if switch is None:
+            return f"{head} — {_KUBECONFIG_BY_HAND}"
+        return f"{head} — 切り替え: {switch}"
 
     return None
+
+
+# `--kubeconfig` のパスが案内に使える形でないときの文 (コマンドの形をとらない。
+# REMEDIATION_PATTERNS にも `shell_word.UNSAFE` の文にも当たらない)。
+_KUBECONFIG_BY_HAND = (
+    "--kubeconfig のパスは案内に使える形ではないため、コマンドの形では案内しません。"
+    "同じ --kubeconfig を付けて、期待したコンテキストに切り替えてください"
+)
 
 
 _USE_CONTEXT_RE = re.compile(r"^kubectl\s+config\s+use-context\s+(\S+)\s*$")
@@ -218,22 +244,29 @@ _USE_CONTEXT_RE = re.compile(r"^kubectl\s+config\s+use-context\s+(\S+)\s*$")
 # self-remediation 判定で**剥がしてよい** option の allow-list。基準は
 # 「`use-context` が書き込む先を変えないこと」。kubectl の global option は
 # ほとんどが着地先を変えてしまう (`--kubeconfig` は別ファイルへ書き、`--context`
-# はその実行の照合先を差し替える) ため、**残るのは verbosity / timeout だけ**。
-# 短い allow-list になるが、これが「着地先が verify() の見る場所
-# (既定 kubeconfig の current-context) と一致し続ける」と言える範囲。
+# はその実行の照合先を差し替える) ため、装飾として剥がすのは verbosity / timeout だけ。
 _DECORATION_FLAGS: frozenset[str] = frozenset()
 _DECORATION_OPTIONS_WITH_VALUE = frozenset({"--v", "-v", "--request-timeout"})
+# 切替に限って剥がす context option (v0.27.0)。`--kubeconfig X` は X に書くので既定の
+# kubeconfig の current-context は変わらないが、切替先は期待値に限られ (X の状態を期待値に
+# 寄せるだけ)、X を使うコマンドも既定のファイルを使うコマンドも実行時に照合されるので、新しい
+# 誤 allow は開かない。先頭に置いた形 (`kubectl --kubeconfig X config use-context ...`) は
+# dispatcher が global option として剥がしてから判定するので 0.26.1 までも通っていた。deny が
+# 案内する末尾の形も同じに扱う。`--context` は入れない (着地先ではなく照合先を差し替える)。
+_LANDING_OPTIONS_WITH_VALUE = frozenset({"--kubeconfig"})
 
 
 def is_self_remediation(candidate: str, expected) -> bool:
     """deny reason が案内する「期待コンテキストへの use-context」なら True。
 
-    装飾 option (`--v=` / `--request-timeout=`) は剥がしてから照合し、**それ以外の
-    option が付いていたら保守的に False** (通常検証に落とす)。`--kubeconfig` /
-    `--context` は着地先そのものを変えるので剥がさない。
+    装飾 option (`--v=` / `--request-timeout=`) と `--kubeconfig` (v0.27.0。
+    `_LANDING_OPTIONS_WITH_VALUE`) は剥がしてから照合し、**それ以外の option が
+    付いていたら保守的に False** (通常検証に落とす)。`--context` は剥がさない。
     """
     normalized = cli_options.strip_allowed_options(
-        candidate, _DECORATION_FLAGS, _DECORATION_OPTIONS_WITH_VALUE
+        candidate,
+        _DECORATION_FLAGS,
+        _DECORATION_OPTIONS_WITH_VALUE | _LANDING_OPTIONS_WITH_VALUE,
     )
     if normalized is None:
         return False

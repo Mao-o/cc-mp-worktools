@@ -2486,10 +2486,11 @@ class TestGcloudSelfRemediation(unittest.TestCase):
 
     def test_options_that_move_the_landing_spot_fall_through(self):
         """着地先を変える option は allow-list に入れない (blanket 許容にしない)。
-        `--configuration other` は非アクティブな configuration に書くので、
-        実行後もアクティブ project は期待値にならない。"""
+        `--flags-file` は任意の flag を注入でき、`--account` は照合先を差し替える。
+        期待値以外への `--configuration` 付きの切替も False。"""
         for candidate in (
-            "gcloud config set project my-proj --configuration other",
+            "gcloud config set project other --configuration other",
+            "gcloud config set project my-proj --configuration",
             "gcloud config set project my-proj --flags-file f.yaml",
             "gcloud config set project my-proj --account other@example.com",
         ):
@@ -2503,6 +2504,21 @@ class TestGcloudSelfRemediation(unittest.TestCase):
     def test_release_track_form_is_accepted(self):
         self.assertTrue(gcloud.is_self_remediation(
             "gcloud beta config set project my-proj", "my-proj"))
+
+    def test_configuration_option_on_the_switch_is_accepted(self):
+        """`--configuration` を付けた期待値への切替は self-remediation (v0.27.0。deny が案内する
+        往復を閉じる。判定表の変更: 0.26.1 までは False)。inert 判定には広げない。"""
+        for candidate, expected in (
+            ("gcloud config set project my-proj --configuration other", "my-proj"),
+            ("gcloud config set project my-proj --configuration=other", "my-proj"),
+            ("gcloud config set project my-proj --configuration other --quiet", "my-proj"),
+            ("gcloud config set account me@example.com --configuration other",
+             {"project": "my-proj", "account": "me@example.com"}),
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertTrue(gcloud.is_self_remediation(candidate, expected))
+        self.assertTrue(gcloud.changes_identity(
+            "gcloud config set compute/region x --configuration other", "my-proj"))
 
     def test_other_gcloud_command(self):
         self.assertFalse(gcloud.is_self_remediation(
@@ -2591,16 +2607,40 @@ class TestFirebaseSelfRemediation(unittest.TestCase):
                 self.assertTrue(firebase.is_self_remediation(candidate, "my-proj"))
 
     def test_options_that_move_the_landing_spot_fall_through(self):
-        """`--project` / `-P` は照合先を差し替え、`--config` は project の解決先
-        (firebase.json) を変えるので allow-list に入れない。"""
+        """`--project` / `-P` は照合先を差し替え、`--config` は project root
+        (firebase.json) を変え、`--token` は認証主体を変えるので allow-list に入れない。"""
         for candidate in (
             "firebase use my-proj --project other",
             "firebase use my-proj -P other",
             "firebase use my-proj --config other/firebase.json",
             "firebase use my-proj --token t",
+            "firebase use other --config other/firebase.json",
+            "firebase use my-proj --config",  # 値の欠けた option
         ):
             with self.subTest(candidate=candidate):
                 self.assertFalse(firebase.is_self_remediation(candidate, "my-proj"))
+
+    def test_trailing_config_option_on_the_switch_falls_through(self):
+        """末尾の `--config` / `-c` は剥がさない (0.26.1 と同じ判定)。切替の名前は `--config` の
+        ディレクトリの `.firebaserc` で alias として解決され、hook はその解決先を照合しないため、
+        剥がすと期待値と同じ名前の alias で別の project に切り替える形が通る (マージ前レビューの
+        指摘)。project ID・alias のどちらでも、scalar・dict のどちらでも False。"""
+        for candidate in (
+            "firebase use my-proj --config other/firebase.json",
+            "firebase use my-proj --config=other/firebase.json",
+            "firebase use my-proj -c other/firebase.json",
+            "firebase use my-proj -cother/firebase.json",
+            "firebase use my-proj -c=other/firebase.json",
+            "firebase use my-proj -c /abs/firebase.json --non-interactive",
+            "firebase use -c other/firebase.json my-proj",
+            "firebase use default -c other/firebase.json",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertFalse(firebase.is_self_remediation(candidate, "my-proj"))
+                self.assertFalse(
+                    firebase.is_self_remediation(candidate, {"default": "my-proj"})
+                )
+                self.assertFalse(firebase.is_pin_action(candidate))
 
     def test_deploy_is_not_remediation(self):
         self.assertFalse(firebase.is_self_remediation("firebase deploy", "my-proj"))
@@ -2632,15 +2672,28 @@ class TestKubectlSelfRemediation(unittest.TestCase):
                 self.assertTrue(kubectl.is_self_remediation(candidate, "staging"))
 
     def test_options_that_move_the_landing_spot_fall_through(self):
-        """`--kubeconfig` は別ファイルへ書き、`--context` は照合先を差し替えるので
-        allow-list に入れない (blanket 許容にしない)。"""
+        """`--context` は照合先を差し替えるので allow-list に入れない (blanket 許容に
+        しない)。期待値以外への `--kubeconfig` 付きの切替も False。"""
         for candidate in (
-            "kubectl config use-context staging --kubeconfig=/tmp/kc",
-            "kubectl config use-context staging --kubeconfig /tmp/kc",
             "kubectl config use-context staging --context other",
+            "kubectl config use-context other --kubeconfig /tmp/kc",
+            "kubectl config use-context staging --kubeconfig",
         ):
             with self.subTest(candidate=candidate):
                 self.assertFalse(kubectl.is_self_remediation(candidate, "staging"))
+
+    def test_kubeconfig_option_on_the_switch_is_accepted(self):
+        """`--kubeconfig` を付けた期待値への切替は self-remediation (v0.27.0。deny が案内する
+        往復を閉じる。判定表の変更: 0.26.1 までは False)。inert 判定には広げない。"""
+        for candidate in (
+            "kubectl config use-context staging --kubeconfig=/tmp/kc",
+            "kubectl config use-context staging --kubeconfig /tmp/kc",
+            "kubectl config use-context staging --kubeconfig k.yaml --v=4",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertTrue(kubectl.is_self_remediation(candidate, "staging"))
+        self.assertTrue(kubectl.changes_identity(
+            "kubectl config set-context --current --kubeconfig=/tmp/kc", "staging"))
 
 
 class TestKubectlChangesIdentity(unittest.TestCase):

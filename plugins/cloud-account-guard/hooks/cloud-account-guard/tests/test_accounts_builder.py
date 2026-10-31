@@ -946,6 +946,317 @@ class TestMigrateScenarios(BaseBuilder):
         self.assertIn("secret-B", err)
 
 
+class TestMigrateRemoveOld(BaseBuilder):
+    """`migrate --commit --remove-old` は統合を書いた後に旧パスを消す (v0.27.0)。
+
+    旧パスが残ると hook は複数パスの競合で deny し続け、利用者が手で消すまで作業が止まって
+    いた (内部バックログ)。dispatcher の判定は変えず、明示フラグのときだけ builder が消す。
+    """
+
+    def _dispatch_gh(self):
+        from core.dispatcher import dispatch
+
+        with mock.patch("services.github.verify", return_value=None), mock.patch.dict(
+            os.environ, {"TMPDIR": self.tmp}
+        ):
+            return dispatch("gh repo view", str(self.project_dir))
+
+    def test_ticket_repro_old_path_only(self):
+        """旧パスだけ → migrate (--remove-old) → gh が fail-closed で止まらない。"""
+        self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+        code, out, err = self._run(["migrate", "--commit", "--remove-old"])
+        self.assertEqual(code, 0, err)
+        self.assertFalse(self._deprecated_path().exists())
+        self.assertEqual(json.loads(self._new_path().read_text(encoding="utf-8")), {"github": "Mao-o"})
+        self.assertIn("旧パスを削除しました", out)
+        self.assertNotIn("rm ", out)
+        self.assertIsNone(self._dispatch_gh())
+
+    def test_without_flag_old_paths_are_kept_and_the_hook_still_stops(self):
+        """フラグが無ければ従来どおり残す (削除は明示したときだけ)。"""
+        self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+        code, out, _err = self._run(["migrate", "--commit"])
+        self.assertEqual(code, 0)
+        self.assertTrue(self._deprecated_path().exists())
+        self.assertIn("--remove-old", out)
+        result = self._dispatch_gh()
+        self.assertIsNotNone(result)
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("複数のパス", reason)
+        # deny の文面も `--remove-old` と skill を案内する (判定は変えない)
+        self.assertIn("migrate --commit --remove-old", reason)
+        self.assertIn("/cloud-account-guard:accounts-migrate", reason)
+
+    def test_rerun_after_plain_commit_removes_both_old_paths(self):
+        """`migrate --commit` の後に `--remove-old` を付けて再実行すると (skill の手順)、
+        新パスはそのまま、両方の旧パスが消える。"""
+        self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+        self._legacy_path().write_text(json.dumps({"kubectl": "ctx"}), encoding="utf-8")
+        self.assertEqual(self._run(["migrate", "--commit"])[0], 0)
+        written = self._new_path().read_text(encoding="utf-8")
+        code, _out, err = self._run(["migrate", "--commit", "--remove-old"])
+        self.assertEqual(code, 0, err)
+        self.assertFalse(self._deprecated_path().exists())
+        self.assertFalse(self._legacy_path().exists())
+        self.assertEqual(self._new_path().read_text(encoding="utf-8"), written)
+
+    def test_dry_run_lists_but_does_not_remove(self):
+        self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+        code, out, _err = self._run(["migrate", "--dry-run", "--remove-old"])
+        self.assertEqual(code, 0)
+        self.assertTrue(self._deprecated_path().exists())
+        self.assertFalse(self._new_path().exists())
+        self.assertIn("--remove-old: --commit で書き込んだ後、次の旧パスを削除します", out)
+        self.assertIn(str(self._deprecated_path()), out)
+
+    def test_conflict_removes_nothing(self):
+        self.new_dir.mkdir(parents=True)
+        self._new_path().write_text(json.dumps({"github": "A"}), encoding="utf-8")
+        self._deprecated_path().write_text(json.dumps({"github": "B"}), encoding="utf-8")
+        code, _out, _err = self._run(["migrate", "--commit", "--remove-old"])
+        self.assertEqual(code, 1)
+        self.assertTrue(self._deprecated_path().exists())
+
+    def test_old_path_changed_after_the_merge_is_kept(self):
+        """統合の判定に使った内容と、消す直前に読み直した内容が違えば消さない (exit 1)。"""
+        self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+        real_write = builder._write_json
+
+        def write_then_change(path, data):
+            real_write(path, data)
+            self._deprecated_path().write_text(
+                json.dumps({"github": "Mao-o", "kubectl": "ctx"}), encoding="utf-8"
+            )
+
+        with mock.patch.object(builder, "_write_json", side_effect=write_then_change):
+            code, _out, err = self._run(["migrate", "--commit", "--remove-old"])
+        self.assertEqual(code, 1)
+        self.assertTrue(self._deprecated_path().exists())
+        self.assertIn("統合した後に内容が変わったため", err)
+        self.assertIn("rm ", err)
+
+    def test_new_path_not_matching_what_was_written_keeps_old_paths(self):
+        self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+        real_write = builder._write_json
+
+        def write_other(path, data):
+            real_write(path, {"github": "someone-else"})
+
+        with mock.patch.object(builder, "_write_json", side_effect=write_other):
+            code, _out, err = self._run_no_raise(["migrate", "--commit", "--remove-old"])
+        self.assertEqual(code, 1)
+        self.assertTrue(self._deprecated_path().exists())
+        self.assertIn("旧パスは削除しません", err)
+
+    def test_non_regular_file_is_kept(self):
+        """消す直前に旧パスが通常のファイルでなくなっていたら (ディレクトリに置き換わった)
+        消さない。統合の対象に数えるのは通常のファイルだけなので、統合の後の置き換えで起きる。"""
+        self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+        real_write = builder._write_json
+
+        def write_then_replace(path, data):
+            real_write(path, data)
+            self._deprecated_path().unlink()
+            self._deprecated_path().mkdir()
+
+        with mock.patch.object(builder, "_write_json", side_effect=write_then_replace):
+            code, out, err = self._run(["migrate", "--commit", "--remove-old"])
+        self.assertEqual(code, 1, out)
+        self.assertTrue(self._deprecated_path().is_dir())
+        self.assertIn("通常のファイルではないため", err)
+
+    def _run_no_raise(self, argv):
+        """例外が漏れたら FAIL にする (except 節を外す変異を assertion の失敗として数える)。"""
+        try:
+            return self._run(argv)
+        except Exception as e:  # noqa: BLE001
+            self.fail(f"例外が漏れた: {e!r}")
+
+    def test_unlink_failure_is_reported(self):
+        self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+        with mock.patch.object(builder.os, "unlink", side_effect=PermissionError(13, "denied")):
+            code, _out, err = self._run_no_raise(["migrate", "--commit", "--remove-old"])
+        self.assertEqual(code, 1)
+        self.assertTrue(self._deprecated_path().exists())
+        self.assertIn("削除できなかったため", err)
+
+    def test_old_path_broken_after_the_merge_is_kept(self):
+        """消す直前に読み直した旧パスが壊れていたら (読めない) 消さない。"""
+        self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+        real_write = builder._write_json
+
+        def write_then_break(path, data):
+            real_write(path, data)
+            self._deprecated_path().write_text("{broken", encoding="utf-8")
+
+        with mock.patch.object(builder, "_write_json", side_effect=write_then_break):
+            code, _out, err = self._run_no_raise(["migrate", "--commit", "--remove-old"])
+        self.assertEqual(code, 1)
+        self.assertTrue(self._deprecated_path().exists())
+        self.assertIn("統合した後に内容が変わったため", err)
+
+    def test_new_path_unreadable_after_write_keeps_old_paths(self):
+        self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+
+        def write_broken(path, data):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_text("{broken", encoding="utf-8")
+
+        with mock.patch.object(builder, "_write_json", side_effect=write_broken):
+            code, _out, err = self._run_no_raise(["migrate", "--commit", "--remove-old"])
+        self.assertEqual(code, 1)
+        self.assertTrue(self._deprecated_path().exists())
+        self.assertIn("旧パスは削除しません", err)
+
+    def test_skill_asks_before_removing(self):
+        """skill の手順 5 は削除を AskUserQuestion で確かめ、承認後に `--remove-old` を付ける。"""
+        skill = (
+            Path(__file__).resolve().parents[3] / "skills" / "accounts-migrate" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        step5 = skill.split("5. **旧パスの削除を確認する**", 1)[1].split("\n6. ", 1)[0]
+        self.assertIn("AskUserQuestion", step5)
+        self.assertIn("accounts_builder.py\" migrate --commit --remove-old", step5)
+        self.assertNotIn("--remove-old", skill.split("allowed-tools:", 1)[1].split("---", 1)[0])
+
+    def test_symlinked_old_path_removes_only_the_link(self):
+        target = Path(self.tmp) / "shared.json"
+        target.write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+        os.symlink(target, self._deprecated_path())
+        code, _out, err = self._run(["migrate", "--commit", "--remove-old"])
+        self.assertEqual(code, 0, err)
+        self.assertFalse(os.path.lexists(self._deprecated_path()))
+        self.assertTrue(target.exists())
+
+    def _assert_only_copy_survives(self, code, err):
+        self.assertEqual(code, 1, err)
+        self.assertTrue(os.path.isfile(self._deprecated_path()))
+        self.assertEqual(
+            json.loads(self._deprecated_path().read_text(encoding="utf-8")), {"github": "Mao-o"}
+        )
+        self.assertEqual(
+            json.loads(self._new_path().read_text(encoding="utf-8")), {"github": "Mao-o"}
+        )
+        self.assertIn("新パスの実体と同じファイルのため", err)
+
+    def test_new_path_symlinked_to_old_path_keeps_the_only_copy(self):
+        """新パスが旧パスへの symlink なら、書き込みは旧パスの実体に入る。旧パスを消すと
+        唯一の実体が消えるので残す (exit 1)。マージ前レビューの指摘。"""
+        self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+        self.new_dir.mkdir(parents=True)
+        os.symlink(os.path.join("..", "accounts.local.json"), self._new_path())
+        code, _out, err = self._run_no_raise(["migrate", "--commit", "--remove-old"])
+        self._assert_only_copy_survives(code, err)
+
+    def test_new_dir_symlinked_to_claude_dir_keeps_the_only_copy(self):
+        """`.claude/cloud-account-guard` が `.claude` への symlink のときも同じ。"""
+        self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+        os.symlink(".", self.new_dir)
+        code, _out, err = self._run_no_raise(["migrate", "--commit", "--remove-old"])
+        self._assert_only_copy_survives(code, err)
+
+    def _skip_unless_case_insensitive_fs(self):
+        upper = self.project_dir / ".CLAUDE"
+        if not (upper.exists() and os.path.samefile(upper, self.claude_dir)):
+            self.skipTest("大文字小文字を区別する FS では、綴りの違う名前は別のファイルになる")
+
+    def test_case_variant_symlinks_keep_the_only_copy(self):
+        """大文字小文字を区別しない FS (macOS の既定) では、綴りの違う名前の symlink も
+        旧パスの実体を指す。名前ではなく inode で比べるので残す (exit 1)。マージ前レビューの指摘。"""
+        self._skip_unless_case_insensitive_fs()
+        forms = {
+            "dir -> ../.CLAUDE": (self.new_dir, os.path.join("..", ".CLAUDE")),
+            "dir -> ../.Claude": (self.new_dir, os.path.join("..", ".Claude")),
+            "file -> ../ACCOUNTS.local.json": (
+                self._new_path(),
+                os.path.join("..", "ACCOUNTS.local.json"),
+            ),
+        }
+        for label, (link, dest) in forms.items():
+            with self.subTest(label):
+                self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+                if link == self._new_path():
+                    self.new_dir.mkdir(parents=True)
+                os.symlink(dest, link)
+                try:
+                    code, _out, err = self._run_no_raise(["migrate", "--commit", "--remove-old"])
+                    self._assert_only_copy_survives(code, err)
+                finally:
+                    if link == self._new_path():
+                        shutil.rmtree(self.new_dir)  # migrate が置く CLAUDE.md ごと
+                    else:
+                        os.unlink(link)
+                    if os.path.lexists(self._deprecated_path()):
+                        os.unlink(self._deprecated_path())
+
+    def test_new_path_written_back_when_removal_slips_through(self):
+        """保険: 判定をすり抜けて新パスの唯一の実体を消しても、統合した内容を新パスに
+        書き戻して exit 1 にする。判定を常に「消してよい」にした状態で固定する。"""
+        self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+        self.new_dir.mkdir(parents=True)
+        os.symlink(os.path.join("..", "accounts.local.json"), self._new_path())
+        with mock.patch.object(builder.os.path, "samestat", return_value=False):
+            code, _out, err = self._run_no_raise(["migrate", "--commit", "--remove-old"])
+        self.assertEqual(code, 1, err)
+        self.assertTrue(os.path.isfile(self._new_path()), "新パスの実体が残っていない")
+        self.assertEqual(
+            json.loads(self._new_path().read_text(encoding="utf-8")), {"github": "Mao-o"}
+        )
+        self.assertIn("書き戻しました", err)
+
+    def _os_failing(self, name, target):
+        """builder の `os` だけを差し替え、`target` に対する `os.<name>` だけを失敗させる。
+
+        読み込みの stat は core.paths の `os` を使うので変わらない。builder は実体のパス
+        (/private/var/... など) で持つことがあるので realpath で比べる。
+        """
+        real = getattr(os, name)
+
+        def failing(path, *args, **kwargs):
+            if os.path.realpath(path) == os.path.realpath(target):
+                raise PermissionError(13, "denied")
+            return real(path, *args, **kwargs)
+
+        class OsProxy:
+            def __getattr__(self, attr):
+                return failing if attr == name else getattr(os, attr)
+
+        return mock.patch.object(builder, "os", OsProxy())
+
+    def test_new_path_not_stattable_keeps_old_paths(self):
+        """削除の判定で新パスを stat できなければ、同じファイルかを確かめられないので消さない。"""
+        self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+        with self._os_failing("stat", self._new_path()):
+            code, _out, err = self._run_no_raise(["migrate", "--commit", "--remove-old"])
+        self.assertEqual(code, 1, err)
+        self.assertTrue(self._deprecated_path().exists())
+        self.assertIn("新パスの実体と同じファイルのため", err)
+
+    def test_old_path_not_lstattable_is_kept(self):
+        """旧パスを lstat できなければ消さない (exit 1 と理由)。"""
+        self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+        with self._os_failing("lstat", self._deprecated_path()):
+            code, _out, err = self._run_no_raise(["migrate", "--commit", "--remove-old"])
+        self.assertEqual(code, 1, err)
+        self.assertTrue(self._deprecated_path().exists())
+        self.assertIn("確かめられなかったため", err)
+
+    def test_new_path_survived_is_false_when_unreadable(self):
+        with mock.patch.object(builder, "_load_existing", side_effect=builder._BuilderError("x")):
+            self.assertFalse(builder._new_path_survived(self._new_path(), {"github": "Mao-o"}))
+
+    def test_new_path_hard_linked_to_old_path_still_removes(self):
+        """hard link は旧パスの名前を消しても新パスに内容が残るので、従来どおり消す。"""
+        self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+        self.new_dir.mkdir(parents=True)
+        os.link(self._deprecated_path(), self._new_path())
+        code, _out, err = self._run_no_raise(["migrate", "--commit", "--remove-old"])
+        self.assertEqual(code, 0, err)
+        self.assertFalse(os.path.lexists(self._deprecated_path()))
+        self.assertEqual(
+            json.loads(self._new_path().read_text(encoding="utf-8")), {"github": "Mao-o"}
+        )
+
+
 class TestProjectClaudeMd(BaseBuilder):
     """0.3.1 で追加した Claude 向け signpost (`CLAUDE.md`) の同梱挙動。
 

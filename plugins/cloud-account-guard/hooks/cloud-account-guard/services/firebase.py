@@ -121,7 +121,13 @@ ACCOUNT_KEY = "firebase"
 # dispatcher は verify() の返り値にこれが一致するときだけ「単独で実行せよ」の注記を
 # 付ける。コマンド名だけの言及 (「firebase use がタイムアウトしました」等の診断文) や
 # インストール案内・設定ファイルの型不正には一致させない。
-REMEDIATION_PATTERNS = (r"firebase use\s+[A-Za-z0-9_.<>-]+", r"firebase login\b")
+# `--config` 付きのコマンドの deny は、同じ `--config` を CLI 名の直後に置いた切替を案内する
+# (v0.27.0。`_config_use_prefix`)。
+REMEDIATION_PATTERNS = (
+    r"firebase use\s+[A-Za-z0-9_.<>-]+",
+    r"firebase --config \S+ use\s+[A-Za-z0-9_.<>-]+",
+    r"firebase login\b",
+)
 SETUP_HINT = (
     'Firebase 最小例: {"firebase": "my-project-id"}。'
     "firebase use で現在値を確認可。"
@@ -693,6 +699,47 @@ def _config_switch_guide(values) -> str:
     return f"{_SWITCH_IN_CONFIG_DIR}。{_EXPECTED_NOT_SHOWN}"
 
 
+def _config_use_prefix(config_file: str) -> str | None:
+    """`--config` 付きのコマンドの deny で案内する切替の前半 (`firebase --config <file> use`)。
+
+    v0.27.0。`firebase use` に同じ `--config` を付けると、firebase-tools はそのファイルの
+    あるディレクトリを project root にして切替先を記録するので、元のコマンドが探す切替先と
+    同じ場所に書く。CLI 名の直後に置く形にする: firebase.json でない名前のファイル・symlink を
+    通るパスでも効くのはこの形 (内部バックログの実測)。パスは `_config_file` が解決した絶対
+    パス (firebase-tools の `path.resolve(process.cwd(), config)` と同じ。作業ディレクトリに
+    依らない)。案内に使える形 (`shell_word.PATH`) でなければ None (呼び出し側は文で案内する)。
+    この形は dispatcher が先頭の `--config` を global option として剥がし、self-remediation
+    (`firebase use <期待値>`) として通す。
+    """
+    word = shell_word.arg(config_file, shell_word.PATH)
+    if word is None:
+        return None
+    return f"firebase --config {word} use"
+
+
+def _config_scalar_switch(expected: str, root: str, config_file: str) -> str | None:
+    """scalar 期待値に対する `--config` 付きの切替コマンド。案内できなければ None。
+
+    語の選び方は `--config` の無い deny と同じ (`_scalar_word`。`.firebaserc` は root =
+    `--config` のファイルのあるディレクトリのもの)。None のとき呼び出し側は 0.18.0 からの文
+    (`_config_switch_guide`) で案内する。
+    """
+    prefix = _config_use_prefix(config_file)
+    if prefix is None:
+        return None
+    target = _scalar_word(_read_firebaserc(root), expected)
+    return None if target is None else f"{prefix} {target}"
+
+
+def _config_alias_lines(expected: dict, root: str, config_file: str) -> list[str]:
+    """dict 期待値に対する `--config` 付きの切替行 (`_alias_lines` と同じ規則)。無ければ空。"""
+    prefix = _config_use_prefix(config_file)
+    if prefix is None:
+        return []
+    lines, _skipped, _unreachable = _alias_lines(expected, prefix, _read_firebaserc(root))
+    return lines
+
+
 def _target(value) -> str | None:
     """`firebase use` / `--project` に入れる alias / project ID。許容形でなければ None。"""
     return shell_word.arg(value, shell_word.NAME)
@@ -829,9 +876,21 @@ def _no_current_deny(expected, valid: list, root: str, config_file: str | None) 
         )
     head = "Firebase: 現在のプロジェクトを取得できません。"
     if config_file is not None:
-        # 期待値は示す (示せる形のものだけ。不一致の deny と同じ)。0.17.1 は同じコマンドの deny で
-        # `firebase use <期待値>` を案内し、どの project に切り替えるかを言っていた。この deny は
-        # コマンドの形で案内しないので、示さないとそれが文面から消える。
+        # 同じ `--config` を付けた切替を案内できればそれを出す (v0.27.0)。
+        if isinstance(expected, dict):
+            lines = _config_alias_lines(expected, root, config_file)
+            if lines:
+                return (
+                    f"{head}firebase login の後、以下のいずれかで切り替えてください:\n"
+                    + "\n".join(lines)
+                )
+        else:
+            switch = _config_scalar_switch(expected, root, config_file)
+            if switch is not None:
+                return f"{head}firebase login && {switch} を実行してください。"
+        # 案内できないときは文で案内する。期待値は示す (示せる形のものだけ。不一致の deny と
+        # 同じ)。0.17.1 は同じコマンドの deny で `firebase use <期待値>` を案内し、どの project に
+        # 切り替えるかを言っていた。示さないとそれが文面から消える。
         values = valid if isinstance(expected, dict) else [expected]
         either = " のいずれか" if isinstance(expected, dict) else ""
         return (
@@ -981,15 +1040,15 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
     if isinstance(expected, dict):
         if current in valid:
             return None
-        if config_file is not None:
-            return (
-                f"Firebase プロジェクト不一致: 現在={shell_word.shown(current)}, "
-                f"期待={shell_word.shown_all(valid)} のいずれか\n{_config_switch_guide(valid)}"
-            )
         head = (
             f"Firebase プロジェクト不一致: 現在={shell_word.shown(current)}, "
             f"期待={shell_word.shown_all(valid)} のいずれか\n"
         )
+        if config_file is not None:
+            lines = _config_alias_lines(expected, root, config_file)
+            if lines:
+                return f"{head}切り替え:\n" + "\n".join(lines)
+            return f"{head}{_config_switch_guide(valid)}"
         lines, skipped, unreachable = _alias_lines(expected, "firebase use", _read_firebaserc(root))
         if not lines:
             return f"{head}{_no_line_by_hand(skipped, unreachable)}"
@@ -997,10 +1056,14 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
 
     if current != expected:
         if config_file is not None:
-            return (
+            head = (
                 f"Firebase プロジェクト不一致: 現在={shell_word.shown(current)}, "
-                f"期待={shell_word.shown_all([expected])} — {_config_switch_guide([expected])}"
+                f"期待={shell_word.shown_all([expected])}"
             )
+            switch = _config_scalar_switch(expected, root, config_file)
+            if switch is not None:
+                return f"{head} — 切り替え: {switch}"
+            return f"{head} — {_config_switch_guide([expected])}"
         head = (
             f"Firebase プロジェクト不一致: 現在={shell_word.shown(current)}, "
             f"期待={shell_word.shown(expected)}"
