@@ -390,6 +390,7 @@
     "claude-platform": {
       "url": "https://platform.claude.com/llms-full.txt",
       "split": "frontmatter",
+      "frontmatter_key": "url",
       "page_url": "frontmatter:url",
       "index_url": "https://platform.claude.com/llms.txt",
       "strip_trailing_headings": true,
