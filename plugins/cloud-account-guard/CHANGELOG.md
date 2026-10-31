@@ -40,7 +40,9 @@
   `maintenance.auto=false` / `maintenance.autoDetach=false` / `gc.auto=0` / `gc.autoDetach=false`
   (`GIT_CONFIG_COUNT`) と、同じ設定を持つ fixture (`tests/hermetic.gitconfig`。`GIT_CONFIG_GLOBAL`)、
   `GIT_CONFIG_NOSYSTEM=1` を渡す。`test_pin_env.py` は `/dev/null` を global に向けていたが、
-  `test_builder_path_escape.py` の `git init` は開発者の `~/.gitconfig` を読んでいた
+  `test_builder_path_escape.py` の `git init` は helper を通らず、`GIT_CONFIG_NOSYSTEM` を立てずに system の
+  config を読み、自動 maintenance を止める設定も持っていなかった (HOME は隔離済みで、開発者の `~/.gitconfig` は
+  読んでいない)
 - 床 (`tests/test_hermetic_env.py`): `GIT_TRACE2_EVENT` で maintenance / gc の子プロセスの起動が 0 件であること、
   止める設定が無い commit では起動が見えること (陽性対照)、env の経路だけ・fixture の経路だけでも止まること、
   fixture の中身の完全一致、system の config を読まないこと、外側の変数が git に届かないこと、

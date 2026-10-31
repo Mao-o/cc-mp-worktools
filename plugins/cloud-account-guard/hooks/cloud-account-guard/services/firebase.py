@@ -866,7 +866,6 @@ def _no_current_deny(expected, valid: list, root: str, config_file: str | None) 
     return f"{head}firebase login && firebase use {target} を実行してください。"
 
 
-
 def verify(expected, project_dir: str, env=None, context=None) -> str | None:
     """context: 候補コマンドのコンテキスト option (`{"project": "<alias|id>", "config": "<path>"}`)。
 

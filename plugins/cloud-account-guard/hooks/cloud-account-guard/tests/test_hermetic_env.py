@@ -400,6 +400,47 @@ class TestHelpersStopBackgroundMaintenance(unittest.TestCase):
         self.assertEqual(spawned_maintenance(events), [])
 
 
+class TestPinEnvRepoHelperStopsMaintenance(unittest.TestCase):
+    """`test_pin_env._init_repo` (repo を作って commit する実際の箇所) が、自動 maintenance を起動しないこと。
+
+    `direct_git_launches` の AST 検出は、argv を変数に入れてから起動する形をすり抜ける。実際に commit する
+    箇所の挙動を直接見る床。外側の env には、止めない側の値 (背景へ切り離さない autoDetach=false だけ) を
+    置く。helper が env を渡し損ねると、commit が maintenance を起動して trace に見える。
+    """
+
+    def setUp(self) -> None:
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+        isolate_git_config(self.tmp)
+        os.environ.update(
+            {
+                "GIT_CONFIG_COUNT": "2",
+                "GIT_CONFIG_KEY_0": "maintenance.autoDetach",
+                "GIT_CONFIG_VALUE_0": "false",
+                "GIT_CONFIG_KEY_1": "gc.autoDetach",
+                "GIT_CONFIG_VALUE_1": "false",
+            }
+        )
+        self.trace = os.path.join(self.tmp, "trace2.jsonl")
+        os.environ["GIT_TRACE2_EVENT"] = self.trace
+
+    def test_init_repo_of_test_pin_env_spawns_no_maintenance(self):
+        import test_pin_env
+
+        repo = Path(self.tmp) / "repo"
+        try:
+            test_pin_env._init_repo(repo)
+        except subprocess.CalledProcessError as e:
+            raise AssertionError(f"git が失敗した: {e.cmd} {e.stderr!r}") from e
+        events = trace_events(self.trace)
+        self.assertIn("commit", command_names(events), "前提: commit が trace に載っている (空の床にしない)")
+        self.assertEqual(spawned_maintenance(events), [])
+
+
 class TestTheIsolatedEnvStopsNothing(unittest.TestCase):
     """`isolate_git_config` だけで作った env (当てる側が何も当てていない床) が、当てる側の値を持たないこと。
 
