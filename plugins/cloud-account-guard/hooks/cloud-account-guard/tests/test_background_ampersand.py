@@ -78,8 +78,10 @@ NOT_SPLIT = [
     # aws が profile 無しで照合される
     ("aws s3 rm ${B:-a&b} --profile p", ["aws s3 rm ${B:-a&b} --profile p"]),
     ("echo ${x:-${y:-a&b}} && kubectl apply -f x", ["echo ${x:-${y:-a&b}}", "kubectl apply -f x"]),
-    # bash は展開の中の素の波括弧も数える (`${x:-{a&b}}` は 1 語)
-    ("echo ${x:-{a&b}} && kubectl apply -f x", ["echo ${x:-{a&b}}", "kubectl apply -f x"]),
+    # 入れ子の `${` の `}` は外側を閉じない (bash / zsh とも `a&b` を 1 語に展開する)
+    ("aws s3 rm ${B:-${C:-a}&b} --profile p", ["aws s3 rm ${B:-${C:-a}&b} --profile p"]),
+    # 展開の中の `$${` は 2 つ目の `$` からの入れ子の `${` (bash / zsh とも最後の `}` で閉じる)
+    ("aws s3 rm ${B:-$${}&b} --profile p", ["aws s3 rm ${B:-$${}&b} --profile p"]),
     # 展開の中の引用符・エスケープの `}` は展開を閉じない
     ('aws s3 rm ${B:-"a}&b"} --profile p', ['aws s3 rm ${B:-"a}&b"} --profile p']),
     ("aws s3 rm ${B:-a\\}&b} --profile p", ["aws s3 rm ${B:-a\\}&b} --profile p"]),
@@ -125,6 +127,99 @@ class SplitTests(unittest.TestCase):
         except RecursionError as e:
             self.fail(f"例外: {e!r}")
         self.assertIn("aws s3 rm s3://b/x", cands)
+
+    def test_bare_brace_in_parameter_expansion_is_not_nesting(self):
+        """展開の中の素の `{` は入れ子に数えない (bash 3.2 / 5.2 は最初の `}` で閉じる)。
+
+        zsh は数えるが、閉じる位置が早い側に合わせれば zsh で展開の中にある部分は分割が増える
+        側に出るだけで、どちらのシェルでも後ろの CLI は候補に残る。
+        """
+        for sep in ("; ", " && ", "\n", " & "):
+            command = f"echo ${{x:-{{}}{sep}aws s3 rm s3://b/x{sep}echo }}"
+            with self.subTest(command=command):
+                cands = [c for c, _e in extract_candidates(command)]
+                self.assertIn("aws s3 rm s3://b/x", cands)
+        # 素の `{` の後ろの `#` は展開の中 (comment ではない)。`cmd` は bash で走る
+        cands = [c for c, _e in extract_candidates("echo ${x:-{ #}; aws s3 rm s3://b/x")]
+        self.assertIn("aws s3 rm s3://b/x", cands)
+        # 素の `{` があっても、最初の `}` までの `&` は展開の中 (bash / zsh とも 1 語)
+        cands = [c for c, _e in extract_candidates("echo ${x:-{a&b}} && kubectl apply -f x")]
+        self.assertIn("kubectl apply -f x", cands)
+        self.assertNotIn("b}}", cands)
+
+    def test_pid_before_brace_is_not_parameter_expansion(self):
+        """`$$` (PID) の後ろの `{` は `${` の始まりではない (bash / zsh とも `cmd` が走る)。"""
+        for sep in ("; ", " && ", " & ", "\n"):
+            command = f"echo $${{{sep}aws s3 rm s3://b/x{sep}echo }}"
+            with self.subTest(command=command):
+                cands = [c for c, _e in extract_candidates(command)]
+                self.assertIn("aws s3 rm s3://b/x", cands)
+
+    def _within(self, seconds, fn):
+        """`fn()` を `seconds` 秒で打ち切る。時間切れと例外は FAIL にする (止まる変異も検出する)。"""
+        import signal
+
+        if not hasattr(signal, "setitimer"):
+            self.skipTest("setitimer が無い")
+
+        class _Timeout(Exception):
+            pass
+
+        def _raise(_sig, _frame):
+            raise _Timeout()
+
+        old = signal.signal(signal.SIGALRM, _raise)
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+        try:
+            return fn()
+        except _Timeout:
+            self.fail(f"{seconds} 秒で終わらない")
+        except RecursionError as e:
+            self.fail(f"例外: {e!r}")
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, old)
+
+    def _cands_within(self, seconds, command):
+        return self._within(seconds, lambda: [c for c, _e in extract_candidates(command)])
+
+    def test_unclosed_command_substitution_inside_expansion_is_linear(self):
+        """閉じない `$(` を含む `${` の連なりで、入れ子 1 段ごとに走査が倍にならない。"""
+        command = "aws s3 rm s3://b/x\necho " + "${x:-$(echo " * 40
+        self.assertIn("aws s3 rm s3://b/x", self._cands_within(2, command))
+        # `$(` は閉じていて `${` だけが閉じない形も同じ
+        command = "aws s3 rm s3://b/x\necho " + "${x $(echo " * 40 + ")" * 40
+        self.assertIn("aws s3 rm s3://b/x", self._cands_within(2, command))
+
+    def test_many_unclosed_parameter_expansions(self):
+        command = "aws s3 rm s3://b/x\necho " + "${" * 20000
+        self.assertIn("aws s3 rm s3://b/x", self._cands_within(1, command))
+
+    def test_deep_mutual_nesting_of_expansion_and_substitution(self):
+        """`${x:-$(echo ` の入れ子 350 段で再帰の上限に当たらない (0.28.0 は通っていた)。"""
+        command = "aws s3 rm s3://b/x; echo " + "${x:-$(echo " * 350 + ")}" * 350
+        self.assertIn("aws s3 rm s3://b/x", self._cands_within(5, command))
+
+    def test_nesting_depth_does_not_leak_across_calls(self):
+        """深さの数え上げは呼び出しごとに戻る (残ると以後の `${` が全部閉じない扱いになる)。"""
+        for _ in range(3):
+            extract_candidates("echo " + "${x:-$(echo " * 100 + ")}" * 100)
+        for _ in range(100):
+            extract_candidates("echo ${a} $(b)")
+        self.assertEqual(
+            [c for c, _e in extract_candidates("aws s3 rm ${B:-a&b} --profile p")],
+            ["aws s3 rm ${B:-a&b} --profile p"],
+        )
+
+    def test_memo_is_per_text(self):
+        """終端の memo を別の text に使い回さない (同じ位置の `${` の終端は text ごとに違う)。"""
+        self.assertEqual(
+            [c for c, _e in extract_candidates("x ${a&b} & aws s3 ls")], ["x ${a&b}", "aws s3 ls"]
+        )
+        self.assertEqual(
+            [c for c, _e in extract_candidates("x ${abcde&g} & aws s3 ls")],
+            ["x ${abcde&g}", "aws s3 ls"],
+        )
 
     def test_resplit_parts_keep_outer_separator_last(self):
         """再分割した候補は中の区切りを使い、最後の 1 つにだけ外側の区切りが付く。"""
@@ -216,6 +311,16 @@ class DispatchTests(BaseWithTmpProject):
                 with self.subTest(command=command):
                     decision, _reason, v = self._decide(command, svc, "不一致")
                     self.assertTrue(v.called, f"検証されていない: {command}")
+                    self.assertEqual(decision, "deny", command)
+
+    def test_cli_after_brace_forms_is_verified_and_denied(self):
+        """`${x:-{}` (bash は最初の `}` で閉じる) と `$${` (PID) の後ろの CLI も検証する。"""
+        for sep in ("; ", " && ", " & ", "\n"):
+            for head in ("echo ${{x:-{{}}", "echo $${{"):
+                command = f"{head}{sep}aws s3 rm s3://b/x{sep}echo }}"
+                with self.subTest(command=command):
+                    decision, _reason, v = self._decide(command, "aws", "不一致")
+                    self.assertTrue(v.called, f"検証されていない: {command!r}")
                     self.assertEqual(decision, "deny", command)
 
     def test_background_cd_does_not_move_the_following_command(self):

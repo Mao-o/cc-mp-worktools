@@ -345,30 +345,60 @@ def _expand_ansi_c(text: str) -> str | None:
     return "".join(out)
 
 
-# `${` から閉じ `}` を探す範囲の上限 (文字数)。閉じない `${` が多数並ぶ入力で、
-# 各 `${` が末尾まで走査し直して二乗の時間になるのを抑える。範囲内で閉じないものは
-# 「閉じていない」扱い (= 1 領域にしない = 中の演算子で切る側。検証が消える側ではない)。
+# `${` から閉じ `}` を探す範囲の上限 (文字数)。範囲内で閉じないものは「閉じていない」扱い
+# (= 1 領域にしない = 中の演算子で切る側。検証が消える側ではない)。
 _PARAM_EXPANSION_SCAN_LIMIT = 4096
+
+# `${` と `$(` の入れ子 (相互再帰) の深さの上限。これより深い `${` は「閉じていない」扱い
+# (`${x:-$(echo ${x:-$(echo ...` が数百段あっても再帰の上限に当たらない)。`$(` だけの入れ子は
+# 0.28.0 までと同じく数えずに辿る。
+_DOLLAR_NEST_LIMIT = 64
+
+
+class _DollarMemo:
+    """`$(` / `${` の終端の memo (同じ text の同じ位置を 2 度走査しない)。
+
+    `${` が閉じないと、呼び出し側はその中身を 1 文字ずつ読み直し、中の `$(` をもう一度走査する。
+    memo が無いと入れ子 1 段ごとに走査が倍になり、`${x:-$(echo ` の繰り返し 40 段で
+    事実上止まる。終端は text と位置だけで決まるので、text が変わったら捨てる。深さの上限で
+    「閉じていない」とした結果も memo に残る (浅い位置から引き直しても、分割が増える側に
+    倒れるだけ)。
+    """
+
+    __slots__ = ("text", "ends", "depth")
+
+    def __init__(self) -> None:
+        self.text: str | None = None
+        self.ends: dict[int, int | None] = {}
+        self.depth = 0
+
+
+_DOLLAR_MEMO = _DollarMemo()
+_UNSET = object()
 
 
 def _param_expansion_end(text: str, i: int) -> int | None:
     """`text[i:]` が閉じたパラメータ展開 `${...}` なら、その直後の index。閉じていなければ None。
 
-    再帰しない (`${${${...` の深い入れ子で再帰の上限に当たらない)。入れ子の `${` は中の `{`
-    として数える。bash と同じく、展開の中の素の波括弧 (`${x:-{a}b}`) も数える。中の
-    エスケープ・引用符・backtick は飛ばす。
+    入れ子は `${` (と `$(`) だけを数え、展開の中の素の `{` は数えない。bash (3.2 / 5.2) は
+    素の `{` を数えずに最初の `}` で閉じ (`${x:-{}; cmd; echo }` の `cmd` は走る)、zsh は数える。
+    閉じる位置が早い側 (bash) に合わせると、zsh で展開の中にある部分はこちらでは外に出て
+    分割が増える (検証が増える側)。素の `{` が出たら 1 領域にしない方式は、中の `#` を
+    トップレベルの comment と読んで後ろを落とす (`${x:-{ #}; cmd` の `cmd` は bash で走る)
+    ので採らない。`$${` は 2 つ目の `$` からの `${` として数える (bash / zsh とも)。
+    中の `${` / `$(` は `_skip_opaque` で飛ばし (閉じない・深さの上限なら外側も閉じない)、
+    エスケープ・引用符・backtick も飛ばす。
     """
     n = min(len(text), i + _PARAM_EXPANSION_SCAN_LIMIT)
-    depth = 1
     j = i + 2
     while j < n:
         c = text[j]
         if c == "\\":
             j += 2
             continue
-        if c == "$" and j + 1 < n and text[j + 1] == "(":
-            # 展開の中のコマンド置換 (`${x:-$(echo })}`)。中の `}` は展開を閉じない。
-            # `$(` の走査は `_skip_opaque` に任せる (入れ子の深さは `$(` の分だけ)。
+        if c == "$" and j + 1 < n and text[j + 1] in "({":
+            # 展開の中の入れ子の展開とコマンド置換 (`${x:-${y}}` / `${x:-$(echo })}`)。
+            # 中の `}` は外側を閉じない。
             end = _skip_opaque(text, j)
             if end is None or end > n:
                 return None
@@ -382,12 +412,8 @@ def _param_expansion_end(text: str, i: int) -> int | None:
                 return None
             j = k + 1
             continue
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return j + 1
+        if c == "}":
+            return j + 1
         j += 1
     return None
 
@@ -404,7 +430,7 @@ def _skip_opaque(text: str, i: int) -> int | None:
     """`text[i]` から始まる「構文として解釈しない領域」の終端 index を返す。
 
     対象は backslash エスケープ / `'...'` / `"..."` / `` `...` `` / `$(...)` /
-    閉じている `${...}` / 算術評価 `(( ... ))`。該当しなければ None。
+    閉じている `${...}` / `$$` / 算術評価 `(( ... ))`。該当しなければ None。
     未終端のクォート等は末尾までを 1 領域とみなす (bash も行を跨いで読み続ける)。
     """
     n = len(text)
@@ -426,28 +452,52 @@ def _skip_opaque(text: str, i: int) -> int | None:
     if ch == "`":
         j = text.find("`", i + 1)
         return n if j == -1 else j + 1
-    if ch == "$" and i + 1 < n and text[i + 1] == "(":
-        depth = 1
-        j = i + 2
-        while j < n:
-            inner = _skip_opaque(text, j)
-            if inner is not None and inner > j:
-                j = inner
-                continue
-            if text[j] == "(":
-                depth += 1
-            elif text[j] == ")":
-                depth -= 1
-                if depth == 0:
-                    return j + 1
-            j += 1
-        return n
-    if ch == "$" and i + 1 < n and text[i + 1] == "{":
-        # パラメータ展開 `${...}`。中の `&` / `;` / `|` は演算子ではない
-        # (`${x:-a&b}` を単独の `&` で切ると、後ろの option が別セグメントに移って
-        # 誤ったコンテキストで照合される)。**閉じているものだけ**を 1 領域とみなす
-        # (閉じない `${` は bash でも構文エラー。残りを飲み込むと検証が消える)。
-        return _param_expansion_end(text, i)
+    if ch == "$" and i + 1 < n and text[i + 1] == "$":
+        # `$$` (PID)。後ろの `{` を `${` の始まりと読まない (`echo $${; cmd; echo }` の
+        # `cmd` は bash / zsh とも走る。`${` と読むと最後の `}` まで 1 領域になり `cmd` が消える)。
+        return i + 2
+    if ch == "$" and i + 1 < n and text[i + 1] in "({":
+        memo = _DOLLAR_MEMO
+        if memo.text is not text:
+            memo.text = text
+            memo.ends = {}
+        end = memo.ends.get(i, _UNSET)
+        if end is not _UNSET:
+            return end  # type: ignore[return-value]
+        memo.depth += 1
+        try:
+            if text[i + 1] == "{":
+                # パラメータ展開 `${...}`。中の `&` / `;` / `|` は演算子ではない
+                # (`${x:-a&b}` を単独の `&` で切ると、後ろの option が別セグメントに移って
+                # 誤ったコンテキストで照合される)。**閉じているものだけ**を 1 領域とみなす
+                # (閉じない `${` は bash でも構文エラー。残りを飲み込むと検証が消える)。
+                # 入れ子が深すぎるものも閉じていない扱い (分割が増える側)。
+                end = (
+                    _param_expansion_end(text, i)
+                    if memo.depth <= _DOLLAR_NEST_LIMIT
+                    else None
+                )
+            else:
+                depth = 1
+                j = i + 2
+                end = n
+                while j < n:
+                    inner = _skip_opaque(text, j)
+                    if inner is not None and inner > j:
+                        j = inner
+                        continue
+                    if text[j] == "(":
+                        depth += 1
+                    elif text[j] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            end = j + 1
+                            break
+                    j += 1
+        finally:
+            memo.depth -= 1
+        memo.ends[i] = end
+        return end
     return _arithmetic_span(text, i)
 
 
