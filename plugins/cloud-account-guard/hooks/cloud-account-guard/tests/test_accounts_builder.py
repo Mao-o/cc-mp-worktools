@@ -22,7 +22,6 @@ import json
 import os
 import shlex
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -1186,15 +1185,10 @@ class TestGitIgnoreAware(BaseBuilder):
         self._git("init", "-q")
 
     def _git(self, *args: str) -> str:
-        result = subprocess.run(
-            ["git", "-C", str(self.project_dir), *args],
-            capture_output=True,
-            text=True,
-            stdin=subprocess.DEVNULL,
-        )
+        result = _testutil.git(["-C", str(self.project_dir), *args], self.tmp, check=False)
         if result.returncode != 0:
-            self.fail(f"git {args} が失敗した: {result.stderr}")
-        return result.stdout
+            self.fail(f"git {args} が失敗した: {result.stderr.decode('utf-8', 'replace')}")
+        return result.stdout.decode("utf-8")
 
     def _gitignore(self) -> Path:
         return self.project_dir / ".gitignore"
@@ -1291,12 +1285,7 @@ class TestGitIgnoreAware(BaseBuilder):
         self._gitignore().write_text(".claude/\n", encoding="utf-8")
         other = Path(self.tmp) / "other"
         other.mkdir()
-        subprocess.run(
-            ["git", "-C", str(other), "init", "-q"],
-            check=True,
-            capture_output=True,
-            stdin=subprocess.DEVNULL,
-        )
+        _testutil.git(["init", "-q"], other)
         with mock.patch.dict(
             os.environ,
             {"GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other)},
@@ -1322,12 +1311,7 @@ class TestGitIgnoreAware(BaseBuilder):
         self.assertFalse(self._gitignore().exists())
         other = Path(self.tmp) / "other"
         other.mkdir()
-        subprocess.run(
-            ["git", "-C", str(other), "init", "-q"],
-            check=True,
-            capture_output=True,
-            stdin=subprocess.DEVNULL,
-        )
+        _testutil.git(["init", "-q"], other)
         for name in ("GIT_DIR", "GIT_COMMON_DIR"):
             with self.subTest(env=name):
                 shutil.rmtree(self.new_dir, ignore_errors=True)

@@ -497,7 +497,16 @@ def _firebase_json_blocks_local(path: str) -> bool:
 
 
 def _from_local(root: str, env=None, config_file: str | None = None) -> str:
-    """CLI が答えられないとき、firebase-tools と同じローカル設定から現在値を解決する。
+    """`_from_local_detail` の現在値だけ (解決しなかった理由は要らない呼び出し用)。"""
+    return _from_local_detail(root, env, config_file)[0]
+
+
+def _from_local_detail(
+    root: str, env=None, config_file: str | None = None
+) -> tuple[str, bool]:
+    """`(現在値, .firebaserc を確かめられず解決を止めたか)`。後者は deny の文面にだけ使う。
+
+    CLI が答えられないとき、firebase-tools と同じローカル設定から現在値を解決する。
 
     applyRC と同じ順: configstore の切替先を `.firebaserc` の alias で解決
     (alias に無ければ project ID そのもの) → alias が 1 つならその値 → `default`。
@@ -516,19 +525,19 @@ def _from_local(root: str, env=None, config_file: str | None = None) -> str:
     exact = config_file is not None
     config_path = config_file if exact else os.path.join(root, "firebase.json")
     if _firebase_json_blocks_local(config_path):
-        return ""
+        return "", False
     projects = _read_firebaserc(root)
     if projects is None:
-        return ""
+        return "", True
     switched = _from_configstore(root, env, exact)
     if switched is None:
         # configstore が大きすぎて切替先の有無を確かめられない (v0.25.0)
-        return ""
+        return "", False
     if switched:
-        return _resolve_alias(projects, switched)
+        return _resolve_alias(projects, switched), False
     if len(projects) == 1:
-        return next(iter(projects.values()))
-    return projects.get("default") or ""
+        return next(iter(projects.values())), False
+    return projects.get("default") or "", False
 
 
 def _resolve(root: str, env=None, config: str | None = None) -> tuple[str, str | None]:
@@ -622,6 +631,16 @@ _PROJECT_FLAG_UNCONFIRMED = (
     "--project を外すと、コマンドはアクティブな project で動きます (意図した project が"
     "アクティブかを確かめてから外してください)。または .firebaserc をこれらに当たらない形に"
     "すると確かめられることがあります"
+)
+# CLI から現在の project を取れず、ローカルの設定 (.firebaserc) からも決められなかったとき、
+# その原因が .firebaserc を確かめられないことにあるときの 1 文 (現在の project を取得できない
+# deny の末尾に添える)。.firebaserc は利用者が直せるので、抜け道を示す。条件の列挙は網羅では
+# ないので、締めも「当たらない形にすれば確かめられる」とは言い切らない。`firebase use` の語は
+# 入れない (切替を案内したことになる)。
+_FIREBASERC_UNCONFIRMED_LOCAL = (
+    "\n.firebaserc を firebase-tools と同じ内容に読めると確かめられないため、ローカルの設定からも"
+    f"現在の project を決められません ({FIREBASERC_UNCONFIRMED_CONDITIONS}に当たる)。"
+    ".firebaserc をこれらに当たらない形にすると確かめられることがあります"
 )
 # `--config` / `-c` のファイルが見つからないときの deny (v0.18.0)。firebase-tools はファイルが
 # 無ければコマンドを始めないが、hook の見立て (作業ディレクトリ = プロジェクトのディレクトリ) が
@@ -796,6 +815,57 @@ def _project_flag_lines(
     return _alias_lines(expected, "--project", projects)
 
 
+def _no_current_deny(expected, valid: list, root: str, config_file: str | None) -> str:
+    """現在の project を取得できないときの deny 文面 (verify() から切り出した本体)。
+
+    `valid` は dict 期待値の project ID (scalar では使わない)。
+    """
+    if shutil.which("firebase") is None:
+        return (
+            "Firebase: firebase コマンドが見つかりません。"
+            "npm install -g firebase-tools でインストールしてください。"
+        )
+    head = "Firebase: 現在のプロジェクトを取得できません。"
+    if config_file is not None:
+        # 期待値は示す (示せる形のものだけ。不一致の deny と同じ)。0.17.1 は同じコマンドの deny で
+        # `firebase use <期待値>` を案内し、どの project に切り替えるかを言っていた。この deny は
+        # コマンドの形で案内しないので、示さないとそれが文面から消える。
+        values = valid if isinstance(expected, dict) else [expected]
+        either = " のいずれか" if isinstance(expected, dict) else ""
+        return (
+            f"{head}期待={shell_word.shown_all(values)}{either}。"
+            f"ログインしたうえで、{_config_switch_guide(values)}。"
+        )
+    if isinstance(expected, dict):
+        # `firebase use YOUR_PROJECT` のような placeholder は self-remediation に
+        # 乗らず同じ deny を繰り返すため、alias ごとの具体コマンドを案内する。
+        lines, skipped, unreachable = _alias_lines(expected, "firebase use", _read_firebaserc(root))
+        if not lines:
+            # 案内できる行が無くても期待値は示す (許容形のものだけ。`--config` 付きのコマンドの
+            # 同じ deny と同じ部品)。この deny の案内は「期待した project に切り替えて」で、どの
+            # project かが要る。出所は `_CHECK_BY_HAND` / `_UNREACHABLE_BY_HAND` が言うので
+            # `_EXPECTED_NOT_SHOWN` は添えない。
+            by_hand = _no_line_by_hand(skipped, unreachable)
+            return (
+                f"{head}期待={shell_word.shown_all(valid)} のいずれか。"
+                f"{_login_then(unreachable)}期待した project に切り替えてください ({by_hand})。"
+            )
+        return (
+            f"{head}firebase login の後、以下のいずれかで切り替えてください:\n"
+            + "\n".join(lines)
+        )
+    target = _scalar_word(_read_firebaserc(root), expected)
+    if target is None:
+        # 期待値は示す (dict で案内できる行が無いときと同じ)。
+        by_hand = _CHECK_BY_HAND if _target(expected) is None else _UNREACHABLE_BY_HAND
+        return (
+            f"{head}期待={shell_word.shown_all([expected])}。"
+            f"{_login_then(by_hand is _UNREACHABLE_BY_HAND)}"
+            f"期待した project に切り替えてください ({by_hand})。"
+        )
+    return f"{head}firebase login && firebase use {target} を実行してください。"
+
+
 def verify(expected, project_dir: str, env=None, context=None) -> str | None:
     """context: 候補コマンドのコンテキスト option (`{"project": "<alias|id>", "config": "<path>"}`)。
 
@@ -818,6 +888,7 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
     探す (`_from_configstore` の exact)。
     """
     # 期待値の形を先に検証する (不正な設定のために CLI を叩かない)。
+    valid: list = []
     if isinstance(expected, dict):
         valid = [v for v in expected.values() if isinstance(v, str) and v]
         if not valid:
@@ -898,50 +969,12 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
     if err:
         return err
     if not current:
-        if shutil.which("firebase") is None:
-            return (
-                "Firebase: firebase コマンドが見つかりません。"
-                "npm install -g firebase-tools でインストールしてください。"
-            )
-        head = "Firebase: 現在のプロジェクトを取得できません。"
-        if config_file is not None:
-            # 期待値は示す (示せる形のものだけ。不一致の deny と同じ)。0.17.1 は同じコマンドの deny で
-            # `firebase use <期待値>` を案内し、どの project に切り替えるかを言っていた。この deny は
-            # コマンドの形で案内しないので、示さないとそれが文面から消える。
-            values = valid if isinstance(expected, dict) else [expected]
-            either = " のいずれか" if isinstance(expected, dict) else ""
-            return (
-                f"{head}期待={shell_word.shown_all(values)}{either}。"
-                f"ログインしたうえで、{_config_switch_guide(values)}。"
-            )
-        if isinstance(expected, dict):
-            # `firebase use YOUR_PROJECT` のような placeholder は self-remediation に
-            # 乗らず同じ deny を繰り返すため、alias ごとの具体コマンドを案内する。
-            lines, skipped, unreachable = _alias_lines(expected, "firebase use", _read_firebaserc(root))
-            if not lines:
-                # 案内できる行が無くても期待値は示す (許容形のものだけ。`--config` 付きのコマンドの
-                # 同じ deny と同じ部品)。この deny の案内は「期待した project に切り替えて」で、どの
-                # project かが要る。出所は `_CHECK_BY_HAND` / `_UNREACHABLE_BY_HAND` が言うので
-                # `_EXPECTED_NOT_SHOWN` は添えない。
-                by_hand = _no_line_by_hand(skipped, unreachable)
-                return (
-                    f"{head}期待={shell_word.shown_all(valid)} のいずれか。"
-                    f"{_login_then(unreachable)}期待した project に切り替えてください ({by_hand})。"
-                )
-            return (
-                f"{head}firebase login の後、以下のいずれかで切り替えてください:\n"
-                + "\n".join(lines)
-            )
-        target = _scalar_word(_read_firebaserc(root), expected)
-        if target is None:
-            # 期待値は示す (dict で案内できる行が無いときと同じ)。
-            by_hand = _CHECK_BY_HAND if _target(expected) is None else _UNREACHABLE_BY_HAND
-            return (
-                f"{head}期待={shell_word.shown_all([expected])}。"
-                f"{_login_then(by_hand is _UNREACHABLE_BY_HAND)}"
-                f"期待した project に切り替えてください ({by_hand})。"
-            )
-        return f"{head}firebase login && firebase use {target} を実行してください。"
+        message = _no_current_deny(expected, valid, root, config_file)
+        # 取得できなかった原因が `.firebaserc` を確かめられないことにあるなら、それを添える (文面だけ。
+        # 判定は上で済んでいる)。解決を試みた結果だけを見て、もう一度同じ解決を行う (deny の経路だけ)。
+        if _from_local_detail(root, env, config_file)[1]:
+            message += _FIREBASERC_UNCONFIRMED_LOCAL
+        return message
 
     if isinstance(expected, dict):
         if current in valid:

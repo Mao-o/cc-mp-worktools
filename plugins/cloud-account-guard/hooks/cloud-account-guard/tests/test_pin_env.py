@@ -11,7 +11,6 @@ import os
 import re
 import shlex
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -27,29 +26,15 @@ from scripts import pin_env  # noqa: E402
 from services import aws, firebase, gcloud  # noqa: E402
 
 ACCOUNT = "111122223333"
-_GIT_ENV = {
-    "GIT_CONFIG_GLOBAL": os.devnull,
-    "GIT_CONFIG_NOSYSTEM": "1",
-    "GIT_AUTHOR_NAME": "probe",
-    "GIT_AUTHOR_EMAIL": "probe@example.invalid",
-    "GIT_COMMITTER_NAME": "probe",
-    "GIT_COMMITTER_EMAIL": "probe@example.invalid",
-}
 
 
 def _git(cwd: Path, *args: str) -> None:
-    subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        check=True,
-        capture_output=True,
-        env={**os.environ, **_GIT_ENV},
-    )
+    _testutil.git(list(args), cwd)
 
 
 def _init_repo(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
-    _git(path, "init", "-q")
+    _testutil.init_repo(path)
     _git(path, "commit", "-q", "--allow-empty", "-m", "init")
     return path
 
@@ -302,40 +287,57 @@ class TestPlanFirebase(_TmpBase):
         self.assertIsNone(plan.command)
         self.assertIn("別の project を指す alias と同じ名前", plan.problem or "")
 
-    def test_dict_with_several_project_ids_asks_the_user_to_choose(self):
-        """alias が使えず project ID で案内するとき、候補が複数なら名前順の先頭を黙って
-        選ばず、案内した先頭の ID でよいかをユーザーに確かめる注記を添える (値は既定で
-        隠すので一覧は出さない。マージ前レビューの指摘)。同じ project を指す alias が
-        複数でも候補は 1 つ。"""
+    def test_dict_with_several_project_ids_gives_each_checked_command_as_a_candidate(self):
+        """alias が使えず project ID で案内するとき、候補が複数なら名前順の先頭を黙って選ばず、
+        確認を通った ID の `firebase use` を全部候補として持つ (`command` は None)。値は既定で
+        隠すので注記には ID を出さない。同じ project を指す alias が複数でも候補は 1 つ。"""
         project_dir = self._project(None)
         plan = pin_env.plan_firebase({"dev": "fb-a", "prod": "fb-b"}, project_dir)
-        self.assertEqual(plan.command, "firebase use fb-a")
+        self.assertIsNone(plan.command)
+        self.assertEqual(plan.command_candidates, ("firebase use fb-a", "firebase use fb-b"))
         self.assertTrue(plan.command_secret)
         joined = "\n".join(plan.notes)
         self.assertIn("project ID は 2 個あり", joined)
-        self.assertIn("名前順で先頭の 1 つを案内しています", joined)
-        self.assertIn("その ID でよいかをユーザーに確かめてください", joined)
+        self.assertIn("どれにするかをユーザーに選んでもらい、選ばれた候補のコマンドをそのまま使ってください", joined)
+        self.assertNotIn("名前順", joined)
+        self.assertNotIn("fb-a", joined)
         self.assertNotIn("fb-b", joined)
         plan = pin_env.plan_firebase({"dev": "fb-a", "dev2": "fb-a"}, project_dir)
         self.assertEqual(plan.command, "firebase use fb-a")
+        self.assertEqual(plan.command_candidates, ())
         self.assertNotIn("個あり", "\n".join(plan.notes))
 
-    def test_several_project_ids_note_does_not_point_to_a_list_with_excluded_ids(self):
-        """複数 ID の注記は、pin-env の確認を通っていない ID も並ぶ一覧へ誘導しない。
-
-        「案内できる期待値の project ID は N 個」の N は、`.firebaserc` の同名の alias が別の
-        project を指す ID (`firebase use <その ID>` が別の project に切り替わる) を除いた数。
-        accounts-show の --show-values は期待値をすべて出すので、そこから選ばせると除いた ID も
-        選べてしまう (マージ前レビューの指摘)。
-        """
+    def test_candidates_leave_out_ids_that_fail_the_same_checks_as_the_single_command(self):
+        """候補の各 ID に、単独の案内と同じ確認 (`_firebase_use_to`: 形と `.firebaserc` の行き先) を
+        通す。`.firebaserc` の同名の alias が別の project を指す ID と、`firebase use` に渡せない形の
+        ID は候補から外れる (外れた ID は注記にも出ない)。"""
         project_dir = self._project({"mm-shadowed": "evil-project"})
         plan = pin_env.plan_firebase(
-            {"dev": "aa-dev", "prod": "zz-prod", "x": "mm-shadowed"}, project_dir
+            {
+                "dev": "aa-dev",
+                "prod": "zz-prod",
+                "x": "mm-shadowed",
+                "y": "-leading-dash",
+                "z": "has space",
+                "w": "semi;colon",
+                "v": "hash#tag",
+            },
+            project_dir,
         )
-        self.assertEqual(plan.command, "firebase use aa-dev")
+        self.assertIsNone(plan.command)
+        self.assertEqual(plan.command_candidates, ("firebase use aa-dev", "firebase use zz-prod"))
         joined = "\n".join(plan.notes)
-        self.assertIn("project ID は 2 個あり", joined)  # mm-shadowed は除かれている
+        self.assertIn("project ID は 2 個あり", joined)
         self.assertNotIn("accounts-show", joined)
+        self.assertNotIn("mm-shadowed", joined)
+
+    def test_one_surviving_id_after_the_checks_is_a_plain_command(self):
+        """確認を通る ID が 1 つに減れば、候補にせず単独のコマンド。"""
+        project_dir = self._project({"mm-shadowed": "evil-project"})
+        plan = pin_env.plan_firebase({"dev": "aa-dev", "x": "mm-shadowed"}, project_dir)
+        self.assertEqual(plan.command, "firebase use aa-dev")
+        self.assertEqual(plan.command_candidates, ())
+        self.assertNotIn("個あり", "\n".join(plan.notes))
 
     def test_notes_say_it_is_per_project_root_and_account_is_not_verified(self):
         plan = pin_env.plan_firebase("fb-dev", self._project({"default": "fb-dev"}))
@@ -859,6 +861,36 @@ class TestRender(unittest.TestCase):
         self.assertIn('"CLOUDSDK_CORE_PROJECT": "secret-project"', text)
         self.assertIn("firebase use secret-fb", text)
 
+    def test_candidate_commands_are_hidden_by_default_and_listed_with_show_values(self):
+        plans = [
+            pin_env.Plan(
+                "firebase",
+                command_candidates=("firebase use secret-a", "firebase use secret-b"),
+                command_secret=True,
+            )
+        ]
+        hidden = pin_env.render(plans, None, "理由", {}, {}, None, show_values=False)
+        self.assertNotIn("secret-", "\n".join(hidden))
+        self.assertEqual(
+            [line for line in hidden if f"firebase use {pin_env.HIDDEN}" in line],
+            [f"    firebase use {pin_env.HIDDEN}"] * 2,
+        )
+        shown = pin_env.render(plans, None, "理由", {}, {}, None, show_values=True)
+        self.assertIn("    firebase use secret-a", shown)
+        self.assertIn("    firebase use secret-b", shown)
+        self.assertLess(shown.index("    firebase use secret-a"), shown.index("    firebase use secret-b"))
+        self.assertNotIn("このディレクトリで 1 回実行: ", "\n".join(shown))
+
+    def test_the_skill_step_names_the_header_that_render_prints(self):
+        """skill (project-accounts) の手順 3 が探す見出しと、render が出す見出しが同じこと。"""
+        skill = Path(__file__).resolve().parents[3] / "skills" / "project-accounts" / "SKILL.md"
+        text = skill.read_text(encoding="utf-8")
+        self.assertIn(pin_env.CANDIDATE_COMMANDS_HEADER, text)
+        plans = [pin_env.Plan("firebase", command_candidates=("firebase use a-1", "firebase use b-2"), command_secret=True)]
+        lines = pin_env.render(plans, None, "理由", {}, {}, None, show_values=True)
+        self.assertIn(f"  {pin_env.CANDIDATE_COMMANDS_HEADER}", lines)
+        self.assertEqual(pin_env.CANDIDATE_COMMANDS_HEADER, "このディレクトリで 1 回実行する候補のコマンド (1 つ選ぶ):")
+
     def test_names_are_shown_without_show_values(self):
         plans = [pin_env.Plan("aws", pins=(pin_env.Pin("AWS_PROFILE", "dev", ("dev",)),))]
         text = "\n".join(
@@ -1039,6 +1071,70 @@ class TestPinEnvCommand(_TmpBase):
         self.assertEqual(code, 0, err)
         self.assertIn("このディレクトリで 1 回実行: firebase use fb-stg\n", out)
         self.assertNotIn("pwned", out)
+
+    def test_every_printed_firebase_candidate_runs_and_reaches_the_expected_project(self):
+        """`--show-values` が出す候補の行を加工せずに shell の規則で分割すると、`firebase use <ID>` に
+        なり、その ID は `.firebaserc` を通しても期待値の project に着く。`.firebaserc` の形
+        (無い / 別名が別 project を指す / 同名の alias が別 project を指す) と、`firebase use` に
+        渡せない形・`#` を含む形の ID を混ぜて、全セルで確かめる。"""
+        expected = {
+            "a": "aa-dev",
+            "b": "zz-prod",
+            "c": "mm-shadowed",
+            "d": "-leading-dash",
+            "e": "has space",
+            "f": "semi;colon",
+            "g": "hash#tag",
+            "h": "back\\_slash",
+        }
+        firebaserc_forms = (
+            None,
+            {"dev": "aa-dev", "other": "elsewhere"},
+            {"mm-shadowed": "evil-project"},
+            {"aa-dev": "evil-project"},
+        )
+        (self.repo / "firebase.json").write_text("{}", encoding="utf-8")
+        self._write_accounts({"firebase": expected})
+        for projects in firebaserc_forms:
+            with self.subTest(firebaserc=projects):
+                rc = self.repo / ".firebaserc"
+                if projects is None:
+                    if rc.exists():
+                        rc.unlink()
+                else:
+                    rc.write_text(json.dumps({"projects": projects}), encoding="utf-8")
+                try:
+                    code, out, err = self._run(["pin-env", "--service", "firebase", "--show-values"])
+                except Exception as e:  # 例外は検出ではなく失敗として数える
+                    self.fail(f"pin-env が例外を投げた: {e!r}")
+                self.assertEqual(code, 0, err)
+                lines = out.splitlines()
+                header = "  このディレクトリで 1 回実行する候補のコマンド (1 つ選ぶ):"  # 文字列は skill と揃える
+                self.assertIn(header, lines, "前提: どの形でも候補が 2 つ以上残る")
+                start = lines.index(header) + 1
+                printed = []
+                for line in lines[start:]:
+                    if not line.startswith("    "):
+                        break
+                    printed.append(line)
+                self.assertGreaterEqual(len(printed), 2, out)
+                reached = []
+                for line in printed:
+                    argv = shlex.split(line, comments=True)
+                    self.assertEqual(argv[:2], ["firebase", "use"], line)
+                    self.assertEqual(len(argv), 3, line)
+                    target = argv[2]
+                    self.assertIn(target, expected.values(), line)
+                    # 着く先が、その ID 自身 (期待値の project) であること
+                    self.assertEqual(firebase.resolve_target(str(self.repo), target), target, line)
+                    reached.append(target)
+                self.assertEqual(reached, sorted(set(reached)), "名前順で、重複しない")
+                for bad in ("-leading-dash", "has space", "semi;colon", "hash#tag", "back\\_slash"):
+                    self.assertNotIn(bad, reached)
+                if projects and "mm-shadowed" in projects:
+                    self.assertNotIn("mm-shadowed", reached)
+                if projects and "aa-dev" in projects:
+                    self.assertNotIn("aa-dev", reached)
 
     def test_env_snippet_from_expected_value_adds_no_other_key(self):
         """期待値の `"` から、BASH_ENV のような別の env が断片に入らないこと。"""

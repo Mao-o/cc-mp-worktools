@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.26.0
+
+### Changed: `pin-env` は firebase の project ID が複数あるとき、確認を通った候補のコマンドを全部出す
+
+- 期待値の alias が使えず project ID で案内するとき、候補が複数あると名前順の先頭だけを案内し、
+  先頭以外を選んだ場合の手順が skill に無かった (Claude が確認を通っていない値を自分で
+  `firebase use` に打つことになりうる)。候補ごとに、単独の案内と同じ確認 (`firebase use` に渡せる形か、
+  `.firebaserc` での行き先が期待した project か) を通したコマンドを
+  `このディレクトリで 1 回実行する候補のコマンド (1 つ選ぶ):` の下に全部出す (値は既定で隠し、
+  `--show-values` で出る)。`.firebaserc` の同名の alias が別の project を指す ID は候補から外れる。
+  確認を通る ID が 1 つなら従来どおり単独の `このディレクトリで 1 回実行:` の行
+- skill (`project-accounts`) の手順 3 に firebase の候補を選んでもらう手順を足し、手順 5 は
+  選ばれた候補の行をそのまま実行するようにした。見出しの文字列は skill と揃え、テストで一致を確かめる
+- 注記の文面を新しい手順に合わせた (「名前順で先頭の 1 つを案内しています」を削除)
+
+### Changed: 現在の project を取得できない deny が、原因が `.firebaserc` にあるときそれを言う
+
+- firebase の CLI から現在の project を取れず、ローカルの設定 (`.firebaserc`) からも
+  firebase-tools と同じ内容に読めると確かめられないために決められないとき、deny の文面は
+  「firebase コマンドが見つかりません」などの文だけで、`.firebaserc` を直せば抜けられることが
+  分からなかった。このときだけ、末尾に 1 文 (`.firebaserc` を firebase-tools と同じ内容に読めると
+  確かめられないため、ローカルの設定からも現在の project を決められません) と条件の列挙
+  (`FIREBASERC_UNCONFIRMED_CONDITIONS`) を添える。`.firebaserc` が確かめられるとき・無いとき、
+  firebase.json の旧形式キーや大きすぎる configstore が止めているときは添えない (判定は変えない。文面だけ)
+- `services/firebase.py` の `_from_local` から、`.firebaserc` を確かめられずに止まったかも返す
+  `_from_local_detail` を切り出した (`_from_local` と `_resolve` の戻り値は変えない)。deny の本体は
+  `_no_current_deny` に切り出しただけで、文面は変えていない
+
+### テスト整理 (挙動の変更なし): テストの git repo で自動 gc / maintenance を止める
+
+- `git commit` は終わりに `git maintenance run --auto --detach` を起動する。git 2.55 は auto maintenance の
+  既定の戦略が geometric で、小さな repo でも loose object が 2 件で repack を始めうる。背景に切り離された
+  repack が書き込んでいる間に一時 dir の後始末が走ると `Directory not empty` で落ちうる (CI の flaky の予防。
+  この suite の後始末は `rmtree(ignore_errors=True)` なので落ちず、残骸と背景の git が残る)。commit するのは
+  `pin-env` のテスト (`test_pin_env.py`) の repo
+- テストが起動する git は `tests/_testutil.py` の `git()` / `init_repo()` を通し、毎回、外側の repo / config /
+  template を指す変数 (`GIT_DIR`・`GIT_CONFIG_PARAMETERS`・`GIT_TEMPLATE_DIR` など) を外したうえで
+  `maintenance.auto=false` / `maintenance.autoDetach=false` / `gc.auto=0` / `gc.autoDetach=false`
+  (`GIT_CONFIG_COUNT`) と、同じ設定を持つ fixture (`tests/hermetic.gitconfig`。`GIT_CONFIG_GLOBAL`)、
+  `GIT_CONFIG_NOSYSTEM=1` を渡す。`test_pin_env.py` は `/dev/null` を global に向けていたが、
+  `test_builder_path_escape.py` の `git init` は helper を通らず、`GIT_CONFIG_NOSYSTEM` を立てずに system の
+  config を読み、自動 maintenance を止める設定も持っていなかった (HOME は隔離済みで、開発者の `~/.gitconfig` は
+  読んでいない)
+- 床 (`tests/test_hermetic_env.py`): `GIT_TRACE2_EVENT` で maintenance / gc の子プロセスの起動が 0 件であること、
+  止める設定が無い commit では起動が見えること (陽性対照)、env の経路だけ・fixture の経路だけでも止まること、
+  fixture の中身の完全一致、system の config を読まないこと、外側の変数が git に届かないこと、
+  test module が `subprocess` で git を直接起動していないこと
+- `TestGitIgnoreAware` (`test_accounts_builder.py`) は `core.excludesFile` を製品の `check-ignore` に読ませるため
+  global の config を自分で書く。その global は fixture にせず、テスト専用の file のまま (この class は commit しない)
+
 ## 0.25.0
 
 ### Fixed: Python 3.9 で、大きな整数を含む JSON の parse が hook の timeout を超えて検証が素通しになっていた
