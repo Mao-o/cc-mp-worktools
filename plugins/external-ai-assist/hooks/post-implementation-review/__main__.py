@@ -200,8 +200,8 @@ MAX_REVIEW_PATHS = 60
 # (`cursor.MAX_TIMEOUT_SEC`。既定は 300s だが env で伸ばせるので上限で見る) +
 # kill 猶予 15s (3 × KILL_GRACE_SEC) を使うため、git に回せるのは約 75s。他の git 呼び出し
 # (rev-parse 2 回 (各 2 秒) + ls-files 10 × 2 [symlink_map と untracked_among] + 予算判定後に走る
-# 最後の 1 パスの path_diff 5) を引いた残りに収まるよう決めている
-# (式は tests/test_review_set.py::TestTimeoutBudgets で固定。合計 59s)。
+# 最後の 1 パスの path_diff 5 + HEAD の無い repo ではその空ツリーの rev-parse 2) を引いた残りに
+# 収まるよう決めている (式は tests/test_review_set.py::TestTimeoutBudgets で固定。合計 61s)。
 COLLECT_BUDGET_SEC = 30
 
 # commit レビュー (PostToolUse(Bash)) の diff 収集に使う時間予算。Stop の

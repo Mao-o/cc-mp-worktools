@@ -11,6 +11,7 @@ import io
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import time
 import unittest
@@ -782,6 +783,143 @@ class TestMidTurnRunMarks(MidTurnTestCase):
             json.dump({"v": 1, "midturn_runs": {"old": now - self.state.MIDTURN_STALE_SEC - 5,
                                                 "live": now}}, f)
         self.assertTrue(self.state.midturn_running(SESSION_A))
+
+
+_PKG_DIR = pathlib.Path(__file__).resolve().parent.parent
+
+# 別のプロセスで印を立て、stdin が閉じるまで待つ (応答の途中のレビューの背景 hook の代わり)。
+# kill すると印を下ろさずに居なくなる (asyncRewake の timeout や teardown の kill と同じ)
+_MARK_HOLDER = """
+import sys
+sys.path[:0] = [sys.argv[1], sys.argv[2]]
+import state
+print(state.begin_midturn(sys.argv[3]), flush=True)
+sys.stdin.read()
+"""
+
+
+class TestDeadMarkOwner(MidTurnTestCase):
+    """印を立てた hook が居なくなったら、`MIDTURN_STALE_SEC` を待たずに印を失効させる (0.18.0)。
+
+    失効させないと、居ない持ち主への引き継ぎを Stop が通知する (誰も引き継がない)。
+    持ち主は別プロセスで立て、遷移 (生きている → kill) の前後に Stop を挟む。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        patcher = mock.patch.dict(os.environ, ON)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def spawn_holder(self, session_id: str):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", _MARK_HOLDER, str(_PKG_DIR.parent), str(_PKG_DIR), session_id],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            env=_testutil.hermetic_env({"TMPDIR": self.tmpdir}),
+        )
+
+        def reap() -> None:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+            for stream in (proc.stdin, proc.stdout):
+                stream.close()
+
+        self.addCleanup(reap)
+        run_id = proc.stdout.readline().decode().strip()
+        self.assertTrue(run_id.startswith(f"{proc.pid}-"), run_id)
+        return proc, run_id
+
+    def stop_while_another_session_holds_the_lock(self, session_id: str) -> str:
+        with self.state.cursor_lock(self.repo) as acquired:
+            self.assertTrue(acquired)
+            return self.stop(session_id, "REVIEW_CLEAN")
+
+    def test_stop_hands_off_only_while_the_owner_is_alive(self):
+        self.edit(SESSION_A, "a.txt", "a\n")
+        proc, run_id = self.spawn_holder(SESSION_A)
+
+        # 持ち主が生きている間: 印は有効で、Stop は引き継ぎを依頼して通知する (0.16.0 と同じ)
+        self.assertTrue(self.state.midturn_running(SESSION_A))
+        output = self.stop_while_another_session_holds_the_lock(SESSION_A)
+        self.assertIn(self.entry.NOTICE_HANDED_OFF, self.assertNotBlocked(output))
+        self.assertTrue(self.state.take_stop_handoff(SESSION_A))
+
+        # 持ち主が印を下ろさずに kill される
+        proc.kill()
+        proc.wait()
+        self.assertIn(run_id, self.raw_state(SESSION_A)["midturn_runs"], "印はまだ残っている")
+        self.assertFalse(self.state.midturn_running(SESSION_A), "居ない持ち主の印は失効する")
+
+        # 同じ条件の Stop は、もう引き継ぎを通知しない (0.15.x と同じ無言の skip)
+        output = self.stop_while_another_session_holds_the_lock(SESSION_A)
+        self.assertEqual(output, "")
+        self.assertNotReviewed()
+        self.assertFalse(self.raw_state(SESSION_A)["stop_handoff"], "誰も読まない依頼を書かない")
+        self.assertEqual(self.pending(SESSION_A), [os.path.join(self.repo, "a.txt")])
+
+    def test_stop_reviews_itself_when_the_dead_owner_mark_remains(self):
+        """1 回目のロックが取れず、持ち主の印が残っていても居なければ、依頼を書かずに再試行で
+        自分で見る。"""
+        self.edit(SESSION_A, "a.txt", "a\n")
+        proc, _run_id = self.spawn_holder(SESSION_A)
+        proc.kill()
+        proc.wait()
+        real = self.entry._stop_review_under_lock
+        attempts: list[int] = []
+
+        def first_fails(*args):
+            attempts.append(1)
+            return None if len(attempts) == 1 else real(*args)
+
+        with mock.patch.object(self.entry, "_stop_review_under_lock", side_effect=first_fails), \
+                mock.patch.object(self.state, "request_stop_handoff") as request:
+            output = self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertEqual(len(attempts), 2)
+        self.assertReviewed("a.txt")
+        self.assertNotIn(self.entry.NOTICE_HANDED_OFF, self.assertNotBlocked(output))
+        request.assert_not_called()
+
+    def test_a_dead_mark_does_not_hide_a_live_one(self):
+        proc, dead = self.spawn_holder(SESSION_A)
+        proc.kill()
+        proc.wait()
+        live = self.state.begin_midturn(SESSION_A)
+        self.assertTrue(self.state.midturn_running(SESSION_A))
+        self.assertEqual(list(self.raw_state(SESSION_A)["midturn_runs"]), [live],
+                         "居ない持ち主の印は掃除される")
+        self.assertNotIn(dead, self.raw_state(SESSION_A)["midturn_runs"])
+
+    def test_owner_is_read_from_the_run_id(self):
+        cases = [
+            ("通常", "123-abc", 123),
+            ("hex の部分に - がある", "45-a-b", 45),
+            ("pid が無い (旧形・手書き)", "old", None),
+            ("負の数", "-5-abc", None),
+            ("ASCII 以外の数字", "١٢-abc", None),
+            ("空", "", None),
+        ]
+        for label, run_id, expected in cases:
+            with self.subTest(label):
+                try:
+                    owner = self.state._run_owner(run_id)
+                except Exception as e:  # noqa: BLE001 - 例外の漏れは検出として数える
+                    self.fail(f"{run_id!r} で例外が漏れた: {e!r}")
+                self.assertEqual(owner, expected)
+
+    def test_unknown_owner_falls_back_to_the_time_limit(self):
+        """pid を読めない印と、生死を言い切れない pid の印は、時間だけで失効させる。"""
+        path = os.path.join(self.tmpdir, "post-implementation-review", "state", f"{SESSION_A}.json")
+        self.state.begin_midturn(SESSION_A)
+        for run_id in ("old", f"{os.getpid()}-abc", "0-abc"):
+            with self.subTest(run_id=run_id):
+                with open(path, "w") as f:
+                    json.dump({"v": 1, "midturn_runs": {run_id: time.time()}}, f)
+                try:
+                    running = self.state.midturn_running(SESSION_A)
+                except Exception as e:  # noqa: BLE001 - 例外の漏れは検出として数える
+                    self.fail(f"{run_id!r} で例外が漏れた: {e!r}")
+                self.assertTrue(running)
 
 
 class TestRegistration(unittest.TestCase):

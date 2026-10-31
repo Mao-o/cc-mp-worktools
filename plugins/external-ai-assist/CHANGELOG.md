@@ -5,6 +5,28 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.18.0
+
+**`post-implementation-review` の差分の取得を `.git/index` を書かない git の呼び方 (plumbing) に替え、応答の途中のレビューの「実行中」の印を、印を立てた hook が居なくなった時点で失効させるようにした。差分の本文が利用者の porcelain 向けの設定 (textconv など) を読まなくなるので minor bump。**
+
+### 修正
+
+- 差分の取得に使っていた porcelain の `git diff` は、作業ツリーと比べると、stat 情報だけが変わったファイル (同じ内容での書き戻しや `touch`) があるとき index を書き直す (`GIT_OPTIONAL_LOCKS=0` を付けても書く。git 2.50.1 で実測)。応答の途中のレビューは背景で Claude 自身の `git add` / `git commit` と並行して走るので、`index.lock` でぶつかって Claude の commit が落ちうる (並行する別セッションでも同じ)。差分は `git diff-index` / `git diff-tree` で取るようにし、`git status` には `GIT_OPTIONAL_LOCKS=0` を付けて stat の書き戻しを止めた。この hook の git はもう index を書かない
+- 「作業ツリーが基準と違うパス」の判定 (commit レビューの部分 commit の判定と、レビュー後の pending の整理) は `--numstat` で取る。plumbing の `--name-only` は stat だけが変わったファイルも「変更あり」に挙げるため
+- 応答の途中のレビューの印は、印を立てた hook のプロセスが居ないと言い切れれば (in-flight の claim と同じ判定) すぐ失効する。0.17.0 までは背景の hook が kill されると印が 30 分 (`MIDTURN_STALE_SEC`) 残り、その間にロックを取れなかった Stop が「残りの変更はそのレビューの後に続けて送ります」と通知しても、誰も引き継がなかった。pid を読めない印と、生死を言い切れない pid の印は、従来どおり時間だけで失効する
+
+### 変わる出力
+
+- 既定の設定では、差分の本文も変更パスの集合も変わらない。この repo の clone で、stat だけの変更・内容の変更・mode の変更・バイナリ・削除・新規のファイル 202 件の差分、94 commit (rename 168 件を含む) の変更パスと 972 組の差分を旧版と比べ、すべて一致した
+- 利用者が porcelain 向けの設定 (`diff.noprefix` / `diff.mnemonicPrefix` / `diff.srcPrefix` / `diff.dstPrefix` / `diff.context` / `diff.interHunkContext` / textconv / `diff.external` / `diff.renames`) を持っている場合、それらは差分の本文に効かなくなる。textconv を通さないので、レビュアーには変換前の本文が渡る。新規ファイル (`git diff --no-index`) は plumbing の版が無いので、本文を変える設定をオプションで打ち消し、commit 後の差分と同じ本文にしている (commit レビューは本文の hash で「Stop がレビュー済み」を判定するため、書式がずれると同じ内容を 2 回送る)
+- HEAD の無い repo では、1 ファイルごとに空ツリーの解決 (git 1 回) が増える。Stop の git の最悪時間は 59 秒から 61 秒になる (hook の timeout には収まる)
+
+### テスト
+
+- `tests/test_gitscan.py` (11 件追加): 全部の走査の前後で `.git/index` の mtime と中身が変わらないこと (porcelain なら書く repo の形であることの陽性対照つき)、stat だけ・内容・mode・バイナリ・削除の各ファイルの差分が porcelain と 1 バイトも同じこと、変更パスの集合が stat だけの変更を落とすこと (tab と空白を含む名前も)、rename・subtree・`diff.renames=false` の変更パス、HEAD の無い repo、Stop の本文と commit 後の本文が porcelain の設定 8 通りで一致すること
+- `tests/test_midturn_flow.py` (5 件追加): 別プロセスで印を立て、生きている間の Stop は引き継ぎを通知し、kill した後の Stop は通知せず依頼も書かないこと。印が残っていても持ち主が居なければ Stop が再試行で自分でレビューすること。居ない持ち主の印が生きた印を隠さず掃除されること。run id からの pid の読み方と、読めない・言い切れない pid の印は時間だけで失効すること
+- 変えた箇所ごとに元に戻す変異 21 件を流し、19 件が assertion の失敗で落ちる。残る 2 件は等価変異 (`diff-tree -p` は `-r` を含意する / `begin_midturn` の pid の取り方は本番では同じ値)
+
 ## 0.17.0
 
 **`post-implementation-review` で、塊ごとの送信の途中で止まったレビューの結果を捨てないようにし、応答の途中のレビューが引き継いだ残りを送っている間に来た Stop の依頼を取りこぼさないようにした。kill されたレビューの回収の仕方が変わる (TTL を待たない) ので minor bump。**

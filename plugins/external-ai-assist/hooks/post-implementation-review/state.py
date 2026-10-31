@@ -782,12 +782,27 @@ def pending_paths(session_id: str) -> list[str]:
 
 
 def _live_midturn_runs(state: dict, now: float) -> dict[str, float]:
-    """`MIDTURN_STALE_SEC` 以内の印だけ (kill された実行の印は、この時間で失効する)。"""
+    """生きている実行の印だけ。
+
+    失効は 2 つ (0.18.0 で 2 つ目を足した): 印から `MIDTURN_STALE_SEC` を超えた、または印を
+    立てた hook のプロセス (run id の先頭の pid) がもう居ない。後者が無いと、背景の hook が
+    kill されたとき印が `MIDTURN_STALE_SEC` (30 分) 残り、その間にロックを取れなかった Stop が
+    「残りは続けて送ります」と通知して、誰も引き継がない。pid の判定は in-flight の claim と
+    同じ `_owner_gone` (居ないと言い切れるときだけ失効させる。pid を読めない id は時間だけ)。
+    """
     return {
         run_id: at
         for run_id, at in state["midturn_runs"].items()
-        if at > 0 and now - at <= MIDTURN_STALE_SEC
+        if at > 0 and now - at <= MIDTURN_STALE_SEC and not _owner_gone(_run_owner(run_id))
     }
+
+
+def _run_owner(run_id: str) -> int | None:
+    """`begin_midturn` の id (`{pid}-{hex}`) から pid を取り出す。読めなければ None。"""
+    head = run_id.split("-", 1)[0]
+    if not (head.isascii() and head.isdigit()):
+        return None
+    return int(head)
 
 
 def begin_midturn(session_id: str) -> str:
@@ -797,7 +812,7 @@ def begin_midturn(session_id: str) -> str:
     方は**自分の id だけ**を下ろす (`end_midturn`)。書き込めなくても id は返す (印が無いと Stop は
     持ち主を見失うが、止めるよりは fail-open)。
     """
-    run_id = f"{os.getpid()}-{uuid.uuid4().hex[:12]}"
+    run_id = f"{_owner_pid()}-{uuid.uuid4().hex[:12]}"
     try:
         with _locked_state(session_id) as state:
             now = time.time()

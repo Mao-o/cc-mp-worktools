@@ -56,7 +56,8 @@ _SHA_RE = re.compile(r"^[0-9a-f]{7,64}$")
 #     REV_PARSE_TIMEOUT_SEC × 2 (worktree_root + head_exists)
 #     + LS_FILES_TIMEOUT_SEC × 2 (symlink_map + untracked_among)
 #     + COLLECT_BUDGET_SEC 30 + PATH_DIFF_TIMEOUT_SEC × 1 (予算判定後に走る
-#       最後の 1 パス) = 59s
+#       最後の 1 パス) + REV_PARSE_TIMEOUT_SEC × 1 (その 1 パスの empty_tree。HEAD の
+#       無い repo だけ。0.18.0) = 61s
 #   実際の予算計算とテストは tests/test_review_set.py::TestTimeoutBudgets を参照。
 #   ここでの数値は目安のコメントに過ぎず、乖離したらテストの方を正とする。
 REV_PARSE_TIMEOUT_SEC = 2
@@ -92,7 +93,19 @@ def _git(
 
     `stdin_data` は `cat-file --batch` 系にリクエストを流し込むためだけに使う
     (渡さなければ従来どおり stdin を継承しない `capture_output` のみ)。
+
+    **この hook の git は `.git/index` を書かない** (0.18.0)。応答の途中のレビューは背景で
+    Claude 自身の `git add` / `git commit` と並行して走り、index を書き直すと `index.lock` で
+    ぶつかる。index を書きうる呼び出しは 2 種類あり、それぞれ別の手で止めている:
+
+    - `git status`: stat 情報の書き戻し (opportunistic refresh) を `GIT_OPTIONAL_LOCKS=0` で
+      止める (git 2.50.1 実測で、付けないと stat だけが変わったファイルがあるとき index を書く)
+    - `git diff` (porcelain): 作業ツリーと比べると、`GIT_OPTIONAL_LOCKS=0` を付けても index を
+      書く (同じく実測)。そのため diff 系は plumbing (`diff-index` / `diff-tree`) だけを使う
+      (`path_diff` / `_changed_vs` / `range_paths` / `range_diff` の docstring)
     """
+    env = dict(os.environ)
+    env["GIT_OPTIONAL_LOCKS"] = "0"
     try:
         return subprocess.run(
             ["git", "--literal-pathspecs", *args],
@@ -100,6 +113,7 @@ def _git(
             capture_output=True,
             timeout=timeout,
             input=stdin_data,
+            env=env,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return None
@@ -391,17 +405,32 @@ def changed_vs_commit(root: str, commit: str, rels: list[str]) -> set[str] | Non
 
 
 def _changed_vs(root: str, base: str, rels: list[str]) -> set[str] | None:
-    """`git diff --name-only <base> -- rels` (作業ツリー対 `base`) の結果集合。"""
+    """作業ツリーの内容 (と mode) が `base` と違うパスの集合 (`git diff-index --numstat`)。
+
+    **`--name-only` ではなく `--numstat` を使うのが要点** (0.18.0)。plumbing の `diff-index` は
+    index を書き直さない代わりに、stat 情報だけが変わったファイル (`touch` や、同じ内容での
+    書き戻し) を `--name-only` / `--name-status` では「変更あり」として挙げる。`--numstat` は
+    内容を比べるので、それらを落とす (mode だけの変更は `0 0` の行として残る。git 2.50.1 実測)。
+    これで porcelain の `git diff --name-only` と同じ集合になる。
+
+    `-z` の各レコードは `<追加>\\t<削除>\\t<パス>` (バイナリは `-\\t-\\t<パス>`)。rename 検出は
+    付けていないので、元パスが続く 2 トークン形式は出ない。
+    """
     if not rels:
         return set()
     res = _git(
         root,
-        ["diff", "--no-color", "--name-only", "-z", base, "--", *rels],
+        ["diff-index", "--numstat", "-z", base, "--", *rels],
         timeout=LS_FILES_TIMEOUT_SEC,
     )
     if res is None or res.returncode != 0:
         return None
-    return {p for p in _decode(res.stdout).split("\0") if p}
+    changed: set[str] = set()
+    for record in _decode(res.stdout).split("\0"):
+        parts = record.split("\t", 2)
+        if len(parts) == 3 and parts[2]:
+            changed.add(parts[2])
+    return changed
 
 
 # --------------------------------------------------------------------------
@@ -456,10 +485,15 @@ def range_paths(root: str, old: str, new: str) -> list[str] | None:
 
     None と空リストを区別するのが要点: 取得失敗を「変更なし」と読むと、
     「このセッションの編集記録が無いパス」の通知が黙って消える。
+
+    plumbing の `diff-tree` で取る (0.18.0。`_git` の docstring)。porcelain の `git diff` と
+    同じ集合にするため、`-r` (porcelain は既定で subtree に降りる) と `-M` (porcelain の既定
+    `diff.renames=true` と同じ rename 検出。rename は新しいパスだけが出る) を付ける。
+    利用者の `diff.renames` の設定は読まなくなる (plumbing は読まない)。
     """
     res = _git(
         root,
-        ["diff", "--no-color", "--name-only", "-z", old, new],
+        ["diff-tree", "-r", "-M", "--no-color", "--name-only", "-z", old, new],
         timeout=PATH_DIFF_TIMEOUT_SEC,
     )
     if res is None or res.returncode != 0:
@@ -585,11 +619,24 @@ def range_diff(root: str, old: str, new: str, rel: str) -> str | None:
     失敗を空文字に畳まないのは、呼び出し側が「差分なし」として黙って skip すると
     そのパスの唯一の commit レビュー機会が失われるため (`range_paths` が変更ありと
     判定したパスで空になるのは失敗しかない。マージ前レビューの指摘)。
+
+    `path_diff` と同じく plumbing (`diff-tree -p`) で取る。**Stop の `path_diff` と同じ書式で
+    なければならない**: commit レビューはこの本文の hash を Stop がレビュー済みの hash と比べて
+    重複を落とす (`__main__._collect_range_diffs`)。片方だけ porcelain だと、`diff.noprefix` などの
+    設定がある環境で hash が一致せず、同じ内容を 2 回送る。
     """
-    res = _git(root, ["diff", "--no-color", old, new, "--", rel])
+    res = _git(root, ["diff-tree", "-r", "-p", "--no-color", old, new, "--", rel])
     if res is None or res.returncode != 0:
         return None
     return _decode(res.stdout)
+
+
+#: untracked のファイルを `git diff --no-index` で取るときに付ける。`--no-index` には plumbing の
+#: 版が無く、porcelain の設定を読む。そのうち本文を変えるもの (git 2.50.1 で 1 つずつ実測:
+#: `diff.noprefix` / `diff.mnemonicPrefix` / `diff.srcPrefix` / `diff.dstPrefix` / textconv /
+#: `diff.external`) を打ち消し、commit 後の `range_diff` (`diff-tree -p`) と同じ本文にする。
+#: `diff.context` / `diff.interHunkContext` は新規ファイル (hunk が 1 つ) では本文を変えない
+_NO_INDEX_NEUTRAL = ("--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/")
 
 
 def path_diff(root: str, rel: str, untracked: bool, has_head: bool) -> str:
@@ -597,16 +644,34 @@ def path_diff(root: str, rel: str, untracked: bool, has_head: bool) -> str:
 
     `--no-color` は必須: `color.ui=always` / `color.diff=always` の環境では ANSI が混ざり、
     レビュアーに渡す本文が汚れるうえ hash もバイト予算も狂う。
+
+    tracked は plumbing の `diff-index -p` で取る (0.18.0。index を書かないため。`_git` の
+    docstring)。既定の設定では porcelain の `git diff HEAD -- <rel>` と 1 バイトも同じで、
+    stat 情報だけが変わったファイルは空になる (git 2.50.1 実測)。違いは porcelain だけが読む
+    設定 (`diff.noprefix` などの接頭辞、`diff.context`、textconv、`diff.external`) を読まない
+    こと。textconv を通さないので、レビュアーには変換前の本文が渡る。
     """
     if untracked:
         # untracked は HEAD 側に対応物が無いので /dev/null と比較する。
         # --no-index は差分ありで exit 1 を返すため returncode は見ない。
-        res = _git(root, ["diff", "--no-color", "--no-index", "--", os.devnull, rel])
+        # --no-index は repo の外の比較なので index を読みも書きもしない
+        res = _git(
+            root, ["diff", "--no-color", *_NO_INDEX_NEUTRAL, "--no-index", "--", os.devnull, rel]
+        )
         return _decode(res.stdout) if res is not None else ""
 
-    # 初回コミット前の repo には HEAD が無いので staged 差分で代替する
-    base = "HEAD" if has_head else "--cached"
-    res = _git(root, ["diff", "--no-color", base, "--", rel])
+    if has_head:
+        base = "HEAD"
+        cached: list[str] = []
+    else:
+        # 初回コミット前の repo には HEAD が無いので、index (staged) と空ツリーを比べる
+        # (porcelain の `git diff --cached` が HEAD の無い repo でする比較と同じ)
+        tree = empty_tree(root)
+        if tree is None:
+            return ""
+        base = tree
+        cached = ["--cached"]
+    res = _git(root, ["diff-index", "-p", "--no-color", *cached, base, "--", rel])
     if res is None or res.returncode != 0:
         return ""
     return _decode(res.stdout)

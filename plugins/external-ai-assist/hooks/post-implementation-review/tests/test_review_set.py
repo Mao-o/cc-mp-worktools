@@ -516,6 +516,7 @@ class TestTimeoutBudgets(ReviewSetTestCase):
             + gitscan.LS_FILES_TIMEOUT_SEC  # untracked 判定 (untracked_among)
             + self.entry.COLLECT_BUDGET_SEC
             + gitscan.PATH_DIFF_TIMEOUT_SEC  # 予算判定後に走る最後の 1 パス
+            + gitscan.REV_PARSE_TIMEOUT_SEC  # その 1 パスの empty_tree (HEAD の無い repo だけ。0.18.0)
         )
         # 外部 AI CLI の timeout 後に process group を止める経路 (SIGTERM 待ち /
         # SIGKILL 待ち / 最後の wait) も Stop の hook timeout 内に収める。超えると
