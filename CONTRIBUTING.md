@@ -59,6 +59,7 @@ make test       # 全 plugin の unit test (= scripts/test-all.sh)
 | `claude plugin validate plugins/<name>` | 各 plugin manifest のスキーマ |
 | `scripts/check_codex_manifest_version.py` | Codex 向け manifest がある plugin の version 一致 |
 | `scripts/check_marketplace_entry_sync.py` | entry と `plugin.json` の `description` / `keywords` 一致 |
+| `scripts/check_skill_allowed_tools.py` | skill の allowed-tools に Bash の `*` / 単独付与が無い |
 
 **warning もゼロに保ってください。** warning を許容すると本当の欠落 (version /
 description / author 未設定) が埋もれます。

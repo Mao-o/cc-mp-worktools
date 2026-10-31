@@ -15,6 +15,8 @@ validate:
 	for dir in plugins/*/; do [ -d "$$dir" ] || continue; echo "== Validating $$dir =="; claude plugin validate "$$dir" || exit 1; done
 	python3 scripts/check_codex_manifest_version.py
 	python3 scripts/check_marketplace_entry_sync.py
+	python3 scripts/check_skill_allowed_tools.py
+	python3 -m unittest discover -s scripts/tests
 
 lint:
 	$(RUFF) check .

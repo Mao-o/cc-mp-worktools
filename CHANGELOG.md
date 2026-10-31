@@ -27,6 +27,15 @@
   付けていた 5 skill (llms-docs の 4 skill と codex-pr-review の 1 skill) は
   script の ALLOWLIST に置き、絞り終えたら外す (対応する付与が無い許可リストは
   FAIL)。script のテストは `scripts/tests/` に置き、同じ job で実行する
+- 同じ検査は、frontmatter を読めない形を黙って通さず FAIL にする (fail closed)。
+  行末・列 0 のコメント、複数行の flow list、引用符付きの scalar、キーの別表記
+  (`allowed-tools :` / `"allowed-tools":`)、先頭の BOM、付与の末尾空白を読み、
+  付与の形に合わない項目・括弧の中の ` #` (YAML ではコメントになる)・キーの重複・
+  キーとして読めない `allowed-tools` の行・閉じていない flow list・値に `Bash` が
+  あるのに Bash の付与を読み取れない場合を FAIL にする。既定の root で検査したときは、
+  許可リストにある skill の rename・削除も FAIL にする
+- `make validate` に同じ検査と `scripts/tests/` のテストを足し、`CONTRIBUTING.md` の
+  検査の表に載せた
 
 ### Changed
 
