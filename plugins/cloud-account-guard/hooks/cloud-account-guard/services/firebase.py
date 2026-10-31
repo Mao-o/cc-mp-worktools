@@ -40,7 +40,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from core import budget, cli_options, shell_word
+from core import budget, cli_config, cli_options, shell_word
 
 # CLI 名の許容形。`\b` だとハイフン付き別コマンド全般を拾ってしまうので空白/終端に
 # 限定するが、npm 経由の 2 つの正当な形は明示的に許可する:
@@ -249,7 +249,7 @@ def _reject_constant(name: str):
 # 「固定できません」と verify() の `--project` の deny が同じ文で示す (「…に当たる」で受ける)。
 # 判定は保守的で、厳密な JSON でも文字列の中に `//` (URL など) があるだけで弾く。
 FIREBASERC_UNCONFIRMED_CONDITIONS = (
-    "UTF-8 でない・U+FEFF がある・// か /* がある (文字列の中の URL なども含む)・"
+    "UTF-8 でない・大きすぎる (256 KiB を超える)・U+FEFF がある・// か /* がある (文字列の中の URL なども含む)・"
     "JSON として読めない (NaN など JSON に無い値・構文の誤り・深い入れ子)・"
     "projects がオブジェクトでないか文字列でない値を持つ、など"
 )
@@ -291,8 +291,10 @@ def _read_firebaserc(root: str) -> dict[str, str] | None:
     if not os.path.isfile(path):
         return {}
     try:
-        text = path.read_bytes().decode("utf-8")
-    except (OSError, UnicodeDecodeError):
+        # 大きさの上限は parse より先に確かめる (`cli_config.read_bounded_text`): Python 3.9 は
+        # 大きな整数の parse が桁数の二乗の時間で、hook の timeout を超えると検証が素通しになる。
+        text = cli_config.read_bounded_text(path)
+    except (OSError, ValueError):
         return None
     if "\ufeff" in text or "//" in text or "/*" in text:
         return None
@@ -400,7 +402,7 @@ def _from_configstore(root: str, env=None, exact: bool = False) -> str:
         path = _configstore_path(env)
         if path is None:
             return ""
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(cli_config.read_bounded_text(path))
     except (ValueError, OSError, RuntimeError):
         return ""
     active = data.get("activeProjects") if isinstance(data, dict) else None
@@ -482,15 +484,12 @@ def _firebase_json_blocks_local(path: str) -> bool:
     if not os.path.isfile(path):
         return False
     try:
-        raw = Path(path).read_bytes()
-    except OSError:
+        text = cli_config.read_bounded_text(Path(path))
+    except (OSError, ValueError):
+        # 読めない・UTF-8 でない・大きすぎる (parse の前に弾く。`_read_firebaserc` と同じ)。
         return True
-    if not raw:
+    if not text:
         return False
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return True
     if "\ufeff" in text:
         return True
     if ("//" in text or "/*" in text) and _cjson_decomment(text) != text:

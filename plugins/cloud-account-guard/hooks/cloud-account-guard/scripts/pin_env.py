@@ -231,17 +231,10 @@ def plan_firebase(expected, project_dir: str) -> Plan:
     if _padded(expected):
         return Plan("firebase", problem=f"firebase の期待値 (project ID) {_PADDED}")
     project = expected
-    # `.firebaserc` はリポジトリのファイルなので、alias 名は信頼できる入力ではない。
-    # 渡せない alias は使わず、無ければ alias が無いときと同じく project ID を使う。
-    aliases = firebase.aliases_for(project_dir, project)
-    usable = [alias for alias in aliases if _firebase_use(alias) is not None]
-    if len(usable) < len(aliases):
-        notes += (
-            ".firebaserc の alias のうち、firebase use に渡せない文字を含むものは使いません"
-            f" ({_FIREBASE_TARGET_RULE})",
-        )
-    if usable:
-        return Plan("firebase", command=_firebase_use(usable[0]), notes=notes)
+    # scalar の期待値には alias を案内しない。hook の self-remediation (`is_self_remediation`) は
+    # scalar の期待値そのものの名前しか通さないので、`firebase use <alias>` は現在値がずれていると
+    # 検証に回って deny され、案内が行き止まりになる。hook の deny 文面 (`_scalar_word`) と同じく
+    # project ID を案内する (表示は既定で隠す。判定は変えない)。
     if _firebase_use(project) is None:
         return Plan(
             "firebase",

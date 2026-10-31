@@ -4259,6 +4259,29 @@ class TestUnstattableAccountsPath(BaseBuilder):
                     self.assertIn("を確かめられません", err)
         self.assertTrue(os.path.islink(new))
 
+    def test_explicit_path_multi_step_symlink_loop_is_unconfirmed_on_every_python(self):
+        # mock なしの実 symlink。2 段以上のループ (accounts.local.json -> loopa -> loopb -> loopa) は、
+        # Python 3.13 からの `resolve()` がループの途中のパスを返し、「--path は dispatcher が読む配置を
+        # 指してください」(exit 2) という誤った案内になっていた。どの版でも「確かめられません」(exit 1)。
+        new = self._new_path()
+        new.parent.mkdir(parents=True, exist_ok=True)
+        loopa, loopb = new.parent / "loopa", new.parent / "loopb"
+        os.symlink("loopa", new)
+        os.symlink("loopb", loopa)
+        os.symlink("loopa", loopb)
+        for argv in (
+            ["show"],
+            ["pin-env"],
+            ["init", "--service", "aws", "--value", "111", "--dry-run"],
+            ["auto-switch", "--enable", "--dry-run"],
+        ):
+            with self.subTest(argv=argv[0]):
+                code, out, err = self._run(argv + ["--path", str(new)])
+                self.assertEqual(code, 1, out + err)
+                self.assertIn(f"{new} を確かめられません", err)
+                self.assertNotIn("dispatcher が読む配置", err)
+        self.assertTrue(os.path.islink(new))
+
     def test_show_and_pin_env_with_explicit_path_under_unreadable_dir(self):
         # 親ディレクトリに入れない (EACCES)。symlink では `resolve()` が先に走るので、`--path` を
         # そのまま stat する経路はこの形で通す。

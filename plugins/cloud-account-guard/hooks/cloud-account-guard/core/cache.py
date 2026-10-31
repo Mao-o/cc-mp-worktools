@@ -53,6 +53,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from core import cli_config
+
 _CACHE_TTL_SEC = 30
 # 切替コマンド検出 (invalidate) からこの秒数は切替の実行中とみなし、成功 cache を書かない。
 # 対話 login (ブラウザ認証) でもおおむね収まる長さ。代償は切替後 60 秒の毎回再検証。
@@ -134,8 +136,17 @@ def _epoch_path(service_name: str) -> Path | None:
 def _write_atomic(path: Path, text: str) -> None:
     """tmp に書いて `os.replace` で置き換える (並行する hook が途中状態を読まないように)。"""
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except BaseException:
+        # 書き込み (ENOSPC など) や置き換えに失敗したとき、tmp を残さない (pid ごとに増え、
+        # 掃除されない)。掃除の失敗は握り、元の例外をそのまま上げる。
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def service_state_path(service_name: str, suffix: str) -> Path | None:
@@ -172,8 +183,10 @@ def read_state(path: Path | None) -> dict | None:
     if path is None or not os.path.isfile(path):
         return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(cli_config.read_bounded_text(path))
     except (ValueError, OSError, RecursionError):
+        # 大きすぎるファイル (FileTooLargeError。ValueError の子) も読めないのと同じ。parse の前に弾く
+        # (Python 3.9 は大きな整数の parse が遅く、hook の timeout で検証が素通しになる)。
         return None
     return data if isinstance(data, dict) else None
 

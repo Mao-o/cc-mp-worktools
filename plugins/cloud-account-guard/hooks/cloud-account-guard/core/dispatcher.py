@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from core import (
-    auto_switch, budget, cache, cli_options, mode, output, paths, shell_word, tiers, workdir,
+    auto_switch, budget, cache, cli_config, cli_options, mode, output, paths, shell_word, tiers, workdir,
 )
 from core.command_parser import extract_candidates
 from services import ALL as SERVICES
@@ -932,12 +932,21 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         return _decide(pre_file_mode, msg, mode_notes, query_warn=query_only)
 
     try:
-        accounts = json.loads(accounts_path.read_text(encoding="utf-8"))
+        accounts = json.loads(cli_config.read_bounded_text(accounts_path))
     except json.JSONDecodeError as e:
         return _decide(
             pre_file_mode,
             f"{shell_word.escape_controls(accounts_path)} の JSON が不正です: {e.msg} (行 {e.lineno})。"
             "内容を確認・修正してください。",
+            mode_notes,
+        )
+    except cli_config.FileTooLargeError:
+        # 大きすぎる (parse の前に弾く。Python 3.9 は大きな整数の parse が桁数の二乗の時間で、
+        # hook の timeout を超えると検証が素通しになる)。不正な JSON と同じ扱い。
+        return _decide(
+            pre_file_mode,
+            f"{shell_word.escape_controls(accounts_path)} を読めません "
+            f"(大きすぎます。{cli_config.MAX_FILE_BYTES} バイト以下にしてください)。",
             mode_notes,
         )
     except (ValueError, RecursionError) as e:

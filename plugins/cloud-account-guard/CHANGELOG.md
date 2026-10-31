@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.25.0
+
+### Fixed: Python 3.9 で、大きな整数を含む JSON の parse が hook の timeout を超えて検証が素通しになっていた
+
+- Python 3.9 の `json.loads` は大きな整数の parse が桁数の二乗の時間になり、2.2 MB の `.firebaserc` で
+  約 25 秒かかって hook の timeout (20 秒) を超え、出力が捨てられてコマンドがそのまま実行されていた
+  (macOS 標準の `python3` は 3.9 系で、PATH の `python3` で起動される hook はそれで動く)。hook が JSON で読む
+  信頼できないファイルを、parse の前に 256 KiB (`cli_config.MAX_FILE_BYTES`) で弾くようにした。
+  超えたら読めないものと同じに扱う: `.firebaserc` と `firebase.json` は「確かめられない」の deny、
+  `accounts.local.json` は不正な JSON と同じ deny (「大きすぎます」と示す)、cache の状態ファイル
+  (epoch・成功 entry・auto-switch の記録) は miss、firebase の configstore は解決しない。
+  正規のファイルは 256 KiB よりずっと小さい (根拠は DEVELOPMENT.md の D36)。`.firebaserc` の
+  「確かめられない」条件の文に「大きすぎる (256 KiB を超える)」を足した
+- 3.9.6 の実機で、2.2 MB の `.firebaserc` の読み込みが約 25 秒から 0.0 秒になることを確かめた
+
+### Fixed: `pin-env` が scalar の firebase の期待値で、別名の `firebase use` を案内して行き止まりにしていた
+
+- 期待値が scalar (project ID) の firebase で、`.firebaserc` に期待 project を指す別名があると、
+  `pin-env` は `firebase use <別名>` を案内していた。hook の self-remediation は scalar の期待値
+  そのものの名前しか通さないので、現在値がずれていると案内したコマンドが deny された。hook の deny
+  文面と同じく project ID (`firebase use <project ID>`。表示は既定で隠す) を案内するようにした
+  (表示だけの変更。判定は変えない)。dict の期待値の別名の案内は変わらない
+
+### Fixed: cache の書き込みに失敗すると tmp ファイルが残っていた
+
+- `core/cache.py` の `_write_atomic` は、tmp への書き込み (ENOSPC など) や `os.replace` に失敗すると
+  `<名前>.<pid>.tmp` を消さずに残し、pid ごとに増えて掃除されなかった。失敗したら tmp を消してから
+  元の例外を上げる (掃除の失敗は握る)
+
+### Fixed: builder の `--path` に多段の symlink のループを渡すと、Python 3.13 以降だけ誤った案内になっていた
+
+- 2 段以上のループ (`accounts.local.json` → `loopa` → `loopb` → `loopa`) を `--path` に渡すと、3.13 以降の
+  `Path.resolve()` がループの途中のパスを返し、「--path は dispatcher が読む配置を指してください」
+  (exit 2) と案内していた (3.12 以前は「確かめられません」(exit 1))。`resolve()` の前に `os.stat` を打ち、
+  ELOOP なら `resolve()` を飛ばすようにして、どの版でも「確かめられません」(exit 1) にした。書き込まない
+  点と hook の deny は変わらない
+
+### Tests
+
+- 上限の確認 (`tests/test_json_size_gate.py`。上限を超えるファイルが `json.loads` に渡されないこと、
+  上限ちょうどは読めること)、`_write_atomic` の掃除 (`tests/test_cache_write_cleanup.py`)、実 symlink の
+  2 段ループ (`tests/test_accounts_builder.py`) を足した。`pin-env` の scalar のテスト 2 件を新しい案内に
+  合わせ、読み込みを差し替えていたテスト 2 件を新しい読み込み口に合わせた
+
 ## 0.24.1
 
 ### Fixed: auto-switch の記録を書き戻せないとき、切り替えたのに「行いませんでした」と通知していた

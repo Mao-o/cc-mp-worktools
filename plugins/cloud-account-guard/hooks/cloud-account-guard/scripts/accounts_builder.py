@@ -142,6 +142,7 @@ stdout の値表示制御を builder 側で一元管理する。Agent Skill (`ac
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import shlex
@@ -275,12 +276,22 @@ def _resolve_target(
         # 止まるので、どちらも「正規化できない」として扱い、その先の stat で
         # 「確かめられません」として止める (hook はこのパスを deny する)。
         # 3.13 からは例外にならず、自分を指す 1 段のループはそのパスのまま (その先の stat で
-        # 止まる)、2 段以上のループはループの途中のパスを返すので、下の配置の検査で exit 2 に
-        # なる。どちらも書き込まない。
+        # 止まる)、2 段以上のループはループの途中のパスを返す (下の stat の分岐で避ける)。
+        # 2 段以上のループは、3.13 からの `resolve()` がループの途中のパスを返して下の配置の検査で
+        # 誤った案内 (exit 2) になるので、resolve の前に stat して ELOOP なら resolve を飛ばす
+        # (どの版でも「確かめられません」で止まる)。
         try:
-            path = path.resolve()
-        except (OSError, RuntimeError):
+            os.stat(path)
+            looped = False
+        except OSError as e:
+            looped = e.errno == errno.ELOOP
+        if looped:
             path = Path(os.path.normpath(str(path)))
+        else:
+            try:
+                path = path.resolve()
+            except (OSError, RuntimeError):
+                path = Path(os.path.normpath(str(path)))
         split = _split_tier_path(path)
         if split is None:
             raise _BuilderError(

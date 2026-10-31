@@ -25,7 +25,16 @@ from pathlib import Path
 # 設定ファイルの読み取り上限。gh の hosts.yml / gcloud の config_<name> はいずれも
 # 数 KB 以下なので、これを超える内容は「想定している設定ファイルではない」として
 # 読まない (巨大ファイルを hook の中で全部読まないためのガードでもある)。
+#
+# JSON として読む信頼できないファイル (.firebaserc・firebase.json・accounts.local.json・
+# cache の状態ファイル) にも同じ上限を使う。Python 3.9 の `json.loads` は大きな整数の parse が
+# 桁数の二乗の時間になり (2.2 MB で 25 秒。3.11 以降は 4,300 桁で ValueError)、hook の
+# timeout を超えると出力が捨てられて検証が素通しになる。parse の前に大きさで弾く。
 MAX_FILE_BYTES = 256 * 1024
+
+
+class FileTooLargeError(ValueError):
+    """`read_bounded_text` が `MAX_FILE_BYTES` を超えるファイルを見つけた。"""
 
 # 値の先頭に現れたら解釈を諦める YAML の記法 (ブロックスカラー / anchor / alias /
 # tag / flow collection)。単純な `key: value` 以外は扱わない。
@@ -57,6 +66,20 @@ def home_overridden(env) -> bool:
     """
     value = env.get(HOME_ENV_VAR)
     return bool(value) and value != os.environ.get(HOME_ENV_VAR)
+
+
+def read_bounded_text(path: Path) -> str:
+    """`MAX_FILE_BYTES` を超えない範囲で UTF-8 の文字列として読む (parse の前の大きさの確認)。
+
+    超えるときは `FileTooLargeError`、読めないときは OSError、UTF-8 でないときは
+    UnicodeDecodeError (どちらも ValueError / OSError の子で、呼び出し側が JSON の失敗と
+    同じ except で受けられる)。
+    """
+    with Path(path).open("rb") as handle:
+        raw = handle.read(MAX_FILE_BYTES + 1)
+    if len(raw) > MAX_FILE_BYTES:
+        raise FileTooLargeError(f"{MAX_FILE_BYTES} バイトを超えています")
+    return raw.decode("utf-8")
 
 
 def read_text(path: Path) -> str | None:

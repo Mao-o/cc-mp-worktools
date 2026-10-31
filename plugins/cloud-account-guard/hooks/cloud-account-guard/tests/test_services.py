@@ -1095,7 +1095,7 @@ class TestLocalResolutionAndFirebaseJsonLegacyKey(_FirebasercFixture):
         """存在するが読めない firebase.json (権限など) は、有無を確かめられないとして止める。"""
         _err, root = self._verify("{}", name="unreadable")
         path = root / "firebase.json"
-        with mock.patch("services.firebase.Path.read_bytes", side_effect=PermissionError):
+        with mock.patch("core.cli_config.Path.open", side_effect=PermissionError):
             self.assertTrue(firebase._firebase_json_blocks_local(str(path)))
 
     def test_legacy_key_is_checked_before_the_configstore_switch(self):
