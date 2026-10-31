@@ -367,14 +367,17 @@ class _DollarMemo:
     `$(` の中では、閉じない扱いの `${` の中の `(` / `)` を `$(` が数えるので、`$(` の閉じる位置が
     ずれて検証が減る側に倒れうる (入れ子が 64 段近いときだけ。0.28.0 は `${` を常に 1 文字ずつ
     読んでいたので、それより悪くはならない)。
+
+    `brace` は走査中のパラメータ展開 `${...}` の段数 (その中の `$(` では comment を読まない)。
     """
 
-    __slots__ = ("text", "ends", "depth")
+    __slots__ = ("text", "ends", "depth", "brace")
 
     def __init__(self) -> None:
         self.text: str | None = None
         self.ends: dict[int, int | None] = {}
         self.depth = 0
+        self.brace = 0
 
 
 _DOLLAR_MEMO = _DollarMemo()
@@ -468,51 +471,122 @@ def _skip_opaque(text: str, i: int) -> int | None:
         end = memo.ends.get(i, _UNSET)
         if end is not _UNSET:
             return end  # type: ignore[return-value]
+        if text[i + 1] == "(":
+            return _command_substitution_end(text, i, memo)
         memo.depth += 1
+        memo.brace += 1
         try:
-            if text[i + 1] == "{":
-                # パラメータ展開 `${...}`。中の `&` / `;` / `|` は演算子ではない
-                # (`${x:-a&b}` を単独の `&` で切ると、後ろの option が別セグメントに移って
-                # 誤ったコンテキストで照合される)。**閉じているものだけ**を 1 領域とみなす
-                # (閉じない `${` は bash でも構文エラー。残りを飲み込むと検証が消える)。
-                # 入れ子が深すぎるものも閉じていない扱い (分割が増える側)。
-                end = (
-                    _param_expansion_end(text, i)
-                    if memo.depth <= _DOLLAR_NEST_LIMIT
-                    else None
-                )
-            else:
-                depth = 1
-                j = i + 2
-                end = n
-                while j < n:
-                    inner = _skip_opaque(text, j)
-                    if (
-                        inner is not None
-                        and text.startswith("${", j)
-                        and ")" in text[j:inner]
-                    ):
-                        # bash 3.2 は `$(` の中の `${...}` にある `)` で `$(` を閉じる
-                        # (`echo $(echo ${x:-)}` + 改行 + `aws ...` の aws は走る)。`)` を含む
-                        # `${...}` は 1 領域にせず、1 文字ずつ読んで `)` を数える (閉じる位置が
-                        # 早い側。zsh で `$(` の中にある部分は分割が増える側に出る)。
-                        inner = None
-                    if inner is not None and inner > j:
-                        j = inner
-                        continue
-                    if text[j] == "(":
-                        depth += 1
-                    elif text[j] == ")":
-                        depth -= 1
-                        if depth == 0:
-                            end = j + 1
-                            break
-                    j += 1
+            # パラメータ展開 `${...}`。中の `&` / `;` / `|` は演算子ではない
+            # (`${x:-a&b}` を単独の `&` で切ると、後ろの option が別セグメントに移って
+            # 誤ったコンテキストで照合される)。**閉じているものだけ**を 1 領域とみなす
+            # (閉じない `${` は bash でも構文エラー。残りを飲み込むと検証が消える)。
+            # 入れ子が深すぎるものも閉じていない扱い (分割が増える側)。
+            end = (
+                _param_expansion_end(text, i)
+                if memo.depth <= _DOLLAR_NEST_LIMIT
+                else None
+            )
         finally:
             memo.depth -= 1
+            memo.brace -= 1
         memo.ends[i] = end
         return end
     return _arithmetic_span(text, i)
+
+
+def _comment_end(text: str, i: int) -> int:
+    """`text[i]` の `#` から始まる comment の終わり (改行の位置。改行が無ければ末尾)。"""
+    eol = text.find("\n", i)
+    return len(text) if eol == -1 else eol
+
+
+def _command_substitution_end(text: str, i: int, memo: _DollarMemo) -> int:
+    """`text[i:]` の `$(` の閉じ `)` の直後の index。閉じなければ `len(text)` (残りを 1 領域)。
+
+    入れ子の `$(` は再帰せず、開いている `$(` の位置を明示スタックに積んで 1 回の走査で辿る
+    (`$(` を 1000 段ほど重ねると、再帰では Python の再帰の上限に当たって hook が内部エラーになり、
+    検証をスキップしていた)。各 `$(` の終端は memo に残す (入れ子の `$(` を後から引き直しても
+    走査し直さない)。開いている `$(` の段数は `memo.depth` に数え、中の `${` の深さの上限
+    (`_DOLLAR_NEST_LIMIT`) の判定に使う。中の `${` / 引用符 / backtick などは `_skip_opaque` で
+    飛ばす (`${` だけは再帰するが、その深さは上限で抑えてある)。
+    """
+    n = len(text)
+    base = memo.depth
+    starts = [i]
+    parens = [1]
+    memo.depth = base + 1
+    # `#` から改行の手前までを comment として飛ばす (中の `)` / `'` / `$'\'` で `$(` を閉じたり
+    # 引用符を始めたりしない。`x=$(true # don't` + 改行 + `)` の後ろのコマンドは bash 3.2 / zsh
+    # とも走る)。comment と読むのは bash 3.2 と zsh の**両方**が comment と読む `#` だけ:
+    #   - 素の空白・タブ・改行の直後と、トップレベルの `$(` の先頭
+    #   - パラメータ展開 `${...}` の中では読まない (bash 3.2 は `${x:-$( #)}` の `#` を comment に
+    #     しない。zsh は `$(echo ${ #)}` の `#` を comment にしない)
+    #   - 行末が `\` の comment は読まない (bash 3.2 は `\` + 改行で comment を次の行まで続け、
+    #     zsh は改行で閉じる)
+    # 片方のシェルだけが comment と読む形 (`;` / `&` / `|` / `(` / `)`・算術評価の閉じ・入れ子の
+    # `$(` の先頭の直後は zsh だけ、エスケープした空白の直後は bash 3.2 だけ) は、0.29.0 と同じく
+    # comment にしない。どちらに倒しても、もう一方のシェルで走るコマンドを見失う形があり、
+    # 0.29.0 で候補に出ていたものを落とさない側に揃える。
+    comments = memo.brace == 0
+    # `$(` の先頭。ここに来る `$(` は、トップレベルのものか `${...}` の中のもの (comments が偽) だけ
+    # (`$(` の中の `$(` はこの走査が積んで辿る)。
+    word_start = True
+    brace_until = -1  # 1 文字ずつ読んでいる `${...}` の終わり (その中では comment を読まない)
+    try:
+        j = i + 2
+        while j < n:
+            if text[j] == "#" and word_start and comments and j >= brace_until:
+                end = _comment_end(text, j)
+                if text[end - 1] != "\\":
+                    j = end
+                    continue
+            if text[j] == "$" and j + 1 < n and text[j + 1] == "(":
+                cached = memo.ends.get(j, _UNSET)
+                word_start = False  # 入れ子の `$(` の先頭と、置換の閉じの後ろ
+                if cached is not _UNSET:
+                    j = cached  # type: ignore[assignment]
+                    continue
+                starts.append(j)
+                parens.append(1)
+                memo.depth += 1
+                j += 2
+                continue
+            inner = _skip_opaque(text, j)
+            if (
+                inner is not None
+                and text.startswith("${", j)
+                and ")" in text[j:inner]
+            ):
+                # bash 3.2 は `$(` の中の `${...}` にある `)` で `$(` を閉じる
+                # (`echo $(echo ${x:-)}` + 改行 + `aws ...` の aws は走る)。`)` を含む
+                # `${...}` は 1 領域にせず、1 文字ずつ読んで `)` を数える (閉じる位置が
+                # 早い側。zsh で `$(` の中にある部分は分割が増える側に出る)。
+                brace_until = max(brace_until, inner)
+                inner = None
+            if inner is not None and inner > j:
+                if not (text[j] == "\\" and text[j + 1] == "\n"):
+                    # 行継続 (`\` + 改行) はその前の状態を引き継ぐ。
+                    word_start = False
+                j = inner
+                continue
+            word_start = text[j] in " \t\n"
+            if text[j] == "(":
+                parens[-1] += 1
+            elif text[j] == ")":
+                parens[-1] -= 1
+                if parens[-1] == 0:
+                    parens.pop()
+                    memo.ends[starts.pop()] = j + 1
+                    memo.depth -= 1
+                    if not starts:
+                        return j + 1
+            j += 1
+        # 閉じないまま尽きた: 開いている `$(` はどれも残り全部 (再帰版と同じ)。
+        for start in starts:
+            memo.ends[start] = n
+        return n
+    finally:
+        memo.depth = base
 
 
 # --- heredoc の開始 (`<<[-]word`) ------------------------------------------
