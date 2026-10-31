@@ -725,6 +725,12 @@ def _outside_error(root: Path | None, *, stops: bool) -> str:
     )
 
 
+def _unresolved_context_error(svc, cands, *, stops: bool) -> str:
+    """`resolve_context` が context を決められなかったときの文 (v0.28.0)。"""
+    tail = "" if stops else "\n(リモート read のみのコマンドなので実行は止めません)"
+    return f"{svc.UNRESOLVED_CONTEXT}{tail}\n(検出コマンド: {_detected(cands)})"
+
+
 def _target_dirs(cands, seg_dirs: dict) -> set:
     """target の各セグメントが走るディレクトリ (None = 静的に決められない)。"""
     dirs: set = set()
@@ -813,6 +819,10 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
     # 起動リポジトリの外で走る target は照合せずに止める (`_outside_error`)。
     launch_root = workdir.launch_root(project_dir)
     seg_dirs = workdir.segment_dirs(command, cwd or project_dir)
+    # seg_dirs は実際には走らない `cd` (括弧・条件・パイプの中) も追う。内外判定には
+    # 安全側だが、相対パスの context をどのファイルに解決するかには使えないので、
+    # `cd` が確実に順に走る形かを別に確かめる (v0.28.0。下の `resolve_context`)。
+    chdir_sequential = workdir.chdir_is_sequential(command)
     env_changes = workdir.segment_env_changes(command)
     # アカウント状態を変えうるコマンド (切替 / ログイン / ログアウト) は、実行前
     # (PreToolUse) の時点で当該 service の成功 cache を全て破棄する。実行後に
@@ -1080,6 +1090,34 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
             problems.append(_combined_short_error(svc, cands, stops=stops))
             continue
 
+        # 相対パスの context (kubectl の `--kubeconfig k.yaml`) を、セグメントが走る
+        # ディレクトリ (`cd` を追ったもの) で解決する (v0.28.0。services/kubectl.py の
+        # `resolve_context`)。cache より前に置く: 解決前の context をキーにすると、別の
+        # ディレクトリの同じ相対パスの成功で通る。決められない・例外は止める側。
+        # `cd` が確実に順に走る形でなければ ({None} = 決められない)、相対パスがあるときだけ
+        # 止まる (絶対パス・相対パスの無いコマンドは今までどおり)。
+        # base (Bash の作業ディレクトリ) は案内の形を決めるのに使う (そこで打つ案内なら
+        # 相対パスのままでも同じファイルを指す)。
+        resolve = getattr(svc, "resolve_context", None)
+        if resolve is not None:
+            try:
+                resolved = resolve(
+                    ctx,
+                    dirs if chdir_sequential else {None},
+                    {**os.environ, **(inline_env or {})},
+                    base=cwd or project_dir,
+                )
+            except Exception:  # noqa: BLE001
+                resolved = None
+            if resolved is None:
+                problems.append(_unresolved_context_error(svc, cands, stops=stops))
+                continue
+            ctx = resolved
+        # 成功 cache のキーに入れる context。案内の表示だけに使う値 (DISPLAY_CONTEXT_KEYS)
+        # は外す (同じファイルを照合したコマンドの成功は、案内の形が違っても共有する)。
+        display_keys = getattr(svc, "DISPLAY_CONTEXT_KEYS", ())
+        cache_ctx = {k: v for k, v in ctx.items() if k not in display_keys} if ctx else ctx
+
         svc_name = _service_name(svc)
         # verify 開始時点の epoch。開始後に (並行する hook の) 切替検出で epoch が進んだ
         # 場合、この検証は旧状態を見ている可能性があるため結果を cache に公開しない
@@ -1098,7 +1136,7 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         # 同じ snapshot を使う。
         ident = cache.identity_env(svc, {**os.environ, **(inline_env or {})})
         if not switching_here and cache.get_success(
-            svc_name, project_dir, entry, accounts_mtime, inline_env, ctx,
+            svc_name, project_dir, entry, accounts_mtime, inline_env, cache_ctx,
             identity_env=ident,
         ):
             if trace is not None:
@@ -1181,7 +1219,7 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
             )
         elif not switching_here:
             cache.set_success(
-                svc_name, project_dir, entry, accounts_mtime, inline_env, ctx,
+                svc_name, project_dir, entry, accounts_mtime, inline_env, cache_ctx,
                 epoch=epoch, identity_env=ident,
             )
 

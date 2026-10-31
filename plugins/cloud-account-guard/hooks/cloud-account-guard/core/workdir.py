@@ -14,7 +14,15 @@ hook が検証に使う env は **Claude を起動したときの env** (+ setti
 **外として扱う** (分からないものを内側とみなすと誤 allow になる)。
 
 subshell の括弧 (`(cd x && gcloud ...)`) は分解の時点で落ちるため、括弧を
-抜けた後のセグメントも移動先にいるものとして扱う (外に倒れる = 安全側)。
+抜けた後のセグメントも移動先にいるものとして扱う (外に倒れる = 安全側)。条件
+(`false && cd x;` / `if ...; then cd x; fi`) やパイプ (`cd x | cat`) の中の `cd` も、
+実行されたものとして追う。
+
+**この過大見積もりはディレクトリの内外判定にとってだけ安全側**。移動先がどこでも
+「外かもしれない」に倒れるだけなので誤 allow にはならないが、移動先を使って**どの
+ファイルか**を決める用途 (kubectl の相対パスの kubeconfig。v0.28.0) では、実際には
+走らない `cd` を追うと別のファイルで照合して誤 allow になる。その用途では
+`chdir_is_sequential` で、`cd` がどれも確実に順に実行される形かを先に確かめる。
 """
 from __future__ import annotations
 
@@ -101,7 +109,10 @@ def _chdir_target(segment: str, current: str | None) -> tuple[bool, str | None]:
         return True, None
     if head not in _CHDIR_COMMANDS:
         return False, None
+    physical = False
     while args and args[0] in _CD_FLAGS:
+        if args[0] in ("-P", "-L"):
+            physical = args[0] == "-P"  # bash と同じく後のものが勝つ
         args = args[1:]
     if args and args[0] == "--":
         args = args[1:]
@@ -128,6 +139,9 @@ def _chdir_target(segment: str, current: str | None) -> tuple[bool, str | None]:
         if not home:
             return True, None
         target = home + target[1:]
+    if physical:
+        # `cd -P lnk/..` は symlink を解いてから `..` を辿る (実体の親。bash と同じ)。
+        return True, os.path.realpath(os.path.join(current, target))
     return True, os.path.normpath(os.path.join(current, target))
 
 
@@ -187,3 +201,134 @@ def segment_dirs(command: str, cwd: str) -> dict[str, set[str | None]]:
             continue
         result.setdefault(segment, set()).add(current)
     return result
+
+
+# 引用符の外にあると、`segment_dirs` が追う `cd` が実際には走らない (または後続に効かない)
+# 可能性がある記号 (v0.28.0)。括弧 = subshell / コマンド置換 / 関数、波括弧 = グループ・
+# 関数本体、`|` = パイプ (各段は subshell) と `||`、backtick = コマンド置換。
+_NON_SEQUENTIAL_CHARS = frozenset("(){}|`")
+# 条件・繰り返しの中の `cd` は走るかどうか (何回走るか) が条件次第。
+_CONTROL_WORDS = frozenset(
+    {"if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac"}
+)
+_WORD_BREAKS = frozenset(" \t\n;&|()<>")
+
+
+def _unquoted(command: str) -> str:
+    """引用符の中とエスケープした文字を `_` に置き換えた文字列 (語の区切りは保つ)。"""
+    out: list[str] = []
+    quote = None
+    i = 0
+    n = len(command)
+    while i < n:
+        c = command[i]
+        if quote == "'":
+            if c == "'":
+                quote = None
+            out.append("_")
+        elif quote == '"':
+            if c == "\\" and i + 1 < n:
+                out.append("__")
+                i += 2
+                continue
+            if c == '"':
+                quote = None
+            out.append("_")
+        elif c == "\\" and i + 1 < n:
+            out.append("__")
+            i += 2
+            continue
+        elif c in ("'", '"'):
+            quote = c
+            out.append("_")
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _has_lone_ampersand(text: str) -> bool:
+    """`&&` でもリダイレクト (`2>&1` / `&>f` / `>&f`) でもない `&` (背景実行) があるか。"""
+    for i, c in enumerate(text):
+        if c != "&":
+            continue
+        prev = text[i - 1] if i > 0 else ""
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+        if prev == "&" or nxt == "&":
+            continue
+        if prev in "<>" or nxt == ">":
+            continue
+        return True
+    return False
+
+
+def chdir_is_sequential(command: str) -> bool:
+    """コマンド中の `cd` / `pushd` / `popd` がどれも、確実に順に実行される形なら True。
+
+    `segment_dirs` は括弧・条件・パイプを落としたまま `cd` を追うので、
+    `(cd sub; true) && kubectl ...` や `false && cd sub; kubectl ...` の kubectl を
+    `sub` で走るものとして扱う。内外の判定ではそれで安全側だが、移動先で**どのファイルか**を
+    決める用途では誤 allow になる。その用途の呼び出し側は、これが False なら走る
+    ディレクトリを「決められない」として扱う。
+
+    False にする形: 作業ディレクトリを変えるセグメントがあり、かつ引用符の外に `(` `)` `{`
+    `}` `|` (`||` を含む) backtick・背景実行の `&`・制御構文の語 (`if` / `for` / `case` 等)
+    のどれかがある。または `&&` の右の cd の後に `;` / 改行で次のリストが続く
+    (`false && cd sub; kubectl ...`)。`cd` が無ければ常に True (`segment_dirs` は移動を
+    追わない)。`&&` と `;` と改行だけで繋いだ形 (`cd a; cd b && kubectl ...` /
+    `mkdir -p sub && cd sub && kubectl ...`) は True。
+    """
+    if not _changes_dir(command):
+        return True
+    text = _unquoted(command)
+    if any(c in _NON_SEQUENTIAL_CHARS for c in text):
+        return False
+    if _has_lone_ampersand(text):
+        return False
+    word: list[str] = []
+    for c in text + " ":
+        if c in _WORD_BREAKS:
+            if "".join(word) in _CONTROL_WORDS:
+                return False
+            word = []
+        else:
+            word.append(c)
+    return not _conditional_chdir_before_next_list(command, text)
+
+
+def _changes_dir(command: str) -> bool:
+    return any(
+        _chdir_target(segment, "/")[0] for segment, _env in extract_candidates(command)
+    )
+
+
+def _conditional_chdir_before_next_list(command: str, text: str) -> bool:
+    """`X && cd sub; kubectl ...` の形 (`&&` の右の cd の後に `;` / 改行で次のリストが続く)。
+
+    `X` が失敗すると cd は走らず、`;` の後は元のディレクトリで走る。同じ `&&` の鎖の中の
+    後続 (`mkdir -p sub && cd sub && kubectl ...`) は cd が走ったときだけ走るので確実。
+    `text` は `_unquoted(command)` (同じ長さ。引用符の中の `;` / `&&` で切らない)。
+    """
+    lists: list[list[str]] = []
+    start = 0
+    chain: list[str] = []
+    i = 0
+    n = len(text)
+    while i <= n:
+        if i == n or text[i] in ";\n":
+            chain.append(command[start:i])
+            lists.append(chain)
+            chain = []
+            start = i + 1
+        elif text.startswith("&&", i):
+            chain.append(command[start:i])
+            start = i + 2
+            i += 2
+            continue
+        i += 1
+    while lists and not any(part.strip() for part in lists[-1]):
+        lists.pop()  # 末尾の `;` / 改行
+    for chain in lists[:-1]:
+        if any(_changes_dir(part) for part in chain[1:]):
+            return True
+    return False
