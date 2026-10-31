@@ -392,6 +392,36 @@ class TestMidTurnDeliversThemToo(InterruptedTestCase):
         self.assertEqual(self.reviewed(), ["a.py", "b.py", "c.py"])
 
 
+class TestSymlinkedPath(InterruptedTestCase):
+    """claim したパスが symlink 経由の名前で、返った塊の hash のキー (実体名) と違うとき。"""
+
+    def edit_via(self, base: str, rel: str, content: str) -> None:
+        _testutil.write(self.repo, rel, content)
+        self.run_hook("post-tool", {
+            "session_id": SESSION_A, "cwd": base, "tool_name": "Write",
+            "tool_input": {"file_path": os.path.join(base, rel), "content": content},
+        })
+
+    def test_returned_chunk_not_resent_when_claimed_by_symlinked_path(self):
+        link = os.path.join(self.tmpdir, "linkrepo")
+        os.symlink(self.repo, link)
+        self.edit_via(link, "a.py", self.content(30, "a"))
+        self.edit_via(link, "b.py", self.content(30, "b"))
+        link_a = os.path.join(link, "a.py")
+        self.assertIn(link_a, self.raw_state()["fingerprints"], "前提: 指紋は生の名前で記録される")
+        self.killed_stop([FINDING], kill_at=2)
+
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertIn(FINDING, self.reason(output))
+        self.assertEqual(len(self.review_calls), 1, "返った塊 (a.py) を送り直さない")
+        self.assertIn("b.py", self.review_calls[0])
+        self.assertNotIn("a.py", self.review_calls[0])
+        self.assertEqual(self.raw_state()["in_flight"], {})
+        self.assertNotIn(
+            link_a, self.raw_state()["fingerprints"], "symlink 経由で回収した塊の指紋も消す"
+        )
+
+
 class TestOwnerGone(unittest.TestCase):
     """`state._owner_gone`: 居ないと言い切れるときだけ True。"""
 

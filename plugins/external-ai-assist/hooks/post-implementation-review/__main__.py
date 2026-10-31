@@ -1828,8 +1828,9 @@ def _review_claim(
     """claim を取り、**何が起きても握りっぱなしにしない**ことを保証する薄い外枠。
 
     claim を取った後で例外が出ると、in-flight にエントリが残ったまま hook が死ぬ。
-    復元されるのは TTL (`IN_FLIGHT_TTL_SEC` = 900s) 超過後の Stop なので、その間
-    このセッションの変更は pending へ戻らず**レビューが 15 分沈黙する**。呼び出し元の
+    復元されるのは TTL 超過後の Stop、または claim した hook がもう居ない (0.17.0、
+    `state._owner_gone`) と分かった後の Stop で、それまでこのセッションの変更は pending へ
+    戻らない。呼び出し元の
     fail-open (`__main__` の `except Exception`) はプロセスを守るだけで状態は戻さない。
 
     実際の経路: `EXTERNAL_AI_POST_REVIEW_TIMEOUT` に非有限値が入ると

@@ -286,17 +286,26 @@ def claim_pending(session_id: str) -> tuple[str, list[str]] | None:
                 covered: dict[str, str] = {}
                 for result in results:
                     covered.update(result["hashes"])
+                # `covered` のキーは実体名 (realpath の root に realpath 相対の rel を join した
+                # もの)、entry の paths は PostToolUse の file_path の生の名前。symlink 経由で
+                # claim したパスを生の名前で比べると、返った塊を pending に戻して送り直す
+                # (指摘が 2 回届く) ので、実体名で比べる
+                kept: list[str] = []
                 for p in entry.get("paths") or []:
-                    if p not in covered:
+                    if isinstance(p, str) and os.path.realpath(p) in covered:
+                        kept.append(p)
+                    else:
                         state["pending"].setdefault(p, now)
                 if not results:
                     del state["in_flight"][cid]
                     continue
                 # 結果の返った塊のパスは、指摘を配るまで in-flight に置く (claim されない =
-                # 再送しない。`recorded_paths` からも見える)。`prior` は回収した時点の hash で、
-                # 配るまでに別のレビューがそのパスの新しい hash を記録していたら上書きしない
+                # 再送しない。`recorded_paths` からも見える)。paths は生の名前のまま残す
+                # (指紋のキーと揃え、`take_orphaned_results` が消せるようにする)。`prior` は
+                # 回収した時点の hash で、`reviewed` と同じ実体名をキーにする。配るまでに別の
+                # レビューがそのパスの新しい hash を記録していたら上書きしない
                 entry["orphan"] = True
-                entry["paths"] = list(covered)
+                entry["paths"] = kept
                 entry["prior"] = {p: state["reviewed"].get(p) for p in covered}
 
             if not state["pending"]:
