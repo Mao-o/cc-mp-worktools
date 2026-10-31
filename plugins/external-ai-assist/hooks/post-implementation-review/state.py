@@ -149,7 +149,9 @@ def _empty_state() -> dict:
         "last_backend": "",
         "continued_turn": False,
         # 応答の途中のレビュー (0.16.0。既定オフ。`__main__.handle_mid_turn`)
-        "midturn_at": 0.0,
+        # 実行中の応答の途中のレビューの印 (実行ごとの id -> 開始時刻)。時刻 1 つだと、並列に
+        # 走る 2 本のうち先に終わった方が、もう一方の分まで下ろしてしまう
+        "midturn_runs": {},
         "stop_handoff": False,
         "midturn_notices": [],
     }
@@ -178,9 +180,13 @@ def _normalize(raw) -> dict:
         state["last_backend"] = backend
     if raw.get("continued_turn") is True:
         state["continued_turn"] = True
-    midturn_at = raw.get("midturn_at")
-    if isinstance(midturn_at, (int, float)) and not isinstance(midturn_at, bool):
-        state["midturn_at"] = float(midturn_at)
+    runs = raw.get("midturn_runs")
+    if isinstance(runs, dict):
+        state["midturn_runs"] = {
+            k: float(v)
+            for k, v in runs.items()
+            if isinstance(k, str) and isinstance(v, (int, float)) and not isinstance(v, bool)
+        }
     if raw.get("stop_handoff") is True:
         state["stop_handoff"] = True
     notices = raw.get("midturn_notices")
@@ -601,25 +607,54 @@ def pending_paths(session_id: str) -> list[str]:
 # --------------------------------------------------------------------------
 
 
-def set_midturn_running(session_id: str, running: bool) -> None:
-    """応答の途中のレビューが cursor lock を握っている間だけ立てる印。"""
+def _live_midturn_runs(state: dict, now: float) -> dict[str, float]:
+    """`MIDTURN_STALE_SEC` 以内の印だけ (kill された実行の印は、この時間で失効する)。"""
+    return {
+        run_id: at
+        for run_id, at in state["midturn_runs"].items()
+        if at > 0 and now - at <= MIDTURN_STALE_SEC
+    }
+
+
+def begin_midturn(session_id: str) -> str:
+    """応答の途中のレビューの実行 1 本分の印を立て、その実行の id を返す。
+
+    印は実行ごとに持つ (時刻 1 つにしない)。同じセッションで 2 本が並列に走っても、先に終わった
+    方は**自分の id だけ**を下ろす (`end_midturn`)。書き込めなくても id は返す (印が無いと Stop は
+    持ち主を見失うが、止めるよりは fail-open)。
+    """
+    run_id = f"{os.getpid()}-{uuid.uuid4().hex[:12]}"
     try:
         with _locked_state(session_id) as state:
-            state["midturn_at"] = time.time() if running else 0.0
+            now = time.time()
+            runs = _live_midturn_runs(state, now)
+            runs[run_id] = now
+            state["midturn_runs"] = runs
+    except OSError:
+        pass
+    return run_id
+
+
+def end_midturn(session_id: str, run_id: str) -> None:
+    """`begin_midturn` が返した id の印だけを下ろす (他の実行の印は残す)。"""
+    try:
+        with _locked_state(session_id) as state:
+            runs = _live_midturn_runs(state, time.time())
+            runs.pop(run_id, None)
+            state["midturn_runs"] = runs
     except OSError:
         pass
 
 
 def midturn_running(session_id: str) -> bool:
-    """このセッションの応答の途中のレビューが実行中か (`MIDTURN_STALE_SEC` 以内の印)。"""
+    """このセッションの応答の途中のレビューが 1 本でも実行中か (`MIDTURN_STALE_SEC` 以内の印)。"""
     if not os.path.exists(_state_path(session_id)):
         return False
     try:
         with _locked_state(session_id) as state:
-            at = float(state.get("midturn_at") or 0.0)
+            return bool(_live_midturn_runs(state, time.time()))
     except OSError:
         return False
-    return at > 0 and time.time() - at <= MIDTURN_STALE_SEC
 
 
 def request_stop_handoff(session_id: str) -> None:

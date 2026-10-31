@@ -46,6 +46,7 @@ global として fixture を読むこと (`GIT_CONFIG_GLOBAL` が届いている
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import shlex
@@ -210,6 +211,30 @@ def snapshot_repo(repo: str) -> dict[str, object]:
         "reflog": out("reflog", "--all"),
         "index": index,
     }
+
+
+def snapshot_git_files(repo: str) -> dict[str, str]:
+    """`repo/.git` 配下の全 file の指紋 (相対パス -> 中身の sha256。dir は空でも `<dir>` として数える)。
+
+    `snapshot_repo` は config / refs / reflog / index だけを見るので、`GIT_COMMON_DIR` /
+    `GIT_OBJECT_DIRECTORY` の外し損ねが objects にだけ書く漏れ (refs も reflog も動かない) を見落とす。
+    ファイル単位で前後を比べる。"""
+    root = os.path.join(repo, ".git")
+    found: dict[str, str] = {}
+    for base, dirs, files in os.walk(root):
+        for name in dirs:
+            if not os.listdir(os.path.join(base, name)):
+                found[os.path.relpath(os.path.join(base, name), root) + "/"] = "<dir>"
+        for name in files:
+            path = os.path.join(base, name)
+            with open(path, "rb") as f:
+                found[os.path.relpath(path, root)] = hashlib.sha256(f.read()).hexdigest()
+    return found
+
+
+def without_outer_leaks(env: dict[str, str]) -> dict[str, str]:
+    """`env` から `OUTER_LEAKS` を外したもの (外側の repo / template を指す変数を、起動する git に渡さない)。"""
+    return {k: v for k, v in env.items() if k not in OUTER_LEAKS}
 
 
 # 外側の `GIT_TEMPLATE_DIR` が指す template に置く hook。走ると `outer_hook_marker` に 1 行ずつ書く
@@ -493,28 +518,88 @@ class TestTheDetectorSeesMaintenance(unittest.TestCase):
     `isolate_git_config` で隔離した env のまま git を直接起動する。
     """
 
+    def _commit_without_the_stopping_settings(self, tmp: str) -> list[dict]:
+        """陽性対照の本体。止める設定の無い repo で commit し、trace の event を返す。
+
+        git は、外側の repo / template を指す変数 (`OUTER_LEAKS`) を env から外して起動する。床
+        (`isolate_git_config`) が外し損ねても、この起動は外側の repo に commit を書かない (床が外し損ねたことは
+        `TestTheFloorDropsTheOuterLeaks` が見るので、ここで外しても検出は消えない)。
+        """
+        os.environ.update(_testutil.git_config_env(FOREGROUND_ONLY_SETTINGS))
+        repo = os.path.join(tmp, "repo")
+        os.makedirs(repo)
+        trace = os.path.join(tmp, "trace2.jsonl")
+        env = without_outer_leaks(os.environ)
+        for args in (
+            ["init", "-q"],
+            ["config", "user.email", "test@example.com"],
+            ["config", "user.name", "test"],
+        ):
+            subprocess.run(["git", *args], cwd=repo, env=env, capture_output=True, check=True)
+        _testutil.write(repo, "seed.txt", "alpha\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, env=env, capture_output=True, check=True)
+        # trace は commit だけを見る (init / config / add の起動は数えない)
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, env={**env, "GIT_TRACE2_EVENT": trace},
+                       capture_output=True, check=True)
+        return trace_events(trace)
+
     def test_a_commit_that_stops_nothing_spawns_maintenance(self):
         with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
             isolate_git_config(tmp)
-            os.environ.update(_testutil.git_config_env(FOREGROUND_ONLY_SETTINGS))
-            repo = os.path.join(tmp, "repo")
-            os.makedirs(repo)
-            for args in (
-                ["init", "-q"],
-                ["config", "user.email", "test@example.com"],
-                ["config", "user.name", "test"],
-            ):
-                subprocess.run(["git", *args], cwd=repo, capture_output=True, check=True)
-            _testutil.write(repo, "seed.txt", "alpha\n")
-            subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=True)
-            trace = os.path.join(tmp, "trace2.jsonl")
-            os.environ["GIT_TRACE2_EVENT"] = trace
-            subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, capture_output=True, check=True)
-            events = trace_events(trace)
+            events = self._commit_without_the_stopping_settings(tmp)
         self.assertIn("commit", command_names(events), "前提: trace が取れている (空の床にしない)")
         self.assertNotEqual(
             spawned_maintenance(events), [], "何も止めない commit で、maintenance の起動が見えない"
         )
+
+    def _run_control_with_planted(self, planted: tuple[str, ...] | None) -> tuple[dict, dict, dict, list]:
+        """外側に本物の別 repo (`decoy`) を作り、床の後で `planted` の変数 (None なら 16 個すべて) を
+        足して陽性対照を流す。返り値は (前の指紋, 後の指紋, 外側の template の痕跡, 対照の event)。
+        対照の git が外側の変数のせいで失敗したら、crash ではなく失敗として数える。"""
+        with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
+            isolate_git_config(tmp)
+            decoy = make_decoy_repo(tmp)
+            before = snapshot_git_files(decoy)
+            planted_all = plant_outer_leaks(decoy)
+            if planted is not None:
+                for name in OUTER_LEAKS:
+                    if name not in planted:
+                        del os.environ[name]
+                assert set(planted) <= set(planted_all)
+            try:
+                events = self._commit_without_the_stopping_settings(tmp)
+            except subprocess.CalledProcessError as e:
+                self.fail(f"外側の repo を指す変数が対照の git に残っている: {e.cmd[1:3]}")
+            after = snapshot_git_files(decoy)
+            traces = outer_template_traces(decoy, os.path.join(tmp, "repo"))
+        return before, after, traces, events
+
+    def test_the_positive_control_does_not_write_to_an_outer_repo(self):
+        """床が外側の repo を指す変数を外し損ねても、陽性対照の git は外側の repo に書かないこと。
+
+        git の hook の中から suite を流すと、外側の env に `GIT_DIR` などが入る。床を作った後で外側の本物の
+        repo (`decoy`) を指す変数を足して (床の外し損ねの再現)、陽性対照を流す。外側の `.git` 配下を
+        **ファイル単位**で前後比較する (refs の数だけだと、`GIT_COMMON_DIR` / `GIT_OBJECT_DIRECTORY` が
+        objects にだけ書く漏れを見落とす)。外側の template の hook も走らず、対照の commit は trace に見える。
+        """
+        before, after, traces, events = self._run_control_with_planted(None)
+        self.assertIn("commit", command_names(events), "前提: 対照の commit が trace に見える")
+        self.assertEqual(after, before, "外側の repo の .git に書き込まれた")
+        self.assertEqual(
+            traces, {"hook_runs": 0, "copied": []}, "外側の GIT_TEMPLATE_DIR の hook が写された / 走った"
+        )
+
+    def test_the_positive_control_drops_each_outer_leak_on_its_own(self):
+        """`OUTER_LEAKS` の変数を 1 つずつだけ足しても、陽性対照は外側の repo に書かないこと。
+
+        全部を一度に足すと、1 つ外し損ねても別の変数が git を失敗させる・同じ場所を指すなどで、どれが
+        外れていないかが隠れる。1 つずつなら、除外から 1 要素だけ抜けた退行がその要素の回で落ちる。
+        """
+        for name in OUTER_LEAKS:
+            with self.subTest(leak=name):
+                before, after, traces, _ = self._run_control_with_planted((name,))
+                self.assertEqual(after, before, f"{name} が対照の git に漏れて、外側の repo に書かれた")
+                self.assertEqual(traces, {"hook_runs": 0, "copied": []})
 
 
 class TestEachSourceOfTheSettingsOnItsOwn(unittest.TestCase):
