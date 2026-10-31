@@ -12,4 +12,4 @@ Sections in [10] "Snapshotting"
 
 (8 sections)
 
-Next: parse-claude-docs.py content 10 "<heading_path>" --cache-dir <CACHE_DIR>
+Next: parse-claude-docs.py content --cache-dir <CACHE_DIR> -- 10 "<heading_path>"

@@ -97,7 +97,7 @@ class RenderContentTest(unittest.TestCase):
         page = PageView(idx=7, title="T", body_lines=BODY * 50)
         out = _capture(render_content, page, self._args(max_chars=40),
                        script="parse-x.py", hint_args=("--max-age", "5"))
-        self.assertIn('parse-x.py content 7 "<heading_path>" --max-age 5', out)
+        self.assertIn('parse-x.py content --max-age 5 -- 7 "<heading_path>"', out)
 
 
 class RowRenderersTest(unittest.TestCase):

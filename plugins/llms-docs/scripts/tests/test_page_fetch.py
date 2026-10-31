@@ -194,7 +194,8 @@ class FirebaseTestsOnGenericLoader(_FetchSource):
         code, out, _ = self.run_g("search-index", "totallyabsentkeyword")
         self.assertEqual(code, 0)
         self.assertIn("No matching documents found", out)
-        self.assertIn("search-content", out)
+        # the word put in place of "<query>" may start with "-": after "--"
+        self.assertIn("'search-content -- \"<query>\"'", out)
         self.assertIn("omit --page-ref to scan every page", out)
 
     def test_search_zero_result_tip_mentions_search_content(self):
@@ -328,8 +329,8 @@ class FirebaseTestsOnGenericLoader(_FetchSource):
         self.assertEqual(code, 0, err)
         hint_block = (
             "\n--- Top-level sections (1) ---\n  - Limits\n\n"
-            f'Next: {SCRIPT} content 0 "<heading_path from above>" --source firebase '
-            f"--sources-file {self.sources} --cache-dir {self.tmp}\n"
+            f"Next: {SCRIPT} content --source firebase "
+            f'--sources-file {self.sources} --cache-dir {self.tmp} -- 0 "<heading_path from above>"\n'
         )
         expected = (
             "# doc_title: Firestore Query Limits\n"
@@ -872,8 +873,8 @@ class PartialFailureTest(_FetchSource):
         self.assertNotIn("showing full-body search results", out)
         # no page to name: only the placeholder line (as parse-firebase.py prints)
         self.assertEqual([line for line in out.splitlines() if line.startswith("Next:")],
-                         [f'Next: {SCRIPT} content <page_ref> "<heading_path>" --source firebase '
-                          f"--sources-file {self.sources} --cache-dir {self.tmp}"])
+                         [f"Next: {SCRIPT} content --source firebase "
+                          f'--sources-file {self.sources} --cache-dir {self.tmp} -- <page_ref> "<heading_path>"'])
 
     def test_a_cached_page_fetched_from_another_url_is_fetched_again(self):
         # a page file whose sidecar names another URL (as if two URLs shared

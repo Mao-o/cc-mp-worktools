@@ -7,7 +7,7 @@
   - Common uses
   - Limits
 
-Next: parse-claude-docs.py content 10 "<heading_path from above>" --cache-dir <CACHE_DIR>
+Next: parse-claude-docs.py content --cache-dir <CACHE_DIR> -- 10 "<heading_path from above>"
 Source: https://code.claude.com/docs/en/snapshotting
 
 Record, restore, and condense edits and chat to manage session state.
@@ -51,11 +51,11 @@ A condensation stands in for the turns after the snapshot. Aute dolor voluptate 
 ## Limits
 
 
-... (1791 chars truncated; narrow with parse-claude-docs.py content 10 "<heading_path>" --cache-dir <CACHE_DIR>)
+... (1791 chars truncated; narrow with parse-claude-docs.py content --cache-dir <CACHE_DIR> -- 10 "<heading_path>")
 
 --- Top-level sections (3) ---
   - How snapshots work
   - Common uses
   - Limits
 
-Next: parse-claude-docs.py content 10 "<heading_path from above>" --cache-dir <CACHE_DIR>
+Next: parse-claude-docs.py content --cache-dir <CACHE_DIR> -- 10 "<heading_path from above>"

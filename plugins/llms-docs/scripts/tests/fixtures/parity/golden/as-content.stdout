@@ -7,7 +7,7 @@
   - Background
   - Solution
 
-Next: parse-ai-sdk.py content 7 "<heading_path from above>" --cache-dir <CACHE_DIR>
+Next: parse-ai-sdk.py content --cache-dir <CACHE_DIR> -- 7 "<heading_path from above>"
 
 > Page list: [/llms.txt](/llms.txt).
 
@@ -39,4 +39,4 @@ Page list: [/llms.txt](/llms.txt)
   - Background
   - Solution
 
-Next: parse-ai-sdk.py content 7 "<heading_path from above>" --cache-dir <CACHE_DIR>
+Next: parse-ai-sdk.py content --cache-dir <CACHE_DIR> -- 7 "<heading_path from above>"

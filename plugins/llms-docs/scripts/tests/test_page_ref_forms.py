@@ -15,6 +15,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shlex
 import shutil
 import tempfile
@@ -577,12 +578,18 @@ class CliTest(unittest.TestCase):
                 shown[-1][1] = line.strip()[len("URL: "):]
         self.assertEqual(len(shown), len(PAGES))
         for idx, url in shown:
+            # pages 3 and 4 share a URL and differ in body: the URL lists both
+            namesakes = [i for i, (_t, u) in enumerate(PAGES) if u == PAGES[idx][1]]
             for ref in (str(idx), url):
                 with self.subTest(ref=ref):
                     code, out, err = self.run_cmd("suffix", "sections", ref)
+                    if ref != str(idx) and len(namesakes) > 1:
+                        self.assertEqual(code, 1, out)
+                        self.assertIn(f"Ambiguous URL '{url}'", err)
+                        self.assertEqual(re.findall(r"^  \[(\d+)\] ", err, re.M), [str(i) for i in namesakes])
+                        continue
                     self.assertEqual(code, 0 if ref == str(idx) or url == PAGES[idx][1] else 1, err)
-                    if ref == str(idx) or PAGES[idx][1] != PAGES[idx - 1][1]:
-                        self.assertIn(f'[{idx}] "{PAGES[idx][0]}"', out.splitlines()[0])
+                    self.assertIn(f'[{idx}] "{PAGES[idx][0]}"', out.splitlines()[0])
 
     def test_hostile_references_fail_cleanly(self):
         for word in ("-x", "--limit", "\\_", "the", "---", "'", "-", "%", "(", "["):

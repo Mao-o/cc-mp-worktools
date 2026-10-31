@@ -93,7 +93,9 @@ def render_sections(page: PageView, *, hint_args: tuple) -> None:
     print()
     print(f"({len(sections)} sections)")
     print()
-    next_hint("content", str(page.idx), '"<heading_path>"', *hint_args)
+    # a placeholder the reader replaces, maybe with a heading that starts
+    # with "-": every positional goes after "--" (see content_command)
+    next_hint("content", *hint_args, "--", str(page.idx), '"<heading_path>"')
 
 
 def render_content(page: PageView, args, *, script: str, hint_args: tuple,
@@ -117,8 +119,7 @@ def render_content(page: PageView, args, *, script: str, hint_args: tuple,
     if transform is not None:
         content = transform(content)
 
-    hint_suffix = (" " + " ".join(hint_args)) if hint_args else ""
-    narrow_hint = f'{script} content {page.idx} "<heading_path>"{hint_suffix}'
+    narrow_hint = " ".join([script, "content", *hint_args, "--", str(page.idx), '"<heading_path>"'])
     # A page or section with no subsections cannot be narrowed by heading: the
     # truncation notice then points at a search inside the page instead.
     # A page with no heading at all is childless too; a page whose headings
@@ -335,7 +336,7 @@ def render_next_content(candidates: list, *, hint_args: tuple,
     if query is not None:
         dropped_terms_note(query)
     if not candidates:
-        next_hint("content", "<page_ref>", '"<heading_path>"', *hint_args)
+        next_hint("content", *hint_args, "--", "<page_ref>", '"<heading_path>"')
         return
     for ref, heading, extra, count in candidates[:NEXT_CONTENT_LIMIT]:
         note = duplicate_heading_note(count)

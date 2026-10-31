@@ -10,4 +10,4 @@ Sections in [3] "useCompletion"
 
 (5 sections)
 
-Next: parse-ai-sdk.py content 3 "<heading_path>" --cache-dir <CACHE_DIR>
+Next: parse-ai-sdk.py content --cache-dir <CACHE_DIR> -- 3 "<heading_path>"

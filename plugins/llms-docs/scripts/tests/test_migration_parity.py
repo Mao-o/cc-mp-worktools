@@ -320,7 +320,14 @@ def update_golden() -> None:
 #     a file (``--source code`` / ``claude-code`` / ``ai-sdk`` / ``firebase``, ``--cache-dir`` /
 #     ``--file`` / ``--index-file`` / ``--sources-file`` and their value)
 #     removed; a ``--source`` that points elsewhere, the subcommand, page ref,
-#     heading and other options still count
+#     heading and other options still count. The generic loader puts the
+#     ``"<query>"`` placeholder of a ``search`` line after ``--`` with the
+#     options before it (``search --source x -- "<query>"``: the word the
+#     reader puts in its place may start with ``-``), where the old scripts
+#     print ``search "<query>" --source x``; that one line is read back in the
+#     old order before the rest of this rule. The ``content`` placeholder
+#     lines come from the shared ``_common`` / ``_commands`` helpers, so the
+#     old scripts print them in the new order too and they are compared as is
 #  3. the trailing count line ``(N … total …)`` (firebase's paged index
 #     says ``(N of M pages shown, …)``)
 #  4. hint lines starting with ``Tip:`` / ``Note:`` at column 0 (the old
@@ -345,6 +352,7 @@ _NEXT_SCRIPT_RE = re.compile(r"^(\s*Next: )\S+\.py ")
 _NEXT_CORPUS_OPT_RE = re.compile(
     r" --(?:source (?:code|claude-code|ai-sdk|firebase)(?!\S)|(?:cache-dir|file|index-file|sources-file) \S+)")
 _NEXT_PLATFORM_RE = re.compile(r" --source (?:claude-)?platform(?!\S)")
+_NEXT_QUERY_PLACEHOLDER_RE = re.compile(r'^(\s*Next: \S+ search)( .*)? -- ("<query>")$')
 _TIP_RE = re.compile(r"^(Tip|Note): ")
 _COUNT_RE = re.compile(r"^\(\d+ [^()]*\b(?:total|shown)\b[^()]*\)$")
 _URL_LABEL_RE = re.compile(r"^(\s*)(?:URL|url): ")
@@ -391,6 +399,7 @@ def normalize(text: str) -> list[str]:
         del body[k]
     for line in body:
         if _NEXT_RE.match(line):
+            line = _NEXT_QUERY_PLACEHOLDER_RE.sub(lambda m: f"{m[1]} {m[3]}{m[2] or ''}", line)
             line = _NEXT_SCRIPT_RE.sub(r"\1<script> ", line)
             line = _NEXT_PLATFORM_RE.sub(" --source <platform>", line)
             line = _NEXT_CORPUS_OPT_RE.sub("", line)

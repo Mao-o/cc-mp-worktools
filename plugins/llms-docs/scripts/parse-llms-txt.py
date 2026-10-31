@@ -961,7 +961,14 @@ _FM_NESTED_KEY_RE = re.compile(r"^\s+[A-Za-z_][\w-]*\s*:(\s|$)")
 _FM_BLOCK_SCALAR_RE = re.compile(r"^[|>](?:[-+]?[1-9]?|[1-9][-+])$")
 # a line that starts like Markdown, never the rest of a frontmatter value
 _FM_PROSE_START_RE = re.compile(r"^(#|[-*+>|`<\[!]|\d+\. )")
-_FM_LOOKAHEAD = 30
+# How far the closing delimiter may be from the opening one. Every line in
+# between must be YAML-shaped, so a horizontal rule followed by prose is
+# rejected at its first prose line whatever this is; the bound only caps the
+# scan. It was 30, and platform.claude.com's ``featureMetadata`` blocks
+# (a ``supportedModels`` list that grows with each model) reached 43 lines:
+# 81 of its 826 pages were not split off and their bodies ran into the page
+# before. Kept well above what is measured, as the lists keep growing.
+_FM_LOOKAHEAD = 400
 
 
 def _frontmatter_at(lines: list[str], pos: int, required_key: str,
@@ -1613,7 +1620,9 @@ def _entry_docs(entries: list[dict], docs: list[dict] | None, profile: dict) -> 
     fragment and a trailing ``/`` ignored). Of pages sharing a URL, the last
     one whose query is the entry's too: ``?surface=cli`` and ``?surface=api``
     are different pages, as for a URL ``page_ref``. Else the last page with
-    no query (``api?id=strings``, an anchor of the one ``api`` page); else,
+    no query (``api?id=strings``, an anchor of the one ``api`` page). Either
+    only when the pages that qualify read the same (one page headed twice);
+    different pages under one URL join none. Else,
     for an entry with no query, the first page (the one its URL as a
     ``page_ref`` opens, as its ref does before llms-full.txt is cached when
     the URL is listed twice); else none (``?surface=web``
@@ -1650,16 +1659,19 @@ def _entry_docs(entries: list[dict], docs: list[dict] | None, profile: dict) -> 
 def _join_url_page(pages: list[int], docs: list[dict], url: str, suffix: str | None) -> int | None:
     """Of the *pages* (indexes into *docs*) whose URL is *url* up to the
     query, the one *url* is joined to (``_entry_docs``): the last one whose
-    query is *url*'s too, else the last with no query, else, for a *url*
-    with no query, the first; else ``None``. URLs are compared by
+    query is *url*'s too, else the last with no query (in both cases only
+    when the pages that qualify read the same, else ``None``), else, for a
+    *url* with no query, the first; else ``None``. URLs are compared by
     ``_ref_url_key`` (*suffix* removed)."""
     want = _ref_url_key_with_query(url, suffix)
     exact = [i for i in pages if _ref_url_key_with_query(docs[i]["url"], suffix) == want]
     bare = [i for i in pages if "?" not in docs[i]["url"].split("#", 1)[0]]
-    if exact:
-        return exact[-1]
-    if bare:
-        return bare[-1]
+    for same in (exact, bare):
+        if same:
+            # of several, only copies of one page name it (as for a URL
+            # page_ref, ``_url_page``): different pages under one URL leave
+            # the entry or link without a page rather than with another one
+            return same[-1] if _copies(docs, same) else None
     # the first page, as a URL page_ref resolves it: the ref shown before
     # llms-full.txt is cached opens the same page
     return pages[0] if pages and "?" not in url.split("#", 1)[0] else None
@@ -1707,7 +1719,7 @@ def _ranked_entries(entries: list[dict], query: str, limit: int, keys: list) -> 
     return rows[:limit]
 
 
-_FETCH_ZERO_TIP = ("Tip: try broader keywords, or 'search-content \"<query>\"' (omit --page-ref to "
+_FETCH_ZERO_TIP = ("Tip: try broader keywords, or 'search-content -- \"<query>\"' (omit --page-ref to "
                    "scan every page — slow on first run) to search page bodies directly")
 _SLUG_REF_NOTE = ("Note: llms-full.txt is not cached yet, so [ref] above is a URL slug, "
                   "not an integer doc_idx. Run 'search' once (or 'sections <slug>' directly) "
@@ -1827,7 +1839,9 @@ def _search_index_from_index(args, profile: dict) -> None:
     if not any(i is not None for i in doc_of):
         print(_SLUG_REF_NOTE if args.file is None else f"Note: {_FILE_SLUG_REF_NOTE}.")
         print()
-    next_hint("search", '"<query>"', *(_source_hint_args(args) + corpus_hint_args(args)))
+    # a placeholder the reader replaces, maybe with a word that starts with
+    # "-": the query goes after "--"
+    next_hint("search", *(_source_hint_args(args) + corpus_hint_args(args)), "--", '"<query>"')
 
 
 def _index_candidates(args, profile: dict, docs: list[dict]) -> list[dict]:
@@ -2152,9 +2166,11 @@ def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
 
     * ``int``: a document index
     * ``url``: a full ``http(s)://`` URL, compared normalised (see
-      ``_ref_url_key``); of the pages with that URL, the first whose query
-      is the reference's too, else the first with no query, else (for a
-      reference with no query) the first. No match ends the search
+      ``_ref_url_key``); of the pages with that URL, those whose query
+      is the reference's too, else those with no query (of several, the
+      first when they are copies of one page, else they are listed:
+      ``_url_page``), else (for a reference with no query) the first. No
+      match ends the search
       (``No page found for URL``): a URL names one page, and a later form
       (``title`` / ``url_substring``) would take a URL that is one letter
       short for the longer page it is a substring of
@@ -2185,20 +2201,22 @@ def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
             found = [(i, d["url"]) for i, d in enumerate(docs)
                      if d["url"] and _ref_url_key(d["url"], strip_suffix) == target]
             if found:
-                # the page whose query is the reference's too; else the first
-                # page with no query (``api?id=strings`` is a place in the
-                # one ``api`` page); else, for a reference with no query, the
-                # first page: one URL can head the same page twice in the
-                # upstream file, and the copies read the same. A query no
-                # page has (``?surface=web`` with cli and api pages) names no
-                # page: opening another query's page would be silently wrong
+                # the page whose query is the reference's too; else the page
+                # with no query (``api?id=strings`` is a place in the one
+                # ``api`` page); of several, the first only when they are
+                # copies (one URL can head the same page twice upstream),
+                # else the candidates are listed (one URL can also head two
+                # different pages: ``_url_page``); else, for a reference with
+                # no query, the first page. A query no page has
+                # (``?surface=web`` with cli and api pages) names no page:
+                # opening another query's page would be silently wrong
                 raw = _ref_url_key_with_query(page_ref, strip_suffix)
                 exact = [i for i, u in found if _ref_url_key_with_query(u, strip_suffix) == raw]
                 if exact:
-                    return exact[0]
+                    return _url_page(docs, exact, page_ref, retry)
                 bare = [i for i, u in found if "?" not in u.split("#", 1)[0]]
                 if bare:
-                    return bare[0]
+                    return _url_page(docs, bare, page_ref, retry)
                 if "?" not in page_ref.split("#", 1)[0]:
                     return found[0][0]
             die(f"No page found for URL: {page_ref}")
@@ -2239,6 +2257,28 @@ def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
     if "slug" in forms and not is_url and not {"title", "url_substring"} & set(forms):
         die(f"No page found for slug: {page_ref}")
     die(f"No document found for: {page_ref}")
+    return -1
+
+
+def _copies(docs: list[dict], pages: list[int]) -> bool:
+    """True when the *pages* (indexes into *docs*) read the same: one page
+    the upstream file heads more than once under one URL."""
+    body = docs[pages[0]]["body_lines"]
+    return all(docs[i]["body_lines"] == body for i in pages[1:])
+
+
+def _url_page(docs: list[dict], pages: list[int], page_ref: str, retry=None) -> int:
+    """Of the *pages* a URL page_ref matches, the one it opens: the first
+    when they are copies of one page (the same body: Claude Code's
+    llms-full.txt heads a few pages twice), else none: the candidates are
+    listed (exit 1). One URL can also head different pages (learn.chatgpt.com
+    lists "Command line options" and "Slash commands in Codex CLI" under the
+    same ``developer-commands.md?surface=cli``), and opening the first of
+    them would show another page than the one the URL was taken from."""
+    if _copies(docs, pages):
+        return pages[0]
+    rows = [(i, f"{docs[i]['title'] or '(untitled)'} ({docs[i]['url']})") for i in pages[:20]]
+    die_ambiguous_page("URL", page_ref, rows, retry)
     return -1
 
 
@@ -2602,7 +2642,9 @@ def cmd_search_index(args):
                     description=d["description"], extra_lines=extra)
     print(f"({len(scored)} results, {len(docs)} documents searched)")
     print()
-    next_hint("search", '"<query>"', *(_source_hint_args(args) + corpus_hint_args(args)))
+    # a placeholder the reader replaces, maybe with a word that starts with
+    # "-": the query goes after "--"
+    next_hint("search", *(_source_hint_args(args) + corpus_hint_args(args)), "--", '"<query>"')
 
 
 def _body_hits(args, d: dict):

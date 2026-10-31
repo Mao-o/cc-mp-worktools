@@ -34,7 +34,8 @@ preset を置き換える。
 - 0.45.0 までの専用 script を置き換えた preset (`claude-code` / `claude-platform` / `claude` / `ai-sdk` /
   `firebase`) の出力が、専用 script の実装 (`scripts/tests/legacy/`) の出力から変わる。ただし移行の比較
   (`scripts/tests/test_migration_parity.py` の `normalize`) が除く行 (1 行目のヘッダの括弧と直後の
-  `(file: …)` などの行、`Next:` の script 名と既定の corpus・ファイルを指すオプション、末尾の件数行、
+  `(file: …)` などの行、`Next:` の script 名と既定の corpus・ファイルを指すオプション、`search` の
+  `"<query>"` プレースホルダ行で語を `--` の後ろに置く並び (`search --source x -- "<query>"`)、末尾の件数行、
   行頭の `Tip:` / `Note:`、単位の語 `page` / `document`、`URL:` / `url:` の大文字小文字) と、
   `GENERIC_INTENDED_DIFF` に理由を書いた意図した差は除く
 - 旧 script 名の shim (`scripts/parse-claude-docs.py` / `parse-ai-sdk.py` / `parse-firebase.py`、実体は

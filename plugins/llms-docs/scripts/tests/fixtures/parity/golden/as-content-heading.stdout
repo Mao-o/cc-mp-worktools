@@ -8,7 +8,7 @@
   - API Signature/Arguments
   - API Signature/Result
 
-Next: parse-ai-sdk.py content 3 "<heading_path from above>" --cache-dir <CACHE_DIR>
+Next: parse-ai-sdk.py content --cache-dir <CACHE_DIR> -- 3 "<heading_path from above>"
 ## API Signature
 
 ### Generics
@@ -33,4 +33,4 @@ Page list: [/llms.txt](/llms.txt)
   - API Signature/Arguments
   - API Signature/Result
 
-Next: parse-ai-sdk.py content 3 "<heading_path from above>" --cache-dir <CACHE_DIR>
+Next: parse-ai-sdk.py content --cache-dir <CACHE_DIR> -- 3 "<heading_path from above>"

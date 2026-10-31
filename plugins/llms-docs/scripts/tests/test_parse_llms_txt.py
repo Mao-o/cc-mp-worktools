@@ -280,6 +280,68 @@ Body.
 """
 
 
+# Cut from platform.claude.com's llms-full.txt (2026-10-30): a page whose
+# frontmatter carries a long ``featureMetadata`` block (35 lines up to the
+# closing ``---``), after a page with a short one.
+PLATFORM_LONG_FRONTMATTER = """\
+---
+title: Streaming Messages
+url: https://platform.claude.com/docs/en/build-with-claude/streaming
+description: Stream responses.
+---
+
+When creating a Message, you can set `"stream": true`.
+
+## Streaming with SDKs
+
+Body.
+
+
+---
+title: Structured outputs
+url: https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+description: Get validated JSON results from agent workflows
+featureMetadata:
+  status: ga
+  zdr:
+    eligibility: qualified
+    note: "Excludes [Covered Models](https://platform.claude.com/docs/en/manage-claude/api-and-data-retention#model-specific-data-retention-requirements). Your prompts and Claude's outputs are not stored."
+  supportedModels:
+    - claude-fable-5-1
+    - claude-mythos-5-1
+    - claude-fable-5
+    - claude-mythos-5
+    - claude-mythos-preview
+    - claude-opus-5-5
+    - claude-opus-5
+    - claude-sonnet-5-5
+    - claude-sonnet-5
+    - claude-haiku-5-5
+    - claude-haiku-4-5-20251001
+    - claude-opus-4-8
+    - claude-opus-4-7
+    - claude-opus-4-6
+    - claude-sonnet-4-6
+    - claude-opus-4-5-20251101
+    - claude-sonnet-4-5-20250929
+  supportedPlatforms:
+    Claude API: ga
+    Claude Platform on AWS: ga
+    Claude Models on Google Cloud (Anthropic managed): ga
+    Amazon Bedrock: ga
+    Amazon Bedrock (InvokeModel): ga
+    Claude Models on Google Cloud (Google managed): ga
+    Microsoft Foundry: ga
+---
+
+Structured outputs constrain Claude's responses to follow a specific schema.
+
+## Why use structured outputs
+
+Body.
+"""
+
+
 class SplitTest(unittest.TestCase):
     def test_frontmatter_with_title(self):
         docs = generic.split_documents(_lines(FRONTMATTER_TITLE), _profile(split="frontmatter", page_url="frontmatter:url"))
@@ -435,6 +497,36 @@ class SplitTest(unittest.TestCase):
         self.assertFalse(generic._closes_double_quote('end\\"'))
         self.assertTrue(generic._closes_double_quote('end\\\\"'))
         self.assertFalse(generic._closes_double_quote("no quote"))
+
+    def test_long_frontmatter_block_is_a_page(self):
+        # platform.claude.com, cut from its llms-full.txt (2026-10-30): the
+        # featureMetadata block of a page runs to 35 lines. Under a 30-line
+        # lookahead it was not a page and its body ran into the page before
+        # (81 of 826 pages, Structured outputs and Strict tool use among them)
+        profile = generic._read_sources_file(generic.PRESETS_FILE)["claude-platform"]
+        docs = generic.split_documents(_lines(PLATFORM_LONG_FRONTMATTER), profile)
+        self.assertEqual([d["title"] for d in docs], ["Streaming Messages", "Structured outputs"])
+        self.assertEqual(docs[1]["url"], "https://platform.claude.com/docs/en/build-with-claude/structured-outputs")
+        self.assertEqual(docs[1]["description"], "Get validated JSON results from agent workflows")
+        self.assertTrue(docs[1]["body_lines"][1].startswith("Structured outputs constrain"))
+        self.assertNotIn("supportedModels:\n", "".join(docs[0]["body_lines"]))
+
+    def test_frontmatter_lookahead_boundary(self):
+        # the closing delimiter may sit at most _FM_LOOKAHEAD - 1 lines after
+        # the opening one; one line further the block is not frontmatter
+        limit = generic._FM_LOOKAHEAD
+        self.assertGreaterEqual(limit, 200)
+
+        def block(items: int) -> list[str]:
+            return _lines("---\ntitle: T\nmodels:\n" + "  - m\n" * items + "---\n\nBody.\n")
+
+        inside = block(limit - 4)
+        self.assertEqual(inside.index("---\n", 1), limit - 1)
+        hit = generic._frontmatter_at(inside, 0, "title")
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit[1], limit)
+        self.assertEqual(len(hit[2]["models"]), limit - 4)
+        self.assertIsNone(generic._frontmatter_at(block(limit - 3), 0, "title"))
 
     def test_skip_empty_treats_a_rule_only_body_as_empty(self):
         docs = generic.split_documents(_lines(CODEX_LIKE), _profile(split="h1", skip_empty=True))

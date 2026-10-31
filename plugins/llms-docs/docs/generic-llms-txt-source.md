@@ -250,7 +250,8 @@ preset の `url` / `index_url` を移転先にし、`description` を更新し�
 - `llms.txt` の死にリンクが 2 件 (どちらも HTTP 404): `use-cases/llms.txt` と `videos.md`。前者は索引
   ファイルなので除かれ (0.28.1)、後者はタイトルの合うページが無い。どちらもページの URL にはなっていない。
   別のタイトルの項目 2 つが同じ URL を指す組が 2 つある (`developer-commands.md?surface=cli` と
-  `?surface=ide`)。この 4 ページは、組ごとに同じ URL を持つ。どれもサイト側の問題で、手を入れない
+  `?surface=ide`)。この 4 ページは、組ごとに同じ URL を持つ。どれもサイト側の問題で、手を入れない。
+  URL の `page_ref` (と anchor) は、この組では先頭のページを黙って開かず候補を列挙する (0.47.3)
 - `index_url` は `url` の `llms-full.txt` と同じディレクトリの `llms.txt` (`/docs/llms.txt`)。`index_url` を
   持つ presets はいずれもこの形 (この時点では 5 件。0.29.0 で cloudflare-browser-rendering から外して、
   zod / hono / render / codex の 4 件)。移転元が転送して
