@@ -345,6 +345,25 @@ def _expand_ansi_c(text: str) -> str | None:
     return "".join(out)
 
 
+def _ansi_c_quote_end(text: str, i: int, n: int) -> int | None:
+    """`text[i:]` が `$'` で始まるとき、閉じ `'` の直後の index。`n` までに閉じなければ None。
+
+    ANSI-C 引用符の中では `\\'` はエスケープした引用符で、引用符を閉じない (bash 3.2 / zsh とも。
+    `\\\\` は backslash 1 つ)。素の `'...'` と同じに読むと `$'a\\'b'` を `\\'` で閉じたことにして、
+    残りの `'` から新しい引用符を始め、後ろのコマンドを引用符の中として飲み込む。
+    """
+    j = i + 2
+    while j < n:
+        c = text[j]
+        if c == "\\":
+            j += 2
+            continue
+        if c == "'":
+            return j + 1
+        j += 1
+    return None
+
+
 # `${` から閉じ `}` を探す範囲の上限 (文字数)。範囲内で閉じないものは「閉じていない」扱い
 # (= 1 領域にしない = 中の演算子で切る側。検証が消える側ではない)。
 _PARAM_EXPANSION_SCAN_LIMIT = 4096
@@ -391,7 +410,7 @@ def _param_expansion_end(text: str, i: int) -> int | None:
     トップレベルの comment と読んで後ろを落とす (`${x:-{ #}; cmd` の `cmd` は bash で走る)
     ので採らない。`$${` は 2 つ目の `$` からの `${` として数える (bash / zsh とも)。
     中の `${` / `$(` は `_skip_opaque` で飛ばし (閉じない・深さの上限なら外側も閉じない)、
-    エスケープ・引用符・backtick も飛ばす。
+    エスケープ・引用符 (ANSI-C 引用符 `$'...'` を含む)・backtick も飛ばす。
     """
     n = min(len(text), i + _PARAM_EXPANSION_SCAN_LIMIT)
     j = i + 2
@@ -405,6 +424,13 @@ def _param_expansion_end(text: str, i: int) -> int | None:
             # 中の `}` は外側を閉じない。
             end = _skip_opaque(text, j)
             if end is None or end > n:
+                return None
+            j = end
+            continue
+        if c == "$" and j + 1 < n and text[j + 1] == "'":
+            # 展開の中の ANSI-C 引用符 (`${x:-$'\''}`。bash 3.2 / zsh とも `\'` で閉じない)。
+            end = _ansi_c_quote_end(text, j, n)
+            if end is None:
                 return None
             j = end
             continue
@@ -433,8 +459,8 @@ def _param_expansion_end(text: str, i: int) -> int | None:
 def _skip_opaque(text: str, i: int) -> int | None:
     """`text[i]` から始まる「構文として解釈しない領域」の終端 index を返す。
 
-    対象は backslash エスケープ / `'...'` / `"..."` / `` `...` `` / `$(...)` /
-    閉じている `${...}` / `$$` / 算術評価 `(( ... ))`。該当しなければ None。
+    対象は backslash エスケープ / `'...'` / `$'...'` (ANSI-C 引用符) / `"..."` /
+    `` `...` `` / `$(...)` / 閉じている `${...}` / `$$` / 算術評価 `(( ... ))`。該当しなければ None。
     未終端のクォート等は末尾までを 1 領域とみなす (bash も行を跨いで読み続ける)。
     """
     n = len(text)
@@ -460,6 +486,10 @@ def _skip_opaque(text: str, i: int) -> int | None:
         # `$$` (PID)。後ろの `{` を `${` の始まりと読まない (`echo $${; cmd; echo }` の
         # `cmd` は bash / zsh とも走る。`${` と読むと最後の `}` まで 1 領域になり `cmd` が消える)。
         return i + 2
+    if ch == "$" and i + 1 < n and text[i + 1] == "'":
+        # ANSI-C 引用符。未終端は末尾までを 1 領域 (素の `'` と同じ)。
+        end = _ansi_c_quote_end(text, i, n)
+        return n if end is None else end
     if ch == "$" and i + 1 < n and text[i + 1] in "({":
         memo = _DOLLAR_MEMO
         if memo.text is not text:
@@ -468,51 +498,86 @@ def _skip_opaque(text: str, i: int) -> int | None:
         end = memo.ends.get(i, _UNSET)
         if end is not _UNSET:
             return end  # type: ignore[return-value]
+        if text[i + 1] == "(":
+            return _command_substitution_end(text, i, memo)
         memo.depth += 1
         try:
-            if text[i + 1] == "{":
-                # パラメータ展開 `${...}`。中の `&` / `;` / `|` は演算子ではない
-                # (`${x:-a&b}` を単独の `&` で切ると、後ろの option が別セグメントに移って
-                # 誤ったコンテキストで照合される)。**閉じているものだけ**を 1 領域とみなす
-                # (閉じない `${` は bash でも構文エラー。残りを飲み込むと検証が消える)。
-                # 入れ子が深すぎるものも閉じていない扱い (分割が増える側)。
-                end = (
-                    _param_expansion_end(text, i)
-                    if memo.depth <= _DOLLAR_NEST_LIMIT
-                    else None
-                )
-            else:
-                depth = 1
-                j = i + 2
-                end = n
-                while j < n:
-                    inner = _skip_opaque(text, j)
-                    if (
-                        inner is not None
-                        and text.startswith("${", j)
-                        and ")" in text[j:inner]
-                    ):
-                        # bash 3.2 は `$(` の中の `${...}` にある `)` で `$(` を閉じる
-                        # (`echo $(echo ${x:-)}` + 改行 + `aws ...` の aws は走る)。`)` を含む
-                        # `${...}` は 1 領域にせず、1 文字ずつ読んで `)` を数える (閉じる位置が
-                        # 早い側。zsh で `$(` の中にある部分は分割が増える側に出る)。
-                        inner = None
-                    if inner is not None and inner > j:
-                        j = inner
-                        continue
-                    if text[j] == "(":
-                        depth += 1
-                    elif text[j] == ")":
-                        depth -= 1
-                        if depth == 0:
-                            end = j + 1
-                            break
-                    j += 1
+            # パラメータ展開 `${...}`。中の `&` / `;` / `|` は演算子ではない
+            # (`${x:-a&b}` を単独の `&` で切ると、後ろの option が別セグメントに移って
+            # 誤ったコンテキストで照合される)。**閉じているものだけ**を 1 領域とみなす
+            # (閉じない `${` は bash でも構文エラー。残りを飲み込むと検証が消える)。
+            # 入れ子が深すぎるものも閉じていない扱い (分割が増える側)。
+            end = (
+                _param_expansion_end(text, i)
+                if memo.depth <= _DOLLAR_NEST_LIMIT
+                else None
+            )
         finally:
             memo.depth -= 1
         memo.ends[i] = end
         return end
     return _arithmetic_span(text, i)
+
+
+def _command_substitution_end(text: str, i: int, memo: _DollarMemo) -> int:
+    """`text[i:]` の `$(` の閉じ `)` の直後の index。閉じなければ `len(text)` (残りを 1 領域)。
+
+    入れ子の `$(` は再帰せず、開いている `$(` の位置を明示スタックに積んで 1 回の走査で辿る
+    (`$(` を 1000 段ほど重ねると、再帰では Python の再帰の上限に当たって hook が内部エラーになり、
+    検証をスキップしていた)。各 `$(` の終端は memo に残す (入れ子の `$(` を後から引き直しても
+    走査し直さない)。開いている `$(` の段数は `memo.depth` に数え、中の `${` の深さの上限
+    (`_DOLLAR_NEST_LIMIT`) の判定に使う。中の `${` / 引用符 / backtick などは `_skip_opaque` で
+    飛ばす (`${` だけは再帰するが、その深さは上限で抑えてある)。
+    """
+    n = len(text)
+    base = memo.depth
+    starts = [i]
+    parens = [1]
+    memo.depth = base + 1
+    try:
+        j = i + 2
+        while j < n:
+            if text[j] == "$" and j + 1 < n and text[j + 1] == "(":
+                cached = memo.ends.get(j, _UNSET)
+                if cached is not _UNSET:
+                    j = cached  # type: ignore[assignment]
+                    continue
+                starts.append(j)
+                parens.append(1)
+                memo.depth += 1
+                j += 2
+                continue
+            inner = _skip_opaque(text, j)
+            if (
+                inner is not None
+                and text.startswith("${", j)
+                and ")" in text[j:inner]
+            ):
+                # bash 3.2 は `$(` の中の `${...}` にある `)` で `$(` を閉じる
+                # (`echo $(echo ${x:-)}` + 改行 + `aws ...` の aws は走る)。`)` を含む
+                # `${...}` は 1 領域にせず、1 文字ずつ読んで `)` を数える (閉じる位置が
+                # 早い側。zsh で `$(` の中にある部分は分割が増える側に出る)。
+                inner = None
+            if inner is not None and inner > j:
+                j = inner
+                continue
+            if text[j] == "(":
+                parens[-1] += 1
+            elif text[j] == ")":
+                parens[-1] -= 1
+                if parens[-1] == 0:
+                    parens.pop()
+                    memo.ends[starts.pop()] = j + 1
+                    memo.depth -= 1
+                    if not starts:
+                        return j + 1
+            j += 1
+        # 閉じないまま尽きた: 開いている `$(` はどれも残り全部 (再帰版と同じ)。
+        for start in starts:
+            memo.ends[start] = n
+        return n
+    finally:
+        memo.depth = base
 
 
 # --- heredoc の開始 (`<<[-]word`) ------------------------------------------
@@ -653,8 +718,9 @@ def split_with_separators(command: str) -> list[tuple[str, str]]:
     heredoc の再スキャン (`_strip_heredoc_bodies`) や括弧の均衡判定
     (`_has_unbalanced_closer`) も同じ関数を通す。経路ごとに書くと必ず食い違う。
 
-    unquoted な `#` (行頭 / 空白 / 演算子の直後に来るもの) 以降改行までは
-    bash コメントとして無視する。
+    語の先頭の `#` (行頭 / 引用符・エスケープの外の空白・演算子・算術評価の閉じの直後に
+    来るもの) 以降改行までは bash コメントとして無視する。エスケープした空白や置換の閉じの
+    直後の `#` は語の続き (comment ではない)。
 
     heredoc (`cat > x.sh <<'EOF'` 〜 `EOF`) の本文は**改行で分割せず**、開始行と
     同じセグメントに取り込む。取り込まないと本文中の 1 行 (`gh release create v1`
@@ -670,10 +736,18 @@ def split_with_separators(command: str) -> list[tuple[str, str]]:
     # 直前に buf へ入れたのが引用符・エスケープの外の `>` / `<` か (`2>&1` / `<&3` の判定)。
     # `command[i - 1]` で見ると `\>&` (エスケープした `>` の後の背景実行) を取り違える。
     after_redirect = False
+    # 次の文字が語の先頭か (`#` を comment の始まりと読むかの判定)。`command[i - 1]` で見ると、
+    # エスケープした空白・演算子 (`echo \ # ; aws ...` の `\ `) や `$(...)` の閉じ `)` の後ろの
+    # `#` を comment と読み、bash / zsh では走る後ろのコマンドを落とす。引用符・エスケープ・置換の
+    # 後ろは語の続き。算術評価 `(( ... ))` の後ろは語の先頭 (bash / zsh とも `((1))#` 以降は
+    # comment)。行継続 (`\` + 改行) は取り除くので、その前の状態を引き継ぐ。
+    word_start = True
 
     def flush(sep: str) -> None:
+        nonlocal word_start
         segments.append(("".join(buf), sep))
         buf.clear()
+        word_start = True
 
     while i < n:
         # quote / 置換 / 算術は 1 領域としてそのまま buf へ (構文解釈しない)。
@@ -700,13 +774,14 @@ def split_with_separators(command: str) -> list[tuple[str, str]]:
                 i = opaque
                 continue
             buf.append(command[i:opaque])
+            word_start = command[i] == "("  # 算術評価だけが `(` で始まる
             i = opaque
             continue
 
         ch = command[i]
         nxt = command[i + 1] if i + 1 < n else ""
 
-        if ch == "#" and (i == 0 or command[i - 1] in " \t\n;&|()"):
+        if ch == "#" and word_start:
             while i < n and command[i] != "\n":
                 i += 1
             continue
@@ -715,17 +790,21 @@ def split_with_separators(command: str) -> list[tuple[str, str]]:
             # here-string `<<<` は heredoc ではない (本文行を持たない)。
             if i + 2 < n and command[i + 2] == "<":
                 buf.append("<<<")
+                word_start = False
                 i += 3
                 continue
             found = _scan_heredoc_start(command, i)
             if found is not None:
                 delim, dash, hd_end = found
                 pending_heredocs.append((delim, dash))
+                # `word_start` は触らない: 語の直後は必ず語を終える文字か末尾で、
+                # その文字が `word_start` を決め直す (`#` は語の一部として読まれる)。
                 buf.append(command[i:hd_end])
                 i = hd_end
                 continue
             # delimiter を解決できない `<<` はそのまま流す = heredoc と見なさない
-            # (本文行が候補になる = 過剰検証側)。
+            # (本文行が候補になる = 過剰検証側)。直後の文字 (`<<-` の `-`・語を終える文字・
+            # 閉じない引用符) が `word_start` を決め直す (`#` が来れば delimiter として解決する)。
             buf.append("<<")
             i += 2
             continue
@@ -781,6 +860,7 @@ def split_with_separators(command: str) -> list[tuple[str, str]]:
 
         buf.append(ch)
         after_redirect = ch in "<>"
+        word_start = ch in " \t\n;&|()"
         i += 1
 
     flush("")
@@ -797,6 +877,12 @@ def _scan_value_end(cmd: str, start: int) -> int | None:
         ch = cmd[i]
         if ch == "\\" and not in_sq and i + 1 < n:
             i += 2
+            continue
+        if ch == "$" and not in_sq and not in_dq and i + 1 < n and cmd[i + 1] == "'":
+            # ANSI-C 引用符 (`X=$'a\'b c' aws ...`)。`\'` で閉じたことにすると値の終わりを
+            # 取り違え、残りの `c' aws ...` がコマンドとして残って aws を見失う。
+            end = _ansi_c_quote_end(cmd, i, n)
+            i = n if end is None else end
             continue
         if ch == "'" and not in_dq:
             in_sq = not in_sq
