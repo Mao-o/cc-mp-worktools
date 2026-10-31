@@ -42,9 +42,6 @@ SCRIPTS_DIR = Path(_loader.SCRIPTS_DIR)
 EXPECTED_MIN_CALLS = {
     "parse-llms-txt.py": 6,
 }
-# The retired script names: shims that hand their arguments to
-# ``parse-llms-txt.py`` (``_shim.run``) and print no hint of their own.
-SHIM_SCRIPTS = frozenset({"parse-claude-docs.py", "parse-ai-sdk.py", "parse-firebase.py"})
 
 HINT_FUNC = "next_hint"
 REQUIRED_HELPER = "corpus_hint_args"
@@ -213,20 +210,6 @@ class NextHintCorpusArgsWiringTest(unittest.TestCase):
                 missing.append(call.lineno)
         self.assertEqual(missing, [], f"parse-llms-txt.py hint calls without _source_hint_args: lines {missing}")
 
-    def test_shims_print_no_hint_of_their_own(self):
-        """A shim only hands its arguments on (the generic loader prints every
-        hint, naming itself); one that grew a command of its own would print
-        hints this guard does not check."""
-        for filename in sorted(SHIM_SCRIPTS):
-            with self.subTest(script=filename):
-                path = SCRIPTS_DIR / filename
-                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-                self.assertEqual(_hint_calls(tree), [])
-                self.assertIn("run", _called_names(tree))
-                defs = [n.name for n in ast.walk(tree)
-                        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
-                self.assertEqual(defs, [])
-
     def test_shared_renderers_forward_their_hint_args(self):
         """``_commands.py`` never builds corpus flags; it forwards ``hint_args``.
 
@@ -280,7 +263,7 @@ class NextHintCorpusArgsWiringTest(unittest.TestCase):
     def test_every_parse_script_is_covered(self):
         """The guard must not silently skip a newly added parse-*.py."""
         found = sorted(p.name for p in SCRIPTS_DIR.glob("parse-*.py"))
-        self.assertEqual(found, sorted(set(EXPECTED_MIN_CALLS) | SHIM_SCRIPTS))
+        self.assertEqual(found, sorted(EXPECTED_MIN_CALLS))
 
 
 if __name__ == "__main__":

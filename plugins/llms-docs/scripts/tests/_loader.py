@@ -1,8 +1,8 @@
 """Test-only helpers for loading and driving the hyphenated parse-*.py scripts.
 
-``parse-claude-docs.py`` / ``parse-ai-sdk.py`` / ``parse-firebase.py`` cannot
-be imported with a normal ``import`` statement because their filenames
-contain hyphens (not valid Python identifiers). We load them with
+``parse-llms-txt.py`` / ``check-preset-urls.py`` cannot be imported with a
+normal ``import`` statement because their filenames contain hyphens (not
+valid Python identifiers). We load them with
 ``importlib.util.spec_from_file_location`` instead.
 
 Importing this module has the side effect of inserting the real
@@ -22,17 +22,17 @@ under test, so no 3.9-compat shim is added here either.
 import contextlib
 import importlib.util
 import io
+import json
+import os
+import shutil
 import sys
+import tempfile
+import unittest
 from pathlib import Path
 from types import ModuleType
+from unittest import mock
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent
-# The dedicated parsers' implementations. ``scripts/<name>`` of each is now a
-# shim that runs ``parse-llms-txt.py`` with the matching preset; the old code
-# stays here, until the shims are removed, as the reference the migration
-# parity tests (and the old scripts' own unit tests) run.
-LEGACY_DIR = Path(__file__).resolve().parent / "legacy"
-LEGACY_SCRIPTS = frozenset({"parse-claude-docs.py", "parse-ai-sdk.py", "parse-firebase.py"})
 
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -41,10 +41,6 @@ if str(SCRIPTS_DIR) not in sys.path:
 def load_script(filename: str) -> ModuleType:
     """Import ``<scripts_dir>/<filename>`` (e.g. ``parse-llms-txt.py``).
 
-    The names in ``LEGACY_SCRIPTS`` load the old implementation from
-    ``LEGACY_DIR``, not the shim at ``scripts/<name>`` (the shims are tested
-    by running them, see ``test_legacy_shims.py``).
-
     Cached in ``sys.modules`` under a sanitized name so repeated calls
     within a test process return the same module object, mirroring normal
     ``import`` caching.
@@ -52,12 +48,30 @@ def load_script(filename: str) -> ModuleType:
     module_name = "_llms_docs_under_test_" + filename[:-3].replace("-", "_")
     if module_name in sys.modules:
         return sys.modules[module_name]
-    path = (LEGACY_DIR if filename in LEGACY_SCRIPTS else SCRIPTS_DIR) / filename
+    path = SCRIPTS_DIR / filename
     spec = importlib.util.spec_from_file_location(module_name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def without_user_sources(test: unittest.TestCase) -> str:
+    """Point ``$LLMS_DOCS_SOURCES_FILE`` at an empty ``sources.json`` for the
+    rest of *test*, so a bundled preset (``--source claude-code``) runs as
+    shipped and the developer's own ``sources.json`` cannot redefine it or
+    add a warning to stderr. The ``Next:`` lines carry it as
+    ``--sources-file <path>``, so a printed command reads the same file.
+    Returns that path."""
+    tmp = tempfile.mkdtemp()
+    test.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+    path = os.path.join(tmp, "sources.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"sources": {}}, f)
+    patcher = mock.patch.dict(os.environ, {"LLMS_DOCS_SOURCES_FILE": path})
+    patcher.start()
+    test.addCleanup(patcher.stop)
+    return path
 
 
 def run_cli(module: ModuleType, argv: list[str]) -> tuple[int, str, str]:

@@ -1,59 +1,46 @@
-"""Parity harness for retiring the three dedicated parsers.
+"""Golden output of the retired dedicated parsers, and the generic loader against it.
 
-``parse-claude-docs.py`` / ``parse-ai-sdk.py`` / ``parse-firebase.py`` are
-being folded into the generic loader ``parse-llms-txt.py`` (profile keys in
-``presets.json`` + CLI flags). Every step of that migration must keep their
-output the same, so this module pins it first:
+``parse-claude-docs.py`` / ``parse-ai-sdk.py`` / ``parse-firebase.py`` were
+folded into the generic loader ``parse-llms-txt.py`` (profile keys in
+``presets.json`` + CLI flags) and removed in 0.48.0. What they printed is kept
+here as the reference the bundled presets (``claude-code`` /
+``claude-platform`` / ``claude`` / ``ai-sdk`` / ``firebase``) are held to:
 
 * ``fixtures/parity/<corpus>/`` holds synthetic cache directories written by
   ``fixtures/parity/build_fixtures.py`` (made-up pages and product names
   that reproduce the shape of the upstream files, including the edge cases
-  listed in ``CORPORA``; no upstream text is copied — its module docstring
-  says how to regenerate them). A run copies one into a temp dir and passes it as
+  listed in ``CORPORA``; no upstream text is copied — they are frozen with
+  the golden, see its module docstring). A run copies one into a temp dir and passes it as
   ``--cache-dir``, so no network is touched: ``urllib.request.urlopen`` is
   patched to fail and every call is counted (the count is part of the
-  golden, so a later step that fetches more than the old script did shows up).
-* ``fixtures/parity/golden/`` holds what the old scripts print for ``CASES``
-  (every subcommand x representative queries, zero-hit and not-found paths).
-  ``GoldenSelfCheckTest`` re-runs the old scripts and requires a byte-for-byte
-  match (stdout, stderr, exit code, fetch count) — the harness is only useful
-  while the golden is exactly what the old scripts print.
-* ``normalize`` / ``compare`` are the comparator later steps use against the
-  generic loader's output. They drop or canonicalise only the lines the
-  migration is allowed to change (listed above ``normalize``) and require
-  everything else — page list and order, refs, titles, URLs, descriptions,
-  section lists, page bodies, hit blocks, the query in the header, the
-  ``Next:`` commands minus the script name and the options naming the
-  default corpus or a file (``--source platform`` still counts) — to match
-  byte for byte. ``compare`` looks at stdout, and at the first line of the
-  normalised stderr when the expected stdout is empty (error paths).
-* ``GENERIC_PARITY_EXPECTED`` lists the cases the generic loader already
-  matches; each migration step adds the cases it brings to parity. Cases
-  taken out when the comparator was tightened are listed next to it.
-* ``CorpusParityGateTest`` runs the same cases on the full local cache
-  (``$LLMS_DOCS_CACHE_DIR`` / ``$XDG_CACHE_HOME/llms-docs`` /
-  ``~/.cache/llms-docs``); it is a local-only gate enabled by
-  ``LLMS_DOCS_PARITY_CORPUS=1`` and skipped otherwise (CI). Parity on the
-  small fixture can be a coincidence of its size (a slug or title substring
-  that is unique among a dozen pages is ambiguous among hundreds), so a step
-  that adds to ``GENERIC_PARITY_EXPECTED`` runs this gate too. The fixture
-  carries namesakes, links between pages and navigation headings so that
-  the cases matching on it are the ones matching on the full corpus. On
-  the full corpus, a case where both scripts fail only counts when it is in
-  ``FAILURE_PARITY_CASES`` (a ref that names no fixture page fails on both
-  sides, and that agreement says nothing); cases whose refs exist only in
-  the fixture are in ``FIXTURE_ONLY_PARITY`` and ``CORPUS_CASES`` carries
-  real refs for the full corpus instead.
+  golden, so a change that fetches more than the old script did shows up).
+* ``fixtures/parity/golden/`` holds what the old scripts printed for ``CASES``
+  (every subcommand x representative queries, zero-hit and not-found paths),
+  recorded while they existed and frozen since: there is no script left to
+  regenerate it from. ``legacy-claude-pages.json`` holds how the old Claude
+  docs parser split the two Claude docs fixtures into pages (title, URL, a
+  hash of the body, the section list) and its ``sections`` output for every
+  claude-platform page.
+* ``normalize`` / ``compare`` are the comparator. They drop or canonicalise
+  only the lines the migration was allowed to change (listed above
+  ``normalize``) and require everything else — page list and order, refs,
+  titles, URLs, descriptions, section lists, page bodies, hit blocks, the
+  query in the header, the ``Next:`` commands minus the script name and the
+  options naming the default corpus or a file (``--source platform`` still
+  counts) — to match byte for byte. ``compare`` looks at stdout, and at the
+  first line of the normalised stderr when the expected stdout is empty
+  (error paths).
+* ``GENERIC_PARITY_EXPECTED`` lists the cases the bundled presets match;
+  ``GENERIC_INTENDED_DIFF`` the ones where they differ on purpose.
 
-Regenerating the golden is a deliberate act: run this file as a script with
-``--update-golden`` (only while the old scripts are the reference), and
-review the diff. ``--report-generic`` prints, per case, how far the generic
-loader with the bundled presets (``PARITY_PRESETS``) is from the golden
-after normalisation.
+``--report-generic`` (run this file as a script) prints, per case, how far
+the generic loader with the bundled presets (``PARITY_PRESETS``) is from the
+golden after normalisation.
 """
 
 import contextlib
 import difflib
+import hashlib
 import io
 import json
 import os
@@ -100,12 +87,6 @@ CORPORA = {
     # Pages printed by ``content`` cases have body lines starting with
     # ``Note:`` / ``Tip:`` and the words ``page`` / ``document``.
     "firebase": ("firebase-llms.txt", "firebase-docs"),
-}
-
-SCRIPTS = {
-    "claude-docs": "parse-claude-docs.py",
-    "ai-sdk": "parse-ai-sdk.py",
-    "firebase": "parse-firebase.py",
 }
 
 _P = ("--source", "platform")
@@ -177,53 +158,12 @@ CASES = [
 
 CASE_IDS = [c[0] for c in CASES]
 
-# Cases with refs that exist in the full cache, not in the fixture (no
-# golden): run by ``CorpusParityGateTest`` only, old script vs. generic loader.
-CORPUS_CASES = [
-    # the exact /<lang>/hooks page among the pages ending in /hooks (a note names the others)
-    ("cd-code-corpus-sections-slug", "claude-docs", ["sections", "hooks"]),
-    ("cd-code-corpus-sections-slug-2", "claude-docs", ["sections", "agent-sdk/hooks"]),
-    ("cd-code-corpus-sections-url-md", "claude-docs", ["sections", "https://code.claude.com/docs/en/hooks.md"]),
-    # a URL the upstream file heads twice: the first page
-    ("cd-code-corpus-sections-url-repeated", "claude-docs",
-     ["sections", "https://code.claude.com/docs/en/plugins/install"]),
-    # one letter short of a page's URL: no page (not the longer one)
-    ("cd-code-corpus-content-url-missing", "claude-docs", ["content", "https://code.claude.com/docs/en/hook"]),
-    # a URL whose title other pages share
-    ("cd-plat-corpus-sections-url-dup-title", "claude-docs",
-     ["sections", "https://platform.claude.com/docs/en/api/messages/create", *_P]),
-    ("cd-plat-corpus-sections-slug", "claude-docs", ["sections", "prompt-caching", *_P]),
-    ("cd-plat-corpus-sections-slug-ambiguous", "claude-docs", ["sections", "messages/create", *_P]),
-    # anchor_style / show_overflow: Section: anchors and the overflow list
-    ("cd-code-corpus-search-content", "claude-docs", ["search-content", "PreToolUse matcher"]),
-    ("cd-code-corpus-search-content-page", "claude-docs", ["search-content", "matcher", "--page-ref", "hooks"]),
-    ("cd-plat-corpus-search-content", "claude-docs", ["search-content", "cache_control ttl", *_P]),
-    # link_annotations: the ``→ [doc_idx N]`` after in-body links on whole pages
-    ("cd-code-corpus-content-links", "claude-docs", ["content", "hooks", "--max-chars", "0"]),
-    ("cd-plat-corpus-content-links", "claude-docs", ["content", "prompt-caching", "--max-chars", "0", *_P]),
-    # members: both sources with hits on the full corpus. The query avoids the
-    # pages llms.txt lists twice ("hooks" has one): the generic loader shows
-    # one line per page since 0.47.2, the old script two, and that intended
-    # difference would hide behind the platform page-number shift that already
-    # fails this case on the current corpus
-    ("cd-corpus-search-both", "claude-docs", ["search", "settings", "--source", "both"]),
-    # body "fetch": pages of the local page cache, by number / URL / slug, and the
-    # last page of the paged index
-    ("fb-corpus-sections-int", "firebase", ["sections", "2771"]),
-    ("fb-corpus-sections-url", "firebase", ["sections", "https://firebase.google.com/docs/projects/multiprojects"]),
-    ("fb-corpus-content-slug", "firebase", ["content", "multiprojects", "--max-chars", "0"]),
-    ("fb-corpus-search-content-page", "firebase", ["search-content", "deploy", "--page-ref", "2771"]),
-    ("fb-corpus-search", "firebase", ["search", "deploy targets"]),
-    ("fb-corpus-fetch-index-page", "firebase", ["fetch-index", "--offset", "7150"]),
-]
-
-
 def case_of(case_id: str) -> tuple:
-    return next(c for c in CASES + CORPUS_CASES if c[0] == case_id)
+    return next(c for c in CASES if c[0] == case_id)
 
 
 # ---------------------------------------------------------------------------
-# Running the old scripts
+# Running a script
 # ---------------------------------------------------------------------------
 
 class _Run:
@@ -274,31 +214,10 @@ def run_script(script: str, argv: list, cache_dir: str) -> _Run:
     return _Run(code, _scrub(out, cache_dir), _scrub(err, cache_dir), len(calls))
 
 
-def run_legacy_case(case_id: str, *, source_dir: Path | None = None) -> _Run:
-    _, corpus, argv = case_of(case_id)
-    tmp = tempfile.mkdtemp(prefix="llms-parity-")
-    try:
-        stage_corpus(corpus, tmp, source_dir=source_dir)
-        return run_script(SCRIPTS[corpus], argv, tmp)
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
 def load_golden(case_id: str) -> tuple[str, dict]:
     stdout = (GOLDEN_DIR / f"{case_id}.stdout").read_text(encoding="utf-8")
     record = json.loads(MANIFEST.read_text(encoding="utf-8"))[case_id]
     return stdout, record
-
-
-def update_golden() -> None:
-    GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
-    manifest = {}
-    for case_id in CASE_IDS:
-        run = run_legacy_case(case_id)
-        (GOLDEN_DIR / f"{case_id}.stdout").write_text(run.stdout, encoding="utf-8")
-        manifest[case_id] = run.as_record()
-    MANIFEST.write_text(json.dumps(manifest, indent=1, ensure_ascii=False, sort_keys=True) + "\n",
-                        encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +381,7 @@ def preset_profile(name: str) -> dict:
 GENERIC_PARITY_EXPECTED: frozenset = frozenset({
     "cd-code-sections-int",
     # page_ref_forms ["int", "url", "slug"]: a slug ref and its failure message (the
-    # first, third and fourth on the fixture only: FIXTURE_ONLY_PARITY)
+    # first, third and fourth name pages only the fixture has)
     "cd-code-sections",
     "cd-code-content-missing",
     "cd-plat-sections",
@@ -546,39 +465,6 @@ GENERIC_PARITY_EXPECTED: frozenset = frozenset({
 # search-index): as-fetch-index / as-search-index / as-search-index-tags
 # moved to ``GENERIC_PARITY_EXPECTED``.
 GENERIC_PARITY_EXPECTED_BUT_URL_LINES: frozenset = frozenset()
-# Cases of ``GENERIC_PARITY_EXPECTED`` whose refs name pages (or headings)
-# only the fixture has: on the full corpus both scripts fail the same way,
-# which compares nothing, so ``CorpusParityGateTest`` leaves them out
-# (``CORPUS_CASES`` covers the page refs with real pages).
-FIXTURE_ONLY_PARITY: frozenset = frozenset({
-    "cd-code-sections",            # slug "snapshotting"
-    "cd-plat-sections",            # slug "get-access-token"
-    "cd-plat-sections-dup-title",  # URL …/api/beta/blobs/fetch
-    "as-content",                  # title "Loom is not assignable"
-    "as-content-heading",          # heading "API Signature" of page 3
-    "as-sections",                 # title "useCompletion": one page in the fixture, many in the corpus
-    "cd-code-search-content-page", # slug "snapshotting"
-    "cd-code-content",             # slug "quillon-tag"
-    "cd-code-content-heading",     # heading "Roll out a hub" of slug "hub"
-    "cd-plat-content-nav-tail",    # slug "folding"
-    "fb-sections",                 # page 14: a page of the fixture's page cache
-    "fb-sections-url",             # URL …/docs/cli/labels
-    "fb-content",                  # slug "labels"
-    "fb-content-heading",          # page 14, heading "Get started"
-})
-
-# Cases where the full-corpus gate compares a failure on purpose (the error
-# text is what the case checks). Any other case failing on both sides there
-# fails the gate.
-FAILURE_PARITY_CASES: frozenset = frozenset({
-    "cd-code-content-missing",
-    "cd-code-corpus-content-url-missing",
-    "cd-plat-corpus-sections-slug-ambiguous",
-    # a page that is not in the page cache, with the network off: the fetch
-    # error (exit 1) on both sides
-    "fb-content-dead",
-})
-
 # Cases where the generic loader is meant to differ from the old script: the
 # old script failed and its stderr named the command that reads the page
 # (``content … -- 8``); the bundled preset opens that page directly. Each
@@ -655,7 +541,7 @@ def run_generic_case(case_id: str, *, source_dir: Path | None = None) -> _Run:
 # ---------------------------------------------------------------------------
 
 class GoldenSelfCheckTest(unittest.TestCase):
-    """The old scripts still print exactly the recorded golden."""
+    """The recorded golden of the retired scripts is whole."""
 
     def test_every_case_has_a_golden(self):
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
@@ -664,17 +550,9 @@ class GoldenSelfCheckTest(unittest.TestCase):
         for case_id in CASE_IDS:
             self.assertTrue((GOLDEN_DIR / f"{case_id}.stdout").is_file(), case_id)
 
-    def test_old_scripts_match_golden_byte_for_byte(self):
-        for case_id in CASE_IDS:
-            with self.subTest(case=case_id):
-                stdout, record = load_golden(case_id)
-                run = run_legacy_case(case_id)
-                self.assertEqual(run.stdout, stdout)
-                self.assertEqual(run.as_record(), record)
-
     def test_cases_cover_every_subcommand_of_every_script(self):
         commands = {"fetch-index", "search-index", "search-content", "sections", "content", "search"}
-        for corpus in SCRIPTS:
+        for corpus in CORPORA:
             seen = {argv[0] for _, c, argv in CASES if c == corpus}
             self.assertEqual(seen, commands, corpus)
 
@@ -975,16 +853,11 @@ class GenericLoaderHarnessTest(unittest.TestCase):
                 self.assertLessEqual(run.fetches, record["fetches"])
 
     def test_parity_sets_are_consistent(self):
-        self.assertLessEqual(FIXTURE_ONLY_PARITY, GENERIC_PARITY_EXPECTED)
-        corpus_ids = [c[0] for c in CORPUS_CASES]
-        self.assertEqual(len(set(corpus_ids)), len(corpus_ids))
-        self.assertFalse(set(corpus_ids) & set(CASE_IDS))
-        self.assertLessEqual(FAILURE_PARITY_CASES,
-                             (GENERIC_PARITY_EXPECTED - FIXTURE_ONLY_PARITY) | set(corpus_ids))
+        self.assertLessEqual(GENERIC_PARITY_EXPECTED, set(CASE_IDS))
+        self.assertLessEqual(set(GENERIC_INTENDED_DIFF), set(CASE_IDS))
 
     def test_intended_differences_open_the_page_the_old_script_named(self):
         self.assertFalse(GENERIC_PARITY_EXPECTED & set(GENERIC_INTENDED_DIFF))
-        self.assertFalse(FAILURE_PARITY_CASES & set(GENERIC_INTENDED_DIFF))
         for case_id, page in sorted(GENERIC_INTENDED_DIFF.items()):
             with self.subTest(case=case_id):
                 _, record = load_golden(case_id)
@@ -1016,73 +889,34 @@ class GenericLoaderHarnessTest(unittest.TestCase):
                 self.assertLessEqual(run.fetches, record["fetches"])
 
 
-class _Served:
-    """What ``urllib.request.urlopen`` returns in ``serve_fixture``."""
-
-    def __init__(self, data: bytes, url: str):
-        self._data, self.url, self.headers = data, url, {}
-
-    def read(self):
-        return self._data
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
-def serve_fixture(corpus: str, calls: list):
-    """A fake ``urlopen`` that answers the old scripts' URLs with *corpus*'s
-    fixture files (the index, the full text, a Firebase page by its cache
-    file name) and fails on any other URL. Every call is recorded."""
-    cd = _loader.load_script("parse-claude-docs.py")
-    fb = _loader.load_script("parse-firebase.py")
-    files = {_loader.load_script("parse-ai-sdk.py").LLMS_TXT_URL: "ai-sdk-llms-full.txt",
-             fb.LLMS_TXT_URL: fb.INDEX_CACHE_NAME}
-    for src in cd.SOURCES.values():
-        files[src["index_url"]] = src["index_cache"]
-        files[src["full_url"]] = src["full_cache"]
-
-    def fake_urlopen(req, *a, **kw):
-        url = getattr(req, "full_url", req)
-        calls.append(url)
-        if url in files:
-            path = FIXTURES / corpus / files[url]
-        else:
-            path = FIXTURES / corpus / fb.PAGES_CACHE_SUBDIR / fb._url_to_cache_filename(url)
-        if not path.is_file():
-            raise OSError(f"parity harness: no fixture for {url}")
-        return _Served(path.read_bytes(), url)
-    return fake_urlopen
-
-
-def run_script_online(script: str, argv: list, cache_dir: str, corpus: str) -> _Run:
-    """``run_script`` with the network answering from *corpus*'s fixture."""
-    module = _loader.load_script(script)
-    calls: list = []
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("LLMS_DOCS_CACHE_DIR", "XDG_CACHE_HOME")}
-    with mock.patch.dict(os.environ, env, clear=True), \
-            mock.patch("urllib.request.urlopen", side_effect=serve_fixture(corpus, calls)):
-        code, out, err = _loader.run_cli(module, [script, *argv, "--cache-dir", cache_dir])
-    return _Run(code, _scrub(out, cache_dir), _scrub(err, cache_dir), len(calls))
-
-
 class PresetCacheSharingTest(unittest.TestCase):
-    """The bundled presets read and write the old scripts' cache files:
-    the same file names, fetched from the same URLs (the sidecar records the
-    URL, and a file whose sidecar names another URL is fetched again), so a
-    cache filled by either one is used by the other without a fetch."""
+    """The bundled presets read and write the cache files the old scripts
+    wrote: the same file names, fetched from the same URLs (the sidecar
+    records the URL, and a file whose sidecar names another URL is fetched
+    again), so a cache filled before 0.46.0 is used without a fetch."""
+
+    # the old scripts' URLs and cache file names (``parse-claude-docs.py``'s
+    # ``SOURCES``, ``parse-ai-sdk.py``'s ``LLMS_TXT_URL`` /
+    # ``DEFAULT_CACHE_FILENAME``, ``parse-firebase.py``'s ``LLMS_TXT_URL`` /
+    # ``INDEX_CACHE_NAME`` / ``PAGES_CACHE_SUBDIR``)
+    OLD_CLAUDE = {
+        "claude-code": {"full_url": "https://code.claude.com/docs/llms-full.txt",
+                        "full_cache": "claude-code-llms-full.txt",
+                        "index_url": "https://code.claude.com/docs/llms.txt",
+                        "index_cache": "claude-code-llms.txt"},
+        "claude-platform": {"full_url": "https://platform.claude.com/llms-full.txt",
+                            "full_cache": "claude-platform-llms-full.txt",
+                            "index_url": "https://platform.claude.com/llms.txt",
+                            "index_cache": "claude-platform-llms.txt"},
+    }
+    OLD_AI_SDK = ("https://ai-sdk.dev/llms-full.txt", "ai-sdk-llms-full.txt")
+    OLD_FIREBASE = ("https://firebase.google.com/docs/llms.txt", "firebase-llms.txt", "firebase-docs")
 
     def test_cache_names_and_urls_are_the_old_scripts(self):
         g = _loader.load_script("parse-llms-txt.py")
-        cd = _loader.load_script("parse-claude-docs.py")
-        ai = _loader.load_script("parse-ai-sdk.py")
-        fb = _loader.load_script("parse-firebase.py")
-        for name, key in (("claude-code", "code"), ("claude-platform", "platform")):
+        for name, src in self.OLD_CLAUDE.items():
             with self.subTest(name):
-                p, src = preset_profile(name), cd.SOURCES[key]
+                p = preset_profile(name)
                 self.assertEqual((p["url"], os.path.basename(g._cache_path("/c", p))),
                                  (src["full_url"], src["full_cache"]))
                 self.assertEqual((p["index_url"], os.path.basename(g._index_cache_path("/c", p))),
@@ -1091,12 +925,11 @@ class PresetCacheSharingTest(unittest.TestCase):
                 # hit; no fixture of the suite has such variants
                 self.assertIs(p["index_group_variants"], True)
         p = preset_profile("ai-sdk")
-        self.assertEqual((p["url"], os.path.basename(g._cache_path("/c", p))),
-                         (ai.LLMS_TXT_URL, ai.DEFAULT_CACHE_FILENAME))
+        self.assertEqual((p["url"], os.path.basename(g._cache_path("/c", p))), self.OLD_AI_SDK)
         p = preset_profile("firebase")
         self.assertEqual((p["index_url"], os.path.basename(g._index_cache_path("/c", p))),
-                         (fb.LLMS_TXT_URL, fb.INDEX_CACHE_NAME))
-        self.assertEqual(g._page_dir_name(p), fb.PAGES_CACHE_SUBDIR)
+                         self.OLD_FIREBASE[:2])
+        self.assertEqual(g._page_dir_name(p), self.OLD_FIREBASE[2])
         self.assertEqual(preset_profile("claude")["members"], ("claude-code", "claude-platform"))
 
     def test_keys_no_fixture_case_tells_apart_keep_the_old_scripts_values(self):
@@ -1136,62 +969,38 @@ class PresetCacheSharingTest(unittest.TestCase):
                 if not case_id.startswith("fb-"):
                     self.assertEqual(run.fetches, 0)
 
-    # (corpus, argv of the old script, the preset) for a fill-then-read round
-    _ROUND_TRIPS = (
-        ("claude-docs", ["search", "snapshot restore"], "claude-code"),
-        ("claude-docs", ["search", "access token", "--source", "platform"], "claude-platform"),
-        ("ai-sdk", ["search", "stream shape"], "ai-sdk"),
-        ("firebase", ["sections", "14"], "firebase"),
-    )
+LEGACY_PAGES = GOLDEN_DIR / "legacy-claude-pages.json"
 
-    def _generic(self, argv: list, name: str, tmp: str) -> list:
-        argv = [a for i, a in enumerate(argv)
-                if a != "--source" and (i == 0 or argv[i - 1] != "--source")]
-        return [*argv, "--source", name, "--sources-file", write_empty_sources(tmp)]
 
-    def test_a_cache_filled_by_one_is_read_by_the_other_without_a_fetch(self):
-        for corpus, argv, name in self._ROUND_TRIPS:
-            for first in ("old", "generic"):
-                with self.subTest(preset=name, filled_by=first):
-                    tmp = tempfile.mkdtemp(prefix="llms-parity-")
-                    try:
-                        old_argv, new_argv = argv, self._generic(argv, name, tmp)
-                        runs = {"old": (SCRIPTS[corpus], old_argv), "generic": ("parse-llms-txt.py", new_argv)}
-                        second = "generic" if first == "old" else "old"
-                        filled = run_script_online(*runs[first], tmp, corpus)
-                        self.assertEqual(filled.code, 0, filled.stderr)
-                        self.assertGreater(filled.fetches, 0)
-                        read = run_script(*runs[second], tmp)
-                        self.assertEqual(read.code, 0, read.stderr)
-                        self.assertEqual(read.fetches, 0, read.stderr)
-                        self.assertEqual(compare(filled.stdout, read.stdout, filled.stderr, read.stderr), [])
-                        # the sidecars name the URLs both use
-                        for meta in Path(tmp).rglob("*.meta.json"):
-                            self.assertTrue(json.loads(meta.read_text(encoding="utf-8"))["url"].startswith("https://"))
-                    finally:
-                        shutil.rmtree(tmp, ignore_errors=True)
+def _legacy_pages(name: str) -> dict:
+    """``legacy-claude-pages.json`` for the Claude docs fixture *name*."""
+    return json.loads(LEGACY_PAGES.read_text(encoding="utf-8"))[name]
+
+
+def _page_record(doc: dict, sections: list) -> tuple:
+    body = "".join(doc["body_lines"])
+    return (doc["title"], doc["url"], hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            json.loads(json.dumps(sections)))
 
 
 def platform_page_mismatches(full_text: Path, profile: dict) -> list[str]:
-    """Pages of a claude-platform ``llms-full.txt`` where the generic loader
-    with *profile* differs from ``parse-claude-docs.py``: title, URL, body
-    lines, or the section list at each loader's heading floor (the old
-    script's pages always use H2; the generic loader's use ``min_level``).
-    Page refs are not involved, so this holds on the full corpus too."""
+    """Pages of the claude-platform fixture where the generic loader with
+    *profile* differs from what ``parse-claude-docs.py`` split it into
+    (``legacy-claude-pages.json``): title, URL, body, or the section list at
+    each loader's heading floor (the old script's pages always used H2; the
+    generic loader's use ``min_level``)."""
     import _common
-    cd = _loader.load_script("parse-claude-docs.py")
     g = _loader.load_script("parse-llms-txt.py")
     lines = _common.load_lines(str(full_text))
-    old = cd.split_documents(lines)
+    old = _legacy_pages("claude-platform")["pages"]
     new = g.split_documents(lines, g._validate_profile("sources.json", "claude-platform", profile))
     if len(old) != len(new):
         return [f"page count {len(old)} != {len(new)}"]
     out = []
     for i, (o, n) in enumerate(zip(old, new)):
-        for what, a, b in (("title", o["title"], n["title"]), ("url", o["source_url"], n["url"]),
-                           ("body", o["body_lines"], n["body_lines"]),
-                           ("sections", _common.extract_sections(o["body_lines"]),
-                            _common.extract_sections(n["body_lines"], min_level=n["min_level"] or 2))):
+        got = _page_record(n, _common.extract_sections(n["body_lines"], min_level=n["min_level"] or 2))
+        for what, a, b in zip(("title", "url", "body", "sections"),
+                              (o["title"], o["url"], o["body_sha256"], o["sections"]), got):
             if a != b:
                 out.append(f"[{i}] {o['title']}: {what}")
     return out
@@ -1199,15 +1008,8 @@ def platform_page_mismatches(full_text: Path, profile: dict) -> list[str]:
 
 class PlatformStructureParityTest(unittest.TestCase):
     """``strip_trailing_headings`` + ``min_heading_level: 2`` reproduce the
-    old script's claude-platform pages and sections. The ``content`` case
-    matches on the fixture too, but not on the full corpus, where links get
-    ``→ [doc_idx N]`` notes (a later step), so it is not in
-    ``GENERIC_PARITY_EXPECTED``; these checks go by page index. (The
-    ``sections`` cases by slug or URL, ``cd-plat-sections`` / ``-dup-title``,
-    are in it on the fixture only: their refs name no page of the full
-    corpus. Page refs on the full corpus are checked by
-    ``CorpusParityGateTest``: ``CORPUS_CASES`` and every page re-resolved by
-    its own URL and slugs.)"""
+    old script's claude-platform pages and sections (recorded in
+    ``legacy-claude-pages.json``); these checks go by page index."""
 
     FULL = FIXTURES / "claude-docs" / "claude-platform-llms-full.txt"
 
@@ -1215,22 +1017,18 @@ class PlatformStructureParityTest(unittest.TestCase):
         self.assertEqual(platform_page_mismatches(self.FULL, GENERIC_PROFILES["claude-platform"]), [])
 
     def test_sections_by_index_match_for_every_page(self):
-        import _common
-        n_pages = len(_loader.load_script("parse-claude-docs.py").split_documents(
-            _common.load_lines(str(self.FULL))))
-        self.assertGreater(n_pages, 5)
+        old_runs = _legacy_pages("claude-platform")["sections_stdout"]
+        self.assertGreater(len(old_runs), 5)
         tmp = tempfile.mkdtemp(prefix="llms-parity-")
         try:
             stage_corpus("claude-docs", tmp)
             sources = write_empty_sources(tmp)
-            for i in range(n_pages):
+            for i, old in enumerate(old_runs):
                 argv = ["sections", str(i), *_P]
                 with self.subTest(page=i):
-                    old = run_script(SCRIPTS["claude-docs"], argv, tmp)
                     new = run_script("parse-llms-txt.py", _generic_argv("claude-docs", argv, sources), tmp)
-                    self.assertEqual(old.code, 0, old.stderr)
                     self.assertEqual(new.code, 0, new.stderr)
-                    self.assertEqual(compare(old.stdout, new.stdout, old.stderr, new.stderr), [])
+                    self.assertEqual(compare(old["stdout"], new.stdout, old["stderr"], new.stderr), [])
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1245,9 +1043,9 @@ class PlatformStructureParityTest(unittest.TestCase):
                 self.assertTrue(any(m.endswith(what) for m in mismatches), mismatches)
 
 
-# ``parse-claude-docs.py`` reads both Claude docs files with one splitter that
-# tries H1 + ``Source:`` and frontmatter + ``url:`` and keeps the one with
-# more URL-bearing pages (a tie goes to H1). ``split: "auto"`` with these
+# ``parse-claude-docs.py`` read both Claude docs files with one splitter that
+# tried H1 + ``Source:`` and frontmatter + ``url:`` and kept the one with
+# more URL-bearing pages (a tie went to H1). ``split: "auto"`` with these
 # candidates is the same rule; the presets name their shape outright.
 CLAUDE_AUTO_PROFILE = {
     "url": "https://example.com/llms-full.txt", "split": "auto", "min_heading_level": 2,
@@ -1257,15 +1055,15 @@ CLAUDE_AUTO_PROFILE = {
 }
 
 
-def auto_split_mismatches(full_text: Path, want_split: str) -> list[str]:
-    """Pages where ``split: "auto"`` (``CLAUDE_AUTO_PROFILE``) differs from
-    ``parse-claude-docs.py``'s ``split_documents``: title, URL or body
-    lines, plus the candidate it chose when that is not *want_split*."""
+def auto_split_mismatches(full_text: Path, name: str, want_split: str) -> list[str]:
+    """Pages of the Claude docs fixture *name* where ``split: "auto"``
+    (``CLAUDE_AUTO_PROFILE``) differs from what ``parse-claude-docs.py``'s
+    ``split_documents`` made of it (``legacy-claude-pages.json``): title,
+    URL or body, plus the candidate it chose when that is not *want_split*."""
     import _common
-    cd = _loader.load_script("parse-claude-docs.py")
     g = _loader.load_script("parse-llms-txt.py")
     lines = _common.load_lines(str(full_text))
-    old = cd.split_documents(lines)
+    old = _legacy_pages(name)["pages"]
     try:
         profile = g._validate_profile("sources.json", "claude", CLAUDE_AUTO_PROFILE)
     except SystemExit as e:
@@ -1275,8 +1073,8 @@ def auto_split_mismatches(full_text: Path, want_split: str) -> list[str]:
     if len(old) != len(new):
         return out + [f"page count {len(old)} != {len(new)}"]
     for i, (o, n) in enumerate(zip(old, new)):
-        for what, a, b in (("title", o["title"], n["title"]), ("url", o["source_url"], n["url"]),
-                           ("body", o["body_lines"], n["body_lines"])):
+        got = _page_record(n, [])
+        for what, a, b in zip(("title", "url", "body"), (o["title"], o["url"], o["body_sha256"]), got):
             if a != b:
                 out.append(f"[{i}] {o['title']}: {what}")
     return out
@@ -1290,7 +1088,7 @@ class SplitAutoParityTest(unittest.TestCase):
         for name, want in (("claude-code", "h1"), ("claude-platform", "frontmatter")):
             with self.subTest(name):
                 full = FIXTURES / "claude-docs" / f"{name}-llms-full.txt"
-                self.assertEqual(auto_split_mismatches(full, want), [])
+                self.assertEqual(auto_split_mismatches(full, name, want), [])
 
 
 def corpus_cache_dir() -> Path:
@@ -1316,234 +1114,12 @@ class CorpusCacheDirTest(unittest.TestCase):
                     self.assertEqual(corpus_cache_dir(), Path(want))
 
 
-@unittest.skipUnless(os.environ.get(CORPUS_ENV) == "1",
-                     f"local-only full-corpus gate ({CORPUS_ENV}=1)")
-class CorpusParityGateTest(unittest.TestCase):
-    """The same cases on the full local cache (whatever corpora it holds).
-
-    Every case runs on the old scripts without a crash, and every case in
-    ``GENERIC_PARITY_EXPECTED`` matches between the old script and the
-    generic loader on the full corpus too, not just on the cut-out fixture.
-    """
-
-    def setUp(self):
-        self.cache = corpus_cache_dir()
-
-    def _cached(self, case_id: str) -> bool:
-        corpus = case_of(case_id)[1]
-        return all((self.cache / n).exists() for n in CORPORA[corpus])
-
-    def test_old_scripts_run_every_case(self):
-        for case_id in filter(self._cached, CASE_IDS):
-            with self.subTest(case=case_id):
-                run = run_legacy_case(case_id, source_dir=self.cache)
-                self.assertIn(run.code, (0, 1), run.stderr)
-
-    def _assert_not_an_empty_match(self, case_id: str, old, new) -> None:
-        """Both sides failing compares nothing unless the case is about that failure."""
-        if case_id in FIXTURE_ONLY_PARITY:
-            self.assertTrue(old.code != 0 and new.code != 0,
-                            f"{case_id} resolves on the full corpus now; take it out of FIXTURE_ONLY_PARITY")
-            return
-        if old.code != 0 and new.code != 0 and case_id not in FAILURE_PARITY_CASES:
-            self.fail(f"{case_id}: both fail on the full corpus ({(old.stderr.splitlines() or [''])[0]!r}); "
-                      "give it a ref the corpus has, or list it in FIXTURE_ONLY_PARITY / FAILURE_PARITY_CASES")
-
-    def test_expected_parity_cases_match_on_the_full_corpus(self):
-        ids = GENERIC_PARITY_EXPECTED | {c[0] for c in CORPUS_CASES}
-        ran = 0
-        for case_id in filter(self._cached, sorted(ids)):
-            with self.subTest(case=case_id):
-                old = run_legacy_case(case_id, source_dir=self.cache)
-                new = run_generic_case(case_id, source_dir=self.cache)
-                self.assertEqual(compare(old.stdout, new.stdout, old.stderr, new.stderr), [])
-                self.assertEqual(new.code, old.code)
-                self._assert_not_an_empty_match(case_id, old, new)
-                ran += 1
-        if any(map(self._cached, ids)):
-            self.assertGreater(ran, 0)
-
-    def test_url_line_cases_match_without_them_on_the_full_corpus(self):
-        for case_id in filter(self._cached, sorted(GENERIC_PARITY_EXPECTED_BUT_URL_LINES)):
-            with self.subTest(case=case_id):
-                old = run_legacy_case(case_id, source_dir=self.cache)
-                new = run_generic_case(case_id, source_dir=self.cache)
-                stripped, _removed = without_url_entry_lines(new.stdout)
-                self.assertEqual(without_url_entry_lines(old.stdout)[1], 0)
-                self.assertEqual(compare(old.stdout, stripped, old.stderr, new.stderr), [])
-                self.assertEqual(new.code, old.code)
-                self._assert_not_an_empty_match(case_id, old, new)
-
-    def test_every_page_resolves_by_its_own_refs_as_the_old_script_does(self):
-        """Every Claude Code / Platform page, by its URL, its URL with ``.md``
-        and the last one and two segments of its URL: the old script's
-        resolver and the generic loader's with ``("int", "url", "slug")``
-        reach the same page, or fail with the same first line."""
-        old_mod = _loader.load_script("parse-claude-docs.py")
-        new_mod = _loader.load_script("parse-llms-txt.py")
-        import _common  # scripts/ is on sys.path (``_loader``)
-
-        def call(fn, *args):
-            err = io.StringIO()
-            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
-                try:
-                    return ("ok", fn(*args))
-                except SystemExit:
-                    return ("die", (err.getvalue().splitlines() or [""])[0])
-                except Exception as e:  # a crash is a failure of the gate, not an error of the run
-                    self.fail(f"{fn.__module__} crashed on {args[1]!r}: {e!r}")
-
-        checked = resolved = 0
-        for name in ("claude-code", "claude-platform"):
-            full = self.cache / f"{name}-llms-full.txt"
-            if not full.exists():
-                continue
-            lines = _common.load_lines(str(full))
-            old_docs = old_mod.split_documents(lines)
-            profile = preset_profile(name)
-            new_docs = new_mod.split_documents(lines, profile)
-            self.assertEqual(len(new_docs), len(old_docs), name)
-            self.assertEqual(profile["page_ref_forms"], ("int", "url", "slug"))
-            for doc in old_docs:
-                url = doc.get("source_url", "")
-                if not url:
-                    continue
-                segs = url.rstrip("/").split("/")
-                for ref in (url, url.rstrip("/") + ".md", segs[-1], "/".join(segs[-2:])):
-                    old = call(old_mod._resolve_page_ref, old_docs, ref, None)
-                    new = call(new_mod._resolve_page_ref, new_docs, ref, None,
-                               profile["page_ref_forms"], profile["page_url_strip_suffix"])
-                    if old != new:
-                        self.fail(f"{name} {ref!r}: old {old!r}, generic {new!r}")
-                    checked += 1
-                    resolved += old[0] == "ok"
-        if not checked:
-            self.skipTest(f"no claude-code / claude-platform full text in {self.cache}")
-        self.assertGreater(resolved, 0)
-
-    def test_every_firebase_entry_resolves_and_caches_as_the_old_script_does(self):
-        """Every entry of the cached Firebase llms.txt, by its number, its
-        ``.md.txt`` URL, its page URL and the last one and two segments of
-        that: ``parse-firebase.py``'s resolver and the generic loader's
-        ``body: "fetch"`` pages reach the same entry, or fail with the same
-        first line; and the page cache file of every entry has the old name."""
-        index = self.cache / "firebase-llms.txt"
-        if not index.exists():
-            self.skipTest(f"no {index}")
-        old_mod = _loader.load_script("parse-firebase.py")
-        new_mod = _loader.load_script("parse-llms-txt.py")
-        import _common  # scripts/ is on sys.path (``_loader``)
-        entries = _common.parse_llms_index(_common.load_lines(str(index)))
-        profile = preset_profile("firebase")
-        args = mock.Mock(file=None, index_file=str(index), source="firebase", cache_dir="/c", max_age=None)
-        _path, docs = new_mod._fetch_entry_docs(args, profile)
-        self.assertEqual([d["url"] for d in docs], [e["url"] for e in entries])
-        old_names = {e["url"]: old_mod._url_to_cache_filename(e["url"]) for e in entries}
-        new_names = {e["url"]: os.path.basename(new_mod._page_cache_path("/c", profile, e["url"]))
-                     for e in entries}
-        self.assertEqual(new_names, old_names)
-
-        def call(fn, *a):
-            err = io.StringIO()
-            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
-                try:
-                    return ("ok", fn(*a))
-                except SystemExit:
-                    return ("die", (err.getvalue().splitlines() or [""])[0])
-
-        resolved = 0
-        mismatches = []
-        for i, e in enumerate(entries):
-            page = e["url"][:-len(".md.txt")] if e["url"].endswith(".md.txt") else e["url"]
-            segs = page.rstrip("/").split("/")
-            for ref in (str(i), e["url"], page, segs[-1], "/".join(segs[-2:])):
-                old = call(old_mod._resolve_page_ref, entries, ref, None)
-                new = call(new_mod._resolve_page_ref, docs, ref, None,
-                           profile["page_ref_forms"], profile["page_url_strip_suffix"])
-                if old != new:
-                    mismatches.append(f"{ref!r}: old {old!r}, generic {new!r}")
-                resolved += old[0] == "ok"
-        self.assertEqual(mismatches[:20], [])
-        self.assertGreater(resolved, len(entries))
-
-    def test_every_ai_sdk_page_resolves_by_its_url_and_titles_as_before(self):
-        """Every AI SDK page, by its URL, its URL with ``.md`` and the last one
-        and two segments of its URL. The ai-sdk preset tries a URL / slug only
-        after the title (``GENERIC_INTENDED_DIFF``), so: a ref the old script
-        resolved (a title substring) reaches the same page; a ref it did not
-        resolve reaches the page whose URL it is or ends with, or fails (a
-        slug several pages end with is listed); and no ref reaches another
-        page than the old script's or than its own."""
-        full = self.cache / "ai-sdk-llms-full.txt"
-        if not full.exists():
-            self.skipTest(f"no {full}")
-        old_mod = _loader.load_script("parse-ai-sdk.py")
-        new_mod = _loader.load_script("parse-llms-txt.py")
-        import _common  # scripts/ is on sys.path (``_loader``)
-        lines = _common.load_lines(str(full))
-        old_docs = old_mod.split_documents(lines)
-        profile = preset_profile("ai-sdk")
-        docs = new_mod.split_documents(lines, profile)
-        self.assertEqual(len(docs), len(old_docs))
-        self.assertEqual(profile["page_ref_forms"], ("int", "title", "url", "slug"))
-
-        def call(fn, *a):
-            err = io.StringIO()
-            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
-                try:
-                    return ("ok", fn(*a))
-                except SystemExit:
-                    return ("die", (err.getvalue().splitlines() or [""])[0])
-
-        wrong = []
-        by_url = 0
-        for i, doc in enumerate(docs):
-            if not doc["url"]:
-                continue
-            segs = doc["url"].rstrip("/").split("/")
-            for ref in (doc["url"], doc["url"].rstrip("/") + ".md", segs[-1], "/".join(segs[-2:])):
-                old = call(old_mod._resolve_page_ref, old_docs, ref, None)
-                new = call(new_mod._resolve_page_ref, docs, ref, None,
-                           profile["page_ref_forms"], profile["page_url_strip_suffix"])
-                if old[0] == "ok" and new != old:
-                    wrong.append(f"{ref!r}: old {old!r}, generic {new!r}")
-                elif old[0] != "ok" and new[0] == "ok" and new[1] != i:
-                    wrong.append(f"{ref!r}: page {i}, generic {new!r}")
-                by_url += old[0] != "ok" and new == ("ok", i) and ref.startswith("http")
-        self.assertEqual(wrong[:20], [])
-        # every page opens by its own URL (with and without .md)
-        self.assertEqual(by_url, 2 * sum(1 for d in docs if d["url"]))
-
-    def test_platform_pages_match_on_the_full_corpus(self):
-        full = self.cache / "claude-platform-llms-full.txt"
-        if not full.exists():
-            self.skipTest(f"no {full}")
-        self.assertEqual(platform_page_mismatches(full, GENERIC_PROFILES["claude-platform"]), [])
-
-    def test_split_auto_pages_match_on_the_full_corpus(self):
-        for name, want in (("claude-code", "h1"), ("claude-platform", "frontmatter")):
-            full = self.cache / f"{name}-llms-full.txt"
-            if not full.exists():
-                continue
-            with self.subTest(name):
-                self.assertEqual(auto_split_mismatches(full, want), [])
-
-
 if __name__ == "__main__":
-    if "--update-golden" in sys.argv:
-        update_golden()
-        print(f"golden written to {GOLDEN_DIR}")
-    elif "--report-generic" in sys.argv:
-        # ``--corpus DIR``: compare the old script and the generic loader on a
-        # full cache directory instead of golden vs. generic on the fixture.
-        corpus_dir = Path(sys.argv[sys.argv.index("--corpus") + 1]) if "--corpus" in sys.argv else None
+    if "--report-generic" in sys.argv:
         for cid in CASE_IDS:
-            r = run_generic_case(cid, source_dir=corpus_dir)
-            if corpus_dir is None:
-                stdout, record = load_golden(cid)
-                ref = _Run(record["exit"], stdout, record["stderr"], record["fetches"])
-            else:
-                ref = run_legacy_case(cid, source_dir=corpus_dir)
+            r = run_generic_case(cid)
+            stdout, record = load_golden(cid)
+            ref = _Run(record["exit"], stdout, record["stderr"], record["fetches"])
             diff = compare(ref.stdout, r.stdout, ref.stderr, r.stderr)
             n = sum(1 for d in diff if d[:1] in "+-" and d[:3] not in ("+++", "---"))
             same = "MATCH" if not diff and r.code == ref.code else "differ"

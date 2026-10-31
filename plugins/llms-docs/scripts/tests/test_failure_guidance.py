@@ -1,14 +1,16 @@
-"""What the four ``parse-*.py`` scripts print after an error or an empty result.
+"""What ``parse-llms-txt.py`` prints after an error or an empty result.
 
 An ambiguous page reference, a heading path that does not resolve, a search
 whose ``Next:`` line was a placeholder, and a search with no hits all used to
 leave the caller to rebuild the next command by hand (a copied heading with a
-typo, a reworded query that cannot help). Each script is checked for the same
-four behaviours against a small local corpus (no network): the shared tests
-live in ``_GuidanceTests`` and every script only supplies its fixture.
+typo, a reworded query that cannot help). Each bundled preset that replaced
+a dedicated script (``claude-code`` / ``ai-sdk`` / ``firebase``) and a plain
+``sources.json`` profile are checked for the same four behaviours against a
+small local corpus (no network): the shared tests live in ``_GuidanceTests``
+and every class only supplies its fixture.
 
 Plus the rule that is specific to URL slugs (``hooks`` -> ``/en/hooks`` rather
-than ``/en/agent-sdk/hooks``), which only claude-docs has.
+than ``/en/agent-sdk/hooks``), which the Claude docs presets have.
 """
 
 import contextlib
@@ -27,10 +29,8 @@ import _loader  # noqa: F401  (side effect: adds scripts/ to sys.path)
 import _common
 import _commands
 
-claude = _loader.load_script("parse-claude-docs.py")
-ai_sdk = _loader.load_script("parse-ai-sdk.py")
-firebase = _loader.load_script("parse-firebase.py")
 generic = _loader.load_script("parse-llms-txt.py")
+SCRIPT = "parse-llms-txt.py"
 
 # Three terms that live in three different sections of the first page, so a
 # query naming all of them has every term in the corpus and no section with
@@ -94,8 +94,8 @@ class _GuidanceTests:
     scripts echo them in a ``Next:`` line.
     """
 
-    module = None
-    script = None
+    module = generic
+    script = SCRIPT
     corpus_args: list
     tail: str
     # AI SDK's heading paths start with the page's H1
@@ -400,56 +400,55 @@ class _GuidanceTests:
 
 
 class ClaudeDocsGuidanceTest(_GuidanceTests, unittest.TestCase):
-    module = claude
-    script = "parse-claude-docs.py"
+    """The ``claude-code`` preset."""
 
     def write_corpus(self):
         pages = [
             ("Hooks", "https://example.com/en/cli/hooks", HOOKS_BODY),
             ("Agent SDK Hooks", "https://example.com/en/agent-sdk/hooks", OTHER_BODY),
         ]
-        # both sources: a 0-hit search offers the other one, and the round
-        # trip runs that command too (it must not reach the network)
+        # both sources' caches, so no command can reach the network
         for prefix in ("claude-code", "claude-platform"):
             Path(self.tmp, f"{prefix}-llms.txt").write_text(
                 "".join(f"- [{t}]({u}): about {t}\n" for t, u, _b in pages), encoding="utf-8")
             Path(self.tmp, f"{prefix}-llms-full.txt").write_text(
                 "".join(f"# {t}\nSource: {u}\n\n{b}\n" for t, u, b in pages), encoding="utf-8")
-        self.corpus_args = ["--cache-dir", self.tmp]
-        self.tail = f"--cache-dir {self.tmp}"
+        sources = _loader.without_user_sources(self)
+        self.corpus_args = ["--source", "claude-code", "--sources-file", sources, "--cache-dir", self.tmp]
+        self.tail = f"--source claude-code --sources-file {sources} --cache-dir {self.tmp}"
 
 
 class ClaudeDocsFileGuidanceTest(ClaudeDocsGuidanceTest):
-    """The same with ``--file``: claude-docs' ``search-index`` has no
-    ``--file``, so no hint may send the reader there with it."""
+    """The same with ``--file`` + ``--index-file`` (``search`` ranks on the
+    llms.txt index, which ``--file`` does not replace)."""
 
     def write_corpus(self):
         super().write_corpus()
-        # search ranks on the llms.txt index, which --file does not replace;
-        # keep it in the temporary dir instead of the real cache
+        # keep any default cache lookup in the temporary dir
         patcher = mock.patch.dict(os.environ, {"LLMS_DOCS_CACHE_DIR": self.tmp})
         patcher.start()
         self.addCleanup(patcher.stop)
         full = str(Path(self.tmp, "claude-code-llms-full.txt"))
-        self.corpus_args = ["--file", full]
-        self.tail = f"--file {full}"
+        index = str(Path(self.tmp, "claude-code-llms.txt"))
+        sources = self.corpus_args[3]
+        self.file_only = ["--source", "claude-code", "--sources-file", sources, "--file", full]
+        # in the order the hints echo them
+        self.corpus_args = ["--source", "claude-code", "--sources-file", sources,
+                            "--index-file", index, "--file", full]
+        self.tail = f"--source claude-code --sources-file {sources} --index-file {index} --file {full}"
 
-    def test_zero_hits_term_not_in_corpus(self):
-        code, out, err = self.run_cmd("search-content", "zzzmissing qqqmissing")
+    def test_zero_hits_with_file_alone_sends_nobody_to_search_index(self):
+        # without --index-file, search-index cannot read the llms.txt index
+        # from the file, so no hint may send the reader there
+        code, out, err = _loader.run_cli(
+            self.module, [self.script, "search-content", "zzzmissing qqqmissing", *self.file_only])
         self.assertEqual(code, 0, err)
         self.assertIn("not in this corpus", out)
         self.assertNotIn("search-index", "".join(self.next_lines(out)))
 
-    def test_smart_search_with_no_result_gets_the_same_diagnosis(self):
-        code, out, err = self.run_cmd("search", "frobnicator quuxify")
-        self.assertEqual(code, 0, err)
-        self.assertIn('"frobnicator": 0 of', out)
-        self.assertNotIn("search-index", "".join(self.next_lines(out)))
-
 
 class AiSdkGuidanceTest(_GuidanceTests, unittest.TestCase):
-    module = ai_sdk
-    script = "parse-ai-sdk.py"
+    """The ``ai-sdk`` preset."""
     path_prefix = "Hooks/"
 
     def write_corpus(self):
@@ -457,8 +456,9 @@ class AiSdkGuidanceTest(_GuidanceTests, unittest.TestCase):
         Path(self.tmp, "ai-sdk-llms-full.txt").write_text(
             "".join(f"---\ntitle: {t}\ndescription: about {t}\n---\n\n# {t}\n\n{b}\n" for t, b in pages),
             encoding="utf-8")
-        self.corpus_args = ["--cache-dir", self.tmp]
-        self.tail = f"--cache-dir {self.tmp}"
+        sources = _loader.without_user_sources(self)
+        self.corpus_args = ["--source", "ai-sdk", "--sources-file", sources, "--cache-dir", self.tmp]
+        self.tail = f"--source ai-sdk --sources-file {sources} --cache-dir {self.tmp}"
 
 
 class AiSdkFileGuidanceTest(AiSdkGuidanceTest):
@@ -467,13 +467,13 @@ class AiSdkFileGuidanceTest(AiSdkGuidanceTest):
     def write_corpus(self):
         super().write_corpus()
         full = str(Path(self.tmp, "ai-sdk-llms-full.txt"))
-        self.corpus_args = ["--file", full]
-        self.tail = f"--file {full}"
+        sources = self.corpus_args[3]
+        self.corpus_args = ["--source", "ai-sdk", "--sources-file", sources, "--file", full]
+        self.tail = f"--source ai-sdk --sources-file {sources} --file {full}"
 
 
 class FirebaseGuidanceTest(_GuidanceTests, unittest.TestCase):
-    module = firebase
-    script = "parse-firebase.py"
+    """The ``firebase`` preset (``body: fetch``)."""
 
     def write_corpus(self):
         pages = [
@@ -486,9 +486,11 @@ class FirebaseGuidanceTest(_GuidanceTests, unittest.TestCase):
         pages_dir = Path(self.tmp, "firebase-docs")
         pages_dir.mkdir()
         for t, u, b in pages:
-            (pages_dir / firebase._url_to_cache_filename(u)).write_text(f"# {t}\n\n{b}\n", encoding="utf-8")
-        self.corpus_args = ["--cache-dir", self.tmp]
-        self.tail = f"--cache-dir {self.tmp}"
+            (pages_dir / _common.page_cache_filename(u, "https://firebase.google.com/")).write_text(
+                f"# {t}\n\n{b}\n", encoding="utf-8")
+        sources = _loader.without_user_sources(self)
+        self.corpus_args = ["--source", "firebase", "--sources-file", sources, "--cache-dir", self.tmp]
+        self.tail = f"--source firebase --sources-file {sources} --cache-dir {self.tmp}"
 
     def test_zero_hits_with_page_ref_says_the_page_cut_it_out(self):
         # Pages are fetched lazily: only the --page-ref page is counted.
@@ -509,8 +511,6 @@ class FirebaseGuidanceTest(_GuidanceTests, unittest.TestCase):
 
 
 class GenericGuidanceTest(_GuidanceTests, unittest.TestCase):
-    module = generic
-    script = "parse-llms-txt.py"
 
     def write_corpus(self):
         sources = Path(self.tmp, "sources.json")
@@ -522,151 +522,12 @@ class GenericGuidanceTest(_GuidanceTests, unittest.TestCase):
         self.tail = f"--source site --sources-file {sources} --file {corpus}"
 
 
-class ClaudeDocsSourceBothTest(unittest.TestCase):
-    """Only ``search`` takes ``--source both``. Any other command that got it
-    used to die with argparse's ``invalid choice`` and no way forward; it now
-    exits 2 and prints the same command once per source (plus ``search`` for
-    a command with a query), and every printed line runs as it stands."""
-
-    module = claude
-    script = "parse-claude-docs.py"
-    setUp = _GuidanceTests.setUp
-    write_corpus = ClaudeDocsGuidanceTest.write_corpus
-    run_cmd = _GuidanceTests.run_cmd
-    run_line = _GuidanceTests.run_line
-    assert_commands_run = _GuidanceTests.assert_commands_run
-
-    def test_each_single_source_command_answers_with_runnable_commands(self):
-        cases = {
-            "search-content": ["search-content", "alphaterm"],
-            "search-index": ["search-index", "hooks"],
-            "content": ["content", "0"],
-            "sections": ["sections", "0"],
-            "fetch-index": ["fetch-index"],
-        }
-        for name, argv in cases.items():
-            with self.subTest(command=name):
-                code, out, err = self.run_cmd(*argv, "--source", "both")
-                self.assertEqual(code, 2, err)
-                self.assertNotIn("invalid choice", err)
-                self.assertIn("--source both", err)
-                commands = self.assert_commands_run(err, at_least=2)
-                lines = [c for c, _n in commands]
-                self.assertTrue(any("--source code" in c for c in lines), err)
-                self.assertTrue(any("--source platform" in c for c in lines), err)
-                # a line that still says both must be the search one
-                for c in lines:
-                    if "both" in c:
-                        self.assertIn(f"{self.script} search ", c)
-
-    def test_a_command_with_a_query_also_offers_search_for_both(self):
-        for argv in (["search-content", "alphaterm"], ["search-index", "hooks"]):
-            with self.subTest(command=argv[0]):
-                code, out, err = self.run_cmd(*argv, "--source", "both")
-                self.assertEqual(code, 2, err)
-                self.assertIn(f"{self.script} search {argv[1]} --source both", err)
-        # content / sections have no query to search for
-        code, out, err = self.run_cmd("content", "0", "--source", "both")
-        self.assertNotIn(f"{self.script} search ", err)
-
-    def test_the_other_options_survive_in_the_printed_commands(self):
-        code, out, err = self.run_cmd("search-content", "alphaterm", "--limit", "3",
-                                      "--source=both")
-        self.assertEqual(code, 2, err)
-        self.assertIn("--limit 3 --source=code", err)
-        self.assertIn("--limit 3 --source=platform", err)
-        self.assert_commands_run(err, at_least=3)
-
-    def test_search_itself_still_takes_both(self):
-        code, out, err = self.run_cmd("search", "alphaterm", "--source", "both")
-        self.assertEqual(code, 0, err)
-
-    # -- round trip: every printed line, split as a shell would, must run ------
-
-    def run_printed(self, argv, *, expect_lines=2):
-        """Run *argv* (exit 2), then every command it printed, unmodified."""
-        code, out, err = _loader.run_cli(self.module, [self.script, *argv])
-        self.assertEqual(code, 2, err)
-        lines = [ln.strip() for ln in err.splitlines()
-                 if ln.strip().startswith(self.script + " ")]
-        self.assertGreaterEqual(len(lines), expect_lines, err)
-        for line in lines:
-            with self.subTest(argv=argv, line=line):
-                code, out2, err2 = self.run_line(line)
-                self.assertEqual(code, 0, f"{line}\n{err2}")
-        return lines, err
-
-    def use_file(self):
-        patcher = mock.patch.dict(os.environ, {"LLMS_DOCS_CACHE_DIR": self.tmp})
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def test_round_trip_without_file(self):
-        c = ["--cache-dir", self.tmp]
-        self.run_printed(["content", "0", "--source", "both", *c], expect_lines=2)
-        self.run_printed(["search-content", "alphaterm", "--source=both", *c], expect_lines=3)
-
-    def test_round_trip_with_file_keeps_only_the_snapshots_own_source(self):
-        self.use_file()
-        full = str(Path(self.tmp, "claude-code-llms-full.txt"))
-        for argv in (["content", "0"], ["sections", "0"], ["search-content", "alphaterm"]):
-            with self.subTest(argv=argv):
-                lines, err = self.run_printed([*argv, "--source", "both", "--file", full],
-                                              expect_lines=1)
-                self.assertTrue(all("--source code" in ln for ln in lines), lines)
-                self.assertFalse(any("--source platform" in ln for ln in lines), lines)
-        # the --source=both spelling takes the same path
-        lines, err = self.run_printed(["content", "0", "--source=both", "--file", full],
-                                      expect_lines=1)
-        self.assertEqual(len(lines), 1, lines)
-
-    def test_file_that_names_no_source_says_to_keep_one_line(self):
-        self.use_file()
-        snap = str(Path(self.tmp, "snap.txt"))
-        shutil.copy(Path(self.tmp, "claude-code-llms-full.txt"), snap)
-        code, out, err = _loader.run_cli(
-            self.module, [self.script, "content", "0", "--source", "both", "--file", snap])
-        self.assertEqual(code, 2, err)
-        self.assertIn("keep only the line", err)
-
-    def test_abbreviated_option_still_gets_a_source_per_line(self):
-        c = ["--cache-dir", self.tmp]
-        lines, err = self.run_printed(["search-content", "alphaterm", "--sour", "both", *c],
-                                      expect_lines=3)
-        singles = [ln for ln in lines if " search " not in ln]
-        self.assertTrue(any(ln.endswith("--source code") or "--source code " in ln
-                            for ln in singles), singles)
-        self.assertTrue(any("--source platform" in ln for ln in singles), singles)
-        # with "--", the added --source goes before it, not into the positionals
-        lines, err = self.run_printed(["search-content", "--sour", "both", *c, "--", "-foo"],
-                                      expect_lines=3)
-        for ln in lines:
-            if " search " not in ln:
-                self.assertLess(ln.index("--source "), ln.index("-- -foo"), ln)
-
-    def test_a_query_starting_with_a_dash_gets_double_dash_in_search(self):
-        c = ["--cache-dir", self.tmp]
-        lines, err = self.run_printed(
-            ["search-content", "--source", "both", *c, "--", "-foo"], expect_lines=3)
-        searches = [ln for ln in lines if f"{self.script} search " in ln]
-        self.assertEqual(len(searches), 1, lines)
-        self.assertIn("-- -foo", searches[0])
-        self.assertLess(searches[0].index("--source"), searches[0].index("-- -foo"))
-        # the per-source lines keep the "--" the user typed and gain no
-        # --source after it
-        for ln in lines:
-            if ln not in searches:
-                self.assertLess(ln.index("--source"), ln.index("-- -foo"), ln)
-
-    def test_help_does_not_advertise_both_as_a_general_choice(self):
-        code, out, err = _loader.run_cli(self.module, [self.script, "content", "-h"])
-        self.assertIn("only for search", " ".join((out + err).split()))
-
-
 class ClaudeDocsSlugTest(unittest.TestCase):
-    """``hooks`` is ``/en/hooks``, not ``/en/agent-sdk/hooks``."""
+    """``hooks`` is ``/en/hooks``, not ``/en/agent-sdk/hooks`` (the
+    ``claude-code`` preset's ``slug`` page_ref)."""
 
     def setUp(self):
+        self.sources = _loader.without_user_sources(self)
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         pages = [
@@ -678,8 +539,12 @@ class ClaudeDocsSlugTest(unittest.TestCase):
         Path(self.tmp, "claude-code-llms-full.txt").write_text(
             "".join(f"# {t}\nSource: {u}\n\n{b}\n" for t, u, b in pages), encoding="utf-8")
 
+    def tail(self):
+        return f"--source claude-code --sources-file {self.sources} --cache-dir {self.tmp}"
+
     def run_cmd(self, *args):
-        return _loader.run_cli(claude, ["parse-claude-docs.py", *args, "--cache-dir", self.tmp])
+        return _loader.run_cli(generic, [SCRIPT, *args, "--source", "claude-code",
+                                         "--sources-file", self.sources, "--cache-dir", self.tmp])
 
     def test_bare_slug_resolves_to_the_exact_lang_page_and_names_the_others(self):
         code, out, err = self.run_cmd("sections", "hooks")
@@ -690,12 +555,11 @@ class ClaudeDocsSlugTest(unittest.TestCase):
     def test_note_ends_with_a_command_for_the_other_page(self):
         code, out, err = self.run_cmd("content", "hooks", "Overview", "--max-chars", "100")
         self.assertEqual(code, 1)  # page 1 has no "Overview"; the Note comes first
-        self.assertIn(f"For [0]: parse-claude-docs.py content --max-chars 100 "
-                      f"--cache-dir {self.tmp} -- 0 Overview", err)
+        self.assertIn(f"For [0]: {SCRIPT} content --max-chars 100 {self.tail()} -- 0 Overview", err)
         code, out, err = self.run_cmd("sections", "hooks")
-        commands = offered_commands(err, "parse-claude-docs.py")
-        self.assertEqual(commands, [(f"parse-claude-docs.py sections --cache-dir {self.tmp} -- 0", 1)])
-        code, out, err = _loader.run_cli(claude, shlex.split(commands[0][0], comments=True))
+        commands = offered_commands(err, SCRIPT)
+        self.assertEqual(commands, [(f"{SCRIPT} sections {self.tail()} -- 0", 1)])
+        code, out, err = _loader.run_cli(generic, shlex.split(commands[0][0], comments=True))
         self.assertEqual(code, 0, err)
         self.assertIn('Sections in [0] "Agent SDK Hooks"', out)
 
@@ -711,7 +575,7 @@ class ClaudeDocsSlugTest(unittest.TestCase):
         code, out, err = self.run_cmd("sections", "hooks")
         self.assertEqual(code, 1)
         self.assertIn("Ambiguous slug 'hooks'", err)
-        self.assertIn("parse-claude-docs.py sections --cache-dir", err)
+        self.assertIn(f"{SCRIPT} sections {self.tail()}", err)
         self.assertIn(" -- 1", err)
 
 
@@ -975,6 +839,7 @@ class ContentCommandDashHeadingTest(unittest.TestCase):
     DASH_HEADINGS = ["-x", "--limit", "---", "-", "--help", "--help-all"]
 
     def setUp(self):
+        sources = _loader.without_user_sources(self)
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         pages = [("Hooks", "https://example.com/en/cli/hooks", DASH_BODY)]
@@ -987,11 +852,14 @@ class ContentCommandDashHeadingTest(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         full = str(Path(self.tmp, "claude-code-llms-full.txt"))
-        self.corpus = {"--cache-dir": ["--cache-dir", self.tmp], "--file": ["--file", full]}
+        index = str(Path(self.tmp, "claude-code-llms.txt"))
+        preset = ["--source", "claude-code", "--sources-file", sources]
+        self.corpus = {"--cache-dir": [*preset, "--cache-dir", self.tmp],
+                       "--file": [*preset, "--index-file", index, "--file", full]}
 
     def assert_reads(self, line, heading):
         argv = shlex.split(line, comments=True)
-        code, out, err = _loader.run_cli(claude, argv)
+        code, out, err = _loader.run_cli(generic, argv)
         self.assertEqual(code, 0, (line, err))
         self.assertIn(f"# heading_path: {heading}\n", out, line)
 
@@ -1000,9 +868,9 @@ class ContentCommandDashHeadingTest(unittest.TestCase):
             hint = tuple(shlex.quote(a) for a in args)
             for heading in self.DASH_HEADINGS:
                 with self.subTest(opt=opt, heading=heading):
-                    line = _common.content_command("parse-claude-docs.py", 0, heading, hint)
+                    line = _common.content_command(SCRIPT, 0, heading, hint)
                     words = shlex.split(line)
-                    self.assertEqual(words[:2], ["parse-claude-docs.py", "content"])
+                    self.assertEqual(words[:2], [SCRIPT, "content"])
                     self.assertEqual(words[-3:], ["--", "0", heading], line)
                     self.assert_reads(line, heading)
 
@@ -1015,14 +883,14 @@ class ContentCommandDashHeadingTest(unittest.TestCase):
             for sub, word in cases:
                 with self.subTest(opt=opt, sub=sub, word=word):
                     code, out, err = _loader.run_cli(
-                        claude, ["parse-claude-docs.py", sub, *args, "--", word])
+                        generic, [SCRIPT, sub, *args, "--", word])
                     self.assertEqual(code, 0, err)
                     nexts = [ln[len("Next: "):] for ln in out.splitlines()
-                             if ln.startswith("Next: parse-claude-docs.py content ")]
+                             if ln.startswith(f"Next: {SCRIPT} content ")]
                     self.assertTrue(nexts, out)
                     argv = shlex.split(nexts[0], comments=True)
                     self.assertIn("--", argv, nexts[0])
-                    code, body, err = _loader.run_cli(claude, argv)
+                    code, body, err = _loader.run_cli(generic, argv)
                     self.assertEqual(code, 0, (nexts[0], err))
                     self.assertIn(word, body, nexts[0])
 
@@ -1042,11 +910,11 @@ class ContentCommandDashHeadingTest(unittest.TestCase):
             for query, expected in cases:
                 with self.subTest(opt=opt, query=query):
                     code, out, err = _loader.run_cli(
-                        claude, ["parse-claude-docs.py", "content", *args, "--", "0", query])
+                        generic, [SCRIPT, "content", *args, "--", "0", query])
                     self.assertEqual(code, 1, err)
                     # the candidates printed before "Available sections:"
                     offered = [c for c, _n in offered_commands(
-                        err.split("Available sections:")[0], "parse-claude-docs.py")]
+                        err.split("Available sections:")[0], SCRIPT)]
                     got = set()
                     for line in offered:
                         argv = shlex.split(line, comments=True)

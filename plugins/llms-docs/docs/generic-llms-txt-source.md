@@ -17,9 +17,9 @@
 >
 > **2026-10-16 追記 (0.46.0)**: 専用 parser 3 本 (Claude docs / AI SDK / Firebase) を汎用 loader に統合した。
 > 4 skill とも `parse-llms-txt.py … --source <name>` (`claude-code` / `claude-platform` / `claude` / `ai-sdk` /
-> `firebase`) を使い、専用 script の名前は引数を読み替えて汎用 loader を起動する shim として 1 リリース残る。
-> 以下の表や本文で専用 script を名指ししている箇所は、計測した時点の状態の記録として残している
-> (旧実装は `scripts/tests/legacy/` にある)。
+> `firebase`) を使う。専用 script の名前は 0.46.0〜0.47.x の間だけ shim として残り、0.48.0 で旧実装とともに
+> 削除した。以下の表や本文で専用 script を名指ししている箇所は、計測した時点の状態の記録として残している
+> (旧実装は 0.47.3 以前の `scripts/tests/legacy/` で読める)。
 
 ## 1. 現状の共通化率 (実測)
 

@@ -32,15 +32,15 @@ preset を置き換える。
 - `sources.json` の検証漏れで、source 名がキャッシュディレクトリの外を指せる・不正な値で
   クラッシュする
 - 0.45.0 までの専用 script を置き換えた preset (`claude-code` / `claude-platform` / `claude` / `ai-sdk` /
-  `firebase`) の出力が、専用 script の実装 (`scripts/tests/legacy/`) の出力から変わる。ただし移行の比較
+  `firebase`) の出力が、専用 script が出した出力の記録 (`scripts/tests/fixtures/parity/golden/`) から変わる。ただし移行の比較
   (`scripts/tests/test_migration_parity.py` の `normalize`) が除く行 (1 行目のヘッダの括弧と直後の
   `(file: …)` などの行、`Next:` の script 名と既定の corpus・ファイルを指すオプション、`search` の
   `"<query>"` プレースホルダ行で語を `--` の後ろに置く並び (`search --source x -- "<query>"`)、末尾の件数行、
   行頭の `Tip:` / `Note:`、単位の語 `page` / `document`、`URL:` / `url:` の大文字小文字) と、
   `GENERIC_INTENDED_DIFF` に理由を書いた意図した差は除く
-- 旧 script 名の shim (`scripts/parse-claude-docs.py` / `parse-ai-sdk.py` / `parse-firebase.py`、実体は
-  `scripts/_shim.py`) が、引数の読み替え (`--source` の値と既定、`--index-limit`、省略形の展開) 以外の
-  ことをする、読み替えで別の source・別のオプションになる、`parse-llms-txt.py` 以外の出力を出す
+- 専用 script が出した出力の記録 (`scripts/tests/fixtures/parity/golden/`) を書き換える。旧実装は
+  削除済みで作り直せないため、記録を今の出力に合わせて直すと比較の基準が失われる。出力を変える
+  ときは、`normalize` の除外か `GENERIC_INTENDED_DIFF` に理由を書く
 
 指摘しないもの (対象外として README に明記済み):
 
@@ -64,6 +64,6 @@ preset を置き換える。
 ### 優先度の目安
 
 - P1: 対応形状での誤分割・誤った URL、別 corpus を指すヒント、キャッシュ外への書き込み、
-  専用 script を置き換えた preset の出力の変化 (上の除外を除く)、shim の読み替えの誤り
+  専用 script を置き換えた preset の出力の変化 (上の除外を除く)、専用 script の出力の記録の書き換え
 - P2: エラーメッセージの誤り、`sources.json` の検証漏れ (クラッシュしないもの)
 - P3: 対応形状を広げる提案、可読性

@@ -1,15 +1,16 @@
 """In-body link annotations ``→ [doc_idx N]`` printed by ``content``.
 
-``parse-claude-docs.py content`` appends `` → [doc_idx N]`` after a Markdown
-link that points at another page of the corpus, so the reader can open it
+``content`` with ``link_annotations`` (the Claude docs presets) appends
+`` → [doc_idx N]`` after a Markdown link that points at another page of the corpus, so the reader can open it
 with ``content N``. Links inside code fences and on table rows, links to the
 page itself and links to URLs that are no page are left as they are;
 ``/docs/en/…`` and ``/en/…`` name the same page; ``--no-link-annotations``
 turns the annotations off.
 
-The cases below pin that behaviour on the old script first. They run on
-both routes the page bodies come from (``--file`` and the cache), with the
-network patched to fail.
+The cases below pin that behaviour on the bundled ``claude-code`` preset
+(the behaviour of the retired ``parse-claude-docs.py``) and on a
+``sources.json`` profile with the same keys. They run on both routes the page
+bodies come from (``--file`` and the cache), with the network patched to fail.
 """
 
 import json
@@ -22,8 +23,6 @@ import unittest
 from unittest import mock
 
 import _loader
-
-CD_SCRIPT = "parse-claude-docs.py"
 
 HOST = "https://code.claude.com"
 
@@ -179,13 +178,16 @@ def _page_key(url: str) -> str:
     return u
 
 
-class _LegacyRunner:
-    """``parse-claude-docs.py`` on a temp copy of the fixture."""
+class _PresetRunner:
+    """The bundled ``claude-code`` preset on a temp copy of the fixture."""
 
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.mkdtemp(prefix="llms-link-annot-")
-        cls.module = _loader.load_script(CD_SCRIPT)
+        cls.module = _loader.load_script("parse-llms-txt.py")
+        cls.sources_file = os.path.join(cls.tmp, "sources.json")
+        with open(cls.sources_file, "w", encoding="utf-8") as f:
+            json.dump({"sources": {}}, f)  # the preset as shipped
         cls.file = os.path.join(cls.tmp, "fixture-llms-full.txt")
         with open(cls.file, "w", encoding="utf-8") as f:
             f.write(full_text())
@@ -203,15 +205,16 @@ class _LegacyRunner:
         os.utime(cached, (now, now))
         where = (["--file", self.file] if self.route == "file" else [])
         with mock.patch("urllib.request.urlopen", side_effect=_no_network):
-            return _loader.run_cli(self.module, [CD_SCRIPT, *argv, *where,
-                                                 "--cache-dir", self.cache_dir])
+            return _loader.run_cli(self.module, [
+                "parse-llms-txt.py", *argv, "--source", "claude-code",
+                "--sources-file", self.sources_file, *where, "--cache-dir", self.cache_dir])
 
 
-class LegacyFileTest(_LegacyRunner, _LinkAnnotationCases, unittest.TestCase):
+class PresetFileTest(_PresetRunner, _LinkAnnotationCases, unittest.TestCase):
     route = "file"
 
 
-class LegacyCacheTest(_LegacyRunner, _LinkAnnotationCases, unittest.TestCase):
+class PresetCacheTest(_PresetRunner, _LinkAnnotationCases, unittest.TestCase):
     route = "cache"
 
 
