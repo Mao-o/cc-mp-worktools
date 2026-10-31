@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.28.0
+
+### Fixed: kubectl の相対パスの `--kubeconfig` / `KUBECONFIG` を、コマンドが走るディレクトリで解決する
+
+- kubectl は相対パスの `--kubeconfig` / `KUBECONFIG` を自分の作業ディレクトリから開く。0.27.0 までの
+  hook は検証の kubectl を hook プロセスの作業ディレクトリで起動していたので、
+  `cd sub && kubectl --kubeconfig k.yaml apply ...` を `sub/k.yaml` ではなく起動側の `k.yaml` で照合する
+  ことがあり、別のファイルの current-context で通す / 止めることがあった。deny が案内する
+  `kubectl config use-context <期待値> --kubeconfig k.yaml` も相対パスのままで、起動ディレクトリで打つと
+  別のファイルに書いた (マージ前レビューの指摘)
+- 相対パスの `--kubeconfig` は、そのコマンドが走るディレクトリ (Bash の作業ディレクトリ + コマンド中の
+  `cd` / `pushd`。起動リポジトリの内外の判定と同じもの) の実体のパスに連結した絶対パスにしてから、検証の
+  kubectl・成功 cache のキー・deny の案内に使う。`..` は正規化しない (移動先が symlink のとき、kubectl が
+  開くのは実体の親の側)。`--kubeconfig` が無く `KUBECONFIG` に相対パスの要素があるときは、検証の kubectl
+  をそのディレクトリで起動する (移動先がまだ無ければ、その旨の文で deny)
+- **判定表の変更**: 同じ相対パスのコマンドが別々のディレクトリで走る形
+  (`cd sub && kubectl --kubeconfig k.yaml apply ...; cd .. && kubectl --kubeconfig k.yaml apply ...`)
+  は、どのファイルで照合するか決められないので deny する (リモート read だけなら警告)。絶対パス・
+  相対パスの無いコマンドは従来どおりで、`cd` の有無で照合も cache も変えない
+- 成功 cache のキーは解決後の絶対パスで作るので、あるディレクトリの成功が別のディレクトリの同じ相対
+  パスのコマンドを通すことはない
+- 確かめ方: テストは、実際のファイルを作業ディレクトリからの相対で開く偽の kubectl で、移動先が
+  symlink・起動ディレクトリの親が symlink・hard link・大文字小文字だけ違う名前の 4 つの配置を回す
+  (同一性は inode で比べ、案内を実行した後に残すべきファイルの中身を読み直す)。本物の kubectl は
+  起動していない
+
 ## 0.27.0
 
 ### Changed: `--kubeconfig` / `--configuration` / `--config` を付けたコマンドの deny が、同じ option を付けた切替を案内し、案内どおりにすると通る

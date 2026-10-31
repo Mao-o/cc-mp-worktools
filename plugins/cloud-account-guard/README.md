@@ -913,7 +913,7 @@ flag** は、その値を検証に反映する。従来は hook の既定コン�
 | Firebase | `--project` / `-P` | `.firebaserc` の alias を解決してから照合 (CLI 本体と同じ規則)。`.firebaserc` を firebase-tools と同じ内容に読めると確かめられなければ deny (v0.18.0) |
 | Firebase | `--config` / `-c` | 指定したファイルのあるディレクトリを project root にする (`.firebaserc` と `firebase use` の起点。CLI 本体と同じ)。相対パスはプロジェクトのディレクトリから探し (プロジェクトのディレクトリは symlink を解いた実体のパスで。CLI 本体と同じ)、見つからなければ deny (v0.18.0) |
 | Kubernetes | `--context` | 値を期待値と直接照合 |
-| Kubernetes | `--kubeconfig` | 現在値の取得コマンドに引き渡す |
+| Kubernetes | `--kubeconfig` | 現在値の取得コマンドに引き渡す。相対パスは、そのコマンドが走るディレクトリ (Bash の作業ディレクトリ + コマンド中の `cd`) の実体のパスに連結した絶対パスにしてから渡し、deny の案内もその絶対パスで出す。相対パスの `KUBECONFIG` も同じディレクトリで解決する。同じ相対パスのコマンドが別々のディレクトリで走る形は、どのファイルか決められないので deny (v0.28.0) |
 
 - 記法は `--opt value` / `--opt=value` / 短縮の分離形 (`-P prod`) / 値の連結形
   (`-Pprod`) を拾う。`-P=prod` は hook では値 `prod` と読むが、firebase-tools (commander) は

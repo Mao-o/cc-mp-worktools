@@ -725,6 +725,12 @@ def _outside_error(root: Path | None, *, stops: bool) -> str:
     )
 
 
+def _unresolved_context_error(svc, cands, *, stops: bool) -> str:
+    """`resolve_context` が context を決められなかったときの文 (v0.28.0)。"""
+    tail = "" if stops else "\n(リモート read のみのコマンドなので実行は止めません)"
+    return f"{svc.UNRESOLVED_CONTEXT}{tail}\n(検出コマンド: {_detected(cands)})"
+
+
 def _target_dirs(cands, seg_dirs: dict) -> set:
     """target の各セグメントが走るディレクトリ (None = 静的に決められない)。"""
     dirs: set = set()
@@ -1079,6 +1085,21 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         if cli_options.COMBINED_SHORT_KEY in ctx:
             problems.append(_combined_short_error(svc, cands, stops=stops))
             continue
+
+        # 相対パスの context (kubectl の `--kubeconfig k.yaml`) を、セグメントが走る
+        # ディレクトリ (`cd` を追ったもの) で解決する (v0.28.0。services/kubectl.py の
+        # `resolve_context`)。cache より前に置く: 解決前の context をキーにすると、別の
+        # ディレクトリの同じ相対パスの成功で通る。決められない・例外は止める側。
+        resolve = getattr(svc, "resolve_context", None)
+        if resolve is not None:
+            try:
+                resolved = resolve(ctx, dirs, {**os.environ, **(inline_env or {})})
+            except Exception:  # noqa: BLE001
+                resolved = None
+            if resolved is None:
+                problems.append(_unresolved_context_error(svc, cands, stops=stops))
+                continue
+            ctx = resolved
 
         svc_name = _service_name(svc)
         # verify 開始時点の epoch。開始後に (並行する hook の) 切替検出で epoch が進んだ

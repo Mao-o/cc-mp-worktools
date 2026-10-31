@@ -1288,12 +1288,19 @@ class TestContextOptionSwitchRoundTrip(BaseWithTmpProject):
     def test_kubectl_kubeconfig_round_trip(self):
         self._write_accounts({"kubectl": "ctx"})
         kc = str(self.kc)
+        real_dir = os.path.realpath(self.project_dir)
+        real_kc = os.path.join(real_dir, "k.yaml")
         commands = {
             "leading": (f"kubectl --kubeconfig {kc} apply -f x.yaml", kc),
             "trailing": (f"kubectl apply -f x.yaml --kubeconfig {kc}", kc),
             "equals": (f"kubectl apply -f x.yaml --kubeconfig={kc}", kc),
-            "relative": ("kubectl apply -f x.yaml --kubeconfig k.yaml", "k.yaml"),
-            "dot relative": ("kubectl apply -f x.yaml --kubeconfig ./k.yaml", "./k.yaml"),
+            # 相対パスはコマンドが走るディレクトリ (ここでは project) の実体のパスに連結した
+            # 絶対パスで照合・案内する (v0.28.0。どこで打っても同じファイルを指す)
+            "relative": ("kubectl apply -f x.yaml --kubeconfig k.yaml", real_kc),
+            "dot relative": (
+                "kubectl apply -f x.yaml --kubeconfig ./k.yaml",
+                os.path.join(real_dir, "./k.yaml"),
+            ),
             "no option": ("kubectl apply -f x.yaml", None),
         }
         for situation in ("mismatch", "unset"):

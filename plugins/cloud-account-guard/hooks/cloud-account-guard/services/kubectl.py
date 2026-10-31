@@ -1,6 +1,7 @@
 """Kubernetes (kubectl CLI) アクティブコンテキスト検証。"""
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 
@@ -118,17 +119,26 @@ SETUP_HINT = (
 ACCEPTS_DICT = False
 
 
-def _run_current_context(env=None, kubeconfig=None) -> tuple[str | None, str | None]:
+def _run_current_context(
+    env=None, kubeconfig=None, cwd=None
+) -> tuple[str | None, str | None]:
     """kubectl config current-context を実行し (context, error_reason) を返す。
 
     env: コマンド行頭のインライン環境変数をマージした完全 env (`KUBECONFIG` 等)。
     None なら hook プロセスの環境を継承する。
     kubeconfig: 候補コマンドが `--kubeconfig X` を指定していた場合の値。
     同じ option を検証コマンドにも渡し、実行時と同じファイルの current-context を読む。
+    cwd: 相対パスの `KUBECONFIG` を、コマンドが走るディレクトリで解決させるときの作業
+    ディレクトリ (`resolve_context`)。None なら hook プロセスの作業ディレクトリを継承する。
     """
     argv = ["kubectl", "config", "current-context"]
     if kubeconfig:
         argv += ["--kubeconfig", kubeconfig]
+    if cwd is not None and not os.path.isdir(cwd):
+        # 移動先がまだ無い (`mkdir` の前など)。subprocess は FileNotFoundError を投げ、下の
+        # 「kubectl が見つからない」と区別できなくなるので、先に言う。パスは文面に出さない
+        # (`cd` の引数はコマンド由来)。
+        return None, _CWD_MISSING
     try:
         result = subprocess.run(
             argv,
@@ -136,6 +146,7 @@ def _run_current_context(env=None, kubeconfig=None) -> tuple[str | None, str | N
             text=True,
             timeout=budget.call_timeout(10),
             env=env,
+            cwd=cwd,
         )
     except FileNotFoundError:
         return None, "kubectl: kubectl コマンドが見つかりません。"
@@ -189,8 +200,11 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
             return f"{head} — --context を外してください ({check_by_hand})"
         return f"{head} — --context を外すか --context {target} を指定してください"
 
+    # 相対パスの `--kubeconfig` は dispatcher が `resolve_context` でコマンドの走る
+    # ディレクトリから絶対パスにしてから渡す (v0.28.0)。案内の `--kubeconfig` もその絶対パスに
+    # なるので、どのディレクトリで打っても同じファイルを指す。
     kubeconfig = ctx.get("kubeconfig")
-    current, err = _run_current_context(env, kubeconfig)
+    current, err = _run_current_context(env, kubeconfig, ctx.get("cwd"))
     if err:
         return err
 
@@ -237,6 +251,64 @@ _KUBECONFIG_BY_HAND = (
     "--kubeconfig のパスは案内に使える形ではないため、コマンドの形では案内しません。"
     "同じ --kubeconfig を付けて、期待したコンテキストに切り替えてください"
 )
+
+
+_CWD_MISSING = (
+    "kubectl: コマンドが走るディレクトリが見つからないため、相対パスの KUBECONFIG が"
+    "どのファイルを指すかを確かめられません。"
+)
+# `resolve_context` が None を返したときの文 (dispatcher が tier に合わせた結びを足す)。
+UNRESOLVED_CONTEXT = (
+    "kubectl: 相対パスの --kubeconfig (または KUBECONFIG) を、別々のディレクトリで走る"
+    "複数のコマンドが使っているため、どのファイルで照合するかを決められません。"
+    "絶対パスで指定するか、ディレクトリごとにコマンドを分けて実行してください。"
+)
+
+
+def _is_relative(path) -> bool:
+    return isinstance(path, str) and path != "" and not os.path.isabs(path)
+
+
+def resolve_context(context, directories, env) -> dict | None:
+    """kubeconfig の相対パスを、コマンドが走るディレクトリで解決した context を返す (v0.28.0)。
+
+    kubectl は相対パスの `--kubeconfig` / `KUBECONFIG` を自分の作業ディレクトリから開く。
+    hook はコマンドの中の `cd` を実行しないので、そのまま渡すと hook プロセスの作業ディレクトリ
+    から開き、`cd sub && kubectl --kubeconfig k.yaml apply` を別のファイル (`./k.yaml`) で
+    照合しうる。dispatcher は照合の前にこれを呼び (成功 cache のキーにも結果の context を使う)、
+    directories には target のセグメントが走るディレクトリ (`cd` を追った論理パス。起動リポジトリ
+    の中と確かめた後) を渡す。
+
+    - `--kubeconfig` が相対パスなら、ディレクトリの実体のパス (`realpath`) に連結した絶対パスに
+      置き換える。`..` は正規化しない: シェルの `cd` は論理パスで動くが、kubectl の作業
+      ディレクトリは実体で、相対パスの `..` は実体の親を指す (`sub` が symlink のとき、論理パスの
+      親とは別のディレクトリ)。kubectl が開くのと同じファイルを指すのはこの形だけ
+    - `--kubeconfig` が無く、`KUBECONFIG` (env はインライン env を重ねた完全な env) に相対パスの
+      要素があれば、`"cwd"` にディレクトリの実体のパスを入れる (verify() が kubectl をそこで
+      起動する)
+    - 相対パスが無ければ context をそのまま返す (`cd` の有無で照合も cache も変えない)
+    - 相対パスがあるのに、ディレクトリが 1 つに決まらなければ None (dispatcher が止める)
+    """
+    ctx = dict(context or {})
+    kubeconfig = ctx.get("kubeconfig")
+    if kubeconfig is not None:
+        relative = _is_relative(kubeconfig)
+    else:
+        value = (env or {}).get("KUBECONFIG") or ""
+        relative = any(_is_relative(part) for part in value.split(os.pathsep))
+    if not relative:
+        return ctx
+    if len(directories) != 1:
+        return None
+    (directory,) = directories
+    if not isinstance(directory, str):
+        return None
+    real = os.path.realpath(directory)
+    if kubeconfig is not None:
+        ctx["kubeconfig"] = os.path.join(real, kubeconfig)
+    else:
+        ctx["cwd"] = real
+    return ctx
 
 
 _USE_CONTEXT_RE = re.compile(r"^kubectl\s+config\s+use-context\s+(\S+)\s*$")
