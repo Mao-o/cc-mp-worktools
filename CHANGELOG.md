@@ -15,6 +15,33 @@
 (更新判定のキーは各 plugin の `plugin.json` の `version`)、semver を振ると
 「plugin のバージョン」と混同されるため採っていません。
 
+## 2026-11-01
+
+### Added
+
+- CI に **skill の `allowed-tools` 検査**を追加 (`scripts/check_skill_allowed_tools.py`、
+  `.github/workflows/validate.yml` の `validate` job)。`plugins/*/skills/*/SKILL.md` の
+  Bash の付与は完全一致の形だけを許し、`Bash(... *)` と `Bash` 単独を FAIL にする
+  (`allowed-tools` は制限ではなく「確認なしで使える」付与なので、`*` があると
+  読み取り専用のつもりの付与が書き込み系まで通る)。検査導入前から Bash 単独を
+  付けていた 5 skill (llms-docs の 4 skill と codex-pr-review の 1 skill) は
+  script の ALLOWLIST に置き、絞り終えたら外す (対応する付与が無い許可リストは
+  FAIL)。script のテストは `scripts/tests/` に置き、同じ job で実行する
+- 同じ検査は、frontmatter を読めない形を黙って通さず FAIL にする (fail closed)。
+  行末・列 0 のコメント、複数行の flow list、引用符付きの scalar、キーの別表記
+  (`allowed-tools :` / `"allowed-tools":`)、先頭の BOM、付与の末尾空白を読み、
+  付与の形に合わない項目・括弧の中の ` #` (YAML ではコメントになる)・キーの重複・
+  キーとして読めない `allowed-tools` の行・閉じていない flow list・値に `Bash` が
+  あるのに Bash の付与を読み取れない場合を FAIL にする。既定の root で検査したときは、
+  許可リストにある skill の rename・削除も FAIL にする
+- `make validate` に同じ検査と `scripts/tests/` のテストを足し、`CONTRIBUTING.md` の
+  検査の表に載せた
+
+### Changed
+
+- `llms-docs-canary.yml` のコメントを現状に合わせた (削除済みの旧 script を
+  「削除予定の互換 shim」と書いたままだった。挙動の変更なし)
+
 ## 2026-10-13
 
 ### Changed
