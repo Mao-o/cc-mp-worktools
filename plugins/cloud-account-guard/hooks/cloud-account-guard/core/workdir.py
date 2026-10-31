@@ -30,7 +30,12 @@ import os
 import shlex
 from pathlib import Path
 
-from core.command_parser import extract_candidates
+from core.command_parser import (
+    BACKGROUND,
+    LIST_TERMINATORS,
+    extract_candidates,
+    extract_candidates_with_separators,
+)
 
 # 作業ディレクトリを変える組み込みコマンド。`builtin cd` は分解の時点で `cd` になる。
 _CHDIR_COMMANDS = frozenset({"cd", "pushd"})
@@ -191,15 +196,24 @@ def segment_dirs(command: str, cwd: str) -> dict[str, set[str | None]]:
 
     同じ文字列のセグメントが別のディレクトリで複数回現れることがあるため集合で返す。
     None は「静的に決められない」。
+
+    単独の `&` で終わるリスト (`cd sub & kubectl ...` の `cd sub`、
+    `cd sub && kubectl get x & aws ...` の `cd sub && kubectl get x`) はサブシェルで走るので、
+    その中の `cd` はリストの中の後続にだけ効き、`&` の後ろには効かない (v0.29.0)。
     """
     current: str | None = cwd or None
+    list_start = current
     result: dict[str, set[str | None]] = {}
-    for segment, _inline_env in extract_candidates(command):
+    for segment, _inline_env, sep in extract_candidates_with_separators(command):
         changes, target = _chdir_target(segment, current)
         if changes:
             current = target
-            continue
-        result.setdefault(segment, set()).add(current)
+        else:
+            result.setdefault(segment, set()).add(current)
+        if sep == BACKGROUND:
+            current = list_start
+        if sep in LIST_TERMINATORS:
+            list_start = current
     return result
 
 
