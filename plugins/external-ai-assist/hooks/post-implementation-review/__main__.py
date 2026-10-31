@@ -1828,8 +1828,9 @@ def _review_claim(
     """claim を取り、**何が起きても握りっぱなしにしない**ことを保証する薄い外枠。
 
     claim を取った後で例外が出ると、in-flight にエントリが残ったまま hook が死ぬ。
-    復元されるのは TTL (`IN_FLIGHT_TTL_SEC` = 900s) 超過後の Stop なので、その間
-    このセッションの変更は pending へ戻らず**レビューが 15 分沈黙する**。呼び出し元の
+    復元されるのは TTL 超過後の Stop、または claim した hook がもう居ない (0.17.0、
+    `state._owner_gone`) と分かった後の Stop で、それまでこのセッションの変更は pending へ
+    戻らない。呼び出し元の
     fail-open (`__main__` の `except Exception`) はプロセスを守るだけで状態は戻さない。
 
     実際の経路: `EXTERNAL_AI_POST_REVIEW_TIMEOUT` に非有限値が入ると
@@ -1840,24 +1841,71 @@ def _review_claim(
     復元は `claimed` 全件に対して行う (レビュー済みのものが混ざっても、hash 一致で
     次回の `_collect_diffs` が落とすので二重レビューにはならない)。除外済みパスが
     戻っても、除外は claim のたびに再適用されるので外部に送られることはない。
+
+    **中断されたレビューの指摘もここで配る (0.17.0)**。前のレビューが塊の途中で kill
+    されていたら、`claim_pending` がその claim を回収し (結果の返った塊のパスだけを残す)、
+    このレビューが自分の結果を出す直前に、退避されていた指摘を足して返す
+    (`_with_recovered_findings`)。hash はその時点で初めて記録する。
     """
     claim = state.claim_pending(session_id)
     if claim is None:
         log("このセッションが変更したファイルが無いため skip")
-        return {}
+        return _with_recovered_findings(session_id, {}, scope)
     claim_id, claimed = claim
     try:
-        return _run_review(session_id, root, claim_id, claimed, scope)
+        output = _run_review(
+            session_id, root, claim_id, claimed, scope,
+            prior_findings_chars=state.orphaned_findings_chars(session_id),
+        )
     except Exception as e:
         log(f"レビュー中に例外 (claim を pending へ戻す): {e}")
         state.restore_claim(session_id, claim_id, claimed)
-        return _with_notices(
+        output = _with_notices(
             {},
             [
                 f"レビューを完了できませんでした ({type(e).__name__})。"
                 f"{len(claimed)} ファイルは次のレビューに持ち越します"
             ],
         )
+    return _with_recovered_findings(session_id, output, scope)
+
+
+#: 中断されたレビューから引き継いだ指摘の前置き (Claude に渡す本文の先頭)
+RECOVERED_PREFACE = (
+    "前回のレビューは途中で中断されました。以下は、中断の前に結果が返っていた分の指摘です。"
+)
+
+
+def _with_recovered_findings(session_id: str, output: dict, scope: str) -> dict:
+    """中断されたレビューで返っていた指摘を、この出力に足す (無ければそのまま返す)。
+
+    `state.take_orphaned_results` は退避した hash を記録してから指摘を返すので、ここで
+    返した指摘は**必ずこの出力に載せる** (載せずに捨てると、返していない指摘の塊を
+    レビュー済みにしてしまう)。指摘なしの塊は hash の記録だけで、出力は変えない。
+    """
+    recovered = state.take_orphaned_results(session_id)
+    if not recovered:
+        return output
+    extra = RECOVERED_PREFACE + "\n\n" + _findings_reason(recovered, scope)
+    notice = f"中断された前回のレビューで返っていた指摘 ({len(recovered)} 回分) を Claude に渡しました"
+    specific = output.get("hookSpecificOutput")
+    if isinstance(output.get("reason"), str) and output["reason"]:
+        output["reason"] = output["reason"] + "\n\n" + extra
+    elif isinstance(specific, dict) and specific.get("additionalContext"):
+        specific["additionalContext"] = specific["additionalContext"] + "\n\n" + extra
+    elif _resolve_mode()[0] == MODE_BLOCK:
+        output["decision"] = "block"
+        output["reason"] = extra
+    else:
+        output["hookSpecificOutput"] = {"hookEventName": "Stop", "additionalContext": extra}
+    final = output.get("reason") or output["hookSpecificOutput"]["additionalContext"]
+    _save_review_copy(session_id, final)
+    log(notice)
+    existing = output.get("systemMessage")
+    lines = [notice]
+    if isinstance(existing, str) and existing:
+        lines.append(existing.removeprefix(_NOTICE_PREFIX))
+    return _with_notices(output, lines)
 
 
 def _run_review(
@@ -1866,8 +1914,12 @@ def _run_review(
     claim_id: str,
     claimed: list[str],
     scope: str = SCOPE_DIFF,
+    prior_findings_chars: int = 0,
 ) -> dict:
     """除外 → diff 収集 → cursor → 状態確定。stdout に出す JSON (無ければ {}) を返す。
+
+    `prior_findings_chars` は、この出力に一緒に載る中断されたレビューの指摘の文字数
+    (`_review_claim`)。2 回目以降の送信の指摘の上限の判定に足す。
 
     利用者向けの通知 (除外・繰り越し・切り詰め) は `systemMessage` にまとめる (block 時は
     `decision` / `reason` と同居させる。公式 docs の共通フィールドで Stop でも有効)。
@@ -1958,7 +2010,7 @@ def _run_review(
     started = _review_clock()
     sent: list[tuple[ReviewChunk, selection.Outcome]] = []
     unsent: list[ReviewChunk] = []
-    findings_chars = 0
+    findings_chars = prior_findings_chars
     held_for_findings = False
     for index, chunk in enumerate(chunks):
         if index > 0 and findings_chars + selection.MAX_OUTPUT_CHARS > MAX_FINDINGS_CHARS:
@@ -1983,8 +2035,16 @@ def _run_review(
         sent.append((chunk, outcome))
         if outcome.backend:
             last = outcome.backend
-        if outcome.text and not is_clean_review(outcome.text):
-            findings_chars += len(outcome.text)
+        if outcome.text:
+            # 返った塊の結果をすぐ退避する。この後の塊の途中で kill されても、後続の
+            # レビューがこの塊の指摘を配り、この塊を送り直さない (`state` の docstring)
+            clean = is_clean_review(outcome.text)
+            state.record_chunk_result(
+                session_id, claim_id, chunk.hashes, "" if clean else outcome.text,
+                outcome.backend or "",
+            )
+            if not clean:
+                findings_chars += len(outcome.text)
     elapsed = _review_clock() - started
     state.mark_review_done(session_id)
 
@@ -2563,6 +2623,10 @@ def handle_mid_turn(payload: dict) -> tuple[int, str]:
     |---|---|
     | 依頼 → (こちらが依頼を読む) → 再試行 | 両方が取りに行き、取れた側が残りを見る |
     | (こちらが依頼を読み終えた) → 依頼 → 再試行 | こちらはロックを放し終えているので、Stop の再試行が取れる |
+    | (こちらが引き継いだ分を送っている) → 依頼 → 再試行 (失敗) | こちらは送り終えてロックを放した後に読み直し、もう一度送る (0.17.0) |
+
+    読み直しは依頼が無くなるまで繰り返す。ただし、もう 1 回送ると hook の timeout に掛かりうる
+    ときは送らず、依頼を書き戻して次のレビューに任せる (`_midturn_has_room`)。
 
     残りの pending が誰にも見られずに次の応答まで残るのは、ロックを別のセッションが
     握っていた場合 (0.15.x までの Stop と同じ)。このとき印が立っていると、Stop は引き継ぎの
@@ -2576,6 +2640,7 @@ def handle_mid_turn(payload: dict) -> tuple[int, str]:
     """
     if not midturn_enabled() or not review_enabled():
         return 0, ""
+    started = _midturn_clock()
     if not selection.any_available(_per_tool_deadline()):
         return 0, ""
     if not _private_root_ok():
@@ -2621,17 +2686,67 @@ def handle_mid_turn(payload: dict) -> tuple[int, str]:
                     )
 
         # Stop から残りを引き継いだか。ロックを**放した後に**読む (docstring の場合分け)。
-        # ロックを取れなかったときも読む (依頼が残っていれば、ロックを取れた側が見る)
-        if state.take_stop_handoff(session_id):
+        # ロックを取れなかったときも読む (依頼が残っていれば、ロックを取れた側が見る)。
+        # 引き継いだ分を送っている間 (2 回目のロック区間) に Stop が来ると、Stop は印を見て
+        # 依頼を書き、再試行はこちらがロックを持つので失敗する。だから送り終えてロックを
+        # 放した後にも読み直し、依頼が無くなるまで繰り返す (0.17.0)
+        while state.take_stop_handoff(session_id):
+            if not _midturn_has_room(started):
+                # もう 1 回送ると hook の timeout に掛かりうる。依頼は書き戻して、次の
+                # 応答の途中のレビューか Stop に任せる (kill されて claim が宙に浮くよりよい)
+                state.request_stop_handoff(session_id)
+                log("応答の途中のレビュー: 時間の上限のため、引き継いだ残りは次のレビューに回す")
+                state.add_midturn_notice(session_id, NOTICE_HANDOFF_DEFERRED)
+                break
             with state.cursor_lock(root) as acquired:
-                if acquired:
-                    log("応答の途中のレビュー: Stop から引き継いだ残りを送る")
-                    outputs.append(_review_claim(payload, session_id, root))
-                else:
+                if not acquired:
                     log("応答の途中のレビュー: 引き継ぎはロックを取った側が行う")
+                    break
+                log("応答の途中のレビュー: Stop から引き継いだ残りを送る")
+                outputs.append(_review_claim(payload, session_id, root))
     finally:
         state.end_midturn(session_id, run_id)
     return _midturn_delivery(session_id, outputs)
+
+
+#: hooks.json の mid-turn の timeout (秒)。引き継ぎを繰り返すかの判定に使う
+#: (`tests/test_midturn_flow.py::TestRegistration` が hooks.json と突き合わせる)
+MIDTURN_HOOK_TIMEOUT_SEC = 1500
+
+#: 引き継いだ残りを時間の上限で送れなかったときの、次の Stop への通知
+NOTICE_HANDOFF_DEFERRED = (
+    "引き継いだ残りの変更は、背景の hook の時間の上限のため次のレビューに回しました"
+)
+
+
+def _midturn_clock() -> float:
+    """応答の途中のレビューの経過時間を測る時計 (テストが差し替える)。"""
+    return time.monotonic()
+
+
+def _midturn_review_worst_sec() -> float:
+    """1 回のレビュー (`_review_claim`) が掛かりうる最長の秒数。
+
+    git の予算 (rev-parse 2 回 + ls-files 2 回 + diff 収集 + 最後の 1 パス分) +
+    送信の最悪待ち時間 + 版数検出。hooks.json の timeout はこの 2 回分と閾値の判定に収める。
+    """
+    git_per_review = (
+        gitscan.REV_PARSE_TIMEOUT_SEC * 2
+        + gitscan.LS_FILES_TIMEOUT_SEC * 2
+        + COLLECT_BUDGET_SEC
+        + gitscan.PATH_DIFF_TIMEOUT_SEC
+    )
+    return git_per_review + selection.worst_case_wall_sec() + _VERSION_SUBPROCESS_TIMEOUT_SEC
+
+
+def _midturn_has_room(started: float) -> bool:
+    """もう 1 回レビューしても hook の timeout に収まるか。
+
+    1 回目の引き継ぎは、閾値超えの分を最悪の時間で送った後でも必ず収まる (hooks.json の
+    timeout を 2 回分にしてある)。2 回目以降は、それまでが速く済んだときだけ送る。
+    """
+    elapsed = _midturn_clock() - started
+    return elapsed + _midturn_review_worst_sec() < MIDTURN_HOOK_TIMEOUT_SEC
 
 
 def _pending_diff_bytes(session_id: str, root: str) -> int:

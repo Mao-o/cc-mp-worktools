@@ -169,8 +169,42 @@ pending += path   ->   in-flight[cid] = paths  -> in-flight から削除
                        pending = {}               reviewed[path] = diff hash
 
 cursor 失敗時: restore_claim() で pending へ戻す (未レビューのため)
-kill された時: in-flight が残る -> TTL 超過を後続 Stop が pending へ回収
+kill された時: in-flight が残る -> TTL 超過か claim した hook の終了 (pid) を見て
+               後続の claim が pending へ回収 (0.17.0 で pid を足した)
 ```
+
+### 塊の途中で kill されたときの結果の退避 (0.17.0)
+
+0.14.0 から 1 回の claim を塊に分けて順に送るが、結果 (hash の記録と指摘の配送) は全部の塊を
+送り終えてから確定していた。途中で次の発言をすると hook ごと止まり、返ってきた塊の結果も
+捨てられ、in-flight が TTL (900 秒) を過ぎるまで送り直しも無かった。
+
+| 遷移 | state | 実装 |
+|---|---|---|
+| claim | `in_flight[cid] = {at, paths, pid}` | `claim_pending` |
+| 塊が返る | `in_flight[cid].results += {hashes, text, backend}` (指摘なしは text が空)。**hash は記録しない** | `record_chunk_result` |
+| 送り終える / 失敗 | entry ごと削除 (results も消える) | `complete_claim` / `restore_claim` |
+| 後続の claim が、claim の主の終了 (pid) か TTL 超過を見る | results の無い entry は全パスを pending へ。results のある entry は**返った塊のパスだけを残して** `orphan` にし、残りを pending へ。残したパスの回収時点の hash を `prior` に控える | `claim_pending` |
+| 後続のレビューが自分の結果を出す直前 | orphan を消し、hash を記録して (`reviewed` が `prior` のままのパスだけ)、指摘を出力に足す | `take_orphaned_results` / `__main__._with_recovered_findings` |
+
+- **配る前に hash を記録しない**: 記録すると、返していない指摘の塊をレビュー済みにする。
+  配るのは後続のレビュー (Stop / 応答の途中) の出力の中で、その直前に記録する。後続のレビュー
+  自体が配る前に kill されても orphan は残るので、その次が 1 回だけ配る
+- **orphan は 2 度回収しない**: 回収のたびに `prior` を取り直すと、回収後に別のレビューが
+  記録した新しい hash を古い hash で上書きし、新しい内容をもう一度送る
+- **pid は「居ないと言い切れる」ときだけ使う**: `os.kill(pid, 0)` が `ProcessLookupError` の
+  ときだけ終了とみなす。権限が無い・0 以下・自分自身・pid の無い旧形式の entry は TTL だけ。
+  pid が再利用されていると生きているとみなし、TTL で回収する (生きている claim を横取りしない側)
+- 一緒に返す退避分の指摘は、後続のレビューの 2 回目以降の送信の上限 (`MAX_FINDINGS_CHARS`) の
+  判定に足す。1 回目の送信は判定しないので、合計は上限 + 1 回分を超えない
+- 退避と hash の記録の間には state の書き込みが 1 回ずつ入る。hash を記録した後・stdout に出す前に
+  kill されると、その指摘は失われる (0.16.x までの、送り終えた後の kill と同じ窓)
+- hook が SIGKILL されたとき、cursor の子プロセスは孤児として残りうる (`state.cursor_lock` の
+  docstring)。0.16.x までは TTL の 900 秒が子プロセスの最長 600 秒を超えていたので、送り直しは
+  子プロセスが終わった後だった。0.17.0 は pid で即座に回収するので、生き残った子プロセスと同じ塊を
+  並行して外部に送りうる (重複の課金と一時的な二重起動。データの欠損はない)
+
+床テストは `tests/test_interrupted_chunks.py` (退避・回収・配送の各遷移の直前直後に kill を挟む)。
 
 削除ではなく予約にするのは、割り込みで Stop hook がプロセスごと落ちるため
 (上表 22:23:39 が実例)。単純な drain だとその瞬間にパスが消えて永久に未レビューになる。
@@ -361,7 +395,8 @@ state lock を**解放してから** cursor lock を**非ブロッキング (try
 **cursor lock に stale claim TTL を置いていないのは意図的**。flock はプロセス終了時に
 カーネルが解放するので、TTL を足すと「まだ走っている cursor のロックを奪う」経路を
 自分で作ることになる。残る穴は、hook が SIGKILL されたとき cursor の子プロセスが孤児として
-ロックより長生きしうる点のみ。
+ロックより長生きしうる点のみ (0.17.0 の pid による回収と重なると、同じ塊を並行して送りうる。
+「塊の途中で kill されたときの結果の退避」節)。
 
 ## レビュー粒度は HEAD 基準 + パス単位 diff hash
 
@@ -680,7 +715,14 @@ try の外で走り、state 整理だけを `_quiet()` が個別に握り潰す�
    送ります」と通知して終わる (ターンは継続させない)。`midturn_running()` が偽なら、依頼は書かずに
    もう 1 回だけロックを試す。それでも取れなければ 0.15.x と同じ無言の skip
 3. 応答の途中のレビューは、ロックを**放した後に** `stop_handoff` を読んで消し、立っていれば
-   再びロックを試して残りを (閾値に関係なく) 送る。1 回目のロックが取れなかったときも読む
+   再びロックを試して残りを (閾値に関係なく) 送る。1 回目のロックが取れなかったときも読む。
+   引き継いだ分を送り終えてロックを放した後にも**読み直し**、依頼が無くなるまで繰り返す (0.17.0)。
+   引き継いだ分を送っている間 (2 回目のロック区間) に来た Stop は、印を見て依頼を書き、再試行は
+   こちらがロックを持つので失敗する。0.16.x は 1 回しか読まなかったので、この依頼は誰にも
+   読まれずに残り、次の応答の途中のレビューが閾値を無視して 1 回余分に走るか、次の Stop まで
+   残りが残った。繰り返すのは「もう 1 回送っても hook の timeout に収まる」間だけ
+   (`_midturn_has_room`: 経過 + `_midturn_review_worst_sec()` < `MIDTURN_HOOK_TIMEOUT_SEC`)。
+   収まらなければ依頼を書き戻し、次の Stop の通知に `NOTICE_HANDOFF_DEFERRED` を積む
 
 0.16.0 の最初の形は、印をロックを取った**後に**立て、ロックを放す**前に**下ろしていた。
 そのため「ロックを取った直後・印を立てる前」と「印を下ろした後・ロックを放す前」の 2 つの窓に
@@ -697,15 +739,17 @@ Stop が来ると、Stop は持ち主を別のセッションと見なして黙�
 - ロックの持ち主が**別のセッション**のとき (0.15.x と同じ)。このとき印が立っていれば、Stop は
   引き継ぎの通知を出すが、実際に残りを見るのは次の応答の途中のレビューか次の Stop になる
 
-1 回の起動で最大 2 回レビューする (閾値超えの分 + 引き継いだ残り) ので、hooks.json の timeout は
-2 回分 (版数検出 + git + `worst_case_wall_sec()` を 2 回 + 閾値の判定の git) に収める
-(`tests/test_midturn_flow.py::TestRegistration`)。印の失効 (`MIDTURN_STALE_SEC`) も
-in-flight の TTL の 2 倍。
+hooks.json の timeout は 2 回分 (版数検出 + git + `worst_case_wall_sec()` を 2 回 + 閾値の
+判定の git) に収める (`tests/test_midturn_flow.py::TestRegistration`)。1 回目の引き継ぎは、
+閾値超えの分を最悪の時間で送った後でも必ずこの中に収まる。3 回目以降は時間の判定を通ったとき
+だけ送るので、hook が timeout で kill される前に止まる。印の失効 (`MIDTURN_STALE_SEC`) は
+in-flight の TTL の 2 倍で、hook の timeout より長い (同じテストで突き合わせる)。
 
 ### 限界
 
 - `claude -p` では teardown で背景 hook が kill される (公式 docs: outcome `cancelled`)。
-  claim は in-flight の TTL 後に後続の Stop が回収する
+  claim は後続の claim が回収する (claim の主の終了を見る。「塊の途中で kill されたときの
+  結果の退避」節)
 - `asyncRewake` を解さない CLI で背景にならない場合、閾値を超えた編集のツール結果がレビューの
   間待たされる (対応版数は実機で未確認)
 - 閾値以上の応答の途中のレビューがロックを握っている間の Bash の commit レビューは、他セッションの
@@ -992,6 +1036,7 @@ pytest tests/                          # pytest でも動く (conftest.py で sy
 | REVIEW_CLEAN の後に再レビューされない | `TestReviewedPathsAreNotRepeated` |
 | cursor 失敗の後に再レビューされる | `TestCursorFailureRestoresPaths` |
 | kill された in-flight が TTL 経過後に回収される | `TestInFlightRecovery` |
+| **塊の途中で kill されても、返った塊の指摘は次のレビューで届き、その塊は送り直さない / claim の主が居なければ残りを TTL を待たずに送り直す (0.17.0)** | `test_interrupted_chunks.py` |
 | `sed -i` など Bash 経由の変更でもレビューが走る | `TestBashAttribution` |
 | cursor agent が同時に 2 つ起動しない | `TestCursorSerialization` |
 | TTL 超過した状態ファイルが削除される | `TestGc` |
@@ -1146,7 +1191,9 @@ hook は合成 stdin で直接起動できるので `/plugin` 更新なしで手
 3. `cat $TMPDIR/post-implementation-review/state/<session_id>.json` —
    `pending` が空なら「このセッションはこのターンで何も編集していない」が正しい判定
 4. `in_flight` にエントリが残り続けている → 前回の Stop が kill された。
-   TTL (`cursor.MAX_TIMEOUT_SEC + 300` = 900 秒) 経過後の Stop で回収される
+   claim した hook (`pid`) が居なければ次の Stop で、そうでなければ TTL
+   (`cursor.MAX_TIMEOUT_SEC + 300` = 900 秒) 経過後の Stop で回収される。`orphan: true` の
+   エントリは回収済みで、返っていた塊の指摘を次のレビューが配るのを待っている
 5. stderr の `[post-implementation-review]` プレフィクス付きログを確認
 6. 他セッションが `cursor agent` を走らせている間は skip する
    (「同一作業ツリーで別セッションがレビュー中」ログ)
