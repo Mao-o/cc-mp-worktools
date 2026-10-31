@@ -169,7 +169,7 @@ class TestFirebaseActiveAccount(unittest.TestCase):
             store = Path(self._xdg) / "configstore" / "firebase-tools.json"
             store.parent.mkdir(parents=True)
             store.write_text(
-                json.dumps({"activeProjects": {os.path.abspath(d): "prod"}}),
+                json.dumps({"activeProjects": {os.path.realpath(d): "prod"}}),
                 encoding="utf-8",
             )
             with mock.patch("subprocess.run", side_effect=FileNotFoundError):
@@ -184,7 +184,7 @@ class TestFirebaseActiveAccount(unittest.TestCase):
                 "subprocess.run", return_value=_fake_run(stdout="my-proj\n")
             ) as m:
                 self.assertEqual(firebase.get_active_account(d), "my-proj")
-            self.assertEqual(m.call_args.kwargs.get("cwd"), os.path.abspath(d))
+            self.assertEqual(m.call_args.kwargs.get("cwd"), os.path.realpath(d))
 
     def test_get_active_runs_cli_in_project_root_with_firebase_json(self):
         with tempfile.TemporaryDirectory() as d:
@@ -196,7 +196,7 @@ class TestFirebaseActiveAccount(unittest.TestCase):
                 "subprocess.run", return_value=_fake_run(stdout="my-proj\n")
             ) as m:
                 self.assertEqual(firebase.suggest_accounts_entry(str(sub)), "my-proj")
-            self.assertEqual(m.call_args.kwargs.get("cwd"), os.path.abspath(repo))
+            self.assertEqual(m.call_args.kwargs.get("cwd"), os.path.realpath(repo))
 
 
 class TestAwsActiveAccount(unittest.TestCase):

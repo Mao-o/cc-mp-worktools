@@ -30,6 +30,16 @@ _ALLOWED_BASENAME = "accounts.local.json"
 # ELOOP など) は、ファイルがあるかどうかを確かめられない = 読めない期待値ファイルとして扱う。
 _ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR})
 
+# 外側が export すると、`git -C <dir>` が `<dir>` ではない repo (の git dir・作業ツリー・index・
+# common dir) を見るようになる env。builder が `git -C <dir>` で `<dir>` の repo について聞くときは
+# これらを外す (`git_env`)。
+GIT_REDIRECT_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
+
+
+def git_env() -> dict[str, str]:
+    """`os.environ` から `GIT_REDIRECT_ENV` を外した env (`git -C <dir>` を `<dir>` の repo に向ける)。"""
+    return {k: v for k, v in os.environ.items() if k not in GIT_REDIRECT_ENV}
+
 
 def _may_hold_accounts(path: Path) -> bool:
     """配置パスに期待値ファイルがある (または、無いと確かめられない) なら True。

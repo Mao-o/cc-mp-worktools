@@ -367,6 +367,10 @@ def settings_local_target(project_dir: str) -> tuple[Path | None, str]:
             text=True,
             timeout=_GIT_TIMEOUT_SEC,
             stdin=subprocess.DEVNULL,
+            # 外側が export した GIT_DIR などで、project_dir ではない repo のルートを答えさせない
+            # (v0.26.1)。Claude Code が読むのはセッションのプロジェクトのディレクトリから決まる
+            # repo のファイルで、builder を起動した shell の GIT_DIR は関係しない。
+            env=paths.git_env(),
         )
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         return None, "git を実行できないため、書き込み先を決められません"
