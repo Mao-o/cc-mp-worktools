@@ -326,18 +326,6 @@ def _resolve_alias(projects: dict[str, str], target: str) -> str:
     return projects.get(target) or target
 
 
-def aliases_for(project_dir: str, project_id: str) -> list[str]:
-    """`.firebaserc` で project_id を指す alias 名を返す (名前順)。
-
-    プロジェクトごとの固定 (builder の `pin-env`) 用。`firebase use <alias>` を案内する
-    ときに、期待値 (project ID) をそのまま出さずに済む。`.firebaserc` は CLI と同じく
-    `firebase.json` を親方向に探した project root から読む。firebase-tools と同じ内容に
-    読めると確かめられなければ空 (pin-env はその前に `firebaserc_reads_like_cli` で止める)。
-    """
-    projects = _read_firebaserc(_project_root(project_dir)) or {}
-    return sorted(alias for alias, project in projects.items() if project == project_id)
-
-
 def firebaserc_reads_like_cli(project_dir: str) -> bool:
     """`.firebaserc` を、このモジュールと firebase-tools が同じ内容に読めるか (無ければ True)。
 
@@ -385,8 +373,13 @@ def _configstore_path(env=None) -> Path | None:
     return Path(base) / "configstore" / "firebase-tools.json"
 
 
-def _from_configstore(root: str, env=None, exact: bool = False) -> str:
+def _from_configstore(root: str, env=None, exact: bool = False) -> str | None:
     """configstore の activeProjects から `firebase use` の切替先 (alias または project ID) を返す。
+
+    切替先が無いときは ""。configstore が大きすぎる (`cli_config.MAX_FILE_BYTES` を超える) ときは
+    None (切替先の有無を確かめられない)。"" にすると、`firebase use` で別の project に切り替えて
+    いても `.firebaserc` の `default` で照合して allow してしまう (v0.25.0)。読めない・壊れた
+    configstore は従来どおり ""。
 
     firebase-tools の configstoreProject と同じく root から親方向に探索する
     (論理パスと実体パスの両方を試す)。このファイルには認証トークンも含まれるため、
@@ -403,6 +396,8 @@ def _from_configstore(root: str, env=None, exact: bool = False) -> str:
         if path is None:
             return ""
         data = json.loads(cli_config.read_bounded_text(path))
+    except cli_config.FileTooLargeError:
+        return None
     except (ValueError, OSError, RuntimeError):
         return ""
     active = data.get("activeProjects") if isinstance(data, dict) else None
@@ -515,6 +510,7 @@ def _from_local(root: str, env=None, config_file: str | None = None) -> str:
     firebase.json (`--config` のファイル、無ければ root の firebase.json) が旧形式キー
     `"firebase"` を持つか、その有無を確かめられないときも "" (`_firebase_json_blocks_local`。
     v0.20.0)。firebase-tools は configstore の切替先が無いときそのキーの project で動く。
+    configstore が大きすぎて切替先の有無を確かめられないときも "" (v0.25.0)。
     呼び出し側は現在値を取得できないとして deny する。
     """
     exact = config_file is not None
@@ -525,6 +521,9 @@ def _from_local(root: str, env=None, config_file: str | None = None) -> str:
     if projects is None:
         return ""
     switched = _from_configstore(root, env, exact)
+    if switched is None:
+        # configstore が大きすぎて切替先の有無を確かめられない (v0.25.0)
+        return ""
     if switched:
         return _resolve_alias(projects, switched)
     if len(projects) == 1:
@@ -770,7 +769,7 @@ def _scalar_project_flag_word(projects: dict[str, str] | None, project: str) -> 
 
     `--project` の値は verify() が `.firebaserc` で解決して照合する (alias を渡しても通る) ので、
     project ID が影になっているとき (`_scalar_word` が None) は、期待した project を指す alias のうち
-    `_reaching_word` が通る先頭 (名前順。`aliases_for` と同じ並び) を案内する。無ければ None。
+    `_reaching_word` が通る先頭 (名前順) を案内する。無ければ None。
     `firebase use` の案内には使わない (そちらは `is_self_remediation` が期待値そのものしか通さない)。
     """
     word = _scalar_word(projects, project)

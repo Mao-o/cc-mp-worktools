@@ -1087,7 +1087,7 @@ gh のアカウントを頻繁に切り替える運用で、不一致 deny の�
   期待値の alias / project ID か、リポジトリの `.firebaserc` の alias (clone しただけの
   リポジトリでも中身を決められる) から来るので、`;` / `$()` / 空白 / 改行や先頭の `-` が
   あると、その文字列がコマンドや option として走る。`.firebaserc` の外れた alias は使わず
-  (alias が無いときと同じく project ID を案内する)、期待値の外れた alias / project ID は
+  (dict の期待値で alias が無いときと同じく project ID を案内する。scalar は v0.25.0 から常に project ID)、期待値の外れた alias / project ID は
   「固定できません」にする。`shlex.quote` は二重化で、許容形はすでにクォートの要らない
   文字だけ。hook が切替の案内として認める形 (firebase の `REMEDIATION_PATTERNS`) にも
   収まる。照合は `fullmatch` で行う (`$` は末尾の改行の前でも一致するため)
@@ -1685,7 +1685,10 @@ Python 3.9 の `json.loads` は大きな整数の parse が桁数の二乗の時
 `cli_config.read_bounded_text` で大きさを確かめ、超えたら読めないものと同じに扱う
 (`.firebaserc` と `firebase.json` は「確かめられない」の deny、cache の状態ファイル (epoch・
 成功 entry・auto-switch の記録) は miss、`accounts.local.json` は不正な JSON と同じ deny、
-configstore は解決しない)。対象は、リポジトリや `$TMPDIR` が内容を決められる入力源 (`.firebaserc`・
+configstore は `firebase use` の切替先の有無を確かめられないとして deny)。configstore を
+「切替先が無い」と同じに扱うと、別の project に切り替えていても `.firebaserc` の `default` で
+照合して allow してしまう (fail-open) ので、`_from_configstore` は None を返し、`_from_local` が
+現在値を取得できない ("") にする。対象は、リポジトリや `$TMPDIR` が内容を決められる入力源 (`.firebaserc`・
 `firebase.json`・`accounts.local.json`・cache の状態ファイル) と、同じ経路で読む configstore。
 builder (利用者が手で起動し、hook の timeout が無い) の `json.loads` は対象外だが、
 `.firebaserc` の読み込みは hook と共有する `firebase._read_firebaserc` を通るので同じ上限になる。
@@ -1697,6 +1700,12 @@ builder (利用者が手で起動し、hook の timeout が無い) の `json.loa
 timeout に近づく。256 KiB なら約 0.35 秒 (2.2 MB の 25 秒を桁数の二乗で換算)。3.9 の実機は CI に
 無いので、テストは「上限を超えるファイルが `json.loads` に渡されない」ことで固定する
 (`tests/test_json_size_gate.py`)。
+
+cache の状態ファイルのうち成功 cache の entry と epoch は、hook 1 回に target の数だけ読まれ、
+予算 (`core/budget.py`) の判定より前に走るので、別の小さい上限 (4 KiB。`cache._MAX_STATE_BYTES`)
+にする。書くのは数十バイトの JSON だけで、256 KiB のままだと target の数だけ 3.9 の最悪ケースが
+積み上がる。auto-switch の記録は切替した対象ごとに増え、hook 1 回に 1 度しか読まないので
+256 KiB のまま読む。
 
 ## 既知の制限
 

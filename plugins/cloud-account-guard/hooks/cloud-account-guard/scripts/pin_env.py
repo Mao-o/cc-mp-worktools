@@ -260,7 +260,7 @@ def _plan_firebase_dict(expected: dict, project_dir: str, notes: tuple[str, ...]
 
     verify() はアクティブ project が期待値のどれかと一致すれば通すので、期待値の alias の
     うち、このディレクトリの `.firebaserc` で期待した project に解決されるものを案内する。
-    無ければ期待値の project ID で案内する (scalar の期待値で alias が無いときと同じ。
+    無ければ期待値の project ID で案内する (scalar の期待値と同じ。
     値は期待値なので既定で隠す)。どちらも出せなければ「固定できません」。
     """
     projects = {

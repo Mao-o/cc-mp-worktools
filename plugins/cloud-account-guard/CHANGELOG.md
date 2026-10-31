@@ -10,8 +10,10 @@
   信頼できないファイルを、parse の前に 256 KiB (`cli_config.MAX_FILE_BYTES`) で弾くようにした。
   超えたら読めないものと同じに扱う: `.firebaserc` と `firebase.json` は「確かめられない」の deny、
   `accounts.local.json` は不正な JSON と同じ deny (「大きすぎます」と示す)、cache の状態ファイル
-  (epoch・成功 entry・auto-switch の記録) は miss、firebase の configstore は解決しない。
-  正規のファイルは 256 KiB よりずっと小さい (根拠は DEVELOPMENT.md の D36)。`.firebaserc` の
+  (epoch・成功 entry・auto-switch の記録) は miss、firebase の configstore は `firebase use` の
+  切替先の有無を確かめられないとして deny。正規のファイルは 256 KiB よりずっと小さい (根拠は
+  DEVELOPMENT.md の D36)。成功 cache の entry と epoch は hook 1 回に target の数だけ読まれるので、
+  別の小さい上限 (4 KiB) にした。`.firebaserc` の
   「確かめられない」条件の文に「大きすぎる (256 KiB を超える)」を足した
 - 3.9.6 の実機で、2.2 MB の `.firebaserc` の読み込みが約 25 秒から 0.0 秒になることを確かめた
 
@@ -41,7 +43,8 @@
 
 - 上限の確認 (`tests/test_json_size_gate.py`。上限を超えるファイルが `json.loads` に渡されないこと、
   上限ちょうどは読めること)、`_write_atomic` の掃除 (`tests/test_cache_write_cleanup.py`)、実 symlink の
-  2 段ループ (`tests/test_accounts_builder.py`) を足した。`pin-env` の scalar のテスト 2 件を新しい案内に
+  2 段ループ (`tests/test_accounts_builder.py`)、configstore が上限を超えるときの `firebase deploy` の deny
+  (`tests/test_dispatcher.py`) を足した。`pin-env` の scalar のテスト 2 件を新しい案内に
   合わせ、読み込みを差し替えていたテスト 2 件を新しい読み込み口に合わせた
 
 ## 0.24.1

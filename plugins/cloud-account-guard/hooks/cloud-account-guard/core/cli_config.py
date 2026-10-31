@@ -34,7 +34,7 @@ MAX_FILE_BYTES = 256 * 1024
 
 
 class FileTooLargeError(ValueError):
-    """`read_bounded_text` が `MAX_FILE_BYTES` を超えるファイルを見つけた。"""
+    """`read_bounded_text` が上限 (既定 `MAX_FILE_BYTES`) を超えるファイルを見つけた。"""
 
 # 値の先頭に現れたら解釈を諦める YAML の記法 (ブロックスカラー / anchor / alias /
 # tag / flow collection)。単純な `key: value` 以外は扱わない。
@@ -68,17 +68,17 @@ def home_overridden(env) -> bool:
     return bool(value) and value != os.environ.get(HOME_ENV_VAR)
 
 
-def read_bounded_text(path: Path) -> str:
-    """`MAX_FILE_BYTES` を超えない範囲で UTF-8 の文字列として読む (parse の前の大きさの確認)。
+def read_bounded_text(path: Path, limit: int = MAX_FILE_BYTES) -> str:
+    """limit (既定 `MAX_FILE_BYTES`) を超えない範囲で UTF-8 の文字列として読む (parse の前の大きさの確認)。
 
     超えるときは `FileTooLargeError`、読めないときは OSError、UTF-8 でないときは
     UnicodeDecodeError (どちらも ValueError / OSError の子で、呼び出し側が JSON の失敗と
     同じ except で受けられる)。
     """
     with Path(path).open("rb") as handle:
-        raw = handle.read(MAX_FILE_BYTES + 1)
-    if len(raw) > MAX_FILE_BYTES:
-        raise FileTooLargeError(f"{MAX_FILE_BYTES} バイトを超えています")
+        raw = handle.read(limit + 1)
+    if len(raw) > limit:
+        raise FileTooLargeError(f"{limit} バイトを超えています")
     return raw.decode("utf-8")
 
 

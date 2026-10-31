@@ -67,6 +67,10 @@ _OTHERS_WRITE_BITS = stat.S_IWGRP | stat.S_IWOTH
 # epoch と tombstone は `time.time_ns()` から作る非負の整数。int64 に収まらない値は読めない
 # ものと同じにする (書き戻す `json.dumps` が、桁の多すぎる整数で ValueError を投げうる)。
 _NS_LIMIT = 1 << 63
+# 成功 cache の entry と epoch を parse する前の大きさの上限。どちらも hook 1 回に target の数だけ
+# 読まれ、予算 (`core.budget`) の判定より前に走るので、`cli_config.MAX_FILE_BYTES` (256 KiB) より
+# ずっと小さくする。書くのは数十バイトの JSON だけ (v0.25.0)。
+_MAX_STATE_BYTES = 4 * 1024
 
 
 def _is_private_dir(path: Path) -> bool:
@@ -170,7 +174,7 @@ def write_state(path: Path, text: str) -> None:
     _write_atomic(path, text)
 
 
-def read_state(path: Path | None) -> dict | None:
+def read_state(path: Path | None, limit: int = _MAX_STATE_BYTES) -> dict | None:
     """cache dir のファイル (成功 cache の entry・epoch・`service_state_path()` のファイル) を
     JSON のオブジェクトとして読む。無い・読めない・オブジェクトでないなら None。
 
@@ -179,11 +183,13 @@ def read_state(path: Path | None) -> dict | None:
     読めないものには、UTF-8 でない (UnicodeDecodeError。ValueError に含まれる)・入れ子が深い
     (RecursionError) ファイルも含む。どれも捕まえないと dispatch() の外まで抜け、__main__ の
     最終防波堤が検証をスキップする。中の値の型は呼び出し側が確かめる。
+
+    limit を超えるファイルも読めないのと同じ (既定は `_MAX_STATE_BYTES`。entry と epoch の大きさ)。
     """
     if path is None or not os.path.isfile(path):
         return None
     try:
-        data = json.loads(cli_config.read_bounded_text(path))
+        data = json.loads(cli_config.read_bounded_text(path, limit=limit))
     except (ValueError, OSError, RecursionError):
         # 大きすぎるファイル (FileTooLargeError。ValueError の子) も読めないのと同じ。parse の前に弾く
         # (Python 3.9 は大きな整数の parse が遅く、hook の timeout で検証が素通しになる)。

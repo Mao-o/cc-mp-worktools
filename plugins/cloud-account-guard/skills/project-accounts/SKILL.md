@@ -157,7 +157,7 @@ aws / gcloud / firebase のアカウントを、各 CLI の公式の仕組みで
   (検証は完全一致なので、どの現在値とも一致しない)。builder の `set` で空白を除いた値に
   直してから再実行する
 - **pin-env の `固定できません: .firebaserc を firebase-tools と同じ内容に読めると確かめられません`** →
-  `.firebaserc` が括弧の中の条件 (UTF-8 でない・U+FEFF がある・`//` か `/*` がある (文字列の
+  `.firebaserc` が括弧の中の条件 (UTF-8 でない・大きすぎる (256 KiB を超える)・U+FEFF がある・`//` か `/*` がある (文字列の
   中の URL なども含む)・JSON として読めない・`projects` がオブジェクトでないか文字列でない値を
   持つ、など。網羅ではない) に当たる。firebase-tools とは読み方が違いうるので、`firebase use` の行き先を
   確かめられない。`.firebaserc` はリポジトリのファイルなので Claude は直さない。理由を

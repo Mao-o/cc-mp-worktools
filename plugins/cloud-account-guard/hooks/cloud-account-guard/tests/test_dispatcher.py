@@ -502,6 +502,26 @@ class TestFirebaseResolutionOrderE2E(BaseWithTmpProject):
         self.assertEqual(out["permissionDecision"], "deny")
         self.assertIn("現在=proj-prod", out["permissionDecisionReason"])
 
+    def test_over_limit_configstore_denies_without_cli(self):
+        """configstore が上限 (256 KiB) を超えると切替先の有無を確かめられない。`.firebaserc` の
+        default (期待値) に落ちて allow せず deny する (切替先は期待外の project)。"""
+        self._write_accounts({"firebase": "right-project"})
+        (self.project_dir / ".firebaserc").write_text(
+            json.dumps({"projects": {"default": "right-project"}}), encoding="utf-8"
+        )
+        store = self._xdg / "configstore" / "firebase-tools.json"
+        store.parent.mkdir(parents=True, exist_ok=True)
+        store.write_text(
+            '{"activeProjects": {%s: "wrong-project"%s}}'
+            % (json.dumps(os.path.abspath(self.project_dir)), " " * (300 * 1024)),
+            encoding="utf-8",
+        )
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError), \
+                mock.patch("shutil.which", return_value=None):
+            result = dispatch("firebase deploy", str(self.project_dir))
+        self.assertIsNotNone(result)
+        self.assertEqual(result["hookSpecificOutput"]["permissionDecision"], "deny")
+
     def test_switched_project_denies_despite_firebaserc_default(self):
         """期待=default (proj-dev) のまま `firebase use prod` 済みなら deploy を deny
         (旧実装は .firebaserc の default で照合し allow = false-allow)。"""

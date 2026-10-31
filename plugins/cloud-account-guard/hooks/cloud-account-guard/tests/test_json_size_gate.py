@@ -119,19 +119,43 @@ class TestFirebaseJsonSize(_Base):
 
 
 class TestConfigstoreSize(_Base):
-    def test_over_limit_is_not_resolved(self):
+    def test_over_limit_is_unconfirmed(self):
+        """上限を超える configstore は「切替先が無い」("") ではなく「確かめられない」(None)。
+        `_from_local` は `.firebaserc` の default に落ちず "" (呼び出し側が deny) にする。"""
         store = self.root / "configstore" / "firebase-tools.json"
         store.parent.mkdir()
-        proj = str(self.root / "proj")
+        proj = self.root / "proj"
+        proj.mkdir()
+        (proj / ".firebaserc").write_text(
+            json.dumps({"projects": {"default": "right-project"}}), encoding="utf-8"
+        )
+        env = {"XDG_CONFIG_HOME": str(self.root)}
         for name, text in {
             "bigint": '{"activeProjects": {"%s": "x"}, "n": ' % proj + "9" * (_LIMIT + 10) + "}",
-            "padded": json.dumps({"activeProjects": {proj: "x"}}) + " " * (_LIMIT + 10),
+            "padded": json.dumps({"activeProjects": {str(proj): "x"}}) + " " * (_LIMIT + 10),
         }.items():
             with self.subTest(name):
                 store.write_text(text, encoding="utf-8")
-                env = {"XDG_CONFIG_HOME": str(self.root)}
-                self.assertEqual(self.call(firebase._from_configstore, proj, env), "")
+                self.assertIsNone(self.call(firebase._from_configstore, str(proj), env))
+                self.assertEqual(self.call(firebase._from_local, str(proj), env), "")
+                self.assertFalse(self.call(firebase.is_pinned, env, str(proj)))
         self.assertNoBigParse()
+
+    def test_unreadable_or_absent_is_no_switch(self):
+        """上限以内で壊れた configstore と、無い configstore は従来どおり「切替先なし」で default。"""
+        proj = self.root / "proj"
+        proj.mkdir()
+        (proj / ".firebaserc").write_text(
+            json.dumps({"projects": {"default": "right-project"}}), encoding="utf-8"
+        )
+        env = {"XDG_CONFIG_HOME": str(self.root)}
+        self.assertEqual(self.call(firebase._from_configstore, str(proj), env), "")
+        self.assertEqual(self.call(firebase._from_local, str(proj), env), "right-project")
+        store = self.root / "configstore" / "firebase-tools.json"
+        store.parent.mkdir()
+        store.write_text("{", encoding="utf-8")
+        self.assertEqual(self.call(firebase._from_configstore, str(proj), env), "")
+        self.assertEqual(self.call(firebase._from_local, str(proj), env), "right-project")
 
 
 class TestCacheStateSize(_Base):
@@ -154,6 +178,46 @@ class TestCacheStateSize(_Base):
             self.assertEqual(self.call(cache._read_epoch, "svc"), (0, 0))
         self.assertNoBigParse()
 
+    def test_epoch_over_state_limit_is_zero(self):
+        """epoch は 256 KiB ではなく `cache._MAX_STATE_BYTES` (4 KiB) で弾く (target の数だけ読まれる)。"""
+        limit = cache._MAX_STATE_BYTES
+        self.assertLess(limit, _LIMIT)
+        with mock.patch.dict(os.environ, {"TMPDIR": str(self.root)}):
+            cache.invalidate("svc")
+            path = cache._epoch_path("svc")
+            head = '{"epoch": 7, "at_ns": 1}'
+            path.write_text(head + " " * (limit - len(head)), encoding="utf-8")
+            self.assertEqual(self.call(cache._read_epoch, "svc"), (7, 1))
+            path.write_text(head + " " * (limit - len(head) + 1), encoding="utf-8")
+            self.assertEqual(self.call(cache._read_epoch, "svc"), (0, 0))
+
+    def test_success_entry_over_state_limit_is_miss(self):
+        limit = cache._MAX_STATE_BYTES
+        with mock.patch.dict(os.environ, {"TMPDIR": str(self.root)}):
+            cache.set_success("svc", "/p", "exp", 1.0)
+            files = [
+                p for p in cache._cache_dir().iterdir() if p.name.startswith("svc-")
+            ]
+            self.assertEqual(len(files), 1)
+            text = files[0].read_text(encoding="utf-8")
+            files[0].write_text(text + " " * (limit - len(text)), encoding="utf-8")
+            self.assertTrue(self.call(cache.get_success, "svc", "/p", "exp", 1.0))
+            files[0].write_text(text + " " * (limit - len(text) + 1), encoding="utf-8")
+            self.assertFalse(self.call(cache.get_success, "svc", "/p", "exp", 1.0))
+
+    def test_auto_switch_records_keep_file_limit(self):
+        """auto-switch の記録は対象ごとに増えるので、4 KiB を超えても (256 KiB 以内なら) 読む。"""
+        from core import auto_switch
+
+        with mock.patch.dict(os.environ, {"TMPDIR": str(self.root)}):
+            path = auto_switch._guard_path("svc")
+            records = {"t": {"value": "v", "project": "/p", "at_ns": 1}}
+            text = json.dumps(records)
+            path.write_text(
+                text + " " * (cache._MAX_STATE_BYTES * 2), encoding="utf-8"
+            )
+            self.assertEqual(self.call(auto_switch._read_records, "svc"), records)
+
     def test_success_entry_over_limit_is_miss(self):
         with mock.patch.dict(os.environ, {"TMPDIR": str(self.root)}):
             cache.set_success("svc", "/p", "exp", 1.0)
@@ -169,9 +233,10 @@ class TestCacheStateSize(_Base):
         self.assertNoBigParse()
 
 
-class TestAccountsFileSize(_Base):
-    def test_over_limit_denies_before_parse(self):
-        project = self.root / "proj"
+class _DispatchBase(_Base):
+    def setUp(self):
+        super().setUp()
+        self.project = project = self.root / "proj"
         (project / ".claude" / "cloud-account-guard").mkdir(parents=True)
         cache_tmp = self.root / "cache_tmp"
         cache_tmp.mkdir()
@@ -182,7 +247,25 @@ class TestAccountsFileSize(_Base):
         )
         env.start()
         self.addCleanup(env.stop)
-        path = project / ".claude" / "cloud-account-guard" / "accounts.local.json"
+        self.accounts = project / ".claude" / "cloud-account-guard" / "accounts.local.json"
+
+
+class TestFirebasercSizeDispatch(_DispatchBase):
+    def test_project_flag_with_over_limit_firebaserc_denies(self):
+        """上限を超える `.firebaserc` で `--project prod` の行き先を確かめられず deny する。"""
+        self.accounts.write_text(json.dumps({"firebase": "p"}), encoding="utf-8")
+        (self.project / ".firebaserc").write_text(_BIG_JSON, encoding="utf-8")
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+            result = self.call(dispatch, "firebase deploy --project prod", str(self.project))
+        self.assertIsNotNone(result)
+        self.assertEqual(result["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertNoBigParse()
+
+
+class TestAccountsFileSize(_DispatchBase):
+    def test_over_limit_denies_before_parse(self):
+        project = self.project
+        path = self.accounts
         for name, text in {
             "bigint": '{"github": "x", "n": ' + "9" * (_LIMIT + 10) + "}",
             "padded": '{"github": "x"}' + " " * (_LIMIT + 10),
