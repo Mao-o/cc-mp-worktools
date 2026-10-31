@@ -399,11 +399,11 @@ class JoinRateGuardTest(_Files):
 
 
 class UnclosedFenceCharacterizationTest(unittest.TestCase):
-    """A frontmatter page whose body leaves a code fence open: the dedicated
-    Claude docs loader ignores fences when it looks for frontmatter and
-    still finds the pages after it; this loader tracks fences, so the open
-    fence hides every later frontmatter block and those pages fold into the
-    open one. No such page is in the current Claude docs corpora (the
+    """A frontmatter page whose body leaves a code fence open: the retired
+    Claude docs loader (``parse-claude-docs.py``) ignored fences when it
+    looked for frontmatter and still found the pages after it; this loader
+    tracks fences, so the open fence hides every later frontmatter block and
+    those pages fold into the open one. No such page is in the current Claude docs corpora (the
     platform pages match one for one). Pinned as it is: whether the generic
     loader should find a frontmatter block inside an open fence (and with
     what guard against frontmatter examples in code samples) is not
@@ -415,8 +415,6 @@ class UnclosedFenceCharacterizationTest(unittest.TestCase):
 
     def test_current_behaviour(self):
         lines = _lines(self.TEXT)
-        old = _loader.load_script("parse-claude-docs.py").split_documents(lines)
-        self.assertEqual([d["title"] for d in old], ["First", "Second"])
         p = _validate(FM)
         self.assertEqual([d["title"] for d in generic.split_documents(lines, p)], ["First"])
 

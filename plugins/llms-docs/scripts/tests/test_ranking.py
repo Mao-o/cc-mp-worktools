@@ -17,7 +17,8 @@ from pathlib import Path
 import _loader  # noqa: F401  (side effect: adds scripts/ to sys.path)
 import _common
 
-claude = _loader.load_script("parse-claude-docs.py")
+generic = _loader.load_script("parse-llms-txt.py")
+SCRIPT = "parse-llms-txt.py"
 
 # Every word of "When edits take effect" (the function word too) many times,
 # one word per row, so the section is a strict AND with lots of hits but no
@@ -259,9 +260,9 @@ class PageRankTest(unittest.TestCase):
 
 
 class PageTitleWiringTest(unittest.TestCase):
-    """Each script hands the page title to the body search: the page titled
-    with the query outranks a page with more hits, though no heading of its
-    body names the query."""
+    """The page title reaches the body search (``claude-code`` and ``ai-sdk``
+    presets): the page titled with the query outranks a page with more hits,
+    though no heading of its body names the query."""
 
     # (title, H1 in the body, body)
     PAGES = [
@@ -270,6 +271,7 @@ class PageTitleWiringTest(unittest.TestCase):
     ]
 
     def setUp(self):
+        self.sources = _loader.without_user_sources(self)
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
 
@@ -289,23 +291,25 @@ class PageTitleWiringTest(unittest.TestCase):
             for i, (t, _h, b) in enumerate(self.PAGES)), encoding="utf-8")
         for cmd in ("search", "search-content"):
             with self.subTest(cmd=cmd):
-                self.assertEqual(self._first_next(claude, [
-                    "parse-claude-docs.py", cmd, "stream options", "--cache-dir", self.tmp]), "1")
+                self.assertEqual(self._first_next(generic, [
+                    SCRIPT, cmd, "stream options", "--source", "claude-code",
+                    "--sources-file", self.sources, "--cache-dir", self.tmp]), "1")
 
     def test_ai_sdk(self):
-        ai_sdk = _loader.load_script("parse-ai-sdk.py")
         Path(self.tmp, "ai-sdk-llms-full.txt").write_text("".join(
             f"---\ntitle: {t}\ndescription: about stream options\n---\n\n# {h}\n\n{b}\n"
             for t, h, b in self.PAGES), encoding="utf-8")
         for cmd in ("search", "search-content"):
             with self.subTest(cmd=cmd):
-                self.assertEqual(self._first_next(ai_sdk, [
-                    "parse-ai-sdk.py", cmd, "stream options", "--cache-dir", self.tmp]), "1")
+                self.assertEqual(self._first_next(generic, [
+                    SCRIPT, cmd, "stream options", "--source", "ai-sdk",
+                    "--sources-file", self.sources, "--cache-dir", self.tmp]), "1")
 
 
 class SearchRoundTripTest(unittest.TestCase):
     """``search`` puts the section with the heading first, and the ``Next:``
-    line it prints, run exactly as printed, reads that section."""
+    line it prints, run exactly as printed, reads that section (the
+    ``claude-code`` preset)."""
 
     PAGES = [
         ("Environment variables", "https://example.com/docs/en/env-vars", HUGE_TABLE),
@@ -314,6 +318,7 @@ class SearchRoundTripTest(unittest.TestCase):
     ]
 
     def setUp(self):
+        self.preset = ["--source", "claude-code", "--sources-file", _loader.without_user_sources(self)]
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.full = Path(self.tmp, "claude-code-llms-full.txt")
@@ -328,19 +333,20 @@ class SearchRoundTripTest(unittest.TestCase):
                     heading="Change a setting/When edits take effect",
                     text="Saved files are reloaded."):
         code, out, err = _loader.run_cli(
-            claude, ["parse-claude-docs.py", "search", query, *corpus_args])
+            generic, [SCRIPT, "search", query, *self.preset, *corpus_args])
         self.assertEqual(code, 0, err)
         nexts = [ln[len("Next: "):] for ln in out.splitlines() if ln.startswith("Next: ")]
         self.assertTrue(nexts, out)
         argv = shlex.split(nexts[0], comments=True)
         self.assertEqual(argv[1:4], ["content", page, heading], nexts[0])
-        code, out, err = _loader.run_cli(claude, argv)
+        code, out, err = _loader.run_cli(generic, argv)
         self.assertEqual(code, 0, err)
         self.assertIn(f"# heading_path: {heading}\n", out)
         self.assertIn(text, out)
 
     CORPUS_ARGS = staticmethod(lambda tmp, full: (
-        ["--cache-dir", tmp], ["--file", str(full), "--cache-dir", tmp]))
+        ["--cache-dir", tmp],
+        ["--index-file", str(Path(tmp, "claude-code-llms.txt")), "--file", str(full), "--cache-dir", tmp]))
 
     def test_all_pages_in_the_index(self):
         self._index(self.PAGES)
@@ -368,23 +374,23 @@ class SearchRoundTripTest(unittest.TestCase):
         self._index(self.PAGES)
         for cmd in ("search", "search-content"):
             with self.subTest(cmd=cmd):
-                code, out, err = _loader.run_cli(claude, [
-                    "parse-claude-docs.py", cmd, "When edits take effect",
+                code, out, err = _loader.run_cli(generic, [
+                    SCRIPT, cmd, "When edits take effect", *self.preset,
                     "--cache-dir", self.tmp])
                 self.assertEqual(code, 0, err)
                 self.assertEqual(out.count("(not searched, too common: when)"), 1, out)
 
     def test_no_note_when_no_word_is_left_out(self):
         self._index(self.PAGES)
-        code, out, err = _loader.run_cli(claude, [
-            "parse-claude-docs.py", "search", "edits effect", "--cache-dir", self.tmp])
+        code, out, err = _loader.run_cli(generic, [
+            SCRIPT, "search", "edits effect", *self.preset, "--cache-dir", self.tmp])
         self.assertEqual(code, 0, err)
         self.assertNotIn("not searched", out)
 
     def test_zero_hits_names_the_words_left_out(self):
         self._index(self.PAGES)
-        code, out, err = _loader.run_cli(claude, [
-            "parse-claude-docs.py", "search-content", "the zzzunknown", "--cache-dir", self.tmp])
+        code, out, err = _loader.run_cli(generic, [
+            SCRIPT, "search-content", "the zzzunknown", *self.preset, "--cache-dir", self.tmp])
         self.assertEqual(code, 0, err)
         self.assertIn('"zzzunknown": 0 of 3', out)
         self.assertEqual(out.count("(not searched, too common: the)"), 1, out)

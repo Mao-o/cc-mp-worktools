@@ -1,0 +1,923 @@
+{
+ "claude-code": {
+  "pages": [
+   {
+    "body_sha256": "97f117c8c5ec795c141cc6010fb62a6a6fa89c7018763363e89658616c7fbe64",
+    "sections": [],
+    "title": "Quillon Tag",
+    "url": "https://code.claude.com/docs/en/quillon-tag"
+   },
+   {
+    "body_sha256": "a87477344be0e6a2391997da00927a05d3059cd48aff61724c0b665a613e0b2f",
+    "sections": [
+     {
+      "has_code_blocks": false,
+      "heading_path": "Typical uses",
+      "level": 2,
+      "line_end": 15,
+      "line_start": 10,
+      "title": "Typical uses"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Before you begin",
+      "level": 2,
+      "line_end": 22,
+      "line_start": 15,
+      "title": "Before you begin"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Under the hood",
+      "level": 2,
+      "line_end": 24,
+      "line_start": 22,
+      "title": "Under the hood"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Under the hood/Intent spotting",
+      "level": 3,
+      "line_end": 28,
+      "line_start": 24,
+      "title": "Intent spotting"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Under the hood/Session lifecycle",
+      "level": 3,
+      "line_end": 33,
+      "line_start": 28,
+      "title": "Session lifecycle"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Fixing problems",
+      "level": 2,
+      "line_end": 35,
+      "line_start": 33,
+      "title": "Fixing problems"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Fixing problems/\"Quillon is switched off for this seat\"",
+      "level": 3,
+      "line_end": 39,
+      "line_start": 35,
+      "title": "\"Quillon is switched off for this seat\""
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Fixing problems/Sessions stay idle",
+      "level": 3,
+      "line_end": 43,
+      "line_start": 39,
+      "title": "Sessions stay idle"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "See also",
+      "level": 2,
+      "line_end": 49,
+      "line_start": 43,
+      "title": "See also"
+     }
+    ],
+    "title": "Quillon in Chat Relay",
+    "url": "https://code.claude.com/docs/en/chat-relay"
+   },
+   {
+    "body_sha256": "f22d291349e7d7c959bd74af0d976f0500bd3bc8eabb19e14b96f05a62b9d795",
+    "sections": [
+     {
+      "has_code_blocks": false,
+      "heading_path": "What a hub does",
+      "level": 2,
+      "line_end": 10,
+      "line_start": 6,
+      "title": "What a hub does"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Pick a hub",
+      "level": 2,
+      "line_end": 12,
+      "line_start": 10,
+      "title": "Pick a hub"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Pick a hub/Managed hub",
+      "level": 3,
+      "line_end": 16,
+      "line_start": 12,
+      "title": "Managed hub"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Pick a hub/Other hubs",
+      "level": 3,
+      "line_end": 20,
+      "line_start": 16,
+      "title": "Other hubs"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Where to go next",
+      "level": 2,
+      "line_end": 25,
+      "line_start": 20,
+      "title": "Where to go next"
+     }
+    ],
+    "title": "Route Quillon through a hub",
+    "url": "https://code.claude.com/docs/en/hubs"
+   },
+   {
+    "body_sha256": "a979d5456620235e70d3bd70e2c44a6ca95f7692327c5b18eaa151150a2698f1",
+    "sections": [
+     {
+      "has_code_blocks": false,
+      "heading_path": "Before you begin",
+      "level": 2,
+      "line_end": 10,
+      "line_start": 6,
+      "title": "Before you begin"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Before you begin/What the hub needs",
+      "level": 3,
+      "line_end": 15,
+      "line_start": 10,
+      "title": "What the hub needs"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Rollout",
+      "level": 2,
+      "line_end": 20,
+      "line_start": 15,
+      "title": "Rollout"
+     },
+     {
+      "has_code_blocks": true,
+      "heading_path": "Rollout/Check that the hub reaches the vendor",
+      "level": 3,
+      "line_end": 34,
+      "line_start": 20,
+      "title": "Check that the hub reaches the vendor"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Rollout/Hand out keys",
+      "level": 3,
+      "line_end": 38,
+      "line_start": 34,
+      "title": "Hand out keys"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Rollout/Ship the settings",
+      "level": 3,
+      "line_end": 40,
+      "line_start": 38,
+      "title": "Ship the settings"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Rollout/Ship the settings/Which settings to ship",
+      "level": 4,
+      "line_end": 47,
+      "line_start": 40,
+      "title": "Which settings to ship"
+     },
+     {
+      "has_code_blocks": true,
+      "heading_path": "Rollout/Ship the settings/Ship them as managed settings",
+      "level": 4,
+      "line_end": 55,
+      "line_start": 47,
+      "title": "Ship them as managed settings"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Rollout/Check the rollout",
+      "level": 3,
+      "line_end": 59,
+      "line_start": 55,
+      "title": "Check the rollout"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Keep the hub healthy",
+      "level": 2,
+      "line_end": 63,
+      "line_start": 59,
+      "title": "Keep the hub healthy"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "See also",
+      "level": 2,
+      "line_end": 68,
+      "line_start": 63,
+      "title": "See also"
+     }
+    ],
+    "title": "Roll out a hub for your crew",
+    "url": "https://code.claude.com/docs/en/hub-rollout"
+   },
+   {
+    "body_sha256": "b595b95b7780f1bac7789e3057b052cf8c92f2e8ce4866a5b577f9de17d04b4f",
+    "sections": [
+     {
+      "has_code_blocks": false,
+      "heading_path": "Snapshot basics",
+      "level": 2,
+      "line_end": 10,
+      "line_start": 6,
+      "title": "Snapshot basics"
+     },
+     {
+      "has_code_blocks": true,
+      "heading_path": "Turn snapshots on",
+      "level": 2,
+      "line_end": 23,
+      "line_start": 10,
+      "title": "Turn snapshots on"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Recipes",
+      "level": 2,
+      "line_end": 25,
+      "line_start": 23,
+      "title": "Recipes"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Recipes/Snapshot ahead of bulk edits",
+      "level": 3,
+      "line_end": 29,
+      "line_start": 25,
+      "title": "Snapshot ahead of bulk edits"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Recipes/Several restore marks",
+      "level": 3,
+      "line_end": 33,
+      "line_start": 29,
+      "title": "Several restore marks"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Limits",
+      "level": 2,
+      "line_end": 37,
+      "line_start": 33,
+      "title": "Limits"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Fixing problems",
+      "level": 2,
+      "line_end": 39,
+      "line_start": 37,
+      "title": "Fixing problems"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Fixing problems/\"Snapshot missing for turn\" error",
+      "level": 3,
+      "line_end": 43,
+      "line_start": 39,
+      "title": "\"Snapshot missing for turn\" error"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Where to go next",
+      "level": 2,
+      "line_end": 48,
+      "line_start": 43,
+      "title": "Where to go next"
+     }
+    ],
+    "title": "Restore file edits with snapshotting",
+    "url": "https://code.claude.com/docs/en/kit/file-snapshotting"
+   },
+   {
+    "body_sha256": "b04b8b000de689e4914106bbc72a0269305a40f880fcd2b7fd68ec0cef55f063",
+    "sections": [
+     {
+      "has_code_blocks": false,
+      "heading_path": "Start with a tiny kit",
+      "level": 2,
+      "line_end": 10,
+      "line_start": 6,
+      "title": "Start with a tiny kit"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Browse a showcase app",
+      "level": 2,
+      "line_end": 15,
+      "line_start": 10,
+      "title": "Browse a showcase app"
+     }
+    ],
+    "title": "Samples",
+    "url": "https://code.claude.com/docs/en/kit/samples"
+   },
+   {
+    "body_sha256": "4eef8dd68c3ea1c88543353f1bc158f5857fa0feb8e70c92945cd122d866f03b",
+    "sections": [
+     {
+      "has_code_blocks": false,
+      "heading_path": "Needs",
+      "level": 2,
+      "line_end": 10,
+      "line_start": 6,
+      "title": "Needs"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Open a sandbox session",
+      "level": 2,
+      "line_end": 15,
+      "line_start": 10,
+      "title": "Open a sandbox session"
+     }
+    ],
+    "title": "Quillon Desktop in a sandbox VM",
+    "url": "https://code.claude.com/docs/en/desktop-vm"
+   },
+   {
+    "body_sha256": "c1d2d7200d148fe138e88014a3b52b8030e363ec8c67725d2b449690ba402923",
+    "sections": [],
+    "title": "Week 21 · Lorem 18–22, 2001",
+    "url": "https://code.claude.com/docs/en/news/2001-w21"
+   },
+   {
+    "body_sha256": "651c3d817266d022416331687259829833d650e5248ccc06dd0a96719daf3c49",
+    "sections": [
+     {
+      "has_code_blocks": false,
+      "heading_path": "What a hub gives you",
+      "level": 2,
+      "line_end": 10,
+      "line_start": 6,
+      "title": "What a hub gives you"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Roll out a hub",
+      "level": 2,
+      "line_end": 15,
+      "line_start": 10,
+      "title": "Roll out a hub"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Plans and hubs",
+      "level": 2,
+      "line_end": 19,
+      "line_start": 15,
+      "title": "Plans and hubs"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "See also",
+      "level": 2,
+      "line_end": 24,
+      "line_start": 19,
+      "title": "See also"
+     }
+    ],
+    "title": "Other hubs",
+    "url": "https://code.claude.com/docs/en/hub"
+   },
+   {
+    "body_sha256": "43e85316ef1b8e5c291892c8dfafe39de8bc86bb90d2d52108f56cce1288371c",
+    "sections": [
+     {
+      "has_code_blocks": false,
+      "heading_path": "Pick a style",
+      "level": 2,
+      "line_end": 13,
+      "line_start": 6,
+      "title": "Pick a style"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Watch running jobs",
+      "level": 2,
+      "line_end": 17,
+      "line_start": 13,
+      "title": "Watch running jobs"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Read on",
+      "level": 2,
+      "line_end": 22,
+      "line_start": 17,
+      "title": "Read on"
+     }
+    ],
+    "title": "Run workers side by side",
+    "url": "https://code.claude.com/docs/en/workers"
+   },
+   {
+    "body_sha256": "1b3c0a525a5dae2f1eb0e05b3a3ebbf5c8785b05703ba5d6c5d2e2588cdade9f",
+    "sections": [
+     {
+      "has_code_blocks": false,
+      "heading_path": "How snapshots work",
+      "level": 2,
+      "line_end": 10,
+      "line_start": 6,
+      "title": "How snapshots work"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "How snapshots work/Automatic capture",
+      "level": 3,
+      "line_end": 14,
+      "line_start": 10,
+      "title": "Automatic capture"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "How snapshots work/Restore and condense",
+      "level": 3,
+      "line_end": 24,
+      "line_start": 14,
+      "title": "Restore and condense"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "How snapshots work/Restore and condense/Restore past a wiped chat",
+      "level": 4,
+      "line_end": 30,
+      "line_start": 24,
+      "title": "Restore past a wiped chat"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "How snapshots work/Restore and condense/Steer a condensation",
+      "level": 4,
+      "line_end": 34,
+      "line_start": 30,
+      "title": "Steer a condensation"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Common uses",
+      "level": 2,
+      "line_end": 40,
+      "line_start": 34,
+      "title": "Common uses"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Limits",
+      "level": 2,
+      "line_end": 44,
+      "line_start": 40,
+      "title": "Limits"
+     },
+     {
+      "has_code_blocks": true,
+      "heading_path": "Limits/Shell edits are not captured",
+      "level": 3,
+      "line_end": 65,
+      "line_start": 44,
+      "title": "Shell edits are not captured"
+     }
+    ],
+    "title": "Snapshotting",
+    "url": "https://code.claude.com/docs/en/snapshotting"
+   }
+  ]
+ },
+ "claude-platform": {
+  "pages": [
+   {
+    "body_sha256": "33775149b1fd0f49cb7a341e972d769c5a4ab39699bcfd5d2006591b62b7a276",
+    "sections": [
+     {
+      "has_code_blocks": false,
+      "heading_path": "Pick a token kind",
+      "level": 2,
+      "line_end": 7,
+      "line_start": 3,
+      "title": "Pick a token kind"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Mint an access token",
+      "level": 2,
+      "line_end": 12,
+      "line_start": 7,
+      "title": "Mint an access token"
+     },
+     {
+      "has_code_blocks": true,
+      "heading_path": "Send your access token",
+      "level": 2,
+      "line_end": 18,
+      "line_start": 12,
+      "title": "Send your access token"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Tokens and the admin side",
+      "level": 2,
+      "line_end": 22,
+      "line_start": 18,
+      "title": "Tokens and the admin side"
+     }
+    ],
+    "title": "Get your Vantry access token",
+    "url": "https://platform.claude.com/docs/en/get-access-token"
+   },
+   {
+    "body_sha256": "c729adb819b737caa3e409c3b62fe4524acf406edc243a16d06184616e1c0935",
+    "sections": [
+     {
+      "has_code_blocks": false,
+      "heading_path": "How a span fills",
+      "level": 2,
+      "line_end": 7,
+      "line_start": 3,
+      "title": "How a span fills"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Span hints",
+      "level": 2,
+      "line_end": 9,
+      "line_start": 7,
+      "title": "Span hints"
+     },
+     {
+      "has_code_blocks": true,
+      "heading_path": "Span hints/Hint format",
+      "level": 3,
+      "line_end": 18,
+      "line_start": 9,
+      "title": "Hint format"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Trim spans by folding",
+      "level": 2,
+      "line_end": 22,
+      "line_start": 18,
+      "title": "Trim spans by folding"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Where to go next",
+      "level": 2,
+      "line_end": 26,
+      "line_start": 22,
+      "title": "Where to go next"
+     }
+    ],
+    "title": "Memory spans",
+    "url": "https://platform.claude.com/docs/en/build/memory-spans"
+   },
+   {
+    "body_sha256": "80fca1d95390126f0ed89e4cde2efdcdf3c7df7d7b737afa6279444c985343bc",
+    "sections": [
+     {
+      "has_code_blocks": false,
+      "heading_path": "Supported setups",
+      "level": 2,
+      "line_end": 7,
+      "line_start": 3,
+      "title": "Supported setups"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Swapping while the chat goes on",
+      "level": 2,
+      "line_end": 11,
+      "line_start": 7,
+      "title": "Swapping while the chat goes on"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Asking for a background fold",
+      "level": 2,
+      "line_end": 15,
+      "line_start": 11,
+      "title": "Asking for a background fold"
+     }
+    ],
+    "title": "Folding in the background",
+    "url": "https://platform.claude.com/docs/en/build/folding-background"
+   },
+   {
+    "body_sha256": "8838b4d916abd673cc90595d54c8dd8e9ef637b2c42182a7d6e9a66c3d57834f",
+    "sections": [
+     {
+      "has_code_blocks": false,
+      "heading_path": "Pick a folding mode",
+      "level": 2,
+      "line_end": 9,
+      "line_start": 3,
+      "title": "Pick a folding mode"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Folding on request",
+      "level": 2,
+      "line_end": 14,
+      "line_start": 9,
+      "title": "Folding on request"
+     }
+    ],
+    "title": "Folding overview",
+    "url": "https://platform.claude.com/docs/en/build/folding"
+   },
+   {
+    "body_sha256": "adec824177f2ef58f15151abc37a0c3cfd2b40cfdcbc92d65ab1001fddc9da41",
+    "sections": [
+     {
+      "has_code_blocks": false,
+      "heading_path": "Picking a path",
+      "level": 2,
+      "line_end": 7,
+      "line_start": 3,
+      "title": "Picking a path"
+     }
+    ],
+    "title": "Guides to sample tasks",
+    "url": "https://platform.claude.com/docs/en/about/task-guides/overview"
+   },
+   {
+    "body_sha256": "7895e590d43e94d3734cd8ce7da8043e6c810f323ae73dcd08e7818d66b0a60a",
+    "sections": [
+     {
+      "has_code_blocks": false,
+      "heading_path": "Before you shape",
+      "level": 2,
+      "line_end": 7,
+      "line_start": 3,
+      "title": "Before you shape"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Shaping steps",
+      "level": 2,
+      "line_end": 11,
+      "line_start": 7,
+      "title": "Shaping steps"
+     }
+    ],
+    "title": "Prompt shaping overview",
+    "url": "https://platform.claude.com/docs/en/build/prompt-shaping/overview"
+   },
+   {
+    "body_sha256": "ea6d2504080ac73ff56a9efd5d81c14bdc8192d3d9c6399690cf3e60f1ca18c7",
+    "sections": [
+     {
+      "has_code_blocks": false,
+      "heading_path": "Span",
+      "level": 2,
+      "line_end": 7,
+      "line_start": 3,
+      "title": "Span"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Lag",
+      "level": 2,
+      "line_end": 13,
+      "line_start": 7,
+      "title": "Lag"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Warmth",
+      "level": 2,
+      "line_end": 19,
+      "line_start": 13,
+      "title": "Warmth"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Units",
+      "level": 2,
+      "line_end": 23,
+      "line_start": 19,
+      "title": "Units"
+     }
+    ],
+    "title": "Glossary",
+    "url": "https://platform.claude.com/docs/en/about/glossary"
+   },
+   {
+    "body_sha256": "1543b10b00d1fb2e13f75da9fd48b74b0918a536f1cee98d8e08bd3ea3d4a037",
+    "sections": [
+     {
+      "has_code_blocks": false,
+      "heading_path": "Asking for help",
+      "level": 2,
+      "line_end": 7,
+      "line_start": 3,
+      "title": "Asking for help"
+     }
+    ],
+    "title": "Migration notes",
+    "url": "https://platform.claude.com/docs/en/about/models/migration-notes"
+   },
+   {
+    "body_sha256": "0d1db9b98b55a1718884c473991587f270055f377722966d1c6a5c1dedbf57b6",
+    "sections": [
+     {
+      "has_code_blocks": false,
+      "heading_path": "Inbound IP addresses",
+      "level": 2,
+      "line_end": 7,
+      "line_start": 3,
+      "title": "Inbound IP addresses"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Inbound IP addresses/Range A",
+      "level": 3,
+      "line_end": 11,
+      "line_start": 7,
+      "title": "Range A"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Inbound IP addresses/Range B",
+      "level": 3,
+      "line_end": 15,
+      "line_start": 11,
+      "title": "Range B"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Outbound ranges",
+      "level": 2,
+      "line_end": 17,
+      "line_start": 15,
+      "title": "Outbound ranges"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Outbound ranges/Range C",
+      "level": 3,
+      "line_end": 21,
+      "line_start": 17,
+      "title": "Range C"
+     },
+     {
+      "has_code_blocks": true,
+      "heading_path": "Outbound ranges/Retired ranges",
+      "level": 3,
+      "line_end": 27,
+      "line_start": 21,
+      "title": "Retired ranges"
+     }
+    ],
+    "title": "IP addresses",
+    "url": "https://platform.claude.com/docs/en/api/ip-addresses"
+   },
+   {
+    "body_sha256": "94582c71c1224c690b3820025ebaed80be880cf7034bda6273b81584c89d822e",
+    "sections": [
+     {
+      "has_code_blocks": false,
+      "heading_path": "Release log",
+      "level": 2,
+      "line_end": 7,
+      "line_start": 3,
+      "title": "Release log"
+     }
+    ],
+    "title": "Releases",
+    "url": "https://platform.claude.com/docs/en/api/releases"
+   },
+   {
+    "body_sha256": "6263359c744b0644223013329a0066989fd26cdc1bc9ea133148e355a1b5cfa6",
+    "sections": [
+     {
+      "has_code_blocks": false,
+      "heading_path": "Path fields",
+      "level": 2,
+      "line_end": 9,
+      "line_start": 5,
+      "title": "Path fields"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Header fields",
+      "level": 2,
+      "line_end": 13,
+      "line_start": 9,
+      "title": "Header fields"
+     },
+     {
+      "has_code_blocks": true,
+      "heading_path": "Example",
+      "level": 2,
+      "line_end": 21,
+      "line_start": 13,
+      "title": "Example"
+     }
+    ],
+    "title": "Fetch Blob",
+    "url": "https://platform.claude.com/docs/en/api/blobs/fetch"
+   },
+   {
+    "body_sha256": "1ca617d06304c0467e003b6fdd19bdc72b2f1b27a00154e8c2ab00eff4289706",
+    "sections": [
+     {
+      "has_code_blocks": false,
+      "heading_path": "Path fields",
+      "level": 2,
+      "line_end": 9,
+      "line_start": 5,
+      "title": "Path fields"
+     },
+     {
+      "has_code_blocks": false,
+      "heading_path": "Header fields",
+      "level": 2,
+      "line_end": 14,
+      "line_start": 9,
+      "title": "Header fields"
+     },
+     {
+      "has_code_blocks": true,
+      "heading_path": "Example",
+      "level": 2,
+      "line_end": 22,
+      "line_start": 14,
+      "title": "Example"
+     }
+    ],
+    "title": "Fetch Blob",
+    "url": "https://platform.claude.com/docs/en/api/beta/blobs/fetch"
+   }
+  ],
+  "sections_stdout": [
+   {
+    "stderr": "",
+    "stdout": "Sections in [0] \"Get your Vantry access token\"\n  URL: https://platform.claude.com/docs/en/get-access-token\n============================================================\n[L2] Pick a token kind\n[L2] Mint an access token\n[L2] Send your access token [code]\n[L2] Tokens and the admin side\n\n(4 sections)\n\nNext: parse-claude-docs.py content --source platform --cache-dir <CACHE_DIR> -- 0 \"<heading_path>\"\n"
+   },
+   {
+    "stderr": "",
+    "stdout": "Sections in [1] \"Memory spans\"\n  URL: https://platform.claude.com/docs/en/build/memory-spans\n============================================================\n[L2] How a span fills\n[L2] Span hints\n  [L3] Span hints/Hint format [code]\n[L2] Trim spans by folding\n[L2] Where to go next\n\n(5 sections)\n\nNext: parse-claude-docs.py content --source platform --cache-dir <CACHE_DIR> -- 1 \"<heading_path>\"\n"
+   },
+   {
+    "stderr": "",
+    "stdout": "Sections in [2] \"Folding in the background\"\n  URL: https://platform.claude.com/docs/en/build/folding-background\n============================================================\n[L2] Supported setups\n[L2] Swapping while the chat goes on\n[L2] Asking for a background fold\n\n(3 sections)\n\nNext: parse-claude-docs.py content --source platform --cache-dir <CACHE_DIR> -- 2 \"<heading_path>\"\n"
+   },
+   {
+    "stderr": "",
+    "stdout": "Sections in [3] \"Folding overview\"\n  URL: https://platform.claude.com/docs/en/build/folding\n============================================================\n[L2] Pick a folding mode\n[L2] Folding on request\n\n(2 sections)\n\nNext: parse-claude-docs.py content --source platform --cache-dir <CACHE_DIR> -- 3 \"<heading_path>\"\n"
+   },
+   {
+    "stderr": "",
+    "stdout": "Sections in [4] \"Guides to sample tasks\"\n  URL: https://platform.claude.com/docs/en/about/task-guides/overview\n============================================================\n[L2] Picking a path\n\n(1 sections)\n\nNext: parse-claude-docs.py content --source platform --cache-dir <CACHE_DIR> -- 4 \"<heading_path>\"\n"
+   },
+   {
+    "stderr": "",
+    "stdout": "Sections in [5] \"Prompt shaping overview\"\n  URL: https://platform.claude.com/docs/en/build/prompt-shaping/overview\n============================================================\n[L2] Before you shape\n[L2] Shaping steps\n\n(2 sections)\n\nNext: parse-claude-docs.py content --source platform --cache-dir <CACHE_DIR> -- 5 \"<heading_path>\"\n"
+   },
+   {
+    "stderr": "",
+    "stdout": "Sections in [6] \"Glossary\"\n  URL: https://platform.claude.com/docs/en/about/glossary\n============================================================\n[L2] Span\n[L2] Lag\n[L2] Warmth\n[L2] Units\n\n(4 sections)\n\nNext: parse-claude-docs.py content --source platform --cache-dir <CACHE_DIR> -- 6 \"<heading_path>\"\n"
+   },
+   {
+    "stderr": "",
+    "stdout": "Sections in [7] \"Migration notes\"\n  URL: https://platform.claude.com/docs/en/about/models/migration-notes\n============================================================\n[L2] Asking for help\n\n(1 sections)\n\nNext: parse-claude-docs.py content --source platform --cache-dir <CACHE_DIR> -- 7 \"<heading_path>\"\n"
+   },
+   {
+    "stderr": "",
+    "stdout": "Sections in [8] \"IP addresses\"\n  URL: https://platform.claude.com/docs/en/api/ip-addresses\n============================================================\n[L2] Inbound IP addresses\n  [L3] Inbound IP addresses/Range A\n  [L3] Inbound IP addresses/Range B\n[L2] Outbound ranges\n  [L3] Outbound ranges/Range C\n  [L3] Outbound ranges/Retired ranges [code]\n\n(6 sections)\n\nNext: parse-claude-docs.py content --source platform --cache-dir <CACHE_DIR> -- 8 \"<heading_path>\"\n"
+   },
+   {
+    "stderr": "",
+    "stdout": "Sections in [9] \"Releases\"\n  URL: https://platform.claude.com/docs/en/api/releases\n============================================================\n[L2] Release log\n\n(1 sections)\n\nNext: parse-claude-docs.py content --source platform --cache-dir <CACHE_DIR> -- 9 \"<heading_path>\"\n"
+   },
+   {
+    "stderr": "",
+    "stdout": "Sections in [10] \"Fetch Blob\"\n  URL: https://platform.claude.com/docs/en/api/blobs/fetch\n============================================================\n[L2] Path fields\n[L2] Header fields\n[L2] Example [code]\n\n(3 sections)\n\nNext: parse-claude-docs.py content --source platform --cache-dir <CACHE_DIR> -- 10 \"<heading_path>\"\n"
+   },
+   {
+    "stderr": "",
+    "stdout": "Sections in [11] \"Fetch Blob\"\n  URL: https://platform.claude.com/docs/en/api/beta/blobs/fetch\n============================================================\n[L2] Path fields\n[L2] Header fields\n[L2] Example [code]\n\n(3 sections)\n\nNext: parse-claude-docs.py content --source platform --cache-dir <CACHE_DIR> -- 11 \"<heading_path>\"\n"
+   }
+  ]
+ }
+}

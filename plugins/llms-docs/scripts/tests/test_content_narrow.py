@@ -15,11 +15,10 @@ import unittest
 from pathlib import Path
 
 import _loader  # noqa: F401  (side effect: adds scripts/ to sys.path)
+import _common
 
-claude = _loader.load_script("parse-claude-docs.py")
-ai_sdk = _loader.load_script("parse-ai-sdk.py")
-firebase = _loader.load_script("parse-firebase.py")
 generic = _loader.load_script("parse-llms-txt.py")
+SCRIPT = "parse-llms-txt.py"
 
 LONG_ROW = "| `SOME_VARIABLE_{i}` | " + ("filler text " * 30) + "|\n"
 NEEDLE_ROW = "| `NEEDLE_VARIABLE` | the row that the reader wants |\n"
@@ -30,13 +29,14 @@ def _big_section() -> str:
 
 
 class _NarrowBase:
-    script: str
-    module = None
+    script = SCRIPT
+    module = generic
     heading: str          # heading_path of the childless section
     # corpus args to try, as (label, builder(tmp) -> list)
     page_title = "Env vars"
 
     def setUp(self):
+        _loader.without_user_sources(self)
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.write_corpus()
@@ -79,8 +79,7 @@ class _NarrowBase:
 
 
 class ClaudeDocsNarrowTest(_NarrowBase, unittest.TestCase):
-    script = "parse-claude-docs.py"
-    module = claude
+    """The ``claude-code`` preset (``rank_from: index``, H1 + ``Source:``)."""
     heading = "Variables"
 
     def write_corpus(self):
@@ -92,15 +91,14 @@ class ClaudeDocsNarrowTest(_NarrowBase, unittest.TestCase):
             "## Variables\n" + _big_section(), encoding="utf-8")
 
     def test_cache_dir(self):
-        self.check(["--cache-dir", self.tmp])
+        self.check(["--source", "claude-code", "--cache-dir", self.tmp])
 
     def test_file(self):
-        self.check(["--file", str(self.full), "--cache-dir", self.tmp])
+        self.check(["--source", "claude-code", "--file", str(self.full), "--cache-dir", self.tmp])
 
 
 class AiSdkNarrowTest(_NarrowBase, unittest.TestCase):
-    script = "parse-ai-sdk.py"
-    module = ai_sdk
+    """The ``ai-sdk`` preset (frontmatter pages)."""
     heading = "Env vars/Variables"
 
     def write_corpus(self):
@@ -110,15 +108,14 @@ class AiSdkNarrowTest(_NarrowBase, unittest.TestCase):
             "# Env vars\n\n## Variables\n" + _big_section(), encoding="utf-8")
 
     def test_cache_dir(self):
-        self.check(["--cache-dir", self.tmp])
+        self.check(["--source", "ai-sdk", "--cache-dir", self.tmp])
 
     def test_file(self):
-        self.check(["--file", str(self.full), "--cache-dir", self.tmp])
+        self.check(["--source", "ai-sdk", "--file", str(self.full), "--cache-dir", self.tmp])
 
 
 class FirebaseNarrowTest(_NarrowBase, unittest.TestCase):
-    script = "parse-firebase.py"
-    module = firebase
+    """The ``firebase`` preset (``body: fetch``, one cached file per page)."""
     heading = "Variables"
 
     def write_corpus(self):
@@ -127,16 +124,14 @@ class FirebaseNarrowTest(_NarrowBase, unittest.TestCase):
             f"- [Env vars]({url}): about env\n", encoding="utf-8")
         pages = Path(self.tmp, "firebase-docs")
         pages.mkdir()
-        (pages / firebase._url_to_cache_filename(url)).write_text(
+        (pages / _common.page_cache_filename(url, "https://firebase.google.com/")).write_text(
             "# Env vars\n\n## Variables\n" + _big_section(), encoding="utf-8")
 
     def test_cache_dir(self):
-        self.check(["--cache-dir", self.tmp])
+        self.check(["--source", "firebase", "--cache-dir", self.tmp])
 
 
 class GenericLlmsTxtNarrowTest(_NarrowBase, unittest.TestCase):
-    script = "parse-llms-txt.py"
-    module = generic
     heading = "Variables"
 
     def write_corpus(self):
@@ -158,16 +153,18 @@ class SectionWithSubsectionsKeepsHeadingHintTest(unittest.TestCase):
     """子見出しのある節は、従来どおり子見出しへ絞る案内のまま。"""
 
     def test_parent_section_still_points_at_content(self):
+        _loader.without_user_sources(self)
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         Path(tmp, "ai-sdk-llms-full.txt").write_text(
             "---\ntitle: Env vars\n---\n\n# Env vars\n\n## Parent\n"
             + _big_section() + "### Child\ntext\n", encoding="utf-8")
-        code, out, err = _loader.run_cli(ai_sdk, [
-            "parse-ai-sdk.py", "content", "0", "Env vars/Parent",
+        code, out, err = _loader.run_cli(generic, [
+            SCRIPT, "content", "0", "Env vars/Parent", "--source", "ai-sdk",
             "--cache-dir", tmp, "--max-chars", "3000"])
         self.assertEqual(code, 0, err)
-        self.assertRegex(out, r'narrow with parse-ai-sdk\.py content --cache-dir \S+ -- 0 "<heading_path>"\)')
+        self.assertRegex(out, r'narrow with parse-llms-txt\.py content --source ai-sdk --\S.* --cache-dir \S+ '
+                              r'-- 0 "<heading_path>"\)')
         self.assertNotIn("search-content", out)
 
 
@@ -231,35 +228,38 @@ class AiSdkPageWithoutH1Test(unittest.TestCase):
     子見出しが無いのは、見出しが 1 つも無いページだけ。"""
 
     def setUp(self):
+        _loader.without_user_sources(self)
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.full = Path(self.tmp, "ai-sdk-llms-full.txt")
         self.full.write_text(AI_SDK_PAGE_WITHOUT_H1, encoding="utf-8")
 
     def corpora(self):
-        return [["--cache-dir", self.tmp], ["--file", str(self.full), "--cache-dir", self.tmp]]
+        return [["--source", "ai-sdk", "--cache-dir", self.tmp],
+                ["--source", "ai-sdk", "--file", str(self.full), "--cache-dir", self.tmp]]
 
     def test_whole_page_truncation_keeps_the_heading_hint(self):
         for corpus in self.corpora():
-            with self.subTest(corpus=corpus[0]):
-                code, out, err = _loader.run_cli(ai_sdk, [
-                    "parse-ai-sdk.py", "content", "0", *corpus, "--max-chars", "300"])
+            with self.subTest(corpus=corpus[2]):
+                code, out, err = _loader.run_cli(generic, [
+                    SCRIPT, "content", "0", *corpus, "--max-chars", "300"])
                 self.assertEqual(code, 0, err)
-                self.assertRegex(out, r'chars truncated; narrow with parse-ai-sdk\.py content --\S.* -- 0 "<heading_path>"\)')
+                self.assertRegex(out, r'chars truncated; narrow with parse-llms-txt\.py content --source ai-sdk --\S.* '
+                                      r'-- 0 "<heading_path>"\)')
                 self.assertNotIn("search-content", out)
 
     def test_top_level_hints_list_the_h2s_and_each_reads_its_section(self):
         for corpus in self.corpora():
-            with self.subTest(corpus=corpus[0]):
-                code, out, err = _loader.run_cli(ai_sdk, [
-                    "parse-ai-sdk.py", "content", "0", *corpus])
+            with self.subTest(corpus=corpus[2]):
+                code, out, err = _loader.run_cli(generic, [
+                    SCRIPT, "content", "0", *corpus])
                 self.assertEqual(code, 0, err)
                 self.assertIn("--- Top-level sections (3) ---", out)
                 listed = [ln[len("  - "):] for ln in out.splitlines() if ln.startswith("  - ")]
                 self.assertEqual(listed[:3], ["Issue", "Cause", "Solution [code]"])
                 # 一覧の見出しで、その節に届く
-                code, got, err = _loader.run_cli(ai_sdk, [
-                    "parse-ai-sdk.py", "content", "0", "Issue", *corpus])
+                code, got, err = _loader.run_cli(generic, [
+                    SCRIPT, "content", "0", "Issue", *corpus])
                 self.assertEqual(code, 0, err)
                 self.assertIn("streaming is slow and in big chunks", got)
                 self.assertNotIn("Content Filtering", got)
@@ -267,14 +267,14 @@ class AiSdkPageWithoutH1Test(unittest.TestCase):
     def test_page_without_headings_points_at_search(self):
         Path(self.tmp, "ai-sdk-llms-full.txt").write_text(
             AI_SDK_PAGE_WITHOUT_HEADINGS, encoding="utf-8")
-        code, out, err = _loader.run_cli(ai_sdk, [
-            "parse-ai-sdk.py", "content", "0", "--cache-dir", self.tmp, "--max-chars", "300"])
+        code, out, err = _loader.run_cli(generic, [
+            SCRIPT, "content", "0", "--source", "ai-sdk", "--cache-dir", self.tmp, "--max-chars", "300"])
         self.assertEqual(code, 0, err)
         self.assertIn("this page has no headings to narrow to", out)
         self.assertIn("'getting started' (the page title, a stand-in)", out)
         nexts = [ln[len("Next: "):] for ln in out.splitlines() if ln.startswith("Next: ")]
         self.assertEqual(len(nexts), 1, out)
-        code, got, err = _loader.run_cli(ai_sdk, shlex.split(nexts[0], comments=True))
+        code, got, err = _loader.run_cli(generic, shlex.split(nexts[0], comments=True))
         self.assertEqual(code, 0, err)
         self.assertIn("[0] Getting Started", got)
         self.assertIn("→ Paragraph 0 about getting started", got)
@@ -284,6 +284,7 @@ class SkippedLevelChildrenTest(unittest.TestCase):
     """段を飛ばした節 (H2 の下に H4 だけ) も、その H4 を子として扱う。"""
 
     def setUp(self):
+        _loader.without_user_sources(self)
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         Path(self.tmp, "claude-code-llms.txt").write_text(
@@ -294,16 +295,17 @@ class SkippedLevelChildrenTest(unittest.TestCase):
             "## Other\nother text\n", encoding="utf-8")
 
     def test_h4_under_h2_is_a_child(self):
-        code, out, err = _loader.run_cli(claude, [
-            "parse-claude-docs.py", "content", "0", "Parent", "--cache-dir", self.tmp,
+        code, out, err = _loader.run_cli(generic, [
+            SCRIPT, "content", "0", "Parent", "--source", "claude-code", "--cache-dir", self.tmp,
             "--max-chars", "3000"])
         self.assertEqual(code, 0, err)
         self.assertIn("--- Subsections of 'Parent' (1) ---", out)
         self.assertIn("  - Parent/Deep", out)
-        self.assertRegex(out, r'narrow with parse-claude-docs\.py content --\S.* -- 0 "<heading_path>"\)')
+        self.assertRegex(out, r'narrow with parse-llms-txt\.py content --source claude-code --\S.* '
+                              r'-- 0 "<heading_path>"\)')
         self.assertNotIn("search-content", out)
-        code, got, err = _loader.run_cli(claude, [
-            "parse-claude-docs.py", "content", "0", "Parent/Deep", "--cache-dir", self.tmp])
+        code, got, err = _loader.run_cli(generic, [
+            SCRIPT, "content", "0", "Parent/Deep", "--source", "claude-code", "--cache-dir", self.tmp])
         self.assertEqual(code, 0, err)
         self.assertIn("text under deep", got)
 
@@ -337,17 +339,19 @@ class AdversarialHeadingRoundTripTest(unittest.TestCase):
         return full
 
     def test_next_line_runs_as_printed_and_reaches_the_section(self):
+        _loader.without_user_sources(self)
         for heading, keyword, note_word in self.CASES:
             tmp = tempfile.mkdtemp()
             self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
             full = self.write_corpus(tmp, heading)
-            for corpus in (["--cache-dir", tmp], ["--file", str(full), "--cache-dir", tmp]):
-                with self.subTest(heading=heading, corpus=corpus[0]):
+            for corpus in (["--source", "claude-code", "--cache-dir", tmp],
+                           ["--source", "claude-code", "--file", str(full), "--cache-dir", tmp]):
+                with self.subTest(heading=heading, corpus=corpus[2]):
                     # every positional after "--" (argparse before 3.12 rejects
                     # an optional positional that follows "--" once the
                     # required one was given before the options)
-                    code, out, err = _loader.run_cli(claude, [
-                        "parse-claude-docs.py", "content", *corpus,
+                    code, out, err = _loader.run_cli(generic, [
+                        SCRIPT, "content", *corpus,
                         "--max-chars", "3000", "--", "0", heading])
                     self.assertEqual(code, 0, err)
                     self.assertIn(f"run the command below with {note_word} "
@@ -356,20 +360,22 @@ class AdversarialHeadingRoundTripTest(unittest.TestCase):
                              if ln.startswith("Next: ")]
                     self.assertEqual(len(nexts), 1, out)
                     argv = shlex.split(nexts[0], comments=True)
+                    self.assertEqual(argv[:2], [SCRIPT, "search-content"], nexts[0])
+                    self.assertEqual(argv[argv.index("--source") + 1], "claude-code", nexts[0])
                     self.assertEqual(argv[-2:], ["--", keyword], nexts[0])
                     # the note's word is that shell word, and a word that
                     # needs quoting reads the same in the note and the line
                     self.assertEqual(shlex.split(note_word), [keyword])
                     if "'" in keyword:
                         self.assertTrue(nexts[0].endswith(" -- " + note_word), nexts[0])
-                    code, got, err = _loader.run_cli(claude, argv)
+                    code, got, err = _loader.run_cli(generic, argv)
                     self.assertEqual(code, 0, err)
                     self.assertIn("[0] Env vars", got)
                     self.assertIn(f"Section: {heading}  (", got)
                     self.assertIn(f"→ The row about {heading} is here.", got)
                     # replaced as the note says, with an option name
                     swapped = argv[:-1] + ["--from-env"]
-                    code, got, err = _loader.run_cli(claude, swapped)
+                    code, got, err = _loader.run_cli(generic, swapped)
                     self.assertEqual(code, 0, err)
 
 

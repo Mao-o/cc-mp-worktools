@@ -2,13 +2,13 @@
 
 The ``llms.txt`` entries are the pages, numbered in ``llms.txt`` order, and a
 page's body is fetched from its entry's URL only when a command needs it,
-into a page cache directory whose file names are those of
-``parse-firebase.py`` (``_common.page_cache_filename``).
+into a page cache directory whose file names are those the retired
+``parse-firebase.py`` wrote (``_common.page_cache_filename``).
 
 The checks here:
 
-* the tests of ``test_parse_firebase.py``, run on the generic loader with a
-  ``body: "fetch"`` profile (``FirebaseTestsOnGenericLoader``);
+* the tests of the retired ``parse-firebase.py``, run on the generic loader
+  with a ``body: "fetch"`` profile (``FirebaseTestsOnGenericLoader``);
 * validation of the keys (``body``, the keys it refuses, ``page_cache_dir``
   for the bundled presets only, the integer keys) and the page cache names;
 * what is fetched, counted on a mocked network: ``fetch-index`` /
@@ -43,8 +43,10 @@ from unittest import mock
 import _loader
 import test_migration_parity as parity
 
+import _common
+
 g = _loader.load_script("parse-llms-txt.py")
-fb = _loader.load_script("parse-firebase.py")
+FIREBASE_HOST_ROOT = "https://firebase.google.com/"
 SCRIPT = "parse-llms-txt.py"
 
 INDEX_URL = "https://firebase.google.com/docs/llms.txt"
@@ -546,8 +548,8 @@ class SkillCommandTableTest(unittest.TestCase):
 
 
 class PageCacheNameTest(unittest.TestCase):
-    """The page cache file of a URL is the one ``parse-firebase.py`` uses, so
-    an existing page cache is read as it is."""
+    """The page cache file of a URL is the one the retired ``parse-firebase.py``
+    wrote, so an existing page cache is read as it is."""
 
     URLS = (
         QL, AUTH, "https://firebase.google.com/docs.md.txt",
@@ -560,13 +562,15 @@ class PageCacheNameTest(unittest.TestCase):
         "https://firebase.google.com/",
     )
 
-    def test_names_match_the_old_script_and_never_contain_a_separator(self):
+    def test_names_use_the_host_root_and_never_contain_a_separator(self):
         p = _valid(g.PRESETS_FILE, "firebase", {**PROFILE, "page_cache_dir": "firebase-docs"})
         names = set()
         for url in self.URLS:
             with self.subTest(url):
                 path = g._page_cache_path("/cache", p, url)
-                self.assertEqual(path, os.path.join("/cache", "firebase-docs", fb._url_to_cache_filename(url)))
+                # the prefix stripped is the host root of index_url
+                self.assertEqual(path, os.path.join(
+                    "/cache", "firebase-docs", _common.page_cache_filename(url, FIREBASE_HOST_ROOT)))
                 name = os.path.basename(path)
                 self.assertNotIn("/", name)
                 self.assertLess(len(name), 256)
@@ -1331,7 +1335,7 @@ class CachedFirebaseRoundTripTest(unittest.TestCase):
         argv = parity._generic_argv("firebase", [], parity.write_empty_sources(tmp))
         opened = 0
         for i, e in enumerate(entries):
-            if fb._url_to_cache_filename(e["url"]) not in cached:
+            if _common.page_cache_filename(e["url"], FIREBASE_HOST_ROOT) not in cached:
                 continue
             run = parity.run_script(SCRIPT, ["sections", str(i), *argv], tmp)
             self.assertEqual(run.code, 0, run.stderr)

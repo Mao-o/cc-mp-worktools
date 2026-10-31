@@ -2,9 +2,9 @@
 """Progressive loader for any site's ``llms-full.txt``, described by a profile.
 
 The three dedicated loaders this replaced (``parse-claude-docs.py`` /
-``parse-ai-sdk.py`` / ``parse-firebase.py``, now shims that run this script
-with the ``claude-code`` / ``ai-sdk`` / ``firebase`` presets, see ``_shim.py``)
-hard-coded one site each. This one reads the site from a
+``parse-ai-sdk.py`` / ``parse-firebase.py``, removed in 0.48.0; the
+``claude-code`` / ``claude-platform`` / ``ai-sdk`` / ``firebase`` presets read
+the same docs) hard-coded one site each. This one reads the site from a
 profile: the presets bundled in ``presets.json`` next to this script, overlaid
 by the user's ``sources.json`` (a user profile replaces a preset of the same
 name). It supports the page shapes seen in the wild (measured 2026-09-26 and
@@ -127,7 +127,7 @@ _PROFILE_KEYS = {
     "anchor_style", "show_overflow", "rank_from", "index_join", "index_group_variants",
     "link_annotations", "link_path_aliases", "members", "body", "page_cache_dir",
     "page_fetch_workers", "page_fetch_timeout", "search_content_warn_pages", "index_page_size",
-    "list_page_urls", "index_heading_level",
+    "list_page_urls", "index_heading_level", "heading_line_pattern",
 }
 # A profile with ``members`` is an alias of several sources for ``search``;
 # it reads no file of its own, so it takes no other key but these.
@@ -425,10 +425,29 @@ def _bool_key(path: str, name: str, raw: dict, key: str, default: bool) -> bool:
     return value
 
 
+def _heading_line_pattern(path: str, name: str, value):
+    """``heading_line_pattern``: a regular expression, or null. A body line
+    outside a code block that it matches as a whole is read as an H2 whose
+    title is the pattern's one group (``"^\\*\\*(\\d+\\.\\d+\\.\\d+)\\*\\*$"``:
+    the ``**2.1.310**`` lines that head each release of a changelog)."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        _bad(path, f"sources.{name}.heading_line_pattern must be a regular expression (or null)")
+    try:
+        rx = re.compile(value)
+    except re.error as e:
+        _bad(path, f"sources.{name}.heading_line_pattern is not a valid regular expression: {e}")
+    if rx.groups != 1:
+        _bad(path, f"sources.{name}.heading_line_pattern must have exactly one group (the heading title)")
+    return rx
+
+
 def _validate_display_keys(path: str, name: str, raw: dict, profile: dict) -> None:
     """Structure / display keys, each one behaviour and off by default (the
     defaults reproduce the output before the key existed)."""
     profile["strip_trailing_headings"] = _bool_key(path, name, raw, "strip_trailing_headings", False)
+    profile["heading_line_pattern"] = _heading_line_pattern(path, name, raw.get("heading_line_pattern"))
     profile["protect_tables"] = _bool_key(path, name, raw, "protect_tables", True)
     profile["compact_pack"] = _bool_key(path, name, raw, "compact_pack", False)
     # fetch-index lists this many entries by default (--limit); 0 or absent = all
@@ -1289,6 +1308,27 @@ def _drop_boilerplate(body_lines: list[str], patterns: list) -> list[str]:
     return out
 
 
+def _promote_heading_lines(body_lines: list[str], rx) -> tuple[list[str], set]:
+    """``heading_line_pattern``: each line outside a code block that *rx*
+    matches as a whole (without its line break) becomes ``## <group>``.
+    Returns the new body and the titles made so (they have no anchor on the
+    page: ``_anchor_for`` gives them none). A title the group leaves empty or
+    one that holds a line break keeps the line as it was."""
+    fence = FenceTracker()
+    out, made = [], set()
+    for line in body_lines:
+        was_in = fence.in_fence
+        fence.update(line)
+        m = None if was_in or fence.in_fence else rx.fullmatch(line.rstrip("\r\n"))
+        title = (m.group(1) or "").strip() if m else ""
+        if title and "\n" not in title:
+            out.append(f"## {title}\n")
+            made.add(title)
+        else:
+            out.append(line)
+    return out, made
+
+
 def _strip_trailing_headings(body_lines: list[str]) -> list[str]:
     """Drop the heading lines (and blank lines) dangling at the end of a page.
 
@@ -1350,6 +1390,9 @@ def split_documents(lines: list[str], profile: dict) -> list[dict]:
             d["body_lines"] = _drop_boilerplate(d["body_lines"], profile["drop_lines"])
         if profile.get("strip_trailing_headings"):
             d["body_lines"] = _strip_trailing_headings(d["body_lines"])
+        if profile.get("heading_line_pattern") is not None:
+            d["body_lines"], d["line_headings"] = _promote_heading_lines(
+                d["body_lines"], profile["heading_line_pattern"])
         if level is not None:
             # ``None`` is the H2 floor everywhere downstream (PageView, body
             # hits, the full-corpus fallback)
@@ -2323,7 +2366,10 @@ def _anchor_for(profile: dict, doc: dict):
     if style is None or not re.match(r"https?://", doc["url"] or ""):
         return None
     url = _ref_url_key_with_query(doc["url"], profile["page_url_strip_suffix"])
-    return lambda title: section_url_anchor(url, title, style=style)
+    # a heading made from a body line (``heading_line_pattern``) is no
+    # heading of the page, so it has no anchor there
+    made = doc.get("line_headings") or set()
+    return lambda title: "" if title in made else section_url_anchor(url, title, style=style)
 
 
 # A Markdown link target in parentheses: an absolute URL or a root-relative

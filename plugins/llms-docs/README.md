@@ -85,14 +85,13 @@ field が抜ける)。
 | Skill | `skills/researching-firebase/SKILL.md` |
 | Skill | `skills/researching-library-docs/SKILL.md` |
 | Script | `scripts/parse-llms-txt.py` (4 skill 共通の loader。同梱 presets と利用者の `sources.json` のサイトを `--source` で選ぶ) |
-| Shim | `scripts/_shim.py` (0.45.0 までの専用 script 名で呼ばれたときに、引数を読み替えて `parse-llms-txt.py` を起動する。次のリリースで削除する) |
 | Data | `scripts/presets.json` (`parse-llms-txt.py` の同梱 profile) |
 | Dev tool | `scripts/check-preset-urls.py` (presets の `url` / `index_url` を HEAD で点検する。ネットワークに出るので suite には入れない) |
 | Shared | `scripts/_common.py` (FenceTracker / extract_sections / fetch_url ほか共通ヘルパー) |
 | Shared | `scripts/_commands.py` (`sections` / `content` / 検索結果・index 行の出力テンプレートと、検索後の `Next:` 行・0 件の診断。各 script は page を `PageView` に詰めて渡す) |
 | Docs | `docs/paths-and-fork-context.md` (`paths` 自動ロードと `context: fork` の実測) |
 | Docs | `docs/generic-llms-txt-source.md` (任意の `llms.txt` サイト対応のコスト見積り) |
-| Test | `scripts/tests/legacy/` (0.45.0 までの専用 script の実装。移行の比較の基準として shim の削除まで残す。実行時には使わない) |
+| Test | `scripts/tests/fixtures/parity/` (0.45.0 までの専用 script が合成 fixture に出した出力の記録。同梱 presets の出力をこれと比べる。実行時には使わない) |
 
 ## インストール
 
@@ -312,6 +311,7 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `join_rate_guard` | | `true` で、`index_url` の `llms.txt` の項目のうち、ページ自身の URL (`page_url` で読んだもの。タイトルの突き合わせで付けた URL は数えない) と一致するものの割合を見る (`.md`・クエリ・`#…`・末尾の `/` は無視)。50% 未満なら終了コード 2 で止め、80% 未満なら stderr に WARNING を出す。区切り方が合っていない profile (frontmatter 形式のファイルを `split: h1` で読むなど) ではページに URL が無く、ここで止まる。`index_url` と `page_url` が要る。`llms.txt` を読めない (取得に失敗した) とき、または絶対 URL のページ項目が 0 件 (相対リンクだけなど) のときは見ない (stderr に WARNING を出し、止めない)。`--file` で `--index-file` を渡さないときは `llms.txt` を読まないので見ない |
 | `h1_needs_url` | | `split: h1` で `true` のとき、`page_url` (`line:` / `link:`) の URL が見つからない H1 をページの区切りにせず、前のページの見出しとして残す (ページ本文の中で H1 を使うサイト向け) |
 | `strip_trailing_headings` | | `true` で、ページ末尾に本文の無いまま並ぶ見出し行 (ページ間に置かれたナビの見出し `## Messages` など) を除く。`drop_lines` の後に適用する。コードブロックの状態は見ない |
+| `heading_line_pattern` | | 正規表現 (グループをちょうど 1 つ持つ)。コードブロックの外で、行全体 (改行を除く) がこれに一致する本文の行を、グループを題にした H2 (`## <グループ>`) として読む。見出しを使わず太字の行で節を区切るページ (Claude Code の changelog の `**2.1.310**`) で、検索の hit・`sections`・`content` が節を持つ。`content` の本文ではその行が `## <グループ>` と出る。ページ上にその見出しの anchor は無いので、`Section:` 行に anchor を付けない。グループが空になる行はそのまま。`strip_trailing_headings` の後に適用する。`claude-code` preset は `^\*\*(\d+\.\d+\.\d+)\*\*\s*$` |
 | `min_heading_level` | | `sections` / `content` / 本文検索で節として数える最も浅い見出し (`1` か `2`)。既定は `split: h1` で `2`、ほかは `1`。本文にコードブロック外の `# …` 行があるサイトでは `2` にする |
 | `index_heading_level` | | `search-index` / `search` のランキングと `--show-sections` の一覧に使う見出しの最も深い段 (`2` か `3`。既定 `3`)。コードブロック外の見出しだけを読む。H3 はキーワード 1 語ごとに +1 するが、全キーワード一致の加点 (+10) には数えない (API を H3 で並べるページが関数名で見つかり、選択肢の H3 を並べるだけのページが、タイトルがその語そのもののページを押し出さないため)。`2` で H1 / H2 だけを読む (Claude docs / AI SDK / Firebase の preset。`rank_from: index` ではランキングに見出しを使わないので `--show-sections` の一覧にだけ効く。`body: fetch` ではどちらにも効かない (`--show-sections` を無視するため)) |
 | `protect_tables` | | `false` で、`content` の節の切り出しを表の途中で止めることを許す (既定 `true`) |
@@ -417,11 +417,12 @@ Firebase など)。Firebase の `search` は top N 件 (default 5) だけを取�
 `page_ref_forms` で決まる (Claude docs / Firebase は int / 完全 URL / slug、ai-sdk は int / タイトル部分一致 /
 完全 URL / slug)。`--file` を省略すると cache を auto-fetch する。
 
-専用 script の名前は、既存のコマンドが動き続けるよう 1 リリースだけ shim (`scripts/_shim.py`) として残る。
-shim は引数を読み替えて (`--source code` / `platform` / `both` を `claude-code` / `claude-platform` / `claude` に、
-`--index-limit` を `--top-n` に) `parse-llms-txt.py` を起動するだけで、出力・終了コードは
-`parse-llms-txt.py` のもの (`Next:` 行も `parse-llms-txt.py` を指す)。旧実装は移行の比較の基準として
-`scripts/tests/legacy/` にあり、shim と一緒に削除する。
+専用 script の名前 (`parse-claude-docs.py` / `parse-ai-sdk.py` / `parse-firebase.py`) は 0.46.0〜0.47.x の間だけ
+shim として残り、0.48.0 で削除した。旧コマンドは `parse-llms-txt.py` に `--source` を付けて打ち直す
+(`--source code` / `platform` / `both` は `claude-code` / `claude-platform` / `claude`、`--source` を付けていなかった
+コマンドは `claude-code` / `ai-sdk` / `firebase`、`--index-limit` は `--top-n`)。旧実装が合成 fixture に出した出力は
+`scripts/tests/fixtures/parity/golden/` に記録してあり、`scripts/tests/test_migration_parity.py` が同梱 presets の
+出力をそれと比べる (旧実装は無いので、記録は作り直せない)。
 
 共通ロジック (code-fence scanner / section & content extraction / llms.txt index parser /
 HTTP fetch / エラーヘルパー / metadata header / Next hint / argparse skeleton /

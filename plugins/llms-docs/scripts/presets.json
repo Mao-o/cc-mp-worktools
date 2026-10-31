@@ -382,6 +382,7 @@
           "/en/"
         ]
       ],
+      "heading_line_pattern": "^\\*\\*(\\d+\\.\\d+\\.\\d+)\\*\\*\\s*$",
       "index_heading_level": 2,
       "cache_name": "claude-code",
       "description": "Claude Code (code.claude.com)"

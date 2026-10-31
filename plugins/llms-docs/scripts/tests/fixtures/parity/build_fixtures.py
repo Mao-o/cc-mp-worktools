@@ -473,7 +473,7 @@ FB = "https://firebase.google.com/"
 
 
 def fb_cache_name(url: str) -> str:
-    """Same naming as ``parse-firebase.py`` (``_url_to_cache_filename``)."""
+    """Same naming as the retired ``parse-firebase.py`` (``_common.page_cache_filename``)."""
     h = hashlib.sha1(url.encode()).hexdigest()[:16]
     base = url[len(FB):]
     base = base[:-len(".md.txt")] if base.endswith(".md.txt") else base

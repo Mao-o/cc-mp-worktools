@@ -10,8 +10,9 @@ A changelog page with every keyword does not count as the answer (it is ranked
 last), and at most two pages are appended, so the top index candidate keeps a
 ``Next:`` line.
 
-Each script is driven through its CLI on a small corpus, and the ``Next:``
-lines it prints are run as printed (split the way a shell would).
+``parse-llms-txt.py`` is driven through its CLI on a small corpus, with the
+``ai-sdk`` / ``claude-code`` presets and a plain ``sources.json`` profile, and
+the ``Next:`` lines it prints are run as printed (split the way a shell would).
 """
 
 import json
@@ -25,8 +26,6 @@ from pathlib import Path
 import _loader  # noqa: F401  (side effect: adds scripts/ to sys.path)
 import _common
 
-claude = _loader.load_script("parse-claude-docs.py")
-ai_sdk = _loader.load_script("parse-ai-sdk.py")
 generic = _loader.load_script("parse-llms-txt.py")
 
 QUERY = "alpha beta"
@@ -55,11 +54,12 @@ def _hits(text: str) -> dict:
 class _Base:
     """Shared tests; a subclass sets ``module`` / ``script`` / ``write_corpus``."""
 
-    module = None
-    script = None
+    module = generic
+    script = "parse-llms-txt.py"
     corpus_args: list
 
     def setUp(self):
+        self.sources = _loader.without_user_sources(self)
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.write_corpus()
@@ -210,19 +210,17 @@ class _SearchContentOrder:
 
 
 class AiSdkTest(_Base, _SearchContentOrder, unittest.TestCase):
-    module = ai_sdk
-    script = "parse-ai-sdk.py"
+    """The ``ai-sdk`` preset."""
 
     def write_corpus(self):
         Path(self.tmp, "ai-sdk-llms-full.txt").write_text(
             "".join(f"---\ntitle: {t}\ndescription: about {t}\n---\n\n# {t}\n\n{b}\n" for t, b in PAGES),
             encoding="utf-8")
-        self.corpus_args = ["--cache-dir", self.tmp]
+        self.corpus_args = ["--source", "ai-sdk", "--sources-file", self.sources, "--cache-dir", self.tmp]
 
 
 class ClaudeDocsTest(_Base, _SearchContentOrder, unittest.TestCase):
-    module = claude
-    script = "parse-claude-docs.py"
+    """The ``claude-code`` preset (``rank_from: index``)."""
 
     def write_corpus(self):
         urls = [f"https://example.com/en/cli/p{i}" for i in range(len(PAGES))]
@@ -230,15 +228,14 @@ class ClaudeDocsTest(_Base, _SearchContentOrder, unittest.TestCase):
             "".join(f"- [{t}]({u}): about {t}\n" for (t, _b), u in zip(PAGES, urls)), encoding="utf-8")
         Path(self.tmp, "claude-code-llms-full.txt").write_text(
             "".join(f"# {t}\nSource: {u}\n\n{b}\n" for (t, b), u in zip(PAGES, urls)), encoding="utf-8")
-        self.corpus_args = ["--cache-dir", self.tmp, "--source", "code"]
+        self.corpus_args = ["--source", "claude-code", "--sources-file", self.sources,
+                            "--cache-dir", self.tmp]
 
     def rows(self, out):
         return [t.replace(" [body-only]", "") for t in super().rows(out)]
 
 
 class GenericLoaderTest(_Base, _SearchContentOrder, unittest.TestCase):
-    module = generic
-    script = "parse-llms-txt.py"
 
     def write_corpus(self):
         sources = Path(self.tmp, "sources.json")

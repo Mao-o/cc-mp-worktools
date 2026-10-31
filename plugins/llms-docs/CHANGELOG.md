@@ -2,6 +2,53 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.48.0] - 2026-11-01
+
+### 変更: 旧 script 名 (`parse-claude-docs.py` / `parse-ai-sdk.py` / `parse-firebase.py`) を削除 / Claude Code の changelog の検索 hit に版が付く
+
+- **削除**: 0.46.0 から 1 リリースだけ残していた旧 script 名の shim (`scripts/parse-claude-docs.py` /
+  `parse-ai-sdk.py` / `parse-firebase.py` と `scripts/_shim.py`) と、移行の比較の基準にしていた旧実装
+  (`scripts/tests/legacy/`) を削除した。旧コマンドは `parse-llms-txt.py` に `--source` を付けて打ち直す
+  (`--source code` / `platform` / `both` は `claude-code` / `claude-platform` / `claude`、`--source` の無かった
+  コマンドは `claude-code` / `ai-sdk` / `firebase`、`--index-limit` は `--top-n`)。キャッシュのファイル名は
+  変わらないので、既存のキャッシュはそのまま読まれる
+- 旧 script と汎用 loader の既知の差 (0.46.0 に列挙したもの) に加え、stderr の文面の差 4 件は旧実装の削除で
+  比べる相手が無くなったので、直さずに残す (終了コードは同じ): Claude docs の join rate が 50% 未満のときの
+  `Error` の後半の案内、`assert_parsed` の名前 (`claude-docs full-text` → `claude-code`、`firebase index` →
+  `Firebase index`)、`--file` が無いときの文面の後半、空の `page_ref` の文面
+- **症状**: `researching-claude-docs` で Claude Code の changelog
+  (`https://code.claude.com/docs/en/changelog`) を検索すると、hit がすべて見出しの無い節 `(top)` に属し、
+  その記述がどの版で入った・直ったかが分からなかった。`llms-full.txt` 上の changelog は版を `## 2.1.310` の
+  ような見出しではなく、太字だけの行 (`**2.1.310**`、次の行に日付) で区切っている (手元のキャッシュで 430 版。
+  ほかの同梱 presets にこの形の行は無い)
+- **修正**: profile キー `heading_line_pattern` を足した。正規表現 (グループをちょうど 1 つ) に、コードブロックの
+  外で行全体が一致する本文の行を、グループを題にした H2 として読む。`claude-code` preset に
+  `^\*\*(\d+\.\d+\.\d+)\*\*\s*$` を入れた。changelog の hit は `Section: 2.1.133` のように版を名指し、
+  `sections` は版を並べ、`Next: … content 5 2.1.133` でその版だけを読める。`content` の本文では、その行が
+  `## 2.1.133` と出る。ページ上にこの見出しの anchor は無いので、`Section:` 行に anchor を付けない。
+  手元のキャッシュで同梱 presets の全ページを変更前の版と比べ、変わったのは changelog の 1 ページ
+  (430 行) だけだった
+- テスト: 旧 script の専用テスト (`test_parse_claude_docs.py` 61 件 / `test_parse_ai_sdk.py` 63 件 /
+  `test_parse_firebase.py` 20 件) と shim のテスト (`test_legacy_shims.py`) を削除した。汎用 loader 側に
+  同じ観点のテストが無かったものは、同梱 preset で走るテストとして移した (`test_claude_docs_preset.py` /
+  `test_ai_sdk_preset.py`。fence 内の H1・閉じない fence・`title` の無い frontmatter・本文の水平線と H1 が
+  ページの区切りにならないこと、frontmatter の値の読み方、`"` を含むタイトルの page_ref、0 件の `Tip:`、
+  `--file` が無いときの文面、argparse の終了コード、`--max-chars 0`、`--max-age` が `Next:` に残ること)。
+  旧実装を走らせていた共通のテスト (案内・切り詰め・順位・リンク注釈・全語一致) は、同じ fixture を
+  同梱 preset (`--source claude-code` / `ai-sdk` / `firebase`) で走らせるように書き換えた。旧 script の
+  `--source both` を単一 source のコマンドに付けたときの案内は移していない (汎用 loader は `claude` の別名を
+  拒んで members を名指す。`test_members.py` にある)
+- テスト: 移行の比較 (`test_migration_parity.py`) は、記録済みの golden (旧 script の出力) と汎用 loader を
+  比べる部分を残した。旧 script が Claude docs の fixture をどう区切ったか (タイトル・URL・本文の hash・節) と
+  claude-platform の全ページの `sections` 出力は、削除の前に `fixtures/parity/golden/legacy-claude-pages.json`
+  に記録し、区切りの比較はそれと比べる。旧 script と汎用 loader を並べて走らせていた検査 (golden の自己照合・
+  キャッシュの相互読み・手元の全キャッシュで回す既定 off のゲート) は削除した。このゲートは
+  claude-platform の長い frontmatter を旧 script が区切れず、実キャッシュで常に失敗していた
+- テスト: `heading_line_pattern` の行の書き換え (行全体の一致・改行・fence の中・空のグループ)、値の検査、
+  `body: fetch` で拒むこと、実データから切り出した changelog で hit が版を名指し、`Next:` 行を出力のまま
+  実行するとその版に届く往復 (キャッシュと `--file` + `--index-file`)、作った見出しに anchor が無く本物の
+  見出しには付くこと
+
 ## [0.47.3] - 2026-11-01
 
 ### 修正: claude-platform の 81 ページが区切られない / プレースホルダの `Next:` 行が `-` で始まる語で落ちる / 同じ URL の別ページを黙って開く
