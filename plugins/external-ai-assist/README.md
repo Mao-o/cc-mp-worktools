@@ -8,7 +8,7 @@ Cursor / Codex などの外部 AI CLI を Claude Code に並走・クロスレ�
 |---|---|---|
 | `explore-parallel` | `PreToolUse(Agent)` + `PostToolUse(Agent)` | `Explore` サブエージェント起動時に Cursor Agent を並走させ、完了時に `additionalContext` として親 Claude に注入 |
 | `exitplan-review` | `PreToolUse(ExitPlanMode)` | プラン承認前に **Cursor (既存コードベース整合) + Codex (要件・アーキ) を並列クロスレビュー** し、指摘を `hookSpecificOutput.permissionDecision: "deny"` で Claude に差し戻す |
-| `post-implementation-review` | `PreToolUse(Bash)` + `PostToolUse(Write/Edit/NotebookEdit/Bash)` + `Stop` | **そのターンにこのセッションが編集したファイルだけ**を外部 AI (既定 Cursor) でレビューし、影響範囲・リグレッションリスク等を `hookSpecificOutput.additionalContext` で Claude に返す。Bash の中で `git commit` があれば、**その Bash の直前に Stop が来ていたら送っていたのと同一だと示せる差分だけ**を同じ経路でレビューする (0.12.0) |
+| `post-implementation-review` | `PreToolUse(Bash)` + `PostToolUse(Write/Edit/NotebookEdit/Bash)` + `Stop` | **そのターンにこのセッションが編集したファイルだけ**を外部 AI (既定 Cursor) でレビューし、影響範囲・リグレッションリスク等を `hookSpecificOutput.additionalContext` で Claude に返す。Bash の中で `git commit` があれば、**その Bash の直前に Stop が来ていたら送っていたのと同一だと示せる差分だけ**を同じ経路でレビューする (0.12.0)。`EXTERNAL_AI_POST_REVIEW_MIDTURN=1` (既定オフ) なら、pending の diff が閾値を超えた時点で応答の途中にも背景でレビューする (0.16.0) |
 
 ## 何がどこへ送られるか
 
@@ -509,6 +509,28 @@ EXTERNAL_AI_POST_REVIEW_EXCLUDE="docs/, *.csv" claude
 EXTERNAL_AI_POST_REVIEW_CODE_ONLY=1 claude
 ```
 
+#### 応答の途中のレビュー (0.16.0。既定オフ)
+
+1 回の応答の中で大量に書くと、Stop 1 回に差分が溜まり、Stop が塊を順に送る間 (最大約 10 分)
+待たされる。`EXTERNAL_AI_POST_REVIEW_MIDTURN=1` にすると、編集のたびに背景の hook
+(`PostToolUse` の `asyncRewake`) が「今 Stop が来たら送る diff」の合計を測り、閾値
+(`EXTERNAL_AI_POST_REVIEW_MIDTURN_BYTES`、既定 40000 バイト) 以上になった時点でその分を
+レビューに出す。応答の終わりの Stop は残りだけを扱う。
+
+- **送る範囲は Stop と同じ** (同じ claim・除外規則・予算・重複抑止を通る)。変わるのは送る時刻だけ
+- 指摘があれば exit 2 で Claude を起こして渡す (応答がもう終わっていても届く)。指摘なしなら
+  何も返さない。所要時間・除外・繰り越しの通知は、背景の hook の出力が利用者に表示されないので、
+  次の Stop の `systemMessage` に「応答の途中のレビュー: …」として出す
+- **Stop と並走しない**: Stop と同じ作業ツリー単位のロックを取る。応答の途中のレビューが
+  走っている間に Stop が来たら、Stop は待たずに「残りの変更はそのレビューの後に続けて送ります」と
+  通知し、応答の途中のレビューが終わり次第、残りを続けて送る
+- 既定でオフなのは、1 回の応答の中で外部 AI CLI を起動する回数が増える (閾値を超えるたびに 1 回)
+  ため。オフのときは背景の hook が設定を読んで即終了するだけで、git も状態ファイルも触らない
+- 制約: `claude -p` (headless) では終了時に背景の hook が kill される (claim は 15 分の TTL 後に
+  回収される)。`asyncRewake` を解さない古い CLI では背景で走らない可能性があり、その場合は閾値を
+  超えた編集のツール結果がレビューの間待たされる (実機での対応版数は未確認)。応答の途中のレビューがロックを握っている間の Bash の commit
+  レビューは、他のセッションのレビュー中と同じく見送られる (1 行通知)
+
 ## 設計原則
 
 1. **hook は絶対に失敗させない** — 全ての外周で例外を捕捉し exit 0
@@ -639,6 +661,8 @@ timeout / レビュアー選択 / hook の無効化で待ち時間を縮める�
 | `EXTERNAL_AI_POST_REVIEW_MIN_LINES` | `0` (無効) | 送る diff の変更行数がこれ未満のターンはレビューを見送る (typo 修正で有料レビューを走らせない) |
 | `EXTERNAL_AI_POST_REVIEW_COOLDOWN_SEC` | `0` (無効) | 前回レビュー完了から N 秒未満のターンはレビューを見送る (セッション単位) |
 | `EXTERNAL_AI_POST_REVIEW_COMMIT` | `1` | Bash の中で作られた commit のレビュー (0.12.0)。`0` で commit レビューだけ切る (Stop の未 commit 差分レビューは残る)。`EXTERNAL_AI_POST_REVIEW=0` / `..._BASH_TRACKING=0` でも止まる |
+| `EXTERNAL_AI_POST_REVIEW_MIDTURN` | `0` | `1` で応答の途中のレビュー (0.16.0) を有効にする。pending の diff が閾値を超えた時点で、応答の終わりを待たずにその分を背景でレビューに出す (上の「応答の途中のレビュー」節) |
+| `EXTERNAL_AI_POST_REVIEW_MIDTURN_BYTES` | `40000` | 応答の途中のレビューを始める diff の合計バイト数 (除外・レビュー済みの分は数えない)。`0` や不正な値は既定に倒す |
 | `EXTERNAL_AI_POST_REVIEW_BASH_TRACKING` | `1` | Bash 経由の変更検出。`0` にすると Bash 前後の `git status` を打たなくなる (巨大 repo での軽量化用。`sed -i` 等の変更は拾えなくなる。**commit レビューの窓の起点も保存しなくなるので commit レビューも止まる**) |
 | `EXTERNAL_AI_POST_REVIEW_EXCLUDE` | — | 外部に送らないファイルをカンマ区切り glob で追加 (例: `docs/, *.csv`)。既定除外に加算される。`!glob` は逆に「必ず送る」 (例: `!credentials-service/*`) |
 | `EXTERNAL_AI_POST_REVIEW_EXCLUDE_DEFAULTS` | `1` | 既定除外 (`.env*` / `*.pem` / 語 `secret` `credential` 等) の有効/無効。`0` で無効化 (追加 glob と CODE_ONLY は残る) |
@@ -671,6 +695,7 @@ Stop ごとに毎回この上限まで待ちうる** (総待ち時間はター�
 | `exitplan-review` | `ExitPlanMode` ごと (プラン内容が変わったときだけ) | **上限なし** — プラン内容が変わるたび 1 回。`EXTERNAL_AI_REVIEW_MAX` が数えるのは「指摘ありで返った回数」だけなので、呼び出し回数の上限にはならない |
 | `post-implementation-review` (Stop) | **編集のあったターンの Stop ごと** | ターン数に比例 (上限なし) |
 | `post-implementation-review` (commit) | **Bash の中で commit が作られるたび** (0.12.0) | commit 回数に比例 (上限なし)。`EXTERNAL_AI_POST_REVIEW_COMMIT=0` で切る |
+| `post-implementation-review` (応答の途中) | **`EXTERNAL_AI_POST_REVIEW_MIDTURN=1` のときだけ**、pending の diff が閾値を超えるたび (0.16.0) | 書いた量に比例。既定オフ |
 
 回数が伸びるのは 2 つ目と 3 つ目。長時間セッションや `/loop` では毎ターン走るので、
 `EXTERNAL_AI_POST_REVIEW_MIN_LINES` / `_COOLDOWN_SEC` で頻度を落とすか、

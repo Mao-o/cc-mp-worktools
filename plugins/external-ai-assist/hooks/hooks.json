@@ -63,6 +63,17 @@
             "timeout": 720
           }
         ]
+      },
+      {
+        "matcher": "Write|Edit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/post-implementation-review\" --phase mid-turn",
+            "timeout": 1500,
+            "asyncRewake": true
+          }
+        ]
       }
     ],
     "Stop": [

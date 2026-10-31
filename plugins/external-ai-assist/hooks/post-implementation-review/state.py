@@ -89,6 +89,15 @@ MAX_REVIEWED_ENTRIES = 500
 # 刈り取りで落ちるため (pending より多く持つ理由が無い)。
 MAX_FINGERPRINT_ENTRIES = MAX_PENDING_PATHS
 
+# 応答の途中のレビュー (0.16.0) が実行中だと見なす上限。flag を下ろす前に hook が
+# kill されても (asyncRewake の timeout)、この時間を過ぎれば「実行中」とは扱わない。
+# 1 回の起動で最大 2 回レビューする (閾値超えの分 + Stop から引き継いだ残り) ので
+# in-flight の TTL の 2 倍にする
+MIDTURN_STALE_SEC = 2 * IN_FLIGHT_TTL_SEC
+
+# 応答の途中のレビューが Stop の通知に回す行の保持数 (古いものから落とす)
+MAX_MIDTURN_NOTICES = 10
+
 _SAFE_KEY = re.compile(r"[^A-Za-z0-9._-]")
 
 
@@ -139,6 +148,10 @@ def _empty_state() -> dict:
         "last_review_at": 0.0,
         "last_backend": "",
         "continued_turn": False,
+        # 応答の途中のレビュー (0.16.0。既定オフ。`__main__.handle_mid_turn`)
+        "midturn_at": 0.0,
+        "stop_handoff": False,
+        "midturn_notices": [],
     }
 
 
@@ -165,6 +178,16 @@ def _normalize(raw) -> dict:
         state["last_backend"] = backend
     if raw.get("continued_turn") is True:
         state["continued_turn"] = True
+    midturn_at = raw.get("midturn_at")
+    if isinstance(midturn_at, (int, float)) and not isinstance(midturn_at, bool):
+        state["midturn_at"] = float(midturn_at)
+    if raw.get("stop_handoff") is True:
+        state["stop_handoff"] = True
+    notices = raw.get("midturn_notices")
+    if isinstance(notices, list):
+        state["midturn_notices"] = [n for n in notices if isinstance(n, str)][
+            -MAX_MIDTURN_NOTICES:
+        ]
     return state
 
 
@@ -552,6 +575,102 @@ def record_continued_turn(session_id: str) -> None:
             state["continued_turn"] = True
     except OSError:
         pass
+
+
+def pending_paths(session_id: str) -> list[str]:
+    """claim せずに pending のパスを claim 順で読む (応答の途中のレビューの閾値判定用)。
+
+    state ファイルが一度も無ければ空 (開かない — `claim_pending` と同じ理由)。
+    """
+    if not os.path.exists(_state_path(session_id)):
+        return []
+    try:
+        with _locked_state(session_id) as state:
+            return [p for p in state["pending"] if isinstance(p, str)]
+    except OSError:
+        return []
+
+
+# --------------------------------------------------------------------------
+# 応答の途中のレビュー (0.16.0) と Stop の引き継ぎ
+#
+# 応答の途中のレビューは PostToolUse の背景 hook (`asyncRewake`) で走り、Stop と同じ
+# cursor lock を取る。Stop がそのロックを取れなかったとき、持ち主が**このセッションの**
+# 応答の途中のレビューなら、Stop は `stop_handoff` を立てて残りの pending を引き継がせる。
+# 詳細と競合の場合分けは `__main__.handle_mid_turn` の docstring。
+# --------------------------------------------------------------------------
+
+
+def set_midturn_running(session_id: str, running: bool) -> None:
+    """応答の途中のレビューが cursor lock を握っている間だけ立てる印。"""
+    try:
+        with _locked_state(session_id) as state:
+            state["midturn_at"] = time.time() if running else 0.0
+    except OSError:
+        pass
+
+
+def midturn_running(session_id: str) -> bool:
+    """このセッションの応答の途中のレビューが実行中か (`MIDTURN_STALE_SEC` 以内の印)。"""
+    if not os.path.exists(_state_path(session_id)):
+        return False
+    try:
+        with _locked_state(session_id) as state:
+            at = float(state.get("midturn_at") or 0.0)
+    except OSError:
+        return False
+    return at > 0 and time.time() - at <= MIDTURN_STALE_SEC
+
+
+def request_stop_handoff(session_id: str) -> None:
+    """Stop が「残りの pending のレビューを応答の途中のレビューに任せる」と書く。"""
+    try:
+        with _locked_state(session_id) as state:
+            state["stop_handoff"] = True
+    except OSError:
+        pass
+
+
+def take_stop_handoff(session_id: str) -> bool:
+    """引き継ぎの依頼を読んで消す。依頼を果たす側 (ロックを取れた側) が呼ぶ。"""
+    if not os.path.exists(_state_path(session_id)):
+        return False
+    try:
+        with _locked_state(session_id) as state:
+            value = state.get("stop_handoff") is True
+            state["stop_handoff"] = False
+            return value
+    except OSError:
+        return False
+
+
+def add_midturn_notice(session_id: str, text: str) -> None:
+    """応答の途中のレビューの結果の要約を、次の Stop の `systemMessage` に回す。
+
+    背景 hook の `systemMessage` は利用者に表示されない (公式 docs の async 節) ので、
+    除外・繰り越しの通知が黙って消えないよう Stop に運ぶ。
+    """
+    if not text:
+        return
+    try:
+        with _locked_state(session_id) as state:
+            notices = state["midturn_notices"]
+            notices.append(text)
+            del notices[:-MAX_MIDTURN_NOTICES]
+    except OSError:
+        pass
+
+
+def take_midturn_notices(session_id: str) -> list[str]:
+    if not os.path.exists(_state_path(session_id)):
+        return []
+    try:
+        with _locked_state(session_id) as state:
+            notices = list(state["midturn_notices"])
+            state["midturn_notices"] = []
+            return notices
+    except OSError:
+        return []
 
 
 # --------------------------------------------------------------------------
