@@ -1715,15 +1715,20 @@ def handle_stop(payload: dict) -> None:
     # cursor lock を先に取る。取れなければ claim もしないので pending は温存される。
     # state lock は claim_pending() の内側で完結し、cursor 実行中は保持しない。
     output = _stop_review_under_lock(payload, session_id, root)
-    if output is None and midturn_enabled() and state.midturn_running(session_id):
-        # ロックの持ち主はこのセッションの応答の途中のレビュー。残りを引き継がせる。
-        # 依頼を書いた**後に**もう一度ロックを試す: 持ち主が依頼を見る前にロックを
-        # 放していた場合は、ここで取れて自分で見る (`handle_mid_turn` の競合の場合分け)
-        state.request_stop_handoff(session_id)
-        output = _stop_review_under_lock(payload, session_id, root)
-        if output is None:
-            log(NOTICE_HANDED_OFF)
-            output = _with_notices({}, [NOTICE_HANDED_OFF])
+    if output is None and midturn_enabled():
+        if state.midturn_running(session_id):
+            # ロックの持ち主はこのセッションの応答の途中のレビュー。残りを引き継がせる。
+            # 依頼を書いた**後に**もう一度ロックを試す: 持ち主が依頼を見る前にロックを
+            # 放していた場合は、ここで取れて自分で見る (`handle_mid_turn` の競合の場合分け)
+            state.request_stop_handoff(session_id)
+            output = _stop_review_under_lock(payload, session_id, root)
+            if output is None:
+                log(NOTICE_HANDED_OFF)
+                output = _with_notices({}, [NOTICE_HANDED_OFF])
+        else:
+            # 印が無い: 持ち主は別のセッションか、印を下ろし終えた応答の途中のレビュー。
+            # 後者ならもうロックを放しているので、依頼は書かずにもう 1 回だけ試す
+            output = _stop_review_under_lock(payload, session_id, root)
     if output is None:
         log("同一作業ツリーで別セッションがレビュー中のため skip (pending は温存)")
         return
@@ -2544,20 +2549,26 @@ def handle_mid_turn(payload: dict) -> tuple[int, str]:
     含む) は背景 hook の `systemMessage` が利用者に表示されないので、state に積んで
     次の Stop の `systemMessage` に出す (`_with_midturn_notices`)。
 
-    **Stop と並走させない**: cursor lock (作業ツリー単位) を非ブロッキングで取り、
-    取れなければ何もしない。閾値の判定 (git diff) もロックの下で行う。ロックを握って
-    いる間は `midturn_at` を立てる。Stop がロックを取れず、持ち主がこのセッションの
-    応答の途中のレビューだと分かったら、Stop は `stop_handoff` を立ててから
-    **もう一度**ロックを試す。応答の途中のレビューは、ロックを**放した後に**依頼を
-    読んで消し、依頼があれば再びロックを試して残りの pending を (閾値に関係なく) 送る:
+    **Stop と並走させない**: 閾値の 1 回目の判定はロックの外で測る (読み取りだけ。
+    閾値未満ならロックを取らずに抜けるので、同じ Bash の commit レビューを止めない)。
+    閾値以上なら `midturn_at` を立ててから cursor lock (作業ツリー単位) を非ブロッキングで
+    取り、ロックの下で測り直してから claim する。印はロックを取りに行く前に立て、
+    引き継ぎの依頼を読み終えた後に 1 箇所 (finally) で下ろす。Stop がロックを取れず、
+    印が立っていれば、Stop は `stop_handoff` を立ててから**もう一度**ロックを試す。
+    印が立っていなければ、依頼は書かずにもう一度だけロックを試す。応答の途中のレビューは、
+    ロックを**放した後に**依頼を読んで消し、依頼があれば再びロックを試して残りの pending を
+    (閾値に関係なく) 送る:
 
     | 順序 | 結果 |
     |---|---|
-    | 依頼 → (こちらが依頼を読む) → 再試行 | どちらか一方だけがロックを取る。取った側が残りを見る |
+    | 依頼 → (こちらが依頼を読む) → 再試行 | 両方が取りに行き、取れた側が残りを見る |
     | (こちらが依頼を読み終えた) → 依頼 → 再試行 | こちらはロックを放し終えているので、Stop の再試行が取れる |
 
-    帰結: 残りの pending が誰にも見られずに次の応答まで残るのは、ロックを別の
-    セッションが握っていた場合だけ (0.15.x までの Stop と同じ)。
+    残りの pending が誰にも見られずに次の応答まで残るのは、ロックを別のセッションが
+    握っていた場合 (0.15.x までの Stop と同じ) と、同じセッションの応答の途中のレビューが
+    並列に 2 つ以上走り、片方が先に印を下ろした場合 (印は 1 つの時刻で、数を数えない)。
+    前者で印が立っていると、Stop は引き継ぎの通知を出すが、実際に見るのは次の応答の
+    途中のレビューか次の Stop になる。
 
     **既定オフ**: 1 回の応答の中で外部 AI CLI を起動する回数が増える (閾値を超える
     たびに 1 回) ので、`EXTERNAL_AI_POST_REVIEW_MIDTURN=1` で利用者が選ぶ。オフの
@@ -2580,35 +2591,46 @@ def handle_mid_turn(payload: dict) -> tuple[int, str]:
         log(cooled)
         return 0, ""
 
-    outputs: list[dict] = []
-    with state.cursor_lock(root) as acquired:
-        if not acquired:
-            log("応答の途中のレビュー: 別のレビューが実行中のため見送り")
-            return 0, ""
-        state.set_midturn_running(session_id, True)
-        try:
-            size = _pending_diff_bytes(session_id, root)
-            threshold = midturn_threshold()
-            if size >= threshold:
-                log(f"応答の途中のレビューを実行 (pending の diff {size} bytes >= {threshold})")
-                outputs.append(_review_claim(payload, session_id, root, SCOPE_MIDTURN))
-            else:
-                log(f"応答の途中のレビュー: pending の diff {size} bytes < {threshold} のため見送り")
-        finally:
-            state.set_midturn_running(session_id, False)
+    # 1 回目の計測はロックの外 (読み取りだけ。claim しない)。閾値未満でロックを握ると、
+    # 同じ Bash の PostToolUse で並列に走る commit レビューがその間見送られる
+    threshold = midturn_threshold()
+    size = _pending_diff_bytes(session_id, root)
+    if size < threshold:
+        log(f"応答の途中のレビュー: pending の diff {size} bytes < {threshold} のため見送り")
+        return 0, ""
 
-    # Stop から残りを引き継いだか。ロックを**放した後に**読む (docstring の場合分け)
-    if state.take_stop_handoff(session_id):
+    outputs: list[dict] = []
+    # 印は**ロックを取りに行く前に**立て、引き継ぎを読み終えるまで下ろさない。ロックを
+    # 取った直後・印を立てる前、印を下ろした後・ロックを放す前の窓に Stop が来ると、
+    # Stop は持ち主を別のセッションと見なして黙って skip してしまう
+    state.set_midturn_running(session_id, True)
+    try:
         with state.cursor_lock(root) as acquired:
-            if acquired:
-                state.set_midturn_running(session_id, True)
-                try:
+            if not acquired:
+                log("応答の途中のレビュー: 別のレビューが実行中のため見送り")
+            else:
+                # ロックの下で測り直す (ロックを待つ間に Stop が送り終えていることがある)
+                size = _pending_diff_bytes(session_id, root)
+                if size >= threshold:
+                    log(f"応答の途中のレビューを実行 (pending の diff {size} bytes >= {threshold})")
+                    outputs.append(_review_claim(payload, session_id, root, SCOPE_MIDTURN))
+                else:
+                    log(
+                        f"応答の途中のレビュー: pending の diff {size} bytes < {threshold} "
+                        "のため見送り"
+                    )
+
+        # Stop から残りを引き継いだか。ロックを**放した後に**読む (docstring の場合分け)。
+        # ロックを取れなかったときも読む (依頼が残っていれば、ロックを取れた側が見る)
+        if state.take_stop_handoff(session_id):
+            with state.cursor_lock(root) as acquired:
+                if acquired:
                     log("応答の途中のレビュー: Stop から引き継いだ残りを送る")
                     outputs.append(_review_claim(payload, session_id, root))
-                finally:
-                    state.set_midturn_running(session_id, False)
-            else:
-                log("応答の途中のレビュー: 引き継ぎはロックを取った側が行う")
+                else:
+                    log("応答の途中のレビュー: 引き継ぎはロックを取った側が行う")
+    finally:
+        state.set_midturn_running(session_id, False)
     return _midturn_delivery(session_id, outputs)
 
 
@@ -2690,14 +2712,17 @@ def _run_mid_turn(payload: dict) -> int:
     real = sys.stderr
     held = io.StringIO()
     sys.stderr = held
+    code, text = 0, ""
     try:
         code, text = handle_mid_turn(payload)
     finally:
         sys.stderr = real
+        # 例外で抜けるときも預かった log を書き出す (外枠の fatal だけでは経緯が残らない)
+        if not (code == REWAKE_EXIT_CODE and text):
+            real.write(held.getvalue())
     if code == REWAKE_EXIT_CODE and text:
         real.write(text + "\n")
         return code
-    real.write(held.getvalue())
     return 0
 
 

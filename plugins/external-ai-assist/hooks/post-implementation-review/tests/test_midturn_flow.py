@@ -6,6 +6,7 @@ PostToolUse の背景 hook (`--phase mid-turn`, `asyncRewake`) が、pending の
 """
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -83,6 +84,16 @@ class TestDisabledByDefault(MidTurnTestCase):
             os.path.exists(os.path.join(self.tmpdir, "post-implementation-review")),
             "オフのときは state ディレクトリも作らない",
         )
+
+    def test_hook_switch_off_wins_over_midturn(self):
+        """`EXTERNAL_AI_POST_REVIEW=0` なら、MIDTURN=1 で pending が閾値を超えていても送らない。"""
+        paths = self.big_edit(SESSION_A)
+        env = dict(ON, EXTERNAL_AI_POST_REVIEW="0")
+        with mock.patch.dict(os.environ, env):
+            code, _, _ = self.mid_turn(SESSION_A, "REVIEW_CLEAN")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.midturn_calls, [])
+        self.assertEqual(paths, self.pending(SESSION_A))
 
     def test_unset_stop_does_not_merge_stored_notices(self):
         """オフのときの Stop は 0.15.x と同じ出力 (応答の途中の通知を読まない)。"""
@@ -256,6 +267,20 @@ class TestScriptExitCode(MidTurnTestCase):
             self.assertEqual(self.entry._run_as_script(), 0)
         self.assertIn("boom", err.getvalue())
 
+    def test_held_log_is_written_when_mid_turn_raises(self):
+        def boom(_payload):
+            self.entry.log("raise の前の log")
+            raise RuntimeError("boom")
+
+        err = io.StringIO()
+        stdin = io.StringIO(json.dumps({"session_id": SESSION_A, "cwd": self.repo}))
+        with mock.patch.object(self.entry, "handle_mid_turn", side_effect=boom), \
+                mock.patch("sys.argv", ["hook", "--phase", "mid-turn"]), \
+                mock.patch("sys.stdin", stdin), mock.patch("sys.stderr", err):
+            self.assertEqual(self.entry._run_as_script(), 0)
+        self.assertIn("raise の前の log", err.getvalue())
+        self.assertIn("boom", err.getvalue())
+
     def test_other_phases_return_zero(self):
         self.edit(SESSION_A, "a.txt", "a\n")
         out, err = io.StringIO(), io.StringIO()
@@ -290,6 +315,8 @@ class TestNoConcurrencyWithStop(MidTurnTestCase):
         seen: dict = {}
 
         def during(n: int) -> None:
+            if n == 3:
+                seen["running_in_handoff"] = self.state.midturn_running(SESSION_A)
             if n != 1:
                 return
             # 応答の途中のレビューが走っている間に、応答が終わって Stop が来る
@@ -310,6 +337,112 @@ class TestNoConcurrencyWithStop(MidTurnTestCase):
         self.assertEqual(self.pending(SESSION_A), [])
         self.assertEqual(code, self.entry.REWAKE_EXIT_CODE, "残りの指摘も Claude に届ける")
         self.assertIn("## 実装直後レビュー結果 (Cursor, 差分レビュー)", err)
+        self.assertFalse(self.raw_state(SESSION_A)["stop_handoff"])
+        self.assertTrue(seen["running_in_handoff"], "引き継いだ分を送る間も印を立てておく")
+        self.assertFalse(self.state.midturn_running(SESSION_A))
+
+    def test_below_threshold_measurement_does_not_hold_the_lock(self):
+        """閾値未満の計測はロックを握らない (同じ Bash の commit レビューを見送らせない)。"""
+        self.edit(SESSION_A, "small.txt", "x\n")
+        seen: list[bool] = []
+        real = self.entry._pending_diff_bytes
+
+        def measuring(*args):
+            with self.state.cursor_lock(self.repo) as got:
+                seen.append(got)
+            return real(*args)
+
+        with mock.patch.object(self.entry, "_pending_diff_bytes", side_effect=measuring):
+            self.mid_turn(SESSION_A, "REVIEW_CLEAN")
+        self.assertEqual(seen, [True], "計測中に別の取得者がロックを取れない")
+        self.assertEqual(self.midturn_calls, [])
+        self.assertFalse(self.state.midturn_running(SESSION_A), "閾値未満では印を立てない")
+
+    def test_remeasures_under_the_lock(self):
+        """印を立ててからロックを取るまでに Stop が送り終えたら、残りが閾値未満なら送らない。"""
+        self.big_edit(SESSION_A)
+        seen: dict = {}
+        real_set = self.state.set_midturn_running
+
+        def set_running(sid, running):
+            real_set(sid, running)
+            if running and "stop" not in seen:
+                # 印は立った・ロックはまだ: ここで Stop が来てロックを取る
+                seen["stop"] = self.stop(SESSION_A, "REVIEW_CLEAN")
+                seen["stop_calls"] = list(self.review_calls)
+                self.edit(SESSION_A, "small.txt", "x\n")
+
+        with mock.patch.object(self.state, "set_midturn_running", side_effect=set_running):
+            self.mid_turn(SESSION_A, "REVIEW_CLEAN")
+        self.assertEqual(len(seen["stop_calls"]), 2, "Stop が自分でロックを取って 2 塊を送る")
+        self.assertEqual(self.midturn_calls, [], "測り直すと閾値未満")
+        self.assertEqual([os.path.join(self.repo, "small.txt")], self.pending(SESSION_A))
+
+    def test_window_a_stop_right_after_lock_acquired(self):
+        """ロックを取った直後 (claim の前) に Stop が来ても、Stop は印を見て引き継ぐ。"""
+        self.big_edit(SESSION_A)
+        self.edit(SESSION_A, "rest.txt", "rest\n")
+        seen: dict = {}
+        real_lock = self.state.cursor_lock
+        from contextlib import contextmanager
+
+        @contextmanager
+        def lock(root):
+            with real_lock(root) as acquired:
+                if acquired and "stop" not in seen:
+                    seen["stop"] = self.stop(SESSION_A, "REVIEW_CLEAN")
+                    seen["stop_calls"] = list(self.review_calls)
+                yield acquired
+
+        with mock.patch.object(self.state, "cursor_lock", side_effect=lock):
+            self.mid_turn(SESSION_A, "REVIEW_CLEAN")
+        self.assertEqual(seen["stop_calls"], [])
+        self.assertIn(self.entry.NOTICE_HANDED_OFF, self.assertNotBlocked(seen["stop"]))
+        self.assertTrue(any("rest.txt" in call for call in self.midturn_calls))
+        self.assertEqual(self.pending(SESSION_A), [])
+        self.assertFalse(self.raw_state(SESSION_A)["stop_handoff"])
+
+    def test_window_b_stop_after_flag_cleared(self):
+        """印を下ろした直後に Stop が来たら、ロックはもう放されていて Stop が自分で見る。"""
+        self.big_edit(SESSION_A)
+        seen: dict = {}
+        real_set = self.state.set_midturn_running
+
+        def set_running(sid, running):
+            real_set(sid, running)
+            if not running and "stop" not in seen:
+                self.edit(SESSION_A, "rest.txt", "rest\n")
+                seen["stop"] = self.stop(SESSION_A, "REVIEW_CLEAN")
+                seen["stop_calls"] = list(self.review_calls)
+
+        with mock.patch.object(self.state, "set_midturn_running", side_effect=set_running):
+            self.mid_turn(SESSION_A, "REVIEW_CLEAN")
+        self.assertEqual(len(self.midturn_calls), 2)
+        self.assertIn("stop_calls", seen, "印が下ろされていない")
+        self.assertEqual(len(seen["stop_calls"]), 1, "Stop が残りを自分で見る")
+        self.assertIn("rest.txt", seen["stop_calls"][0])
+        self.assertEqual(self.pending(SESSION_A), [])
+
+    def test_window_b_stop_retries_when_flag_is_gone(self):
+        """Stop の 1 回目が失敗した後、印を読む前に持ち主が印を下ろしロックを放したら、
+        Stop は依頼を書かずにもう 1 回だけ試して自分で見る。"""
+        self.edit(SESSION_A, "rest.txt", "rest\n")
+        stack = contextlib.ExitStack()
+        self.assertTrue(stack.enter_context(self.state.cursor_lock(self.repo)))
+        self.state.set_midturn_running(SESSION_A, True)
+        real_running = self.state.midturn_running
+
+        def running(sid):
+            # 持ち主が終わる: 印を下ろす → ロックを放す → 依頼を読む (無い)
+            self.state.set_midturn_running(sid, False)
+            stack.close()
+            self.assertFalse(self.state.take_stop_handoff(sid))
+            return real_running(sid)
+
+        with mock.patch.object(self.state, "midturn_running", side_effect=running):
+            output = self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertReviewed("rest.txt")
+        self.assertNotIn(self.entry.NOTICE_HANDED_OFF, self.assertNotBlocked(output))
         self.assertFalse(self.raw_state(SESSION_A)["stop_handoff"])
 
     def test_stop_retry_reviews_itself_when_lock_was_released(self):
@@ -345,6 +478,7 @@ class TestNoConcurrencyWithStop(MidTurnTestCase):
         self.edit(SESSION_A, "a.txt", "a\n")
         self.state.request_stop_handoff(SESSION_A)
         self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertFalse(self.raw_state(SESSION_A)["stop_handoff"])
         self.edit(SESSION_A, "b.txt", "b\n")
         self.mid_turn(SESSION_A, "REVIEW_CLEAN")
         self.assertEqual(self.midturn_calls, [])
@@ -352,10 +486,14 @@ class TestNoConcurrencyWithStop(MidTurnTestCase):
 
     def test_handoff_without_lock_is_left_to_the_holder(self):
         """引き継ぎの再試行でロックが取れなければ、何も送らない (持ち主が見る)。"""
-        self.edit(SESSION_A, "a.txt", "a\n")
-        self.state.request_stop_handoff(SESSION_A)
+        self.big_edit(SESSION_A)
         real_lock = self.state.cursor_lock
         entered: list[int] = []
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _held():
+            yield False
 
         def lock(root):
             entered.append(1)
@@ -363,17 +501,40 @@ class TestNoConcurrencyWithStop(MidTurnTestCase):
                 return real_lock(root)
             return _held()
 
+        def during(n: int) -> None:
+            if n == 1:
+                self.edit(SESSION_A, "rest.txt", "rest\n")
+                self.state.request_stop_handoff(SESSION_A)
+
+        with mock.patch.object(self.state, "cursor_lock", side_effect=lock):
+            code, _, _ = self.mid_turn(SESSION_A, "REVIEW_CLEAN", inside=during)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(entered), 2, "依頼を読んでロックを取りに行った")
+        self.assertEqual(len(self.midturn_calls), 2, "閾値超えの 2 塊だけ")
+        self.assertIn(os.path.join(self.repo, "rest.txt"), self.pending(SESSION_A))
+        self.assertFalse(self.state.midturn_running(SESSION_A))
+
+    def test_handoff_is_read_even_when_the_first_lock_fails(self):
+        """1 回目のロックが取れなくても依頼は読む (取れた側が残りを見る)。"""
+        self.big_edit(SESSION_A)
+        self.state.request_stop_handoff(SESSION_A)
+        real_lock = self.state.cursor_lock
+        entered: list[int] = []
         from contextlib import contextmanager
 
         @contextmanager
         def _held():
             yield False
 
+        def lock(root):
+            entered.append(1)
+            return _held() if len(entered) == 1 else real_lock(root)
+
         with mock.patch.object(self.state, "cursor_lock", side_effect=lock):
-            code, _, _ = self.mid_turn(SESSION_A, "REVIEW_CLEAN")
-        self.assertEqual(code, 0)
-        self.assertEqual(self.midturn_calls, [])
-        self.assertIn(os.path.join(self.repo, "a.txt"), self.pending(SESSION_A))
+            self.mid_turn(SESSION_A, "REVIEW_CLEAN")
+        self.assertEqual(len(self.midturn_calls), 2, "引き継ぎで残り (2 塊) を送る")
+        self.assertEqual(self.pending(SESSION_A), [])
+        self.assertFalse(self.raw_state(SESSION_A)["stop_handoff"])
 
     def test_stale_running_flag_is_ignored(self):
         self.edit(SESSION_A, "a.txt", "a\n")
