@@ -7,7 +7,7 @@
   - Inbound IP addresses/Range A
   - Inbound IP addresses/Range B
 
-Next: parse-claude-docs.py content 8 "<heading_path from above>" --source platform --cache-dir <CACHE_DIR>
+Next: parse-claude-docs.py content --source platform --cache-dir <CACHE_DIR> -- 8 "<heading_path from above>"
 ## Inbound IP addresses
 
 Sit cillum voluptate sunt aliquip anim eiusmod nulla velit duis sit pariatur amet pariatur. Deserunt lorem mollit lorem dolore incididunt irure minim quis magna dolore eiusmod occaecat enim.
@@ -25,4 +25,4 @@ Sit cillum voluptate sunt aliquip anim eiusmod nulla velit duis sit pariatur ame
   - Inbound IP addresses/Range A
   - Inbound IP addresses/Range B
 
-Next: parse-claude-docs.py content 8 "<heading_path from above>" --source platform --cache-dir <CACHE_DIR>
+Next: parse-claude-docs.py content --source platform --cache-dir <CACHE_DIR> -- 8 "<heading_path from above>"

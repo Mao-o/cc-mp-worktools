@@ -37,6 +37,16 @@ generic = _loader.load_script("parse-llms-txt.py")
 import _common  # noqa: E402  (scripts/ is on sys.path via _loader)
 
 SCRIPT = "parse-llms-txt.py"
+
+
+def sections_line(search_line: str, placeholder: str) -> str:
+    """``sections <placeholder>`` with the options of *search_line* (the
+    ``search ... -- "<query>"`` line search-index points at)."""
+    _script, sep, tail = search_line.partition(" search ")
+    opts, sep2, query = tail.rpartition(" -- ")
+    if not (sep and sep2 and query == '"<query>"'):
+        raise AssertionError(f"not a search placeholder line: {search_line}")
+    return f"{SCRIPT} sections {placeholder} {opts}"
 FULL_URL = "https://example.com/llms-full.txt"
 INDEX_URL = "https://example.com/llms.txt"
 CODE = {"url": FULL_URL, "split": "h1", "page_url": "line:Source: ", "index_url": INDEX_URL,
@@ -271,9 +281,9 @@ class QueryVariantJoinTest(_Case):
         with no query, the first page (the one its ref opens before
         llms-full.txt is cached: a URL page_ref takes the first); else none
         (``?surface=web`` is not the cli or api page). Two pages with the
-        very same URL: the last (as the dedicated parser)."""
+        very same URL that read the same: the last (as the dedicated parser)."""
         profile = self.profile()
-        docs = [{"title": t, "url": u} for t, u in (
+        docs = [{"title": t, "url": u, "body_lines": []} for t, u in (
             ("A", "https://example.com/docs/x?surface=cli"), ("B", "https://example.com/docs/x?surface=api"),
             ("C", "https://example.com/docs/y"), ("D", "https://example.com/docs/y.md"), ("E", None),
             ("F", "https://example.com/docs/w?v=2"), ("G", "https://example.com/docs/w"),
@@ -341,7 +351,7 @@ class QueryVariantJoinTest(_Case):
         split it by the shell rules, run it, return the output."""
         placeholder = "<page_ref>" if "<page_ref>" in next_line else "<slug>"
         if command[0] == "search-index":  # it points at search; open the ref with sections
-            next_line = f"{SCRIPT} sections {placeholder} " + next_line.split(" ", 3)[3]
+            next_line = sections_line(next_line, placeholder)
         try:
             argv = shlex.split(next_line.replace(placeholder, ref), comments=True)
         except ValueError as e:
@@ -796,7 +806,7 @@ class RefRoundTripTest(_Case):
             placeholder = "<page_ref>" if "<page_ref>" in next_line else "<slug>"
             if command[0] == "search-index":
                 # search-index points at search; open the ref with sections
-                line = f"{SCRIPT} sections {placeholder} " + next_line.split(" ", 3)[3]
+                line = sections_line(next_line, placeholder)
             else:
                 line = next_line
             with self.subTest(command=command, title=title, ref=ref):
@@ -946,7 +956,7 @@ class QueryDecisionTableTest(_Case):
         self.assertEqual(len(nexts), 1, out)
         next_line = nexts[0]
         if command[0] == "search-index":  # it points at search; open the ref with sections
-            next_line = f"{SCRIPT} sections <page_ref> " + next_line.split(" ", 3)[3]
+            next_line = sections_line(next_line, "<page_ref>")
         return refs, next_line
 
     def _open(self, next_line: str, ref: str):

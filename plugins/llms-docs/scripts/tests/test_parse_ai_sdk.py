@@ -538,7 +538,7 @@ class GoldenOutputTest(unittest.TestCase):
             "--- Top-level sections (1) ---\n"
             "  - streamText\n"
             "\n"
-            f'Next: parse-ai-sdk.py content 0 "<heading_path from above>" --cache-dir {tmp}\n'
+            f'Next: parse-ai-sdk.py content --cache-dir {tmp} -- 0 "<heading_path from above>"\n'
         )
         expected = (
             "# doc_title: streamText\n"
@@ -618,7 +618,7 @@ class SectionsHeadingPathTest(unittest.TestCase):
         ])
         self.assertEqual(code, 0, err)
         self.assertIn("chars truncated", out)
-        self.assertIn('narrow with parse-ai-sdk.py content 0 "<heading_path>"', out)
+        self.assertRegex(out, r'narrow with parse-ai-sdk\.py content --cache-dir \S+ -- 0 "<heading_path>"\)')
         self.assertNotIn("0123456789 0123456789 0123456789 0123456789 0123456789", out)
 
     def test_narrow_hint_and_subsection_hints_retain_file_flag(self):
@@ -641,8 +641,8 @@ class SectionsHeadingPathTest(unittest.TestCase):
             ])
         mock_urlopen.assert_not_called()
         self.assertEqual(code, 0, err)
-        self.assertIn(f"narrow with parse-ai-sdk.py content 0 \"<heading_path>\" --file {snapshot}", out)
-        self.assertIn(f'Next: parse-ai-sdk.py content 0 "<heading_path from above>" --file {snapshot}', out)
+        self.assertIn(f'narrow with parse-ai-sdk.py content --file {snapshot} -- 0 "<heading_path>"', out)
+        self.assertIn(f'Next: parse-ai-sdk.py content --file {snapshot} -- 0 "<heading_path from above>"', out)
         # --file makes --cache-dir irrelevant (read-only mode never
         # touches the cache), so it must NOT also be echoed redundantly.
         self.assertNotIn("--cache-dir", out)

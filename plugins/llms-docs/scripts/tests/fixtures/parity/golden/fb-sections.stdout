@@ -11,4 +11,4 @@ Sections in [14] "Use Zentor with your Arcade Hub project"
 
 (6 sections)
 
-Next: parse-firebase.py content 14 "<heading_path>" --cache-dir <CACHE_DIR>
+Next: parse-firebase.py content --cache-dir <CACHE_DIR> -- 14 "<heading_path>"

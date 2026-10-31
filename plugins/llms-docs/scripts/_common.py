@@ -2799,9 +2799,7 @@ def print_subsection_hints(body_lines, page_ref, heading_path, *,
         code_marker = " [code]" if s["has_code_blocks"] else ""
         print(f"  - {s['heading_path']}{code_marker}")
     print()
-    basename = os.path.basename(sys.argv[0])
-    extra_suffix = (" " + " ".join(extra_hint_args)) if extra_hint_args else ""
-    print(
-        f'Next: {basename} content {page_ref} '
-        f'"<heading_path from above>"{extra_suffix}'
-    )
+    # the reader puts a heading listed above in place of the placeholder,
+    # and one may start with "-" (``--bg``): the options go first and every
+    # positional after "--", as in ``content_command``
+    next_hint("content", *extra_hint_args, "--", str(page_ref), '"<heading_path from above>"')

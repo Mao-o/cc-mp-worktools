@@ -8,7 +8,7 @@
   - Edit ship labels
   - Ship one labelled resource [code]
 
-Next: parse-firebase.py content 17 "<heading_path from above>" --cache-dir <CACHE_DIR>
+Next: parse-firebase.py content --cache-dir <CACHE_DIR> -- 17 "<heading_path from above>"
 ***Ship labels*** are short names you pick for the resources in a Zentor project.
 
 Ship labels help when you run
@@ -54,4 +54,4 @@ zentor ship --only site:blog
   - Edit ship labels
   - Ship one labelled resource [code]
 
-Next: parse-firebase.py content 17 "<heading_path from above>" --cache-dir <CACHE_DIR>
+Next: parse-firebase.py content --cache-dir <CACHE_DIR> -- 17 "<heading_path from above>"

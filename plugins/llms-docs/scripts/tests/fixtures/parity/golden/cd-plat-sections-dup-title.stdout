@@ -7,4 +7,4 @@ Sections in [11] "Fetch Blob"
 
 (3 sections)
 
-Next: parse-claude-docs.py content 11 "<heading_path>" --source platform --cache-dir <CACHE_DIR>
+Next: parse-claude-docs.py content --source platform --cache-dir <CACHE_DIR> -- 11 "<heading_path>"

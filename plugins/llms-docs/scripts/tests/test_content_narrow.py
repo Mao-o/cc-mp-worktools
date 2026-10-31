@@ -167,7 +167,7 @@ class SectionWithSubsectionsKeepsHeadingHintTest(unittest.TestCase):
             "parse-ai-sdk.py", "content", "0", "Env vars/Parent",
             "--cache-dir", tmp, "--max-chars", "3000"])
         self.assertEqual(code, 0, err)
-        self.assertIn('narrow with parse-ai-sdk.py content 0 "<heading_path>"', out)
+        self.assertRegex(out, r'narrow with parse-ai-sdk\.py content --cache-dir \S+ -- 0 "<heading_path>"\)')
         self.assertNotIn("search-content", out)
 
 
@@ -245,7 +245,7 @@ class AiSdkPageWithoutH1Test(unittest.TestCase):
                 code, out, err = _loader.run_cli(ai_sdk, [
                     "parse-ai-sdk.py", "content", "0", *corpus, "--max-chars", "300"])
                 self.assertEqual(code, 0, err)
-                self.assertIn("chars truncated; narrow with parse-ai-sdk.py content 0", out)
+                self.assertRegex(out, r'chars truncated; narrow with parse-ai-sdk\.py content --\S.* -- 0 "<heading_path>"\)')
                 self.assertNotIn("search-content", out)
 
     def test_top_level_hints_list_the_h2s_and_each_reads_its_section(self):
@@ -300,7 +300,7 @@ class SkippedLevelChildrenTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn("--- Subsections of 'Parent' (1) ---", out)
         self.assertIn("  - Parent/Deep", out)
-        self.assertIn('narrow with parse-claude-docs.py content 0 "<heading_path>"', out)
+        self.assertRegex(out, r'narrow with parse-claude-docs\.py content --\S.* -- 0 "<heading_path>"\)')
         self.assertNotIn("search-content", out)
         code, got, err = _loader.run_cli(claude, [
             "parse-claude-docs.py", "content", "0", "Parent/Deep", "--cache-dir", self.tmp])

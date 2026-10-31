@@ -2,6 +2,45 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.47.3] - 2026-11-01
+
+### 修正: claude-platform の 81 ページが区切られない / プレースホルダの `Next:` 行が `-` で始まる語で落ちる / 同じ URL の別ページを黙って開く
+
+- **症状 1**: `claude-platform` で、Structured outputs・Strict tool use・Streaming・Prompt caching など
+  81 ページ (826 ページ中) が `sections` / `content` で `No page found for slug` になり、`search` でも
+  `skip: no full-text` で飛ばされた。上流の `llms-full.txt` には本文がある。これらのページの frontmatter は
+  `featureMetadata` (対応モデルの一覧) を持ち、閉じる `---` まで最大 43 行あったが、frontmatter を探すのは
+  開く `---` から 30 行以内だったため、ページの区切りとみなさず、本文が前のページに混ざっていた
+- **修正 1**: 閉じる `---` を探す範囲を 400 行にした。間の行がすべて YAML の形であることは引き続き求めるので、
+  水平線の後に地の文が続く箇所は従来どおり区切りではない。手元のキャッシュでは claude-platform が
+  745 → 826 ページ (llms.txt の全 826 項目が本文に対応づく) になり、ほかの同梱 presets のページは変わらない。
+  claude-platform のページ番号は、増えたページの分だけずれる
+- **症状 2**: プレースホルダを出す `Next:` 行 (`search "<query>"`、`content <N> "<heading_path>"`、
+  `content <N> "<heading_path from above>"`、`content <page_ref> "<heading_path>"`、切り詰めの
+  `narrow with …`) は、案内どおり `-x` や `--bg` のような `-` で始まる語に差し替えると、argparse が
+  オプションと読んで実行できなかった
+- **修正 2**: これらの行は常にオプションを先に、プレースホルダを `--` の後ろに置く
+  (`search --source x -- "<query>"`、`content --source x -- 3 "<heading_path>"`)。`search-index` の 0 件の
+  Tip が勧める `search-content` も `search-content -- "<query>"` にした
+- **症状 3**: 同じ URL (クエリ込み) が中身の違う複数のページに付くサイトで (learn.chatgpt.com の
+  `developer-commands.md?surface=cli` は "Command line options" と "Slash commands in Codex CLI" の 2 ページ、
+  vercel.com にも 5 組)、URL の `page_ref` と、`anchor_style` が出す anchor の URL は先頭のページを開き、
+  後ろのページの anchor から別のページに着いた (手元のキャッシュで codex 2 件・vercel 5 件)
+- **修正 3**: URL の `page_ref` は、クエリまで同じページ (またはクエリの無いページ) が複数あるとき、本文が
+  同じ写しなら従来どおり先頭を開き、本文が違えば候補を列挙して終了する (候補ごとに開くコマンドを出す)。
+  `index_join: url` の対応づけと `link_annotations` も、本文の違うページが同じ URL に並ぶときは
+  どのページにも対応づけない。クエリの無い参照が、クエリ付きのページしか無い URL を指すときに先頭を開くのは
+  従来どおり
+- 旧 3 script の golden 出力は、共有の部品が出す `content` のプレースホルダ行が新しい並びになった分を
+  更新した。旧 script が自前で出す `search "<query>"` の行は並びだけが違うので、移行の比較の `normalize` が
+  旧い並びに読み替えて比べる (AGENTS.md の除外に追記)
+- テスト: 長い frontmatter の実データからの切り出しと、探す範囲の境界。プレースホルダの各行を出力のまま
+  取り、`-` で始まる見出し・語 (`-x` / `--limit` / `---` / `-` / `--help`、エスケープ `\_`、機能語だけ、
+  記号だけ) に差し替えて実行し、名前どおりの節に着く往復 (キャッシュ・`--file` + `--index-file`・
+  ページから順位付けする profile)。同じ URL の別ページは候補の列挙、写しは先頭、対応づけと注釈は無し。
+  codex の形で、検索が出す anchor をそのまま渡すと 2 ページが列挙され、それぞれのコマンドが自分のページを
+  開く往復
+
 ## [0.47.2] - 2026-10-22
 
 ### 修正: llms.txt に 2 回載るページが検索結果に 2 行出る / `--file` だけの 0 件時に実行できない `search-index` の行を出す

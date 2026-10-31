@@ -662,7 +662,7 @@ class GoldenOutputTest(unittest.TestCase):
             # corpus_hint_args correctly echoes it — a follow-up 'content'
             # command that dropped it would resolve doc_idx 0 against the
             # default cache instead, silently returning a different page.
-            f'Next: parse-claude-docs.py content 0 "<heading_path>" --cache-dir {tmp}\n'
+            f'Next: parse-claude-docs.py content --cache-dir {tmp} -- 0 "<heading_path>"\n'
         )
         self.assertEqual(out, expected)
 
@@ -1065,7 +1065,7 @@ class ContentSubsectionHintBeforeAndAfterTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(out.count("--- Top-level sections (1) ---"), 2)
         self.assertEqual(
-            out.count('Next: parse-claude-docs.py content 0 "<heading_path from above>"'),
+            out.count(f'Next: parse-claude-docs.py content --cache-dir {self.tmp} -- 0 "<heading_path from above>"'),
             2,
         )
         # The first hint occurrence must come before the body text, and the

@@ -428,7 +428,7 @@ class GoldenOutputTest(unittest.TestCase):
             "--- Top-level sections (1) ---\n"
             "  - Limits\n"
             "\n"
-            f'Next: parse-firebase.py content 0 "<heading_path from above>" --cache-dir {tmp}\n'
+            f'Next: parse-firebase.py content --cache-dir {tmp} -- 0 "<heading_path from above>"\n'
         )
         expected = (
             "# doc_title: Firestore Query Limits\n"

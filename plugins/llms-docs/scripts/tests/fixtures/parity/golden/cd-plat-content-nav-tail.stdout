@@ -6,7 +6,7 @@
   - Pick a folding mode
   - Folding on request
 
-Next: parse-claude-docs.py content 3 "<heading_path from above>" --source platform --cache-dir <CACHE_DIR>
+Next: parse-claude-docs.py content --source platform --cache-dir <CACHE_DIR> -- 3 "<heading_path from above>"
 
 Folding swaps older turns for a short digest. Ipsum deserunt occaecat ipsum nulla tempor commodo cupidatat excepteur sit ullamco nisi eiusmod duis. Sunt labore adipiscing sed ipsum mollit deserunt mollit aliquip sint voluptate officia nostrud adipiscing.
 
@@ -26,4 +26,4 @@ Folding swaps older turns for a short digest. Ipsum deserunt occaecat ipsum null
   - Pick a folding mode
   - Folding on request
 
-Next: parse-claude-docs.py content 3 "<heading_path from above>" --source platform --cache-dir <CACHE_DIR>
+Next: parse-claude-docs.py content --source platform --cache-dir <CACHE_DIR> -- 3 "<heading_path from above>"

@@ -10,4 +10,4 @@ Sections in [17] "Ship labels"
 
 (5 sections)
 
-Next: parse-firebase.py content 17 "<heading_path>" --cache-dir <CACHE_DIR>
+Next: parse-firebase.py content --cache-dir <CACHE_DIR> -- 17 "<heading_path>"
