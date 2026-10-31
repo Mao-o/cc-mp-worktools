@@ -17,7 +17,6 @@ import json
 import os
 import shlex
 import shutil
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -538,13 +537,13 @@ class TestCliErrorText(_Base):
 
 class TestPinEnv(_Base):
     def _git_repo(self) -> None:
-        subprocess.run(["git", "init", "-q", str(self.project)], check=True, stdin=subprocess.DEVNULL)
+        _testutil.git(["init", "-q", str(self.project)], self.root)
 
     def _esc_repo(self) -> Path:
         """改行を含まない (git の出力が行に割れない) が、ESC を含むリポジトリ。"""
         repo = self.root / "esc\x1b[31m_repo"
         repo.mkdir()
-        subprocess.run(["git", "init", "-q", str(repo)], check=True, stdin=subprocess.DEVNULL)
+        _testutil.git(["init", "-q", str(repo)], self.root)
         return repo
 
     def test_pin_env_output_is_one_line(self):

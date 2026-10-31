@@ -1231,13 +1231,15 @@ alias が `.firebaserc` で別の project を指す・alias が無い・project 
 別の project を指す、のどれでも、案内どおりにすると期待した project にならず、続く検証が
 deny し続ける。行き先が期待値の project になる alias → 期待値の project ID の順に選び、
 どちらも無ければ「固定できません」にする (マージ前レビューの指摘)。project ID で
-案内できるものが複数あるときは、名前順の先頭を案内しつつ、その ID でよいかを利用者に
-確かめる注記を付ける (値は既定で隠すので一覧は出さない)。候補の一覧へは誘導しない:
-accounts-show の `--show-values` は期待値をすべて出すので、pin-env が除いた ID (`.firebaserc`
-の同名の alias が別の project を指すものなど。`firebase use <その ID>` は別の project に
-切り替わる) も候補に見える。skill は、利用者が別の ID を選んだら `firebase use` を組み立てず、
-手で実行してもらう (確かめた候補をコマンドの形で出すのは内部バックログ。マージ前レビューの
-指摘)
+案内できるものが複数あるときは、名前順の先頭を黙って選ばず、確認を通った ID の
+`firebase use` を候補のコマンドとして全部出す (`Plan.command_candidates`。このとき `command` は
+None。値は既定で隠し、`--show-values` で出す。単独の案内の `command_secret` と同じ扱い)。
+各 ID には単独の案内と同じ確認 (`_firebase_use_to`: `firebase use` に渡せる形か、`.firebaserc`
+での行き先が期待した project か) を通すので、`.firebaserc` の同名の alias が別の project を
+指す ID は候補から外れる。accounts-show の `--show-values` は期待値をすべて出すので、そちらからは
+選ばせない (除いた ID も見えるため)。確認を通る ID が 1 つに減れば候補にせず単独の `command`。
+skill は利用者に候補を選んでもらい、選ばれた候補の行をそのまま使う (Claude が
+`firebase use` を組み立てる場面は無い。マージ前レビューの指摘)
 
 **pin-env は、firebase-tools と同じ内容に読めない `.firebaserc` では案内しない**
 

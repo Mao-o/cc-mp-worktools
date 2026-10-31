@@ -37,6 +37,9 @@ from services import aws, firebase, gcloud
 PIN_SERVICES = ("aws", "gcloud", "firebase")
 SETTINGS_LOCAL_REL = Path(".claude") / "settings.local.json"
 HIDDEN = "(value hidden. use --show-values to reveal)"
+# 候補のコマンドを並べる前の見出し (render)。skill (project-accounts) の手順 3 がこの語で探すので、
+# 変えるときは SKILL.md も揃える (test_pin_env が一致を確かめる)。
+CANDIDATE_COMMANDS_HEADER = "このディレクトリで 1 回実行する候補のコマンド (1 つ選ぶ):"
 # 候補が複数で決められないときの env の断片の目印。名前を並べると、区切り文字を含む候補で別の組と
 # 同じ目印になる (`("a / b", "c")` と `("a", "b", "c")`) ため固定の文にする (正典は `候補` の行)。
 _CANDIDATE_PLACEHOLDER = "<上の候補から 1 つ>"
@@ -101,11 +104,16 @@ class Pin:
 
 @dataclass(frozen=True)
 class Plan:
-    """1 service 分の提案。pins (env) か command (実行するコマンド) のどちらか。"""
+    """1 service 分の提案。pins (env) か command (実行するコマンド) のどちらか。
+
+    command_candidates: 案内できるコマンドが複数あり、どれにするかを利用者が選ぶとき、確認を通った
+    コマンドの全部 (名前順)。このとき command は None。選ばれた候補をそのまま使う
+    """
 
     service: str
     pins: tuple[Pin, ...] = ()
     command: str | None = None
+    command_candidates: tuple[str, ...] = ()
     command_secret: bool = False
     notes: tuple[str, ...] = ()
     problem: str | None = None
@@ -290,19 +298,33 @@ def _plan_firebase_dict(expected: dict, project_dir: str, notes: tuple[str, ...]
         if len(usable) > 1:
             notes = (f"期待値のどの alias でも通ります: {', '.join(usable)}",) + notes
         return Plan("firebase", command=_firebase_use(usable[0]), notes=notes)
-    ids = sorted({project for project in exact.values() if _firebase_use_to(project, project, project_dir)})
-    if ids:
+    commands = [
+        command
+        for command in (
+            _firebase_use_to(project, project, project_dir)
+            for project in sorted(set(exact.values()))
+        )
+        if command
+    ]
+    if commands:
         notes += ("使える alias が無いため、期待値の project ID で案内します",)
-        if len(ids) > 1:
-            # 名前順の先頭を黙って選ぶと、どの project に固定するかを利用者が選べない。
-            # accounts-show は期待値をすべて出し、pin-env が除いた ID (.firebaserc の同名の
-            # alias が別の project を指すものなど) も候補に見えるので、そこからは選ばせない。
+        if len(commands) > 1:
+            # 名前順の先頭を黙って選ぶと、どの project に固定するかを利用者が選べない。確認
+            # (形と `.firebaserc` の行き先) を通った ID のコマンドを全部出し、選んでもらう。
+            # accounts-show は期待値をすべて出し、確認で除いた ID (.firebaserc の同名の alias が
+            # 別の project を指すものなど) も見えるので、そちらからは選ばせない。
             notes += (
-                f"案内できる期待値の project ID は {len(ids)} 個あり、どれに切り替えても検証は"
-                "通ります。pin-env は名前順で先頭の 1 つを案内しています。その ID でよいかを"
-                "ユーザーに確かめてください",
+                f"案内できる期待値の project ID は {len(commands)} 個あり、どれに切り替えても検証は"
+                "通ります。候補のコマンド (値は既定で隠すので --show-values で出ます) から、どれに"
+                "するかをユーザーに選んでもらい、選ばれた候補のコマンドをそのまま使ってください",
             )
-        return Plan("firebase", command=_firebase_use(ids[0]), command_secret=True, notes=notes)
+            return Plan(
+                "firebase",
+                command_candidates=tuple(commands),
+                command_secret=True,
+                notes=notes,
+            )
+        return Plan("firebase", command=commands[0], command_secret=True, notes=notes)
     return Plan(
         "firebase",
         problem=(
@@ -497,6 +519,11 @@ def render(
         if plan.command:
             command = plan.command if (show_values or not plan.command_secret) else f"firebase use {HIDDEN}"
             lines.append(f"  このディレクトリで 1 回実行: {command}")
+        if plan.command_candidates:
+            lines.append(f"  {CANDIDATE_COMMANDS_HEADER}")
+            for candidate in plan.command_candidates:
+                hidden = not show_values and plan.command_secret
+                lines.append("    " + (f"firebase use {HIDDEN}" if hidden else candidate))
         for note in plan.notes:
             lines.append(f"  - {note}")
     if snippet:

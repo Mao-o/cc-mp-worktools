@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import errno
 import os
+import subprocess
 import sys
 from pathlib import Path
 from unittest import mock
@@ -52,6 +53,101 @@ def _isolate_git_discovery() -> None:
 
 
 _isolate_git_discovery()
+
+
+# テストの repo で git に自動 gc / maintenance を起こさせない設定 (key, value)。
+#
+# `git commit` は終わりに `git maintenance run --auto --detach` を起動する。git 2.55 は auto
+# maintenance の既定の戦略が geometric で、小さな repo でも `.git/objects/17` に loose object が 2 件
+# あるだけで repack を始めうる。`--detach` は自動条件の判定の前に背景へ切り離すので、commit は待たずに
+# 戻る。その repack が `.git/objects/pack` に書いている間に一時 dir の後始末が走ると
+# `Directory not empty` で落ちうる (CI の flaky の予防。この suite は `rmtree(ignore_errors=True)` で
+# 後始末するので落ちず、tmp に残骸と、テストより長く生きる背景の git が残る)。git 2.50 は戦略が gc で
+# しきい値が高く、同じ条件でも repack は起きないが、maintenance の起動そのものは commit のたびに起きる。
+#
+#   maintenance.auto=false: そもそも起動しない
+#   gc.auto=0: 起動された maintenance の gc を走らせない (2.50 では gc.auto=0 だけだと起動は止まらない)
+#   maintenance.autoDetach=false / gc.autoDetach=false: 何かが走っても背景へ切り離さない
+#
+# env で渡す (`GIT_CONFIG_COUNT`。git 2.31 以上) のは、repo 自身の config より優先させるため。
+# `git push` の受け側 (`receive-pack`) には届かないので、同じ設定を fixture (`hermetic.gitconfig`) にも
+# 置き、`GIT_CONFIG_GLOBAL` で指す。
+NO_BACKGROUND_GIT_SETTINGS = (
+    ("maintenance.auto", "false"),
+    ("maintenance.autoDetach", "false"),
+    ("gc.auto", "0"),
+    ("gc.autoDetach", "false"),
+)
+
+
+def git_config_env(settings: tuple[tuple[str, str], ...]) -> dict[str, str]:
+    """`(key, value)` の並びを `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` にする。
+
+    件数は並びから数える (手で書くと、項目を足し引きしたときに COUNT がずれる)。
+    """
+    env = {"GIT_CONFIG_COUNT": str(len(settings))}
+    for i, (key, value) in enumerate(settings):
+        env[f"GIT_CONFIG_KEY_{i}"] = key
+        env[f"GIT_CONFIG_VALUE_{i}"] = value
+    return env
+
+
+# repo を作る git に読ませる global / system の設定。global の代わりに読ませるのは tests 配下の fixture
+# (自動 maintenance を止める設定だけ)。テストから `git config --global` で書かないこと (tracked の
+# file が書き換わる)。既定の除外ファイル (`$XDG_CONFIG_HOME/git/ignore`) はこの指定では外れない。
+HERMETIC_GIT_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hermetic.gitconfig")
+HERMETIC_GIT_ENV = {
+    "GIT_CONFIG_GLOBAL": HERMETIC_GIT_CONFIG,
+    "GIT_CONFIG_NOSYSTEM": "1",
+    **git_config_env(NO_BACKGROUND_GIT_SETTINGS),
+}
+
+# 外側の env にあると、テストの git が別の repo / config / template を見てしまう変数。外さないと
+# repo を作る helper の `init` / `config` / `commit` が外側の repo に書き込む。`GIT_CONFIG_PARAMETERS` は
+# `GIT_CONFIG_COUNT` に勝ち、`GIT_TEMPLATE_DIR` は `git init` が写す hook / 除外を差し替える。
+OUTER_GIT_LEAK_ENV = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_TEMPLATE_DIR",
+)
+
+
+def hermetic_env() -> dict[str, str]:
+    """git を起動するときの env: `os.environ` から `OUTER_GIT_LEAK_ENV` を外し、`HERMETIC_GIT_ENV` を足す
+    (後から足すので、外側に同名の変数があっても定数が勝つ)。"""
+    env = {k: v for k, v in os.environ.items() if k not in OUTER_GIT_LEAK_ENV}
+    env.update(HERMETIC_GIT_ENV)
+    return env
+
+
+def git(args: list[str], cwd, *, check: bool = True) -> subprocess.CompletedProcess:
+    """テストが repo を作る / 操作するために起動する git。毎回 `hermetic_env()` を env で渡す。
+
+    テストから git を直接起動しないこと (直接の起動は `test_hermetic_env.py` が検出する)。出力は bytes。
+    """
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        env=hermetic_env(),
+        check=check,
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
+    )
+
+
+def init_repo(cwd) -> None:
+    """commit できる状態の空の repo を作る (`git init` と user / gpgsign の設定)。"""
+    git(["init", "-q", "--initial-branch=main"], cwd)
+    git(["config", "user.name", "test"], cwd)
+    git(["config", "user.email", "test@example.com"], cwd)
+    git(["config", "commit.gpgsign", "false"], cwd)
 
 
 # 実環境から漏れるとローカル読取 / モード解決の結果が変わる env。

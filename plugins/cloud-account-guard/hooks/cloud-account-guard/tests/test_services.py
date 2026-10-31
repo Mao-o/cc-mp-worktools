@@ -14,7 +14,7 @@ from unittest import mock
 
 import _testutil  # noqa: F401
 
-from core import shell_word  # noqa: E402
+from core import cli_config, shell_word  # noqa: E402
 from services import aws, firebase, gcloud, github, kubectl  # noqa: E402
 
 _ISOLATION = None
@@ -1043,6 +1043,137 @@ class TestLocalResolutionNeedsAConfirmedFirebaserc(_FirebasercFixture):
 _FBJSON_CJSON_LIFTS_KEY = (
     '{"a": "\\\\", "b": "/*", "h": {"c": "*/", "firebase": "evil-project", "z": "/*"}, "y": "*/"}'
 )
+
+
+class TestDenyNamesAnUnconfirmedFirebaserc(_FirebasercFixture):
+    """現在の project を取得できない deny は、原因が `.firebaserc` を確かめられないことにあるとき、
+    それを 1 文で言う (利用者が `.firebaserc` を直せば抜けられると分かるように)。判定は変えない。"""
+
+    SENTENCE = "ローカルの設定からも現在の project を決められません"
+    UNCONFIRMED = {
+        "NaN": _FBRC_NAN,
+        "BOM in a key": _FBRC_BOM_IN_KEY,
+        "comment": _FBRC_COMMENTED,
+        "deep": _FBRC_DEEP,
+        "not utf-8": b"\xff\xfe{}",
+    }
+    # 確かめられる `.firebaserc` で、ローカルの解決が現在値を決められない形 (alias が 2 つで default が無い・空)
+    CONFIRMED_BUT_UNRESOLVED = {
+        "two aliases, no default": '{"projects": {"a": "x", "b": "y"}}',
+        "empty projects": '{"projects": {}}',
+        "empty object": "{}",
+    }
+
+    def _root(self, content, name="fb"):
+        root = self.tmp / name
+        root.mkdir()
+        (root / "firebase.json").write_text("{}", encoding="utf-8")
+        if content is not None:
+            data = content if isinstance(content, bytes) else content.encode("utf-8")
+            (root / ".firebaserc").write_bytes(data)
+        return str(root)
+
+    def _deny(self, expected, root, *, cli_missing, context=None):
+        if cli_missing:
+            run = mock.patch("subprocess.run", side_effect=FileNotFoundError)
+            which = mock.patch("services.firebase.shutil.which", return_value=None)
+        else:
+            run = mock.patch("subprocess.run", return_value=SimpleNamespace(stdout="", stderr="", returncode=1))
+            which = mock.patch("services.firebase.shutil.which", return_value="/usr/bin/firebase")
+        with run, which:
+            err = firebase.verify(expected, root, context=context)
+        self.assertIsNotNone(err)
+        return err
+
+    def test_missing_cli_with_an_unconfirmed_firebaserc_says_so(self):
+        for form, content in self.UNCONFIRMED.items():
+            for expected in ("right-project", {"default": "right-project"}):
+                with self.subTest(form=form, expected=expected):
+                    root = self._root(content, name=f"{form}-{type(expected).__name__}".replace(" ", "-"))
+                    err = self._deny(expected, root, cli_missing=True)
+                    self.assertIn("firebase コマンドが見つかりません", err)
+                    self.assertIn(self.SENTENCE, err)
+                    self.assertIn(firebase.FIREBASERC_UNCONFIRMED_CONDITIONS, err)
+                    self.assertNotIn("firebase use", err)
+
+    def test_every_unresolved_branch_says_so(self):
+        """CLI があるのに答えない (取得できません) 経路も、scalar / dict / `--config` 付きのどれも。"""
+        root = self._root(_FBRC_NAN)
+        config = {"config": os.path.join(root, "firebase.json")}
+        cases = {
+            "scalar": ("right-project", None),
+            "dict": ({"default": "right-project"}, None),
+            "dict, nothing to guide": ({"a:b": "right-project"}, None),
+            "scalar, --config": ("right-project", config),
+            "dict, --config": ({"default": "right-project"}, config),
+        }
+        for name, (expected, context) in cases.items():
+            with self.subTest(name):
+                err = self._deny(expected, root, cli_missing=False, context=context)
+                self.assertIn("現在のプロジェクトを取得できません", err)
+                self.assertIn(self.SENTENCE, err)
+                self.assertNotIn("firebase use", err.split(self.SENTENCE, 1)[1])
+
+    def test_a_confirmed_firebaserc_or_none_adds_nothing(self):
+        forms = dict(self.CONFIRMED_BUT_UNRESOLVED)
+        forms["no .firebaserc"] = None
+        for name, content in forms.items():
+            for cli_missing in (True, False):
+                with self.subTest(form=name, cli_missing=cli_missing):
+                    root = self._root(content, name=f"{name}-{cli_missing}".replace(" ", "-").replace(",", ""))
+                    err = self._deny("right-project", root, cli_missing=cli_missing)
+                    self.assertNotIn(self.SENTENCE, err)
+                    self.assertIn(
+                        "firebase コマンドが見つかりません" if cli_missing else "現在のプロジェクトを取得できません",
+                        err,
+                    )
+
+    def test_a_legacy_firebase_json_key_is_the_reason_not_the_firebaserc(self):
+        """firebase.json の旧形式キーがローカルの解決を止めているときは、`.firebaserc` が確かめられなくても
+        原因は firebase.json なので、この文は添えない。"""
+        root = self._root(_FBRC_NAN)
+        Path(root, "firebase.json").write_text('{"firebase": "x"}', encoding="utf-8")
+        self.assertEqual(firebase._from_local_detail(root), ("", False))
+        err = self._deny("right-project", root, cli_missing=False)
+        self.assertNotIn(self.SENTENCE, err)
+
+    def test_an_oversized_configstore_is_not_blamed_on_the_firebaserc(self):
+        root = self._root(_FBRC_STRICT)
+        store = self._xdg / "configstore" / "firebase-tools.json"
+        store.parent.mkdir(parents=True)
+        store.write_text("{}" + " " * (cli_config.MAX_FILE_BYTES + 10), encoding="utf-8")
+        self.assertEqual(firebase._from_local_detail(root), ("", False))
+        err = self._deny("right-project", root, cli_missing=False)
+        self.assertNotIn(self.SENTENCE, err)
+
+    def test_detail_flag_follows_the_firebaserc_only(self):
+        for form, content in self.UNCONFIRMED.items():
+            with self.subTest(form=form):
+                root = self._root(content, name=f"d-{form}".replace(" ", "-"))
+                self.assertEqual(firebase._from_local_detail(root), ("", True))
+                self.assertEqual(firebase._from_local(root), "")
+        root = self._root(_FBRC_STRICT, name="strict")
+        self.assertEqual(firebase._from_local_detail(root), ("right-project", False))
+        self.assertEqual(firebase._from_local(root), "right-project")
+        # 解決できる他の経路: configstore の切替先を alias として解決 / alias が 1 つだけ
+        self._switch(root, "prod")
+        self.assertEqual(firebase._from_local_detail(root), ("wrong-project", False))
+        single = self._root('{"projects": {"only": "single-project"}}', name="single")
+        self.assertEqual(firebase._from_local_detail(single), ("single-project", False))
+
+    def test_a_cli_answer_or_a_timeout_never_carries_the_sentence(self):
+        root = self._root(_FBRC_NAN)
+        ok = SimpleNamespace(stdout="right-project\n", stderr="", returncode=0)
+        with mock.patch("subprocess.run", return_value=ok), mock.patch(
+            "services.firebase.shutil.which", return_value="/usr/bin/firebase"
+        ):
+            self.assertIsNone(firebase.verify("right-project", root))
+            err = firebase.verify("other-project", root)
+        self.assertNotIn(self.SENTENCE, err)
+        with mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired(["firebase"], 10)):
+            err = firebase.verify("right-project", root)
+        self.assertIn("タイムアウト", err)
+        self.assertNotIn(self.SENTENCE, err)
 
 
 class TestLocalResolutionAndFirebaseJsonLegacyKey(_FirebasercFixture):
