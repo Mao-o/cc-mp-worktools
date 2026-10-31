@@ -238,11 +238,14 @@ class TestPlanFirebase(_TmpBase):
             )
         return str(root)
 
-    def test_alias_is_used_instead_of_the_project_id(self):
+    def test_scalar_expected_is_guided_with_the_project_id_not_a_named_target(self):
+        """scalar の期待値には、.firebaserc の別名を案内しない。hook の self-remediation は期待値
+        そのものの名前しか通さず、現在値がずれていると別名の `firebase use` が deny されて
+        行き止まりになる。"""
         project_dir = self._project({"default": "fb-dev", "staging": "fb-stg"})
         plan = pin_env.plan_firebase("fb-stg", project_dir)
-        self.assertEqual(plan.command, "firebase use staging")
-        self.assertFalse(plan.command_secret)
+        self.assertEqual(plan.command, "firebase use fb-stg")
+        self.assertTrue(plan.command_secret)
         self.assertEqual(plan.pins, ())
 
     def test_without_alias_the_project_id_is_secret(self):
@@ -590,17 +593,16 @@ class TestFirebaseCommandIsShellSafe(_TmpBase):
         self.assertIn("除きました", joined)
 
     def test_firebaserc_alias_that_is_not_a_plain_name_is_not_used(self):
-        """リポジトリの `.firebaserc` の alias は使わず、alias が無いときと同じ扱いにする。"""
-        self._firebaserc({"$(touch pwned)": "fb-stg", "-P": "fb-stg"})
-        plan = pin_env.plan_firebase("fb-stg", str(self.root))
-        self.assertEqual(plan.command, "firebase use fb-stg")
-        self.assertTrue(plan.command_secret)
-        self.assertTrue(any(".firebaserc" in note for note in plan.notes))
-
-        self._firebaserc({"-x": "fb-stg", "staging": "fb-stg"})
-        plan = pin_env.plan_firebase("fb-stg", str(self.root))
-        self.assertEqual(plan.command, "firebase use staging")
-        self.assertFalse(plan.command_secret)
+        """scalar の期待値は、リポジトリの `.firebaserc` の別名を案内に使わない (project ID を出す)。"""
+        for projects in (
+            {"$(touch pwned)": "fb-stg", "-P": "fb-stg"},
+            {"-x": "fb-stg", "staging": "fb-stg"},
+        ):
+            with self.subTest(projects=projects):
+                self._firebaserc(projects)
+                plan = pin_env.plan_firebase("fb-stg", str(self.root))
+                self.assertEqual(plan.command, "firebase use fb-stg")
+                self.assertTrue(plan.command_secret)
 
     def test_project_id_that_is_not_a_plain_name_is_a_problem(self):
         for project in self.HOSTILE:

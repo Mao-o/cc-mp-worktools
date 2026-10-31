@@ -49,7 +49,7 @@ import shlex
 import time
 from dataclasses import dataclass
 
-from core import budget, cache, shell_word
+from core import budget, cache, cli_config, shell_word
 
 ENV_VAR = "CLOUD_ACCOUNT_GUARD_AUTO_SWITCH"
 # accounts.local.json の予約キー。`$mode` / `$readonly` (builder は書かない手編集キー)
@@ -212,7 +212,9 @@ def _read_records(service_name: str) -> dict:
     (dispatcher の `_auto_switch` が握って「内部エラーのため自動切替を行わない」になり、
     3.14 からは記録が無いのと同じで切り替えていた)。
     """
-    records = cache.read_state(_guard_path(service_name))
+    # 記録は切替した対象ごとに増え、hook 1 回に 1 度しか読まないので、entry 用の小さい上限
+    # (`cache._MAX_STATE_BYTES`) ではなく他の設定ファイルと同じ上限で読む。
+    records = cache.read_state(_guard_path(service_name), limit=cli_config.MAX_FILE_BYTES)
     return records if records is not None else {}
 
 

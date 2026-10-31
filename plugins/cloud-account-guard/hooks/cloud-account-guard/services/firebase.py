@@ -40,7 +40,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from core import budget, cli_options, shell_word
+from core import budget, cli_config, cli_options, shell_word
 
 # CLI 名の許容形。`\b` だとハイフン付き別コマンド全般を拾ってしまうので空白/終端に
 # 限定するが、npm 経由の 2 つの正当な形は明示的に許可する:
@@ -249,7 +249,7 @@ def _reject_constant(name: str):
 # 「固定できません」と verify() の `--project` の deny が同じ文で示す (「…に当たる」で受ける)。
 # 判定は保守的で、厳密な JSON でも文字列の中に `//` (URL など) があるだけで弾く。
 FIREBASERC_UNCONFIRMED_CONDITIONS = (
-    "UTF-8 でない・U+FEFF がある・// か /* がある (文字列の中の URL なども含む)・"
+    "UTF-8 でない・大きすぎる (256 KiB を超える)・U+FEFF がある・// か /* がある (文字列の中の URL なども含む)・"
     "JSON として読めない (NaN など JSON に無い値・構文の誤り・深い入れ子)・"
     "projects がオブジェクトでないか文字列でない値を持つ、など"
 )
@@ -291,8 +291,10 @@ def _read_firebaserc(root: str) -> dict[str, str] | None:
     if not os.path.isfile(path):
         return {}
     try:
-        text = path.read_bytes().decode("utf-8")
-    except (OSError, UnicodeDecodeError):
+        # 大きさの上限は parse より先に確かめる (`cli_config.read_bounded_text`): Python 3.9 は
+        # 大きな整数の parse が桁数の二乗の時間で、hook の timeout を超えると検証が素通しになる。
+        text = cli_config.read_bounded_text(path)
+    except (OSError, ValueError):
         return None
     if "\ufeff" in text or "//" in text or "/*" in text:
         return None
@@ -322,18 +324,6 @@ def _resolve_alias(projects: dict[str, str], target: str) -> str:
     alias にあればその値、無いか空文字なら target そのもの (project ID として扱う)。
     """
     return projects.get(target) or target
-
-
-def aliases_for(project_dir: str, project_id: str) -> list[str]:
-    """`.firebaserc` で project_id を指す alias 名を返す (名前順)。
-
-    プロジェクトごとの固定 (builder の `pin-env`) 用。`firebase use <alias>` を案内する
-    ときに、期待値 (project ID) をそのまま出さずに済む。`.firebaserc` は CLI と同じく
-    `firebase.json` を親方向に探した project root から読む。firebase-tools と同じ内容に
-    読めると確かめられなければ空 (pin-env はその前に `firebaserc_reads_like_cli` で止める)。
-    """
-    projects = _read_firebaserc(_project_root(project_dir)) or {}
-    return sorted(alias for alias, project in projects.items() if project == project_id)
 
 
 def firebaserc_reads_like_cli(project_dir: str) -> bool:
@@ -383,8 +373,13 @@ def _configstore_path(env=None) -> Path | None:
     return Path(base) / "configstore" / "firebase-tools.json"
 
 
-def _from_configstore(root: str, env=None, exact: bool = False) -> str:
+def _from_configstore(root: str, env=None, exact: bool = False) -> str | None:
     """configstore の activeProjects から `firebase use` の切替先 (alias または project ID) を返す。
+
+    切替先が無いときは ""。configstore が大きすぎる (`cli_config.MAX_FILE_BYTES` を超える) ときは
+    None (切替先の有無を確かめられない)。"" にすると、`firebase use` で別の project に切り替えて
+    いても `.firebaserc` の `default` で照合して allow してしまう (v0.25.0)。読めない・壊れた
+    configstore は従来どおり ""。
 
     firebase-tools の configstoreProject と同じく root から親方向に探索する
     (論理パスと実体パスの両方を試す)。このファイルには認証トークンも含まれるため、
@@ -400,7 +395,9 @@ def _from_configstore(root: str, env=None, exact: bool = False) -> str:
         path = _configstore_path(env)
         if path is None:
             return ""
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(cli_config.read_bounded_text(path))
+    except cli_config.FileTooLargeError:
+        return None
     except (ValueError, OSError, RuntimeError):
         return ""
     active = data.get("activeProjects") if isinstance(data, dict) else None
@@ -482,15 +479,12 @@ def _firebase_json_blocks_local(path: str) -> bool:
     if not os.path.isfile(path):
         return False
     try:
-        raw = Path(path).read_bytes()
-    except OSError:
+        text = cli_config.read_bounded_text(Path(path))
+    except (OSError, ValueError):
+        # 読めない・UTF-8 でない・大きすぎる (parse の前に弾く。`_read_firebaserc` と同じ)。
         return True
-    if not raw:
+    if not text:
         return False
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return True
     if "\ufeff" in text:
         return True
     if ("//" in text or "/*" in text) and _cjson_decomment(text) != text:
@@ -516,6 +510,7 @@ def _from_local(root: str, env=None, config_file: str | None = None) -> str:
     firebase.json (`--config` のファイル、無ければ root の firebase.json) が旧形式キー
     `"firebase"` を持つか、その有無を確かめられないときも "" (`_firebase_json_blocks_local`。
     v0.20.0)。firebase-tools は configstore の切替先が無いときそのキーの project で動く。
+    configstore が大きすぎて切替先の有無を確かめられないときも "" (v0.25.0)。
     呼び出し側は現在値を取得できないとして deny する。
     """
     exact = config_file is not None
@@ -526,6 +521,9 @@ def _from_local(root: str, env=None, config_file: str | None = None) -> str:
     if projects is None:
         return ""
     switched = _from_configstore(root, env, exact)
+    if switched is None:
+        # configstore が大きすぎて切替先の有無を確かめられない (v0.25.0)
+        return ""
     if switched:
         return _resolve_alias(projects, switched)
     if len(projects) == 1:
@@ -771,7 +769,7 @@ def _scalar_project_flag_word(projects: dict[str, str] | None, project: str) -> 
 
     `--project` の値は verify() が `.firebaserc` で解決して照合する (alias を渡しても通る) ので、
     project ID が影になっているとき (`_scalar_word` が None) は、期待した project を指す alias のうち
-    `_reaching_word` が通る先頭 (名前順。`aliases_for` と同じ並び) を案内する。無ければ None。
+    `_reaching_word` が通る先頭 (名前順) を案内する。無ければ None。
     `firebase use` の案内には使わない (そちらは `is_self_remediation` が期待値そのものしか通さない)。
     """
     word = _scalar_word(projects, project)

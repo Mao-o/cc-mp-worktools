@@ -365,10 +365,13 @@ settings.local.json は書かない)、書く前に確認してから設定す�
   の記録は project root (firebase.json のあるディレクトリ) ごとなので、別の worktree では最初に 1 回要ることがある。
   firebase.json の無いサブディレクトリで実行すると親の project root に記録され、兄弟のディレクトリにも効く。
   VCA は firebase のアカウントは検証しない。`firebase use` は引数を `.firebaserc` の
-  alias として先に解決するので、`pin-env` はこのディレクトリの `.firebaserc` で期待した
-  project に解決される alias を案内し、無ければ期待値の project ID で案内する (v0.17.1)。
+  alias として先に解決する。`pin-env` は、scalar の期待値には project ID を案内する (v0.25.0。
+  hook の自己回復が期待値そのものしか通さないため)。dict の期待値には、このディレクトリの
+  `.firebaserc` で期待した project に解決される alias を案内し、無ければ期待値の project ID で
+  案内する (v0.17.1)。
   `.firebaserc` を firebase-tools と同じ内容に読めると確かめられないとき (UTF-8 でない・
-  U+FEFF がある・`//` か `/*` がある (文字列の中の URL なども含む)・JSON として読めない
+  大きすぎる (256 KiB を超える)・U+FEFF がある・`//` か `/*` がある (文字列の中の URL なども
+  含む)・JSON として読めない
   (`NaN` など JSON に無い値・構文の誤り・深い入れ子)・`projects` がオブジェクトでないか
   文字列でない値を持つ、など) は、firebase-tools と同じ行き先を確かめられないので「固定
   できません」と出す (v0.17.1)。判定は保守的で、URL を含むだけの厳密な JSON も対象になる。
@@ -699,9 +702,11 @@ alias が 1 つならその値 → `default`。`npx firebase ...` のように h
 firebase.json (`--config` 付きのコマンドではそのファイル) に旧形式のキー `"firebase"` がある
 とき (値に関わらず) と、そのキーの有無を確かめられないときも同じく deny する (v0.20.0)。
 firebase-tools は configstore の切替先が無いと、`.firebaserc` の alias より先にこのキーの project
-で動く。確かめられないのは、読めない・UTF-8 でない・U+FEFF がある・コメントがある (cjson が
-除く形。URL のような文字列の中の `//` は当たらない)・厳密な JSON として読めない
-(NaN・末尾のカンマ・構文の誤りなど) とき。空のファイルは firebase-tools と同じく `{}` として読む。
+で動く。確かめられないのは、読めない・UTF-8 でない・大きすぎる (256 KiB を超える)・U+FEFF が
+ある・コメントがある (cjson が除く形。URL のような文字列の中の `//` は当たらない)・厳密な JSON
+として読めない (NaN・末尾のカンマ・構文の誤りなど) とき。空のファイルは firebase-tools と同じく
+`{}` として読む。configstore が大きすぎる (256 KiB を超える) ときも、`firebase use` の切替先の
+有無を確かめられないとして deny する (v0.25.0)。
 `firebase use` が timeout したときは fallback せず「firebase use がタイムアウト
 しました」で deny する (fail-closed)。
 

@@ -21,7 +21,7 @@ from unittest import mock
 
 import _testutil  # noqa: F401
 
-from core import paths, shell_word  # noqa: E402
+from core import cli_config, paths, shell_word  # noqa: E402
 from core.dispatcher import dispatch  # noqa: E402
 
 _FAKE = "FAKE_LINE_9f3"
@@ -102,14 +102,14 @@ class TestAccountsPathInDeny(_Base):
     def test_read_failure_escapes_both_path_and_os_error(self):
         """読み込みの OSError は、パスも例外の文面 (`strerror`) もエスケープする。"""
         self._accounts(self.project, {"github": "x"})
-        real = Path.read_text
+        real = cli_config.read_bounded_text
 
         def read_text(path, *args, **kwargs):
             if path.name == "accounts.local.json":
                 raise PermissionError(13, f"denied\n{_FAKE}_E")
             return real(path, *args, **kwargs)
 
-        with mock.patch.object(Path, "read_text", read_text):
+        with mock.patch.object(cli_config, "read_bounded_text", read_text):
             reason = self._reason("gh pr create")
         self._assert_one_line(reason)
         self.assertIn(f"denied\\n{_FAKE}_E", reason)

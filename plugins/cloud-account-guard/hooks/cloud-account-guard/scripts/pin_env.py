@@ -231,17 +231,10 @@ def plan_firebase(expected, project_dir: str) -> Plan:
     if _padded(expected):
         return Plan("firebase", problem=f"firebase の期待値 (project ID) {_PADDED}")
     project = expected
-    # `.firebaserc` はリポジトリのファイルなので、alias 名は信頼できる入力ではない。
-    # 渡せない alias は使わず、無ければ alias が無いときと同じく project ID を使う。
-    aliases = firebase.aliases_for(project_dir, project)
-    usable = [alias for alias in aliases if _firebase_use(alias) is not None]
-    if len(usable) < len(aliases):
-        notes += (
-            ".firebaserc の alias のうち、firebase use に渡せない文字を含むものは使いません"
-            f" ({_FIREBASE_TARGET_RULE})",
-        )
-    if usable:
-        return Plan("firebase", command=_firebase_use(usable[0]), notes=notes)
+    # scalar の期待値には alias を案内しない。hook の self-remediation (`is_self_remediation`) は
+    # scalar の期待値そのものの名前しか通さないので、`firebase use <alias>` は現在値がずれていると
+    # 検証に回って deny され、案内が行き止まりになる。hook の deny 文面 (`_scalar_word`) と同じく
+    # project ID を案内する (表示は既定で隠す。判定は変えない)。
     if _firebase_use(project) is None:
         return Plan(
             "firebase",
@@ -267,7 +260,7 @@ def _plan_firebase_dict(expected: dict, project_dir: str, notes: tuple[str, ...]
 
     verify() はアクティブ project が期待値のどれかと一致すれば通すので、期待値の alias の
     うち、このディレクトリの `.firebaserc` で期待した project に解決されるものを案内する。
-    無ければ期待値の project ID で案内する (scalar の期待値で alias が無いときと同じ。
+    無ければ期待値の project ID で案内する (scalar の期待値と同じ。
     値は期待値なので既定で隠す)。どちらも出せなければ「固定できません」。
     """
     projects = {

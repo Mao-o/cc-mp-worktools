@@ -1087,7 +1087,7 @@ gh のアカウントを頻繁に切り替える運用で、不一致 deny の�
   期待値の alias / project ID か、リポジトリの `.firebaserc` の alias (clone しただけの
   リポジトリでも中身を決められる) から来るので、`;` / `$()` / 空白 / 改行や先頭の `-` が
   あると、その文字列がコマンドや option として走る。`.firebaserc` の外れた alias は使わず
-  (alias が無いときと同じく project ID を案内する)、期待値の外れた alias / project ID は
+  (dict の期待値で alias が無いときと同じく project ID を案内する。scalar は v0.25.0 から常に project ID)、期待値の外れた alias / project ID は
   「固定できません」にする。`shlex.quote` は二重化で、許容形はすでにクォートの要らない
   文字だけ。hook が切替の案内として認める形 (firebase の `REMEDIATION_PATTERNS`) にも
   収まる。照合は `fullmatch` で行う (`$` は末尾の改行の前でも一致するため)
@@ -1552,9 +1552,10 @@ ENOENT / ENOTDIR / EBADF / ELOOP 以外の stat の失敗を例外にし、例�
   (3.9.6 / 3.12.13 / 3.13.16 / 3.14.0 で実測): 自分を指す 1 段のループはそのパスのまま返るので
   stat で「確かめられません」(exit 1)、2 段以上のループ (`accounts.local.json` → `loopa` →
   `loopb` → `loopa`) はループの途中のパス (`loopa`) が返るので `_split_tier_path` が None になり、
-  「--path は dispatcher が読む配置を指してください」(exit 2) になる。案内は事実と合わないが
-  書き込まず、hook は deny する。版を問わず同じ文面にする修正は別の課題として内部バックログに
-  送った。`_resolve_target` のプロジェクト側 (`--path` なし) の `resolve()` は OSError だけを拾う
+  「--path は dispatcher が読む配置を指してください」(exit 2) になっていた (0.19.1 まで。書き込まず、
+  hook は deny する)。0.25.0 で `resolve()` の前に `os.stat` を打ち、ELOOP ならそのパスを
+  `os.path.normpath` だけにして `resolve()` を飛ばす (どの版でも stat で「確かめられません」の
+  exit 1。実 symlink の 2 段ループで固定)。`_resolve_target` のプロジェクト側 (`--path` なし) の `resolve()` は OSError だけを拾う
   (project_dir は cwd か CLAUDE_PROJECT_DIR で実在する前提。hook 側の
   `paths.discover_accounts_files_with_ancestors` と dispatcher と同じ)。builder の残りの try の外の述語 (`.gitignore` / CLAUDE.md の `exists()`) と
   `scripts/pin_env.py` の `settings_env` は配置パスと関係しないので、この変更では触っていない
@@ -1674,6 +1675,37 @@ Claude Code が読み込むため、コミットされると plugin を使って
 されない」と答えたときだけ作らず、理由を stdout に 1 行出す。判定できないとき (git の外
 など) はコミットされる経路が無いので従来どおり作る。signpost のパスを `.gitignore` に
 足す案は、D34 と同じく共有の `.gitignore` に plugin 固有の行を残すので採らない。
+
+**D36: hook が JSON で読む信頼できないファイルは、parse の前に 256 KiB で弾く** —
+Python 3.9 の `json.loads` は大きな整数の parse が桁数の二乗の時間になる (2.2 MB の
+`.firebaserc` で約 25 秒。3.9.6 で実測)。hook は PATH の `python3` で起動され、macOS 標準の
+`python3` は 3.9 系なので、README の動作要件 (3.11+) を満たさない環境でも動く。hook の timeout
+(20 秒) を超えると出力が捨てられ、コマンドがそのまま実行される (検証の素通し)。3.11 以降は
+4,300 桁で ValueError になり「確かめられない」の deny に落ちるので起きない。そこで parse の前に
+`cli_config.read_bounded_text` で大きさを確かめ、超えたら読めないものと同じに扱う
+(`.firebaserc` と `firebase.json` は「確かめられない」の deny、cache の状態ファイル (epoch・
+成功 entry・auto-switch の記録) は miss、`accounts.local.json` は不正な JSON と同じ deny、
+configstore は `firebase use` の切替先の有無を確かめられないとして deny)。configstore を
+「切替先が無い」と同じに扱うと、別の project に切り替えていても `.firebaserc` の `default` で
+照合して allow してしまう (fail-open) ので、`_from_configstore` は None を返し、`_from_local` が
+現在値を取得できない ("") にする。対象は、リポジトリや `$TMPDIR` が内容を決められる入力源 (`.firebaserc`・
+`firebase.json`・`accounts.local.json`・cache の状態ファイル) と、同じ経路で読む configstore。
+builder (利用者が手で起動し、hook の timeout が無い) の `json.loads` は対象外だが、
+`.firebaserc` の読み込みは hook と共有する `firebase._read_firebaserc` を通るので同じ上限になる。
+
+上限の値は既存の `cli_config.MAX_FILE_BYTES` (256 KiB。gh / gcloud の設定の読み取り上限) を
+そのまま使う。正規の `.firebaserc` は数百バイト、`firebase.json` は数 KB、cache の状態ファイルは
+1 KB 前後、`accounts.local.json` は数 KB で、どれも 2 桁以上の余裕がある。値を 1 MB に
+すると、3.9 の最悪ケースでも約 5 秒かかり、1 回の hook が複数のファイルを読むと合計が
+timeout に近づく。256 KiB なら約 0.35 秒 (2.2 MB の 25 秒を桁数の二乗で換算)。3.9 の実機は CI に
+無いので、テストは「上限を超えるファイルが `json.loads` に渡されない」ことで固定する
+(`tests/test_json_size_gate.py`)。
+
+cache の状態ファイルのうち成功 cache の entry と epoch は、hook 1 回に target の数だけ読まれ、
+予算 (`core/budget.py`) の判定より前に走るので、別の小さい上限 (4 KiB。`cache._MAX_STATE_BYTES`)
+にする。書くのは数十バイトの JSON だけで、256 KiB のままだと target の数だけ 3.9 の最悪ケースが
+積み上がる。auto-switch の記録は切替した対象ごとに増え、hook 1 回に 1 度しか読まないので
+256 KiB のまま読む。
 
 ## 既知の制限
 
