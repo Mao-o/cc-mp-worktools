@@ -1083,20 +1083,11 @@ _USE_RE = re.compile(rf"^{_CLI}\s+use\s+(\S+)\s*$")
 # 「`firebase use` が書き込む先を変えないこと」— `--non-interactive` / `--debug` /
 # `--json` は対話と出力の制御だけで、configstore の activeProjects (verify() が
 # `firebase use` で読む先) に対する書込先を変えない。
-# **`--project` / `-P` / `--account` / `--token` は入れない** — 前 2 つは照合先を
-# 差し替える context option、残りは認証主体を変える。`--config` / `-c` は装飾ではないが、
-# self-remediation に限って剥がす (下の `_LANDING_OPTIONS_WITH_VALUE`)。
+# **`--project` / `-P` / `--config` / `-c` / `--account` / `--token` は入れない** —
+# 前 2 つは照合先を差し替える context option、`--config` は firebase.json を
+# 名指しして project の解決先を変え、残りは認証主体を変える。
 _DECORATION_FLAGS = frozenset({"--non-interactive", "--debug", "--json"})
 _DECORATION_OPTIONS_WITH_VALUE: frozenset[str] = frozenset()
-# 切替に限って剥がす context option (v0.27.0)。`--config X` は X のあるディレクトリの切替先を
-# 書くので、プロジェクトのディレクトリの切替先は変わらない。切替の名前は X のディレクトリの
-# `.firebaserc` で alias として解決されるが、hook は alias の解決先を照合しない (既知の穴。
-# 別途対応)。そのため、末尾の `--config` / `-c` を剥がす形は期待値の project ID そのものへの
-# 切替に限って受ける (alias は受けない)。先頭に置いた形 (`firebase --config X use ...`。deny が
-# 案内する形) は dispatcher が global option として剥がしてから判定するので 0.26.1 までも
-# 通っており、alias の受理も含めて挙動を変えない。`is_pin_action` には足さない (期待値が
-# 未登録のときの経路で、このチケットの往復とは別)。
-_LANDING_OPTIONS_WITH_VALUE = frozenset({"--config", "-c"})
 
 
 def is_self_remediation(candidate: str, expected) -> bool:
@@ -1104,21 +1095,18 @@ def is_self_remediation(candidate: str, expected) -> bool:
 
     dict 期待値は alias 名 (キー) と project ID (値) の両方を受け付ける
     (deny メッセージが `firebase use <alias>` を案内するため)。装飾 option
-    (`--non-interactive` / `--debug` / `--json`) と `--config` / `-c` (v0.27.0) は剥がしてから
-    照合し、**それ以外の option が付いていたら保守的に False** (通常検証に落とす)。
-    `--config` / `-c` を剥がしたときは alias 名を受けず、project ID だけを受ける。
+    (`--non-interactive` / `--debug` / `--json`) は剥がしてから照合し、
+    **それ以外の option が付いていたら保守的に False** (通常検証に落とす)。
     `use --add` / `--clear` / `--unalias` もここで False になる (位置引数の意味が
     変わる = 期待値への切替とは言えない)。
     """
-    m = _use_match(candidate, _DECORATION_OPTIONS_WITH_VALUE)
-    accept_alias = m is not None
-    if m is None:
-        # `--config` / `-c` を剥がして初めて `firebase use <x>` になる形。x は X のある
-        # ディレクトリの `.firebaserc` で alias として解決されるが、hook はその解決先を照合
-        # しない (既知の穴。別途対応)。alias をキーとして受けると、X の `.firebaserc` で別の
-        # project を指す alias への切替が通るので、期待値の project ID そのものだけを受ける。
-        m = _use_match(candidate, _DECORATION_OPTIONS_WITH_VALUE | _LANDING_OPTIONS_WITH_VALUE)
-    if m is None:
+    normalized = cli_options.strip_allowed_options(
+        candidate, _DECORATION_FLAGS, _DECORATION_OPTIONS_WITH_VALUE
+    )
+    if normalized is None:
+        return False
+    m = _USE_RE.match(normalized)
+    if not m:
         return False
     target = m.group(1)
     if isinstance(expected, str):
@@ -1127,15 +1115,9 @@ def is_self_remediation(candidate: str, expected) -> bool:
         for alias, project in expected.items():
             if not (isinstance(project, str) and project):
                 continue
-            if target == project or (accept_alias and target == alias):
+            if target in (alias, project):
                 return True
     return False
-
-
-def _use_match(candidate: str, with_value) -> re.Match[str] | None:
-    """装飾 option と `with_value` の option を剥がした候補が `firebase use <x>` ならその match。"""
-    normalized = cli_options.strip_allowed_options(candidate, _DECORATION_FLAGS, with_value)
-    return None if normalized is None else _USE_RE.match(normalized)
 
 
 def is_pin_action(candidate: str) -> bool:

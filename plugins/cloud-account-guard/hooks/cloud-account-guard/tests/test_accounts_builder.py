@@ -1154,6 +1154,96 @@ class TestMigrateRemoveOld(BaseBuilder):
         code, _out, err = self._run_no_raise(["migrate", "--commit", "--remove-old"])
         self._assert_only_copy_survives(code, err)
 
+    def _skip_unless_case_insensitive_fs(self):
+        upper = self.project_dir / ".CLAUDE"
+        if not (upper.exists() and os.path.samefile(upper, self.claude_dir)):
+            self.skipTest("大文字小文字を区別する FS では、綴りの違う名前は別のファイルになる")
+
+    def test_case_variant_symlinks_keep_the_only_copy(self):
+        """大文字小文字を区別しない FS (macOS の既定) では、綴りの違う名前の symlink も
+        旧パスの実体を指す。名前ではなく inode で比べるので残す (exit 1)。マージ前レビューの指摘。"""
+        self._skip_unless_case_insensitive_fs()
+        forms = {
+            "dir -> ../.CLAUDE": (self.new_dir, os.path.join("..", ".CLAUDE")),
+            "dir -> ../.Claude": (self.new_dir, os.path.join("..", ".Claude")),
+            "file -> ../ACCOUNTS.local.json": (
+                self._new_path(),
+                os.path.join("..", "ACCOUNTS.local.json"),
+            ),
+        }
+        for label, (link, dest) in forms.items():
+            with self.subTest(label):
+                self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+                if link == self._new_path():
+                    self.new_dir.mkdir(parents=True)
+                os.symlink(dest, link)
+                try:
+                    code, _out, err = self._run_no_raise(["migrate", "--commit", "--remove-old"])
+                    self._assert_only_copy_survives(code, err)
+                finally:
+                    if link == self._new_path():
+                        shutil.rmtree(self.new_dir)  # migrate が置く CLAUDE.md ごと
+                    else:
+                        os.unlink(link)
+                    if os.path.lexists(self._deprecated_path()):
+                        os.unlink(self._deprecated_path())
+
+    def test_new_path_written_back_when_removal_slips_through(self):
+        """保険: 判定をすり抜けて新パスの唯一の実体を消しても、統合した内容を新パスに
+        書き戻して exit 1 にする。判定を常に「消してよい」にした状態で固定する。"""
+        self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+        self.new_dir.mkdir(parents=True)
+        os.symlink(os.path.join("..", "accounts.local.json"), self._new_path())
+        with mock.patch.object(builder.os.path, "samestat", return_value=False):
+            code, _out, err = self._run_no_raise(["migrate", "--commit", "--remove-old"])
+        self.assertEqual(code, 1, err)
+        self.assertTrue(os.path.isfile(self._new_path()), "新パスの実体が残っていない")
+        self.assertEqual(
+            json.loads(self._new_path().read_text(encoding="utf-8")), {"github": "Mao-o"}
+        )
+        self.assertIn("書き戻しました", err)
+
+    def _os_failing(self, name, target):
+        """builder の `os` だけを差し替え、`target` に対する `os.<name>` だけを失敗させる。
+
+        読み込みの stat は core.paths の `os` を使うので変わらない。builder は実体のパス
+        (/private/var/... など) で持つことがあるので realpath で比べる。
+        """
+        real = getattr(os, name)
+
+        def failing(path, *args, **kwargs):
+            if os.path.realpath(path) == os.path.realpath(target):
+                raise PermissionError(13, "denied")
+            return real(path, *args, **kwargs)
+
+        class OsProxy:
+            def __getattr__(self, attr):
+                return failing if attr == name else getattr(os, attr)
+
+        return mock.patch.object(builder, "os", OsProxy())
+
+    def test_new_path_not_stattable_keeps_old_paths(self):
+        """削除の判定で新パスを stat できなければ、同じファイルかを確かめられないので消さない。"""
+        self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+        with self._os_failing("stat", self._new_path()):
+            code, _out, err = self._run_no_raise(["migrate", "--commit", "--remove-old"])
+        self.assertEqual(code, 1, err)
+        self.assertTrue(self._deprecated_path().exists())
+        self.assertIn("新パスの実体と同じファイルのため", err)
+
+    def test_old_path_not_lstattable_is_kept(self):
+        """旧パスを lstat できなければ消さない (exit 1 と理由)。"""
+        self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+        with self._os_failing("lstat", self._deprecated_path()):
+            code, _out, err = self._run_no_raise(["migrate", "--commit", "--remove-old"])
+        self.assertEqual(code, 1, err)
+        self.assertTrue(self._deprecated_path().exists())
+        self.assertIn("確かめられなかったため", err)
+
+    def test_new_path_survived_is_false_when_unreadable(self):
+        with mock.patch.object(builder, "_load_existing", side_effect=builder._BuilderError("x")):
+            self.assertFalse(builder._new_path_survived(self._new_path(), {"github": "Mao-o"}))
+
     def test_new_path_hard_linked_to_old_path_still_removes(self):
         """hard link は旧パスの名前を消しても新パスに内容が残るので、従来どおり消す。"""
         self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")

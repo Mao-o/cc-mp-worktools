@@ -9,23 +9,25 @@
   0.26.1 までの deny は option の無い切替 (`kubectl config use-context <期待値>` /
   `gcloud config set project <期待値>`) を案内するか、firebase では切替をコマンドの形で案内せず
   文で案内していた。案内どおりに切り替えても既定の kubeconfig / アクティブな構成 / プロジェクトの
-  ディレクトリに書くだけなので、元のコマンドを再実行すると同じ deny に戻っていた。同じ option を
-  末尾に付けた切替は deny、CLI 名の直後に付けた形だけが通り、揃っていなかった
+  ディレクトリに書くだけなので、元のコマンドを再実行すると同じ deny に戻っていた。kubectl / gcloud
+  では、同じ option を末尾に付けた切替は deny、CLI 名の直後に付けた形だけが通り、揃っていなかった
 - deny は同じ option を付けた切替を案内する: `kubectl config use-context <期待値> --kubeconfig <ファイル>`、
   `gcloud config set <project|account> <期待値> --configuration <構成>`、
   `firebase --config <ファイルの絶対パス> use <期待値>` (dict の期待値は alias ごとの行)。パスや構成名が
   案内に使える形でないとき (空白・`~` 始まり・glob の文字を含むなど) は、コマンドの形では案内せず文で
   案内する (firebase は 0.18.0 からの文)
-- **判定表の変更**: これらの option を末尾に付けた期待値への切替 (`firebase use <期待値> -c <path>` など)
-  を、CLI 名の直後に付けた形と同じく self-remediation として通す (0.26.1 までは通常検証に落ちていた)。
-  切替と書込の連結 (`<期待値への切替 + その option> && <書込>`) も止めない。続くコマンドは実行時に
-  照合される。ただし firebase の切替の名前は `--config` のファイルのあるディレクトリの `.firebaserc` で
-  alias として解決され、hook はその解決先を照合しない (既知の穴。別途対応)。そのため firebase で末尾の
-  `--config` / `-c` を剥がして受理するのは、期待値の project ID そのものへの切替だけにした (alias 名は
-  受けない。マージ前レビューで、別の project を指す alias への切替と書込の連結が通ることを指摘された)。
-  CLI 名の直後に付けた形の扱いは変えていない。期待値以外への切替、`--context` /
-  `--project` / `--flags-file` などほかの option を付けた切替は従来どおり。firebase の
-  期待値が未登録のときの固定の操作 (`firebase use <x>`) の判定は変えていない
+- **判定表の変更 (kubectl / gcloud)**: `--kubeconfig` / `--configuration` を末尾に付けた期待値への切替
+  (`kubectl config use-context <期待値> --kubeconfig <ファイル>` など) を、CLI 名の直後に付けた形と同じく
+  self-remediation として通す (0.26.1 までは通常検証に落ちていた)。切替と書込の連結
+  (`<期待値への切替 + その option> && <書込>`) も止めない。続くコマンドは実行時に照合される。
+  期待値以外への切替、`--context` / `--flags-file` などほかの option を付けた切替は従来どおり
+- firebase は末尾の `-c` / `--config` を剥がさない (判定は 0.26.1 と同じ)。firebase の切替の名前は
+  `--config` のファイルのあるディレクトリの `.firebaserc` で alias として解決され、hook はその解決先を
+  照合しない (既知の穴。別途対応)。末尾の形を剥がすと、この穴と組み合わさって通る形が構文の上で
+  増える (マージ前レビューで、期待値と同じ名前の alias が別の project を指す `.firebaserc` のディレクトリを
+  `-c` で指し、切替と書込を連結する形が通ることを指摘された)。deny は CLI 名の直後に置く形
+  (`firebase --config <絶対パス> use <期待値>`) で案内するので、案内どおりの往復は閉じる。CLI 名の直後に
+  付けた形の扱いと、期待値が未登録のときの固定の操作 (`firebase use <x>`) の判定は変えていない
 - 確かめ方: firebase は、firebase.json でない名前のファイルと symlink を通るパスでも
   `firebase --config <path> use <x>` (CLI 名の直後の形) が効くことを以前のレーンで実測した結果に
   基づく。kubectl の `--kubeconfig` と gcloud の `--configuration` を付けた切替が、それぞれ指定した
@@ -43,7 +45,11 @@
   書いた内容と一致し、旧パスが統合したときから変わっておらず、通常のファイル (symlink は link だけ)
   のときだけ。新パスが旧パスへの symlink のとき (または新パスのディレクトリが `.claude` を指す symlink の
   とき) は、書き込みが旧パスの実体に入るので、旧パスを消すと唯一の実体が消える。この配置では旧パスを
-  消さない (旧パスの名前自体が新パスの実体と同じなら残す)。消せなかった旧パスがあると exit 1 で理由と `rm` の行を出す。フラグを付けない
+  消さない。同じファイルかどうかは名前ではなく inode で比べる (旧パスが symlink でなく、新パスの実体と
+  同じファイルで、ほかに link が無ければ残す)。大文字小文字を区別しない FS (macOS の既定) では
+  `../.CLAUDE` のように綴りの違う名前が同じファイルを指すので、名前の比較では見分けられない
+  (マージ前レビューの指摘)。保険として、消した後に新パスを読み直し、統合した内容でなくなっていれば
+  書き戻して exit 1 にする。消せなかった旧パスがあると exit 1 で理由と `rm` の行を出す。フラグを付けない
   `migrate --commit` は従来どおり旧パスを残す
 - accounts-migrate skill の手順 5 で、旧パスを消すかを AskUserQuestion で確認し、承認されたら
   `migrate --commit --remove-old` を単独のコマンドとして実行するようにした。dispatcher の判定

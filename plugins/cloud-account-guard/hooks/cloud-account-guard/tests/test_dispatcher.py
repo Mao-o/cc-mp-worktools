@@ -838,8 +838,8 @@ class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
                     self.assertIn(self._NOTE, reason)
                     # 空文字・null の entry は案内行にもならない
                     self.assertNotIn("# → \n", reason)
-                    # 末尾に `-c` / `--config` を付けた切替は案内しない (その形は alias を
-                    # 受けないので、alias の行が案内どおりに打っても通らなくなる)
+                    # 末尾に `-c` / `--config` を付けた切替は案内しない (hook はその形の
+                    # option を剥がさないので、案内どおりに打っても通常検証で deny される)
                     self.assertNotRegex(reason, r"firebase use \S+ (?:-c|--config)")
                     lines = self._guided_switches(reason)
                     # 案内した行 (alias の行を含む) はすべて案内どおりに打つと hook を通る
@@ -850,24 +850,24 @@ class TestFirebaseConfigSwitchGuidance(_FirebaseConfigFixture):
                     self._run_switch(lines[0])
                     self.assertIsNone(self._dispatch(with_cli))
 
-    def test_text_derived_switch_forms_pass_the_hook(self):
-        """文から読める形 (末尾に `-c` / `--config` を付けた切替、先頭に付けた切替) も、
-        期待値への切替として hook を通る (v0.27.0。0.26.1 までは末尾の形が通常検証に落ち、
-        切り替える前の状態で deny されていた)。期待値以外への切替は従来どおり検証に回る。"""
+    def test_only_the_leading_config_switch_form_passes_the_hook(self):
+        """CLI 名の直後に `-c` / `--config` を置いた切替 (deny が案内する形) は期待値への切替として
+        hook を通る。末尾に付けた形は剥がさず、0.26.1 と同じく通常検証に回る (切り替える前の
+        状態で deny される)。末尾の形を剥がすと、`--config` のディレクトリの `.firebaserc` で
+        期待値と同じ名前の alias が別の project を指す形が通るため (マージ前レビューの指摘)。"""
         self._write_accounts({"firebase": "right-project"})
         self._record({self.sub: "wrong-project"})
+        with mock.patch("subprocess.run") as run:
+            self.assertIsNone(
+                dispatch("firebase -c sub/firebase.json use right-project", str(self.project_dir))
+            )
+            run.assert_not_called()
         for command in (
             "firebase use right-project -c sub/firebase.json",
             "firebase use right-project --config sub/firebase.json",
             "firebase use right-project --config=sub/firebase.json",
             "firebase use right-project -csub/firebase.json",
-            "firebase -c sub/firebase.json use right-project",
             "firebase use right-project -c sub/firebase.json --non-interactive",
-        ):
-            with self.subTest(command=command), mock.patch("subprocess.run") as run:
-                self.assertIsNone(dispatch(command, str(self.project_dir)))
-                run.assert_not_called()
-        for command in (
             "firebase use wrong-project -c sub/firebase.json",
             "firebase use right-project -c sub/firebase.json --project other",
         ):
@@ -3392,18 +3392,18 @@ class TestChainedSwitchAndWrite(BaseWithTmpProject):
                 self.assertIsNone(result, f"新規に deny された: {command}")
 
     def test_switch_with_landing_spot_options_follows_the_target(self):
-        """着地先を変える context option (`--configuration` / `--kubeconfig` / `--config`) を
-        付けた切替は、切替先が期待値なら「期待値への切替」として連結を止めない (v0.27.0。判定表の
-        変更: 0.26.1 までは deny。先頭に置いた形は 0.26.1 までも止めていなかった)。切替は指定した
-        構成 / ファイルを期待値に寄せるだけで、続く書込はその場で照合される。切替先が期待値で
-        なければ従来どおり deny。照合先を差し替える option (`--context`) は剥がさない。"""
+        """着地先を変える context option (`--configuration` / `--kubeconfig`) を付けた切替は、
+        切替先が期待値なら「期待値への切替」として連結を止めない (v0.27.0。判定表の変更: 0.26.1
+        までは deny。先頭に置いた形は 0.26.1 までも止めていなかった)。切替は指定した構成 /
+        ファイルを期待値に寄せるだけで、続く書込はその場で照合される。切替先が期待値でなければ
+        従来どおり deny。照合先を差し替える option (`--context`) は剥がさない。firebase の末尾の
+        `--config` / `-c` は剥がさない (0.26.1 と同じ判定)。"""
         self._write_accounts({"gcloud": "my-proj", "kubectl": "ctx", "firebase": "proj-dev"})
         for command, service in (
             ("gcloud config set project my-proj --configuration other"
              " && gcloud run deploy svc", "gcloud"),
             ("kubectl config use-context ctx --kubeconfig=/tmp/kc"
              " && kubectl apply -f y.yaml", "kubectl"),
-            ("firebase use proj-dev -c sub/firebase.json && firebase deploy", "firebase"),
         ):
             with self.subTest(command=command):
                 result, _v = self._assert_no_chain_deny(command, service)
@@ -3416,40 +3416,63 @@ class TestChainedSwitchAndWrite(BaseWithTmpProject):
             ("kubectl config use-context ctx --context other"
              " && kubectl apply -f y.yaml", "kubectl"),
             ("firebase use other -c sub/firebase.json && firebase deploy", "firebase"),
+            # firebase は末尾の `-c` を剥がさない (0.26.1 と同じ。alias の解決先を照合しない
+            # 既知の穴と組み合わさるため)。期待値への切替でも連結は deny
+            ("firebase use proj-dev -c sub/firebase.json && firebase deploy", "firebase"),
         ):
             with self.subTest(command=command):
                 self._assert_chain_denied(command, service)
 
-    def test_trailing_config_switch_to_an_alias_then_write_is_denied(self):
-        """firebase の末尾の `-c` / `--config` を剥がす形は、期待値の project ID への切替だけを
-        「期待値への切替」として受け、alias 名への切替は受けない (v0.27.0)。alias は `-c` の
-        ディレクトリの `.firebaserc` で解決され (そこで別の project を指せる)、hook はその解決先を
-        照合しないため。マージ前レビューの再現 (`default` が別の project を指す `.firebaserc` の
-        ディレクトリを `-c` で指し、切替と書込を連結する) が連結の deny に戻ることを固定する。
-        option の無い形と CLI 名の直後に置く形 (deny が案内する形) は従来どおり alias も受ける。"""
-        self._write_accounts({"firebase": {"default": "right-project"}})
+    def test_trailing_config_switch_then_write_keeps_the_0_26_1_verdicts(self):
+        """firebase の末尾の `-c` / `--config` は剥がさないので、切替と書込の連結の判定は 0.26.1 と
+        同じ (CLI 名の直後に置いた形だけが通る)。マージ前レビューの再現: `-c` のディレクトリの
+        `.firebaserc` で、期待値の project ID と同じ名前の alias が別の project を指す。hook は
+        alias の解決先を照合しない (既知の穴) ので、末尾の形を剥がすとこれらが通っていた。
+        CLI 名の直後に置いた形の扱いは 0.26.1 のまま (既知の穴として別途対応)。"""
         evil = Path(self.tmp) / "evil"
         evil.mkdir()
-        (evil / "firebase.json").write_text("{}", encoding="utf-8")
-        (evil / ".firebaserc").write_text(
-            json.dumps({"projects": {"default": "evil-project"}}), encoding="utf-8"
-        )
         cfg = evil / "firebase.json"
-        for command in (
-            f"firebase use default -c {cfg} && firebase deploy -c {cfg}",
-            f"firebase use default --config {cfg} && firebase deploy --config {cfg}",
-            f"firebase use default --config={cfg} && firebase deploy",
-        ):
-            with self.subTest(command=command):
-                self._assert_chain_denied(command, "firebase")
-        for command in (
+        cfg.write_text("{}", encoding="utf-8")
+        (evil / ".firebaserc").write_text(
+            json.dumps({"projects": {"right-project": "evil-project", "default": "evil-project"}}),
+            encoding="utf-8",
+        )
+        allowed = {f"firebase -c {cfg} use right-project && firebase -c {cfg} deploy"}
+        commands = [
             f"firebase use right-project -c {cfg} && firebase deploy -c {cfg}",
-            f"firebase -c {cfg} use default && firebase -c {cfg} deploy",
-            "firebase use default && firebase deploy",
-        ):
-            with self.subTest(command=command):
-                result, _v = self._assert_no_chain_deny(command, "firebase")
-                self.assertIsNone(result, f"新規に deny された: {command}")
+            f"firebase use right-project --config={cfg} && firebase deploy --config={cfg}",
+            f"firebase use right-project --config {cfg} && firebase deploy --config {cfg}",
+            f"firebase use right-project -c {cfg} && firebase deploy",
+            f"firebase use default -c {cfg} && firebase deploy -c {cfg}",
+            f"firebase use right-project -c {cfg} --non-interactive && firebase deploy -c {cfg}",
+            f"firebase use right-project -c {cfg} --json && firebase deploy -c {cfg}",
+            f"firebase use right-project -c {cfg} -c {cfg} && firebase deploy -c {cfg}",
+            f"firebase use -c {cfg} right-project && firebase deploy -c {cfg}",
+            f"firebase use right-project -c {cfg} --project evil-project && firebase deploy",
+            f"firebase use right-project -c {cfg}; firebase deploy -c {cfg}",
+            f"firebase use right-project -c {cfg} || firebase deploy -c {cfg}",
+            f"firebase use right-project -c={cfg} && firebase deploy -c {cfg}",
+            f"firebase use right-project -c{cfg} && firebase deploy -c {cfg}",
+            "firebase use right-project -c && firebase deploy",
+            *sorted(allowed),
+        ]
+        for expected in ("right-project", {"default": "right-project"}):
+            self._write_accounts({"firebase": expected})
+            for command in commands:
+                with self.subTest(command=command, expected=expected), mock.patch(
+                    "services.firebase._resolve", return_value=("right-project", None)
+                ):
+                    try:
+                        result = dispatch(command, str(self.project_dir))
+                    except Exception as e:  # noqa: BLE001
+                        self.fail(f"例外が漏れた: {e!r}")
+                    if command in allowed:
+                        self.assertIsNone(result, command)
+                    else:
+                        self.assertIsNotNone(result, f"allow された: {command}")
+                        self.assertEqual(
+                            result["hookSpecificOutput"]["permissionDecision"], "deny"
+                        )
 
     # --- 例外は deny 側に倒す (床) ---
 

@@ -248,14 +248,13 @@ service ごとに走査し、次の並びを deny する:
   唯一の出口**になったので、案内形に `--quiet` を 1 つ足しただけで deny になる。
   許容は「**着地先を変えない**」と言える option だけの allow-list
   (`--project` / `--context` は照合先を変えるので入れない)。blanket な option 許容には
-  しない。v0.27.0 で、着地先を変える context option (`--configuration` / `--kubeconfig` /
-  `--config` / `-c`) は self-remediation に限って剥がすようにした (`_LANDING_OPTIONS_WITH_VALUE`。
-  deny がその option を付けた切替を案内するため。inert 判定と firebase の `is_pin_action` には
-  広げない)。根拠: 切替先は期待値に限られ、その option で選んだ構成 / ファイルの状態を期待値に
-  寄せるだけで、続くコマンドはどの構成 / ファイルを使うものも実行時に照合される。CLI 名の直後に
-  置いた形は global option として剥がされて以前から通っていたので、末尾の形を揃えただけでもある。
-  firebase は alias の解決先を照合しない (既知の穴) ので、末尾の `-c` / `--config` を剥がす形は
-  期待値の project ID への切替に限る (alias 名は受けない。0.27.0 の節を参照)
+  しない。v0.27.0 で、着地先を変える context option (`--configuration` / `--kubeconfig`) は
+  self-remediation に限って剥がすようにした (`_LANDING_OPTIONS_WITH_VALUE`。deny がその option を
+  付けた切替を案内するため。inert 判定には広げない)。根拠: 切替先は期待値に限られ、その option で
+  選んだ構成 / ファイルの状態を期待値に寄せるだけで、続くコマンドはどの構成 / ファイルを使うものも
+  実行時に照合される。CLI 名の直後に置いた形は global option として剥がされて以前から通っていたので、
+  末尾の形を揃えただけでもある。firebase の末尾の `-c` / `--config` は剥がさない (alias の解決先を
+  照合しない既知の穴と組み合わさるため。0.27.0 の節を参照)。deny は CLI 名の直後に置く形で案内する
 - **判定に CLI を呼ばない** (cache / self-remediation / verify より**前**で deny する)。
   現在値が何であっても切替後の状態は検証できないので verify の結果で判定が変わる
   余地がなく、確実に deny になるコマンドで実時間予算 (`core/budget.py`) を使うと、
@@ -1456,8 +1455,8 @@ verify() は CLI が出した現在値 (前後の空白を除いた値) と期�
   に当たらず通常検証に落ちる (そのディレクトリの切替先が期待値と違うあいだは deny。安全側。
   `is_self_remediation` の剥がす option を広げるのは判定表の変更なので、kubectl の
   `--kubeconfig` / gcloud の `--configuration` と合わせて別に扱う。内部バックログ)。
-  **0.27.0 で扱った** (下の「0.27.0」の節。deny は `firebase --config <path> use <期待値>` を
-  案内し、末尾の形も self-remediation に当たる)
+  **0.27.0 で扱った** (下の「0.27.0」の節。deny は CLI 名の直後に置く `firebase --config <path>
+  use <期待値>` を案内する。末尾の形は剥がさず、通常検証に落ちるまま)
 - 値を静的に解決できない (`$VAR` 等) ときは、他の context option と同じく既定の root で
   照合する (`cli_options.find_context_options`。0.17.1 までと同じ)
 - 確認: detectProjectRoot と `_config_file` を 11 の形 (相対・絶対・`..` を含むもの・
@@ -1734,8 +1733,8 @@ cache の状態ファイルのうち成功 cache の entry と epoch は、hook 
 - `--kubeconfig X` / `--configuration X` / `--config X` を付けたコマンドは、X の状態で動く。
   0.26.1 までの deny は option の無い切替 (既定の kubeconfig / アクティブな構成 / プロジェクトの
   ディレクトリの切替先に書く) を案内するか (kubectl / gcloud)、文で案内していた (firebase。0.18.0)。
-  案内どおりにしても元のコマンドは同じ deny に戻り、同じ option を末尾に付けた切替は
-  self-remediation に当たらず deny、CLI 名の直後に付けた形だけが通っていた (揃っていない)
+  案内どおりにしても元のコマンドは同じ deny に戻り、kubectl / gcloud では同じ option を末尾に
+  付けた切替は self-remediation に当たらず deny、CLI 名の直後に付けた形だけが通っていた (揃っていない)
 - 案内: kubectl `kubectl config use-context <期待値> --kubeconfig <X>`、gcloud
   `gcloud config set <key> <期待値> --configuration <X>`、firebase
   `firebase --config <X の絶対パス> use <期待値>`。値が案内に使える形でなければ文で案内する
@@ -1745,18 +1744,20 @@ cache の状態ファイルのうち成功 cache の entry と epoch は、hook 
   効くのはこの形。内部バックログの実測。作業ディレクトリにも依らない)。kubectl のパスは書かれた
   まま (相対パスは元のコマンドと同じ作業ディレクトリで解決される)
 - 判定表の変更: `is_self_remediation` が `_LANDING_OPTIONS_WITH_VALUE` (kubectl `--kubeconfig`、
-  gcloud `--configuration`、firebase `--config` / `-c`) を剥がす。末尾の形の deny → allow。連結規則
+  gcloud `--configuration`) を剥がす。末尾の形の deny → allow。連結規則
   (`_is_expected_switch`) も同じ述語なので、`<期待値への切替 + その option> && <書込>` は止めない。
   kubectl / gcloud で誤 allow を開かない理由: 切替先は期待値に限られ、X の状態を期待値に寄せるだけ。
   続く書込は X を使うものも使わないものも、その場の状態で照合される (X を使う書込は切替前の X で
   照合されるので、起きうるのは誤 deny だけ)。CLI 名の直後の形は以前から同じ扱い
-- firebase は例外: `firebase use <x> -c X` の x は X のディレクトリの `.firebaserc` で alias として
-  解決され、hook は alias の解決先を照合しない (既知の穴。別途対応)。末尾の `-c` を剥がす経路で
-  alias をキーとして受けると、`firebase use default -c X && firebase deploy -c X` (X の `.firebaserc` の
-  `default` が別の project) が新しく通っていた (マージ前レビューの指摘)。そのため `-c` / `--config` を
-  剥がして初めて `firebase use <x>` になる形は、期待値の project ID そのものだけを受ける。剥がさずに
-  当たる形 (option なし・CLI 名の直後に置く形) は従来どおり alias も受ける。deny が案内するのは
-  CLI 名の直後に置く形 (`_config_use_prefix`) なので、案内の往復はこの制限に掛からない
+- firebase は末尾の `-c` / `--config` を剥がさない (判定は 0.26.1 と同じ)。`firebase use <x> -c X` の
+  x は X のディレクトリの `.firebaserc` で alias として解決され、hook は alias の解決先を照合しない
+  (既知の穴。別途対応)。剥がすと、この穴と組み合わさって通る形が構文の上で増える: alias をキーと
+  して受けると `firebase use default -c X && firebase deploy -c X` (X の `.firebaserc` の `default` が別の
+  project) が、project ID だけを受けても `firebase use right-project -c X && ...` (X の `.firebaserc` で
+  期待値と同じ名前の alias が別の project を指す) が通っていた (マージ前レビューの 2 ラウンドの指摘)。
+  deny が案内するのは CLI 名の直後に置く形 (`_config_use_prefix`) で、dispatcher が global option として
+  剥がしてから判定するので、案内の往復は閉じる。CLI 名の直後に置く形が同じ穴を持つことは変えていない
+  (既知の穴として別に扱う)
 - 推論のまま残したもの: gcloud の `--configuration X` を付けた `config set` が構成 X に書くこと
   (gcloud の global flag の仕様からの推論。このレーンでは実機の gcloud を起動していない)。
   kubectl の `--kubeconfig` も同じく推論 (kubectl の global flag)。firebase は内部バックログの実測
@@ -1775,11 +1776,16 @@ cache の状態ファイルのうち成功 cache の entry と epoch は、hook 
   明示フラグ `--remove-old` を足し、skill が削除の確認 (AskUserQuestion) を取ってから付ける
 - 消す条件: 新パスを読み直した内容が書いた内容と一致し、旧パスを読み直した内容が統合の判定に
   使った内容と一致し、通常のファイル (symlink は link だけ消す) であること。加えて、旧パスの名前
-  (親だけを解決し、最後の要素は解決しない) が新パスの実体 (`realpath`) と同じなら消さない。新パスが
-  旧パスへの symlink のときや、`.claude/cloud-account-guard` が `.claude` への symlink のときは、
-  書き込みが旧パスの実体に入り、上の照合はすべて一致するので、unlink が唯一の実体を消していた。
-  `os.path.samefile` にしないのは、hard link と「旧パス → 別の実体」の symlink は unlink しても
-  実体が残る (消してよい) ため。消せなかった旧パスは exit 1 と `rm` の行で手での削除を案内する
+  そのもの (`lstat`) が symlink でなく、新パスの実体 (`stat`) と同じ inode で、link が他に無い
+  (`st_nlink <= 1`) なら消さない。新パスを stat できないときも消さない。新パスが旧パスへの symlink の
+  ときや、`.claude/cloud-account-guard` が `.claude` への symlink のときは、書き込みが旧パスの実体に入り、
+  上の照合はすべて一致するので、unlink が唯一の実体を消していた。名前 (realpath の文字列) で比べない
+  のは、大文字小文字を区別しない FS (macOS の既定の APFS) で `../.CLAUDE` のような綴りの違う名前が同じ
+  ファイルを指すため (マージ前レビューの 2 ラウンド目の指摘)。hard link (link が他にある) と「旧パス →
+  別の実体」の symlink は unlink しても実体が残るので消してよい
+- 保険: unlink の後に新パスを読み直し、統合した内容でなくなっていれば新パスに書き戻して exit 1 に
+  する。判定をすり抜ける配置が他にあってもデータは残る。消せなかった旧パスは exit 1 と `rm` の行で
+  手での削除を案内する
 
 ## 既知の制限
 

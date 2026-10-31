@@ -146,6 +146,7 @@ import errno
 import json
 import os
 import shlex
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -1904,9 +1905,11 @@ def _remove_old_sources(
     - 旧パスを読み直した内容が、統合の判定に使った内容と一致する (判定の後で書き換わって
       いない。一致しなければ、その値は新パスに入っていない可能性がある)
     - 通常のファイル (またはそれを指す symlink。symlink は link だけを消す)
+    - 新パスの唯一の実体ではない (inode で比べる)
 
     消せなかった旧パスがあれば exit 1 にし、`rm` の行で手での削除を案内する (新パスは
-    書き込み済み)。
+    書き込み済み)。消した後に新パスの内容が統合した内容でなくなっていたら、書き戻して
+    exit 1 にする (判定をすり抜けたときの保険)。
     """
     try:
         if _load_existing(new_path) != merged:
@@ -1921,17 +1924,30 @@ def _remove_old_sources(
     kept: list[tuple[str, Path, str]] = []
     # 新パスが旧パスへの symlink のとき (またはディレクトリが `.claude` への symlink の
     # とき)、書き込みは symlink をたどって旧パスの実体に入る。上の照合はどちらも一致する
-    # ので、ここで旧パスを unlink すると唯一の実体が消える。旧パス自身が指す名前 (親だけを
-    # 解決し、最後の要素は解決しない = symlink なら link 自体) が新パスの実体と同じなら
-    # 消さない。hard link と「旧パス → 別の実体」の symlink は unlink しても実体が残るので、
-    # samefile ではなくこの比較にする。
-    new_real = os.path.realpath(new_path)
+    # ので、ここで旧パスを unlink すると唯一の実体が消える。名前 (realpath の文字列) では
+    # 比べない: 大文字小文字を区別しない FS (macOS の既定) では `../.CLAUDE` のように綴りの
+    # 違う名前が同じファイルを指す。inode で比べ、旧パスの名前そのもの (lstat) が symlink で
+    # なく、新パスの実体 (stat) と同じファイルで、ほかに link が無いときは消さない。symlink の
+    # 旧パスは link だけが消え、hard link が他にあれば実体が残るので、どちらも消してよい。
+    # 新パスを stat できないときも消さない側に倒す。
+    try:
+        new_st: os.stat_result | None = os.stat(new_path)
+    except OSError:
+        new_st = None
     for kind, path in retained:
         if not os.path.isfile(path):
             kept.append((kind, path, "通常のファイルではないため"))
             continue
-        own = os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
-        if own == new_real:
+        try:
+            old_lst = os.lstat(path)
+        except OSError as e:
+            kept.append((kind, path, f"確かめられなかったため ({e.strerror or type(e).__name__})"))
+            continue
+        if new_st is None or (
+            not stat.S_ISLNK(old_lst.st_mode)
+            and os.path.samestat(old_lst, new_st)
+            and new_st.st_nlink <= 1
+        ):
             kept.append((kind, path, "新パスの実体と同じファイルのため"))
             continue
         try:
@@ -1948,6 +1964,28 @@ def _remove_old_sources(
             continue
         removed.append(path)
 
+    if removed and not _new_path_survived(new_path, merged):
+        # 保険: 上の判定をすり抜けて新パスの実体を消してしまったとき (想定していない
+        # symlink の組み合わせなど)、統合した内容を新パスに書き戻してデータを残す。
+        print(
+            "error: 旧パスを削除した後、新パスの内容が統合した内容と一致しなくなりました"
+            " (新パスが削除した旧パスと同じファイルを指していた可能性があります)。",
+            file=stderr,
+        )
+        for path in removed:
+            print(f"  - 削除: {_p(path)}", file=stderr)
+        try:
+            _write_json(new_path, merged)
+        except (OSError, _BuilderError) as e:
+            print(f"error: 新パスへの書き戻しに失敗しました: {_p(e)}", file=stderr)
+            return 1
+        print(
+            f"統合した内容を {_p(new_path)} に書き戻しました。"
+            "新パスと旧パスの symlink の行き先を確かめてください。",
+            file=stderr,
+        )
+        return 1
+
     if removed:
         print("\n旧パスを削除しました:", file=stdout)
         for path in removed:
@@ -1960,6 +1998,14 @@ def _remove_old_sources(
         _print_rm_lines([(kind, path) for kind, path, _why in kept], stderr)
         return 1
     return 0
+
+
+def _new_path_survived(new_path: Path, merged: dict[str, Any]) -> bool:
+    """旧パスを消した後も、新パスを読み直した内容が統合した内容のままなら True。"""
+    try:
+        return _load_existing(new_path) == merged
+    except _BuilderError:
+        return False
 
 
 def _auto_switch_missing_file_message(target: _Target) -> str:

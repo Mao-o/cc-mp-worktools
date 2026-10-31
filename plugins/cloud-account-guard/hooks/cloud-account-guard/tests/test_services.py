@@ -2591,37 +2591,6 @@ class TestFirebaseSelfRemediation(unittest.TestCase):
         self.assertTrue(firebase.is_self_remediation("firebase use proj-dev", expected))
         self.assertFalse(firebase.is_self_remediation("firebase use staging", expected))
 
-    def test_trailing_config_accepts_only_the_project_id(self):
-        """末尾の `-c` / `--config` を剥がして受ける形は、期待値の project ID だけを受け、alias
-        名は受けない (v0.27.0)。alias は `--config` のディレクトリの `.firebaserc` で解決されるが、
-        hook はその解決先を照合しないため (マージ前レビューの指摘)。option の無い形は従来どおり
-        alias も受ける。"""
-        expected = {"default": "proj-dev", "prod": "proj-prod"}
-        for option in ("-c sub/firebase.json", "--config sub/firebase.json",
-                       "--config=sub/firebase.json", "-csub/firebase.json"):
-            with self.subTest(option=option):
-                self.assertTrue(
-                    firebase.is_self_remediation(f"firebase use proj-dev {option}", expected)
-                )
-                self.assertTrue(
-                    firebase.is_self_remediation(f"firebase use proj-prod {option}", expected)
-                )
-                self.assertFalse(
-                    firebase.is_self_remediation(f"firebase use default {option}", expected)
-                )
-                self.assertFalse(
-                    firebase.is_self_remediation(
-                        f"firebase use prod {option} --non-interactive", expected
-                    )
-                )
-        self.assertTrue(firebase.is_self_remediation("firebase use default", expected))
-        self.assertTrue(
-            firebase.is_self_remediation("firebase use default --non-interactive", expected)
-        )
-        self.assertTrue(
-            firebase.is_self_remediation("firebase use my-proj -c sub/firebase.json", "my-proj")
-        )
-
     def test_use_with_extra_args_falls_through(self):
         self.assertFalse(firebase.is_self_remediation(
             "firebase use my-proj --add", "my-proj"))
@@ -2638,11 +2607,12 @@ class TestFirebaseSelfRemediation(unittest.TestCase):
                 self.assertTrue(firebase.is_self_remediation(candidate, "my-proj"))
 
     def test_options_that_move_the_landing_spot_fall_through(self):
-        """`--project` / `-P` は照合先を差し替え、`--token` は認証主体を変えるので
-        allow-list に入れない。期待値以外への `--config` 付きの切替も False。"""
+        """`--project` / `-P` は照合先を差し替え、`--config` は project root
+        (firebase.json) を変え、`--token` は認証主体を変えるので allow-list に入れない。"""
         for candidate in (
             "firebase use my-proj --project other",
             "firebase use my-proj -P other",
+            "firebase use my-proj --config other/firebase.json",
             "firebase use my-proj --token t",
             "firebase use other --config other/firebase.json",
             "firebase use my-proj --config",  # 値の欠けた option
@@ -2650,19 +2620,24 @@ class TestFirebaseSelfRemediation(unittest.TestCase):
             with self.subTest(candidate=candidate):
                 self.assertFalse(firebase.is_self_remediation(candidate, "my-proj"))
 
-    def test_config_option_on_the_switch_is_accepted(self):
-        """`--config` / `-c` を付けた期待値への切替は self-remediation (v0.27.0。deny が案内する
-        往復を閉じる。判定表の変更: 0.26.1 までは False)。is_pin_action には広げない。"""
+    def test_trailing_config_option_on_the_switch_falls_through(self):
+        """末尾の `--config` / `-c` は剥がさない (0.26.1 と同じ判定)。切替の名前は `--config` の
+        ディレクトリの `.firebaserc` で alias として解決され、hook はその解決先を照合しないため、
+        剥がすと期待値と同じ名前の alias で別の project に切り替える形が通る (マージ前レビューの
+        指摘)。project ID・alias のどちらでも、scalar・dict のどちらでも False。"""
         for candidate in (
             "firebase use my-proj --config other/firebase.json",
             "firebase use my-proj --config=other/firebase.json",
             "firebase use my-proj -c other/firebase.json",
             "firebase use my-proj -cother/firebase.json",
+            "firebase use my-proj -c=other/firebase.json",
             "firebase use my-proj -c /abs/firebase.json --non-interactive",
+            "firebase use -c other/firebase.json my-proj",
+            "firebase use default -c other/firebase.json",
         ):
             with self.subTest(candidate=candidate):
-                self.assertTrue(firebase.is_self_remediation(candidate, "my-proj"))
-                self.assertTrue(
+                self.assertFalse(firebase.is_self_remediation(candidate, "my-proj"))
+                self.assertFalse(
                     firebase.is_self_remediation(candidate, {"default": "my-proj"})
                 )
                 self.assertFalse(firebase.is_pin_action(candidate))

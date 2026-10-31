@@ -813,17 +813,17 @@ deny される remediation loop を防ぐため、**accounts.local.json の期�
 `--json`、`gh` はオプションの順序・`=` 形・短縮形すべて。
 
 **切替の着地先を変える context option も、切替先が期待値なら同じ扱いになる (v0.27.0)。**
-gcloud の `--configuration`、kubectl の `--kubeconfig`、firebase の `--config` / `-c` は、
-その option で選んだ構成 / ファイル / project root の状態を書き換える。これらを付けたコマンドの
-deny は同じ option を付けた切替を案内するので (`gcloud config set project <期待値>
---configuration <構成>` / `kubectl config use-context <期待値> --kubeconfig <ファイル>` /
-`firebase --config <ファイル> use <期待値>`)、その形を期待値への切替として通す。0.26.1 までは
-末尾に付けた形は通常検証に落ちて、案内どおりにしても往復が閉じなかった (CLI 名の直後に付けた形は
-以前から通っていた)。その構成 / ファイルを使うコマンドも使わないコマンドも実行時に照合される。
-ただし firebase の切替の名前は、`--config` のファイルのあるディレクトリの `.firebaserc` で alias として
-解決され、hook はその解決先を照合しない (既知の穴。別途対応)。そのため firebase で末尾の
-`--config` / `-c` を付けた形は、期待値の project ID そのものへの切替だけを通し、alias 名への切替は
-通常検証に落とす (CLI 名の直後に付けた形の扱いは変えていない)。
+gcloud の `--configuration`、kubectl の `--kubeconfig` は、その option で選んだ構成 / ファイルの
+状態を書き換える。これらを付けたコマンドの deny は同じ option を付けた切替を案内するので
+(`gcloud config set project <期待値> --configuration <構成>` /
+`kubectl config use-context <期待値> --kubeconfig <ファイル>`)、その形を期待値への切替として通す。
+0.26.1 までは末尾に付けた形は通常検証に落ちて、案内どおりにしても往復が閉じなかった (CLI 名の直後に
+付けた形は以前から通っていた)。その構成 / ファイルを使うコマンドも使わないコマンドも実行時に照合される。
+firebase は末尾の `--config` / `-c` を剥がさない (末尾に付けた切替は通常検証に落ちる)。firebase の
+切替の名前は `--config` のファイルのあるディレクトリの `.firebaserc` で alias として解決され、hook は
+その解決先を照合しない (既知の穴。別途対応) ので、剥がすとこの穴と組み合わさって通る形が増えるため。
+deny は CLI 名の直後に置く形 (`firebase --config <ファイルの絶対パス> use <期待値>`) で案内し、この形は
+以前から期待値への切替として通る。
 
 **それ以外のオプションは対象外** (許可オプションの allow-list で、コマンドの allow-list では
 ない)。`gcloud config set project <期待値> --flags-file f.yaml` (任意の flag を注入できる)、
@@ -1082,7 +1082,8 @@ dispatcher は以下の順に accounts.local.json を探す:
 `/cloud-account-guard:accounts-migrate` で統合するか、不要な方を手動削除する。
 `migrate --commit` は旧パスを消さないので、消すまでこの deny は続く。skill は統合の後に
 旧パスを消すかを確認し、承認されたら `migrate --commit --remove-old` で消す (v0.27.0。
-builder は、新パスが書いた内容のとおりで、旧パスが統合したときから変わっていないときだけ消す)。
+builder は、新パスが書いた内容のとおりで、旧パスが統合したときから変わっておらず、新パスの唯一の
+実体でないときだけ消す。消した後に新パスが統合した内容でなくなっていれば書き戻して exit 1 にする)。
 
 **stat できない配置パスは「ある (が読めない)」に数える** (v0.19.1)。途中のディレクトリに
 権限が無い・長すぎる名前を指す symlink・symlink のループなどで、そこにファイルがあるかどうかを
