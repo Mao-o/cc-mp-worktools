@@ -250,7 +250,7 @@ claim に現れない (マージ前レビューの指摘)。symlink の列挙は
 root から 3 階層の BFS scandir (5000 エントリ / 500 件で打ち切り)。Stop の git 予算は
 rev-parse 2秒×2 (worktree_root + head_exists) + ls-files (symlink) 10秒
 + ls-files (untracked) 10秒 + diff 収集 30秒 + 予算判定後の最後の 1 パス分 diff 5秒
-= 59s (詳細は `gitscan.py` モジュール docstring の予算表)。
++ HEAD の無い repo ではその 1 パスの空ツリーの解決 2秒 (0.18.0) = 61s (詳細は `gitscan.py` モジュール docstring の予算表)。
 
 **予算** は `_collect_diffs` がファイル単位で積む。0.4.1 までは結合後に末尾を切っていたため、
 切り落とされたファイルの hash まで記録され「Cursor が見ていないのにレビュー済み」になっていた。
@@ -594,9 +594,44 @@ xattr の書き込みは ctime だけを動かすので、比較に入れると*
 
 ### 送る差分は窓全体で 1 本
 
-`git diff <窓を開いた時点の HEAD> <最後の new> -- <path>`。commit ごとに分けると
+`git diff-tree -r -p <窓を開いた時点の HEAD> <最後の new> -- <path>`。commit ごとに分けると
 等価性が成り立たない (窓の途中の状態は Stop からは見えない)。副次的に `range_paths` も
-`git diff --name-only` 1 回で済む。
+`git diff-tree -r -M --name-only` 1 回で済む。
+
+### 差分は plumbing で取る (0.18.0)
+
+この hook の git は `.git/index` を書かない。応答の途中のレビューは背景で Claude 自身の
+`git add` / `git commit` と並行して走るので、index を書き直すと `index.lock` でぶつかる。
+porcelain の `git diff` は作業ツリーと比べると、stat 情報だけが変わったファイルがあるとき index を
+書き直し、`GIT_OPTIONAL_LOCKS=0` でも止まらない (git 2.50.1 実測)。そこで:
+
+| 呼び出し | 0.17.0 まで | 0.18.0 |
+|---|---|---|
+| `path_diff` (tracked) | `git diff HEAD -- <rel>` | `git diff-index -p HEAD -- <rel>` |
+| `path_diff` (HEAD の無い repo) | `git diff --cached -- <rel>` | `git diff-index -p --cached <空ツリー> -- <rel>` |
+| `path_diff` (untracked) | `git diff --no-index` | 同じ + 設定を打ち消すオプション (下) |
+| `changed_vs_head` / `changed_vs_commit` | `git diff --name-only <base>` | `git diff-index --numstat <base>` |
+| `range_paths` | `git diff --name-only <old> <new>` | `git diff-tree -r -M --name-only` |
+| `range_diff` | `git diff <old> <new> -- <rel>` | `git diff-tree -r -p` |
+| `status_snapshot` | `git status` | 同じ (`_git` が `GIT_OPTIONAL_LOCKS=0` を付け、stat の書き戻しを止める) |
+
+- **既定の設定では出力は 1 バイトも変わらない**。実 repo の clone で、stat だけの変更・内容の変更・
+  mode の変更・バイナリ・削除・新規のファイル 202 件の `path_diff`、94 commit (rename 168 件を含む)
+  の `range_paths` と 972 組の `range_diff` を旧版と突き合わせて一致した
+- stat だけが変わったファイルは、`diff-index` の `--name-only` では「変更あり」に出る (index を
+  refresh しないため)。`--numstat` は内容を比べるので落ちる。mode だけの変更は `0 0` の行として残る
+- 変わるのは porcelain だけが読む設定 (`diff.noprefix` / `diff.mnemonicPrefix` /
+  `diff.srcPrefix` / `diff.dstPrefix` / `diff.context` / `diff.interHunkContext` / textconv /
+  `diff.external` / `diff.renames`) が効かなくなること。textconv を通さないので、レビュアーには
+  変換前の本文が渡る
+- **Stop と commit レビューの本文は同じ書式でなければならない** (commit レビューは本文の hash で
+  「Stop がレビュー済み」を判定する)。`--no-index` には plumbing の版が無いので、本文を変える設定を
+  `--no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/` で打ち消す (`gitscan._NO_INDEX_NEUTRAL`)。
+  床は `tests/test_gitscan.py::TestStopAndCommitReviewShareOneFormat` (上の設定を 1 つずつ置いて、
+  Stop の本文と commit 後の `range_diff` が一致する)
+- index を書かないことの床は `tests/test_gitscan.py::TestDiffDoesNotWriteTheIndex`
+  (`.git/index` の mtime と中身が全部の走査の前後で変わらない。porcelain なら書く repo の形であることを
+  陽性対照で確かめる)
 
 ### P1 の集合を読む順序と、pending に積む側の guard
 
@@ -755,13 +790,14 @@ in-flight の TTL の 2 倍で、hook の timeout より長い (同じテスト�
 - 閾値以上の応答の途中のレビューがロックを握っている間の Bash の commit レビューは、他セッションの
   レビュー中と同じく見送る (`NOTICE_LOCK_HELD`。窓は 1 回きり)。閾値未満の計測はロックを取らない
   ので、この見送りは起きない
-- 背景で走る `git diff` は index の stat 情報を書き戻すことがあり (refresh)、同じ時刻に Claude が
-  打つ `git add` / `git commit` と `index.lock` でぶつかりうる (Stop も同じ git を呼ぶが、応答の
-  途中のレビューは Claude のツール呼び出しと時間が重なる)。plumbing の呼び方に変えるのは別の課題
 - 計測は、同じツール呼び出しの同期 hook が pending に積む前に走りうるので、その呼び出しの分は
   1 手遅れて次の判定に入る
-- 背景 hook が kill されると、その実行の印が `MIDTURN_STALE_SEC` の間残り、その間に来た Stop が
-  ロックを取れなければ、実際には誰も引き継がないのに `NOTICE_HANDED_OFF` を出しうる
+- 背景 hook が kill されたときの印は、印を立てたプロセス (run id の先頭の pid) が居ないと
+  言い切れれば (`ProcessLookupError`) すぐ失効する (0.18.0。in-flight の claim と同じ
+  `state._owner_gone`)。0.17.0 までは `MIDTURN_STALE_SEC` (30 分) の間残り、その間にロックを
+  取れなかった Stop が、誰も引き継がないのに `NOTICE_HANDED_OFF` を出していた。残る窓は pid が
+  別のプロセスに再利用された場合だけで、そのときは生きているとみなし `MIDTURN_STALE_SEC` で失効する。
+  床は `tests/test_midturn_flow.py::TestDeadMarkOwner` (別プロセスで印を立て、kill の前後に Stop を挟む)
 - サブエージェントのツール呼び出しで発火した背景 hook の exit 2 が、親とサブエージェントの
   どちらを起こすかは公式 docs に記述が無く、実機でも未確認
 - 同じ PostToolUse の同期 hook (pending に積む側) と並列に起動するので、直前の編集がまだ

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -463,6 +464,239 @@ class TestBlobDigests(GitScanTestCase):
         self.assertEqual(
             list(gitscan._parse_batch_blobs(out, wanted)), ["a.txt"]
         )
+
+
+class PlumbingTestCase(GitScanTestCase):
+    """index を書かない git で差分を取る (0.18.0)。repo の形は次の 6 種を 1 つずつ持つ:
+
+    - `stat.txt`: stat 情報だけが変わった (内容は commit と同じ)
+    - `seed.txt`: 内容を変えた
+    - `run.sh`: mode だけを変えた (+x)
+    - `blob.bin`: バイナリの内容を変えた
+    - `gone.txt`: 作業ツリーから消した
+    - `fresh.txt`: untracked
+
+    stat だけの変更は「index に記録した stat と違う」ことが要点なので、まず全ファイルの mtime を
+    過去にして index に記録させ (index の書き込みはこの準備だけ)、そのあと `stat.txt` の mtime を
+    未来に動かす。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        write(self.repo, "stat.txt", "same\n")
+        write(self.repo, "run.sh", "echo hi\n")
+        write(self.repo, "gone.txt", "bye\n")
+        with open(os.path.join(self.repo, "blob.bin"), "wb") as f:
+            f.write(b"\x00\x01binary\x00")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "fixture")
+        past = time.time() - 60
+        for rel in ("seed.txt", "stat.txt", "run.sh", "gone.txt", "blob.bin"):
+            os.utime(os.path.join(self.repo, rel), (past, past))
+        git(self.repo, "update-index", "-q", "--really-refresh")
+
+        future = time.time() + 60
+        os.utime(os.path.join(self.repo, "stat.txt"), (future, future))
+        write(self.repo, "seed.txt", "alpha\nBETA\ngamma\n")
+        os.chmod(os.path.join(self.repo, "run.sh"), 0o755)
+        with open(os.path.join(self.repo, "blob.bin"), "wb") as f:
+            f.write(b"\x00\x02binary\x00")
+        os.remove(os.path.join(self.repo, "gone.txt"))
+        write(self.repo, "fresh.txt", "brand new\n")
+        self.tracked = ["stat.txt", "seed.txt", "run.sh", "blob.bin", "gone.txt"]
+
+    def index_state(self) -> tuple[int, bytes]:
+        path = os.path.join(self.repo, ".git", "index")
+        with open(path, "rb") as f:
+            return os.stat(path).st_mtime_ns, f.read()
+
+
+class TestDiffDoesNotWriteTheIndex(PlumbingTestCase):
+    """差分の取得で `.git/index` を書かない (背景のレビューが Claude の `git commit` と
+    `index.lock` でぶつからない)。"""
+
+    def test_every_scan_leaves_the_index_alone(self):
+        before = self.index_state()
+        head = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        calls = {
+            "path_diff tracked": lambda: [
+                gitscan.path_diff(self.repo, rel, untracked=False, has_head=True)
+                for rel in self.tracked
+            ],
+            "path_diff untracked": lambda: gitscan.path_diff(
+                self.repo, "fresh.txt", untracked=True, has_head=True
+            ),
+            "changed_vs_head": lambda: gitscan.changed_vs_head(self.repo, self.tracked),
+            "changed_vs_commit": lambda: gitscan.changed_vs_commit(self.repo, head, self.tracked),
+            "range_paths": lambda: gitscan.range_paths(self.repo, f"{head}~1", head),
+            "range_diff": lambda: gitscan.range_diff(self.repo, f"{head}~1", head, "run.sh"),
+            "status_snapshot": lambda: gitscan.status_snapshot(self.repo),
+            "untracked_among": lambda: gitscan.untracked_among(self.repo, ["fresh.txt"]),
+            "flagged_index_entries": lambda: gitscan.flagged_index_entries(self.repo, self.tracked),
+            "symlink_map": lambda: gitscan.symlink_map(self.repo),
+        }
+        for label, call in calls.items():
+            with self.subTest(label):
+                call()
+                self.assertEqual(self.index_state(), before, f"{label} が index を書いた")
+
+    def test_the_fixture_is_one_that_porcelain_would_rewrite(self):
+        """陽性対照: この repo の形では porcelain の `git diff` が index を書く (前提が生きている)。"""
+        before = self.index_state()
+        git(self.repo, "diff", "--no-color", "HEAD", "--", "stat.txt")
+        self.assertNotEqual(self.index_state(), before)
+
+
+class TestPlumbingOutputMatchesPorcelain(PlumbingTestCase):
+    """plumbing に替えても、既定の設定では差分の本文と集合が porcelain と同じ。"""
+
+    def porcelain(self, *args: str) -> str:
+        # 比較のためだけに porcelain を流す (index を書くので、比べる側より後に呼ぶ)
+        return git(self.repo, "diff", "--no-color", *args).stdout
+
+    def test_path_diff_is_byte_identical(self):
+        mine = {rel: gitscan.path_diff(self.repo, rel, untracked=False, has_head=True)
+                for rel in self.tracked}
+        for rel in self.tracked:
+            with self.subTest(rel):
+                self.assertEqual(mine[rel], self.porcelain("HEAD", "--", rel))
+        self.assertEqual(mine["stat.txt"], "", "stat だけの変更は空")
+        self.assertIn("new mode 100755", mine["run.sh"])
+        self.assertIn("Binary files", mine["blob.bin"])
+        self.assertIn("deleted file mode", mine["gone.txt"])
+
+    def test_changed_sets_drop_stat_only_changes(self):
+        head = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        expected = {"seed.txt", "run.sh", "blob.bin", "gone.txt"}
+        self.assertEqual(gitscan.changed_vs_head(self.repo, self.tracked), expected)
+        self.assertEqual(gitscan.changed_vs_commit(self.repo, head, self.tracked), expected)
+        porcelain = set(self.porcelain("--name-only", "-z", "HEAD", "--", *self.tracked)
+                        .split("\0")) - {""}
+        self.assertEqual(porcelain, expected)
+
+    def test_changed_sets_keep_names_with_tabs_and_spaces(self):
+        odd = ["tab\tname.txt", "space name.txt"]
+        for rel in odd:
+            write(self.repo, rel, "v1\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "odd")
+        for rel in odd:
+            write(self.repo, rel, "v2\n")
+        self.assertEqual(gitscan.changed_vs_head(self.repo, odd), set(odd))
+
+    def test_changed_sets_report_failure_as_none(self):
+        self.assertIsNone(gitscan.changed_vs_commit(self.repo, "0" * 40, self.tracked))
+        with mock.patch.object(gitscan, "_git", return_value=None):
+            self.assertIsNone(gitscan.changed_vs_head(self.repo, self.tracked))
+
+    def test_range_paths_and_range_diff_match_porcelain(self):
+        git(self.repo, "add", "-A")
+        git(self.repo, "mv", "seed.txt", "moved.txt")
+        os.makedirs(os.path.join(self.repo, "sub"))
+        write(self.repo, "sub/deep.txt", "deep\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "range")
+        head = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        base = f"{head}~1"
+        names = gitscan.range_paths(self.repo, base, head)
+        expected = sorted(set(self.porcelain("--name-only", "-z", base, head).split("\0")) - {""})
+        self.assertEqual(sorted(names), expected)
+        self.assertIn("moved.txt", names)
+        self.assertNotIn("seed.txt", names, "rename は新しいパスだけ (porcelain の既定と同じ)")
+        self.assertIn("sub/deep.txt", names, "subtree の中まで降りる")
+        for rel in expected:
+            with self.subTest(rel):
+                self.assertEqual(gitscan.range_diff(self.repo, base, head, rel),
+                                 self.porcelain(base, head, "--", rel))
+
+    def test_repo_without_head_matches_porcelain_cached(self):
+        fresh = os.path.join(self._tmp.name, "fresh-repo")
+        os.makedirs(fresh)
+        git(fresh, "init", "-q")
+        write(fresh, "first.txt", "hello\n")
+        git(fresh, "add", "-A")
+        mine = gitscan.path_diff(fresh, "first.txt", untracked=False, has_head=False)
+        self.assertEqual(mine, git(fresh, "diff", "--no-color", "--cached", "--", "first.txt").stdout)
+        with mock.patch.object(gitscan, "empty_tree", return_value=None):
+            try:
+                text = gitscan.path_diff(fresh, "first.txt", untracked=False, has_head=False)
+            except Exception as e:  # noqa: BLE001 - 例外の漏れは検出として数える
+                self.fail(f"空ツリーを引けないときに例外が漏れた: {e!r}")
+            self.assertEqual(text, "")
+
+    def test_range_paths_ignores_the_renames_setting(self):
+        """`diff.renames=false` でも rename は新しいパスだけ (plumbing は利用者の設定を読まない)。"""
+        git(self.repo, "add", "-A")
+        git(self.repo, "mv", "seed.txt", "moved.txt")
+        git(self.repo, "commit", "-qm", "mv")
+        git(self.repo, "config", "diff.renames", "false")
+        names = gitscan.range_paths(self.repo, "HEAD~1", "HEAD")
+        self.assertIn("moved.txt", names)
+        self.assertNotIn("seed.txt", names)
+
+
+class TestFirstCommitSharesTheFormat(GitScanTestCase):
+    """HEAD の無い repo の staged 差分も、最初の commit の `range_diff` と同じ本文
+    (porcelain の接頭辞の設定があっても)。"""
+
+    def test_staged_text_equals_the_first_commit_text(self):
+        fresh = os.path.join(self._tmp.name, "fresh-repo")
+        os.makedirs(fresh)
+        git(fresh, "init", "-q")
+        git(fresh, "config", "user.email", "t@example.com")
+        git(fresh, "config", "user.name", "t")
+        git(fresh, "config", "diff.noprefix", "true")
+        write(fresh, "first.txt", "hello\n")
+        git(fresh, "add", "-A")
+        staged = gitscan.path_diff(fresh, "first.txt", untracked=False, has_head=False)
+        git(fresh, "commit", "-qm", "first")
+        empty = gitscan.empty_tree(fresh)
+        self.assertIn("+hello", staged)
+        self.assertEqual(staged, gitscan.range_diff(fresh, empty, "HEAD", "first.txt"))
+
+
+class TestStopAndCommitReviewShareOneFormat(GitScanTestCase):
+    """Stop の `path_diff` と commit レビューの `range_diff` は、porcelain の設定があっても同じ本文。
+
+    commit レビューは本文の hash で「Stop がレビュー済み」を判定する。書式がずれると同じ内容を
+    2 回送る。
+    """
+
+    CONFIGS = [
+        (),
+        (("diff.noprefix", "true"),),
+        (("diff.mnemonicPrefix", "true"),),
+        (("diff.srcPrefix", "x/"), ("diff.dstPrefix", "y/")),
+        (("diff.context", "1"),),
+        (("diff.interHunkContext", "30"),),
+        (("diff.up.textconv", "tr a-z A-Z <"),),
+        (("diff.external", "echo EXTERNAL"),),
+    ]
+
+    def test_stop_text_equals_commit_review_text(self):
+        body = "".join(f"line {i}\n" for i in range(40))
+        for cfg in self.CONFIGS:
+            label = ",".join(f"{k}={v}" for k, v in cfg) or "(none)"
+            with self.subTest(label):
+                repo = init_repo(os.path.join(self._tmp.name, f"repo-{self.CONFIGS.index(cfg)}"))
+                write(repo, ".gitattributes", "*.txt diff=up\n")
+                write(repo, "mod.txt", body)
+                git(repo, "add", "-A")
+                git(repo, "commit", "-qm", "base")
+                for key, value in cfg:
+                    git(repo, "config", key, value)
+                lines = body.splitlines(keepends=True)
+                lines[3], lines[30] = "changed 3\n", "changed 30\n"
+                write(repo, "mod.txt", "".join(lines))
+                write(repo, "new.txt", "hello\n\nworld\n")
+                stop_mod = gitscan.path_diff(repo, "mod.txt", untracked=False, has_head=True)
+                stop_new = gitscan.path_diff(repo, "new.txt", untracked=True, has_head=True)
+                git(repo, "add", "-A")
+                git(repo, "commit", "-qm", "work")
+                self.assertIn("+changed 3", stop_mod)
+                self.assertIn("+hello", stop_new)
+                self.assertEqual(stop_mod, gitscan.range_diff(repo, "HEAD~1", "HEAD", "mod.txt"))
+                self.assertEqual(stop_new, gitscan.range_diff(repo, "HEAD~1", "HEAD", "new.txt"))
 
 
 if __name__ == "__main__":
