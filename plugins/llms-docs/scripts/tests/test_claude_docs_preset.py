@@ -53,6 +53,18 @@ class PageBoundaryTest(unittest.TestCase):
         self.assertIn("horizontal rule below.\n\n---\n", body)
         self.assertIn("# not a page boundary\n", body)
 
+    def test_frontmatter_without_url_is_not_a_platform_boundary(self):
+        # a YAML sample outside a code fence has the frontmatter shape and a
+        # ``title:``, but no ``url:``: every claude-platform page carries one
+        sample = "---\ntitle: just a yaml sample\nname: foo\n---\n"
+        docs = _split("---\ntitle: Documentation\nurl: https://example.com/a\n---\nbody\n"
+                      f"{sample}more\n"
+                      "---\ntitle: Next page\nurl: https://example.com/b\n---\nnext\n",
+                      "claude-platform")
+        self.assertEqual([(d["title"], d["url"]) for d in docs],
+                         [("Documentation", "https://example.com/a"), ("Next page", "https://example.com/b")])
+        self.assertEqual("".join(docs[0]["body_lines"]), f"body\n{sample}more\n")
+
 
 class _Cli(unittest.TestCase):
     PAGES = [("Hooks", "hooks", "## Matchers\nmatcher text\n"),

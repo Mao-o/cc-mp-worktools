@@ -2,6 +2,23 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.48.1] - 2026-11-01
+
+### 修正: claude-platform で `url:` の無い frontmatter の形のブロックがページの区切りになる
+
+- **症状**: `claude-platform` preset は、frontmatter の区切りに必須のキー `frontmatter_key` を指定しておらず、
+  既定の `title` で区切っていた。そのため本文中に置かれた、`title:` はあるが `url:` の無い frontmatter の形の
+  ブロック (コードブロックの外に置かれた YAML の例など) も新しいページとして切り出され、そこから後ろの本文が
+  前のページから外れた。旧 script (`parse-claude-docs.py`。0.48.0 で削除) は `url:` を持つブロックだけを区切りに
+  していた (0.48.0 の「既知の差」に載せたもの)
+- **修正**: `claude-platform` preset に `frontmatter_key: "url"` を足した。`url:` の無いブロックは前のページの
+  本文に残る。claude-platform のページはすべて frontmatter に `url:` を持つ
+- 手元のキャッシュで同梱 presets の全ページを変更前の版と比べ (タイトル・URL・本文の hash)、差は 0 件だった
+  (claude-platform は 826 ページのまま。現在の上流のファイルにはこの形のブロックが無い)。`claude-platform` と
+  `claude` で固定の 15 クエリを `search` / `search-index` / `search-content` に流した出力 (90 回) も変更前と同じ
+- テスト: `url:` の無い frontmatter の形のブロックを挟んだ 3 ブロックが 2 ページに区切られ、ブロックが前のページの
+  本文に残ること
+
 ## [0.48.0] - 2026-11-01
 
 ### 変更: 旧 script 名 (`parse-claude-docs.py` / `parse-ai-sdk.py` / `parse-firebase.py`) を削除 / Claude Code の changelog の検索 hit に版が付く
