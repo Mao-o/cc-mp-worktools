@@ -3178,6 +3178,9 @@ class TestChainedSwitchAndWrite(BaseWithTmpProject):
             "gh auth switch --user other; gh pr create",
             "gh auth switch --user other\ngh pr create",
             "gh auth switch --user other && echo ok && gh pr create",
+            # 単独の `&` (v0.29.0)。切替を背景で走らせると write との前後は競合次第で、
+            # 切替後の状態で走りうる。0.28.0 までは 1 セグメントに畳まれて素通しした。
+            "gh auth switch --user other & gh pr create",
         ):
             with self.subTest(command=command):
                 self._assert_chain_denied(command)

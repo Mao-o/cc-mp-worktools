@@ -607,11 +607,11 @@ gh pr create` のように「切替 → 同じ service の書込」を 1 行に�
   数えることはしない (リモートを変えないため)
 - `CLOUD_ACCOUNT_GUARD_MODE=warn` / `off` は従来どおり全体を弱める
 - **この deny はコマンド行のセグメント分解に依存する。** `&&` / `;` / 改行 / `||` /
-  `(...)` / `|` / `if…then` / `watch '...'` 等は分解するが、**末尾の単独 `&`
-  (バックグラウンド実行) と `bash -c '...'` の内側は分解しない**ため、
-  `gh auth switch --user other & gh pr create` /
+  `(...)` / `|` / 単独の `&` / `if…then` / `watch '...'` 等は分解するが、
+  **`bash -c '...'` の内側は分解しない**ため、
   `gh auth switch --user other && bash -c 'gh pr create'` は検出されない
-  (v0.14.0 以前と同じ挙動。[既知の制限](#既知の制限))
+  ([既知の制限](#既知の制限))。`gh auth switch --user other & gh pr create` は
+  v0.29.0 から連結として止める (背景の切替と write の前後は競合次第)
 
 #### 従来どおり deny させたいとき (`"$readonly"`)
 
@@ -642,7 +642,11 @@ QUERY の不一致も止めたい場合は `accounts.local.json` に書く:
 コマンドを**セグメントに分解して先頭が対象 CLI になる形**を照合する。以下の
 チェーン・構文・ラッパは自動で解析・剥がしたうえで CLI 部分だけを照合する:
 
-- **コマンドチェーン**: `&&` / `||` / `;` / `|` / 改行 (quote / $() / backtick 内は保護)
+- **コマンドチェーン**: `&&` / `||` / `;` / `|` / `|&` / 単独の `&` (バックグラウンド実行。
+  v0.29.0) / 改行 (quote / `$()` / `${}` / backtick 内は保護。`2>&1` / `>&` / `&>` は
+  リダイレクトなので区切りにしない)。`&` で終わるリストはサブシェルで走るので、その中の
+  `cd` は `&` の後ろのコマンドの走るディレクトリに数えない (`cd sub & aws ...` の aws は
+  元のディレクトリで走る)
 - **heredoc** (v0.9.0): `cat > x.sh <<'EOF'` 〜 `EOF` の**本文は解析しない**。
   本文に書かれた CLI 例は実行されないため (`<<-` のタブ除去、quote 付き
   delimiter、`END-OF-FILE` のようなハイフン入り delimiter、1 行に複数 heredoc、
@@ -1449,13 +1453,12 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   判らない形 (引数なしの `gh auth switch` / `--user $VAR` / login 系 / AWS 全般) は
   期待値への切替であっても連結を deny する = **誤 deny 側の失敗が残る**。
   切替を単独で実行すれば cache が破棄され、次の write は切替後の状態で再検証される
-- **上の deny はコマンド行のセグメント分解に依存する。** 末尾の単独 `&`
-  (バックグラウンド実行) と `bash -c '...'` の内側は分解されないため、
-  `gh auth switch --user other & gh pr create` /
-  `gh auth switch --user other && bash -c 'gh pr create'` は検出されない。
-  同じ理由で、単独 `&` で区切られた行は 1 セグメントに畳まれるため、
-  `gh pr create & aws s3 cp a s3://b` では **aws 側が検証対象にならない**
-  (v0.14.0 以前と同じ挙動)
+- **上の deny はコマンド行のセグメント分解に依存する。** `bash -c '...'` の内側は
+  分解されないため、`gh auth switch --user other && bash -c 'gh pr create'` は
+  検出されない。単独の `&` (バックグラウンド実行) は v0.29.0 から区切りとして扱うので、
+  `gh auth switch --user other & gh pr create` は連結として止め、
+  `gh pr create & aws s3 cp a s3://b` の aws 側も検証する (0.28.0 までは 1 セグメントに
+  畳まれ、`&` の後ろのクラウド CLI がどれも検証されなかった)
 - 期待値への切替と認識する形に、着地先を変える context option
   (`--configuration` / `--kubeconfig` / `--config`) 以外のオプション
   (`--flags-file` / `--context` / `--project` 等) を足したものは、従来どおり通常検証に

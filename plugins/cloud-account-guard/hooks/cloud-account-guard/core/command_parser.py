@@ -1,7 +1,9 @@
 """Bash コマンド文字列を検証対象候補セグメントに分解するユーティリティ。
 
-- split_on_operators: `&&` / `||` / `;` / `|` / `\\n` で分割。
-  quote / $() / バッククォート内は保護 (subshell 内の quote も追跡)。
+- split_on_operators: `&&` / `||` / `;` / `|` / `|&` / 単独の `&` / `\\n` で分割。
+  quote / $() / ${} / バッククォート内は保護 (subshell 内の quote も追跡)。
+  `2>&1` / `>&` / `&>` は区切りではない。区切りの演算子も要るときは
+  split_with_separators
   heredoc (`<<EOF` 〜 `EOF`) の本文は 1 セグメントに取り込んで分割しない。
   bash コメント (unquoted `#` 以降行末まで) は無視
 - strip_leading_env: 先頭の `FOO=bar` 形式環境変数割当を剥がす
@@ -343,6 +345,83 @@ def _expand_ansi_c(text: str) -> str | None:
     return "".join(out)
 
 
+# `${` から閉じ `}` を探す範囲の上限 (文字数)。範囲内で閉じないものは「閉じていない」扱い
+# (= 1 領域にしない = 中の演算子で切る側。検証が消える側ではない)。
+_PARAM_EXPANSION_SCAN_LIMIT = 4096
+
+# `${` と `$(` の入れ子 (相互再帰) の深さの上限。これより深い `${` は「閉じていない」扱い
+# (`${x:-$(echo ${x:-$(echo ...` が数百段あっても再帰の上限に当たらない)。深さには `$(` の
+# 入れ子も数える (`$(` が 64 段より深い位置の `${` も閉じていない扱い)。`$(` そのものは深さに
+# 関係なく閉じ `)` まで辿る。
+_DOLLAR_NEST_LIMIT = 64
+
+
+class _DollarMemo:
+    """`$(` / `${` の終端の memo (同じ text の同じ位置を 2 度走査しない)。
+
+    `${` が閉じないと、呼び出し側はその中身を 1 文字ずつ読み直し、中の `$(` をもう一度走査する。
+    memo が無いと入れ子 1 段ごとに走査が倍になり、`${x:-$(echo ` の繰り返し 40 段で
+    事実上止まる。text が変わったら捨てる。深さの上限で「閉じていない」とした結果も memo に
+    残るので、終端は厳密には text と位置だけでは決まらない: 深い位置で上限に当たった `${` を
+    浅い位置から引き直すと、閉じていない扱いのまま返る。トップレベルでは分割が増える側だが、
+    `$(` の中では、閉じない扱いの `${` の中の `(` / `)` を `$(` が数えるので、`$(` の閉じる位置が
+    ずれて検証が減る側に倒れうる (入れ子が 64 段近いときだけ。0.28.0 は `${` を常に 1 文字ずつ
+    読んでいたので、それより悪くはならない)。
+    """
+
+    __slots__ = ("text", "ends", "depth")
+
+    def __init__(self) -> None:
+        self.text: str | None = None
+        self.ends: dict[int, int | None] = {}
+        self.depth = 0
+
+
+_DOLLAR_MEMO = _DollarMemo()
+_UNSET = object()
+
+
+def _param_expansion_end(text: str, i: int) -> int | None:
+    """`text[i:]` が閉じたパラメータ展開 `${...}` なら、その直後の index。閉じていなければ None。
+
+    入れ子は `${` (と `$(`) だけを数え、展開の中の素の `{` は数えない。bash (3.2 / 5.2) は
+    素の `{` を数えずに最初の `}` で閉じ (`${x:-{}; cmd; echo }` の `cmd` は走る)、zsh は数える。
+    閉じる位置が早い側 (bash) に合わせると、zsh で展開の中にある部分はこちらでは外に出て
+    分割が増える (検証が増える側)。素の `{` が出たら 1 領域にしない方式は、中の `#` を
+    トップレベルの comment と読んで後ろを落とす (`${x:-{ #}; cmd` の `cmd` は bash で走る)
+    ので採らない。`$${` は 2 つ目の `$` からの `${` として数える (bash / zsh とも)。
+    中の `${` / `$(` は `_skip_opaque` で飛ばし (閉じない・深さの上限なら外側も閉じない)、
+    エスケープ・引用符・backtick も飛ばす。
+    """
+    n = min(len(text), i + _PARAM_EXPANSION_SCAN_LIMIT)
+    j = i + 2
+    while j < n:
+        c = text[j]
+        if c == "\\":
+            j += 2
+            continue
+        if c == "$" and j + 1 < n and text[j + 1] in "({":
+            # 展開の中の入れ子の展開とコマンド置換 (`${x:-${y}}` / `${x:-$(echo })}`)。
+            # 中の `}` は外側を閉じない。
+            end = _skip_opaque(text, j)
+            if end is None or end > n:
+                return None
+            j = end
+            continue
+        if c in "'\"`":
+            k = j + 1
+            while k < n and text[k] != c:
+                k += 2 if (c != "'" and text[k] == "\\") else 1
+            if k >= n:
+                return None
+            j = k + 1
+            continue
+        if c == "}":
+            return j + 1
+        j += 1
+    return None
+
+
 # --- シェル構文として解釈しない領域のスキップ (**この 1 箇所が唯一の判定**) -----
 #
 # quote / コマンド置換 / バッククォート / 算術評価の内側は「シェル構文もどき」が
@@ -355,7 +434,7 @@ def _skip_opaque(text: str, i: int) -> int | None:
     """`text[i]` から始まる「構文として解釈しない領域」の終端 index を返す。
 
     対象は backslash エスケープ / `'...'` / `"..."` / `` `...` `` / `$(...)` /
-    算術評価 `(( ... ))`。該当しなければ None。
+    閉じている `${...}` / `$$` / 算術評価 `(( ... ))`。該当しなければ None。
     未終端のクォート等は末尾までを 1 領域とみなす (bash も行を跨いで読み続ける)。
     """
     n = len(text)
@@ -377,22 +456,62 @@ def _skip_opaque(text: str, i: int) -> int | None:
     if ch == "`":
         j = text.find("`", i + 1)
         return n if j == -1 else j + 1
-    if ch == "$" and i + 1 < n and text[i + 1] == "(":
-        depth = 1
-        j = i + 2
-        while j < n:
-            inner = _skip_opaque(text, j)
-            if inner is not None and inner > j:
-                j = inner
-                continue
-            if text[j] == "(":
-                depth += 1
-            elif text[j] == ")":
-                depth -= 1
-                if depth == 0:
-                    return j + 1
-            j += 1
-        return n
+    if ch == "$" and i + 1 < n and text[i + 1] == "$":
+        # `$$` (PID)。後ろの `{` を `${` の始まりと読まない (`echo $${; cmd; echo }` の
+        # `cmd` は bash / zsh とも走る。`${` と読むと最後の `}` まで 1 領域になり `cmd` が消える)。
+        return i + 2
+    if ch == "$" and i + 1 < n and text[i + 1] in "({":
+        memo = _DOLLAR_MEMO
+        if memo.text is not text:
+            memo.text = text
+            memo.ends = {}
+        end = memo.ends.get(i, _UNSET)
+        if end is not _UNSET:
+            return end  # type: ignore[return-value]
+        memo.depth += 1
+        try:
+            if text[i + 1] == "{":
+                # パラメータ展開 `${...}`。中の `&` / `;` / `|` は演算子ではない
+                # (`${x:-a&b}` を単独の `&` で切ると、後ろの option が別セグメントに移って
+                # 誤ったコンテキストで照合される)。**閉じているものだけ**を 1 領域とみなす
+                # (閉じない `${` は bash でも構文エラー。残りを飲み込むと検証が消える)。
+                # 入れ子が深すぎるものも閉じていない扱い (分割が増える側)。
+                end = (
+                    _param_expansion_end(text, i)
+                    if memo.depth <= _DOLLAR_NEST_LIMIT
+                    else None
+                )
+            else:
+                depth = 1
+                j = i + 2
+                end = n
+                while j < n:
+                    inner = _skip_opaque(text, j)
+                    if (
+                        inner is not None
+                        and text.startswith("${", j)
+                        and ")" in text[j:inner]
+                    ):
+                        # bash 3.2 は `$(` の中の `${...}` にある `)` で `$(` を閉じる
+                        # (`echo $(echo ${x:-)}` + 改行 + `aws ...` の aws は走る)。`)` を含む
+                        # `${...}` は 1 領域にせず、1 文字ずつ読んで `)` を数える (閉じる位置が
+                        # 早い側。zsh で `$(` の中にある部分は分割が増える側に出る)。
+                        inner = None
+                    if inner is not None and inner > j:
+                        j = inner
+                        continue
+                    if text[j] == "(":
+                        depth += 1
+                    elif text[j] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            end = j + 1
+                            break
+                    j += 1
+        finally:
+            memo.depth -= 1
+        memo.ends[i] = end
+        return end
     return _arithmetic_span(text, i)
 
 
@@ -500,9 +619,36 @@ def _find_heredoc_end(command: str, i: int, delim: str, strip_tabs: bool) -> int
 
 
 def split_on_operators(command: str) -> list[str]:
-    """`&&`, `||`, `;`, `|`, `\\n` でトップレベル分割。
+    """`&&`, `||`, `;`, `|`, `|&`, 単独の `&`, `\\n` でトップレベル分割。
 
-    quote / `$(...)` / バッククォート / 算術評価 `(( ... ))` の内側は
+    区切りの演算子も要るときは `split_with_separators` を使う (分割の規則は共有)。
+    """
+    return [seg for seg, _sep in split_with_separators(command)]
+
+
+# 「リスト」(後続のコマンドとは別に完結する単位) を閉じる区切り。`&&` / `||` / `|` / `|&`
+# は同じリストの中の区切り。単独の `&` はリスト全体をバックグラウンド (サブシェル) で
+# 走らせるので、その中の `cd` は後続に効かない (`core/workdir.py` の `segment_dirs`)。
+LIST_TERMINATORS = frozenset({";", "\n", "&", ""})
+BACKGROUND = "&"
+
+
+def split_with_separators(command: str) -> list[tuple[str, str]]:
+    """トップレベルで分割し、各セグメントと**その直後の区切り**の組を返す。
+
+    区切りは `&&` / `||` / `;` / `|` / `|&` / `&` (単独 = バックグラウンド) / `\\n` /
+    `""` (末尾)。空のセグメントは落とす。
+
+    単独の `&` は次のものと区別する (どれも区切りではない):
+
+    - `&&` (AND リスト)
+    - `>&` / `<&` / `2>&1` (fd の複製。直前が引用符・エスケープの外の `>` / `<`)
+    - `&>` / `&>>` (stdout と stderr のリダイレクト)
+    - `|&` (`2>&1 |` の略記。`|` と同じパイプの区切りとして扱う)
+    - 引用符・`$(...)`・`${...}`・バッククォート・算術・エスケープ (`\\&`) の中の `&`
+      (`_skip_opaque` がまとめて飛ばす)
+
+    quote / `$(...)` / `${...}` / バッククォート / 算術評価 `(( ... ))` の内側は
     **シェル構文として解釈しない**。この判断は `_skip_opaque` に一本化してあり、
     heredoc の再スキャン (`_strip_heredoc_bodies`) や括弧の均衡判定
     (`_has_unbalanced_closer`) も同じ関数を通す。経路ごとに書くと必ず食い違う。
@@ -516,16 +662,24 @@ def split_on_operators(command: str) -> list[str]:
     だけで検証が走って誤 deny される。here-string (`<<<`) は heredoc ではないので
     対象外。同一行に複数の heredoc (`cmd <<A <<B`) がある形も宣言順に取り込む。
     """
-    segments: list[str] = []
+    segments: list[tuple[str, str]] = []
     buf: list[str] = []
     i = 0
     n = len(command)
     pending_heredocs: list[tuple[str, bool]] = []
+    # 直前に buf へ入れたのが引用符・エスケープの外の `>` / `<` か (`2>&1` / `<&3` の判定)。
+    # `command[i - 1]` で見ると `\>&` (エスケープした `>` の後の背景実行) を取り違える。
+    after_redirect = False
+
+    def flush(sep: str) -> None:
+        segments.append(("".join(buf), sep))
+        buf.clear()
 
     while i < n:
         # quote / 置換 / 算術は 1 領域としてそのまま buf へ (構文解釈しない)。
         opaque = _skip_opaque(command, i)
         if opaque is not None and opaque > i:
+            after_redirect = False
             if command[i] == "\\" and i + 1 < n and command[i + 1] == "\n":
                 # **quote 外の行継続 (行末の `\` + 改行) はシェルと同じく取り除く。**
                 # 残すと候補文字列に改行が残り、**改行を跨げない判定表エントリだけが
@@ -593,8 +747,7 @@ def split_on_operators(command: str) -> list[str]:
                 i = body_end
                 # delimiter 行の改行はトップレベルの区切りなので、ここでセグメントを
                 # 閉じる。閉じないと heredoc の**次**のコマンドが吸収される。
-                segments.append("".join(buf))
-                buf = []
+                flush("\n")
                 continue
 
         # heredoc の宣言から本文の終わりまでは、途中に演算子が来ても**セグメントを
@@ -606,36 +759,32 @@ def split_on_operators(command: str) -> list[str]:
         # 再分割で改めて候補になるので取りこぼさない)。
         if not pending_heredocs:
             if ch == "&" and nxt == "&":
-                segments.append("".join(buf))
-                buf = []
+                flush("&&")
                 i += 2
                 continue
-            if ch == "|" and nxt == "|":
-                segments.append("".join(buf))
-                buf = []
+            if ch == "|" and nxt in "|&" and nxt:
+                flush("|" + nxt)
                 i += 2
                 continue
-            if ch == ";":
-                segments.append("".join(buf))
-                buf = []
+            if ch == "&" and not after_redirect and nxt != ">":
+                # 単独の `&` (バックグラウンド実行)。0.28.0 までは区切りに数えず、
+                # `true & kubectl apply ...` が `true` のセグメントに畳まれて後ろの CLI が
+                # どれも検証されなかった。`>&` / `<&` (fd の複製) と `&>` (リダイレクト) は
+                # 区切りではない。
+                flush("&")
                 i += 1
                 continue
-            if ch == "|":
-                segments.append("".join(buf))
-                buf = []
-                i += 1
-                continue
-            if ch == "\n":
-                segments.append("".join(buf))
-                buf = []
+            if ch in ";|\n":
+                flush(ch)
                 i += 1
                 continue
 
         buf.append(ch)
+        after_redirect = ch in "<>"
         i += 1
 
-    segments.append("".join(buf))
-    return [s.strip() for s in segments if s.strip()]
+    flush("")
+    return [(seg.strip(), sep) for seg, sep in segments if seg.strip()]
 
 
 def _scan_value_end(cmd: str, start: int) -> int | None:
@@ -1373,24 +1522,40 @@ def extract_candidates(command: str) -> list[tuple[str, dict[str, str]]]:
     - `sudo time mise exec -- firebase deploy` → [(`firebase deploy`, {})]
     - `gh auth status && gh pr list`
         → [(`gh auth status`, {}), (`gh pr list`, {})]
+    - `true & kubectl apply -f x.yaml` → [(`true`, {}), (`kubectl apply -f x.yaml`, {})]
 
     env は検証 subprocess に渡され、コマンド実行時と同条件でアカウント検証する
     (インライン `AWS_PROFILE` 等を剥がすだけで検証に使わない非対称を解消)。
+    区切りの演算子も要るときは `extract_candidates_with_separators`。
     """
-    out: list[tuple[str, dict[str, str]]] = []
-    for seg in split_on_operators(command):
+    return [(cand, env) for cand, env, _sep in extract_candidates_with_separators(command)]
+
+
+def extract_candidates_with_separators(
+    command: str,
+) -> list[tuple[str, dict[str, str], str]]:
+    """`extract_candidates` の各候補に、そのセグメントの直後の区切りを添えて返す。
+
+    区切りは `split_with_separators` と同じ (`&` = バックグラウンド、`""` = 末尾)。
+    正規化した結果をもう一度分割した候補 (シェル経由 wrapper の中身・heredoc の本文を
+    落とした後の宣言行) は、中の区切りをそのまま使い、最後の 1 つにだけ外側の区切りを付ける。
+    正規化して空になったセグメントは候補にならず、その区切りも捨てる。
+    """
+    out: list[tuple[str, dict[str, str], str]] = []
+    for seg, sep in split_with_separators(command):
         normalized, env = _normalize_segment(seg)
         if not normalized:
             continue
         # シェル経由 wrapper のクォートを剥がすと、中身が複合コマンドのことがある
         # (`watch 'gh pr create && aws s3 rm x'`)。剥がした結果をもう一度分割して
         # 各段を候補にする。分割が要らない通常のセグメントはここを素通りする。
-        parts = split_on_operators(normalized)
+        parts = split_with_separators(normalized)
         if len(parts) > 1:
-            for part in parts:
+            last = len(parts) - 1
+            for k, (part, inner_sep) in enumerate(parts):
                 inner, inner_env = _normalize_segment(part)
                 if inner:
-                    out.append((inner, {**env, **inner_env}))
+                    out.append((inner, {**env, **inner_env}, sep if k == last else inner_sep))
             continue
-        out.append((normalized, env))
+        out.append((normalized, env, sep))
     return out
