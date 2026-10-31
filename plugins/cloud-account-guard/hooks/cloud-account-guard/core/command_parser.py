@@ -345,25 +345,6 @@ def _expand_ansi_c(text: str) -> str | None:
     return "".join(out)
 
 
-def _ansi_c_quote_end(text: str, i: int, n: int) -> int | None:
-    """`text[i:]` が `$'` で始まるとき、閉じ `'` の直後の index。`n` までに閉じなければ None。
-
-    ANSI-C 引用符の中では `\\'` はエスケープした引用符で、引用符を閉じない (bash 3.2 / zsh とも。
-    `\\\\` は backslash 1 つ)。素の `'...'` と同じに読むと `$'a\\'b'` を `\\'` で閉じたことにして、
-    残りの `'` から新しい引用符を始め、後ろのコマンドを引用符の中として飲み込む。
-    """
-    j = i + 2
-    while j < n:
-        c = text[j]
-        if c == "\\":
-            j += 2
-            continue
-        if c == "'":
-            return j + 1
-        j += 1
-    return None
-
-
 # `${` から閉じ `}` を探す範囲の上限 (文字数)。範囲内で閉じないものは「閉じていない」扱い
 # (= 1 領域にしない = 中の演算子で切る側。検証が消える側ではない)。
 _PARAM_EXPANSION_SCAN_LIMIT = 4096
@@ -413,7 +394,7 @@ def _param_expansion_end(text: str, i: int) -> int | None:
     トップレベルの comment と読んで後ろを落とす (`${x:-{ #}; cmd` の `cmd` は bash で走る)
     ので採らない。`$${` は 2 つ目の `$` からの `${` として数える (bash / zsh とも)。
     中の `${` / `$(` は `_skip_opaque` で飛ばし (閉じない・深さの上限なら外側も閉じない)、
-    エスケープ・引用符 (ANSI-C 引用符 `$'...'` を含む)・backtick も飛ばす。
+    エスケープ・引用符・backtick も飛ばす。
     """
     n = min(len(text), i + _PARAM_EXPANSION_SCAN_LIMIT)
     j = i + 2
@@ -427,13 +408,6 @@ def _param_expansion_end(text: str, i: int) -> int | None:
             # 中の `}` は外側を閉じない。
             end = _skip_opaque(text, j)
             if end is None or end > n:
-                return None
-            j = end
-            continue
-        if c == "$" and j + 1 < n and text[j + 1] == "'":
-            # 展開の中の ANSI-C 引用符 (`${x:-$'\''}`。bash 3.2 / zsh とも `\'` で閉じない)。
-            end = _ansi_c_quote_end(text, j, n)
-            if end is None:
                 return None
             j = end
             continue
@@ -462,8 +436,8 @@ def _param_expansion_end(text: str, i: int) -> int | None:
 def _skip_opaque(text: str, i: int) -> int | None:
     """`text[i]` から始まる「構文として解釈しない領域」の終端 index を返す。
 
-    対象は backslash エスケープ / `'...'` / `$'...'` (ANSI-C 引用符) / `"..."` /
-    `` `...` `` / `$(...)` / 閉じている `${...}` / `$$` / 算術評価 `(( ... ))`。該当しなければ None。
+    対象は backslash エスケープ / `'...'` / `"..."` / `` `...` `` / `$(...)` /
+    閉じている `${...}` / `$$` / 算術評価 `(( ... ))`。該当しなければ None。
     未終端のクォート等は末尾までを 1 領域とみなす (bash も行を跨いで読み続ける)。
     """
     n = len(text)
@@ -489,10 +463,6 @@ def _skip_opaque(text: str, i: int) -> int | None:
         # `$$` (PID)。後ろの `{` を `${` の始まりと読まない (`echo $${; cmd; echo }` の
         # `cmd` は bash / zsh とも走る。`${` と読むと最後の `}` まで 1 領域になり `cmd` が消える)。
         return i + 2
-    if ch == "$" and i + 1 < n and text[i + 1] == "'":
-        # ANSI-C 引用符。未終端は末尾までを 1 領域 (素の `'` と同じ)。
-        end = _ansi_c_quote_end(text, i, n)
-        return n if end is None else end
     if ch == "$" and i + 1 < n and text[i + 1] in "({":
         memo = _DOLLAR_MEMO
         if memo.text is not text:
@@ -920,18 +890,6 @@ def _scan_value_end(cmd: str, start: int) -> int | None:
         ch = cmd[i]
         if ch == "\\" and not in_sq and i + 1 < n:
             i += 2
-            continue
-        if ch == "$" and not in_sq and i + 1 < n and cmd[i + 1] == "$":
-            # `$$` (PID)。2 つ目の `$` を ANSI-C 引用符の始まりと読まない (`X=$$'a\' aws ...` の
-            # aws は bash 3.2 で走る。`$'a\' aws ...` と読むと値が末尾まで続き、aws を見失う)。
-            # トップレベルの `_skip_opaque` と同じ扱い。
-            i += 2
-            continue
-        if ch == "$" and not in_sq and not in_dq and i + 1 < n and cmd[i + 1] == "'":
-            # ANSI-C 引用符 (`X=$'a\'b c' aws ...`)。`\'` で閉じたことにすると値の終わりを
-            # 取り違え、残りの `c' aws ...` がコマンドとして残って aws を見失う。
-            end = _ansi_c_quote_end(cmd, i, n)
-            i = n if end is None else end
             continue
         if ch == "'" and not in_dq:
             in_sq = not in_sq

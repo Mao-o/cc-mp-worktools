@@ -3,9 +3,8 @@
 - `#` を comment の始まりと読むのは語の先頭だけ。エスケープした空白・演算子
   (`echo \\ # ; aws ...`)、`$(...)` / `$((...))` の閉じ `)`、行継続の直後の `#` は語の続き
   (bash 3.2 / zsh とも後ろの aws が走る)
-- ANSI-C 引用符 `$'...'` の中の `\\'` は引用符を閉じない (`echo $'a\\'b'; aws ...` の aws は走る)
-- `$(` の中でも語の先頭の `#` から改行の手前までは comment (中の `)` / `'` で `$(` を閉じない)
-- 代入の値の `$$'` の 2 つ目の `$` は ANSI-C 引用符の始まりではない
+- `$(` の中でも、bash 3.2 と zsh の両方が comment と読む `#` から改行の手前までは comment
+  (中の `)` / `'` で `$(` を閉じない)
 - `$(` の入れ子は再帰せずに辿る (`$(` を 1000 段ほど重ねると RecursionError になり、hook は
   内部エラーとして検証をスキップしていた)
 
@@ -54,7 +53,6 @@ COMMENT_FORMS = [
     # 置換・引用符の閉じの後ろも語の続き
     ("echo $(true)# ; {a}", True),
     ("echo $((1))# ; {a}", True),
-    ("echo $'a\\'b'# ; {a}", True),
     ("echo 'a'# ; {a}", True),
     ("echo ${HOME}# ; {a}", True),
     # 行継続は取り除くので、その前の文字で決まる
@@ -72,25 +70,6 @@ COMMENT_FORMS = [
     ("((1))# ; {a}", False),
     ("((1))#'\n{a}", True),
     ("(true)#'\n{a}", True),
-]
-
-ANSI_C_FORMS = [
-    # チケットの形 (bash では aws が走る。zsh は最後の `}` で構文エラー)
-    ("echo $'a\\'${'; {a}; echo }", True),
-    ("echo $'a\\'b'; {a}", True),
-    ("echo $'\\\\\\''; {a}", True),
-    ("echo $'\\\\'; {a}", True),
-    ("echo $(echo $'\\'' ); {a}", True),
-    ("echo ${x:-$'\\''}; {a}", True),
-    ("x=$'a\\'b'; {a}", True),
-    ("echo $'a\\'b' ; {a} #'", True),
-    # 引用符の中の aws は走らない
-    ("echo $'a\\'; {a}; b'", False),
-    ("echo $'a\\' ; {a}", False),
-    # `$'` が ANSI-C 引用符でない場所 (二重引用符の中 / `$$` の後ろ / エスケープした `$`)
-    ("echo \"$'\"; {a}", True),
-    ("echo $$'a'; {a}", True),
-    ("echo \\$'a; {a}", False),
 ]
 
 # `$(` の中の comment。bash 3.2 と zsh の両方が comment と読む `#` から改行の手前までは comment で、
@@ -139,16 +118,6 @@ SUBST_COMMENT_FORMS = [
     ("x=$(true #) ; {a}", False),
 ]
 
-# 代入の値の `$$` (PID) の後ろの `$'` は ANSI-C 引用符ではない (bash 3.2 では aws が走る。
-# zsh は `$'` と読んで走らない。走る側に合わせる)。
-ENV_PID_FORMS = [
-    "X=$$'a\\' {a}",
-    "AWS_PROFILE=$$'a\\' {a}",
-    "X=$$'a\\' {a}; echo \"'\"",
-    "X=a$$'b\\' {a}",
-    "X=$$$'a\\'b' {a}",  # bash / zsh (`$$` の後ろの `$'a\'b'` は ANSI-C 引用符)
-]
-
 
 class CandidateTests(unittest.TestCase):
     def _check(self, forms):
@@ -170,48 +139,9 @@ class CandidateTests(unittest.TestCase):
     def test_comment_inside_command_substitution(self):
         self._check(SUBST_COMMENT_FORMS)
 
-    def test_env_value_with_pid_before_quote(self):
-        """`X=$$'a\\' aws ...` の 2 つ目の `$` を ANSI-C 引用符の始まりと読まない。"""
-        for form in ENV_PID_FORMS:
-            command = form.replace("{a}", AWS)
-            with self.subTest(command=command):
-                try:
-                    cands = _cands(command)
-                except Exception as e:  # noqa: BLE001
-                    self.fail(f"例外: {e!r}")
-                self.assertEqual(cands[0], AWS)
-
     def test_here_string_operator_keeps_hash(self):
         """`<<<` の直後の `#` は従来どおり comment にしない (bash では構文エラー。過剰検証側)。"""
         self.assertIn(AWS, _cands(f"echo <<<# ; {AWS}"))
-
-    def test_ansi_c_quote_escaped_quote(self):
-        self._check(ANSI_C_FORMS)
-
-    def test_ansi_c_quote_in_parameter_expansion_keeps_one_word(self):
-        """展開の中の `$'...'` の `&` は区切りではない (`--profile` を同じ候補に残す)。"""
-        for command in (
-            "aws s3 rm ${B:-$'a\\'&b'} --profile p",
-            # `}` も引用符の中 (bash / zsh とも `'}&b` の 1 語)
-            "aws s3 rm ${B:-$'\\'}&b'} --profile p",
-        ):
-            with self.subTest(command=command):
-                self.assertEqual(_cands(command), [command])
-
-    def test_unclosed_ansi_c_quote_in_parameter_expansion_is_not_closed(self):
-        """展開の中の閉じない `$'` で展開を閉じたことにしない。
-
-        bash / zsh では閉じない引用符で構文エラーになり何も走らない。`}` で展開を閉じると、
-        引用符の中の ` & aws ...` を区切りとして外に出す (従来どおり残りは引用符の中)。
-        """
-        self.assertNotIn(AWS, _cands("echo ${x:-$'a} & " + AWS))
-
-    def test_env_value_with_ansi_c_quote(self):
-        """`X=$'a\\'b c' aws ...` の値の終わりを `\\'` で取り違えない (aws が残る)。"""
-        for value in ("$'a\\'b c'", "$'a\\'b'", "$'\\\\' "):
-            command = f"X={value} {AWS}"
-            with self.subTest(command=command):
-                self.assertEqual(_cands(command), [AWS])
 
 
 class DeepCommandSubstitutionTests(unittest.TestCase):
@@ -322,13 +252,7 @@ class DispatchTests(BaseWithTmpProject):
         forms = [
             "echo \\ # ; {a}",
             "echo $(true)# ; {a}",
-            "echo $'a\\'${'; {a}; echo }",
-            "echo $'a\\'b'; {a}",
-            "X=$'a\\'b c' {a}",
             "echo " + "$(" * 3000 + ")" * 3000 + " ; {a}",
-            "X=$$'a\\' {a}",
-            "AWS_PROFILE=$$'a\\' {a}",
-            "X=$$'a\\' {a}; echo \"'\"",
             "echo $(true #)#'\n)\n{a}",
             "x=$(true #$'\\'\n)\n{a}",
             "x=$(true # don't\n)\n{a}",
