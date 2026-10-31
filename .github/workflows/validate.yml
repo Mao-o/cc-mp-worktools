@@ -73,6 +73,15 @@ jobs:
       - name: Check marketplace entry / plugin.json sync
         run: python3 scripts/check_marketplace_entry_sync.py
 
+      # skill の allowed-tools は「確認なしで使える」付与で、制限ではない。
+      # Bash の付与に `*` や Bash 単独があると、読み取り専用のつもりの付与が書き込み系
+      # まで確認なしで通す。完全一致の形だけを許し、例外は script の ALLOWLIST に置く。
+      - name: Check skill allowed-tools (no Bash wildcard)
+        run: python3 scripts/check_skill_allowed_tools.py
+
+      - name: Test root check scripts
+        run: python3 -m unittest discover -s scripts/tests
+
   lint:
     # ruff (E/F/W) の静的検査。設定は root の pyproject.toml に置いてあり、
     # ローカルでも `make lint` で同じ結果が出る。

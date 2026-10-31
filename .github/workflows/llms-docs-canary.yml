@@ -57,9 +57,8 @@ jobs:
       #
       # 各 check は汎用 loader parse-llms-txt.py を `--source <preset>`
       # (claude-code / claude-platform / ai-sdk / firebase。presets.json に同梱)
-      # で直接呼ぶ。旧専用 script 名 (parse-claude-docs.py ほか) は
-      # parse-llms-txt.py へ引数を変換して exec するだけの互換 shim で、
-      # 削除予定のため canary からは使わない。件数・hit 数は loader の出力行
+      # で直接呼ぶ (llms-docs 0.48.0 で旧専用 script は削除済みで、preset が
+      # 唯一の入口)。件数・hit 数は loader の出力行
       # ("(N documents total" / "of N documents shown" / "(N documents from" /
       # "(N body hits, showing") から読む。
       #
