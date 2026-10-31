@@ -26,6 +26,7 @@ from unittest import mock
 import _testutil  # noqa: F401
 from test_dispatcher import BaseWithTmpProject, setUpModule, tearDownModule  # noqa: F401
 
+from core import workdir  # noqa: E402
 from core.dispatcher import dispatch  # noqa: E402
 from services import kubectl  # noqa: E402
 
@@ -229,6 +230,100 @@ class KubectlWorkdirTests(BaseWithTmpProject):
         # WRITE の deny には付けない
         self.assertNotIn("実行は止めません", reason)
 
+    # 実際には走らない (後続に効かない) cd。hook の移動の追跡は括弧・条件・パイプを落とすので、
+    # 移動先のファイルで照合すると誤 allow になる (root/k.yaml が kubectl の読むファイル)。
+    _NOT_SEQUENTIAL = (
+        "(cd sub; true) && kubectl apply -f x.yaml --kubeconfig k.yaml",
+        "(cd sub && true); kubectl apply -f x.yaml --kubeconfig k.yaml",
+        "(cd sub); kubectl apply -f x.yaml --kubeconfig k.yaml",
+        "(cd sub && kubectl get pods); kubectl apply -f x.yaml --kubeconfig k.yaml",
+        "false && cd sub; kubectl apply -f x.yaml --kubeconfig k.yaml",
+        "true || cd sub; kubectl apply -f x.yaml --kubeconfig k.yaml",
+        "if false; then cd sub; fi; kubectl apply -f x.yaml --kubeconfig k.yaml",
+        "cd sub | cat; kubectl apply -f x.yaml --kubeconfig k.yaml",
+        "(cd sub && KUBECONFIG=k.yaml true); KUBECONFIG=k.yaml kubectl apply -f x.yaml",
+        "{ cd sub; } ; kubectl apply -f x.yaml --kubeconfig k.yaml",
+        "for d in sub; do cd sub; done; kubectl apply -f x.yaml --kubeconfig k.yaml",
+        "mkdir -p sub && cd sub; kubectl apply -f x.yaml --kubeconfig k.yaml",
+        "false && cd sub\nkubectl apply -f x.yaml --kubeconfig k.yaml",
+    )
+    # 移動の追跡がそもそも cd を拾わない形 (起動側のファイルで正しく照合する)
+    _NOT_TRACKED = (
+        "x=$(cd sub && pwd); kubectl apply -f x.yaml --kubeconfig k.yaml",
+        "x=`cd sub`; kubectl apply -f x.yaml --kubeconfig k.yaml",
+        "f() { cd sub; }; kubectl apply -f x.yaml --kubeconfig k.yaml",
+        "bash -c 'cd sub'; kubectl apply -f x.yaml --kubeconfig k.yaml",
+    )
+
+    def test_cd_that_may_not_run_is_unresolved(self):
+        self._write(self.project_dir / "k.yaml", "wrong")
+        self._write(self.sub / "k.yaml", "ctx")
+        for command in self._NOT_SEQUENTIAL:
+            with self.subTest(command):
+                reason = self._assert_deny(command)
+                self.assertIn(kubectl.UNRESOLVED_CONTEXT, reason)
+        for command in self._NOT_TRACKED:
+            with self.subTest(command):
+                reason = self._assert_deny(command)
+                self.assertTrue(
+                    kubectl.UNRESOLVED_CONTEXT in reason or "現在=wrong" in reason, reason
+                )
+        # QUERY tier は警告だけ
+        result = self._dispatch("(cd sub); kubectl get pods --kubeconfig k.yaml")
+        decision, text = self._decision(result)
+        self.assertEqual(decision, "allow")
+        self.assertIn(kubectl.UNRESOLVED_CONTEXT, text)
+
+    def test_cd_that_may_not_run_keeps_absolute_and_no_path_commands(self):
+        """相対パスが無ければ、括弧や条件の中の cd があっても今までどおり照合する。"""
+        kc = self.project_dir / "k.yaml"
+        self._write(kc, "ctx")
+        self._assert_allow(f"(cd sub); kubectl apply -f x.yaml --kubeconfig {kc}")
+        with mock.patch.dict(os.environ, {"KUBECONFIG": str(kc)}):
+            self._assert_allow("false && cd sub; kubectl apply -f x.yaml")
+        self._write(kc, "wrong")
+        reason = self._assert_deny(f"cd sub | cat; kubectl apply -f x.yaml --kubeconfig {kc}")
+        self.assertIn("現在=wrong", reason)
+
+    def test_sequential_cd_is_still_resolved(self):
+        """`&&` / `;` だけで繋いだ cd、引用符の中の記号、リダイレクトの `&` は解決する。"""
+        self._write(self.project_dir / "k.yaml", "wrong")
+        self._write(self.sub / "k.yaml", "ctx")
+        (self.project_dir / "a").mkdir()
+        for command in (
+            "cd sub && kubectl apply -f x.yaml --kubeconfig k.yaml",
+            "cd a; cd ../sub && kubectl apply -f x.yaml --kubeconfig k.yaml",
+            "cd sub\nkubectl apply -f x.yaml --kubeconfig k.yaml",
+            "cd sub && kubectl apply -f x.yaml --kubeconfig k.yaml 2>&1",
+            "cd sub && kubectl apply -f x.yaml --kubeconfig k.yaml &>/dev/null",
+            "cd sub && kubectl apply -f 'x(1)|{y}&`.yaml' --kubeconfig k.yaml",
+            'cd sub && kubectl apply -f "if (x).yaml" --kubeconfig k.yaml',
+            "cd sub && kubectl apply -f x\\(1\\).yaml --kubeconfig k.yaml",
+            "mkdir -p sub && cd sub && kubectl apply -f x.yaml --kubeconfig k.yaml",
+            "true; cd sub && kubectl apply -f x.yaml --kubeconfig k.yaml;",
+            "cd sub && echo 'a; b' && kubectl apply -f x.yaml --kubeconfig k.yaml",
+        ):
+            with self.subTest(command):
+                self._assert_allow(command)
+        # 括弧があっても cd が無ければ、Bash の作業ディレクトリで解決する
+        self._write(self.project_dir / "k.yaml", "ctx")
+        self._assert_allow("(kubectl apply -f x.yaml --kubeconfig k.yaml)")
+
+    def test_cd_physical_dotdot(self):
+        """`cd -P lnk/..` は symlink を解いてから `..` を辿る (bash と同じ)。"""
+        real = self.project_dir / "a" / "b" / "real"
+        real.mkdir(parents=True)
+        (self.project_dir / "lnk").symlink_to(real, target_is_directory=True)
+        command = "cd -P lnk/.. && kubectl apply -f x.yaml --kubeconfig k.yaml"
+        self._write(real.parent / "k.yaml", "wrong")  # kubectl が実際に読む
+        self._write(self.project_dir / "k.yaml", "ctx")  # 論理パスの `..`
+        self.assertIn("現在=wrong", self._assert_deny(command))
+        self._write(real.parent / "k.yaml", "ctx")
+        self._write(self.project_dir / "k.yaml", "wrong")
+        self._assert_allow(command)
+        # `-L` が後なら論理パス (後のものが勝つ)
+        self._assert_deny("cd -P -L lnk/.. && kubectl apply -f x.yaml --kubeconfig k.yaml")
+
     def test_absolute_kubeconfig_in_two_dirs_is_not_unresolved(self):
         kc = self.project_dir / "k.yaml"
         self._write(kc, "ctx")
@@ -267,6 +362,89 @@ class KubectlWorkdirTests(BaseWithTmpProject):
         reason = self._assert_deny("cd nowhere && KUBECONFIG=k.yaml kubectl apply -f x.yaml")
         self.assertIn("コマンドが走るディレクトリが見つからない", reason)
         self.assertNotIn("kubectl コマンドが見つかりません", reason)
+
+    def test_relative_kubeconfig_env_after_cd_is_not_guided_as_a_command(self):
+        """cd の後の相対の KUBECONFIG: 切替を Bash の作業ディレクトリで打つと別のファイルに書く。"""
+        keep = self.project_dir / "k.yaml"
+        self._write(keep, "keep")
+        self._write(self.sub / "k.yaml", "wrong")
+        with mock.patch.dict(os.environ, {"KUBECONFIG": "k.yaml"}):
+            reason = self._assert_deny("cd sub && kubectl apply -f x.yaml")
+            self.assertNotIn("kubectl config use-context", reason)
+            self.assertIn("相対パスの KUBECONFIG はコマンドが走るディレクトリ", reason)
+            self.assertIn(os.path.realpath(self.sub), reason)
+            (self.sub / "k.yaml").unlink()
+            reason = self._assert_deny("cd sub && kubectl apply -f x.yaml")
+            self.assertNotIn("kubectl config use-context", reason)
+            self.assertIn("相対パスの KUBECONFIG はコマンドが走るディレクトリ", reason)
+            # cd が無ければ (Bash の作業ディレクトリで走る) 従来どおりコマンドの形で案内する
+            self._write(keep, "wrong")
+            reason = self._assert_deny("kubectl apply -f x.yaml")
+            self.assertIn("切り替え: kubectl config use-context ctx", reason)
+
+    def test_cache_key_includes_the_dir_of_a_relative_kubeconfig_env(self):
+        a, b = self.project_dir / "a", self.project_dir / "b"
+        a.mkdir()
+        b.mkdir()
+        self._write(a / "k.yaml", "ctx")
+        self._write(b / "k.yaml", "wrong")
+        with mock.patch.dict(os.environ, {"KUBECONFIG": "k.yaml"}), self.isolated_cache(), \
+                mock.patch("subprocess.run", side_effect=self.fake):
+            self.assertIsNone(dispatch("cd a && kubectl apply -f x.yaml", self.launch))
+            n = len(self.fake.calls)
+            self.assertIsNone(dispatch("cd a && kubectl apply -f x.yaml", self.launch))
+            self.assertEqual(len(self.fake.calls), n, "成功 cache が公開されていない")
+            result = dispatch("cd b && kubectl apply -f x.yaml", self.launch)
+        self.assertEqual(self._decision(result)[0], "deny")
+
+    def test_guide_stays_relative_when_the_absolute_path_is_not_guidable(self):
+        """Bash の作業ディレクトリの実パスに空白や非 ASCII があると絶対パスは案内に使えない。
+
+        そのディレクトリで走るコマンドなら、元の相対パスのまま案内する (そこで打てば同じファイル)。
+        案内の行は加工せずに shell の規則で分割し、hook に通してから CLI の書込を再現する。
+        """
+        keep = self.project_dir / "k.yaml"
+        self._write(keep, "keep")
+        for name in ("my dir", "日本語", "Mobile Documents"):
+            for given in ("k.yaml", "./k.yaml"):
+                with self.subTest(name=name, given=given):
+                    d = self.project_dir / name
+                    d.mkdir(exist_ok=True)
+                    kc = d / "k.yaml"
+                    self._write(kc, "wrong")
+                    command = f"kubectl apply -f x.yaml --kubeconfig {given}"
+                    reason = self._assert_deny(command, cwd=str(d))
+                    lines = _GUIDE.findall(reason)
+                    self.assertEqual(len(lines), 1, reason)
+                    tokens = shlex.split(lines[0], comments=True)
+                    path = tokens[tokens.index("--kubeconfig") + 1]
+                    self.assertEqual(path, given)
+                    with mock.patch("subprocess.run") as run:
+                        self.assertIsNone(dispatch(lines[0], str(d)), lines[0])
+                    run.assert_not_called()
+                    with open(os.path.join(d, path), "w", encoding="utf-8") as f:
+                        f.write("ctx\n")
+                    self.assertEqual(keep.read_text(encoding="utf-8").strip(), "keep")
+                    self._assert_allow(command, cwd=str(d))
+        # 相対パス自体が許容形でなければ、相対でも案内しない
+        d = self.project_dir / "my dir"
+        self._write(d / "a b.yaml", "wrong")
+        reason = self._assert_deny("kubectl apply -f x.yaml --kubeconfig 'a b.yaml'", cwd=str(d))
+        self.assertEqual(_GUIDE.findall(reason), [])
+        self.assertIn(kubectl._KUBECONFIG_BY_HAND, reason)
+        # 絶対パスが許容形なら、Bash の作業ディレクトリで走るコマンドでも絶対パスで案内する
+        plain = self.project_dir / "plain"
+        plain.mkdir()
+        self._write(plain / "k.yaml", "wrong")
+        _line, path = self._guide_path(
+            self._assert_deny("kubectl apply -f x.yaml --kubeconfig k.yaml", cwd=str(plain))
+        )
+        self.assertTrue(self._same(path, plain / "k.yaml"))
+        # cd の後 (Bash の作業ディレクトリと違う) は相対では案内しない (起動側で打つと別のファイル)
+        self._write(d / "k.yaml", "wrong")
+        reason = self._assert_deny("cd 'my dir' && kubectl apply -f x.yaml --kubeconfig k.yaml")
+        self.assertEqual(_GUIDE.findall(reason), [])
+        self.assertIn(kubectl._KUBECONFIG_BY_HAND, reason)
 
     def test_no_relative_path_keeps_the_hook_cwd(self):
         """相対パスが無ければ cwd は渡さない (0.27.0 と同じ。cd の有無で照合を変えない)。"""
@@ -366,6 +544,55 @@ class KubectlWorkdirTests(BaseWithTmpProject):
         self.assertTrue(self._same(path, self.sub / "K.yaml"), line)
 
 
+class ChdirIsSequentialTests(unittest.TestCase):
+    def test_table(self):
+        cases = [
+            # cd が無ければ常に True
+            ("no cd", "(kubectl get pods) | cat & if x; then y; fi", True),
+            ("plain", "cd a && kubectl apply", True),
+            ("semicolons", "cd a; cd b && kubectl apply", True),
+            ("newline", "cd a\nkubectl apply", True),
+            ("and chain", "mkdir a && cd a && kubectl apply", True),
+            ("trailing semicolon", "cd a && kubectl apply;", True),
+            ("conditional cd, trailing semicolon", "mkdir a && cd a && kubectl apply;", True),
+            ("conditional cd, trailing newlines", "mkdir a && cd a && kubectl apply\n\n", True),
+            ("redirect 2>&1", "cd a && kubectl apply 2>&1", True),
+            ("redirect &>", "cd a && kubectl apply &>/dev/null", True),
+            ("redirect >&", "cd a && kubectl apply >&/dev/null", True),
+            ("quoted symbols", "cd a && kubectl apply -f '(|{}`&;'", True),
+            ("double quoted", 'cd a && kubectl apply -f "x) if ;"', True),
+            ("escaped", "cd a && kubectl apply -f x\\(1\\)\\|\\&", True),
+            ("keyword as part of word", "cd a && kubectl apply -f iffy", True),
+            ("pushd", "pushd a && kubectl apply", True),
+            ("open paren", "(cd a); kubectl apply", False),
+            ("subshell after", "cd a && (kubectl apply)", False),
+            ("brace", "{ cd a; }; kubectl apply", False),
+            ("close brace only", "cd a; kubectl apply }", False),
+            ("pipe", "cd a | cat; kubectl apply", False),
+            ("or", "true || cd a; kubectl apply", False),
+            ("background", "cd a & kubectl apply", False),
+            ("backtick", "cd a; x=`true`", False),
+            ("if", "if true; then cd a; fi; kubectl apply", False),
+            ("while", "while false; do cd a; done; kubectl apply", False),
+            # 分解が `case x in x) cd a` を 1 セグメントにする = 移動の追跡も cd を拾わない
+            ("case (cd not tracked)", "case x in x) cd a;; esac; kubectl apply", True),
+            ("case with tracked cd", "case x in x) true;; esac; cd a; kubectl apply", False),
+            ("conditional cd with inline env", "false && X=1 cd a; kubectl apply", False),
+            ("until", "until true; do cd a; done", False),
+            ("conditional cd then list", "false && cd a; kubectl apply", False),
+            ("conditional cd then newline", "false && cd a\nkubectl apply", False),
+            ("conditional popd then list", "false && popd; kubectl apply", False),
+            ("popd plain", "popd; kubectl apply", True),
+        ]
+        for name, command, want in cases:
+            with self.subTest(name):
+                try:
+                    got = workdir.chdir_is_sequential(command)
+                except Exception as e:  # noqa: BLE001
+                    self.fail(f"例外: {e!r}")
+                self.assertEqual(got, want, command)
+
+
 class ResolveContextUnitTests(unittest.TestCase):
     def test_table(self):
         real = os.path.realpath("/")
@@ -377,15 +604,28 @@ class ResolveContextUnitTests(unittest.TestCase):
             ("relative flag unknown dir", {"kubeconfig": "k"}, {None}, {}, None),
             ("no flag no env", {}, {"/", "/tmp"}, {}, {}),
             ("absolute env", {}, {"/", "/tmp"}, {"KUBECONFIG": "/a:/b"}, {}),
-            ("relative env", {}, {"/"}, {"KUBECONFIG": "k"}, {"cwd": real}),
+            # base が無い / 違う = cd の後とみなし、切替をコマンドの形で案内しない印を立てる
+            ("relative env", {}, {"/"}, {"KUBECONFIG": "k"}, {"cwd": real, "cwd_moved": True}),
             ("relative env two dirs", {}, {"/", "/tmp"}, {"KUBECONFIG": "/a:k"}, None),
             ("flag wins over env", {"kubeconfig": "/k"}, {"/", "/tmp"}, {"KUBECONFIG": "k"}, {"kubeconfig": "/k"}),
             ("context kept", {"context": "c", "kubeconfig": "k"}, {"/"}, {}, {"context": "c", "kubeconfig": os.path.join(real, "k")}),
+            # 先頭の `./` だけを剥がす (`..` は剥がさない。剥がすと空なら元のまま)
+            ("dot slash", {"kubeconfig": "./k"}, {"/"}, {}, {"kubeconfig": os.path.join(real, "k")}),
+            ("dot slash twice", {"kubeconfig": "././k"}, {"/"}, {}, {"kubeconfig": os.path.join(real, "k")}),
+            ("dot double slash", {"kubeconfig": ".//k"}, {"/tmp"}, {}, {"kubeconfig": os.path.join(os.path.realpath("/tmp"), "k")}),
+            ("dotdot kept", {"kubeconfig": "../k"}, {"/"}, {}, {"kubeconfig": os.path.join(real, "../k")}),
+            ("dot slash only", {"kubeconfig": "./"}, {"/"}, {}, {"kubeconfig": os.path.join(real, "./")}),
+            # base と同じディレクトリなら元の相対パスを案内用に残す / cwd_moved を立てない
+            ("relative flag at base", {"kubeconfig": "./k"}, {"/"}, {}, {"kubeconfig": os.path.join(real, "k"), "kubeconfig_given": "./k"}, "/"),
+            ("relative flag off base", {"kubeconfig": "k"}, {"/"}, {}, {"kubeconfig": os.path.join(real, "k")}, "/tmp"),
+            ("relative env at base", {}, {"/"}, {"KUBECONFIG": "k"}, {"cwd": real}, "/"),
+            ("relative env off base", {}, {"/"}, {"KUBECONFIG": "k"}, {"cwd": real, "cwd_moved": True}, "/tmp"),
+            ("absolute flag at base", {"kubeconfig": "/k"}, {"/"}, {}, {"kubeconfig": "/k"}, "/"),
         ]
-        for name, ctx, dirs, env, want in cases:
+        for name, ctx, dirs, env, want, *base in cases:
             with self.subTest(name):
                 try:
-                    got = kubectl.resolve_context(ctx, dirs, env)
+                    got = kubectl.resolve_context(ctx, dirs, env, base=(base or [None])[0])
                 except Exception as e:  # noqa: BLE001
                     self.fail(f"例外: {e!r}")
                 self.assertEqual(got, want)

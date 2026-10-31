@@ -1295,12 +1295,10 @@ class TestContextOptionSwitchRoundTrip(BaseWithTmpProject):
             "trailing": (f"kubectl apply -f x.yaml --kubeconfig {kc}", kc),
             "equals": (f"kubectl apply -f x.yaml --kubeconfig={kc}", kc),
             # 相対パスはコマンドが走るディレクトリ (ここでは project) の実体のパスに連結した
-            # 絶対パスで照合・案内する (v0.28.0。どこで打っても同じファイルを指す)
+            # 絶対パスで照合・案内する (v0.28.0。どこで打っても同じファイルを指す)。
+            # 先頭の `./` は剥がして連結する
             "relative": ("kubectl apply -f x.yaml --kubeconfig k.yaml", real_kc),
-            "dot relative": (
-                "kubectl apply -f x.yaml --kubeconfig ./k.yaml",
-                os.path.join(real_dir, "./k.yaml"),
-            ),
+            "dot relative": ("kubectl apply -f x.yaml --kubeconfig ./k.yaml", real_kc),
             "no option": ("kubectl apply -f x.yaml", None),
         }
         for situation in ("mismatch", "unset"):

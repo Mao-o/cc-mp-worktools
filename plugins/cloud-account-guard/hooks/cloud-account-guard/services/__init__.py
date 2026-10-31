@@ -72,8 +72,9 @@
                                     **アクティブアカウントを変えない option は
                                     宣言しない** (github の `--hostname` は
                                     リモートを指定するだけなので非宣言)
-     - resolve_context(context, directories, env) -> dict | None
+     - resolve_context(context, directories, env, base=None) -> dict | None
      - UNRESOLVED_CONTEXT: str
+     - DISPLAY_CONTEXT_KEYS: frozenset[str]
                                     (任意、v0.28.0) context の値のうち相対パスを、
                                     target のセグメントが走るディレクトリ (`cd` を
                                     追ったもの。directories は集合) で解決した context
@@ -81,7 +82,13 @@
                                     結果を両方に使う。決められなければ None を返し、
                                     dispatcher は UNRESOLVED_CONTEXT の文で止める
                                     (QUERY tier は警告)。現状 kubectl だけ
-                                    (`--kubeconfig` / `KUBECONFIG` の相対パス)
+                                    (`--kubeconfig` / `KUBECONFIG` の相対パス)。
+                                    `cd` が確実に順に走る形でなければ
+                                    directories は `{None}`
+                                    (core/workdir.py の chdir_is_sequential)。
+                                    base は Bash の作業ディレクトリ。
+                                    DISPLAY_CONTEXT_KEYS は案内の形だけを決める
+                                    context のキーで、成功 cache のキーから外す
      - IDENTITY_ENV_VARS: frozenset[str]
      - IDENTITY_ENV_PREFIXES: tuple[str, ...]
                                     CLI が「どのアカウント / project で動くか」を

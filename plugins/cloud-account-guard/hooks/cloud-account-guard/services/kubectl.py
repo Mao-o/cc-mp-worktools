@@ -202,7 +202,8 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
 
     # 相対パスの `--kubeconfig` は dispatcher が `resolve_context` でコマンドの走る
     # ディレクトリから絶対パスにしてから渡す (v0.28.0)。案内の `--kubeconfig` もその絶対パスに
-    # なるので、どのディレクトリで打っても同じファイルを指す。
+    # なるので、どのディレクトリで打っても同じファイルを指す (絶対パスが案内に使えない形の
+    # ときの例外は下の `kubeconfig_given`)。
     kubeconfig = ctx.get("kubeconfig")
     current, err = _run_current_context(env, kubeconfig, ctx.get("cwd"))
     if err:
@@ -212,12 +213,23 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
     # option を付ける (v0.27.0)。付けないと既定の kubeconfig に書き、案内どおりにしても
     # 元のコマンドは同じ deny に戻る。パスが案内に使える形 (`shell_word.PATH`) でなければ
     # コマンドの形では案内せず、文で言う (`_KUBECONFIG_BY_HAND`)。
+    # 絶対パスが許容形でない (起動ディレクトリの実パスに空白や非 ASCII がある) ときは、
+    # Bash の作業ディレクトリで走るコマンドに限り、元の相対パスで案内する (そこで打てば
+    # 同じファイルを指す。`resolve_context` が `kubeconfig_given` を残すのはその場合だけ)。
+    # 相対パスの `KUBECONFIG` を `cd` の後のディレクトリで解決したとき (`cwd_moved`) は、
+    # 切替を Bash の作業ディレクトリで打つと別のファイルに書くので、コマンドの形では案内しない。
     switch = None
+    by_hand = _KUBECONFIG_BY_HAND
     if target is not None:
         if kubeconfig is None:
-            switch = f"kubectl config use-context {target}"
+            if ctx.get("cwd_moved"):
+                by_hand = _relative_env_by_hand(ctx.get("cwd"))
+            else:
+                switch = f"kubectl config use-context {target}"
         else:
             kc = shell_word.arg(kubeconfig, shell_word.PATH)
+            if kc is None and ctx.get("kubeconfig_given") is not None:
+                kc = shell_word.arg(ctx["kubeconfig_given"], shell_word.PATH)
             if kc is not None:
                 switch = f"kubectl config use-context {target} --kubeconfig {kc}"
 
@@ -225,7 +237,7 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
         if target is None:
             return f"kubectl: アクティブコンテキストが設定されていません。{check_by_hand}。"
         if switch is None:
-            return f"kubectl: アクティブコンテキストが設定されていません。{_KUBECONFIG_BY_HAND}。"
+            return f"kubectl: アクティブコンテキストが設定されていません。{by_hand}。"
         return (
             f"kubectl: アクティブコンテキストが設定されていません。"
             f"{switch} を実行してください。"
@@ -239,7 +251,7 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
         if target is None:
             return f"{head} — {check_by_hand}"
         if switch is None:
-            return f"{head} — {_KUBECONFIG_BY_HAND}"
+            return f"{head} — {by_hand}"
         return f"{head} — 切り替え: {switch}"
 
     return None
@@ -253,14 +265,24 @@ _KUBECONFIG_BY_HAND = (
 )
 
 
+def _relative_env_by_hand(directory) -> str:
+    """相対パスの KUBECONFIG を `cd` の後で解決したときの文 (コマンドの形をとらない)。"""
+    return (
+        "相対パスの KUBECONFIG はコマンドが走るディレクトリ "
+        f"({shell_word.shown(directory)}) で解決されるため、コマンドの形では案内しません。"
+        "そのディレクトリで、期待したコンテキストに切り替えてください"
+    )
+
+
 _CWD_MISSING = (
     "kubectl: コマンドが走るディレクトリが見つからないため、相対パスの KUBECONFIG が"
     "どのファイルを指すかを確かめられません。"
 )
 # `resolve_context` が None を返したときの文 (dispatcher が tier に合わせた結びを足す)。
 UNRESOLVED_CONTEXT = (
-    "kubectl: 相対パスの --kubeconfig (または KUBECONFIG) を、別々のディレクトリで走る"
-    "複数のコマンドが使っているため、どのファイルで照合するかを決められません。"
+    "kubectl: 相対パスの --kubeconfig (または KUBECONFIG) がどのディレクトリから開かれるかを"
+    "決められないため (別々のディレクトリで走る複数のコマンドが使っている、または括弧・条件・"
+    "パイプ・背景実行の中の cd と同じコマンドにある)、どのファイルで照合するかを決められません。"
     "絶対パスで指定するか、ディレクトリごとにコマンドを分けて実行してください。"
 )
 
@@ -269,7 +291,29 @@ def _is_relative(path) -> bool:
     return isinstance(path, str) and path != "" and not os.path.isabs(path)
 
 
-def resolve_context(context, directories, env) -> dict | None:
+# context のうち案内の形を決めるだけの値 (成功 cache のキーには入れない。dispatcher)。
+DISPLAY_CONTEXT_KEYS = frozenset({"kubeconfig_given", "cwd_moved"})
+
+
+def _strip_dot_slash(path: str) -> str:
+    """先頭の `./` だけを剥がす (`..` は剥がさない)。剥がすと空になるなら元のまま。"""
+    stripped = path
+    while stripped.startswith("./"):
+        # `.//k.yaml` の残りの `/` も剥がす (残すと連結が絶対パスになる)
+        stripped = stripped[2:].lstrip("/")
+    return stripped or path
+
+
+def _same_dir(a, b) -> bool:
+    if not isinstance(a, str) or not isinstance(b, str):
+        return False
+    try:
+        return os.path.samefile(a, b)
+    except (OSError, ValueError):
+        return False
+
+
+def resolve_context(context, directories, env, base=None) -> dict | None:
     """kubeconfig の相対パスを、コマンドが走るディレクトリで解決した context を返す (v0.28.0)。
 
     kubectl は相対パスの `--kubeconfig` / `KUBECONFIG` を自分の作業ディレクトリから開く。
@@ -282,12 +326,19 @@ def resolve_context(context, directories, env) -> dict | None:
     - `--kubeconfig` が相対パスなら、ディレクトリの実体のパス (`realpath`) に連結した絶対パスに
       置き換える。`..` は正規化しない: シェルの `cd` は論理パスで動くが、kubectl の作業
       ディレクトリは実体で、相対パスの `..` は実体の親を指す (`sub` が symlink のとき、論理パスの
-      親とは別のディレクトリ)。kubectl が開くのと同じファイルを指すのはこの形だけ
+      親とは別のディレクトリ)。ディレクトリを実体のパスにするのは、表示と cache キーを実体の
+      パスに揃えるため。先頭の `./` だけは剥がす (`..` は剥がさない)
+    - 上の場合で、ディレクトリが `base` (Bash の作業ディレクトリ) と同じなら、元の相対パスを
+      `"kubeconfig_given"` に残す (絶対パスが案内に使える形でないとき、verify() が相対の
+      まま案内する。そこで打てば同じファイルを指す)
     - `--kubeconfig` が無く、`KUBECONFIG` (env はインライン env を重ねた完全な env) に相対パスの
       要素があれば、`"cwd"` にディレクトリの実体のパスを入れる (verify() が kubectl をそこで
-      起動する)
+      起動する)。ディレクトリが `base` と違えば `"cwd_moved"` も立てる (切替をコマンドの形で
+      案内しない)
+    - `kubeconfig_given` / `cwd_moved` は案内の形だけを決める値 (DISPLAY_CONTEXT_KEYS)
     - 相対パスが無ければ context をそのまま返す (`cd` の有無で照合も cache も変えない)
-    - 相対パスがあるのに、ディレクトリが 1 つに決まらなければ None (dispatcher が止める)
+    - 相対パスがあるのに、ディレクトリが 1 つに決まらなければ None (dispatcher が止める)。
+      `cd` が確実に順に走る形でないとき、dispatcher は `{None}` を渡す
     """
     ctx = dict(context or {})
     kubeconfig = ctx.get("kubeconfig")
@@ -304,10 +355,15 @@ def resolve_context(context, directories, env) -> dict | None:
     if not isinstance(directory, str):
         return None
     real = os.path.realpath(directory)
+    at_base = _same_dir(real, base)
     if kubeconfig is not None:
-        ctx["kubeconfig"] = os.path.join(real, kubeconfig)
+        ctx["kubeconfig"] = os.path.join(real, _strip_dot_slash(kubeconfig))
+        if at_base:
+            ctx["kubeconfig_given"] = kubeconfig
     else:
         ctx["cwd"] = real
+        if not at_base:
+            ctx["cwd_moved"] = True
     return ctx
 
 
