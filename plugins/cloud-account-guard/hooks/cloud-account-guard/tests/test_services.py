@@ -2591,6 +2591,37 @@ class TestFirebaseSelfRemediation(unittest.TestCase):
         self.assertTrue(firebase.is_self_remediation("firebase use proj-dev", expected))
         self.assertFalse(firebase.is_self_remediation("firebase use staging", expected))
 
+    def test_trailing_config_accepts_only_the_project_id(self):
+        """末尾の `-c` / `--config` を剥がして受ける形は、期待値の project ID だけを受け、alias
+        名は受けない (v0.27.0)。alias は `--config` のディレクトリの `.firebaserc` で解決されるが、
+        hook はその解決先を照合しないため (マージ前レビューの指摘)。option の無い形は従来どおり
+        alias も受ける。"""
+        expected = {"default": "proj-dev", "prod": "proj-prod"}
+        for option in ("-c sub/firebase.json", "--config sub/firebase.json",
+                       "--config=sub/firebase.json", "-csub/firebase.json"):
+            with self.subTest(option=option):
+                self.assertTrue(
+                    firebase.is_self_remediation(f"firebase use proj-dev {option}", expected)
+                )
+                self.assertTrue(
+                    firebase.is_self_remediation(f"firebase use proj-prod {option}", expected)
+                )
+                self.assertFalse(
+                    firebase.is_self_remediation(f"firebase use default {option}", expected)
+                )
+                self.assertFalse(
+                    firebase.is_self_remediation(
+                        f"firebase use prod {option} --non-interactive", expected
+                    )
+                )
+        self.assertTrue(firebase.is_self_remediation("firebase use default", expected))
+        self.assertTrue(
+            firebase.is_self_remediation("firebase use default --non-interactive", expected)
+        )
+        self.assertTrue(
+            firebase.is_self_remediation("firebase use my-proj -c sub/firebase.json", "my-proj")
+        )
+
     def test_use_with_extra_args_falls_through(self):
         self.assertFalse(firebase.is_self_remediation(
             "firebase use my-proj --add", "my-proj"))

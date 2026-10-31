@@ -1127,6 +1127,45 @@ class TestMigrateRemoveOld(BaseBuilder):
         self.assertFalse(os.path.lexists(self._deprecated_path()))
         self.assertTrue(target.exists())
 
+    def _assert_only_copy_survives(self, code, err):
+        self.assertEqual(code, 1, err)
+        self.assertTrue(os.path.isfile(self._deprecated_path()))
+        self.assertEqual(
+            json.loads(self._deprecated_path().read_text(encoding="utf-8")), {"github": "Mao-o"}
+        )
+        self.assertEqual(
+            json.loads(self._new_path().read_text(encoding="utf-8")), {"github": "Mao-o"}
+        )
+        self.assertIn("新パスの実体と同じファイルのため", err)
+
+    def test_new_path_symlinked_to_old_path_keeps_the_only_copy(self):
+        """新パスが旧パスへの symlink なら、書き込みは旧パスの実体に入る。旧パスを消すと
+        唯一の実体が消えるので残す (exit 1)。マージ前レビューの指摘。"""
+        self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+        self.new_dir.mkdir(parents=True)
+        os.symlink(os.path.join("..", "accounts.local.json"), self._new_path())
+        code, _out, err = self._run_no_raise(["migrate", "--commit", "--remove-old"])
+        self._assert_only_copy_survives(code, err)
+
+    def test_new_dir_symlinked_to_claude_dir_keeps_the_only_copy(self):
+        """`.claude/cloud-account-guard` が `.claude` への symlink のときも同じ。"""
+        self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+        os.symlink(".", self.new_dir)
+        code, _out, err = self._run_no_raise(["migrate", "--commit", "--remove-old"])
+        self._assert_only_copy_survives(code, err)
+
+    def test_new_path_hard_linked_to_old_path_still_removes(self):
+        """hard link は旧パスの名前を消しても新パスに内容が残るので、従来どおり消す。"""
+        self._deprecated_path().write_text(json.dumps({"github": "Mao-o"}), encoding="utf-8")
+        self.new_dir.mkdir(parents=True)
+        os.link(self._deprecated_path(), self._new_path())
+        code, _out, err = self._run_no_raise(["migrate", "--commit", "--remove-old"])
+        self.assertEqual(code, 0, err)
+        self.assertFalse(os.path.lexists(self._deprecated_path()))
+        self.assertEqual(
+            json.loads(self._new_path().read_text(encoding="utf-8")), {"github": "Mao-o"}
+        )
+
 
 class TestProjectClaudeMd(BaseBuilder):
     """0.3.1 で追加した Claude 向け signpost (`CLAUDE.md`) の同梱挙動。

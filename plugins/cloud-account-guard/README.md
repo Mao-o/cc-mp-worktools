@@ -819,8 +819,11 @@ deny は同じ option を付けた切替を案内するので (`gcloud config se
 --configuration <構成>` / `kubectl config use-context <期待値> --kubeconfig <ファイル>` /
 `firebase --config <ファイル> use <期待値>`)、その形を期待値への切替として通す。0.26.1 までは
 末尾に付けた形は通常検証に落ちて、案内どおりにしても往復が閉じなかった (CLI 名の直後に付けた形は
-以前から通っていた)。切替先は期待値に限られ、その構成 / ファイルを使うコマンドも使わない
-コマンドも実行時に照合されるので、新しい誤 allow は開かない。
+以前から通っていた)。その構成 / ファイルを使うコマンドも使わないコマンドも実行時に照合される。
+ただし firebase の切替の名前は、`--config` のファイルのあるディレクトリの `.firebaserc` で alias として
+解決され、hook はその解決先を照合しない (既知の穴。別途対応)。そのため firebase で末尾の
+`--config` / `-c` を付けた形は、期待値の project ID そのものへの切替だけを通し、alias 名への切替は
+通常検証に落とす (CLI 名の直後に付けた形の扱いは変えていない)。
 
 **それ以外のオプションは対象外** (許可オプションの allow-list で、コマンドの allow-list では
 ない)。`gcloud config set project <期待値> --flags-file f.yaml` (任意の flag を注入できる)、

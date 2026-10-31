@@ -1919,9 +1919,20 @@ def _remove_old_sources(
 
     removed: list[Path] = []
     kept: list[tuple[str, Path, str]] = []
+    # 新パスが旧パスへの symlink のとき (またはディレクトリが `.claude` への symlink の
+    # とき)、書き込みは symlink をたどって旧パスの実体に入る。上の照合はどちらも一致する
+    # ので、ここで旧パスを unlink すると唯一の実体が消える。旧パス自身が指す名前 (親だけを
+    # 解決し、最後の要素は解決しない = symlink なら link 自体) が新パスの実体と同じなら
+    # 消さない。hard link と「旧パス → 別の実体」の symlink は unlink しても実体が残るので、
+    # samefile ではなくこの比較にする。
+    new_real = os.path.realpath(new_path)
     for kind, path in retained:
         if not os.path.isfile(path):
             kept.append((kind, path, "通常のファイルではないため"))
+            continue
+        own = os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
+        if own == new_real:
+            kept.append((kind, path, "新パスの実体と同じファイルのため"))
             continue
         try:
             unchanged = _load_existing(path) == sources[kind]

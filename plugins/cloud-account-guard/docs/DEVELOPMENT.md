@@ -253,7 +253,9 @@ service ごとに走査し、次の並びを deny する:
   deny がその option を付けた切替を案内するため。inert 判定と firebase の `is_pin_action` には
   広げない)。根拠: 切替先は期待値に限られ、その option で選んだ構成 / ファイルの状態を期待値に
   寄せるだけで、続くコマンドはどの構成 / ファイルを使うものも実行時に照合される。CLI 名の直後に
-  置いた形は global option として剥がされて以前から通っていたので、末尾の形を揃えただけでもある
+  置いた形は global option として剥がされて以前から通っていたので、末尾の形を揃えただけでもある。
+  firebase は alias の解決先を照合しない (既知の穴) ので、末尾の `-c` / `--config` を剥がす形は
+  期待値の project ID への切替に限る (alias 名は受けない。0.27.0 の節を参照)
 - **判定に CLI を呼ばない** (cache / self-remediation / verify より**前**で deny する)。
   現在値が何であっても切替後の状態は検証できないので verify の結果で判定が変わる
   余地がなく、確実に deny になるコマンドで実時間予算 (`core/budget.py`) を使うと、
@@ -1745,9 +1747,16 @@ cache の状態ファイルのうち成功 cache の entry と epoch は、hook 
 - 判定表の変更: `is_self_remediation` が `_LANDING_OPTIONS_WITH_VALUE` (kubectl `--kubeconfig`、
   gcloud `--configuration`、firebase `--config` / `-c`) を剥がす。末尾の形の deny → allow。連結規則
   (`_is_expected_switch`) も同じ述語なので、`<期待値への切替 + その option> && <書込>` は止めない。
-  誤 allow を開かない理由: 切替先は期待値に限られ、X の状態を期待値に寄せるだけ。続く書込は
-  X を使うものも使わないものも、その場の状態で照合される (X を使う書込は切替前の X で照合されるので、
-  起きうるのは誤 deny だけ)。CLI 名の直後の形は以前から同じ扱い
+  kubectl / gcloud で誤 allow を開かない理由: 切替先は期待値に限られ、X の状態を期待値に寄せるだけ。
+  続く書込は X を使うものも使わないものも、その場の状態で照合される (X を使う書込は切替前の X で
+  照合されるので、起きうるのは誤 deny だけ)。CLI 名の直後の形は以前から同じ扱い
+- firebase は例外: `firebase use <x> -c X` の x は X のディレクトリの `.firebaserc` で alias として
+  解決され、hook は alias の解決先を照合しない (既知の穴。別途対応)。末尾の `-c` を剥がす経路で
+  alias をキーとして受けると、`firebase use default -c X && firebase deploy -c X` (X の `.firebaserc` の
+  `default` が別の project) が新しく通っていた (マージ前レビューの指摘)。そのため `-c` / `--config` を
+  剥がして初めて `firebase use <x>` になる形は、期待値の project ID そのものだけを受ける。剥がさずに
+  当たる形 (option なし・CLI 名の直後に置く形) は従来どおり alias も受ける。deny が案内するのは
+  CLI 名の直後に置く形 (`_config_use_prefix`) なので、案内の往復はこの制限に掛からない
 - 推論のまま残したもの: gcloud の `--configuration X` を付けた `config set` が構成 X に書くこと
   (gcloud の global flag の仕様からの推論。このレーンでは実機の gcloud を起動していない)。
   kubectl の `--kubeconfig` も同じく推論 (kubectl の global flag)。firebase は内部バックログの実測
@@ -1765,8 +1774,12 @@ cache の状態ファイルのうち成功 cache の entry と epoch は、hook 
   D4 の fail-closed を弱める方向で、包含の判定を hook が毎回行うことになる)。代わりに builder に
   明示フラグ `--remove-old` を足し、skill が削除の確認 (AskUserQuestion) を取ってから付ける
 - 消す条件: 新パスを読み直した内容が書いた内容と一致し、旧パスを読み直した内容が統合の判定に
-  使った内容と一致し、通常のファイル (symlink は link だけ消す) であること。消せなかった旧パスは
-  exit 1 と `rm` の行で手での削除を案内する
+  使った内容と一致し、通常のファイル (symlink は link だけ消す) であること。加えて、旧パスの名前
+  (親だけを解決し、最後の要素は解決しない) が新パスの実体 (`realpath`) と同じなら消さない。新パスが
+  旧パスへの symlink のときや、`.claude/cloud-account-guard` が `.claude` への symlink のときは、
+  書き込みが旧パスの実体に入り、上の照合はすべて一致するので、unlink が唯一の実体を消していた。
+  `os.path.samefile` にしないのは、hard link と「旧パス → 別の実体」の symlink は unlink しても
+  実体が残る (消してよい) ため。消せなかった旧パスは exit 1 と `rm` の行で手での削除を案内する
 
 ## 既知の制限
 
