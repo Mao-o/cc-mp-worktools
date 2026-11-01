@@ -1460,6 +1460,10 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 - option 付きの `env` (`env -C dir` / `env -u X`) の後ろのクラウド CLI。候補にならず検証されない
 - 配列の閉じの直後に語の断片が続く代入 (`a=(1 2)y aws ...`) の後ろのクラウド CLI
 - コマンド語の無い heredoc に演算子が続く形 (`<<E && aws ...`) の後ろのクラウド CLI
+- heredoc と、シェル経由の wrapper (`watch` / `sudo -s` / `sudo -i` / `npx -c`) に引用符で包んで渡す
+  複合コマンドを組み合わせた形 (`cat <<EOF && watch 'true && kubectl ...'` + 改行 + 本文 + `EOF` /
+  `watch 'cat <<EOF && kubectl ...'`) の中のクラウド CLI。候補にならず検証されない。heredoc だけの形
+  (`cat <<EOF && kubectl ...`) と wrapper だけの形 (`watch 'true && kubectl ...'`) は守る範囲
 - 代入の頭の珍しい形 (`NAME+=`、添字の中の空白、二重引用符の中の `$(` に heredoc を置いたもの)
   の後ろのクラウド CLI
 - コマンド置換やバッククォートの中だけにあるクラウド CLI (`echo $(aws ...)`)

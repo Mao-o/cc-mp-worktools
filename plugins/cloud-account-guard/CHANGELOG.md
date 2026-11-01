@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.29.7
+
+### Docs: heredoc とシェル経由の wrapper の複合コマンドの組み合わせを守らない範囲に入れる
+
+- heredoc を置いた行の後ろにシェル経由の wrapper (`watch` / `sudo -s` / `sudo -i` / `npx -c`) を置き、
+  引用符で包んだ複合コマンドを渡す形 (`cat <<EOF && watch 'true && kubectl ...'` + 改行 + 本文 + `EOF`)
+  と、wrapper の引用符の中に heredoc を置いた形 (`watch 'cat <<EOF && kubectl ...'`) では、中の
+  クラウド CLI が候補にならない (分割し直した段を、もう一段は割らない)。README の「守らない範囲」に
+  足した。判定は変えていない
+- 範囲外と決めた理由: `watch` は終わらないコマンドで、`sudo -s` / `sudo -i` は対話のシェルを前提と
+  するため、heredoc と同じ 1 回のコマンドに組み合わせて書くことは普段は無い。heredoc だけの形
+  (`cat <<EOF && kubectl ...`) と wrapper だけの形 (`watch 'true && kubectl ...'`) は従来どおり
+  検証する。範囲外の形のために分割の段を増やすと、それ自体が新しい読み違いの入口になる
+
 ## 0.29.6
 
 ### Fixed: context option の値の `~` を展開せずに照合していた (誤 deny / 別のファイルでの照合)
