@@ -91,6 +91,10 @@ Claude Code は PreToolUse hook が時間切れになるとコマンドをその
 
 `cd "$DIR" && gh pr create` のように移動先が変数で、どの repo を検査すればよいか
 静的に分からない場合も、「ゲートを完了できない」扱いで止めます (絶対パスで書けば通ります)。
+cd が何度もあるときは順に合成します (`cd plugins/x && make test && cd ../.. && gh pr create` は
+repo root を検査します)。サブシェルやパイプの中など shell の cwd を変えないことがある cd の後に
+相対パスの cd が続く場合と、`cd -` を合成する場合も、移動先が決まらないので止めます。
+heredoc の本文はコマンドとして読まないので、本文に `'` があっても止めません。
 
 同様に、PR 操作がコマンド置換 (`url="$(gh pr create ...)"`)・関数・`pushd` の後などにあって
 検査対象を特定できない場合も止めます。**`gh pr create` / `gh pr ready` は単独のコマンド

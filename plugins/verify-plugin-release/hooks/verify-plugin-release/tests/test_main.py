@@ -205,6 +205,80 @@ class MainTest(unittest.TestCase):
         self.assertEqual(self.decision(out), "deny")
         self.assertIn("set-default", out["hookSpecificOutput"]["permissionDecisionReason"])
 
+    def test_cd_back_to_the_root_runs_the_gate(self):
+        # 最後の cd (`../..`) だけで解決すると repo の外になり、ゲートが走らずに通っていた
+        write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
+        commit_all(self.root, "change without bump")
+        for cmd in (
+            "cd plugins/alpha && python3 -m unittest && cd ../.. && gh pr create -t x",
+            "cd plugins && cd alpha && cd ../.. && gh pr create -t x",
+        ):
+            with self.subTest(cmd=cmd):
+                out = run_hook(bash(cmd, self.root))
+                self.assertEqual(self.decision(out), "deny")
+                self.assertIn("version[alpha]", out["hookSpecificOutput"]["permissionDecisionReason"])
+        # 合成した先が repo の外なら従来どおり何もしない
+        self.assertIsNone(run_hook(bash("cd plugins && cd ../.. && gh pr create -t x", self.root)))
+
+    def test_composed_cd_follows_links_like_the_shell(self):
+        write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
+        commit_all(self.root, "change without bump")
+        outside = Path(self._tmp.name) / "outside" / "deep"
+        outside.mkdir(parents=True)
+        # (1) 移動先が repo を指す symlink
+        (Path(self._tmp.name) / "repo-link").symlink_to(self.root)
+        out = run_hook(bash("cd repo-link && cd plugins && cd .. && gh pr create -t x", Path(self._tmp.name)))
+        self.assertEqual(self.decision(out), "deny")
+        # (2) 途中の dir が repo の外を指す symlink: `..` は shell と同じく symlink を辿る前の親 (= repo root)
+        link = self.root / "ext"
+        link.symlink_to(outside)
+        out = run_hook(bash("cd ext && cd .. && gh pr create -t x", self.root))
+        self.assertEqual(self.decision(out), "deny")
+        out = run_hook(bash("cd ext/.. && gh pr create -t x", self.root))
+        self.assertEqual(self.decision(out), "deny")
+        # symlink の先そのものは repo の外
+        self.assertIsNone(run_hook(bash("cd plugins && cd ../ext && gh pr create -t x", self.root)))
+
+    def test_composed_cd_with_a_case_insensitive_name(self):
+        probe = Path(self._tmp.name) / "CaseProbe"
+        probe.mkdir()
+        if not (Path(self._tmp.name) / "caseprobe").exists():
+            self.skipTest("大文字小文字を区別する FS")
+        write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
+        commit_all(self.root, "change without bump")
+        out = run_hook(bash("cd PLUGINS && cd ALPHA && cd ../.. && gh pr create -t x", self.root))
+        self.assertEqual(self.decision(out), "deny")
+        self.assertIn("version[alpha]", out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_unresolvable_composed_cd_is_denied(self):
+        cases = {
+            "missing step": ("cd no-such-dir && cd .. && gh pr create -t x", "存在しない"),
+            "cd after a subshell": ("(cd plugins/alpha) && cd ../.. && gh pr create -t x", "静的に解決できない"),
+            "variable then relative": ('cd "$WT" && cd sub && gh pr create -t x', "静的に解決できない"),
+            "oldpwd": ("cd plugins && cd - && gh pr create -t x", "静的に解決できない"),
+        }
+        for label, (cmd, why) in cases.items():
+            with self.subTest(label):
+                out = run_hook(bash(cmd, self.root))
+                self.assertEqual(self.decision(out), "deny")
+                reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+                self.assertIn("cd の移動先", reason)
+                self.assertIn(why, reason)
+
+    def test_heredoc_body_with_an_apostrophe_runs_the_gate(self):
+        write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
+        commit_all(self.root, "change without bump")
+        for cmd in (
+            "cat > b.md <<'EOF'\nIt's done\nEOF\ngh pr create -t x --body-file b.md",
+            "gh pr create -t x --body-file - <<'EOF'\nI don't know\nEOF",
+        ):
+            with self.subTest(cmd=cmd):
+                out = run_hook(bash(cmd, self.root))
+                self.assertEqual(self.decision(out), "deny")
+                reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+                self.assertIn("version[alpha]", reason)
+                self.assertNotIn("解析できない", reason)
+
     def test_unresolvable_cd_is_denied(self):
         for cmd in ('cd "$WT" && gh pr create -t x', "cd no-such-dir && gh pr create -t x"):
             with self.subTest(cmd=cmd):
