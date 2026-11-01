@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.29.9
+
+### テスト整理 (挙動の変更なし): 手元の env でテストの結果が変わらないようにする / test_command_parser の表駆動化
+
+- テストの隔離 (`tests/_testutil.py`) が `AWS_*` を外しておらず、手元に `AWS_CONFIG_FILE` を export
+  していると deny の案内のテストが落ちた (`AWS_PROFILE` では 5 件)。外側に `CDPATH` があると、`cd` の
+  行き先を「決められない」と読むので 200 件が落ちた。隔離が外す env に、`AWS_` (prefix)・`KUBECONFIG`・
+  `FIREBASE_TOKEN`・`GOOGLE_APPLICATION_CREDENTIALS`・`APPDATA`・`CDPATH` を足した
+- 各 service が CLI のアカウントを決める env として宣言するもの (`IDENTITY_ENV_VARS` /
+  `IDENTITY_ENV_PREFIXES`) は、隔離が設定し直すもの (`HOME` など) を除いてすべて外す。宣言との一致を
+  `tests/test_testutil.py` が検査する
+- 隔離 (`start_isolation()`) を呼ばないモジュールのために、`_testutil` の import の時点でテスト実行
+  プロセスの env からも外す。外側に `AWS_CONFIG_FILE` / `AWS_PROFILE` / `KUBECONFIG` / `CDPATH` を
+  export したまま、実際に落ちたテストが green になることを子プロセスで確かめるテストを足した
+- `test_command_parser.py` の 5 クラス (`TestSplitOnOperators` / `TestStripLeadingEnv` /
+  `TestStripTransparentWrappers` / `TestExtractCandidates` / `TestSudoEnvScrub`) の、入力と期待だけが違う
+  テストを表 + subTest にまとめた。ケース数は 89 のまま (元のテスト名をケースのラベルに、回帰の注記は
+  コメントに残した)
+- `test_services.py` の、本体もクラスも同じ重複テスト 1 件を削除した (configstore のキーが実体パスの
+  ときの一致。残るテストが同じことを確かめる)
+
 ## 0.29.8
 
 ### テスト整理 (挙動の変更なし): テストから本物のクラウド CLI を起動しない

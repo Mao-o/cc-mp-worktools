@@ -558,7 +558,10 @@ class TestFirebase(unittest.TestCase):
         self.assertIn("現在=proj-prod", err)
 
     def test_cli_missing_configstore_switch_matches_expected(self):
-        """同じ状況で期待が切替先 (proj-prod) なら allow (永久 deny 防止)。"""
+        """同じ状況で期待が切替先 (proj-prod) なら allow (永久 deny 防止)。
+
+        configstore のキーが実体パス (symlink 解決済み) でも一致することも、これで確かめる
+        (同じ本体の重複テストを統合した)。"""
         with tempfile.TemporaryDirectory() as d:
             self._write_firebaserc(d, {"default": "proj-dev", "prod": "proj-prod"})
             self._write_configstore({os.path.realpath(d): "prod"})
@@ -588,14 +591,6 @@ class TestFirebase(unittest.TestCase):
             self._write_configstore({os.path.realpath(d): "prod"})
             with mock.patch("subprocess.run", side_effect=FileNotFoundError):
                 self.assertIsNone(firebase.verify("proj-prod", str(sub)))
-
-    def test_configstore_lookup_matches_realpath_key(self):
-        """configstore のキーが実体パス (symlink 解決済み) でも一致する。"""
-        with tempfile.TemporaryDirectory() as d:
-            self._write_firebaserc(d, {"default": "proj-dev", "prod": "proj-prod"})
-            self._write_configstore({os.path.realpath(d): "prod"})
-            with mock.patch("subprocess.run", side_effect=FileNotFoundError):
-                self.assertIsNone(firebase.verify("proj-prod", d))
 
     def test_configstore_path_honours_env_argument(self):
         """verify(env=...) の XDG_CONFIG_HOME を configstore の場所に使う
