@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -199,6 +200,144 @@ class TestAssertRealIsFileOnThisVersion(unittest.TestCase):
         unstattable = self.tmp / "long"
         os.symlink("a" * 300, unstattable)  # 1 要素が 255 バイトを超える → stat が ENAMETOOLONG
         _testutil.assert_real_is_file_on_this_version(self, unstattable)
+
+
+class TestRealCliGuard(unittest.TestCase):
+    """テストから本物のクラウド CLI を起動させないガード (`_testutil` の Popen と TestCase.run の包み)。
+
+    「一時 dir の外」を作るため、偽の CLI を置いた dir とは別の dir を `tempfile.tempdir` にする。
+    偽の CLI は起動されると印のファイルを作るので、起動されなかったことを印の有無で確かめる。
+    """
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(self.root, ignore_errors=True))
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.marker = self.root / "launched"
+        for name in ("gh", "notacli"):
+            script = self.bin / name
+            script.write_text(f"#!/bin/sh\necho {name} >> '{self.marker}'\nexit 0\n", encoding="utf-8")
+            script.chmod(0o755)
+        self.env = {"PATH": str(self.bin)}
+        self.start = len(_testutil.REAL_CLI_LAUNCHES)
+        # このテスト自身が記録で落ちないよう、終わりに記録を戻す (登録順で、ガードの確認より先に走る)。
+        self.addCleanup(self._forget_records)
+
+    def _forget_records(self):
+        del _testutil.REAL_CLI_LAUNCHES[self.start:]
+
+    def _outside(self):
+        """`self.bin` を一時 dir の外にする (tempdir を別の dir に向ける)。"""
+        inner = self.root / "tmp"
+        inner.mkdir(exist_ok=True)
+        return mock.patch.object(tempfile, "tempdir", str(inner))
+
+    def _records(self):
+        return _testutil.REAL_CLI_LAUNCHES[self.start:]
+
+    def _launched(self) -> str:
+        return self.marker.read_text(encoding="utf-8") if self.marker.exists() else ""
+
+    def _run(self, args, **kwargs):
+        """起動して結果を返す。FileNotFoundError はそのまま返し、それ以外の例外は失敗にする。"""
+        kwargs.setdefault("env", self.env)
+        try:
+            return subprocess.run(args, capture_output=True, **kwargs)
+        except FileNotFoundError as e:
+            return e
+        except Exception as e:  # noqa: BLE001 — ガードの不具合を ERROR ではなく FAIL として数える
+            self.fail(f"起動で想定外の例外: {e!r}")
+
+    def _assert_not_found(self, args, **kwargs):
+        got = self._run(args, **kwargs)
+        self.assertIsInstance(got, FileNotFoundError, f"起動された: {got!r}")
+
+    def _assert_ran(self, args, **kwargs):
+        got = self._run(args, **kwargs)
+        self.assertIsInstance(got, subprocess.CompletedProcess, f"起動されなかった: {got!r}")
+        self.assertEqual(got.returncode, 0)
+
+    def _assert_blocked(self, args, **kwargs):
+        with self._outside():
+            self._assert_not_found(args, **kwargs)
+        self.assertEqual(self._launched(), "", "本物扱いの CLI が起動された")
+        self.assertEqual(len(self._records()), 1, self._records())
+        self.assertEqual(self._records()[0][0], os.path.realpath(self.bin / "gh"))
+
+    def test_cli_outside_the_tempdir_is_blocked_and_recorded(self):
+        self._assert_blocked(["gh", "auth", "status"])
+
+    def test_cli_named_by_path_is_blocked(self):
+        self._assert_blocked([str(self.bin / "gh"), "auth", "status"])
+
+    def test_cli_named_relative_to_cwd_is_blocked(self):
+        self._assert_blocked(["./gh"], cwd=str(self.bin))
+
+    def test_cli_given_as_executable_is_blocked(self):
+        self._assert_blocked(["anything"], executable=str(self.bin / "gh"))
+
+    def test_cli_given_as_a_single_string_is_blocked(self):
+        self._assert_blocked("gh")
+
+    def test_cli_found_through_os_environ_path_is_blocked(self):
+        """`env` を渡さない起動は `os.environ` の PATH で引く。"""
+        with mock.patch.dict(os.environ, {"PATH": str(self.bin)}), self._outside():
+            self._assert_not_found(["gh"], env=None)
+        self.assertEqual(self._launched(), "")
+        self.assertEqual(len(self._records()), 1)
+
+    def test_fake_cli_inside_the_tempdir_runs(self):
+        """テストが一時 dir に置いた偽の CLI はそのまま走る。"""
+        with mock.patch.object(tempfile, "tempdir", str(self.root)):
+            self._assert_ran(["gh"])
+        self.assertEqual(self._launched(), "gh\n")
+        self.assertEqual(self._records(), [])
+
+    def test_other_commands_run(self):
+        with self._outside():
+            self._assert_ran(["notacli"])
+        self.assertEqual(self._launched(), "notacli\n")
+        self.assertEqual(self._records(), [])
+
+    def test_missing_cli_is_not_recorded(self):
+        empty = self.root / "empty"
+        empty.mkdir()
+        with self._outside():
+            self._assert_not_found(["gh"], env={"PATH": str(empty)})
+            self._assert_not_found(["./gh"], cwd=str(empty))
+        self.assertEqual(self._records(), [])
+
+    def test_shell_launch_is_out_of_scope(self):
+        """シェルの中の起動は見えない (限界の固定。偽の CLI はそのまま走る)。"""
+        with self._outside():
+            self._assert_ran("gh", shell=True)
+        self.assertEqual(self._launched(), "gh\n")
+        self.assertEqual(self._records(), [])
+
+    def test_a_test_that_launches_a_real_cli_fails(self):
+        """記録が増えたテストは assertion の失敗になる。CLI の失敗を握る経路 (builder の `show`) でも落ちる。"""
+        outer = self
+
+        class Inner(unittest.TestCase):
+            def test_swallowed(self):
+                with outer._outside():
+                    try:
+                        subprocess.run(["gh"], env=outer.env, capture_output=True)
+                    except Exception:  # noqa: BLE001 — 握る経路の再現
+                        pass
+
+            def test_clean(self):
+                subprocess.run(["notacli"], env=outer.env, capture_output=True)
+
+        result = unittest.TestResult()
+        unittest.TestSuite(
+            [Inner("test_swallowed"), Inner("test_clean")]
+        ).run(result)
+        self.assertEqual(result.errors, [])
+        self.assertEqual([case.id().rsplit(".", 1)[-1] for case, _tb in result.failures], ["test_swallowed"])
+        self.assertIn("本物のクラウド CLI", result.failures[0][1])
+        self.assertEqual(self._launched(), "notacli\n")
 
 
 if __name__ == "__main__":

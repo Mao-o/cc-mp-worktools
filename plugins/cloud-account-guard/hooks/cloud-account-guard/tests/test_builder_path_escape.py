@@ -51,6 +51,12 @@ class _Base(unittest.TestCase):
         patcher = mock.patch.object(Path, "home", staticmethod(lambda: self.home))
         patcher.start()
         self.addCleanup(patcher.stop)
+        # `show` は現在値を CLI に問い合わせる。この suite の検査は出力の 1 行性だけなので、
+        # 現在値は「取れない」に固定し、本物の CLI を起動しない。
+        for svc in builder._SERVICE_BY_KEY.values():
+            patcher = mock.patch.object(svc, "get_active_account", return_value=None)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self._launch(self.project)
 
     def _launch(self, project: Path) -> None:

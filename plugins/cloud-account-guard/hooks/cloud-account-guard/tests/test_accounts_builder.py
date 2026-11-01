@@ -3960,9 +3960,10 @@ class TestExplicitPathArgument(BaseBuilder):
         """show は読み取り専用なので旧パスも直接見られる。"""
         deprecated = self.claude_dir / "accounts.local.json"
         deprecated.write_text(json.dumps({"aws": "111"}), encoding="utf-8")
-        code, out, _err = self._run(
-            ["show", "--show-values", "--path", str(deprecated)]
-        )
+        with mock.patch("services.aws.get_active_account", return_value="111"):
+            code, out, _err = self._run(
+                ["show", "--show-values", "--path", str(deprecated)]
+            )
         self.assertEqual(code, 0)
         self.assertIn(str(deprecated), out)
         self.assertIn("111", out)
@@ -4226,7 +4227,10 @@ class TestAutoSwitchSubcommand(BaseBuilder):
     def test_show_reports_what_enable_wrote(self):
         self._write_new({"github": "Mao-o"})
         self._run(["auto-switch", "--enable", "--commit"])
-        code, out, _err = self._run(["show"])
+        with mock.patch(
+            "services.github.get_active_account", return_value={"github.com": "Mao-o"}
+        ):
+            code, out, _err = self._run(["show"])
         self.assertEqual(code, 0)
         self.assertIn("[auto-switch: github]", out)
 
