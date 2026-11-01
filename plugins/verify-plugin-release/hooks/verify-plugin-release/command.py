@@ -50,6 +50,62 @@ class Invocation:
     parsed: bool = True  # False = shlex で分解できず文字列一致で検出した
 
 
+# shell が単語の先頭と読む位置の直前に来る文字 (これらの直後の `#` からがコメント)
+_WORD_START_PREV = frozenset(" \t\r\n;&|()<>")
+
+
+def _join_continuations(s: str) -> str:
+    """`\\`+改行の継続行をつなぐ (安全網用。引用符は見ないので、つなぎすぎても締める側に倒れる)。"""
+    return re.sub(r"(?<!\\)((?:\\\\)*)\\\n", r"\1", s)
+
+
+def _strip_comments(command: str) -> str:
+    """shell と同じ規則でコメントを落とし、`\\`+改行の継続行をつなぐ。
+
+    shlex の既定の commenters (`#`) は単語の途中の `#` (`feature#1`、`${x##*/}`) でも
+    コメントと読み、しかも読み捨てるときに改行まで消費するので、次の行の
+    `gh pr create` が前の行につながって見失われる。そこで shlex には commenters を
+    使わせず、ここで単語の先頭 (直前が空白か区切り) の `#` から改行の手前までだけを落とす。
+    引用符の中の `#` と、単語の途中の `#` は落とさない。改行そのものは残す
+    (複数行のコマンドを 1 セグメントに潰さないため)。
+    """
+    out: list[str] = []
+    quote = ""  # "" | "'" | '"'
+    escaped_end = -1  # 直近の `\\X` を足した直後の len(out) (エスケープした空白は単語の区切りではない)
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if quote == "'":
+            out.append(ch)
+            if ch == "'":
+                quote = ""
+        elif ch == "\\" and i + 1 < n:
+            if command[i + 1] == "\n":
+                pass  # 継続行: 両方とも捨てて前後をつなぐ (単一引用符の外ならどこでも)
+            else:
+                out.append(ch)
+                out.append(command[i + 1])
+                escaped_end = len(out)
+            i += 2
+            continue
+        elif quote == '"':
+            out.append(ch)
+            if ch == '"':
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+            out.append(ch)
+        elif ch == "#" and (not out or (out[-1] in _WORD_START_PREV and escaped_end != len(out))):
+            while i < n and command[i] != "\n":
+                i += 1
+            continue
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _is_separator(tok: str) -> bool:
     """punctuation だけの token が区切りを含むか。
 
@@ -181,8 +237,10 @@ def find_invocations(command: str) -> list[Invocation]:
     """
     if "gh" not in command or "pr" not in command:
         return []
+    joined = _join_continuations(command)
     try:
-        lex = shlex.shlex(command, posix=True, punctuation_chars=_PUNCT)
+        lex = shlex.shlex(_strip_comments(command), posix=True, punctuation_chars=_PUNCT)
+        lex.commenters = ""  # コメントは _strip_comments で落とす (shlex は改行まで食う)
         lex.whitespace = " \t\r"
         lex.whitespace_split = True
         tokens = list(lex)
@@ -190,10 +248,10 @@ def find_invocations(command: str) -> list[Invocation]:
         return [
             Invocation(
                 kind="ready" if m.group(1) == "ready" else "create",
-                draft=bool(re.search(r"\s(?:--draft|-d)\b", command)) and m.group(1) != "ready",
+                draft=bool(re.search(r"\s(?:--draft|-d)\b", joined)) and m.group(1) != "ready",
                 parsed=False,
             )
-            for m in _FALLBACK.finditer(command)
+            for m in _FALLBACK.finditer(joined)
         ]
 
     found: list[Invocation] = []
@@ -245,6 +303,7 @@ def unresolved_reason(command: str, found: list[Invocation]) -> str | None:
     実行位置に現れる PR 操作の数と、構文解析で認識できた数が合わない場合は
     「検査対象を特定できない」として扱い、呼び出し側で止める。
     """
+    command = _join_continuations(command)
     expected = 0
     for m in _EXEC_POS.finditer(command):
         if m.group(1) == "ready" and "--undo" in m.group(2):

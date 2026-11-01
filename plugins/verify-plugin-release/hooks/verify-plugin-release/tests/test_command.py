@@ -5,7 +5,7 @@ import unittest
 
 import _testutil  # noqa: F401
 
-from command import find_invocation, find_invocations
+from command import find_invocation, find_invocations, unresolved_reason
 
 
 class FindInvocationTest(unittest.TestCase):
@@ -133,6 +133,119 @@ class FindInvocationTest(unittest.TestCase):
 
     def test_mention_inside_quoted_body_is_not_invocation(self):
         self.assertIsNone(find_invocation('git commit -m "run gh pr create later"'))
+
+
+class CommentHandlingTest(unittest.TestCase):
+    """行末コメントが次の行を巻き込まない / 単語の途中・引用符の中の `#` は切らない。"""
+
+    def _kinds(self, cmd):
+        found = find_invocations(cmd)
+        self.assertIsNone(unresolved_reason(cmd, found), cmd)
+        return [i.kind for i in found]
+
+    def test_trailing_comment_then_next_line(self):
+        cases = {
+            "create after comment": ("git status # check\ngh pr create --fill", ["create"]),
+            "ready after comment": ("git push  # c\ngh pr ready", ["ready"]),
+            "comment right after separator": ("git status;# don't\ngh pr create", ["create"]),
+            "comment only line": ("# don't\ngh pr create", ["create"]),
+            "comment after pipe": ("git log |# don't\ngh pr create", ["create"]),
+            "comment after ampersand": ("git log &&# don't\ngh pr create", ["create"]),
+            "comment after open paren": ("(# don't\ngh pr create)", ["create"]),
+            "comment after the invocation": ("gh pr create # c", ["create"]),
+            "comment after redirect": ("git log >/dev/null # c\ngh pr ready", ["ready"]),
+            "escaped single quote before comment": ("echo \\' # c\ngh pr create", ["create"]),
+            "escaped double quote before comment": ('echo \\" # c\ngh pr create', ["create"]),
+            "escaped backslash before comment": ("echo \\\\ # c\ngh pr create", ["create"]),
+        }
+        for label, (cmd, want) in cases.items():
+            with self.subTest(label):
+                self.assertEqual(self._kinds(cmd), want)
+
+    def test_hash_inside_a_word_is_not_a_comment(self):
+        cases = {
+            "word with hash": "echo feature#1\ngh pr create",
+            "parameter expansion": "echo ${x##*/}\ngh pr create",
+            "string length": "echo ${#x} $#\ngh pr create",
+            "escaped hash": "echo \\# x\ngh pr create",
+        }
+        for label, cmd in cases.items():
+            with self.subTest(label):
+                self.assertEqual(self._kinds(cmd), ["create"])
+
+    def test_hash_inside_quotes_is_not_a_comment(self):
+        cases = {
+            "single": "echo '# x'\ngh pr create",
+            "double": 'echo "a # b"\ngh pr create',
+            "double with escaped quote": 'echo "a\\" # b"\ngh pr create',
+            "single quote spanning lines": "echo '# a\n# b'\ngh pr create",
+        }
+        for label, cmd in cases.items():
+            with self.subTest(label):
+                self.assertEqual(self._kinds(cmd), ["create"])
+
+    def test_commented_out_invocation_is_not_found(self):
+        self.assertEqual(find_invocations("git status # gh pr create\ngit diff"), [])
+
+    def test_option_after_comment_line_is_not_swallowed(self):
+        inv = find_invocation("git status # c\ngh pr create --base dev # more")
+        self.assertIsNotNone(inv)
+        self.assertEqual(inv.base, "dev")
+
+    def test_hash_inside_an_argument_is_kept(self):
+        inv = find_invocation("gh pr create --base feature#1 --head x${y##*/}z --draft")
+        self.assertIsNotNone(inv)
+        self.assertEqual((inv.base, inv.head, inv.draft), ("feature#1", "x${y##*/}z", True))
+
+    def test_backslash_newline_joins_lines(self):
+        cases = {
+            "between words": ("gh pr \\\ncreate --fill", ["create"]),
+            "before option": ("gh pr create \\\n --draft", ["create"]),
+            "hash after join is mid-word": ("echo a\\\n# x\ngh pr create", ["create"]),
+            "comment after join with space": ("echo a \\\n# x\ngh pr create", ["create"]),
+        }
+        for label, (cmd, want) in cases.items():
+            with self.subTest(label):
+                self.assertEqual(self._kinds(cmd), want)
+
+    def test_continuation_option_is_parsed(self):
+        inv = find_invocation("gh pr create \\\n --draft")
+        self.assertIsNotNone(inv)
+        self.assertTrue(inv.draft)
+
+
+    def test_escaped_space_before_hash_is_not_a_comment(self):
+        inv = find_invocation("gh pr create --title a\\ #b --base dev")
+        self.assertIsNotNone(inv)
+        self.assertEqual(inv.base, "dev")
+
+    def test_continuation_is_not_replaced_by_a_space(self):
+        # `\`+改行は消えるだけ。空白に置き換えると `#1` が単語の先頭になりコメントと読まれる
+        inv = find_invocation("gh pr create --title a\\\n#1 --base dev")
+        self.assertIsNotNone(inv)
+        self.assertEqual(inv.base, "dev")
+
+    def test_redirect_operator_is_a_word_start_for_comments(self):
+        self.assertEqual(self._kinds("git log ># don't\ngh pr create"), ["create"])
+
+    def test_safety_nets_see_joined_continuations(self):
+        # shlex が ValueError になる (奇数個の ') 本文の後でも、継続行をまたいだ gh pr create を検出する
+        cmd = "cat > b.md <<'EOF'\nIt's done\nEOF\ngh pr \\\n  create --body-file b.md"
+        found = find_invocations(cmd)
+        self.assertEqual([i.kind for i in found], ["create"])
+        self.assertIsNotNone(unresolved_reason(cmd, found))
+
+    def test_ready_undo_across_a_continuation_is_not_counted(self):
+        cmd = "gh pr ready \\\n  --undo"
+        self.assertIsNone(unresolved_reason(cmd, find_invocations(cmd)))
+
+    def test_fallback_joins_only_real_continuations(self):
+        # 閉じていない引用符 -> 安全網。`\\`+改行は継続行ではない (バックスラッシュ自体のエスケープ)
+        found = find_invocations("echo it's \\\\\ngh pr create")
+        self.assertEqual([i.kind for i in found], ["create"])
+        # 継続行でつないだ結果 `t--draft` は --draft ではない
+        found = find_invocations("echo it's\ngh pr create --title t\\\n--draft")
+        self.assertEqual([(i.kind, i.draft) for i in found], [("create", False)])
 
 
 if __name__ == "__main__":
