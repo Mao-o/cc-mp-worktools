@@ -1168,6 +1168,67 @@ def tilde_home(command: str) -> str | None:
     return home
 
 
+def expand_word_tilde(candidate: str, home: str) -> str:
+    """候補の語のうち、シェルが HOME に展開する `~` で始まる語の `~` を `home` に置き換える (v0.29.6)。
+
+    `kubectl --kubeconfig ~/.kube/x.yaml` の `~/...` は独立した語なので、シェルは HOME に展開して
+    CLI に渡す。0.29.5 までの hook は生の `~/...` を相対パスとして読んでいた。
+
+    展開するのは、語の先頭にある引用符の外の `~` で、その直後が語の終わり (空白か文字列の終わり) か
+    引用符の外の `/` のものだけ。bash 3.2 と zsh -f で読みが一致する形に限る (どちらも展開しない形と、
+    zsh だけが展開する形は置き換えずに残す):
+
+    - 引用符の中 (`'~/a'` / `"~/a"` / `\\~/a`)、語の途中 (`a~/b` / `--kubeconfig=~/a` / `-c~/a`)、
+      2 つ目以降の `:` の後 (`~/a:~/b` の 2 つ目) は、両方のシェルが展開しない
+    - `~` の直後が引用符 (`~"/a"` / `~''/a` / `~\\/a`) か `:` (`~:x`)、`~-` は bash と zsh で読みが割れる
+    - `~user` / `~+` は HOME 以外の行き先になる
+
+    語の切れ目は `shlex.split` (option の走査が使う分割) と同じ規則で数える。`home` は shell の 1 語に
+    quote して差し込むので、分割の結果の語の数は変わらない。引用符が閉じない候補・`$'` を含む候補は
+    そのまま返す (分割器と読みが割れる)。
+    """
+    if "$'" in candidate:
+        return candidate
+    out: list[str] = []
+    i = 0
+    n = len(candidate)
+    at_start = True
+    while i < n:
+        c = candidate[i]
+        if at_start and c == "~" and (i + 1 == n or candidate[i + 1] in " \t\n/"):
+            out.append(shlex.quote(home))
+            i += 1
+            at_start = False
+            continue
+        if c == "\\":
+            out.append(candidate[i:i + 2])
+            i += 2
+            at_start = False
+            continue
+        if c == "'":
+            j = candidate.find("'", i + 1)
+            if j < 0:
+                return candidate
+            out.append(candidate[i:j + 1])
+            i = j + 1
+            at_start = False
+            continue
+        if c == '"':
+            j = i + 1
+            while j < n and candidate[j] != '"':
+                j += 2 if candidate[j] == "\\" else 1
+            if j >= n:
+                return candidate
+            out.append(candidate[i:j + 1])
+            i = j + 1
+            at_start = False
+            continue
+        at_start = c in " \t\n"
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def _parse_leading_env(cmd: str, home: str | None = None) -> tuple[str, dict[str, str]]:
     """先頭の `KEY=VALUE` 群を剥がし (残りコマンド, 収集 env dict) を返す。
 
@@ -1496,45 +1557,51 @@ def _command_is_query(rest: str) -> bool:
 
 
 def _strip_one_wrapper(cmd: str) -> str | None:
+    return _strip_one_wrapper_kind(cmd)[0]
+
+
+def _strip_one_wrapper_kind(cmd: str) -> tuple[str | None, bool]:
+    """wrapper を 1 つ剥がした形と、剥がした中身がコマンド**文字列**として別のシェルで読み直される
+    か (`_shell_command_argument` の経路) を返す。剥がせなければ (None, False)。"""
     toks = _tokens(cmd)
     if not toks:
-        return None
+        return None, False
 
     if len(toks) >= 3 and (toks[0], toks[1], toks[2]) in _WRAPPERS_THREE:
-        return _drop_tokens(cmd, 3)
+        return _drop_tokens(cmd, 3), False
 
     if len(toks) >= 2 and (toks[0], toks[1]) in _WRAPPERS_TWO:
-        return _drop_tokens(cmd, 2)
+        return _drop_tokens(cmd, 2), False
 
     t0 = toks[0]
 
     if t0 == "env":
         if len(toks) < 2:
-            return None
+            return None, False
         if toks[1].startswith("-"):
-            return None
-        return _drop_tokens(cmd, 1)
+            return None, False
+        return _drop_tokens(cmd, 1), False
 
     if t0 in _WRAPPERS_SINGLE:
         rest = _drop_tokens(cmd, 1)
         if t0 == "command" and _command_is_query(rest):
-            return None
+            return None, False
         # `--help` / `--version` 付きは後続を実行しないので剥がさない。
         if _wrapper_terminates(rest, t0):
-            return None
+            return None, False
         # シェル経由で実行する wrapper は、引数をコマンド**文字列**として解釈する。
         shell_cmd = _shell_command_argument(rest, t0)
         if shell_cmd is not None:
-            return shell_cmd
+            return shell_cmd, True
         # timeout は位置引数 DURATION を自前で消費するので、汎用の
         # arg-like 読み飛ばしを無効にする (有効だと DURATION まで食われ、
         # _drop_timeout_duration がコマンド名を DURATION と誤判定して剥がしを諦める)。
         rest = _drop_wrapper_flags(rest, t0, skip_arg_like=(t0 != "timeout"))
         if t0 == "timeout":
-            return _drop_timeout_duration(rest)
-        return rest
+            return _drop_timeout_duration(rest), False
+        return rest, False
 
-    return None
+    return None, False
 
 
 # sudo が `-E` 無しに継承環境を scrub しないことを示す preserve-env フラグ群。
@@ -1852,6 +1919,28 @@ _DIR_COMMAND_NAMES = frozenset({"cd", "pushd", "popd", "chdir"})
 
 # `external_chdir_candidates` が分解の間だけ立てる記録先。None なら記録しない。
 _EXTERNAL_CHDIR_SEEN: set[str] | None = None
+# `shell_string_candidates` が分解の間だけ立てる記録先。None なら記録しない。
+_SHELL_STRING_SEEN: set[str] | None = None
+
+
+def shell_string_candidates(command: str) -> frozenset[str]:
+    """語を Bash のシェルが読んだとは言えない候補の集合 (v0.29.6)。
+
+    シェル経由で実行する wrapper (`watch '...'` / `sudo -i ...` / `npx -c '...'`) から取り出した中身と、
+    正規化した結果を分割し直した段 (wrapper の中身の複合コマンドなど) を返す。これらの語の `~` は
+    wrapper が起動する別のシェルが (`sudo -i` なら別の HOME で) 展開するか、Bash のシェルでは引用符の
+    中にあって展開されない。同じ文字列の候補が wrapper 無しでも現れるときも含める (呼び出し側は
+    展開しない側に倒す)。読みは `extract_candidate_readings` と同じ。
+    """
+    global _SHELL_STRING_SEEN
+    saved = _SHELL_STRING_SEEN
+    seen: set[str] = set()
+    _SHELL_STRING_SEEN = seen
+    try:
+        extract_candidate_readings(command)
+    finally:
+        _SHELL_STRING_SEEN = saved
+    return frozenset(seen)
 
 
 def external_chdir_candidates(command: str) -> frozenset[str]:
@@ -1876,15 +1965,20 @@ def external_chdir_candidates(command: str) -> frozenset[str]:
 
 def _normalize_segment(cmd: str, max_iter: int = 8) -> tuple[str, dict[str, str]]:
     """wrapper と先頭 env を剥がし (正規化コマンド, 収集 env) を返す。"""
-    normalized, env, _chdir, _external = _normalize_segment_chdir(cmd, max_iter)
+    normalized, env, _chdir, _external, _reread = _normalize_segment_chdir(cmd, max_iter)
     return normalized, env
 
 
 def _normalize_segment_chdir(
     cmd: str, max_iter: int = 8, home: str | None = None
-) -> tuple[str, dict[str, str], bool, bool]:
+) -> tuple[str, dict[str, str], bool, bool, bool]:
     """wrapper と先頭 env を剥がし (正規化コマンド, 収集 env, 作業ディレクトリを変えたか,
-    外部プログラムを剥がしたか) を返す。
+    外部プログラムを剥がしたか, 中身を別のシェルが読み直すか) を返す。
+
+    5 つ目は、シェル経由で実行する wrapper (`_WRAPPER_SHELL_EXEC`。`watch '...'` / `sudo -i` /
+    `npx -c '...'`) の中身を取り出したか (v0.29.6)。取り出した中身の語は、Bash のシェルではなく
+    wrapper が起動する別のシェルが読む (`~` をどの HOME で展開するかが Bash のシェルと同じとは
+    言えない。`shell_string_candidates`)。
 
     `home` (`tilde_home`) を渡すと、最初の wrapper を剥がすまでの代入 (シェル自身が行う代入) の
     値の `~` を展開する (v0.29.5)。wrapper の後ろの `NAME=値` は wrapper の引数で、bash は代入の形の
@@ -1918,6 +2012,7 @@ def _normalize_segment_chdir(
     collected: dict[str, str] = {}
     chdir = False
     external = False
+    reread = False
     # heredoc 本文はデータであってコマンドラインではない。先に落としておかないと
     # 後段の option 走査が本文の行を引数として読む (`_strip_heredoc_bodies` 参照)。
     cmd = _strip_heredoc_bodies(cmd)
@@ -1944,8 +2039,10 @@ def _normalize_segment_chdir(
                 collected.clear()
             if _has_flag(rest_after_sudo, "sudo", _SUDO_CHDIR_FLAGS):
                 chdir = True
-        stripped = _strip_one_wrapper(cmd)
+        stripped, via_shell = _strip_one_wrapper_kind(cmd)
         if stripped is not None:
+            if via_shell:
+                reread = True
             # option 付きの `time -p` / `time --` / `builtin --` は、zsh では後ろの cd を走らせない
             # (bash も `time --` は走らせない)。シェル内の wrapper とみなさず外部側に倒す
             if not toks or toks[0] not in _IN_SHELL_WRAPPERS or (
@@ -1959,7 +2056,7 @@ def _normalize_segment_chdir(
         # その結果に対してもう一度 wrapper 判定をやり直す。
         if cmd == before:
             break
-    return _strip_trailing_syntax(cmd), collected, chdir, external
+    return _strip_trailing_syntax(cmd), collected, chdir, external, reread
 
 
 def strip_transparent_wrappers(cmd: str, max_iter: int = 6) -> str:
@@ -2079,7 +2176,7 @@ def extract_candidates_with_separators(
     # (下の parts) は wrapper の引数か区切りの後ろで、0.29.4 までと同じく展開しない。
     home = tilde_home(command)
     for seg, sep in split_with_separators(command):
-        normalized, env, chdir, external = _normalize_segment_chdir(seg, home=home)
+        normalized, env, chdir, external, reread = _normalize_segment_chdir(seg, home=home)
         if not normalized:
             continue
         # シェル経由 wrapper のクォートを剥がすと、中身が複合コマンドのことがある
@@ -2092,18 +2189,22 @@ def extract_candidates_with_separators(
         if len(parts) > 1 or (parts and normalized[0] in ";&|"):
             last = len(parts) - 1
             for k, (part, inner_sep) in enumerate(parts):
-                inner, inner_env, inner_chdir, inner_external = _normalize_segment_chdir(part)
+                inner, inner_env, inner_chdir, inner_external, _r = _normalize_segment_chdir(part)
                 if inner:
-                    _note_chdir(inner, chdir or inner_chdir, external or inner_external)
+                    # 分割し直した段は wrapper の中身か区切りの後ろで、Bash のシェルの語と言えない側に倒す
+                    _note_chdir(inner, chdir or inner_chdir, external or inner_external, reread=True)
                     out.append((inner, {**env, **inner_env}, sep if k == last else inner_sep))
             continue
-        _note_chdir(normalized, chdir, external)
+        _note_chdir(normalized, chdir, external, reread=reread)
         out.append((normalized, env, sep))
     return out
 
 
-def _note_chdir(candidate: str, chdir: bool, external: bool) -> None:
-    """`wrapper_chdir_candidates` / `external_chdir_candidates` の分解中なら候補を記録する。"""
+def _note_chdir(candidate: str, chdir: bool, external: bool, reread: bool = False) -> None:
+    """`wrapper_chdir_candidates` / `external_chdir_candidates` / `shell_string_candidates` の
+    分解中なら候補を記録する。"""
+    if reread and _SHELL_STRING_SEEN is not None:
+        _SHELL_STRING_SEEN.add(candidate)
     if chdir and _WRAPPER_CHDIR_SEEN is not None:
         _WRAPPER_CHDIR_SEEN.add(candidate)
     if (

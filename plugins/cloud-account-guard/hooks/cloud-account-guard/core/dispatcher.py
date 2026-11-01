@@ -134,17 +134,23 @@ def _normalize_candidate(candidate: str, service) -> tuple[str, dict]:
     return cli_options.strip_leading_options(candidate, with_value, flags)
 
 
-def _context_override(candidate: str, service) -> dict[str, str]:
+def _context_override(candidate: str, service, home: str | None = None) -> dict[str, str]:
     """候補に書かれた「照合先を決める option」の値を返す (`--profile` / `--project` 等)。
 
     service が `CONTEXT_OPTIONS` を宣言していなければ常に空 dict (= 従来どおり
     アクティブなアカウントと照合)。値の解析は共通スキャナ
     (`cli_options.find_context_options`) に一本化してある。
+
+    `home` を渡すと、シェルが HOME に展開する `~` で始まる語を展開してから値を読む
+    (`kubectl --kubeconfig ~/x.yaml` / `firebase -c ~/x/firebase.json`。v0.29.6。
+    `command_parser.expand_word_tilde`)。語を Bash のシェルが読む候補にだけ渡す。
     """
     options = getattr(service, "CONTEXT_OPTIONS", None)
     if not options:
         return {}
     with_value = getattr(service, "GLOBAL_OPTIONS_WITH_VALUE", frozenset())
+    if home is not None:
+        candidate = command_parser.expand_word_tilde(candidate, home)
     return cli_options.find_context_options(candidate, options, with_value)
 
 
@@ -338,6 +344,10 @@ def _analyze_command(
     segments: list[tuple] = []
     readings = extract_candidate_readings(command)
     default_count = len(readings[0])
+    # option の値の `~` をシェルと同じく HOME に展開する (v0.29.6)。HOME を変えうるコマンドでは
+    # 展開しない (`tilde_home`)。語を別のシェルが読む候補 (`watch '...'` の中身など) も展開しない。
+    tilde = command_parser.tilde_home(command) if "~" in command else None
+    reread = command_parser.shell_string_candidates(command) if tilde is not None else frozenset()
     for index, (cand, inline_env) in enumerate(merge_readings(readings)):
         svc, tier, forms, changed = _segment_facts(cand)
         is_ro = tier == tiers.READONLY
@@ -365,8 +375,8 @@ def _analyze_command(
         # 「検証すべき対象」を変えるので grouping key に含める。含めないと
         # `aws --profile a s3 rm && aws --profile b s3 rm` が 1 エントリに畳まれ、
         # 後段 (b) が検証されないまま誤 allow される。
-        ctx = _context_override(cand, svc)
-        key = (svc, tuple(sorted(inline_env.items())), tuple(sorted(ctx.items())))
+        ctx = _context_override(cand, svc, None if cand in reread else tilde)
+        key =(svc, tuple(sorted(inline_env.items())), tuple(sorted(ctx.items())))
         if key not in cand_map:
             cand_map[key] = []
             tier_map[key] = tier
