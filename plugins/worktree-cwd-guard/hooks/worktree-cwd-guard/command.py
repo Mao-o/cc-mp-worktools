@@ -250,14 +250,35 @@ def _cd_target(args: list[str]) -> str | None:
     return args[i]
 
 
-# here-document の開始 (`<<EOF` / `<<-'EOF'` / `<< "EOF"`)。`<<<` (here-string) は除く
-_HEREDOC = re.compile(r"(?<!<)<<(-?)[ \t]*(['\"]?)([A-Za-z_][\w.-]*)\2")
+# here-document の開始 (`<<EOF` / `<<-'EOF'` / `<< "EOF"` / `<<\EOF` / `<<'END MSG'` / `<<'2EOF'`)。
+# `<<<` (here-string) は除く。区切り語は shell の 1 単語で、引用符と `\` を外したものが終端行になる。
+# 引用符の中には空白や数字始まりも書ける。`$x` / `${x}` は展開せず文字どおり比べる (bash / zsh と同じ)。`$'E'` は
+# escape を含まないものだけ読む。`$(` や backtick、escape を含む `$'...'`、入れ子の `${` を含む語は読まない
+# (here-document と見なさない。本文をコードとして読む)。zsh は区切り語に続けて書いた `(...)` も区切り語に含める
+# (`<<E(x)` の終端行は `E(x)`。bash は構文エラー) ので、`(` が続く語も読まない
+_HEREDOC = re.compile(
+    r"(?<!<)<<(-?)[ \t]*"
+    r"((?:'[^'\n]*'|\$'[^'\\\n]*'|\"(?:[^\"\\\n$`]|\\[\"\\])*\"|\\[^\n]|[^\s;&|()<>'\"\\$`]|\$\{[^\s{}'\"\\$`]*\}|\$(?![({'\"]))+)(?=[\s;&|)<>]|$)"
+)
+_HEREDOC_PART = re.compile(r"\$?'([^']*)'|\"((?:[^\"\\]|\\.)*)\"|\\(.)|(.)", re.S)
+
+
+def _heredoc_delim(word: str) -> str:
+    """区切り語から引用符と `\\` を外した終端行。"""
+    out = []
+    for m in _HEREDOC_PART.finditer(word):
+        if m.group(2) is not None:
+            out.append(re.sub(r"\\([\"\\])", r"\1", m.group(2)))
+        else:
+            out.append(next(g for g in m.groups() if g is not None))
+    return "".join(out)
 
 
 # この文字の直後 (と文字列の先頭) は単語の始まり。`#` は単語の始まりでだけ comment になる
 _WORD_BREAK = " \t\n;&|()<>"
 # 引用符の frame。`$'` は `$'...'` (中で `\'` が引用符を守る)。それ以外の frame は
-# `(` = サブシェル、`$(` = コマンド置換・プロセス置換 (単語の一部)、
+# `(` = サブシェル、`((` = 算術 (`((` の 2 つ目の `(`)、`w(` = 単語に続けた `(` (zsh の glob の group)、
+# `$(` = コマンド置換・プロセス置換 (単語の一部)、
 # `"$(` = 二重引用符の中のコマンド置換 (中身は出さない)、`` ` `` = backtick
 _QUOTES = ("'", '"', "$'")
 
@@ -379,15 +400,25 @@ class _Normalizer:
         if ch == "<":
             m = _HEREDOC.match(self.src, i)
             if m:
-                self.pending.append((m.group(1) == "-", m.group(3), len(self.stack)))
+                self.pending.append((m.group(1) == "-", _heredoc_delim(m.group(2)), len(self.stack)))
                 self.emit(m.group(0))
                 self.word_start, self.prev = False, ""
                 return m.end()
         if ch == "(":
-            self.stack.append("$(" if self.prev in ("$", "<", ">") else "(")
-        elif ch == ")" and top in ("(", "$(", '"$('):
+            if self.prev == "(" and top == "(":
+                # `((` は算術。中の改行は here-document の本文を始めない (2 つ目の `(` を算術の frame にする)
+                self.stack.append("((")
+            elif self.prev in ("$", "<", ">"):
+                self.stack.append("$(")
+            elif not self.word_start and self.prev != "=":
+                # 単語に続けた `(` は zsh の glob の group で単語の一部 (bash は構文エラー)。閉じの後の `#` は
+                # comment ではなく、中の改行は here-document の本文を始めない
+                self.stack.append("w(")
+            else:
+                self.stack.append("(")
+        elif ch == ")" and top in ("(", "((", "w(", "$(", '"$('):
             self.stack.pop()
-            if top != "(":
+            if top not in ("(", "((", "w("):
                 # 同じ行で閉じたコマンド置換の中の here-document は、外の行を本文にしない
                 self.pending = [p for p in self.pending if p[2] <= len(self.stack)]
             if top == '"$(':
@@ -400,9 +431,16 @@ class _Normalizer:
         if ch == "\n":
             if not any(f in _QUOTES for f in self.stack):
                 self.line_start = len(self.out)
-            for strip_tabs, delim, _depth in self.pending:
-                i = _skip_heredoc_body(self.src, i + 1, strip_tabs, delim) - 1
-            self.pending = []
+            # 本文はその here-document を書いた深さの改行から始まる。間にコマンド置換 (`$(` / `"$(` /
+            # backtick / `<(`) や算術の `((` があれば、その中の改行ではまだ始まらない (サブシェルの `(` の中の
+            # 改行では始まる)
+            keep = []
+            for strip_tabs, delim, depth in self.pending:
+                if all(f == "(" for f in self.stack[depth:]):
+                    i = _skip_heredoc_body(self.src, i + 1, strip_tabs, delim) - 1
+                else:
+                    keep.append((strip_tabs, delim, depth))
+            self.pending = keep
         return i + 1
 
 

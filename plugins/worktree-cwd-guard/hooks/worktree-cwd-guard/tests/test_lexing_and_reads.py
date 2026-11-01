@@ -150,6 +150,87 @@ class CommentAndContinuationTest(test_guard.GuardBase):
         ))
 
 
+class HeredocDelimiterFormsTest(test_guard.GuardBase):
+    """識別子以外の区切り語 (`\\EOF` / 空白を含む / 数字始まり) の here-document。
+
+    区切り語を読み損ねると本文をコードとして読み、本文の `'` や `(` が閉じないまま残って、
+    その行から後ろの git をすべて捨てていた (zsh では後ろの git が実行される)。
+    """
+
+    def test_commit_message_heredoc_with_unusual_delimiter(self):
+        m = self.main
+        for op, d in (("<<\\EOF", "EOF"), ("<<'END MSG'", "END MSG"), ("<<'2EOF'", "2EOF")):
+            for body in ("fix: don't x", "msg (with paren"):
+                for cmd in (
+                    f'git -C "{m}" commit -m "$(cat {op}\n{body}\n{d}\n)"',
+                    f'git commit -m "$(cat {op}\n{body}\n{d}\n)" && git -C "{m}" reset --hard',
+                    f'cat > n.md {op}\n{body}\n{d}\ngit -C "{m}" reset --hard',
+                ):
+                    with self.subTest(cmd=cmd):
+                        self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+
+    def test_quoted_delimiter_is_compared_after_quote_removal(self):
+        m = self.main
+        for op, d in (('<<"EOF"', "EOF"), ("<<-'EOF'", "\tEOF"), ('<<E"O"F', "EOF"), ("<<2EOF", "2EOF"),
+                      ("<<'END MSG'", "END MSG")):
+            with self.subTest(op=op):
+                # 本文の git は読まず、終端の次の行は読む
+                self.assertIsNone(evaluate(bash(f'cat > x.sh {op}\ngit -C "{m}" reset --hard\n{d}\ngit status',
+                                                self.a)))
+                self.assertEqual(decision(evaluate(bash(f'cat {op}\nbody\n{d}\ngit -C "{m}" reset --hard',
+                                                        self.a))), "deny")
+
+    def test_delimiter_with_dollar_is_compared_literally(self):
+        # bash / zsh は区切り語の `$x` / `${x}` を展開せずに終端行と比べ、`$'E'` は E と読む
+        # (どちらのシェルでも終端の次の git が実行される)
+        m = self.main
+        for op, d in (("<<E$x", "E$x"), ("<<E${x}", "E${x}"), ("<<$'E'", "E"), ('<<"E\\"F"', 'E"F')):
+            with self.subTest(op=op):
+                cmd = f"cat > n.md {op}\nfix: don't x\n{d}\ngit -C \"{m}\" reset --hard"
+                self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+
+    def test_outer_body_starts_after_the_command_substitution(self):
+        # 外の here-document の本文は、同じ深さの改行から始まる。コマンド置換の中の改行からは始まらない
+        # (bash / zsh とも、`; git` は実行され、本文は閉じの後の改行から)
+        m = self.main
+        for sub in ('"$(cat <<\\E\nfix: don\'t x\nE\n)"', '"$(cat <<\'E F\'\nin\nE F\n)"', '"$(echo a\necho b)"',
+                    "$(echo a\necho b)", "`echo a\necho b`", "<(echo a\necho b)"):
+            with self.subTest(sub=sub):
+                cmd = f'cat <<\\E {sub} ; git -C "{m}" reset --hard\nouter\nE'
+                self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+        # 閉じの後の改行から始まる本文の中の git は読まない
+        self.assertIsNone(evaluate(bash(
+            f'cat <<\\E "$(echo a\necho b)" ; git status\ngit -C "{m}" reset --hard\nE', self.a)))
+        # サブシェルの `(` の中の改行では始まる
+        self.assertEqual(decision(evaluate(bash(f'cat <<E ; (echo a\nE\ngit -C "{m}" reset --hard)', self.a))),
+                         "deny")
+        self.assertIsNone(evaluate(bash(f'cat <<E ; (echo a\ngit -C "{m}" reset --hard)\nE', self.a)))
+        # 算術の `((` の中の改行では始まらない (bash / zsh とも `; git` を実行する)
+        for arith in ("((1\n+2))", "echo $((1\n+2))"):
+            with self.subTest(arith=arith):
+                cmd = f'cat <<E ; {arith} ; git -C "{m}" reset --hard\nbody\nE'
+                self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+        # 単語に続けた `(...)` は zsh の glob の group で、閉じの後の `#` は comment ではない。zsh は引用符を次の行まで
+        # 読み、here-document の本文はその後ろから始まる (`; git` が実行される。bash は構文エラーで何も実行しない)
+        self.assertEqual(decision(evaluate(bash(
+            f"cat <<'E F' x(a)#' ; b\n' ; git -C \"{m}\" reset --hard", self.a))), "deny")
+        # その group の中の改行でも本文は始まらない (zsh は閉じの後の `; git` を実行する)
+        self.assertEqual(decision(evaluate(bash(
+            f'cat <<E x(a\nb) ; git -C "{m}" reset --hard\nbody\nE', self.a))), "deny")
+        # 算術の閉じの直後の `#` は comment (サブシェルの閉じと同じ)
+        self.assertEqual(decision(evaluate(bash(f"((1))#'\ngit -C \"{m}\" reset --hard", self.a))), "deny")
+
+    def test_delimiter_with_command_substitution_is_not_cut_short(self):
+        # `$(` や backtick を含む区切り語は here-document と読まない。手前の `E` だけを区切り語にすると、
+        # shell が終端と見る `E$(echo x)` の行の後ろの git を本文として飛ばす
+        m = self.main
+        # zsh は区切り語に続けた `(...)` も区切り語に含める (`<<E(x)` の終端行は `E(x)`)
+        for w in ("E$(echo x)", "E`echo x`", "E(x)", "E((1))#"):
+            with self.subTest(w=w):
+                cmd = f'cat <<{w}\nbody\n{w}\ngit -C "{m}" reset --hard\nE'
+                self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+
+
 class ReadOnlyStashAndApplyTest(test_guard.GuardBase):
     def test_reading_stash_and_apply_in_other_checkout_is_allowed(self):
         m = self.main
