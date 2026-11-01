@@ -11,7 +11,9 @@
 - 引用符の中・語の途中 (`--kubeconfig=~/a` / `-c~/a`) の `~` (両方のシェルが展開しない)
 - `~"/a"` / `~:x` / `~-` のように bash と zsh で読みが割れる形、`~user` / `~+`
 - HOME を変えうるコマンド (`HOME=/y kubectl ...` / `source` / `eval`。`tilde_home`)
-- 語を別のシェルが読む候補 (`watch '...'` / `sudo -i ...` / `npx -c '...'` の中身、分割し直した段)
+- シェル経由の wrapper の中身 (`watch '...'` / `sudo -i ...` / `npx -c '...'`) と、それを分割し直した段
+  (引用符で包んだ中身は wrapper が起動するシェルが読み直す。包まずに並べた形は Bash のシェルが先に
+  展開するが、剥がした後の文字列から区別できないので展開しない側に倒す)
 """
 from __future__ import annotations
 
@@ -241,9 +243,32 @@ class CommandLevelTests(unittest.TestCase):
             "kubectl --kubeconfig ~/a apply -k .",
             "kubectl --kubeconfig ~/a apply -f ${HOME}/x.yaml",
             "kubectl --kubeconfig ~/a apply # c",
+            # heredoc を置いた行の後ろの段も Bash のシェルが読む語 (本文を落とした行を分割し直した段)
+            "cat <<EOF && kubectl --kubeconfig ~/a apply\nbody\nEOF",
+            "cat <<EOF; kubectl --kubeconfig ~/a apply\nbody\nEOF",
+            "cat <<'EOF' | kubectl --kubeconfig ~/a apply -f -\nx\nEOF",
+            "cat <<EOF | kubectl --kubeconfig ~/a apply -f -\nx\nEOF",
+            "X=1 cat <<EOF && kubectl --kubeconfig ~/a apply\nx\nEOF",
+            "cat <<EOF && sudo kubectl --kubeconfig ~/a apply\nx\nEOF",
+            "cat <<EOF && cd sub && kubectl --kubeconfig ~/a apply\nx\nEOF",
         ):
             with self.subTest(command=command):
                 self.assertEqual(_contexts(command), [{"kubeconfig": "/H/a"}])
+
+    def test_after_a_heredoc_on_the_same_line(self):
+        """heredoc の宣言を持つ段の後ろの CLI (`kubectl apply -f - <<EOF && kubectl ...`) も展開する。"""
+        self.assertEqual(
+            _contexts("kubectl apply -f - <<EOF && kubectl --kubeconfig ~/a get po\nx\nEOF"),
+            [{}, {"kubeconfig": "/H/a"}],
+        )
+        self.assertEqual(
+            _contexts("kubectl apply -f - <<EOF && kubectl --kubeconfig ~/a delete po x\nx\nEOF"),
+            [{}, {"kubeconfig": "/H/a"}],
+        )
+        self.assertEqual(
+            _contexts("kubectl --kubeconfig ~/a apply -f - <<EOF && true\nx\nEOF"),
+            [{"kubeconfig": "/H/a"}],
+        )
 
     def test_unsure_commands_keep_the_raw_value(self):
         for command in (
@@ -253,7 +278,9 @@ class CommandLevelTests(unittest.TestCase):
             ". ./env.sh; kubectl --kubeconfig ~/a apply",
             "source env.sh; kubectl --kubeconfig ~/a apply",
             "eval x; kubectl --kubeconfig ~/a apply",
-            # 語を別のシェルが読む (`sudo -i` / `-s` は対象ユーザーの HOME で展開しうる)
+            # シェル経由の wrapper の中身。引用符で包んだ中身は wrapper が起動するシェルが読み直す。
+            # 包まずに並べた形 (`watch kubectl ...` / `sudo -i kubectl ...`) は Bash のシェルが先に展開するが、
+            # 剥がした後の文字列から包んだ形と区別できないので展開しない側に倒す (0.29.5 と同じ読み)
             "watch 'kubectl --kubeconfig ~/a apply'",
             "watch -n 1 'kubectl --kubeconfig ~/a apply'",
             "watch kubectl --kubeconfig ~/a apply",
@@ -262,8 +289,19 @@ class CommandLevelTests(unittest.TestCase):
             "sudo -s kubectl --kubeconfig ~/a apply",
             "npx -c 'kubectl --kubeconfig ~/a apply'",
             "watch 'true && kubectl --kubeconfig ~/a apply'",
-            # 同じ文字列の候補が別のシェルの中にもある
+            # 同じ文字列の候補が wrapper の中身にもある
             "watch 'kubectl --kubeconfig ~/a apply'; kubectl --kubeconfig ~/a apply",
+            # heredoc の後ろの段でも、シェル経由の wrapper の中身と HOME を変えうるコマンドは展開しない
+            "cat <<EOF && watch 'kubectl --kubeconfig ~/a apply'\nx\nEOF",
+            "cat <<EOF && sudo -i kubectl --kubeconfig ~/a apply\nx\nEOF",
+            "cat <<EOF && sudo -s 'kubectl --kubeconfig ~/a apply'\nx\nEOF",
+            "cat <<EOF && npx -c 'kubectl --kubeconfig ~/a apply'\nx\nEOF",
+            "cat <<EOF && HOME=/y kubectl --kubeconfig ~/a apply\nx\nEOF",
+            "cat <<EOF\nHOME=/y\nEOF\nkubectl --kubeconfig ~/a apply",
+            # wrapper の中身の複合コマンド (外側が heredoc を含んでも見送り)
+            "sudo -s 'true; kubectl --kubeconfig ~/a apply'",
+            "sudo -i 'true; kubectl --kubeconfig ~/a apply'",
+            "npx -c 'true && kubectl --kubeconfig ~/a apply'",
         ):
             with self.subTest(command=command):
                 self.assertEqual(_contexts(command), [{"kubeconfig": "~/a"}])
@@ -285,6 +323,17 @@ class CommandLevelTests(unittest.TestCase):
             frozenset({"true", "kubectl apply"}),
         )
         self.assertEqual(command_parser.shell_string_candidates("sudo kubectl apply"), frozenset())
+        # heredoc の本文を落とした行を分割し直した段は Bash のシェルの語 (段自身が wrapper の形なら含める)
+        self.assertEqual(
+            command_parser.shell_string_candidates(
+                "kubectl apply -f - <<EOF && kubectl --kubeconfig ~/a get po\nx\nEOF"
+            ),
+            frozenset(),
+        )
+        self.assertEqual(
+            command_parser.shell_string_candidates("cat <<EOF && watch 'kubectl get po'\nx\nEOF"),
+            frozenset({"kubectl get po"}),
+        )
         self.assertIsNone(command_parser._SHELL_STRING_SEEN)
 
     def test_candidates_do_not_change(self):

@@ -345,7 +345,7 @@ def _analyze_command(
     readings = extract_candidate_readings(command)
     default_count = len(readings[0])
     # option の値の `~` をシェルと同じく HOME に展開する (v0.29.6)。HOME を変えうるコマンドでは
-    # 展開しない (`tilde_home`)。語を別のシェルが読む候補 (`watch '...'` の中身など) も展開しない。
+    # 展開しない (`tilde_home`)。シェル経由の wrapper の中身 (`watch '...'` など) も展開しない。
     tilde = command_parser.tilde_home(command) if "~" in command else None
     reread = command_parser.shell_string_candidates(command) if tilde is not None else frozenset()
     for index, (cand, inline_env) in enumerate(merge_readings(readings)):
@@ -376,7 +376,7 @@ def _analyze_command(
         # `aws --profile a s3 rm && aws --profile b s3 rm` が 1 エントリに畳まれ、
         # 後段 (b) が検証されないまま誤 allow される。
         ctx = _context_override(cand, svc, None if cand in reread else tilde)
-        key =(svc, tuple(sorted(inline_env.items())), tuple(sorted(ctx.items())))
+        key = (svc, tuple(sorted(inline_env.items())), tuple(sorted(ctx.items())))
         if key not in cand_map:
             cand_map[key] = []
             tier_map[key] = tier

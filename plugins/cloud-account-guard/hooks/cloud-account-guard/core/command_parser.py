@@ -1561,8 +1561,8 @@ def _strip_one_wrapper(cmd: str) -> str | None:
 
 
 def _strip_one_wrapper_kind(cmd: str) -> tuple[str | None, bool]:
-    """wrapper を 1 つ剥がした形と、剥がした中身がコマンド**文字列**として別のシェルで読み直される
-    か (`_shell_command_argument` の経路) を返す。剥がせなければ (None, False)。"""
+    """wrapper を 1 つ剥がした形と、剥がした中身がシェル経由 wrapper の引数
+    (`_shell_command_argument` の経路) かを返す。剥がせなければ (None, False)。"""
     toks = _tokens(cmd)
     if not toks:
         return None, False
@@ -1927,10 +1927,13 @@ def shell_string_candidates(command: str) -> frozenset[str]:
     """語を Bash のシェルが読んだとは言えない候補の集合 (v0.29.6)。
 
     シェル経由で実行する wrapper (`watch '...'` / `sudo -i ...` / `npx -c '...'`) から取り出した中身と、
-    正規化した結果を分割し直した段 (wrapper の中身の複合コマンドなど) を返す。これらの語の `~` は
-    wrapper が起動する別のシェルが (`sudo -i` なら別の HOME で) 展開するか、Bash のシェルでは引用符の
-    中にあって展開されない。同じ文字列の候補が wrapper 無しでも現れるときも含める (呼び出し側は
-    展開しない側に倒す)。読みは `extract_candidate_readings` と同じ。
+    その中身を分割し直した段 (`watch 'true && kubectl ...'` の各段) を返す。引用符で包んだ中身は
+    wrapper が起動するシェルが読み直す。引用符で包まずに並べた形 (`watch kubectl ... ~/a` /
+    `sudo -i kubectl ... ~/a`) は Bash のシェルが先に展開するが、wrapper を剥がした後の文字列からは
+    包んだ形かどうかを区別できないので、展開しない側に倒す (0.29.5 と同じ読み)。heredoc の本文を
+    落とした宣言行を分割し直した段 (`cat <<EOF && kubectl ...`) は Bash のシェルが読む語なので含めない。
+    同じ文字列の候補が wrapper 無しでも現れるときも含める (呼び出し側は展開しない側に倒す)。
+    読みは `extract_candidate_readings` と同じ。
     """
     global _SHELL_STRING_SEEN
     saved = _SHELL_STRING_SEEN
@@ -1973,12 +1976,12 @@ def _normalize_segment_chdir(
     cmd: str, max_iter: int = 8, home: str | None = None
 ) -> tuple[str, dict[str, str], bool, bool, bool]:
     """wrapper と先頭 env を剥がし (正規化コマンド, 収集 env, 作業ディレクトリを変えたか,
-    外部プログラムを剥がしたか, 中身を別のシェルが読み直すか) を返す。
+    外部プログラムを剥がしたか, シェル経由 wrapper の中身を取り出したか) を返す。
 
     5 つ目は、シェル経由で実行する wrapper (`_WRAPPER_SHELL_EXEC`。`watch '...'` / `sudo -i` /
-    `npx -c '...'`) の中身を取り出したか (v0.29.6)。取り出した中身の語は、Bash のシェルではなく
-    wrapper が起動する別のシェルが読む (`~` をどの HOME で展開するかが Bash のシェルと同じとは
-    言えない。`shell_string_candidates`)。
+    `npx -c '...'`) の中身を取り出したか (v0.29.6)。引用符で包んだ中身は wrapper が起動するシェルが
+    読み直し、包まずに並べた形と剥がした後の文字列から区別できないので、どちらも Bash のシェルが
+    読んだ語とは扱わない (`shell_string_candidates`)。
 
     `home` (`tilde_home`) を渡すと、最初の wrapper を剥がすまでの代入 (シェル自身が行う代入) の
     値の `~` を展開する (v0.29.5)。wrapper の後ろの `NAME=値` は wrapper の引数で、bash は代入の形の
@@ -2189,10 +2192,15 @@ def extract_candidates_with_separators(
         if len(parts) > 1 or (parts and normalized[0] in ";&|"):
             last = len(parts) - 1
             for k, (part, inner_sep) in enumerate(parts):
-                inner, inner_env, inner_chdir, inner_external, _r = _normalize_segment_chdir(part)
+                inner, inner_env, inner_chdir, inner_external, inner_reread = _normalize_segment_chdir(part)
                 if inner:
-                    # 分割し直した段は wrapper の中身か区切りの後ろで、Bash のシェルの語と言えない側に倒す
-                    _note_chdir(inner, chdir or inner_chdir, external or inner_external, reread=True)
+                    # 分割し直した段の語を Bash のシェルが読むかは、段を取り出した経路で決まる。シェル経由
+                    # wrapper の中身 (外側の `reread`) と、段自身がシェル経由 wrapper の形 (`inner_reread`) は
+                    # Bash のシェルの語と扱わない (`shell_string_candidates`)。heredoc の本文を落とした
+                    # 宣言行と、前置きの代入を剥がした残りは、Bash のシェルが読む語 (`cat <<EOF && kubectl --kubeconfig ~/a ...` の `~` は展開される)
+                    _note_chdir(
+                        inner, chdir or inner_chdir, external or inner_external, reread=reread or inner_reread
+                    )
                     out.append((inner, {**env, **inner_env}, sep if k == last else inner_sep))
             continue
         _note_chdir(normalized, chdir, external, reread=reread)

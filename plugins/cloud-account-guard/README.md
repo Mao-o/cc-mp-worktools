@@ -964,7 +964,14 @@ flag** は、その値を検証に反映する。従来は hook の既定コン�
   引用符の中 (`'~/x'`)、`=` や短い option に続けた形 (`--kubeconfig=~/x` / `-c~/x`。どちらの
   シェルも展開しない)、`~user` / `~+` / `~-` / `~:x` / `~"/x"`、コマンドが `HOME` を書き換えうるとき
   (行頭の代入の `~` と同じ条件)、シェル経由の wrapper の中身 (`watch '...'` / `sudo -i ...` /
-  `npx -c '...'`。別のシェルが読み、`sudo -i` は別の HOME で展開しうる)
+  `npx -c '...'`)。引用符で包んだ中身は wrapper が起動するシェルが読み直す。引用符で包まずに並べた形
+  (`watch kubectl ... ~/x` / `sudo -i kubectl ... ~/x`) は Bash のシェルが先に展開するが、wrapper を
+  剥がした後の文字列からは包んだ形かどうかを区別できないので、展開しない側に倒す (0.29.5 と同じ読み)。
+  heredoc を置いた行の後ろの段 (`cat <<EOF && kubectl --kubeconfig ~/x ...`) は Bash のシェルが読む語
+  なので展開する
+- ユーザーの zsh で `setopt magic_equal_subst` が有効だと、`--kubeconfig=~/x` の `~` も zsh が HOME に
+  展開する。hook は展開しない読み (bash と `zsh -f` の既定) で照合するので、この設定では照合先と
+  CLI が読むファイルが食い違いうる
 - **短いオプションを結合したトークンに、照合先を決める短い option が含まれる形は deny する**
   (v0.20.0)。Firebase の `-jP prod` / `-iPprod` / `-jc sub/firebase.json` は、firebase-tools
   (commander) では `-j -P prod` などに分かれる。hook は結合形を展開しない (CLI ごとの展開の規則を

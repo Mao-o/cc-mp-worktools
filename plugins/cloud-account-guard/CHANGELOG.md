@@ -13,6 +13,10 @@
 - 展開するのは bash 3.2 と zsh -f で読みが一致する形だけ: 語の先頭にある引用符の外の `~` で、
   その直後が語の終わりか引用符の外の `/` のもの (`~/a` / `~` / `~/a#x` / `~/a'b c'`。`~/a:~/b` は
   先頭だけ)
+- heredoc を置いた行の後ろの段 (`cat <<EOF && kubectl --kubeconfig ~/a ...` / `cat <<'EOF' | kubectl
+  --kubeconfig ~/a apply -f -` / `kubectl apply -f - <<EOF && kubectl --kubeconfig ~/a get po`) も、
+  Bash のシェルが読む語として展開する (heredoc の本文を落とした行を分割し直した段を、シェル経由の
+  wrapper の中身と同じく展開しない側に入れていた)
 - 次の形は展開せず、0.29.5 までと同じ読みのまま:
   - どちらのシェルも展開しない形: 引用符の中 (`'~/a'` / `"~/a"` / `\~/a`)、語の途中
     (`--kubeconfig=~/a` / `-c~/a` / `a~/b`)
@@ -21,16 +25,23 @@
   - コマンドが HOME を書き換えうるとき (行頭の代入の `~` と同じ条件。0.29.5) と、hook の HOME が
     空・未設定・`$` を含むとき
   - シェル経由の wrapper の中身 (`watch '...'` / `sudo -i ...` / `sudo -s ...` / `npx -c '...'`) と、
-    それを分割し直した段。語を Bash のシェルではなく wrapper が起動するシェルが読む (`sudo -i` は
-    対象ユーザーの HOME で展開しうる)。同じ文字列の候補が wrapper の外にもあるときも展開しない
+    それを分割し直した段。引用符で包んだ中身は wrapper が起動するシェルが読み直す。引用符で包まずに
+    並べた形 (`watch kubectl ... ~/a` / `sudo -i kubectl ... ~/a`) は Bash のシェルが先に展開するが、
+    wrapper を剥がした後の文字列からは包んだ形かどうかを区別できないので、展開しない側に倒す
+    (0.29.5 と同じ読み)。同じ文字列の候補が wrapper の外にもあるときも展開しない
+  - zsh の `setopt magic_equal_subst` が有効なときの `--kubeconfig=~/a` (zsh は `~` を展開するが、
+    hook は bash と `zsh -f` の既定の読みで照合する)
   - `$'` を含む候補 (option の走査に使う分割と、シェルの読みが割れる)
-- 判定の比較 (旧版と新版に同じ 2924 件の入力を、HOME の下のファイルと作業ディレクトリの `~/...` の
-  中身を入れ替えた 2 通りで流した。wrapper の語彙は option 付き・`--` 付きの形も含む): 変わったのは
-  展開した形だけで、deny → allow 168 件 (ほかに deny → 警告 2 件) / allow → deny 160 件 (警告 →
-  deny 2 件)。allow → deny は、0.29.5 が CLI の読まない `./~/...` で照合して通していた形。
+- 判定の比較 (旧版と新版に同じ 19964 件の入力を、HOME の下のファイルと作業ディレクトリの `~/...` の
+  中身を入れ替えた 2 通りで流した。wrapper の語彙は option 付き・`--` 付きの形も含み、heredoc を置いた
+  行 (`cat <<EOF && ` / `cat <<EOF | ` / `cat <<'EOF' | ` / `cat <<-EOF && ` など) を前置きにした形も
+  含む): 変わったのは展開した形だけで、deny → allow 384 件 (ほかに deny → 警告 2 件) / allow → deny
+  361 件 (警告 → deny 2 件)。allow → deny は、0.29.5 が CLI の読まない `./~/...` で照合して通していた形。
   deny → allow の形はすべて、bash と zsh で偽の kubectl に渡る値が HOME の下のパスであることを
-  実測した (zsh が `-p` をコマンドとして読む `time -p kubectl ...` を除く)。候補 (コマンドの断片) の
-  分解は変えていない
+  実測した (kubectl が走らない形 (zsh の `time -p kubectl ...`、`builtin kubectl ...` など) を除く)。
+  `cat <<EOF | xargs kubectl --kubeconfig ~/a ...` は本文の語を xargs が引数に足すが、hook は本文を
+  読まないので、HOME の下の絶対パスで書いた形と同じ判定になる。候補 (コマンドの断片) の分解は
+  変えていない
 
 ## 0.29.5
 
