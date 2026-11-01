@@ -40,7 +40,6 @@ _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _WORD_PART = r"""(?:'[^']*'|"[^"]*"|\$\([^()]*\)|`[^`]*`|[^\s'";&|<>])"""
 
 
-
 def _atomic(pattern: str, name: str) -> str:
     """`(?>pattern)` と同じく、一度読んだら後戻りしない group (Python 3.9 / 3.10 でも解釈できる形)。"""
     return r"(?=(?P<%s>%s))(?P=%s)" % (name, pattern, name)
