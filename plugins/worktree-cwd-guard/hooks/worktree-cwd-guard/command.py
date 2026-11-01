@@ -283,16 +283,16 @@ _WORD_BREAK = " \t\n;&|()<>"
 _QUOTES = ("'", '"', "$'")
 
 
-def _skip_heredoc_body(command: str, i: int, strip_tabs: bool, delim: str) -> int:
-    """i 行目から始まる here-document の本文と終端行を飛ばし、その次の位置を返す。"""
+def _skip_heredoc_body(command: str, i: int, strip_tabs: bool, delim: str) -> tuple[int, bool]:
+    """i 行目から始まる here-document の本文と終端行を飛ばし、(その次の位置, 終端行があったか) を返す。"""
     while i < len(command):
         end = command.find("\n", i)
         end = len(command) if end < 0 else end
         line = command[i:end]
         i = end + 1
         if (line.lstrip("\t") if strip_tabs else line) == delim:
-            break
-    return min(i, len(command))
+            return min(i, len(command)), True
+    return len(command), False
 
 
 class _Normalizer:
@@ -316,15 +316,22 @@ class _Normalizer:
     読み捨てるため、`#` の次の行が前の行につながっていた。
     """
 
-    def __init__(self, command: str):
+    def __init__(self, command: str, ignore: frozenset[int] = frozenset()):
         self.src = command
+        self.ignore = ignore  # here-document と読まない `<<` の位置 (安全網の読み直しで使う)
         self.out: list[str] = []
         self.stack: list[str] = []  # 開いている引用符・括弧の frame (_QUOTES の説明を参照)
-        self.pending: list[tuple[bool, str, int]] = []  # 本文が次の行から始まる here-document
+        # 本文が次の行から始まる here-document (`-` 付きか, 終端行, 書いた深さ, `<<` の位置)
+        self.pending: list[tuple[bool, str, int, int]] = []
         self.quiet = 0  # 二重引用符の中の `$(` の深さ。0 でないときは出さない
         self.line_start = 0  # 引用符の外の改行の直後の out の位置
         self.word_start = True
         self.prev = ""  # 直前に読んだ素の 1 文字 (escape や引用符の後は空)
+        # 閉じない frame か終わらない here-document を残して読み終えたか (run() の後で見る)。
+        # True のときは、この読みが shell とずれて後ろを読み落としている可能性がある
+        self.unclosed = False
+        # 終わらない here-document (本文が最後まで続いたか、本文が始まらなかったもの) の `<<` の位置
+        self.open_heredocs: set[int] = set()
 
     def emit(self, s: str) -> None:
         if not self.quiet:
@@ -335,6 +342,9 @@ class _Normalizer:
         i = 0
         while i < n:
             i = self._step(i, src[i], src[i + 1 : i + 2])
+        # 本文の始まらなかった here-document (`<<E` で終わる行が最後の行) も終わらないものに数える
+        self.open_heredocs.update(p[3] for p in self.pending)
+        self.unclosed = bool(self.stack) or bool(self.open_heredocs)
         if any(f in _QUOTES for f in self.stack):
             return "".join(self.out[: self.line_start])
         return "".join(self.out)
@@ -401,11 +411,11 @@ class _Normalizer:
             while j < len(self.src) and self.src[j] != "\n" and not (top == "`" and self.src[j] == "`"):
                 j += 1
             return j
-        if ch == "<" and self._code_frame() != "((":
+        if ch == "<" and self._code_frame() != "((" and i not in self.ignore:
             # 算術の中の `<<` はシフト。here-document として読むと後ろの行を本文として捨てる
             m = _HEREDOC.match(self.src, i)
             if m:
-                self.pending.append((m.group(1) == "-", _heredoc_delim(m.group(2)), len(self.stack)))
+                self.pending.append((m.group(1) == "-", _heredoc_delim(m.group(2)), len(self.stack), i))
                 self.emit(m.group(0))
                 self.word_start, self.prev = False, ""
                 return m.end()
@@ -440,33 +450,96 @@ class _Normalizer:
             # backtick / `<(`) や算術の `((` があれば、その中の改行ではまだ始まらない (サブシェルの `(` の中の
             # 改行では始まる)
             keep = []
-            for strip_tabs, delim, depth in self.pending:
+            for p in self.pending:
+                strip_tabs, delim, depth, pos = p
                 if all(f == "(" for f in self.stack[depth:]):
-                    i = _skip_heredoc_body(self.src, i + 1, strip_tabs, delim) - 1
+                    i, closed = _skip_heredoc_body(self.src, i + 1, strip_tabs, delim)
+                    i -= 1
+                    if not closed:
+                        self.open_heredocs.add(pos)
                 else:
-                    keep.append((strip_tabs, delim, depth))
+                    keep.append(p)
             self.pending = keep
         return i + 1
 
 
-def _normalize(command: str) -> str:
-    return _Normalizer(command).run()
+# 安全網の旧来の読み (0.1.5 まで) の here-document の開始。識別子の区切り語だけを読む
+_LEGACY_HEREDOC = re.compile(r"(?<!<)<<(-?)[ \t]*(['\"]?)([A-Za-z_][\w.-]*)\2")
+
+
+def _legacy_strip_heredocs(command: str) -> str:
+    """旧来の読みの here-document の除去。引用符や comment を見ずに、行ごとに `<<EOF` を探す。"""
+    lines = command.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        i += 1
+        for m in _LEGACY_HEREDOC.finditer(line):
+            strip_tabs, delim = m.group(1) == "-", m.group(3)
+            while i < len(lines):
+                body = lines[i]
+                i += 1
+                if (body.lstrip("\t") if strip_tabs else body) == delim:
+                    break
+    return "\n".join(out)
+
+
+def _tokens(command: str, commenters: str) -> list[str] | None:
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars=_PUNCT)
+        lex.whitespace = " \t\r"
+        lex.whitespace_split = True
+        lex.commenters = commenters
+        return list(lex)
+    except ValueError:
+        return None  # 分解できないコマンドは判定しない (git 自身もまず動かない)
+
+
+# 安全網で、終わらない here-document を here-document と読まずに読み直す回数の上限
+_REREAD_LIMIT = 8
+
+
+def _read(normalized: str, cwd: str, fam: Family) -> list[Finding]:
+    # comment は正規化で捨てた。残った `#` は単語の一部
+    tokens = _tokens(normalized, commenters="")
+    return [] if tokens is None else _Analyzer(cwd, fam).run(tokens)
 
 
 def analyze(command: str, cwd: str, fam: Family) -> list[Finding]:
     if "git" not in command:
         return []
-    command = _normalize(command)
-    try:
-        lex = shlex.shlex(command, posix=True, punctuation_chars=_PUNCT)
-        lex.whitespace = " \t\r"
-        lex.whitespace_split = True
-        lex.commenters = ""  # comment は _normalize で捨てた。残った `#` は単語の一部
-        tokens = list(lex)
-    except ValueError:
-        return []  # 分解できないコマンドは判定しない (git 自身もまず動かない)
-
-    return _Analyzer(cwd, fam).run(tokens)
+    normalizer = _Normalizer(command)
+    findings = _read(normalizer.run(), cwd, fam)
+    if not normalizer.unclosed:
+        return findings
+    # 安全網: 閉じない frame か終わらない here-document が残ったときは、正規化の読みが shell とずれて
+    # 後ろの行を読み落としている可能性がある。別の読みでも判定し、どれかで見つかったものを返す
+    # (読みの和集合で止める側に倒す)。
+    # - 正規化しない旧来の読み (行ごとの here-document の除去と、shlex の comment だけ)
+    # - 終わらない here-document を here-document と読まない読み (shell がそこを here-document と読まなければ、
+    #   後ろの行はコマンドとして走る。読み直して新たに終わらないものが出れば、それも外して繰り返す)
+    readings = []
+    legacy = _tokens(_legacy_strip_heredocs(command), commenters="#")
+    if legacy is not None:
+        readings.append(_Analyzer(cwd, fam).run(legacy))
+    ignore = frozenset(normalizer.open_heredocs)
+    for _ in range(_REREAD_LIMIT):
+        if not ignore:
+            break
+        again = _Normalizer(command, ignore)
+        readings.append(_read(again.run(), cwd, fam))
+        if again.open_heredocs <= ignore:
+            break
+        ignore |= again.open_heredocs
+    seen = {f.message for f in findings}
+    for reading in readings:
+        for f in reading:
+            if f.message not in seen:
+                seen.add(f.message)
+                findings.append(f)
+    return findings
 
 
 # 1 つの「実行時にありうる状態」: (作業ディレクトリ, pushd のスタック, 直前のコマンドの成否)。
