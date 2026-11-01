@@ -81,11 +81,15 @@
                                     を返す。dispatcher は cache と verify() の前に呼び、
                                     結果を両方に使う。決められなければ None を返し、
                                     dispatcher は UNRESOLVED_CONTEXT の文で止める
-                                    (QUERY tier は警告)。現状 kubectl だけ
-                                    (`--kubeconfig` / `KUBECONFIG` の相対パス)。
+                                    (QUERY tier は警告)。kubectl
+                                    (`--kubeconfig` / `KUBECONFIG` の相対パス) と
+                                    firebase (`--config` の相対パス。v0.29.3)。
                                     `cd` が確実に順に走る形でなければ
                                     directories は `{None}`
                                     (core/workdir.py の chdir_is_sequential)。
+                                    作業ディレクトリを変える sudo の option の
+                                    中で走るセグメントも `{None}` (v0.29.3。
+                                    command_parser.wrapper_chdir_candidates)。
                                     base は Bash の作業ディレクトリ。
                                     DISPLAY_CONTEXT_KEYS は案内の形だけを決める
                                     context のキーで、成功 cache のキーから外す

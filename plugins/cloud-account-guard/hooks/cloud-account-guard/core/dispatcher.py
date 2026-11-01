@@ -11,7 +11,8 @@ import time
 from pathlib import Path
 
 from core import (
-    auto_switch, budget, cache, cli_config, cli_options, mode, output, paths, shell_word, tiers, workdir,
+    auto_switch, budget, cache, cli_config, cli_options, command_parser, mode, output, paths,
+    shell_word, tiers, workdir,
 )
 from core.command_parser import extract_candidate_readings, merge_readings
 from services import ALL as SERVICES
@@ -779,8 +780,13 @@ def _touches_identity(svc, names) -> bool:
     return any(n in exact or n.startswith(tuple(prefixes)) for n in names)
 
 
+def _wrapper_moves(cands, wrapper_chdir) -> bool:
+    """target のどれかのセグメントが、作業ディレクトリを変える wrapper (`sudo -D <dir>` 等) の中で走るか。"""
+    return any(orig in wrapper_chdir for orig, _norm in cands)
+
+
 def _pinned(
-    svc, inline_env: dict, cands, env_changes: dict, directory: str, trace: dict | None
+    svc, inline_env: dict, cands, env_changes: dict, directories, trace: dict | None
 ) -> bool:
     """期待値の代わりに、公式のディレクトリ単位の固定で決まっているか (v0.19.0)。
 
@@ -791,6 +797,16 @@ def _pinned(
     これを固定とみなすと未登録の deny を行頭の 1 語で抜けられる (その値でアカウントが
     決まるのに、何とも照合しない)。identity env をそうして変えている target は固定
     されていないとみなす。判定の例外も固定されていない側 (= 従来どおり deny) に倒す。
+
+    directories は target のセグメントが走りうるディレクトリの集合で、**全部で**固定されて
+    いるときだけ True (v0.29.3)。0.29.2 までは任意の 1 つだけを見ていたため、
+    `cd a && firebase deploy; cd ../b && firebase deploy` を a の `firebase use` だけで通した。
+    None (決められない) を含むか空なら False。ディレクトリに依存する固定は `PIN_DEPENDS_ON_DIR`
+    を宣言した service (firebase) だけで、宣言の無い service (aws / gcloud の環境変数) は
+    directories を見ずに 1 回だけ確かめる (可能性の数の上限で畳んだ None で消さない)。
+    directories 自体が None なら、作業ディレクトリを変える wrapper (`sudo -D <dir>` 等) の
+    中で走る target で、どの service でも固定されていない側に倒す (sudo -D の中の環境変数は
+    sudo の設定次第で、起動時の env と同じとは限らない)。
     """
     fn = getattr(svc, "is_pinned", None)
     if fn is None:
@@ -801,11 +817,17 @@ def _pinned(
     overridden = {
         k for k, v in (inline_env or {}).items() if os.environ.get(k) != v
     }
+    by_dir = bool(getattr(svc, "PIN_DEPENDS_ON_DIR", False))
     if _touches_identity(svc, changed | overridden):
+        pinned = False
+    elif directories is None:
+        pinned = False
+    elif by_dir and (not directories or None in directories):
         pinned = False
     else:
         try:
-            pinned = bool(fn(dict(os.environ), directory))
+            env = dict(os.environ)
+            pinned = all(bool(fn(env, d)) for d in (sorted(directories) if by_dir else [None]))
         except Exception:  # noqa: BLE001
             pinned = False
     if trace is not None:
@@ -865,6 +887,25 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         cache.invalidate(_service_name(svc))
     if not targets:
         return None
+    # 作業ディレクトリを変える wrapper (`sudo -D <dir>` / `--chdir` / `-R` / `-i`) を剥がした
+    # 候補 (v0.29.3)。剥がした後の候補は seg_dirs のディレクトリでは走らないので、相対パスの
+    # context の解決と、ディレクトリ単位の固定の判定では「決められない」とする。
+    wrapper_chdir = command_parser.wrapper_chdir_candidates(command)
+    # ディレクトリ単位の固定を確かめるディレクトリ (v0.29.3)。`cd` が確実に順に走る形なら
+    # seg_dirs と同じ。そうでなければ、確実に走って後続に効く `cd` (`workdir.sure_chdirs`) 以外は
+    # 走らなかった可能性を残した和で確かめる (`(cd sub && true); firebase deploy` は起動側でも
+    # 確かめ、`cd sub && firebase deploy | tail` は sub だけで確かめる)。
+    pin_seg_dirs = (
+        seg_dirs if chdir_sequential
+        else workdir.segment_dirs(
+            command, cwd or project_dir, maybe_skipped=True, sure=workdir.sure_chdirs(command)
+        )
+    )
+
+    def pin_dirs(cands) -> set | None:
+        if _wrapper_moves(cands, wrapper_chdir):
+            return None
+        return _target_dirs(cands, pin_seg_dirs)
 
     # 検証を起動したセグメントが**全て QUERY tier** (リモート read) なら、不一致でも
     # 止めずに警告だけ返す (`core/tiers.py`)。accounts.local.json を読む前に決まる
@@ -919,7 +960,7 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
                 outside_problems.append(_outside_error(launch_root, stops=stops_t))
                 continue
             if _pinned(
-                svc, inline_env, cands, env_changes, next(iter(dirs)), trace
+                svc, inline_env, cands, env_changes, pin_dirs(cands), trace
             ) or _all_pin_actions(cands, svc):
                 continue
             remaining.append(t)
@@ -1078,7 +1119,7 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
             # 期待値が未登録でも、公式のディレクトリ単位の固定 (env / firebase use) が
             # 効いていれば止めない (v0.19.0)。gh / kubectl は固定の仕組みが無いので登録を促す。
             if _pinned(
-                svc, inline_env, cands, env_changes, next(iter(dirs)), trace
+                svc, inline_env, cands, env_changes, pin_dirs(cands), trace
             ) or _all_pin_actions(cands, svc):
                 continue
             problems.append(_unregistered_error(svc, shell_word.escape_controls(accounts_path), stops=stops))
@@ -1129,12 +1170,15 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         # 止まる (絶対パス・相対パスの無いコマンドは今までどおり)。
         # base (Bash の作業ディレクトリ) は案内の形を決めるのに使う (そこで打つ案内なら
         # 相対パスのままでも同じファイルを指す)。
+        # 作業ディレクトリを変える wrapper (`sudo -D sub kubectl ...`) の中で走るセグメントも
+        # 決められない側にする (v0.29.3。0.29.2 までは起動側のファイルで照合した)。
         resolve = getattr(svc, "resolve_context", None)
         if resolve is not None:
+            known = chdir_sequential and not _wrapper_moves(cands, wrapper_chdir)
             try:
                 resolved = resolve(
                     ctx,
-                    dirs if chdir_sequential else {None},
+                    dirs if known else {None},
                     {**os.environ, **(inline_env or {})},
                     base=cwd or project_dir,
                 )

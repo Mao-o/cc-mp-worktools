@@ -410,6 +410,17 @@ v0.19.0 から、その CLI に**ディレクトリ単位でアカウントを�
   `declare -x` / `unset` / 代入、内容を読めない `source` / `.` / `eval` / `set` の後。
   これを固定とみなすと、未登録の deny を行頭の 1 語で抜けられる (その値でアカウントが
   決まるのに、何とも照合しない)
+- 固定は、そのコマンドが走りうる**すべての**ディレクトリで確かめる (v0.29.3)。
+  `cd a && firebase deploy; cd ../b && firebase deploy` は a と b の両方で `firebase use` の記録が
+  要る。括弧・条件・パイプの中の `cd` があるコマンド (`(cd sub && npm test); firebase deploy`) は、
+  その `cd` が後続に効かない場合もあるので、移動前と移動後の両方で確かめる。`cd` より後ろにだけ
+  パイプ・`||`・背景実行・波括弧・制御構文がある形 (`cd sub && firebase deploy | tee log`) は移動後
+  だけで確かめる。外部プログラムとして走る `cd` (`nohup cd sub` / `env cd sub` など。シェルは移動
+  しない) も、移動前と移動後の両方で確かめる。環境変数で固定する aws / gcloud は、ディレクトリに
+  よらず固定とみなす。作業ディレクトリを
+  変える `sudo` の option (`-D` / `--chdir` / `-R` / `--chroot` / `-i` / `--login`) の中で走る
+  コマンドは、どのディレクトリで走るかを確かめないので固定とみなさない (環境変数で固定する
+  aws / gcloud も同じ)
 - 期待値を登録してある service は、固定されていても従来どおり照合する (ずれていれば止める)。
   固定した環境変数が期待値と違うとき、gcloud の deny は `gcloud config set` ではなく、
   環境変数の直し方と `--account` / `--project` を案内する (環境変数が設定ファイルより
@@ -443,7 +454,17 @@ PreToolUse hook には届かない ([direnv / CLAUDE_ENV_FILE 経由の env は�
   `|` / `||`・背景実行の `&`・backtick・制御構文の語 (`if` / `for` / `case` 等) がある、または
   `&&` の右の `cd` の後に `;` / 改行で次のコマンドが続くコマンドでは、相対パスの kubeconfig を
   決められないとして止める (リモート read のみなら警告。v0.28.0)。`cd a; cd b && kubectl ...` の
-  ように `&&` と `;` だけで繋いだ `cd` は移動先で解決する
+  ように `&&` と `;` だけで繋いだ `cd` は移動先で解決する。firebase の相対パスの `--config` も
+  同じ規則で解決する (v0.29.3)。外部プログラムとして走る `cd` (`nohup cd sub` / `env cd sub` /
+  `sudo cd sub` / `/usr/bin/cd sub`、zsh の `command cd sub`) があるコマンドも止める (シェルは移動
+  しない。v0.29.3)
+- 行き先を静的に決められない `cd` (`cd "$D"` / `cd -` / `popd`、zsh の `chdir`、`CDPATH` がある
+  ときの相対パスの `cd sub`) の後のコマンドは、起動リポジトリの外かもしれないとして止める。
+  `CDPATH` は環境に export されたものと `CDPATH=x cd sub` の前置きを見る (v0.29.3)
+- 作業ディレクトリを変える `sudo` の option (`-D` / `--chdir` / `-R` / `--chroot` / `-i` /
+  `--login`) の中で走るコマンドは、相対パスの kubeconfig / `--config` をどのファイルに解決するかを
+  決められないとして止める (リモート read のみなら警告。v0.29.3。0.29.2 までは起動側のファイルで
+  照合した)。内外の判定は変えない (移動先は見ない)
 - 別のリポジトリで作業するときは、そのリポジトリで Claude Code を起動し直す。Subagent に
   任せても、hook と Bash の環境変数は変わらない
 - 起動リポジトリの中でも、サブディレクトリごとに環境変数を切り替えている場合の差は
@@ -926,7 +947,7 @@ flag** は、その値を検証に反映する。従来は hook の既定コン�
 | GCP | `--project` / `--account` | 値を期待値と直接照合 (アクティブ設定は見ない) |
 | GCP | `--configuration` | 現在値の取得コマンドに引き渡す |
 | Firebase | `--project` / `-P` | `.firebaserc` の alias を解決してから照合 (CLI 本体と同じ規則)。`.firebaserc` を firebase-tools と同じ内容に読めると確かめられなければ deny (v0.18.0) |
-| Firebase | `--config` / `-c` | 指定したファイルのあるディレクトリを project root にする (`.firebaserc` と `firebase use` の起点。CLI 本体と同じ)。相対パスはプロジェクトのディレクトリから探し (プロジェクトのディレクトリは symlink を解いた実体のパスで。CLI 本体と同じ)、見つからなければ deny (v0.18.0) |
+| Firebase | `--config` / `-c` | 指定したファイルのあるディレクトリを project root にする (`.firebaserc` と `firebase use` の起点。CLI 本体と同じ)。相対パスは、そのコマンドが走るディレクトリ (Bash の作業ディレクトリ + コマンド中の `cd`) の実体のパスから探し (CLI 本体と同じ。v0.29.3。0.29.2 まではプロジェクトのディレクトリから探していた)、見つからなければ deny (v0.18.0)。決められない形は kubectl の `--kubeconfig` と同じく deny |
 | Kubernetes | `--context` | 値を期待値と直接照合 |
 | Kubernetes | `--kubeconfig` | 現在値の取得コマンドに引き渡す。相対パスは、そのコマンドが走るディレクトリ (Bash の作業ディレクトリ + コマンド中の `cd`) の実体のパスに連結した絶対パスにしてから渡し、deny の案内もその絶対パスで出す。相対パスの `KUBECONFIG` も同じディレクトリで解決する。同じ相対パスのコマンドが別々のディレクトリで走る形と、括弧・条件・パイプの中の `cd` と同じコマンドにある形は、どのファイルか決められないので deny (v0.28.0) |
 

@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.29.3
+
+### Fixed: コマンドが走るディレクトリの追い方の残り (firebase の相対パスの `--config` / sudo の作業ディレクトリの option / 複数ディレクトリでの固定)
+
+どれも 0.29.2 以前からの挙動。
+
+- firebase の相対パスの `--config` / `-c` を、コマンドが走るディレクトリ (Bash の作業ディレクトリ +
+  コマンド中の `cd`) から解決する (kubectl の相対パスの `--kubeconfig` と同じ規則。0.28.0)。
+  `cd sub && firebase --config firebase.json deploy` を、`sub/firebase.json` ではなく起動側の
+  firebase.json (と、そのディレクトリの `firebase use` の切替先) で照合していた。別々のディレクトリで
+  走る複数のコマンドが同じ相対パスを使う形と、括弧・条件・パイプ・背景実行の中の `cd` と同じコマンドに
+  ある形は、どのファイルか決められないので deny (リモート read のみなら警告)。絶対パスの `--config` と
+  `--config` の無いコマンドは今までどおり。deny が案内する切替 (`firebase --config <絶対パス> use ...`)
+  は移動先のファイルを指す
+- ディレクトリの綴りは、大文字小文字を区別しない FS でもディスク上の綴りにする (firebase-tools の
+  作業ディレクトリと同じ)。`cd SUB` の綴りのままだと、CLI の無いときの解決が `sub` で記録された
+  `firebase use` の切替先を見落としうる
+- 作業ディレクトリを変える `sudo` の option (`-D` / `--chdir` / `-R` / `--chroot` / `-i` / `--login`)
+  の中で走るコマンドは、相対パスの kubeconfig / `KUBECONFIG` / firebase の `--config` をどのファイルに
+  解決するかを決められないとして deny する (リモート read のみなら警告)。`sudo -D sub kubectl apply ...
+  --kubeconfig k.yaml` を起動側の `k.yaml` で照合していた。絶対パスのものは今までどおり照合する。
+  ディレクトリ単位の固定 (`firebase use` の記録 / `AWS_PROFILE` などの環境変数) も、この中で走る
+  コマンドでは固定とみなさない (期待値が未登録なら deny)
+- ディレクトリ単位の固定を、コマンドが走りうるすべてのディレクトリで確かめる。任意の 1 つだけを
+  見ていたため、`cd a && firebase deploy; cd ../b && firebase deploy` を a の `firebase use` の
+  記録だけで通していた。括弧・条件・パイプの中の `cd` があるコマンド (`(cd sub && true); firebase deploy`)
+  は、その `cd` が後続に効かない場合も含めて、移動前と移動後の両方で確かめる (0.29.2 は移動後だけ)。
+  `cd` より**後ろ**にだけパイプ・`||`・背景実行・波括弧・制御構文がある形
+  (`cd sub && firebase deploy 2>&1 | tail -20` / `cd sub && firebase deploy || echo fail` /
+  `git pull; cd sub && firebase deploy | tee log` / `cd sub || exit 1; firebase deploy` など) は、
+  移動後のディレクトリだけで確かめる。括弧の中 (`(cd sub && firebase deploy)`) は分解で括弧が落ち、
+  `(cd sub && true); firebase deploy` と見分けられないので、移動前の記録も要る (deny のまま)
+- ディレクトリに依存しない固定 (aws / gcloud の環境変数) は、ディレクトリの可能性の数の上限で
+  消さない。`(cd d0); (cd d1); ... aws s3 rm ...` を、`AWS_PROFILE` を固定していても deny していた
+  (この版の途中の変更で入った退行)
+- 外部プログラムとして走る `cd` (`nohup cd sub` / `env cd sub` / `sudo cd sub` / `timeout 5 cd sub` /
+  `xargs cd sub` / `nice cd sub` / `/usr/bin/cd sub`、zsh の `command cd sub`) は、シェルを移動させ
+  ない (bash 3.2 / zsh で実測)。分解すると `cd sub` に見えるため、`nohup cd sub; firebase deploy
+  --config firebase.json` を sub のファイルで、`nohup cd sub; kubectl apply ... --kubeconfig k.yaml` を
+  sub の k.yaml で照合し、`nohup cd sub; firebase deploy` を sub の `firebase use` の記録だけで通して
+  いた (kubectl は 0.28.0 から)。このような `cd` があるコマンドは、相対パスの context を決められない
+  として止め、固定は移動前と移動後の両方で確かめる
+- `CDPATH` (環境、または `CDPATH=x cd sub` の前置き) があるときの相対パスの `cd sub` は、行き先を
+  決められないとして扱う (bash は `CDPATH` の候補を先に探し、zsh は作業ディレクトリを先に探すので、
+  シェルで割れる)。`/`・`./`・`../` で始まる行き先は今までどおり。同じコマンドの前のほうで
+  CDPATH を代入する形 (`CDPATH=x; cd sub` / `export CDPATH=x; cd sub`) も同じ扱い
+- bash 3.2 と zsh が受け付けない `cd -e` / `cd -@` と、option 付きの `time -p` / `time --` /
+  `builtin --` の後ろの cd は、移動を追わない (実際のシェルでは移動しないため)。0.28.0 から kubectl の
+  相対の kubeconfig を `cd -e sub` の移動先で照合していたのも直る
+- zsh の `chdir` (cd の同義語。bash には無い) は、行き先を決められないとして扱う。今までは
+  `chdir sub && firebase deploy --config firebase.json` の移動を追わず、起動側のファイルで照合していた
+
+行き先を決められない `cd` の後のコマンドは、今までどおり起動リポジトリの外かもしれないとして止まる
+(`cd "$D"` と同じ)。`CDPATH` を環境に export したまま Claude Code を起動していると、相対パスの `cd` の
+後のクラウド CLI が止まる。
+
+直していないもの: `env -C <dir>` / `env --chdir` を前に置いたコマンドは、`env` が option 付きだと
+剥がさない (0.7.2 からの方針) ので、そもそもクラウド CLI の候補にならず検証されない。別の課題として扱う。
+
 ## 0.29.2
 
 ### Fixed: コマンド行の分解で、後ろのクラウド CLI を候補から落とす形 (`#` の手前の読み・ANSI-C 引用符・シェルで割れる読み)
