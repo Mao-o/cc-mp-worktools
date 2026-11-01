@@ -27,6 +27,29 @@ deny し、切り替え手順を提示する。
 等を実行する事故を防ぐ。期待値は `accounts.local.json` に置き、hook 実行時に
 CLI から現在値を取得して照合する。
 
+## 脅威モデル (うっかり予防)
+
+守る範囲は README の「守る範囲と守らない範囲」が正本。要点は、普段どおりに書くコマンドで
+期待外のアカウントに書き込むのを止めることで、意図的なすり抜け (シェルの珍しい構文・option の
+省略形・細工した設定ファイル) は守らない。判定の原則は「不一致が確定したときだけ deny し、
+解析で決められない形は deny しない」。
+
+こう決めた理由: シェルの書き方の穴埋めには終わりが無く、直すたびに新しい食い違い (旧版で deny
+だった形が新版で allow になる退行) を生んでいた。0.28.0〜0.29.3 の開発では、kubectl の相対
+kubeconfig の `cd` の追跡が、実際には移動しない `cd` (外部プログラムとして走る `cd` など) を
+移動として追う退行を持ち込み、同じ形を firebase に広げたときにも再発した。
+
+実装の規則:
+
+- 0.29.2 で入れた「既定の読み + bash / zsh / ANSI-C の読み」の分解と、0.29.3 の `cd` の追跡は
+  そのまま残す (テスト済みで、守る範囲の形を壊していない)
+- **守らない範囲の形のために、読み (分解の読みの種類) や追跡 (`cd` / wrapper / env の追跡) を
+  増やさない。** 増やした読みや追跡は、それ自体が新しい読み違いの入口になる
+- 新しい課題が来たら、まず「普段どおりに書くコマンドか」で範囲を決める。範囲外なら README の
+  「守らない範囲」に 1 行足して閉じる。範囲内なら直す。どちらか決めきれない形は範囲外に倒す
+- 決められない形を止める判定 (相対パスの context の `UNRESOLVED_CONTEXT` など) は原則と食い違って
+  いる。緩めるのは別の作業として行い、新しく足さない
+
 ## ディレクトリ構成
 
 ```
@@ -1858,6 +1881,22 @@ cache の状態ファイルのうち成功 cache の entry と epoch は、hook 
   `.` / `..` でない相対パスなら (True, None)。bash は `CDPATH` の候補を先に、zsh は作業ディレクトリを
   先に探す (実測で割れる)。`segment_dirs` は読みの inline env を渡す
 - zsh の `chdir` は `_UNKNOWN_DIR_COMMANDS` に入れた (bash には無い)
+
+### 0.29.4 (脅威モデルの明記 / firebase の固定と `--config` / インラインの KUBECONFIG の案内)
+
+- 脅威モデル (うっかり予防) を README と上の「脅威モデル」節に書いた。コードの読みは変えていない
+- firebase の `is_pinned` は `context` (解決前の context option) を受け取り、`--config` があれば
+  そのファイルのあるディレクトリから configstore を探す (`_pin_root`)。相対パスは dispatcher が
+  渡すディレクトリの `_physical_dir` から `..` を字句的に畳んで解決する (`resolve_context` と同じ)。
+  dispatcher は `PIN_USES_CONTEXT` を宣言した service にだけ `context=` を渡す (aws / gcloud の
+  `is_pinned` は 2 引数のまま)。ファイルが見つからないときは 0.29.3 と同じ起点 (`_project_root`) で
+  判定する。決められないことを理由に「固定されていない」(未登録の deny) には倒さない (上の原則)
+- kubectl の verify() は、env (hook の env + インライン env) の `KUBECONFIG` が hook の env と違えば
+  インラインの指定とみなし (`_inline_kubeconfig`)、同じ値を前置きした切替を案内する
+  (`_guide_kubeconfig_env`。相対パスの要素は `resolve_context` の cwd に連結した絶対パス。絶対パスが
+  許容形でなければ元の値)。前置きの代入は分解で inline env として剥がれるので、案内の行は従来の
+  self-remediation (`kubectl config use-context <期待値>`) として通る。`cd` の後の相対パスは従来どおり
+  文で案内する (`_relative_env_by_hand`)
 
 ## 既知の制限
 

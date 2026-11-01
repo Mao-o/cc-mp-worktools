@@ -591,10 +591,10 @@ class PinnedInEveryDirTests(_Asserts, BaseWithTmpProject):
 
         real = firebase.is_pinned
 
-        def flaky(env, directory):
+        def flaky(env, directory, **kwargs):
             if os.path.basename(directory) == "b":
                 raise RuntimeError("x")
-            return real(env, directory)
+            return real(env, directory, **kwargs)
 
         with mock.patch.object(firebase, "is_pinned", side_effect=flaky):
             self._assert_deny(self._run(self._TWO_DIRS), self._TWO_DIRS)

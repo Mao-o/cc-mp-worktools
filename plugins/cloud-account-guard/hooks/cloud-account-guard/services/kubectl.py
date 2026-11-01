@@ -218,12 +218,23 @@ def verify(expected, project_dir: str, env=None, context=None) -> str | None:
     # 同じファイルを指す。`resolve_context` が `kubeconfig_given` を残すのはその場合だけ)。
     # 相対パスの `KUBECONFIG` を `cd` の後のディレクトリで解決したとき (`cwd_moved`) は、
     # 切替を Bash の作業ディレクトリで打つと別のファイルに書くので、コマンドの形では案内しない。
+    # 行頭のインライン `KUBECONFIG=a.yaml kubectl apply` (hook の env と値が違う) は、そのファイルの
+    # current-context で動く。素の `kubectl config use-context X` は Bash の env の kubeconfig に書き、
+    # 案内どおりにしても同じ deny に戻る (v0.29.4)。同じ `KUBECONFIG=` を前に付けた切替を案内する。
+    # 相対パスの要素は走るディレクトリ (`resolve_context` の cwd) の絶対パスにする。
     switch = None
     by_hand = _KUBECONFIG_BY_HAND
     if target is not None:
         if kubeconfig is None:
+            inline = _inline_kubeconfig(env)
             if ctx.get("cwd_moved"):
                 by_hand = _relative_env_by_hand(ctx.get("cwd"))
+            elif inline is not None:
+                value = _guide_kubeconfig_env(inline, ctx.get("cwd"))
+                if value is None:
+                    by_hand = _KUBECONFIG_ENV_BY_HAND
+                else:
+                    switch = f"KUBECONFIG={value} kubectl config use-context {target}"
             else:
                 switch = f"kubectl config use-context {target}"
         else:
@@ -263,6 +274,45 @@ _KUBECONFIG_BY_HAND = (
     "--kubeconfig のパスは案内に使える形ではないため、コマンドの形では案内しません。"
     "同じ --kubeconfig を付けて、期待したコンテキストに切り替えてください"
 )
+
+
+# インラインの KUBECONFIG の値が案内に使える形でないときの文 (コマンドの形をとらない)。
+_KUBECONFIG_ENV_BY_HAND = (
+    "KUBECONFIG の値は案内に使える形ではないため、コマンドの形では案内しません。"
+    "同じ KUBECONFIG を付けて、期待したコンテキストに切り替えてください"
+)
+
+
+def _inline_kubeconfig(env):
+    """行頭のインライン env が hook の env と違う `KUBECONFIG` を与えていればその値、でなければ None。
+
+    verify() の env は hook の env にインライン env を重ねたもの (dispatcher)。値が hook の env と
+    同じなら、Bash で打つ切替も同じファイルに書くので、素の切替を案内してよい。
+    """
+    if env is None:
+        return None
+    value = env.get("KUBECONFIG")
+    if value == os.environ.get("KUBECONFIG"):
+        return None
+    return value if value is not None else ""
+
+
+def _guide_kubeconfig_env(value: str, cwd) -> str | None:
+    """切替の案内に前置きする `KUBECONFIG=` の値 (シェルの 1 語)。案内に使える形でなければ None。
+
+    相対パスの要素は cwd (`resolve_context` が入れた、走るディレクトリの実体のパス) に連結した
+    絶対パスにする (どのディレクトリで打っても同じファイルを指す)。絶対パスが案内に使える形で
+    なければ元の値を試す (呼び出し側は Bash の作業ディレクトリで走るコマンドに限って呼ぶので、
+    そこで打てば同じファイルを指す。`--kubeconfig` の `kubeconfig_given` と同じ)。
+    """
+    parts = value.split(os.pathsep)
+    if cwd is not None:
+        parts = [os.path.join(cwd, _strip_dot_slash(p)) if _is_relative(p) else p for p in parts]
+    for candidate in (os.pathsep.join(parts), value):
+        word = shell_word.arg(candidate, shell_word.PATH)
+        if word is not None:
+            return word
+    return None
 
 
 def _relative_env_by_hand(directory) -> str:

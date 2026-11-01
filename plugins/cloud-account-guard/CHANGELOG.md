@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.29.4
+
+### Docs: 守る範囲と守らない範囲 (うっかり予防)
+
+- README に「守る範囲と守らない範囲」を足した。この plugin が守るのは、普段どおりに書くコマンドで
+  期待外のアカウントに書き込むことで、意図的に検証をすり抜けようとする書き方 (シェルの珍しい構文・
+  option の省略形・細工した設定ファイル) は守らない。判定の原則は「不一致が確定したときだけ deny し、
+  解析で決められない形は deny しない」。検出しない形を一覧にした (wrapper の long option の省略形、
+  option 付きの `env`、コマンド置換の中だけにある CLI など)
+- DEVELOPMENT に、守らない範囲の形のために読みや追跡を増やさないことと、新しい課題の範囲の決め方を
+  書いた
+
+### Fixed: firebase の固定の判定と `--config` / インラインの KUBECONFIG の deny の案内
+
+どちらも 0.29.3 以前からの挙動。
+
+- firebase の期待値が未登録のときの固定の判定 (`firebase use` の記録) が `--config` / `-c` を
+  見ていなかった。`firebase --config other/firebase.json deploy` を、other ではなく走るディレクトリの
+  記録で固定とみなして通していた。`--config` のファイルのあるディレクトリ (firebase-tools が
+  project root にするディレクトリ。照合と同じ) の記録で判定する。そのディレクトリに記録が無ければ
+  未登録の deny になる。逆に、走るディレクトリに記録が無くても `--config` の先に記録があれば通す。
+  `--config` のファイルが見つからないときは、今までどおり走るディレクトリの記録で判定する
+- kubectl の行頭の `KUBECONFIG=a.yaml kubectl apply ...` (起動時の値と違うもの) の deny が、素の
+  `kubectl config use-context <期待値>` を案内していた。素の切替は Bash の env の kubeconfig に書くので、
+  案内どおりにしても同じ deny に戻った。同じ `KUBECONFIG` を前に付けた切替
+  (`KUBECONFIG=<絶対パス> kubectl config use-context <期待値>`) を案内する。相対パスの要素は、その
+  コマンドが走るディレクトリの絶対パスにする。値が案内に使える形でない (空白・`~` 始まり・空など)
+  ときは、コマンドの形では案内せず文で言う
+
 ## 0.29.3
 
 ### Fixed: コマンドが走るディレクトリの追い方の残り (firebase の相対パスの `--config` / sudo の作業ディレクトリの option / 複数ディレクトリでの固定)
