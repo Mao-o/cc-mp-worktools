@@ -31,17 +31,35 @@ _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # 1 つのリダイレクトは atomic group で読み方を 1 通りに固定する。`>>f` を `>` + `>f` とも読める形の
 # 繰り返しは、一致しないときの後戻りが個数に対して指数時間になり、hook が時間切れで素通しになる。
 # 演算子は shell の演算子そのもの (`-` は `<<-` の一部か、`<&-` / `>&-` の対象。`2>-` の `-` はファイル名)
+# 対象の語は shell と同じく引用の外の `;` `&` `|` `<` `>` で終わる (`&>f&>f` は `&>f` が 2 つ)。区切りをまたいで
+# 読むと、`&>f&>f...` の `&` ごとに残り全部を読み直して個数の 2 乗の時間になる。`$(...)` と backtick の中の
+# 区切りは対象の語の一部として読む。対象の直後は空白か、次のリダイレクトの演算子
+_WORD_PART = r"""(?:'[^']*'|"[^"]*"|\$\([^()]*\)|`[^`]*`|[^\s'";&|<>])"""
 _REDIRECT_PREFIX = (
-    r"""(?>\d*(?:&>>?|<<-|<<<?|<>|[<>]&|>>|>\||[<>])\s*(?:'[^']*'|"[^"]*"|[^\s'"])+)\s+"""
+    r"(?>\d*(?:&>>?|<<-|<<<?|<>|[<>]&|>>|>\||[<>])\s*" + _WORD_PART + r"+)(?:\s+|(?=\d*(?:&>|[<>])))"
+)
+_EXEC_START = r"(?:^|[;&|(\n`{]|\$\()\s*"
+_PREFIX_ITEM = (
+    r"(?:(?:if|then|else|elif|do|while|until|!|env|command|exec|time|nohup)\s+"
+    r"|(?>[A-Za-z_][A-Za-z0-9_]*=" + _WORD_PART + r"*)\s+|" + _REDIRECT_PREFIX + r")"
+)
+# 前置きの繰り返しには上限を置く。`&>f&>f ...` のように前置きの中に実行位置の始まり (`&` など) が並ぶと、
+# 始まりごとに残り全部を読み直して個数の 2 乗の時間になるため。上限を超える前置きの後ろの PR 操作は
+# ここでは数えないので、_LONG_PREFIX で別に見つけて止める
+_PREFIX_LIMIT = 32
+_PR_OP = (
+    r"gh(?:\.exe)?\s+(?:(?:-R|--repo)(?:\s+|=)\S+\s+)*pr\s+(?:(?:-R|--repo)(?:\s+|=)\S+\s+)*(create|new|ready)\b"
 )
 _EXEC_POS = re.compile(
-    r"(?:^|[;&|(\n`{]|\$\()\s*(?:(?:if|then|else|elif|do|while|until|!|env|command|exec|time|nohup)\s+"
-    r"|[A-Za-z_][A-Za-z0-9_]*=\S*\s+|" + _REDIRECT_PREFIX + r")*(?:\S*/)?gh(?:\.exe)?\s+"
-    r"(?:(?:-R|--repo)(?:\s+|=)\S+\s+)*pr\s+(?:(?:-R|--repo)(?:\s+|=)\S+\s+)*(create|new|ready)\b([^;&|\n)`]*)"
+    _EXEC_START + _PREFIX_ITEM + "{0,%d}" % _PREFIX_LIMIT + r"(?:[^\s;&|<>]*/)?" + _PR_OP + r"([^;&|\n)`]*)"
 )
+_LONG_PREFIX = re.compile(_EXEC_START + _PREFIX_ITEM + "{%d}" % (_PREFIX_LIMIT + 1))
+_PR_OP_ANYWHERE = re.compile(_PR_OP)
+# shell の名前 (sh / bash / zsh / ksh / dash / ash / ssh / csh / tcsh / mksh / yash / fish)
+_SHELLS = r"(?:ba|z|k|da|a|c|tc|mk|ya|fi)?sh"
 # `bash -c '...'` / `sh -lc "..."` / `eval "..."` の中身。中の PR 操作は構文解析の対象外になる
 _NESTED_SHELL = re.compile(
-    r"(?:\b(?:ba|z|k|da|a)?sh(?:\.exe)?\s+(?:-\w+\s+)*-\w*c\w*|\beval)\s+(['\"])(.*?)\1",
+    r"(?:\b" + _SHELLS + r"(?:\.exe)?\s+(?:-\w+\s+)*-\w*c\w*|\beval)\s+(['\"])(.*?)\1",
     re.S,
 )
 _DIR_CHANGERS = re.compile(r"(?:^|[;&|(\n`{]|\$\()\s*(?:pushd|popd)\b")
@@ -545,7 +563,42 @@ def _terminates(segments: list[_Segment], index: int) -> bool:
     if index >= len(segments):
         return False
     rest, _assigns, _wrappers = _strip_prefix(segments[index].tokens)
-    return bool(rest) and rest[0] in _TERMINATORS
+    prefix = segments[index].tokens[: len(segments[index].tokens) - len(rest)]
+    if "{" not in prefix:
+        # `cd A || exit 1 | tee` の exit はパイプの中 (サブシェル) で走り、shell を終わらせない
+        return bool(rest) and rest[0] in _TERMINATORS and segments[index].after not in ("pipe", "bg")
+    return _brace_group_exits(segments, index)
+
+
+def _brace_group_exits(segments: list[_Segment], index: int) -> bool:
+    """segments[index] から始まる `{ ...; }` が、どの経路でも exit / return に届くか。
+
+    `cd A || { echo fail >&2; exit 1; }` の右側。数えるのは波括弧の一番外側に `;` / 改行で並んだ
+    exit / return だけ。`&&` / `||` / パイプの後ろ、`if` / `while` などの中、入れ子の `{ }` やサブシェルの中の
+    exit は走らないことがあるので数えない (止める側に倒す)。
+    """
+    depth = 0
+    for j in range(index, len(segments)):
+        seg = segments[j]
+        rest, _assigns, _wrappers = _strip_prefix(seg.tokens)
+        prefix = seg.tokens[: len(seg.tokens) - len(rest)]
+        depth += prefix.count("{")
+        if rest and rest[0] == "}":
+            depth -= 1
+            if depth <= 0:
+                return False
+            continue
+        if (
+            depth == 1
+            and rest
+            and rest[0] in _TERMINATORS
+            # `then exit` / `( exit` / `env exit` / `X=1 exit` は一番外側の素の exit ではない
+            and all(tok == "{" for tok in prefix)
+            and (j == index or seg.before == "seq")
+            and seg.after not in ("pipe", "bg")
+        ):
+            return True
+    return False
 
 
 def find_invocations(command: str) -> list[Invocation]:
@@ -632,9 +685,26 @@ def find_invocations(command: str) -> list[Invocation]:
 # (`sudo bash` / `xargs sh` / `/bin/zsh` などは語の位置を問わない。`run.sh` のようなファイル名は除く。
 # `.` は実行位置に置かれたものだけ)
 _SHELL_READER = re.compile(
-    r"(?:^|[^\w.-])(?:(?:ba|z|k|da|a|s)?sh|eval|source)(?:\.exe)?(?![\w.-])"
+    r"(?:^|[^\w.-])(?:" + _SHELLS + r"|ssh|eval|source)(?:\.exe)?(?![\w.-])"
     r"|(?:^|[;&|(\n`{]|\$\()\s*\.\s"
 )
+# 引用符の中の文字列のうち、空白を含み、区切り・リダイレクト・括弧・置換・エスケープを含まないもの
+# (`--title 'source map を直す'` の類)。中の語はコマンドの位置に来ないので、本文を読むコマンドの判定から外す。
+# それ以外の引用 (`'bash'` の 1 語、`"$(...)"`、区切りを含むもの) は残して止める側に倒す
+_QUOTED_OR_ESCAPED = re.compile(r"""\\.|'[^']*'|"(?:\\.|[^"\\])*\"""", re.S)
+_PLAIN_TEXT = re.compile(r"""[^;&|<>()$`\\'"\n]*\s[^;&|<>()$`\\'"\n]*""")
+
+
+def _without_plain_quoted_text(s: str) -> str:
+    """引用符の対応を左から順に取り、_PLAIN_TEXT に当たる中身の引用だけを `''` にする (`\\'` などは飛ばす)。"""
+
+    def repl(m: re.Match) -> str:
+        tok = m.group(0)
+        if tok[0] != "\\" and _PLAIN_TEXT.fullmatch(tok[1:-1]):
+            return "''"
+        return tok
+
+    return _QUOTED_OR_ESCAPED.sub(repl, s)
 
 
 def _blank_quoted_bodies(command: str) -> str:
@@ -656,7 +726,8 @@ def _blank_quoted_bodies(command: str) -> str:
         prev = end
     parts.append(command[prev:])
     blanked = "".join(parts)
-    return command if _SHELL_READER.search(blanked) else blanked
+    probe = _without_plain_quoted_text(blanked)
+    return command if _SHELL_READER.search(probe) else blanked
 
 
 def unresolved_reason(command: str, found: list[Invocation]) -> str | None:
@@ -671,7 +742,11 @@ def unresolved_reason(command: str, found: list[Invocation]) -> str | None:
         return None  # 安全網の正規表現はどれも gh と pr を含む (継続行をつないだ後で見る)
     expected = 0
     # 数え上げは、区切り語に引用がある heredoc の本文を空行にした文字列で行う (構文解析と同じく本文を数えない)
-    for m in _EXEC_POS.finditer(_join_continuations(_blank_quoted_bodies(command))):
+    counted = _join_continuations(_blank_quoted_bodies(command))
+    long_prefix = _LONG_PREFIX.search(counted)
+    if long_prefix and _PR_OP_ANYWHERE.search(counted, long_prefix.start()):
+        return "PR 操作の前の前置き (リダイレクト・代入など) が長すぎて位置を確かめられない"
+    for m in _EXEC_POS.finditer(counted):
         if m.group(1) == "ready" and "--undo" in m.group(2):
             continue
         expected += 1

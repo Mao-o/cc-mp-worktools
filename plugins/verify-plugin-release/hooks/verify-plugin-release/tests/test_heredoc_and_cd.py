@@ -13,6 +13,7 @@ from pathlib import Path
 
 import _testutil  # noqa: F401
 
+import command
 from command import find_invocations, unresolved_reason
 
 
@@ -247,6 +248,11 @@ class HeredocBodyTest(unittest.TestCase):
                 with self.subTest(op=op, body=body):
                     self.assert_clean(cmd, ["m1"])
         self.assert_clean("gh pr create --base m1 --body-file - <<'EOF'\ngh pr create --fill\nEOF", ["m1"])
+        # 引用符の中の文 (`--title 'source map を直す'`) にある shell の名前は、本文を読むコマンドではない
+        for title in ("'source map を直す'", '"fix the zsh prompt"', "'use bash and eval here'"):
+            cmd = f"cat > b.md <<'EOF'\ngh pr create --fill\nEOF\ngh pr create --base m1 --title {title} --body-file b.md"
+            with self.subTest(title=title):
+                self.assert_clean(cmd, ["m1"])
 
     def test_quoted_body_is_counted_when_something_may_run_it(self):
         # 本文を標準入力から読んで実行しうるコマンド (sh / bash / eval / source / .) があれば本文も数える
@@ -258,6 +264,18 @@ class HeredocBodyTest(unittest.TestCase):
             "source /dev/stdin <<'EOF'\ngh pr create\nEOF",
             ". /dev/stdin <<'EOF'\ngh pr create\nEOF",
             "cat <<'EOF' | bash\ngh pr create\nEOF",
+            # csh 系 (macOS に標準で入る) や他の shell も本文を読む
+            "tcsh <<'EOF'\ngh pr create\nEOF",
+            "csh <<'EOF'\ngh pr create --fill\nEOF",
+            "/bin/tcsh -s <<'EOF'\ngh pr create\nEOF",
+            "cat <<'EOF' | fish\ngh pr create\nEOF",
+            "mksh <<'EOF'\ngh pr create\nEOF",
+            "yash <<'EOF'\ngh pr create\nEOF",
+            # 引用した 1 語の shell の名前、置換・区切りを含む引用の中の shell の名前は残して数える
+            "cat <<'EOF' | 'bash'\ngh pr create\nEOF",
+            'cat <<\'EOF\' | "sh"\ngh pr create\nEOF',
+            "x='a b'; cat <<'EOF' | \"$(echo bash) -s\"\ngh pr create\nEOF",
+            "echo 'a; bash -s' <<'EOF'\ngh pr create\nEOF",
             # 引用の無い区切り語の本文は従来どおり加工前を数える
             "cat <<EOF\ngh pr create --fill\nEOF\ngh pr create --base m1",
             # 終わりの行が無い本文は、区切り語の読み違いで shell と本文の範囲がずれていることがあるので数える
@@ -305,6 +323,84 @@ class HeredocBodyTest(unittest.TestCase):
             self.fail("リダイレクトの繰り返しで 20 秒を超えた")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertLess(float(r.stdout), 1.0)
+
+    def test_prefix_runs_with_start_characters_take_linear_time(self):
+        # `&>f&>f ...` は前置きの中に実行位置の始まり (`&`) が並ぶ。前置きの繰り返しに上限が無いと、始まりごとに
+        # 残り全部を読み直して個数の 2 乗の時間になる (8000 個で 10 秒)。リダイレクトの対象・代入の値・gh の
+        # パスが区切りをまたいで読んでも同じになる。1000 個と 4000 個の時間の比で見る
+        script = (
+            "import time\n"
+            "from command import find_invocations, unresolved_reason\n"
+            "def run(k):\n"
+            "    best = None\n"
+            "    for _ in range(3):\n"
+            "        t = time.perf_counter()\n"
+            "        for tok in ('&>f', '&>f ', '2>&1 ', '>f;', '>f|', 'a=1&', '>f>', 'a=1 '):\n"
+            "            cmd = 'true; ' + tok * k + ' make gh pr'\n"
+            "            unresolved_reason(cmd, find_invocations(cmd))\n"
+            "        d = time.perf_counter() - t\n"
+            "        best = d if best is None else min(best, d)\n"
+            "    return best\n"
+            "small, large = run(1000), run(4000)\n"
+            "print(small, large)\n"
+        )
+        pkg = Path(__file__).resolve().parent.parent
+        try:
+            r = subprocess.run([sys.executable, "-c", script], cwd=pkg, capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            self.fail("前置きの繰り返しで 30 秒を超えた")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        small, large = map(float, r.stdout.split())
+        self.assertLess(large, 1.0)
+        # 線形なら約 4 倍、2 乗なら約 16 倍
+        self.assertLess(large / max(small, 1e-4), 8.0, (small, large))
+
+    def test_too_long_prefix_before_a_pr_operation_stops(self):
+        # 上限を超える前置きの後ろの PR 操作は安全網が数えないので、別に見つけて止める
+        # (関数定義の中の gh は構文解析が見つけず、安全網の数え上げだけが止める根拠になる)
+        for cmd in (
+            "f() { " + ">>a " * 40 + "gh pr create; }",
+            "f() { " + "2>&1 " * 40 + "gh pr create; }",
+            "f() { " + "X=1 " * 40 + "gh pr ready 3; }",
+        ):
+            with self.subTest(cmd=cmd[:30]):
+                self.assertIsNotNone(unresolved_reason(cmd, find_invocations(cmd)))
+        # 上限ちょうどの前置きは数える
+        cmd = "f() { " + ">>a " * 32 + "gh pr create; }"
+        self.assertEqual(find_invocations(cmd), [])
+        self.assertIsNotNone(unresolved_reason(cmd, find_invocations(cmd)))
+        # 長い前置きがあっても、後ろに PR 操作が無ければ止めない
+        for cmd in ("true; " + ">>a " * 40 + "make gh pr", "gh pr view; " + ">>a " * 40 + "make"):
+            with self.subTest(cmd=cmd[:30]):
+                self.assertIsNone(unresolved_reason(cmd, find_invocations(cmd)))
+
+    def test_prefix_words_end_where_the_shell_ends_them(self):
+        # 関数定義の中の gh は構文解析が見つけないので、安全網が数えて止める。リダイレクトの対象・代入の値は
+        # 引用の外の `;&|<>` で終わり、`$(...)` / backtick / 引用の中はまたいで読む
+        for cmd in (
+            "f() { >f>g gh pr create; }",
+            "f() { 2>&1>f gh pr create; }",
+            "f() { >$(a|b) gh pr create; }",
+            "f() { >`a;b` gh pr create; }",
+            "f() { >`a;b`.log gh pr create; }",
+            "f() { >\"a;b\" gh pr create; }",
+            "f() { A=$(x;y) gh pr create; }",
+            "f() { A='a b' gh pr create; }",
+            "f() { \"$d\"/gh pr create; }",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(unresolved_reason(cmd, find_invocations(cmd)))
+
+    def test_plain_quoted_text_skips_escaped_quotes(self):
+        # 引用符の対応は左から取り、`\'` は引用の始まりにしない
+        self.assertEqual(command._without_plain_quoted_text("a\\' b c 'x y'"), "a\\' b c ''")
+        self.assertEqual(command._without_plain_quoted_text("'a;b' 'a b' 'ab' \"$(x) y\""), "'a;b' '' 'ab' \"$(x) y\"")
+
+    def test_other_shells_with_c_are_nested_shells(self):
+        for sh in ("csh", "tcsh", "fish", "mksh", "yash"):
+            cmd = f"{sh} -c 'gh pr create --fill'"
+            with self.subTest(sh=sh):
+                self.assertIn("別の shell", unresolved_reason(cmd, find_invocations(cmd)) or "")
 
     def test_safety_net_reads_redirect_operators_as_the_shell_does(self):
         # shell の演算子どおりに読む: `>- x` の `-` はファイル名、`<<- gh` の gh は区切り語で、どちらも
@@ -478,10 +574,35 @@ class CdCompositionTest(unittest.TestCase):
             "cd a || exit 1; cd b && gh pr create",
             "cd a || return 1\ncd b\ngh pr create",
             "cd a || { exit 1; }; cd b && gh pr create",
+            # 波括弧の中で何かしてから exit する形
+            "cd a || { echo no >&2; exit 1; }; cd b && gh pr create",
+            "cd a || {\n  echo no >&2\n  return 1\n}\ncd b && gh pr create",
+            "cd a || { echo no; { echo nested; }; exit 1; }; cd b && gh pr create",
         ):
             with self.subTest(cmd=cmd):
                 inv = self.first(cmd)
                 self.assertEqual((inv.cd_steps, inv.cd_unresolved), (("a", "b"), None))
+        # 波括弧の中の exit が走らないことがある形は、cd a が失敗しても後ろが続くので決まらない
+        for cmd in (
+            "cd a || { echo no; }; cd b && gh pr create",
+            "cd a || { echo no; false && exit 1; }; cd b && gh pr create",
+            "cd a || { echo no; false || exit 1; }; cd b && gh pr create",
+            "cd a || { echo no | exit 1; }; cd b && gh pr create",
+            "cd a || { echo no; exit 1 & }; cd b && gh pr create",
+            "cd a || { if false; then exit 1; fi; }; cd b && gh pr create",
+            "cd a || { echo no; (exit 1); }; cd b && gh pr create",
+            "cd a || { echo no; { false && exit 1; }; }; cd b && gh pr create",
+            "cd a || { echo no; false && { echo; exit 1; }; }; cd b && gh pr create",
+            "cd a || { echo no; }; exit 1; cd b && gh pr create",
+            # 波括弧が閉じた後ろの exit は、その前の gh を止めない
+            "cd a || { echo no; }; cd b && gh pr create; { exit 1; }",
+            "cd a || ! { exit 1; }; cd b && gh pr create",
+            "cd a || exit 1 | tee; cd b && gh pr create",
+            "cd a || exit 1 & cd b && gh pr create",
+        ):
+            with self.subTest(cmd=cmd):
+                inv = self.first(cmd)
+                self.assertIsNotNone(inv.cd_unresolved)
         inv = self.first("cd a; cd /abs || exit; gh pr create")
         self.assertEqual((inv.cd_steps, inv.cd_unresolved), (("/abs",), None))
 
