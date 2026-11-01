@@ -149,20 +149,74 @@ def to_relative(root: str, path: str) -> str | None:
     git のパススペックは root 相対でなければ黙って何にもマッチしないため、
     ここで確実に相対化しておく。
 
-    symlink を解くだけでなく、大文字小文字を区別しない FS ではディスク上の綴りに揃える
-    (`_common.physpath`)。`B.py` と書いた名前の実体が `b.py` のとき、`B.py` のまま
-    literal pathspec に渡すと index の `b.py` に当たらず差分が空になるため。
+    大文字小文字を区別しない FS では、書かれた綴り (realpath の相対。0.18.1 までの値) と
+    ディスク上の綴り (`_common.physpath`) が大文字小文字だけ違うことがある。literal
+    pathspec は大文字小文字を区別するので、git には **index にある方** を渡す
+    (`_index_spelling`)。`B.py` と書いた名前の実体が `b.py` なら `b.py`、git を通さずに
+    `mod.py` を `Mod.py` へ rename した後に index の綴り `mod.py` で書いたなら `mod.py`。
+    root を大文字小文字だけ違う綴りで書いたパスも作業ツリー内として扱う。
+    """
+    names = _relative_spellings(root, path)
+    if names is None:
+        return None
+    written, disk = names
+    if written == disk:
+        return disk
+    return _index_spelling(root, written, disk)
+
+
+def relative_names(root: str, path: str) -> list[str]:
+    """`to_relative` が選びうる作業ツリー相対の綴りすべて (書かれた綴り・ディスク上の綴り)。
+
+    除外判定に両方を渡すために使う (どちらの綴りが機密に見えても送らない)。git は呼ばない。
+    """
+    names = _relative_spellings(root, path)
+    if names is None:
+        return []
+    return list(dict.fromkeys(names))
+
+
+def _relative_spellings(root: str, path: str) -> tuple[str, str] | None:
+    """(書かれた綴りの相対, ディスク上の綴りの相対)。作業ツリー外なら None。
+
+    書かれた綴りは realpath の末尾から、ディスク上の綴りと同じ数の構成要素を取ったもの。
+    `physpath` は realpath と構成要素の数が同じで、各構成要素が畳むと等しいパスしか返さない
+    (`physpath._align`) ので、2 つは構成要素ごとに大文字小文字だけが違う。
     """
     if not path:
         return None
-    real = physpath.physical_path(path)
-    root_real = physpath.physical_dir(root)
-    if real == root_real:
+    phys = physpath.physical_path(path)
+    root_phys = physpath.physical_dir(root)
+    if phys == root_phys:
         return None
-    prefix = root_real.rstrip(os.sep) + os.sep
-    if not real.startswith(prefix):
+    prefix = root_phys.rstrip(os.sep) + os.sep
+    if not phys.startswith(prefix):
         return None
-    return real[len(prefix) :]
+    disk = phys[len(prefix) :]
+    count = len(disk.split(os.sep))
+    written = os.sep.join(os.path.realpath(path).split(os.sep)[-count:])
+    return written, disk
+
+
+def _index_spelling(root: str, written: str, disk: str) -> str:
+    """大文字小文字だけ違う 2 つの綴りのうち、git に渡す方を選ぶ。
+
+    - index に書かれた綴りがあれば書かれた綴り (0.18.1 までと同じ値。index に大文字小文字
+      違いの 2 entry がある repo でも、書かれた方だけを送る)
+    - 無ければディスク上の綴り (index にあるのは通常こちら。untracked なら `ls-files --others`
+      が返す名前)。ディスク上の綴りも index に無い (git を通さずに rename した後に第 3 の綴りで
+      書いた) ときは 0.18.1 までと同じく git に当たらない
+    - git が失敗したら書かれた綴り (0.18.1 までと同じ)
+
+    `:(icase)` は使わない (大文字小文字違いの別 entry に当たり、送る範囲が広がる)。
+    大文字小文字の別名を書いたときだけ走る (通常の名前では git を呼ばない)。
+    """
+    res = _git(root, ["ls-files", "-z", "--", written], timeout=REV_PARSE_TIMEOUT_SEC)
+    if res is None or res.returncode != 0:
+        return written
+    if os.fsencode(written) in res.stdout.split(b"\0"):
+        return written
+    return disk
 
 
 # --------------------------------------------------------------------------

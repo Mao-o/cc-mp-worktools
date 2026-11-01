@@ -290,11 +290,14 @@ def claim_pending(session_id: str) -> tuple[str, list[str]] | None:
                 # もの)、entry の paths は PostToolUse の file_path の生の名前。symlink 経由で
                 # claim したパスを生の名前で比べると、返った塊を pending に戻して送り直す
                 # (指摘が 2 回届く) ので、実体名で比べる。大文字小文字だけ違う名前 (`B.py` で
-                # claim、実体は `b.py`) も同じ理由で、ディスク上の綴りに揃えて比べる (`covered`
-                # の rel は `gitscan.to_relative` が既にディスク上の綴りにしている)
+                # claim、実体は `b.py`) も同じ理由で、書かれた綴り (realpath) とディスク上の
+                # 綴りの両方で比べる (`covered` の rel は `gitscan.to_relative` が index にある
+                # 方の綴りを選んでいる)
                 kept: list[str] = []
                 for p in entry.get("paths") or []:
-                    if isinstance(p, str) and physpath.physical_path(p) in covered:
+                    if isinstance(p, str) and (
+                        os.path.realpath(p) in covered or physpath.physical_path(p) in covered
+                    ):
                         kept.append(p)
                     else:
                         state["pending"].setdefault(p, now)

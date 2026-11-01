@@ -220,6 +220,73 @@ class TestToRelativeCaseOnlyAlias(GitScanTestCase):
         diff = gitscan.path_diff(self.repo, rel, untracked=False, has_head=True)
         self.assertIn("+y", diff or "")
 
+    def _commit_seed(self) -> None:
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "seed")
+
+    def test_written_index_spelling_after_case_rename_outside_git(self):
+        """git を通さずに `mod.py` → `Mod.py` と rename した後、index の綴りで書いたら index の綴り。
+
+        git status (Bash 経由の claim) は index の綴り `pkg/mod.py` を返す。ディスクの綴り
+        `pkg/Mod.py` に揃えると literal pathspec が index に当たらず、0.18.1 で取れていた差分が空になる。
+        """
+        self._commit_seed()
+        d = os.path.join(self.repo, "pkg")
+        os.rename(os.path.join(d, "mod.py"), os.path.join(d, "tmp"))
+        os.rename(os.path.join(d, "tmp"), os.path.join(d, "Mod.py"))
+        write(self.repo, "pkg/Mod.py", "y\n")
+        rel = gitscan.to_relative(self.repo, os.path.join(self.repo, "pkg", "mod.py"))
+        self.assertEqual(rel, "pkg/mod.py")
+        diff = gitscan.path_diff(self.repo, rel, untracked=False, has_head=True)
+        self.assertIn("+y", diff or "")
+
+    def test_index_with_both_spellings_keeps_the_written_one(self):
+        """index に大文字小文字違いの 2 entry があれば、書かれた綴りだけを渡す (範囲を広げない)。"""
+        self._commit_seed()
+        sha = git(self.repo, "rev-parse", "HEAD:pkg/mod.py").stdout.strip()
+        git(self.repo, "update-index", "--add", "--cacheinfo", f"100644,{sha},pkg/Mod.py")
+        self.assertEqual(
+            gitscan.to_relative(self.repo, os.path.join(self.repo, "pkg", "Mod.py")), "pkg/Mod.py"
+        )
+        self.assertEqual(
+            gitscan.to_relative(self.repo, os.path.join(self.repo, "pkg", "mod.py")), "pkg/mod.py"
+        )
+
+    def test_git_failure_keeps_the_written_spelling(self):
+        """index を引けなければ 0.18.1 までと同じ書かれた綴り。"""
+        self._commit_seed()
+        for res in (None, mock.Mock(returncode=128, stdout=b"")):
+            with self.subTest(res=res), mock.patch.object(gitscan, "_git", return_value=res):
+                self.assertEqual(
+                    gitscan.to_relative(self.repo, os.path.join(self.repo, "PKG", "Mod.py")),
+                    "PKG/Mod.py",
+                )
+
+    def test_untracked_alias_uses_the_disk_spelling(self):
+        """index に無い (untracked) なら、`ls-files --others` が返すディスク上の綴り。"""
+        self.assertEqual(
+            gitscan.to_relative(self.repo, os.path.join(self.repo, "PKG", "Mod.py")), "pkg/mod.py"
+        )
+
+    def test_git_is_not_called_when_the_spelling_matches(self):
+        self._commit_seed()
+        with mock.patch.object(gitscan, "_git", side_effect=AssertionError("git を呼んだ")):
+            self.assertEqual(
+                gitscan.to_relative(self.repo, os.path.join(self.repo, "pkg", "mod.py")),
+                "pkg/mod.py",
+            )
+
+    def test_relative_names_lists_both_spellings(self):
+        self.assertEqual(
+            gitscan.relative_names(self.repo, os.path.join(self.repo, "PKG", "Mod.py")),
+            ["PKG/Mod.py", "pkg/mod.py"],
+        )
+        self.assertEqual(
+            gitscan.relative_names(self.repo, os.path.join(self.repo, "pkg", "mod.py")),
+            ["pkg/mod.py"],
+        )
+        self.assertEqual(gitscan.relative_names(self.repo, "/elsewhere/x.py"), [])
+
 
 class TestStatusSnapshot(GitScanTestCase):
     def test_untracked_files_are_listed_individually(self):

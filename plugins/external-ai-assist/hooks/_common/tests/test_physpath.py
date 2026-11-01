@@ -134,18 +134,63 @@ class TestCaseOnlyAlias(PhyspathTestCase):
         self.assertEqual(self.path("sub", "H.py"), h)
         self.assertEqual(self.path("sub", "B.py"), self.b)
 
-    def test_unicode_normalization_alias(self):
+    def _nfd_entry(self, *parts: str, directory: bool = False) -> None:
+        """`parts` (NFD) を作る。FS が正規化の違いを区別する・形を保存しないなら skip。"""
         self.needs_case_insensitive()
+        target = os.path.join(self.root, *parts)
+        if directory:
+            os.mkdir(target)
+        else:
+            with open(target, "w"):
+                pass
+        nfc = unicodedata.normalize("NFC", target)
+        if not os.path.exists(nfc):
+            self.skipTest("正規化の違いを区別する FS")
+        if parts[-1] not in os.listdir(os.path.dirname(target)):
+            self.skipTest("FS が名前を作成時の形で保存しない")
+
+    def test_unicode_normalization_alias_keeps_the_written_form(self):
+        """正規化形だけの違いは書かれた形のまま (git の index は precompose した NFC を持つ)。"""
         nfd = unicodedata.normalize("NFD", "café.py")
         nfc = unicodedata.normalize("NFC", nfd)
-        on_disk = os.path.join(self.root, "sub", nfd)
-        with open(on_disk, "w"):
+        self._nfd_entry("sub", nfd)
+        self.assertEqual(self.path("sub", nfc), os.path.join(self.root, "sub", nfc))
+        self.assertEqual(self.path("sub", nfd), os.path.join(self.root, "sub", nfd))
+
+    def test_nfd_directory_keeps_the_written_form(self):
+        nfd = unicodedata.normalize("NFD", "ガイド")
+        nfc = unicodedata.normalize("NFC", nfd)
+        self._nfd_entry(nfd, directory=True)
+        with open(os.path.join(self.root, nfd, "b.py"), "w"):
             pass
-        if not os.path.exists(os.path.join(self.root, "sub", nfc)):
-            self.skipTest("正規化の違いを区別する FS")
-        if nfd not in os.listdir(os.path.join(self.root, "sub")):
-            self.skipTest("FS が名前を作成時の形で保存しない")
-        self.assertEqual(self.path("sub", nfc), on_disk)
+        self.assertEqual(self.dir(nfc), os.path.join(self.root, nfc))
+        self.assertEqual(self.path(nfc, "b.py"), os.path.join(self.root, nfc, "b.py"))
+
+    def test_case_and_normalization_both_differ(self):
+        """大文字小文字はディスク上、正規化形は書かれた形 (NFC で書いた `CAFÉ.py` → NFC の `café.py`)。"""
+        nfd = unicodedata.normalize("NFD", "café.py")
+        self._nfd_entry("sub", nfd)
+        written = unicodedata.normalize("NFC", "CAFÉ.py")
+        self.assertEqual(
+            self.path("sub", written),
+            os.path.join(self.root, "sub", unicodedata.normalize("NFC", "café.py")),
+        )
+        nfd_dir = unicodedata.normalize("NFD", "Dé")
+        self._nfd_entry(nfd_dir, directory=True)
+        self.assertEqual(
+            self.dir(unicodedata.normalize("NFC", "DÉ")),
+            os.path.join(self.root, unicodedata.normalize("NFC", "Dé")),
+        )
+
+    def test_getpath_answer_that_does_not_fold_to_the_written_path_is_ignored(self):
+        """F_GETPATH が大文字小文字と正規化以外で違う答え (構成要素の数・名前) を返したら realpath。"""
+        self.needs_case_insensitive()
+        sub = os.path.join(self.root, "SUB")
+        for answer in (b"/elsewhere/sub\0", os.fsencode(self.root + "/other\0"),
+                       os.fsencode(self.root + "/sub/extra\0")):
+            with self.subTest(answer=answer), \
+                    mock.patch.object(physpath.fcntl, "fcntl", return_value=answer):
+                self.assertEqual(self.dir("SUB"), sub)
 
     def test_unreadable_directory_keeps_the_written_name(self):
         self.needs_case_insensitive()
@@ -181,6 +226,43 @@ class TestCaseOnlyAlias(PhyspathTestCase):
         with mock.patch.object(physpath.os, "lstat", side_effect=lstat):
             got = self.path("sub", "B.py")
         self.assertEqual(os.path.basename(got), "B.py")
+
+
+class TestListingMemo(PhyspathTestCase):
+    """同じディレクトリの一覧は、変わっていなければ読み直さない (5000 項目で約 100 倍遅かった)。"""
+
+    def test_listing_is_read_once_per_unchanged_directory(self):
+        self.needs_case_insensitive()
+        physpath._LISTING_CACHE.clear()
+        with open(os.path.join(self.root, "sub", "c.py"), "w"):
+            pass
+        real_listdir = os.listdir
+        with mock.patch.object(physpath.os, "listdir", side_effect=real_listdir) as listdir:
+            self.assertEqual(os.path.basename(self.path("sub", "B.py")), "b.py")
+            self.assertEqual(os.path.basename(self.path("sub", "C.py")), "c.py")
+        self.assertEqual(listdir.call_count, 1)
+
+    def test_listing_is_read_again_after_a_rename(self):
+        self.needs_case_insensitive()
+        physpath._LISTING_CACHE.clear()
+        self.assertEqual(os.path.basename(self.path("sub", "B.py")), "b.py")
+        sub = os.path.join(self.root, "sub")
+        os.rename(os.path.join(sub, "b.py"), os.path.join(sub, "tmp"))
+        os.rename(os.path.join(sub, "tmp"), os.path.join(sub, "Bb.py"))
+        os.rename(os.path.join(sub, "Bb.py"), os.path.join(sub, "B.py"))
+        self.assertEqual(os.path.basename(self.path("sub", "b.py")), "B.py")
+
+    def test_memo_is_bounded(self):
+        self.needs_case_insensitive()
+        physpath._LISTING_CACHE.clear()
+        with mock.patch.object(physpath, "_LISTING_CACHE_MAX", 2):
+            for i in range(5):
+                d = os.path.join(self.root, f"d{i}")
+                os.mkdir(d)
+                with open(os.path.join(d, "x.py"), "w"):
+                    pass
+                self.path(f"d{i}", "X.py")
+                self.assertLessEqual(len(physpath._LISTING_CACHE), 2)
 
 
 if __name__ == "__main__":

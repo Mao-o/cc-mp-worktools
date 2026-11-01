@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import unicodedata
 import unittest
 from unittest import mock
 
@@ -181,6 +182,84 @@ class TestCaseOnlyAlias(_CarryCase):
             f"commit レビューが内容を送っていない (通知: {self.notice(output)})",
         )
         self.assertNotIn("ファイル名のみ", self.notice(output))
+
+
+_NFC = unicodedata.normalize("NFC", "ガイド")
+_NFD = unicodedata.normalize("NFD", _NFC)
+
+
+class TestSpellingsThatGitKeepsAsWritten(_CarryCase):
+    """git が書かれた綴りで持つ名前は、ディスク上の綴りに揃えずに送る (0.18.1 で送れていた形)。
+
+    - ディスク上は NFD (Finder で作った名前など)、index は NFC (`core.precomposeunicode`)、
+      Write は NFC のパス。ディスク上の NFD に揃えると、P1 の照合と `cat-file --batch` の
+      stdin (precompose されない) で index の NFC から外れ、commit レビューが「記録が無い」で
+      内容を送らなかった
+    - git を通さずに大文字小文字だけ rename した (index は `mod.py`、ディスクは `Mod.py`) ファイルを
+      index の綴りで書いた。ディスクの綴りに揃えると literal pathspec が index に当たらず空になった
+    """
+
+    def _seed_nfd(self, dir_name: str, file_name: str) -> None:
+        """`dir_name/file_name` を作って commit する (どちらかが NFD)。"""
+        if not _case_insensitive_fs(self.repo):
+            self.skipTest("正規化の違いを同じ実体として扱う FS (macOS) でだけ意味を持つ")
+        os.mkdir(os.path.join(self.repo, dir_name))
+        _testutil.write(self.repo, os.path.join(dir_name, file_name), "old\n")
+        if dir_name not in os.listdir(self.repo) or file_name not in os.listdir(
+            os.path.join(self.repo, dir_name)
+        ):
+            self.skipTest("FS が名前を作成時の形で保存しない")
+        self.commit("seed")
+
+    def _seed_outside_rename(self) -> str:
+        if not _case_insensitive_fs(self.repo):
+            self.skipTest("大文字小文字を区別する FS では同じ実体を指す別名にならない")
+        _testutil.write(self.repo, "pkg/mod.py", "old\n")
+        self.commit("seed")
+        d = os.path.join(self.repo, "pkg")
+        os.rename(os.path.join(d, "mod.py"), os.path.join(d, "tmp"))
+        os.rename(os.path.join(d, "tmp"), os.path.join(d, "Mod.py"))
+        self.assertIn("Mod.py", os.listdir(d))
+        return os.path.join(d, "mod.py")  # index の綴り (git status が返す名前)
+
+    def assert_sent(self, out: str) -> None:
+        self.assertTrue(
+            any(OURS in body for body in self.review_calls),
+            f"内容を送っていない (通知: {self.notice(out)})",
+        )
+
+    def test_commit_review_nfd_directory_on_disk(self):
+        self._seed_nfd(_NFD, "b.py")
+        self.edit_as(os.path.join(self.repo, _NFC, "b.py"), OURS + "\ny\n", self.repo)
+        out = self.window("tu_commit", lambda: self.commit("c", _NFC + "/b.py"))
+        self.assert_sent(out)
+
+    def test_commit_review_nfd_file_name_on_disk(self):
+        self._seed_nfd("plain", unicodedata.normalize("NFD", "ガ.py"))
+        nfc_name = unicodedata.normalize("NFC", "ガ.py")
+        self.edit_as(os.path.join(self.repo, "plain", nfc_name), OURS + "\ny\n", self.repo)
+        out = self.window("tu_commit", lambda: self.commit("c", "plain/" + nfc_name))
+        self.assert_sent(out)
+
+    def test_stop_nfd_directory_on_disk(self):
+        self._seed_nfd(_NFD, "b.py")
+        self.edit_as(os.path.join(self.repo, _NFC, "b.py"), OURS + "\nx\n", self.repo)
+        out = self.stop_with(["REVIEW_CLEAN"])
+        self.assert_sent(out)
+        self.assertNotIn("差分が空で取得できませんでした", self.notice(out))
+
+    def test_stop_index_spelling_after_case_rename_outside_git(self):
+        b = self._seed_outside_rename()
+        self.edit_as(b, OURS + "\nx\n", self.repo)
+        out = self.stop_with(["REVIEW_CLEAN"])
+        self.assert_sent(out)
+        self.assertNotIn("差分が空で取得できませんでした", self.notice(out))
+
+    def test_commit_review_index_spelling_after_case_rename_outside_git(self):
+        b = self._seed_outside_rename()
+        self.edit_as(b, OURS + "\ny\n", self.repo)
+        out = self.window("tu_commit", lambda: self.commit("c", "pkg/mod.py"))
+        self.assert_sent(out)
 
 
 def _make(layout: str, exit_: str):

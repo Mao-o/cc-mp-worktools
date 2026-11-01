@@ -2329,7 +2329,13 @@ def _resolve_paths(
             continue
         names = candidates.setdefault(rel, [rel])
         lexical = _lexical_relative(root_real, path)
-        for name in [lexical, *exclusion.expand_aliases(rel, symlinks)]:
+        # symlink の別名は、大文字小文字だけ違う綴り (書かれた綴り / ディスク上の綴り。`rel` は
+        # そのどちらか) のそれぞれから作る。symlink の target はディスク上の綴りなので、git に
+        # 渡す綴りが書かれた綴りのときは、それだけでは別名に届かない。綴りそのものは大文字小文字
+        # だけの違いで、除外判定は小文字にして比べるので足さない
+        spellings = gitscan.relative_names(root, path)
+        aliases = [a for s in spellings for a in exclusion.expand_aliases(s, symlinks)]
+        for name in [lexical, *aliases]:
             if name and name not in names:
                 names.append(name)
 

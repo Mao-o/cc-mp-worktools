@@ -246,6 +246,23 @@ class TestResolvePathsExclusion(ReviewSetTestCase):
         self.assertEqual(rels, [], "書かれた名前 (credentials) が除外判定に届いていない")
         self.assertEqual([name for name, _ in excluded], ["credentials/data.json"])
 
+    def test_symlink_alias_of_the_other_spelling_is_judged(self):
+        """git に渡す綴りが書かれた綴り (`ORDINARY/...`) でも、ディスク上の綴りの symlink 別名で除外する。
+
+        symlink の target はディスク上の綴り (`ordinary`) なので、書かれた綴りからは別名
+        `credentials/...` が作れない。両方の綴りを判定に入れる。
+        """
+        self._symlinked_credentials_dir()
+        upper = os.path.join(self.repo, "ORDINARY", "data.json")
+        if not os.path.exists(upper):
+            self.skipTest("大文字小文字を区別する FS では同じ実体を指す別名にならない")
+        with mock.patch.object(
+            self.entry.gitscan, "_index_spelling", side_effect=lambda root, w, d: w
+        ):
+            rels, _, excluded = self.resolve([upper], exclusion.load_policy({}))
+        self.assertEqual(rels, [], "ディスク上の綴りの別名 (credentials) が除外判定に届いていない")
+        self.assertEqual([name for name, _ in excluded], ["credentials/data.json"])
+
     def test_link_name_is_judged_through_symlinked_root(self):
         """claim 側が symlink 経由の root 表記 (macOS の /tmp → /private/tmp 等) でもリンク名を見る。"""
         os.makedirs(os.path.join(self.repo, "vault"))
