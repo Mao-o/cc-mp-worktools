@@ -14,8 +14,11 @@ from __future__ import annotations
 
 import errno
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
+import unittest
 from pathlib import Path
 from unittest import mock
 
@@ -53,6 +56,94 @@ def _isolate_git_discovery() -> None:
 
 
 _isolate_git_discovery()
+
+
+# -- 本物のクラウド CLI を起動させない ------------------------------------------------------------
+#
+# hook と builder は aws / gcloud / gh / firebase / kubectl を `subprocess.run` で起動する。テストで
+# mock を書き忘れると、手元や CI の本物の CLI が走る (実際に、`show` が現在値を問い合わせる経路の 7 件が
+# 本物の `aws sts get-caller-identity` と `gh auth status` を起動していた。aws は IMDS の探索待ちで
+# 1 件 4 秒以上かかり、認証情報があれば実際に STS に問い合わせる)。builder の `show` は CLI の失敗を
+# `except Exception` で握るので、起動の時点で例外を投げてもテストは落ちない。そこで:
+#
+# 1. `subprocess.Popen` の起動の前に、コマンド語が下の CLI で、解決先が一時 dir の外にあるものを
+#    `REAL_CLI_LAUNCHES` に記録し、起動せずに FileNotFoundError にする (「CLI が無い」と同じ扱い)
+# 2. 各テストの終わりに、そのテストの間に記録が増えていたら assertion の失敗にする
+#
+# 一時 dir の中の偽の CLI (テストが PATH の先頭に置くもの) は対象外。シェル (`bash -c` など) や子の
+# Python が起動する CLI は、このプロセスの Popen を通らないので見えない。
+GUARDED_CLIS = frozenset({"aws", "gcloud", "gh", "firebase", "kubectl"})
+REAL_CLI_LAUNCHES: list[tuple[str, tuple[str, ...]]] = []
+_REAL_POPEN_INIT = subprocess.Popen.__init__
+_REAL_TESTCASE_RUN = unittest.TestCase.run
+
+
+def _is_under(path: str, root: str) -> bool:
+    return os.path.commonpath([path, root]) == root
+
+
+def real_cli_target(args, kwargs) -> str | None:
+    """`Popen(args, **kwargs)` が一時 dir の外の対象 CLI を起動するなら、その解決先 (それ以外は None)。"""
+    if kwargs.get("shell"):
+        return None
+    if isinstance(args, (str, bytes, os.PathLike)):
+        argv = [args]
+    else:
+        try:
+            argv = list(args)
+        except TypeError:
+            return None
+    program = kwargs.get("executable") or (argv[0] if argv else None)
+    if program is None:
+        return None
+    word = os.fsdecode(program)
+    if os.path.basename(word) not in GUARDED_CLIS:
+        return None
+    env = kwargs.get("env")
+    search = (os.environ if env is None else env).get("PATH", os.defpath)
+    if os.sep in word:
+        cwd = kwargs.get("cwd")
+        resolved = os.path.join(os.fsdecode(cwd), word) if cwd is not None else word
+        if not os.path.exists(resolved):
+            return None
+    else:
+        resolved = shutil.which(word, path=search)
+        if resolved is None:
+            return None
+    real = os.path.realpath(resolved)
+    if _is_under(real, os.path.realpath(tempfile.gettempdir())):
+        return None
+    return real
+
+
+def _guarded_popen_init(self, args, *rest, **kwargs):
+    target = real_cli_target(args, kwargs)
+    if target is not None:
+        argv = (args,) if isinstance(args, (str, bytes, os.PathLike)) else tuple(args)
+        REAL_CLI_LAUNCHES.append((target, tuple(os.fsdecode(a) for a in argv)))
+        raise FileNotFoundError(
+            errno.ENOENT, "テストからは本物のクラウド CLI を起動しない (mock すること)", target
+        )
+    _REAL_POPEN_INIT(self, args, *rest, **kwargs)
+
+
+def _fail_if_real_cli_launched(case: unittest.TestCase, start: int) -> None:
+    launched = REAL_CLI_LAUNCHES[start:]
+    if launched:
+        case.fail(
+            "本物のクラウド CLI を起動しようとした (get_active_account などを mock する): "
+            + "; ".join(f"{target} {list(argv)!r}" for target, argv in launched)
+        )
+
+
+def _run_with_cli_guard(self, result=None):
+    # 後始末の最後 (登録が最初なので LIFO で最後) に、このテストの間の記録を確かめる。
+    self.addCleanup(_fail_if_real_cli_launched, self, len(REAL_CLI_LAUNCHES))
+    return _REAL_TESTCASE_RUN(self, result)
+
+
+subprocess.Popen.__init__ = _guarded_popen_init
+unittest.TestCase.run = _run_with_cli_guard
 
 
 # テストの repo で git に自動 gc / maintenance を起こさせない設定 (key, value)。

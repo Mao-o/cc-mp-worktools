@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.29.8
+
+### テスト整理 (挙動の変更なし): テストから本物のクラウド CLI を起動しない
+
+- in-process のテスト 7 件が、builder の `show` が現在値を CLI に問い合わせる経路で mock を書き忘れ、
+  手元や CI の本物の `aws sts get-caller-identity` (1 件) と `gh auth status` (6 件) を起動していた。
+  assertion は CLI の結果に依存しないので、`get_active_account` を mock した
+  (`test_accounts_builder.py` の 2 件は各テストで、`test_builder_path_escape.py` の 5 件は共通の `setUp` で)。
+  aws の 1 件は IMDS の探索待ちで 4 秒以上かかっていた
+- 構造的な床 (`tests/_testutil.py`): `subprocess.Popen` の起動の前に、コマンド語が aws / gcloud / gh /
+  firebase / kubectl で解決先が一時 dir の外のものを記録し、起動せずに FileNotFoundError にする
+  (「CLI が無い」と同じ扱い)。記録が増えたテストは、終わりに assertion の失敗になる (builder の `show` は
+  CLI の失敗を握るので、起動の時点の例外だけではテストが落ちない)。テストが一時 dir に置いた偽の CLI は
+  対象外。シェルや子の Python が起動する CLI は見えない
+- 床のテスト (`tests/test_testutil.py`): PATH / 絶対パス / cwd からの相対パス / `executable` / 文字列 1 つ /
+  `os.environ` の PATH の各経路で止まって記録されること、一時 dir の中の偽の CLI と対象外のコマンドは走ること、
+  見つからない CLI は記録しないこと、記録が増えたテストが (CLI の失敗を握っていても) 失敗になること
+
 ## 0.29.7
 
 ### Docs: heredoc とシェル経由の wrapper の複合コマンドの組み合わせを守らない範囲に入れる
