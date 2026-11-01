@@ -1080,6 +1080,7 @@ pytest tests/                          # pytest でも動く (conftest.py で sy
 | 作業ツリー外の絶対パスが除外される | `TestOutsideWorktree` |
 | **入れ子の作業ツリー / git リポジトリ / submodule の中のファイルを黙って落とす (誤通知しない)** | `TestNestedWorktree` |
 | 上限超過パスを黙って捨てない | `TestOverflowCarryOver` |
+| **繰り越し・失敗で pending に戻すパスは claim したときの名前 (symlink を通る名前) のまま戻し、指紋を失わない (0.18.1)** | `test_claimed_name_carry.py` |
 | コードフェンス付き REVIEW_CLEAN (+ 前置き) を指摘扱いしない | `TestFencedCleanSentinel` (判定規則の網羅は `hooks/_common/tests/test_sentinel.py`) |
 | 機密・非コードファイルの差分を外部に送らない (恒久除外 + 通知) | `TestExclusion` (判定規則の網羅は `tests/test_exclusion.py`) |
 | glob に見えるファイル名で他セッションの差分が混入しない | `TestLiteralPathspecFlow` (git 単体は `test_gitscan.py::TestLiteralPathspec`) |

@@ -1947,7 +1947,9 @@ def _run_review(
     # 繰り越しは捨てずに pending へ戻す (次の Stop でレビューされる)。claim 順を保って 1 回で
     # 積む: 送れなかった塊 (rels の途中) → 時間切れ (rels の末尾) → 上限超過 (rels の外) の順。
     # 送れなかった塊は送信を終えるまで決まらないので、積むのは各出口で行う
-    carried = batch.deferred + overflow
+    # pending に戻すパスは**claim されたときの名前**に写し戻す (`_as_claimed`)
+    claimed_by_rel = _recorded_by_rel(root, claimed)
+    carried = _as_claimed(root, batch.deferred + overflow, claimed_by_rel)
     if batch.unretrievable:
         # HEAD 基準の diff が空だったパス。復元は試みない (`_collect_diffs` の
         # docstring「HEAD 基準の diff が空のパスは復元を試みない」参照)。pending
@@ -1986,7 +1988,9 @@ def _run_review(
         # 消費せず pending に戻す (cursor 失敗時と同じ経路。hash も記録しない)
         if carried:
             state.record_pending(session_id, carried)
-        state.restore_claim(session_id, claim_id, batch.submitted)
+        state.restore_claim(
+            session_id, claim_id, _as_claimed(root, batch.submitted, claimed_by_rel)
+        )
         notices.insert(
             0,
             f"変更 {changed_lines} 行が {ENV_MIN_LINES}={min_lines} に満たないため"
@@ -2068,7 +2072,9 @@ def _run_review(
         log("全 backend がレビュー結果を返さなかった (fail-open、pending に戻す)")
         if carried:
             state.record_pending(session_id, carried)
-        state.restore_claim(session_id, claim_id, batch.submitted)
+        state.restore_claim(
+            session_id, claim_id, _as_claimed(root, batch.submitted, claimed_by_rel)
+        )
         notices.insert(0, f"{summary} → 結果を取得できず (timeout / 失敗)。次ターンに持ち越し")
         return _with_notices({}, notices)
 
@@ -2077,7 +2083,10 @@ def _run_review(
     failed_paths = [p for chunk, outcome in sent if not outcome.text for p in chunk.submitted]
     unsent_paths = [p for chunk in unsent for p in chunk.submitted]
     if failed_paths or unsent_paths or carried:
-        state.record_pending(session_id, failed_paths + unsent_paths + carried)
+        state.record_pending(
+            session_id,
+            _as_claimed(root, failed_paths + unsent_paths, claimed_by_rel) + carried,
+        )
     carried_notices: list[str] = []
     if failed_paths:
         carried_notices.append(
@@ -2258,6 +2267,29 @@ def _sent_manifest(root: str, batch: ReviewBatch | ReviewChunk) -> str:
         f"{rel} ({len(section.encode())} bytes)"
         for rel, section in zip(_rel_names(root, batch.submitted), batch.sections)
     )
+
+
+def _as_claimed(root: str, paths: list[str], by_rel: dict[str, list[str]]) -> list[str]:
+    """実体名 (`os.path.join(root, rel)`) のパスを、claim されたときの名前に写し戻す。
+
+    `_resolve_paths` 以降は実体名で扱うが、指紋 (`state.record_fingerprints`) のキーは
+    PostToolUse が受け取った名前 (repo 内の symlink や、repo の祖先の symlink を通る名前)
+    のまま。実体名で pending に戻すと `state.complete_claim` が claim 時の名前の指紋を
+    消し (pending に同じ名前が無いため)、消えなかった場合 (`restore_claim`) も
+    `_verify_fingerprints` が引けない。どちらでも、繰り越したファイルを書き換えずに
+    commit すると commit レビューは内容を送らずファイル名だけを通知し、次の Stop は
+    「差分が空」と通知して、内容がどこにも送られなかった。
+
+    同じ実体を複数の名前で claim していたら全部を戻す (`_verify_fingerprints` は全ての
+    別名の指紋が揃うことを求める)。`by_rel` に無いパスはそのまま返す。順序は `paths` の
+    順を保ち、重複は除く。
+    """
+    out: dict[str, None] = {}
+    for path in paths:
+        rel = gitscan.to_relative(root, path)
+        for name in (by_rel.get(rel) if rel else None) or [path]:
+            out.setdefault(name, None)
+    return list(out)
 
 
 def _resolve_paths(
