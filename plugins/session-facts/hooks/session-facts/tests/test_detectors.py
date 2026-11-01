@@ -394,6 +394,15 @@ class HasFirebaseMemoizationTest(unittest.TestCase):
             (root / "firebase.json").write_text("{}")  # would be True if rescanned
             self.assertFalse(has_firebase(ctx))
 
+    def test_memo_does_not_outlive_its_context(self):
+        # The memo is per run (one RepoContext), not process-wide: a fresh
+        # context on the same root rescans.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertFalse(has_firebase(RepoContext(root=root, config=AnalysisConfig())))
+            (root / "firebase.json").write_text("{}")
+            self.assertTrue(has_firebase(RepoContext(root=root, config=AnalysisConfig())))
+
 
 if __name__ == "__main__":
     unittest.main()
