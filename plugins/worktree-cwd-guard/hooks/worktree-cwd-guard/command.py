@@ -603,6 +603,8 @@ class _Analyzer:
                 seg.append(tok)  # リダイレクト記号はそのまま
                 continue
             for op in _OPS.findall(tok):
+                if op == "\n" and not seg and self.in_pipe:
+                    continue  # `|` の後ろの改行は pipeline の続き
                 self._flush(seg, next_is_pipe=op in ("|", "|&"))
                 seg = []
                 self._operator(op)

@@ -17,6 +17,9 @@ main checkout で走るのに止まっていなかった (pipeline の要素を�
 (どちらの shell でも移動先で走る) も止まる。pipeline の途中の要素の `cd` (`printf a | cd <main> | cat`) は、どちらの shell
 でもサブシェルで動くので、これまでどおり外に残らないものとして扱う。
 
+`|` の直後で改行して続けた pipeline (`printf a |⏎ cd <dir>`) も、改行の後ろの要素を最後の要素として読む (改行で
+pipeline が終わったとみなし、最後の要素の `cd` を今の shell の `cd` として読んでいた。0.3.0 まで)。
+
 ### テストの追加
 
 - `tests/test_guard.py`: 最後の要素の `cd` / `pushd` / `|&` / brace group で止まること、途中の要素の `cd` は残らない

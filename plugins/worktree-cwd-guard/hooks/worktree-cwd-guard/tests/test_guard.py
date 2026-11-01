@@ -188,8 +188,13 @@ class GuardTest(GuardBase):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(evaluate(bash(cmd, self.a)))
         # 最後の要素の cd が自分の worktree へ戻っても、bash の読み (残らない) では main のまま
-        cmd = f'cd "{self.main}"; printf a | cd "{self.a}"; git reset --hard'
-        self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+        for cmd in (
+            f'cd "{self.main}"; printf a | cd "{self.a}"; git reset --hard',
+            # `|` の直後の改行は pipeline の続きなので、次の cd も最後の要素
+            f'cd "{self.main}"; printf a |\n cd "{self.a}"; git reset --hard',
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
         # 読み取りは止めない
         self.assertIsNone(evaluate(bash(f'printf a | cd "{self.main}" && git status', self.a)))
 
