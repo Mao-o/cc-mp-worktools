@@ -33,8 +33,9 @@ from pathlib import Path
 from core.command_parser import (
     BACKGROUND,
     LIST_TERMINATORS,
+    _ansi_c_quote_end,
+    extract_candidate_readings,
     extract_candidates,
-    extract_candidates_with_separators,
 )
 
 # 作業ディレクトリを変える組み込みコマンド。`builtin cd` は分解の時点で `cd` になる。
@@ -182,12 +183,17 @@ def _env_names_changed(segment: str) -> set[str]:
 
 
 def segment_env_changes(command: str) -> dict[str, set[str]]:
-    """各セグメント → それより前のセグメントが変えた環境変数の名前 ({ANY_ENV} は不明)。"""
-    changed: set[str] = set()
+    """各セグメント → それより前のセグメントが変えた環境変数の名前 ({ANY_ENV} は不明)。
+
+    bash と zsh で分解が割れる形は、読みごとに辿った結果の和を返す
+    (`command_parser.extract_candidate_readings`)。
+    """
     result: dict[str, set[str]] = {}
-    for segment, _inline_env in extract_candidates(command):
-        result.setdefault(segment, set()).update(changed)
-        changed |= _env_names_changed(segment)
+    for reading in extract_candidate_readings(command):
+        changed: set[str] = set()
+        for segment, _inline_env, _sep in reading:
+            result.setdefault(segment, set()).update(changed)
+            changed |= _env_names_changed(segment)
     return result
 
 
@@ -200,20 +206,23 @@ def segment_dirs(command: str, cwd: str) -> dict[str, set[str | None]]:
     単独の `&` で終わるリスト (`cd sub & kubectl ...` の `cd sub`、
     `cd sub && kubectl get x & aws ...` の `cd sub && kubectl get x`) はサブシェルで走るので、
     その中の `cd` はリストの中の後続にだけ効き、`&` の後ろには効かない (v0.29.0)。
+    bash と zsh で分解が割れる形は、読みごとに辿った結果の和を返す
+    (`command_parser.extract_candidate_readings`)。
     """
-    current: str | None = cwd or None
-    list_start = current
     result: dict[str, set[str | None]] = {}
-    for segment, _inline_env, sep in extract_candidates_with_separators(command):
-        changes, target = _chdir_target(segment, current)
-        if changes:
-            current = target
-        else:
-            result.setdefault(segment, set()).add(current)
-        if sep == BACKGROUND:
-            current = list_start
-        if sep in LIST_TERMINATORS:
-            list_start = current
+    for reading in extract_candidate_readings(command):
+        current: str | None = cwd or None
+        list_start = current
+        for segment, _inline_env, sep in reading:
+            changes, target = _chdir_target(segment, current)
+            if changes:
+                current = target
+            else:
+                result.setdefault(segment, set()).add(current)
+            if sep == BACKGROUND:
+                current = list_start
+            if sep in LIST_TERMINATORS:
+                list_start = current
     return result
 
 
@@ -229,13 +238,29 @@ _WORD_BREAKS = frozenset(" \t\n;&|()<>")
 
 
 def _unquoted(command: str) -> str:
-    """引用符の中とエスケープした文字を `_` に置き換えた文字列 (語の区切りは保つ)。"""
+    r"""引用符の中とエスケープした文字を `_` に置き換えた文字列 (語の区切りは保つ)。
+
+    `$'...'` は ANSI-C 引用符として読み、中の `\'` / `\\` では閉じない (`command_parser` の
+    `_skip_opaque` と同じ規則。`$$` は先に 2 文字進めるので `$$'` は普通の引用符)。
+    `'...'` と同じに読むと `echo $'\'' ; (cd sub; true) ; ...` の `(` を引用符の中と読み、
+    `cd sub` が後続に効くものとして扱う。
+    """
     out: list[str] = []
     quote = None
     i = 0
     n = len(command)
     while i < n:
         c = command[i]
+        if quote is None and command.startswith("$$", i):
+            out.append("$$")
+            i += 2
+            continue
+        if quote is None and command.startswith("$'", i):
+            end = _ansi_c_quote_end(command, i)
+            end = n if end is None else end
+            out.append("_" * (end - i))
+            i = end
+            continue
         if quote == "'":
             if c == "'":
                 quote = None

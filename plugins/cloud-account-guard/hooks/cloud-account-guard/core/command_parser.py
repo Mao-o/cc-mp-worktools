@@ -22,6 +22,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import re
 import shlex
 
@@ -384,24 +385,84 @@ _DOLLAR_MEMO = _DollarMemo()
 _UNSET = object()
 
 
+def _ansi_c_quote_end(text: str, i: int, limit: int | None = None) -> int | None:
+    r"""`text[i:]` の `$'` から始まる ANSI-C 引用符の閉じ `'` の直後の index。`limit` までに閉じなければ None。
+
+    中の `\` は次の 1 文字と組で飛ばす (`\'` と `\\` は引用符を閉じない)。bash 3.2 / zsh とも
+    `echo $'\'' ; cmd` の `cmd` は走る。`'...'` と同じに読むと 2 つ目の `'` で閉じ、3 つ目の `'` から
+    残り全部を引用符の中と読んで `cmd` を落とす。
+    """
+    n = len(text) if limit is None else limit
+    j = i + 2
+    while j < n:
+        if text[j] == "\\":
+            j += 2
+            continue
+        if text[j] == "'":
+            return j + 1
+        j += 1
+    return None
+
+
+# --- シェルで読み方が割れる形の別の読み (`extract_candidate_readings`) -------------
+#
+# bash 3.2 と zsh で分解が割れ、どちらに合わせても、もう一方のシェルで走る CLI を落とす形がある。
+# 既定の読みはこれまでどおりにし、割れる形があるときだけ別の読みでも分解して候補の和集合を取る。
+#
+# zsh の読み (`_ZSH_READING`):
+#   - パラメータ展開 `${...}` の中の素の `{` を数え、対応する `}` では展開を閉じない
+#     (`${x:-{} #}; cmd` の `cmd` は zsh でだけ走る。bash は最初の `}` で閉じ、後ろの ` #}; cmd` を
+#     comment と読む)
+_ZSH_READING = False
+# bash の読み (`_BASH_READING`):
+#   - 配列代入 `name=(...)` の閉じの直後の `#` は語の続き (`a=(1 2)# ; cmd` の `cmd` は bash でだけ
+#     走る)。zsh は comment と読む (`a=(1 2)#'` + 改行 + `cmd` の `cmd` は zsh でだけ走る)。既定の
+#     読みは comment (0.29.1 まで同じ)
+#   - 配列代入の中の `(` は構文エラーで、行の残りを読み捨てる (既定の読みは読み続ける)
+_BASH_READING = False
+# ANSI-C の読み (`_ANSI_C_READING`): `$'...'` を ANSI-C 引用符として読み、中の `\'` で閉じない
+# (bash 3.2 / zsh とも。`echo $'\'' ; cmd` の `cmd` は走る)。既定の読みは 0.29.1 までと同じく
+# `$` + `'...'` と読む。既定の読みを置き換えると、`$'` の中の `\'` で引用符の向きが入れ替わる
+# 形のうち、`$(` の中の comment などシェルで割れる読みと重なる形で、0.29.1 が候補にしていた
+# CLI を落とす (差分 fuzz で 6 万件中 7 件)。そこで別の読みとして足す (bash / zsh の読みも
+# ANSI-C で読む)。
+_ANSI_C_READING = False
+
+# トップレベルの `(` の種類。閉じ `)` の直後が語の続きかを決める。
+_PAREN_SUBSHELL = "subshell"  # サブシェル・関数定義の `()`。閉じの後ろは語の先頭
+_PAREN_PROCESS = "process"  # プロセス置換 `<(` / `>(`。閉じの後ろは語の続き (bash 3.2 / zsh とも)
+_PAREN_ARRAY = "array"  # 配列代入 `name=(`。閉じの後ろはシェルで割れる (`_BASH_READING`)
+
+
 def _param_expansion_end(text: str, i: int) -> int | None:
     """`text[i:]` が閉じたパラメータ展開 `${...}` なら、その直後の index。閉じていなければ None。
 
     入れ子は `${` (と `$(`) だけを数え、展開の中の素の `{` は数えない。bash (3.2 / 5.2) は
     素の `{` を数えずに最初の `}` で閉じ (`${x:-{}; cmd; echo }` の `cmd` は走る)、zsh は数える。
     閉じる位置が早い側 (bash) に合わせると、zsh で展開の中にある部分はこちらでは外に出て
-    分割が増える (検証が増える側)。素の `{` が出たら 1 領域にしない方式は、中の `#` を
-    トップレベルの comment と読んで後ろを落とす (`${x:-{ #}; cmd` の `cmd` は bash で走る)
-    ので採らない。`$${` は 2 つ目の `$` からの `${` として数える (bash / zsh とも)。
+    分割が増える (検証が増える側)。ただし外に出た部分の `#` は comment になり、zsh で
+    走る後ろのコマンドを落とす (`${x:-{} #}; cmd`)。そこで `extract_candidates` は、素の `{` を
+    数える zsh の読み方 (`_ZSH_READING`) でも分解して候補の和集合を取る。素の `{` が出たら 1 領域に
+    しない方式は、中の `#` をトップレベルの comment と読んで後ろを落とす (`${x:-{ #}; cmd` の
+    `cmd` は bash で走る) ので採らない。`$${` は 2 つ目の `$` からの `${` として数える (bash / zsh
+    とも)。`$'...'` は ANSI-C 引用符として飛ばす (`$$'` も 2 つ目の `$` からの `$'` として読む。
+    `${x:-$$'\''} ; cmd` の `cmd` は bash / zsh とも走る)。
     中の `${` / `$(` は `_skip_opaque` で飛ばし (閉じない・深さの上限なら外側も閉じない)、
     エスケープ・引用符・backtick も飛ばす。
     """
     n = min(len(text), i + _PARAM_EXPANSION_SCAN_LIMIT)
     j = i + 2
+    braces = 0  # zsh の読み方で数える素の `{` の段数
     while j < n:
         c = text[j]
         if c == "\\":
             j += 2
+            continue
+        if _ANSI_C_READING and c == "$" and j + 1 < n and text[j + 1] == "'":
+            end = _ansi_c_quote_end(text, j, n)
+            if end is None:
+                return None
+            j = end
             continue
         if c == "$" and j + 1 < n and text[j + 1] in "({":
             # 展開の中の入れ子の展開とコマンド置換 (`${x:-${y}}` / `${x:-$(echo })}`)。
@@ -419,8 +480,12 @@ def _param_expansion_end(text: str, i: int) -> int | None:
                 return None
             j = k + 1
             continue
-        if c == "}":
-            return j + 1
+        if c == "{" and _ZSH_READING:
+            braces += 1
+        elif c == "}":
+            if not braces:
+                return j + 1
+            braces -= 1
         j += 1
     return None
 
@@ -462,7 +527,11 @@ def _skip_opaque(text: str, i: int) -> int | None:
     if ch == "$" and i + 1 < n and text[i + 1] == "$":
         # `$$` (PID)。後ろの `{` を `${` の始まりと読まない (`echo $${; cmd; echo }` の
         # `cmd` は bash / zsh とも走る。`${` と読むと最後の `}` まで 1 領域になり `cmd` が消える)。
+        # 後ろの `'` も `$'` の始まりと読まない (`echo $$'\'' ; cmd '` の `cmd` は走らない)。
         return i + 2
+    if _ANSI_C_READING and ch == "$" and i + 1 < n and text[i + 1] == "'":
+        end = _ansi_c_quote_end(text, i)
+        return n if end is None else end
     if ch == "$" and i + 1 < n and text[i + 1] in "({":
         memo = _DOLLAR_MEMO
         if memo.text is not text:
@@ -617,7 +686,12 @@ def _scan_heredoc_word(text: str, i: int) -> tuple[str | None, int]:
             break
         if ch == "$" and i + 1 < n and text[i + 1] in "'\"":
             quote = text[i + 1]
-            end = text.find(quote, i + 2)
+            if quote == "'":
+                # 中の `\'` では閉じない (`<<$'E\'F'` の delimiter は `E'F`)。
+                close = _ansi_c_quote_end(text, i)
+                end = -1 if close is None else close - 1
+            else:
+                end = text.find(quote, i + 2)
             if end == -1:
                 return None, i
             body = text[i + 2:end]
@@ -744,6 +818,16 @@ def split_with_separators(command: str) -> list[tuple[str, str]]:
     # 直前に buf へ入れたのが引用符・エスケープの外の `>` / `<` か (`2>&1` / `<&3` の判定)。
     # `command[i - 1]` で見ると `\>&` (エスケープした `>` の後の背景実行) を取り違える。
     after_redirect = False
+    # 次の文字が語の先頭か (そこの `#` だけが comment)。直前の 1 文字ではなく、直前に読んだものの
+    # 種類で決める: エスケープ (`\;` / `\)` / `\ `)・`$(...)`・`$((...))`・引用符の直後は語の続き
+    # (`echo $(true)# ; cmd` / `echo \)# ; cmd` の `cmd` は bash 3.2 / zsh とも走る)。トップレベルの
+    # 算術評価 `((...))` の直後は語の先頭 (`((1))# ; cmd` の `cmd` は両方で走らない)。行継続
+    # (`\` + 改行) は前の状態を引き継ぐ (`echo a\` + 改行 + `#; cmd` の `cmd` は走る)。
+    word_start = True
+    # 開いている `(` の種類 (`_PAREN_*`)。閉じ `)` の後ろが語の続きかを決める。
+    # 要素は (種類, 開いたときのセグメント数)。
+    parens: list[tuple[str, int]] = []
+    prev_plain = ""  # 直前に buf へ 1 文字ずつ入れた文字 (`<(` / `=(` の判定)
 
     def flush(sep: str) -> None:
         segments.append(("".join(buf), sep))
@@ -773,6 +857,10 @@ def split_with_separators(command: str) -> list[tuple[str, str]]:
                 # `_skip_opaque` が 1 領域で返すのでここには来ない)。
                 i = opaque
                 continue
+            # 算術評価 `((...))` の後ろだけが語の先頭。`<((1))` / `>((1))` はプロセス置換
+            # (`echo <((1))# ; cmd` の `cmd` は bash 3.2 / zsh とも走る)。
+            word_start = command[i] == "(" and prev_plain not in ("<", ">")
+            prev_plain = ""
             buf.append(command[i:opaque])
             i = opaque
             continue
@@ -780,7 +868,7 @@ def split_with_separators(command: str) -> list[tuple[str, str]]:
         ch = command[i]
         nxt = command[i + 1] if i + 1 < n else ""
 
-        if ch == "#" and (i == 0 or command[i - 1] in " \t\n;&|()"):
+        if ch == "#" and word_start:
             while i < n and command[i] != "\n":
                 i += 1
             continue
@@ -789,6 +877,8 @@ def split_with_separators(command: str) -> list[tuple[str, str]]:
             # here-string `<<<` は heredoc ではない (本文行を持たない)。
             if i + 2 < n and command[i + 2] == "<":
                 buf.append("<<<")
+                word_start = False
+                prev_plain = ""
                 i += 3
                 continue
             found = _scan_heredoc_start(command, i)
@@ -796,11 +886,15 @@ def split_with_separators(command: str) -> list[tuple[str, str]]:
                 delim, dash, hd_end = found
                 pending_heredocs.append((delim, dash))
                 buf.append(command[i:hd_end])
+                word_start = False
+                prev_plain = ""
                 i = hd_end
                 continue
             # delimiter を解決できない `<<` はそのまま流す = heredoc と見なさない
             # (本文行が候補になる = 過剰検証側)。
             buf.append("<<")
+            word_start = False
+            prev_plain = ""
             i += 2
             continue
 
@@ -822,6 +916,8 @@ def split_with_separators(command: str) -> list[tuple[str, str]]:
                 # delimiter 行の改行はトップレベルの区切りなので、ここでセグメントを
                 # 閉じる。閉じないと heredoc の**次**のコマンドが吸収される。
                 flush("\n")
+                word_start = True
+                prev_plain = ""
                 continue
 
         # heredoc の宣言から本文の終わりまでは、途中に演算子が来ても**セグメントを
@@ -834,10 +930,14 @@ def split_with_separators(command: str) -> list[tuple[str, str]]:
         if not pending_heredocs:
             if ch == "&" and nxt == "&":
                 flush("&&")
+                word_start = True
+                prev_plain = ""
                 i += 2
                 continue
             if ch == "|" and nxt in "|&" and nxt:
                 flush("|" + nxt)
+                word_start = True
+                prev_plain = ""
                 i += 2
                 continue
             if ch == "&" and not after_redirect and nxt != ">":
@@ -846,15 +946,50 @@ def split_with_separators(command: str) -> list[tuple[str, str]]:
                 # どれも検証されなかった。`>&` / `<&` (fd の複製) と `&>` (リダイレクト) は
                 # 区切りではない。
                 flush("&")
+                word_start = True
+                prev_plain = ""
                 i += 1
                 continue
             if ch in ";|\n":
                 flush(ch)
+                word_start = True
+                prev_plain = ""
                 i += 1
                 continue
 
+        if ch == "(":
+            if _BASH_READING and parens and parens[-1][0] == _PAREN_ARRAY:
+                # bash 3.2 は配列代入の中の `(` を構文エラーにし、その行の残りを読み捨てて
+                # 次の行から続ける (`a=(x (y) 'q` + 改行 + `cmd` の `cmd` は bash でだけ走る)。
+                while i < n and command[i] != "\n":
+                    i += 1
+                parens.clear()
+                word_start = True
+                prev_plain = ""
+                continue
+            if prev_plain in ("<", ">"):
+                kind = _PAREN_PROCESS
+            elif prev_plain == "=":
+                kind = _PAREN_ARRAY
+            else:
+                kind = _PAREN_SUBSHELL
+            parens.append((kind, len(segments)))
+            word_start = True
+        elif ch == ")":
+            kind, opened_at = parens.pop() if parens else (_PAREN_SUBSHELL, -1)
+            if opened_at != len(segments):
+                # 開いてから区切りをまたいだ (`<(true` + 改行 + `aws ...)#`)。閉じの直後は
+                # 0.29.1 までと同じく語の先頭として読む (後ろが中のコマンドの続きに付くのを避ける)。
+                word_start = True
+            elif kind == _PAREN_ARRAY:
+                word_start = not _BASH_READING
+            else:
+                word_start = kind == _PAREN_SUBSHELL
+        else:
+            word_start = ch in " \t\n;&|"
         buf.append(ch)
         after_redirect = ch in "<>"
+        prev_plain = ch
         i += 1
 
     flush("")
@@ -872,6 +1007,16 @@ def _scan_value_end(cmd: str, start: int) -> int | None:
         if ch == "\\" and not in_sq and i + 1 < n:
             i += 2
             continue
+        if _ANSI_C_READING and ch == "$" and not in_sq and not in_dq:
+            # `$'...'` は ANSI-C 引用符 (中の `\'` で閉じない。`A=$'\'' aws ...` の aws は走る)。
+            # `$$'` は `$$` の後ろの普通の引用符 (`_skip_opaque` と同じ)。
+            if cmd.startswith("$$'", i):
+                i += 2
+                continue
+            if cmd.startswith("$'", i):
+                end = _ansi_c_quote_end(cmd, i)
+                i = n if end is None else end
+                continue
         if ch == "'" and not in_dq:
             in_sq = not in_sq
             i += 1
@@ -911,6 +1056,34 @@ def _unquote_env_value(raw: str) -> str | None:
     return value
 
 
+# 代入の頭 (`NAME=` / `NAME+=` / `NAME[...]=`)。group 2 は添字、group 3 は `+`。
+_ASSIGNMENT_HEAD = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(\[[^\]\s]*\])?(\+)?=")
+
+
+def _array_value_end(cmd: str, start: int) -> int | None:
+    """`cmd[start]` の `(` から始まる配列の値の閉じ `)` の直後。閉じなければ None。
+
+    引用符・置換・エスケープは `_skip_opaque` で飛ばす (中の `)` で閉じない)。入れ子の `(` は
+    数える (bash 3.2 は構文エラーにするが、閉じる位置を早めると後ろを値に含めない側になる)。
+    """
+    depth = 0
+    i = start
+    n = len(cmd)
+    while i < n:
+        opaque = _skip_opaque(cmd, i)
+        if opaque is not None and opaque > i:
+            i = opaque
+            continue
+        if cmd[i] == "(":
+            depth += 1
+        elif cmd[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
+
+
 def _parse_leading_env(cmd: str) -> tuple[str, dict[str, str]]:
     """先頭の `KEY=VALUE` 群を剥がし (残りコマンド, 収集 env dict) を返す。
 
@@ -922,17 +1095,31 @@ def _parse_leading_env(cmd: str) -> tuple[str, dict[str, str]]:
     """
     collected: dict[str, str] = {}
     while True:
-        m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=", cmd)
+        m = _ASSIGNMENT_HEAD.match(cmd)
         if not m:
             return cmd, collected
-        end = _scan_value_end(cmd, m.end())
+        # 配列の値 `(...)` は閉じ `)` の直後が空白のときだけ配列として剥がす。閉じの直後に語の
+        # 断片が続く形 (`a=(x)y` / `a=(x)""`) や閉じない形 (`a=(1 2 aws ...`) は、0.29.1 までと
+        # 同じく `_scan_value_end` で値を読む (配列の経路だけにすると剥がすのをやめ、
+        # `a=(x)y aws s3 rm ...` の aws を検証しなくなる。bash 3.2 では aws は走る)。
+        end = None
+        if cmd.startswith("(", m.end()):
+            end = _array_value_end(cmd, m.end())
+            if end is not None and cmd[end:end + 1] not in (" ", "\t"):
+                end = None
+        if end is None:
+            end = _scan_value_end(cmd, m.end())
         if end is None:
             return cmd, collected
         rest = cmd[end:]
         if not rest or rest[0] not in " \t":
             return cmd, collected
         key = m.group(1)
-        value = _unquote_env_value(cmd[m.end():end])
+        # 配列の代入 (`a=(1 2)`)・追記 (`a+=x`)・要素の代入 (`a[1]=x`) は剥がすが、値は集めない
+        # (静的な文字列の値として検証に渡せない)。0.29.1 までは剥がさず、`a=(1 2) aws ...` /
+        # `a+=(x) aws ...` の aws を検証していなかった (bash 3.2 / zsh とも aws は走る)。
+        plain = not m.group(2) and not m.group(3) and not cmd.startswith("(", m.end())
+        value = _unquote_env_value(cmd[m.end():end]) if plain else None
         if value is not None:
             # 同一キーの重複代入は shell と同じく最右 (最後) の値が勝つ。
             # `AWS_PROFILE=dev AWS_PROFILE=prod aws ...` は prod で実行されるため、
@@ -1352,47 +1539,55 @@ def _strip_heredoc_bodies(cmd: str) -> str:
     """
     if "<<" not in cmd:
         return cmd
+    # 行ごとではなく全体を 1 回で読む。引用符は改行をまたぐ (`E'F` + 改行 + `\;<<$'E\'F''<<'EOF' & aws ...`
+    # の 1 行目の `'` は 2 行目の `$'` までの引用符で、その後ろの `<<'EOF'` が宣言)。行ごとに読むと、
+    # 前の行から続く引用符の中を構文として読み、宣言を見失ったり引用符の中を宣言と読んだりする。
+    # 本文は宣言のある行の改行の直後から始まる。
     out: list[str] = []
-    i = 0
+    pending: list[tuple[str, bool]] = []
+    k = 0
     n = len(cmd)
-    while i < n:
-        eol = cmd.find("\n", i)
-        line_end = n if eol == -1 else eol + 1
-        line = cmd[i:line_end]
-        i = line_end
-
-        # この行で開かれた heredoc を宣言順に集めつつ、宣言トークンを除いた行を作る。
-        pending: list[tuple[str, bool]] = []
-        kept: list[str] = []
-        k = 0
-        while k < len(line):
-            opaque = _skip_opaque(line, k)
-            if opaque is not None and opaque > k:
-                kept.append(line[k:opaque])
-                k = opaque
+    line_start = line_end = 0  # 切り出し済みの行 (`line`) の範囲
+    line = ""
+    while k < n:
+        opaque = _skip_opaque(cmd, k)
+        if opaque is not None and opaque > k:
+            out.append(cmd[k:opaque])
+            k = opaque
+            continue
+        if cmd[k] == "<" and k + 1 < n and cmd[k + 1] == "<":
+            # here-string `<<<` は heredoc ではない (本文行を持たない)。
+            # `split_on_operators` と同じ guard を置かないと、3 つ目の `<` から
+            # 再び `<<` を読み取って後続を delimiter と誤認する。
+            if k + 2 < n and cmd[k + 2] == "<":
+                out.append("<<<")
+                k += 3
                 continue
-            if line[k] == "<" and k + 1 < len(line) and line[k + 1] == "<":
-                # here-string `<<<` は heredoc ではない (本文行を持たない)。
-                # `split_on_operators` と同じ guard を置かないと、3 つ目の `<` から
-                # 再び `<<` を読み取って後続を delimiter と誤認する。
-                if k + 2 < len(line) and line[k + 2] == "<":
-                    kept.append("<<<")
-                    k += 3
-                    continue
-                found = _scan_heredoc_start(line, k)
-                if found is not None:
-                    pending.append((found[0], found[1]))
-                    k = found[2]  # 宣言トークンは kept に入れない (= 落とす)
-                    continue
-            kept.append(line[k])
+            # delimiter の語は行 (改行まで) の中で読む (0.29.1 までの行ごとの読みと同じ)。
+            # 行は 1 度だけ切り出す。
+            if not line_start <= k < line_end:
+                line_start = cmd.rfind("\n", 0, k) + 1
+                eol = cmd.find("\n", k)
+                line_end = n if eol == -1 else eol + 1
+                line = cmd[line_start:line_end]
+            found = _scan_heredoc_start(line, k - line_start)
+            if found is not None:
+                pending.append((found[0], found[1]))
+                k = line_start + found[2]  # 宣言トークンは out に入れない (= 落とす)
+            else:
+                out.append(cmd[k])
+                k += 1
+        else:
+            out.append(cmd[k])
             k += 1
-        out.append("".join(kept))
-
-        for delim, strip_tabs in pending:
-            found_end = _find_heredoc_end(cmd, i, delim, strip_tabs)
-            if found_end is None:
-                break
-            i = found_end  # 本文 + delimiter 行を出力せず読み飛ばす
+        if pending and cmd[k - 1] == "\n":
+            # 宣言のある行の改行の直後から本文 (改行は宣言の語の `\` が飲んでいることもある)。
+            for delim, strip_tabs in pending:
+                found_end = _find_heredoc_end(cmd, k, delim, strip_tabs)
+                if found_end is None:
+                    break
+                k = found_end  # 本文 + delimiter 行を出力せず読み飛ばす
+            pending = []
     return "".join(out)
 
 
@@ -1601,8 +1796,81 @@ def extract_candidates(command: str) -> list[tuple[str, dict[str, str]]]:
     env は検証 subprocess に渡され、コマンド実行時と同条件でアカウント検証する
     (インライン `AWS_PROFILE` 等を剥がすだけで検証に使わない非対称を解消)。
     区切りの演算子も要るときは `extract_candidates_with_separators`。
+
+    bash と zsh で分解が割れる形 (`extract_candidate_readings`) は、どの読みの候補も返す
+    (既定の読みの候補の後ろに、別の読みにだけある候補を足す)。
     """
-    return [(cand, env) for cand, env, _sep in extract_candidates_with_separators(command)]
+    return merge_readings(extract_candidate_readings(command))
+
+
+def merge_readings(
+    readings: list[list[tuple[str, dict[str, str], str]]],
+) -> list[tuple[str, dict[str, str]]]:
+    """`extract_candidate_readings` の結果を `extract_candidates` の形に畳む (既定の読みの候補の後ろに、
+    別の読みにだけある候補を足す)。並びは読みをまたいだ出現順ではない (順序が要る判定は読みごとに辿る)。"""
+    first, *others = readings
+    out = [(cand, env) for cand, env, _sep in first]
+    seen = {(cand, tuple(sorted(env.items()))) for cand, env in out}
+    for reading in others:
+        for cand, env, _sep in reading:
+            key = (cand, tuple(sorted(env.items())))
+            if key not in seen:
+                seen.add(key)
+                out.append((cand, env))
+    return out
+
+
+def extract_candidate_readings(
+    command: str,
+) -> list[list[tuple[str, dict[str, str], str]]]:
+    """コマンドの読み方ごとの `extract_candidates_with_separators` の結果 (先頭が既定の読み)。
+
+    次の形があるときだけ、別の読みを足す (同じ結果になる読みは足さない):
+
+    - zsh の読み: パラメータ展開の中に素の `{` があるとき。`${...}` の中の素の `{` を数える
+      (`echo ${x:-{} #}; aws ...` の aws は zsh でだけ走る)
+    - bash の読み: `=(` があるとき (配列代入 `name=(`)。閉じの直後の `#` を語の続きと読み
+      (`a=(1 2)# ; aws ...` の aws は bash でだけ走る)、中の `(` で行の残りを読み捨てる
+    - ANSI-C の読み: `$'` があるとき。`$'...'` の中の `\'` で引用符を閉じない
+      (`echo $'\'' ; aws ...` の aws は bash / zsh とも走る)。bash / zsh の読みも ANSI-C で読む
+
+    どれも既定の読みに足す側で、既定の読みの候補は減らない。読みごとに区切りの並びを保つので、
+    `cd` の追跡 (`core/workdir.py`) は読みごとに辿る。
+    """
+    readings = [extract_candidates_with_separators(command)]
+    alternatives = []
+    # 起動条件は、分割器と同じく行の継続 (`\` + 改行) を取り除いた文字列で見る (`a=\` + 改行 + `(` も
+    # 配列代入)。多めに起動しても候補が増えるだけで、既定の読みは変わらない。
+    probe = command.replace("\\\n", "")
+    if "$'" in probe:
+        alternatives.append((False, False))
+    # bash の読みの起動は、zsh / ANSI-C と同じく文字列の中身で決める (配列代入の `(` は必ず `=(` と
+    # 並ぶ)。既定の読みが配列代入を読んだかで決めると、既定の読みが `$'\''` の 3 つ目の `'` から
+    # 後ろを引用符の中と読む `echo $'\'' ; a=(1 2)# ; aws ...` で起動せず、aws を落とす (bash 3.2 で走る)。
+    if "=(" in probe:
+        alternatives.append((False, True))
+    if "${" in probe and probe.count("{") > probe.count("${"):
+        alternatives.append((True, False))
+    for zsh, bash in alternatives:
+        with _reading(zsh, bash):
+            other = extract_candidates_with_separators(command)
+        if other not in readings:
+            readings.append(other)
+    return readings
+
+
+@contextlib.contextmanager
+def _reading(zsh: bool, bash: bool):
+    """分解の読み方を一時的に切り替える (別の読みは ANSI-C で読む。`$(` / `${` の終端の memo も捨てる)。"""
+    global _ZSH_READING, _BASH_READING, _ANSI_C_READING
+    saved = (_ZSH_READING, _BASH_READING, _ANSI_C_READING)
+    _ZSH_READING, _BASH_READING, _ANSI_C_READING = zsh, bash, True
+    _DOLLAR_MEMO.text = None
+    try:
+        yield
+    finally:
+        _ZSH_READING, _BASH_READING, _ANSI_C_READING = saved
+        _DOLLAR_MEMO.text = None
 
 
 def extract_candidates_with_separators(
@@ -1614,6 +1882,7 @@ def extract_candidates_with_separators(
     正規化した結果をもう一度分割した候補 (シェル経由 wrapper の中身・heredoc の本文を
     落とした後の宣言行) は、中の区切りをそのまま使い、最後の 1 つにだけ外側の区切りを付ける。
     正規化して空になったセグメントは候補にならず、その区切りも捨てる。
+    返すのは現在の読み (既定の読み) の結果だけ。別の読みも要るときは `extract_candidate_readings`。
     """
     out: list[tuple[str, dict[str, str], str]] = []
     for seg, sep in split_with_separators(command):
@@ -1623,8 +1892,11 @@ def extract_candidates_with_separators(
         # シェル経由 wrapper のクォートを剥がすと、中身が複合コマンドのことがある
         # (`watch 'gh pr create && aws s3 rm x'`)。剥がした結果をもう一度分割して
         # 各段を候補にする。分割が要らない通常のセグメントはここを素通りする。
+        # 前置きの代入を剥がした結果が区切りで始まるとき (分割が閉じない配列代入の中と読んだ
+        # `a=(<<E \` + 改行 + `a+=(x)y ; aws ...` の代入を剥がすと `; aws ...` が残る) も分割し直す。
+        # 区切りの付いたままの形を候補にすると、後ろの CLI に一致しない。
         parts = split_with_separators(normalized)
-        if len(parts) > 1:
+        if len(parts) > 1 or (parts and normalized[0] in ";&|"):
             last = len(parts) - 1
             for k, (part, inner_sep) in enumerate(parts):
                 inner, inner_env = _normalize_segment(part)
