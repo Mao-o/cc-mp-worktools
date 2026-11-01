@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import re
 import shlex
 
@@ -1084,7 +1085,82 @@ def _array_value_end(cmd: str, start: int) -> int | None:
     return None
 
 
-def _parse_leading_env(cmd: str) -> tuple[str, dict[str, str]]:
+def _expand_assignment_tilde(raw: str, home: str) -> str:
+    """代入の値 (引用符を外す前の生の文字列) の、シェルが展開する `~` を `home` に置き換える (v0.29.5)。
+
+    展開するのは、値の先頭か引用符の外の `:` の直後にある引用符の外の `~` で、その直後が値の終わり・
+    引用符の外の `/`・引用符の外の `:` のものだけ (`K=~/a:~/b` → `<home>/a:<home>/b`)。bash 3.2 と
+    zsh -f で読みが一致する形に限る。引用符の中の `~` (`'~/a'` / `"~/a"` / `\\~/a`)、語の途中の `~`
+    (`a~/b`) は両方のシェルが展開しない。引用符付きの `:` の後 (`x':'~/b`)、`~` の直後が引用符
+    (`~"/a"` / `~''/a` / `~\\/a`) の形は zsh だけが展開し、`~user` / `~+` / `~-` は HOME 以外の行き先に
+    なる。これらは置き換えずに残す (0.29.4 までと同じ読み)。
+
+    `home` は shell の 1 語に quote して差し込む (後段の `_unquote_env_value` が引用符を外す)。
+    引用符が閉じない値はそのまま返す。
+    """
+    out: list[str] = []
+    i = 0
+    n = len(raw)
+    at_start = True
+    while i < n:
+        c = raw[i]
+        if at_start and c == "~" and (i + 1 == n or raw[i + 1] in "/:"):
+            out.append(shlex.quote(home))
+            i += 1
+            at_start = False
+            continue
+        at_start = False
+        if c == "\\":
+            out.append(raw[i:i + 2])
+            i += 2
+            continue
+        if c == "'":
+            j = raw.find("'", i + 1)
+            if j < 0:
+                return raw
+            out.append(raw[i:j + 1])
+            i = j + 1
+            continue
+        if c == '"':
+            j = i + 1
+            while j < n and raw[j] != '"':
+                j += 2 if raw[j] == "\\" else 1
+            if j >= n:
+                return raw
+            out.append(raw[i:j + 1])
+            i = j + 1
+            continue
+        if c == ":":
+            at_start = True
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+# `~` の展開を見送るコマンドの印 (v0.29.5)。`HOME` の語 (前の段の `HOME=/x;` / `export HOME=...` /
+# 同じ行頭の `HOME=/x KUBECONFIG=~/a` (bash は元の HOME、zsh は新しい HOME で展開する) など) か、
+# 別のファイルや文字列をシェルとして読むコマンド (`.` / `source` / `eval`。HOME を変えうる) があると、
+# 実行時の `~` が hook の HOME と同じだと言えない。多めに当たっても 0.29.4 までの読みに戻るだけ。
+# `HOME` は名前の一部 (`XDG_CONFIG_HOME` / `FOO_HOME` / `HOMEBREW_PREFIX`) と、読むだけの `$HOME` には
+# 当てない (HOME を変えない)。`${HOME:=x}` は代入しうるので当てる。
+_TILDE_UNSURE = re.compile(
+    r"(?<![A-Za-z0-9_$])HOME(?![A-Za-z0-9_])|(?:^|[\s;&|(){}`])(?:\.|source|eval)(?=[\s;&|)]|$)"
+)
+
+
+def tilde_home(command: str) -> str | None:
+    """コマンドの行頭の代入の `~` を展開するときの HOME (v0.29.5)。展開しないなら None。
+
+    hook の env の HOME が空・未設定、`$` を含む、またはコマンドが HOME を変えうる (`_TILDE_UNSURE`)
+    ときは None。
+    """
+    home = os.environ.get("HOME")
+    if not home or "$" in home or _TILDE_UNSURE.search(command):
+        return None
+    return home
+
+
+def _parse_leading_env(cmd: str, home: str | None = None) -> tuple[str, dict[str, str]]:
     """先頭の `KEY=VALUE` 群を剥がし (残りコマンド, 収集 env dict) を返す。
 
     剥がし条件は従来の strip_leading_env と同一:
@@ -1092,6 +1168,8 @@ def _parse_leading_env(cmd: str) -> tuple[str, dict[str, str]]:
     - `FOO=bar` のみで後続コマンドが無いケースはそのまま返す (空コマンド化回避)
     収集 env には静的に解決できた値のみ入る (`$VAR` を含む値はキーごと除外)。
     同一キーが複数回代入された場合は shell semantics に合わせ最右 (最後) を採用する。
+    `home` を渡すと、値の `~` をシェルの代入と同じ規則で展開する (`_expand_assignment_tilde`)。
+    シェル自身が行う代入 (wrapper の後ろではない) にだけ渡す。
     """
     collected: dict[str, str] = {}
     while True:
@@ -1119,7 +1197,10 @@ def _parse_leading_env(cmd: str) -> tuple[str, dict[str, str]]:
         # (静的な文字列の値として検証に渡せない)。0.29.1 までは剥がさず、`a=(1 2) aws ...` /
         # `a+=(x) aws ...` の aws を検証していなかった (bash 3.2 / zsh とも aws は走る)。
         plain = not m.group(2) and not m.group(3) and not cmd.startswith("(", m.end())
-        value = _unquote_env_value(cmd[m.end():end]) if plain else None
+        raw = cmd[m.end():end]
+        if plain and home is not None:
+            raw = _expand_assignment_tilde(raw, home)
+        value = _unquote_env_value(raw) if plain else None
         if value is not None:
             # 同一キーの重複代入は shell と同じく最右 (最後) の値が勝つ。
             # `AWS_PROFILE=dev AWS_PROFILE=prod aws ...` は prod で実行されるため、
@@ -1792,10 +1873,15 @@ def _normalize_segment(cmd: str, max_iter: int = 8) -> tuple[str, dict[str, str]
 
 
 def _normalize_segment_chdir(
-    cmd: str, max_iter: int = 8
+    cmd: str, max_iter: int = 8, home: str | None = None
 ) -> tuple[str, dict[str, str], bool, bool]:
     """wrapper と先頭 env を剥がし (正規化コマンド, 収集 env, 作業ディレクトリを変えたか,
     外部プログラムを剥がしたか) を返す。
+
+    `home` (`tilde_home`) を渡すと、最初の wrapper を剥がすまでの代入 (シェル自身が行う代入) の
+    値の `~` を展開する (v0.29.5)。wrapper の後ろの `NAME=値` は wrapper の引数で、bash は代入の形の
+    引数の `~` を展開するが zsh は展開しない (`env K=~/a ...`。bash 3.2 / zsh -f で実測)。
+    そこは 0.29.4 までと同じく展開しない。
 
     3 つ目は、剥がした `sudo` の flag 領域に作業ディレクトリを変える option
     (`_SUDO_CHDIR_FLAGS`) があったか。4 つ目は、シェル自身で走らせる wrapper
@@ -1834,7 +1920,7 @@ def _normalize_segment_chdir(
         # env の後ろにパス付きコマンドが来る形 (`FOO=bar /usr/bin/gh ...`) の
         # 両方を 1 ラウンドで畳めるようにしてある。
         cmd = _strip_leading_syntax(cmd)
-        cmd, env = _parse_leading_env(cmd)
+        cmd, env = _parse_leading_env(cmd, home)
         collected.update(env)  # 内側 (後段) が外側を上書きする
         pathed = cmd
         cmd = _strip_command_path(cmd)
@@ -1859,6 +1945,7 @@ def _normalize_segment_chdir(
             ):
                 external = True
             cmd = stripped
+            home = None  # wrapper の後ろの代入の形の引数は展開しない (docstring)
             continue
         # wrapper は剥がれなかったが構文 / env / パスの正規化が進んだなら、
         # その結果に対してもう一度 wrapper 判定をやり直す。
@@ -1980,8 +2067,11 @@ def extract_candidates_with_separators(
     返すのは現在の読み (既定の読み) の結果だけ。別の読みも要るときは `extract_candidate_readings`。
     """
     out: list[tuple[str, dict[str, str], str]] = []
+    # 行頭の代入の値の `~` はシェルが HOME に展開する (v0.29.5。`tilde_home`)。分割し直した中身
+    # (下の parts) は wrapper の引数か区切りの後ろで、0.29.4 までと同じく展開しない。
+    home = tilde_home(command)
     for seg, sep in split_with_separators(command):
-        normalized, env, chdir, external = _normalize_segment_chdir(seg)
+        normalized, env, chdir, external = _normalize_segment_chdir(seg, home=home)
         if not normalized:
             continue
         # シェル経由 wrapper のクォートを剥がすと、中身が複合コマンドのことがある

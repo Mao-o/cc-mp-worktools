@@ -215,6 +215,53 @@ class InlineKubeconfigGuideTests(BaseWithTmpProject):
                 self._run_in_shells(line, d, kc, [self.default_kc])
                 self._allow(command, d)
 
+    # -- v0.29.5: 代入の値の `~` は HOME の下のファイルで照合する --------------------
+    def test_tilde_inline_kubeconfig_is_matched_under_home(self):
+        kc = self.home / ".kube" / "prod.yaml"
+        command = "KUBECONFIG=~/.kube/prod.yaml kubectl apply -f x.yaml"
+        for cwd in (self.project_dir, self.sub):
+            with self.subTest(cwd=cwd):
+                kc.write_text("ctx\n", encoding="utf-8")
+                self._allow(command, cwd)
+                self._allow(f"cd sub && {command}", self.project_dir)
+                kc.write_text("wrong\n", encoding="utf-8")
+                reason = self._deny(command, cwd)
+                self.assertIn("現在=wrong", reason)
+        # 照合が読んだのは HOME の下のファイル (作業ディレクトリの `~/...` ではない)
+        paths = {self.fake._path(argv, kw) for argv, kw in self.fake.calls}
+        self.assertEqual(paths, {str(kc)})
+
+    def test_tilde_inline_kubeconfig_round_trips(self):
+        kc = self.home / ".kube" / "prod.yaml"
+        kc.write_text("wrong\n", encoding="utf-8")
+        command = "KUBECONFIG=~/.kube/prod.yaml kubectl apply -f x.yaml"
+        line = self._guide(self._deny(command, self.project_dir))
+        self.assertEqual(shlex.split(line)[0], f"KUBECONFIG={kc}")
+        self._run_in_shells(line, self.sub, kc, [self.default_kc])
+        self._allow(command, self.project_dir)
+
+    def test_quoted_tilde_is_not_expanded(self):
+        kc = self.home / ".kube" / "prod.yaml"
+        kc.write_text("ctx\n", encoding="utf-8")
+        for command in (
+            "KUBECONFIG='~/.kube/prod.yaml' kubectl apply -f x.yaml",
+            'KUBECONFIG="~/.kube/prod.yaml" kubectl apply -f x.yaml',
+        ):
+            with self.subTest(command=command):
+                # シェルも展開しないので、kubectl は作業ディレクトリの `~/.kube/prod.yaml` を読む
+                reason = self._deny(command, self.project_dir)
+                self.assertIn(kubectl._KUBECONFIG_ENV_BY_HAND, reason)
+
+    def test_tilde_with_home_changed_in_the_command_keeps_the_raw_value(self):
+        (self.home / ".kube" / "prod.yaml").write_text("ctx\n", encoding="utf-8")
+        for command in (
+            f"HOME={self.other} KUBECONFIG=~/.kube/prod.yaml kubectl apply -f x.yaml",
+            f"export HOME={self.other}; KUBECONFIG=~/.kube/prod.yaml kubectl apply -f x.yaml",
+            "env KUBECONFIG=~/.kube/prod.yaml kubectl apply -f x.yaml",
+        ):
+            with self.subTest(command=command):
+                self._deny(command, self.project_dir)
+
     # -- 案内しない形 / 従来どおりの形 ------------------------------------------
     def test_unguidable_values_are_said_in_words(self):
         bad = self.project_dir / "a b.yaml"
