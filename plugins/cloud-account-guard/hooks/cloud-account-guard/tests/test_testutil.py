@@ -8,6 +8,7 @@ false red を防ぐが、**その落とす処理自体には誰も負テスト�
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -131,6 +132,94 @@ class TestSanitizedEnv(unittest.TestCase):
         self.assertEqual(sanitized["CLOUDSDK_CONFIG"], "/tmp/cfg")
         self.assertEqual(sanitized["PATH"], "/usr/bin")
         self.assertIn("GH_TOKEN", base, "引数の dict を書き換えている")
+
+
+class TestOuterCloudEnvIsDropped(unittest.TestCase):
+    """開発者の手元の `AWS_CONFIG_FILE` / `AWS_PROFILE` / `KUBECONFIG` / `CDPATH` などで、テストの
+    結果が変わらないこと。隔離が外す env は、各 service が CLI のアカウントを決める env として宣言する
+    `IDENTITY_ENV_VARS` / `IDENTITY_ENV_PREFIXES` を (隔離が設定し直すものを除いて) すべて含む。"""
+
+    # 外側に export されていると、実際にテストが落ちた値 (存在しないパス・名前)。
+    OUTER = {
+        "AWS_CONFIG_FILE": "/nonexistent-cag-test/aws/config",
+        "AWS_PROFILE": "prod",
+        "KUBECONFIG": "/nonexistent-cag-test/kube/config",
+        "CDPATH": "/nonexistent-cag-test-cdpath",
+    }
+
+    def _declared_identity_env(self):
+        from services import ALL
+
+        reset = set(_testutil.cli_config_env(Path("/x")))
+        names, prefixes = set(), set()
+        for svc in ALL:
+            names |= set(svc.IDENTITY_ENV_VARS) - reset
+            prefixes |= set(svc.IDENTITY_ENV_PREFIXES)
+        return sorted(names), sorted(prefixes)
+
+    def test_every_declared_identity_env_is_dropped(self):
+        names, prefixes = self._declared_identity_env()
+        self.assertIn("KUBECONFIG", names)
+        self.assertIn("AWS_", prefixes)
+        sample = {name: "x" for name in names}
+        sample.update({prefix + "CAG_TEST": "x" for prefix in prefixes})
+        sanitized = _testutil.sanitized_env({**sample, "PATH": "/usr/bin"})
+        for name in sample:
+            with self.subTest(name):
+                self.assertNotIn(name, sanitized)
+        self.assertEqual(sanitized["PATH"], "/usr/bin")
+
+    def test_start_isolation_drops_the_outer_cloud_env(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        with mock.patch.dict(os.environ, self.OUTER):
+            isolation = _testutil.start_isolation(root)
+            try:
+                for name in self.OUTER:
+                    with self.subTest(name):
+                        self.assertNotIn(name, os.environ)
+            finally:
+                isolation.stop()
+            self.assertEqual(os.environ["AWS_PROFILE"], "prod")
+
+    def _run_in_child(self, args):
+        env = {**os.environ, **self.OUTER, "PYTHONDONTWRITEBYTECODE": "1"}
+        return subprocess.run(
+            [sys.executable, *args],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=120,
+        )
+
+    def test_importing_the_helper_drops_the_outer_cloud_env_for_the_process(self):
+        """`start_isolation()` を呼ばないモジュール (cd の追跡のテストなど) のために、import の時点で
+        プロセスの env から落とす。"""
+        res = self._run_in_child(
+            ["-c", "import os, _testutil, json; print(json.dumps(sorted(os.environ)))"]
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        present = set(json.loads(res.stdout))
+        for name in self.OUTER:
+            with self.subTest(name):
+                self.assertNotIn(name, present)
+
+    def test_tests_that_read_the_outer_env_pass_with_it_exported(self):
+        """外側の env で実際に落ちたテストが、その env を export したまま green になる。"""
+        res = self._run_in_child(
+            [
+                "-m",
+                "unittest",
+                "test_dispatcher.TestRemediationGuidanceContract.test_aws_mismatch_with_profile_in_config",
+                "test_pinning.TestUnregisteredButPinned.test_no_accounts_file_mentions_pinning",
+                "test_pinning.TestWorkdir.test_segment_dirs",
+                "test_kubectl_workdir.KubectlWorkdirTests.test_sequential_cd_is_still_resolved",
+            ]
+        )
+        self.assertEqual(res.returncode, 0, res.stderr[-3000:])
+        self.assertIn("Ran 4 tests", res.stderr)
 
 
 class TestIsFileLikePy313(unittest.TestCase):

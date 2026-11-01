@@ -241,22 +241,35 @@ def init_repo(cwd) -> None:
     git(["config", "commit.gpgsign", "false"], cwd)
 
 
-# 実環境から漏れるとローカル読取 / モード解決の結果が変わる env。
+# 実環境から漏れるとローカル読取 / モード解決 / cd の行き先の読みが変わる env。
+#
+# 各 service が「CLI がどのアカウントで動くか」を決める env として宣言する `IDENTITY_ENV_VARS` /
+# `IDENTITY_ENV_PREFIXES` は、隔離が設定し直すもの (`cli_config_env()` の名前) を除いてすべてここに
+# 入れる (`test_testutil` が宣言との一致を検査する)。抜けていると、開発者の手元の `AWS_PROFILE` /
+# `AWS_CONFIG_FILE` などでテストの結果が変わる (実際に `AWS_CONFIG_FILE` を export した手元で
+# deny の案内のテストが落ちた)。`CDPATH` は `cd sub` の行き先を「決められない」に変える
+# (`core/workdir.py`)。
 LEAKY_ENV_VARS = (
     "GH_TOKEN",
     "GITHUB_TOKEN",
     "GH_ENTERPRISE_TOKEN",
     "GITHUB_ENTERPRISE_TOKEN",
     "GH_HOST",
+    "APPDATA",
     "GOOGLE_CLOUD_PROJECT",
     "GCLOUD_PROJECT",
     "GOOGLE_CLOUD_QUOTA_PROJECT",
+    "KUBECONFIG",
+    "FIREBASE_TOKEN",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "CDPATH",
     "CLOUD_ACCOUNT_GUARD_MODE",
     "CLOUD_ACCOUNT_GUARD_DEBUG",
     "CLOUD_ACCOUNT_GUARD_AUTO_SWITCH",
 )
 
-_CLOUDSDK_PREFIX = "CLOUDSDK_"
+# prefix で落とす env (`CLOUDSDK_CONFIG` は隔離が設定し直すので残す)。
+LEAKY_ENV_PREFIXES = ("CLOUDSDK_", "AWS_")
 
 # 隔離中の `$HOME`。**実在しない絶対パス**を使う:
 # - 実 HOME を読まない / 書かない
@@ -294,9 +307,23 @@ def _leaky_names(env) -> list[str]:
     names += [
         name
         for name in env
-        if name.startswith(_CLOUDSDK_PREFIX) and name != "CLOUDSDK_CONFIG"
+        if name.startswith(LEAKY_ENV_PREFIXES) and name != "CLOUDSDK_CONFIG"
     ]
     return names
+
+
+def _drop_leaky_env_for_the_process() -> None:
+    """テスト実行プロセスの env から「判定を変えうる env」を落とす (import 時に 1 回)。
+
+    現在の suite では、どのモジュールも `start_isolation()` / `sanitized_env()` を通して外側の env
+    から切り離されている。import 時の除去は、隔離を呼ばないモジュールが今後増えたときの保険
+    (外側に `CDPATH` があり、`CDPATH` が除外リストに無かったときは 200 件が落ちた)。
+    """
+    for name in _leaky_names(os.environ):
+        os.environ.pop(name, None)
+
+
+_drop_leaky_env_for_the_process()
 
 
 def sanitized_env(base) -> dict[str, str]:
