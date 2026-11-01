@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -205,6 +207,80 @@ class MainTest(unittest.TestCase):
         self.assertEqual(self.decision(out), "deny")
         self.assertIn("set-default", out["hookSpecificOutput"]["permissionDecisionReason"])
 
+    def test_cd_back_to_the_root_runs_the_gate(self):
+        # 最後の cd (`../..`) だけで解決すると repo の外になり、ゲートが走らずに通っていた
+        write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
+        commit_all(self.root, "change without bump")
+        for cmd in (
+            "cd plugins/alpha && python3 -m unittest && cd ../.. && gh pr create -t x",
+            "cd plugins && cd alpha && cd ../.. && gh pr create -t x",
+        ):
+            with self.subTest(cmd=cmd):
+                out = run_hook(bash(cmd, self.root))
+                self.assertEqual(self.decision(out), "deny")
+                self.assertIn("version[alpha]", out["hookSpecificOutput"]["permissionDecisionReason"])
+        # 合成した先が repo の外なら従来どおり何もしない
+        self.assertIsNone(run_hook(bash("cd plugins && cd ../.. && gh pr create -t x", self.root)))
+
+    def test_composed_cd_follows_links_like_the_shell(self):
+        write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
+        commit_all(self.root, "change without bump")
+        outside = Path(self._tmp.name) / "outside" / "deep"
+        outside.mkdir(parents=True)
+        # (1) 移動先が repo を指す symlink
+        (Path(self._tmp.name) / "repo-link").symlink_to(self.root)
+        out = run_hook(bash("cd repo-link && cd plugins && cd .. && gh pr create -t x", Path(self._tmp.name)))
+        self.assertEqual(self.decision(out), "deny")
+        # (2) 途中の dir が repo の外を指す symlink: `..` は shell と同じく symlink を辿る前の親 (= repo root)
+        link = self.root / "ext"
+        link.symlink_to(outside)
+        out = run_hook(bash("cd ext && cd .. && gh pr create -t x", self.root))
+        self.assertEqual(self.decision(out), "deny")
+        out = run_hook(bash("cd ext/.. && gh pr create -t x", self.root))
+        self.assertEqual(self.decision(out), "deny")
+        # symlink の先そのものは repo の外
+        self.assertIsNone(run_hook(bash("cd plugins && cd ../ext && gh pr create -t x", self.root)))
+
+    def test_composed_cd_with_a_case_insensitive_name(self):
+        probe = Path(self._tmp.name) / "CaseProbe"
+        probe.mkdir()
+        if not (Path(self._tmp.name) / "caseprobe").exists():
+            self.skipTest("大文字小文字を区別する FS")
+        write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
+        commit_all(self.root, "change without bump")
+        out = run_hook(bash("cd PLUGINS && cd ALPHA && cd ../.. && gh pr create -t x", self.root))
+        self.assertEqual(self.decision(out), "deny")
+        self.assertIn("version[alpha]", out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_unresolvable_composed_cd_is_denied(self):
+        cases = {
+            "missing step": ("cd no-such-dir && cd .. && gh pr create -t x", "存在しない"),
+            "cd after a subshell": ("(cd plugins/alpha) && cd ../.. && gh pr create -t x", "静的に解決できない"),
+            "variable then relative": ('cd "$WT" && cd sub && gh pr create -t x', "静的に解決できない"),
+            "oldpwd": ("cd plugins && cd - && gh pr create -t x", "静的に解決できない"),
+        }
+        for label, (cmd, why) in cases.items():
+            with self.subTest(label):
+                out = run_hook(bash(cmd, self.root))
+                self.assertEqual(self.decision(out), "deny")
+                reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+                self.assertIn("cd の移動先", reason)
+                self.assertIn(why, reason)
+
+    def test_heredoc_body_with_an_apostrophe_runs_the_gate(self):
+        write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
+        commit_all(self.root, "change without bump")
+        for cmd in (
+            "cat > b.md <<'EOF'\nIt's done\nEOF\ngh pr create -t x --body-file b.md",
+            "gh pr create -t x --body-file - <<'EOF'\nI don't know\nEOF",
+        ):
+            with self.subTest(cmd=cmd):
+                out = run_hook(bash(cmd, self.root))
+                self.assertEqual(self.decision(out), "deny")
+                reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+                self.assertIn("version[alpha]", reason)
+                self.assertNotIn("解析できない", reason)
+
     def test_unresolvable_cd_is_denied(self):
         for cmd in ('cd "$WT" && gh pr create -t x', "cd no-such-dir && gh pr create -t x"):
             with self.subTest(cmd=cmd):
@@ -328,6 +404,67 @@ class UnresolvedCommandTest(unittest.TestCase):
                 self.assertEqual((out or {}).get("hookSpecificOutput", {}).get("permissionDecision"), "deny")
         # 文中の言及は PR 操作ではない
         self.assertIsNone(self.mod.evaluate('git commit -m "run gh pr create later"', self._tmp.name))
+
+
+class FailClosedTest(unittest.TestCase):
+    """hook が例外で終わるとコマンドがそのまま走るので、想定外の例外は止める側に倒す (in-process)。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        (Path(self._tmp.name) / "sub").mkdir()
+        self.mod = _load_entry()
+        self._env = mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": self._tmp.name}, clear=False)
+        self._env.start()
+        os.environ.pop("VERIFY_PLUGIN_RELEASE_MODE", None)
+
+    def tearDown(self):
+        self._env.stop()
+        self._tmp.cleanup()
+
+    def decision(self, out):
+        return (out or {}).get("hookSpecificOutput", {}).get("permissionDecision")
+
+    def test_cd_lookup_errors_are_denied(self):
+        # 権限の無い dir / 長すぎる名前 / symlink の循環で is_dir / resolve が投げる (Python 3.11〜3.13)
+        for name, err in (
+            ("is_dir", PermissionError(13, "Permission denied")),
+            ("is_dir", OSError(63, "File name too long")),
+            ("resolve", OSError(62, "Too many levels of symbolic links")),
+            ("resolve", RuntimeError("Symlink loop")),
+        ):
+            with self.subTest(name=name, err=err):
+                with mock.patch.object(Path, name, side_effect=err):
+                    try:
+                        out = self.mod.evaluate("cd sub && gh pr create -t x", self._tmp.name)
+                    except Exception as e:  # noqa: BLE001
+                        self.fail(f"evaluate が例外を投げた: {e!r}")
+                self.assertEqual(self.decision(out), "deny")
+                self.assertIn("cd の移動先", out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def run_main(self, payload: dict) -> dict | None:
+        stdin = mock.Mock()
+        stdin.buffer.read.return_value = json.dumps(payload).encode("utf-8")
+        stdout = io.StringIO()
+        with mock.patch.object(sys, "stdin", stdin), mock.patch.object(sys, "stdout", stdout), \
+                mock.patch.object(sys, "argv", ["verify-plugin-release"]):
+            try:
+                self.mod.main()
+            except Exception as e:  # noqa: BLE001
+                self.fail(f"main が例外を投げた: {e!r}")
+        return json.loads(stdout.getvalue()) if stdout.getvalue().strip() else None
+
+    def test_unexpected_error_in_evaluate_is_denied(self):
+        payload = {"tool_name": "Bash", "tool_input": {"command": "gh pr create -t x"}, "cwd": self._tmp.name}
+        with mock.patch.object(self.mod, "evaluate", side_effect=ValueError("boom")):
+            out = self.run_main(payload)
+        self.assertEqual(self.decision(out), "deny")
+        self.assertIn("ValueError: boom", out["hookSpecificOutput"]["permissionDecisionReason"])
+        # warn では止めずに伝える
+        os.environ["VERIFY_PLUGIN_RELEASE_MODE"] = "warn"
+        with mock.patch.object(self.mod, "evaluate", side_effect=ValueError("boom")):
+            out = self.run_main(payload)
+        self.assertIsNone(self.decision(out))
+        self.assertIn("ValueError: boom", out["hookSpecificOutput"]["additionalContext"])
 
 
 class ManualCheckTest(unittest.TestCase):

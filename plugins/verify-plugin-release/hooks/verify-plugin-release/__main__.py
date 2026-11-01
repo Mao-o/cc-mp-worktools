@@ -189,14 +189,24 @@ def _load_config(root: Path, dl: Deadline) -> tuple[config.Config, str | None]:
 def _evaluate_one(inv: Invocation, cwd: str, mode: str) -> dict | None:
     soft = mode == "warn" or inv.draft
     workdir = Path(cwd or os.getcwd())
-    if inv.cd:
+    if inv.cd_unresolved is not None or inv.cd:
         # `cd "$WT" && gh pr create` のように移動先が静的に決まらない / 存在しない場合、
         # 検査する repo が分からない。素通しにせず「完了できなかった」として扱う。
-        if any(c in inv.cd for c in "$`"):
-            return _error(RuntimeError(f"cd の移動先 ({inv.cd}) を静的に解決できない。絶対パスで指定する"), soft)
-        workdir = (workdir / os.path.expanduser(inv.cd)).resolve()
-        if not workdir.is_dir():
-            return _error(RuntimeError(f"cd の移動先 ({workdir}) が存在しない"), soft)
+        unresolved = inv.cd_unresolved or (inv.cd if any(c in inv.cd for c in "$`") else None)
+        if unresolved is not None:
+            return _error(RuntimeError(f"cd の移動先 ({unresolved}) を静的に解決できない。絶対パスで指定する"), soft)
+        # cd を 1 つずつ辿る。shell の cd と同じく論理パス (`..` は symlink を辿る前の親) で進め、
+        # 途中の移動先が無ければ止める (`cd 無い && cd ..` を `.` と読まないため)
+        # 権限の無い dir・長すぎる名前・symlink の循環は is_dir / resolve が例外を投げる (Python 3.11〜3.13)。
+        # hook が例外で終わるとコマンドがそのまま走るので、止める側に倒す
+        try:
+            for step in inv.cd_steps or (inv.cd,):
+                workdir = Path(os.path.normpath(workdir / os.path.expanduser(step)))
+                if not workdir.is_dir():
+                    return _error(RuntimeError(f"cd の移動先 ({workdir}) が存在しない"), soft)
+            workdir = workdir.resolve()
+        except (OSError, RuntimeError) as e:
+            return _error(RuntimeError(f"cd の移動先 ({workdir}) を確かめられない: {e}"), soft)
 
     probe = Deadline(10)
     try:
@@ -366,7 +376,10 @@ def main() -> None:
     command = (data.get("tool_input") or {}).get("command") or ""
     if not isinstance(command, str) or not command:
         return
-    result = evaluate(command, data.get("cwd") or "")
+    try:
+        result = evaluate(command, data.get("cwd") or "")
+    except Exception as e:  # noqa: BLE001 - ゲートを完了できない → 止める (例外で終わるとコマンドが走る)
+        result = _error(e, _mode() == "warn")
     if result is not None:
         json.dump(result, sys.stdout)
 

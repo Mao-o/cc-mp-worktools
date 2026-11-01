@@ -229,8 +229,8 @@ class CommentHandlingTest(unittest.TestCase):
         self.assertEqual(self._kinds("git log ># don't\ngh pr create"), ["create"])
 
     def test_safety_nets_see_joined_continuations(self):
-        # shlex が ValueError になる (奇数個の ') 本文の後でも、継続行をまたいだ gh pr create を検出する
-        cmd = "cat > b.md <<'EOF'\nIt's done\nEOF\ngh pr \\\n  create --body-file b.md"
+        # shlex が ValueError になる (閉じていない ') 行の後でも、継続行をまたいだ gh pr create を検出する
+        cmd = "echo it's done\ngh pr \\\n  create --body-file b.md"
         found = find_invocations(cmd)
         self.assertEqual([i.kind for i in found], ["create"])
         self.assertIsNotNone(unresolved_reason(cmd, found))
