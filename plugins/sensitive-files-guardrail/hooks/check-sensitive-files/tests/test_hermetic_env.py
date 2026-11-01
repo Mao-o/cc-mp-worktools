@@ -12,7 +12,7 @@
   気付ける。前提として、commit / receive-pack が trace に載っていること (空の床にしない) と、上書き
   した env が helper の git に**起動の引数として**届いていること (spy) も確かめる。陽性対照として、
   止める設定が無い commit では起動が trace に見えることも確かめる (見えない git の版では「0 件」は
-  何も見ていない)。trace は maintenance を起動しない git (`init` / `config` / `add`) の迂回には
+  何も見ていない)。trace は maintenance を起動しない git (`init` / `add`) の迂回には
   気付けないので、helper が起動する git の全部が `HERMETIC_GIT_ENV` を持つことは、spy で全件記録して
   別に見る (`test_every_git_launched_by_the_helpers_carries_the_env`)
 - **設定の出どころ別** (`_HermeticConfigChecks`): 止める経路は env の `GIT_CONFIG_COUNT` と global の
@@ -28,7 +28,7 @@
   - `GIT_CONFIG_NOSYSTEM`: system の config の代わりに置いた目印が読まれないこと
 - **外側の repo / config / template を指す変数** (`_OuterRepoEnvChecks`): 外側の env に `GIT_DIR` や
   `GIT_CONFIG_PARAMETERS`、`GIT_TEMPLATE_DIR` などがあっても (git の hook や `git -c` の配下から suite を
-  流すと入る)、helper の git と基底クラスが起動する git に届かないこと。届くと helper の `init` / `config` /
+  流すと入る)、helper の git と基底クラスが起動する git に届かないこと。届くと helper の `init` /
   `commit` が外側の repo に書き込み、`GIT_CONFIG_PARAMETERS` は `GIT_CONFIG_COUNT` に勝って maintenance を
   黙って復活させ、外側の template の pre-commit が helper の commit で走る。外側の repo の中身が前後で
   一致することと、起動した git の env に変数が無いことで見る
@@ -919,8 +919,9 @@ class TestOuterRepoEnvAndTheHelpers(_OuterRepoEnvChecks, unittest.TestCase):
         """外側に別の repo を指す `GIT_DIR` などがあっても、helper が repo を作る間、その repo を変えないこと。
 
         外さないと、`init` / `commit` が外側の repo に書き込む (init し直され、commit も増える)。外側の repo の
-        全 file の中身が前後で一致すること、旧来の `GIT_CONFIG` が指す file が作られないこと (`git config` の
-        書き込み先になる) で見る。外側の変数が届いた helper の git が失敗する形と、`init` が外側に向いて helper が
+        全 file の中身が前後で一致することで見る。旧来の `GIT_CONFIG` の漏れは、helper が `git config` を起動しなく
+        なったためここでは検出できない。検出は `test_none_of_the_outer_variables_reaches_git` が受け持つ (末尾の
+        file が作られない検査は保険)。外側の変数が届いた helper の git が失敗する形と、`init` が外側に向いて helper が
         `<work>/.git/config` に書けない形も検出のうち: 例外のまま crash させず、失敗として報告する。
         """
         self.assert_env_unchanged_since_applied()
