@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -98,6 +100,53 @@ class PinByConfigDirTests(BaseWithTmpProject):
             ("firebase deploy", a, [b], "deny"),
         ]
         self._table(cases)
+
+    def _reason(self, command, cwd) -> str:
+        try:
+            with self.isolated_cache(), mock.patch(
+                "subprocess.run", side_effect=AssertionError("CLI を呼ばない")
+            ):
+                result = dispatch(command, str(cwd))
+        except Exception as e:  # noqa: BLE001
+            self.fail(f"例外: {e!r}")
+        self.assertIsNotNone(result, command)
+        out = result["hookSpecificOutput"]
+        self.assertEqual(out.get("permissionDecision"), "deny", command)
+        return out.get("permissionDecisionReason") or ""
+
+    def test_deny_guide_round_trips_to_the_config_dir(self):
+        """--config 付きの未固定の deny の案内どおりに打つと、--config の先 (b) に記録されて通る。
+
+        案内の形 (`firebase --config <file> use <alias>`) を理由から切り出し、プレースホルダを
+        差し替えた行を加工せずに hook に通す (固定の操作として止めない)。firebase-tools はその
+        `--config` のファイルのあるディレクトリ (b) に記録するので、それを模して元のコマンドを流す。
+        """
+        a, b = self.real / "a", self.real / "b"
+        for original, config in (
+            ("firebase --config ../b/firebase.json deploy", "../b/firebase.json"),
+            ("firebase -c ../b/firebase.json deploy", "../b/firebase.json"),
+            ("firebase deploy --config=../b/firebase.json", "../b/firebase.json"),
+            (f"firebase --config {self.project_dir / 'b' / 'firebase.json'} deploy",
+             str(self.project_dir / "b" / "firebase.json")),
+        ):
+            with self.subTest(original=original):
+                self._record(a)
+                reason = self._reason(original, a)
+                forms = re.findall(r"firebase --config <file> use <alias>", reason)
+                self.assertEqual(len(forms), 1, reason)
+                self.assertIn("そのファイルのあるディレクトリが project root", reason)
+                line = forms[0].replace("<file>", config).replace("<alias>", "my-proj")
+                self.assertEqual(
+                    shlex.split(line, comments=True),
+                    ["firebase", "--config", config, "use", "my-proj"],
+                )
+                self.assertEqual(self._decision(line, a), "allow", line)
+                # firebase-tools は --config のファイルのあるディレクトリ (b) に、path.resolve
+                # (getcwd から字句的に解決し、symlink は解かない) の綴りで記録する
+                where = Path(os.path.normpath(os.path.join(str(a), config))).parent
+                self.assertTrue(os.path.samefile(where, b))
+                self._record(a, where)
+                self.assertEqual(self._decision(original, a), "allow", original)
 
     def test_without_any_accounts_file(self):
         """accounts.local.json がどこにも無い経路でも、--config の先の記録で判定する。"""

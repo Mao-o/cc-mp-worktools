@@ -646,6 +646,8 @@ PIN_HINT = (
     "Firebase: project を project root (firebase.json のあるディレクトリ) ごとに固定するには、"
     "そこで firebase use <alias または project ID> を 1 回実行してください "
     "(/cloud-account-guard:project-accounts)。"
+    "--config / -c 付きのコマンドは、そのファイルのあるディレクトリが project root です "
+    "(同じ --config を付けて firebase --config <file> use <alias> を実行すると固定できます)。"
 )
 
 # 固定がディレクトリ (project root) ごとに決まる (v0.29.3)。dispatcher は target が走りうる全部の

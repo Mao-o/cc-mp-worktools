@@ -244,9 +244,14 @@ class InlineKubeconfigGuideTests(BaseWithTmpProject):
 
     def test_no_inline_env_keeps_the_plain_guide(self):
         self.default_kc.write_text("wrong\n", encoding="utf-8")
-        reason = self._deny("kubectl apply -f x.yaml", self.project_dir)
-        self.assertEqual(_ENV_GUIDE.findall(reason), [])
-        self.assertEqual(len(_PLAIN_GUIDE.findall(reason)), 1, reason)
+        # hook の env に KUBECONFIG が無いときのインラインの空は未設定と同じ (kubectl は既定の
+        # ファイルを読む)。素の切替がそのファイルに書くので、素の切替を案内する
+        for command in ("kubectl apply -f x.yaml", "KUBECONFIG= kubectl apply -f x.yaml"):
+            with self.subTest(command=command):
+                reason = self._deny(command, self.project_dir)
+                self.assertEqual(_ENV_GUIDE.findall(reason), [])
+                self.assertNotIn(kubectl._KUBECONFIG_ENV_BY_HAND, reason)
+                self.assertEqual(len(_PLAIN_GUIDE.findall(reason)), 1, reason)
 
     def test_kubeconfig_option_wins_over_inline_env(self):
         kc = self.other / "k.yaml"
@@ -303,6 +308,12 @@ class GuideValueUnitTests(unittest.TestCase):
             os.environ.pop("KUBECONFIG", None)
             self.assertIsNone(kubectl._inline_kubeconfig({}))
             self.assertEqual(kubectl._inline_kubeconfig({"KUBECONFIG": "k"}), "k")
+            # kubectl は空の KUBECONFIG を未設定と同じに扱う: 素の切替が同じファイルに書く
+            self.assertIsNone(kubectl._inline_kubeconfig({"KUBECONFIG": ""}))
+        with mock.patch.dict(os.environ, {"KUBECONFIG": ""}):
+            self.assertIsNone(kubectl._inline_kubeconfig({}))
+            self.assertIsNone(kubectl._inline_kubeconfig({"KUBECONFIG": ""}))
+            self.assertEqual(kubectl._inline_kubeconfig({"KUBECONFIG": "/i.yaml"}), "/i.yaml")
 
 
 if __name__ == "__main__":

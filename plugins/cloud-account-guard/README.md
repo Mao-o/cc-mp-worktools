@@ -397,7 +397,7 @@ v0.19.0 から、その CLI に**ディレクトリ単位でアカウントを�
 |---|---|---|
 | gcloud | 環境変数 `CLOUDSDK_CORE_ACCOUNT` が空でない、または `CLOUDSDK_ACTIVE_CONFIG_NAME` が account を持つ構成を指している (project は問わない。project が要るコマンドは gcloud 自身が未設定をエラーにする) | deny。固定の方法と期待値の登録を案内 |
 | aws | 環境変数 `AWS_PROFILE` が空でない (認証情報そのものを置く `AWS_ACCESS_KEY_ID` は固定とみなさない) | 同上 |
-| firebase | そのディレクトリで `firebase use` の切替先が記録されている (commit される `.firebaserc` の `default` だけでは固定とみなさない)。`--config` / `-c` 付きのコマンドは、そのファイルのあるディレクトリの記録で判定する (v0.29.4。firebase-tools がそこを project root にするため。ファイルが見つからないときは走るディレクトリの記録で判定する) | 同上。案内した `firebase use <x>` は未登録の間も止めない |
+| firebase | そのディレクトリで `firebase use` の切替先が記録されている (commit される `.firebaserc` の `default` だけでは固定とみなさない)。`--config` / `-c` 付きのコマンドは、そのファイルのあるディレクトリの記録で判定する (v0.29.4。firebase-tools がそこを project root にするため。ファイルが見つからないときは走るディレクトリの記録で判定する)。`--config` が起動したリポジトリの外を指すときも、その先の記録で判定する | 同上。案内した `firebase use <x>` は未登録の間も止めない |
 | gh / kubectl | (固定の公式の仕組みが無い) | 従来どおり deny。期待値の登録を案内 |
 
 - 判定に使うのは **hook が見ている環境変数** (Claude Code を起動したときの値 +

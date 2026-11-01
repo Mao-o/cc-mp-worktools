@@ -287,12 +287,14 @@ def _inline_kubeconfig(env):
     """行頭のインライン env が hook の env と違う `KUBECONFIG` を与えていればその値、でなければ None。
 
     verify() の env は hook の env にインライン env を重ねたもの (dispatcher)。値が hook の env と
-    同じなら、Bash で打つ切替も同じファイルに書くので、素の切替を案内してよい。
+    同じなら、Bash で打つ切替も同じファイルに書くので、素の切替を案内してよい。空の値と未設定は
+    同じとみなす (kubectl は空の KUBECONFIG を未設定と同じに扱う)。
     """
     if env is None:
         return None
     value = env.get("KUBECONFIG")
-    if value == os.environ.get("KUBECONFIG"):
+    # kubectl は空の KUBECONFIG を未設定と同じに扱う (既定の ~/.kube/config を使う)。
+    if (value or "") == (os.environ.get("KUBECONFIG") or ""):
         return None
     return value if value is not None else ""
 
