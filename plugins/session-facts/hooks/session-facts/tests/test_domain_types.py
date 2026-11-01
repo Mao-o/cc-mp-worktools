@@ -215,59 +215,44 @@ class DomainTypesExclusionTest(unittest.TestCase):
         "export interface Epsilon {}\n"
     )
 
-    def test_dts_vendor_type_declaration_excluded(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            ctx = _ctx(tmp, {
-                "src/types/woff.d.ts": (
-                    'declare module "*.woff" { const x: string; export default x; }\n'
-                    "export interface FontFace {}\n"
-                ),
-                "src/models/a.ts": self._OTHER_MODULE,
-            })
-            out = DomainTypesCollector().collect(ctx)
-            self.assertIsNotNone(out)
-            self.assertNotIn("FontFace", out)
-            self.assertNotIn("woff.d.ts", out)
-
-    def test_vendor_directory_excluded(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            ctx = _ctx(tmp, {
-                "src/vendor/models/thirdparty.ts": "export interface ThirdPartyThing {}\n",
-                "src/models/a.ts": self._OTHER_MODULE,
-            })
-            out = DomainTypesCollector().collect(ctx)
-            self.assertIsNotNone(out)
-            self.assertNotIn("ThirdPartyThing", out)
-
-    def test_generated_directory_excluded(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            ctx = _ctx(tmp, {
-                "src/generated/models/auto.ts": "export interface AutoThing {}\n",
-                "src/models/a.ts": self._OTHER_MODULE,
-            })
-            out = DomainTypesCollector().collect(ctx)
-            self.assertIsNotNone(out)
-            self.assertNotIn("AutoThing", out)
-
-    def test_dot_generated_filename_excluded(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            ctx = _ctx(tmp, {
-                "src/models/schema.generated.ts": "export interface GenThing {}\n",
-                "src/models/a.ts": self._OTHER_MODULE,
-            })
-            out = DomainTypesCollector().collect(ctx)
-            self.assertIsNotNone(out)
-            self.assertNotIn("GenThing", out)
-
-    def test_dot_pb_filename_excluded(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            ctx = _ctx(tmp, {
-                "src/models/service.pb.go": "type PbThing struct {}\n",
-                "src/models/a.ts": self._OTHER_MODULE,
-            })
-            out = DomainTypesCollector().collect(ctx)
-            self.assertIsNotNone(out)
-            self.assertNotIn("PbThing", out)
+    def test_excluded_paths_never_become_candidates(self):
+        # (label, the excluded file's path, its content, names that must
+        # not appear). Each is added next to a real module so the section
+        # still renders. The label is the name the case had as a test.
+        cases = [
+            ("test_dts_vendor_type_declaration_excluded",
+             "src/types/woff.d.ts",
+             'declare module "*.woff" { const x: string; export default x; }\n'
+             "export interface FontFace {}\n",
+             ("FontFace", "woff.d.ts")),
+            ("test_vendor_directory_excluded",
+             "src/vendor/models/thirdparty.ts",
+             "export interface ThirdPartyThing {}\n",
+             ("ThirdPartyThing",)),
+            ("test_generated_directory_excluded",
+             "src/generated/models/auto.ts",
+             "export interface AutoThing {}\n",
+             ("AutoThing",)),
+            ("test_dot_generated_filename_excluded",
+             "src/models/schema.generated.ts",
+             "export interface GenThing {}\n",
+             ("GenThing",)),
+            ("test_dot_pb_filename_excluded",
+             "src/models/service.pb.go",
+             "type PbThing struct {}\n",
+             ("PbThing",)),
+        ]
+        for label, path, content, forbidden in cases:
+            with self.subTest(label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    ctx = _ctx(tmp, {
+                        path: content,
+                        "src/models/a.ts": self._OTHER_MODULE,
+                    })
+                    out = DomainTypesCollector().collect(ctx)
+                    self.assertIsNotNone(out)
+                    for name in forbidden:
+                        self.assertNotIn(name, out)
 
 
 class DomainTypesCandidateFileCapTest(unittest.TestCase):
@@ -284,65 +269,45 @@ class DomainTypesCandidateFileCapTest(unittest.TestCase):
     collector exists to help with; that regression is what the tests below
     guard against."""
 
-    def test_real_cluster_past_the_candidate_cap_is_found(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            files = {
-                f"src/models/dud{i:02d}.ts": "export interface Props {}\n"
-                for i in range(25)  # stop-name only: 0 qualifying names each
-            }
-            files["src/models/zzz_real.ts"] = DomainTypesExclusionTest._OTHER_MODULE
-            ctx = _ctx(tmp, files)
+    def test_real_cluster_is_found_at_every_position_around_the_cap(self):
+        # (label, dud file prefix, dud count, real file name). Duds are
+        # stop-name-only: 0 qualifying names each, so the gate is never
+        # satisfied before the real cluster is reached. The label is the
+        # name the case had as a test.
+        cases = [
             # Tracked-file order puts zzz_real.ts at position 26, past the
             # 20-file cap. The cap only bounds scan cost once the gate is
-            # already satisfied, and 25 stop-name-only duds never satisfy
-            # it, so the scan must continue past the cap and find the
-            # cluster -- unlike the old hard-truncation behavior this
-            # replaced.
-            out = DomainTypesCollector().collect(ctx)
-            self.assertIsNotNone(out)
-            self.assertIn("Alpha", out)
-
-    def test_candidate_count_one_past_the_cap_is_found(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            files = {
-                f"src/models/dud{i:02d}.ts": "export interface Props {}\n"
-                for i in range(20)  # exactly _MAX_CANDIDATE_FILES duds
-            }
-            files["src/models/zzz_real.ts"] = DomainTypesExclusionTest._OTHER_MODULE
-            ctx = _ctx(tmp, files)
-            # 21 total candidates, real cluster at position 21 -- the exact
-            # boundary the soft-cap fix targets (20 candidates was already
-            # fine; 21 is where the old hard truncation first dropped the
-            # section entirely).
-            out = DomainTypesCollector().collect(ctx)
-            self.assertIsNotNone(out)
-            self.assertIn("Alpha", out)
-
-    def test_candidate_count_exactly_at_the_cap_is_unaffected(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            files = {
-                f"src/models/dud{i:02d}.ts": "export interface Props {}\n"
-                for i in range(19)
-            }
-            files["src/models/zzz_real.ts"] = DomainTypesExclusionTest._OTHER_MODULE
-            ctx = _ctx(tmp, files)
+            # already satisfied, and 25 duds never satisfy it, so the scan
+            # must continue past the cap and find the cluster -- unlike the
+            # old hard-truncation behavior this replaced.
+            ("test_real_cluster_past_the_candidate_cap_is_found",
+             "dud", 25, "zzz_real"),
+            # 21 total candidates (exactly _MAX_CANDIDATE_FILES duds + the
+            # real one), real cluster at position 21 -- the exact boundary
+            # the soft-cap fix targets (20 candidates was already fine; 21
+            # is where the old hard truncation first dropped the section
+            # entirely).
+            ("test_candidate_count_one_past_the_cap_is_found",
+             "dud", 20, "zzz_real"),
             # Exactly 20 candidates (19 duds + 1 real): already worked
             # before the soft-cap fix, and must keep working identically.
-            out = DomainTypesCollector().collect(ctx)
-            self.assertIsNotNone(out)
-            self.assertIn("Alpha", out)
-
-    def test_cluster_within_the_candidate_cap_is_found(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            files = {
-                f"src/models/aaa_dud{i:02d}.ts": "export interface Props {}\n"
-                for i in range(10)
-            }
-            files["src/models/aab_real.ts"] = DomainTypesExclusionTest._OTHER_MODULE
-            ctx = _ctx(tmp, files)
-            out = DomainTypesCollector().collect(ctx)
-            self.assertIsNotNone(out)
-            self.assertIn("Alpha", out)
+            ("test_candidate_count_exactly_at_the_cap_is_unaffected",
+             "dud", 19, "zzz_real"),
+            ("test_cluster_within_the_candidate_cap_is_found",
+             "aaa_dud", 10, "aab_real"),
+        ]
+        for label, prefix, n_duds, real in cases:
+            with self.subTest(label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    files = {
+                        f"src/models/{prefix}{i:02d}.ts": "export interface Props {}\n"
+                        for i in range(n_duds)
+                    }
+                    files[f"src/models/{real}.ts"] = DomainTypesExclusionTest._OTHER_MODULE
+                    ctx = _ctx(tmp, files)
+                    out = DomainTypesCollector().collect(ctx)
+                    self.assertIsNotNone(out)
+                    self.assertIn("Alpha", out)
 
     def test_break_only_fires_once_the_gate_is_already_satisfied(self):
         # None of the other tests in this class pin the soft-cap break

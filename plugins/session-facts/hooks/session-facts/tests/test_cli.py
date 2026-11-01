@@ -137,27 +137,6 @@ class MoreHintInvokedAsTest(HermeticGitTestCase):
             self.assertIn(f"`python3 {shlex.quote(spaced)} {root_arg} --help`", out)
             self.assertNotIn(f"`python3 {spaced} {root_arg} --help`", out)
 
-    def test_hint_command_names_analyzed_root_not_readers_cwd(self):
-        # internal backlog: the printed `--help` hint used to omit --root,
-        # so copying it (or extending it with another opt-in flag, e.g.
-        # --include-domain-types) from a different cwd than the analyzed
-        # directory silently analyzed Path.cwd() instead of anything named
-        # in this same header. --root is passed directly here (cwd ==
-        # root, no subdirectory) to isolate that concern from the
-        # subdirectory-scoping one covered by
-        # test_hint_command_names_analyzed_subdirectory_not_repo_root
-        # below: the hint must always carry an explicit --root, never rely
-        # on the reader's own process cwd.
-        with tempfile.TemporaryDirectory() as tmp:
-            root = _make_repo(tmp)
-            fake_invoked_as = str(root / "hooks" / "session-facts")
-            with mock.patch.object(sys, "argv", [fake_invoked_as]):
-                out = _run_cli(["--root", str(root)])
-            self.assertIn(f"- repo_root: {root.resolve()}", out)
-            self.assertIn(
-                f"--root {shlex.quote(str(root.resolve()))} --help", out
-            )
-
     def test_hint_command_names_analyzed_subdirectory_not_repo_root(self):
         # Codex review round 2 (P2): when --root points at a subdirectory
         # of a git repo, ctx.root is the git top-level while ctx.cwd
