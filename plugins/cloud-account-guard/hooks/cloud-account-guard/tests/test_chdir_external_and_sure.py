@@ -85,6 +85,29 @@ class FirebaseExternalCdTests(base.FirebaseRelativeConfigTests):
         command = "chdir sub && firebase deploy --config firebase.json"
         self._assert_deny(self._run(command), command)
 
+    def test_cd_flags_unknown_to_zsh_and_bash32_do_not_move(self):
+        # bash 3.2 は `-e` / `-@` を invalid option、zsh 5.9 は `cd old new` の置換形として失敗する
+        for pre in ("cd -e sub;", "cd -@ sub;", "cd -P -e sub;", "cd -e sub\n", "builtin cd -e sub;"):
+            command = f"{pre} firebase deploy --config firebase.json"
+            with self.subTest(command=command):
+                self._assert_deny(self._run(command), command)
+
+    def test_time_and_builtin_with_options_do_not_move(self):
+        # zsh: `time -p` / `time --` / `builtin --` はどれも cd を走らせない (bash も `time --` は走らせない)
+        for pre in ("time -p cd sub;", "time -- cd sub;", "builtin -- cd sub;"):
+            command = f"{pre} firebase deploy --config firebase.json"
+            with self.subTest(command=command):
+                self._assert_deny(self._run(command), command)
+
+    def test_cdpath_assigned_earlier_in_the_command_is_unresolved(self):
+        # bash は other/sub へ、zsh は ./sub へ移る (シェルで割れる)
+        (self.project_dir / "other" / "sub").mkdir(parents=True)
+        for pre in ("CDPATH=other; cd sub &&", "export CDPATH=other; cd sub &&",
+                    "CDPATH=other\ncd sub\n", "declare -x CDPATH=other; cd sub;"):
+            command = f"{pre} firebase deploy --config firebase.json"
+            with self.subTest(command=command):
+                self._assert_deny(self._run(command), command)
+
 
 # 継承した FirebaseRelativeConfigTests の test_* は継承元のモジュールで走るので、ここでは消す
 for _name in [n for n in dir(base.FirebaseRelativeConfigTests) if n.startswith("test_")]:
@@ -115,6 +138,8 @@ class KubectlExternalCdTests(base.SudoChdirKubectlTests):
         for command in (
             "CDPATH=/elsewhere cd sub && kubectl apply -f x.yaml --kubeconfig k.yaml",
             "chdir sub && kubectl apply -f x.yaml --kubeconfig k.yaml",
+            "cd -e sub; kubectl apply -f x.yaml --kubeconfig k.yaml",
+            "export CDPATH=/elsewhere; cd sub && kubectl apply -f x.yaml --kubeconfig k.yaml",
         ):
             with self.subTest(command=command):
                 self._assert_deny(self._run(command), command)

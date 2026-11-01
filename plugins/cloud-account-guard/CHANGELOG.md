@@ -44,8 +44,11 @@
   として止め、固定は移動前と移動後の両方で確かめる
 - `CDPATH` (環境、または `CDPATH=x cd sub` の前置き) があるときの相対パスの `cd sub` は、行き先を
   決められないとして扱う (bash は `CDPATH` の候補を先に探し、zsh は作業ディレクトリを先に探すので、
-  シェルで割れる)。`/`・`./`・`../` で始まる行き先は今までどおり。同じコマンドの中の
-  `export CDPATH=...` は追わない
+  シェルで割れる)。`/`・`./`・`../` で始まる行き先は今までどおり。同じコマンドの前のほうで
+  CDPATH を代入する形 (`CDPATH=x; cd sub` / `export CDPATH=x; cd sub`) も同じ扱い
+- bash 3.2 と zsh が受け付けない `cd -e` / `cd -@` と、option 付きの `time -p` / `time --` /
+  `builtin --` の後ろの cd は、移動を追わない (実際のシェルでは移動しないため)。0.28.0 から kubectl の
+  相対の kubeconfig を `cd -e sub` の移動先で照合していたのも直る
 - zsh の `chdir` (cd の同義語。bash には無い) は、行き先を決められないとして扱う。今までは
   `chdir sub && firebase deploy --config firebase.json` の移動を追わず、起動側のファイルで照合していた
 

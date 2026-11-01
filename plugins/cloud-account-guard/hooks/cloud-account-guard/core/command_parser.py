@@ -1852,7 +1852,11 @@ def _normalize_segment_chdir(
                 chdir = True
         stripped = _strip_one_wrapper(cmd)
         if stripped is not None:
-            if not toks or toks[0] not in _IN_SHELL_WRAPPERS:
+            # option 付きの `time -p` / `time --` / `builtin --` は、zsh では後ろの cd を走らせない
+            # (bash も `time --` は走らせない)。シェル内の wrapper とみなさず外部側に倒す
+            if not toks or toks[0] not in _IN_SHELL_WRAPPERS or (
+                len(toks) > 1 and toks[1].startswith("-")
+            ):
                 external = True
             cmd = stripped
             continue

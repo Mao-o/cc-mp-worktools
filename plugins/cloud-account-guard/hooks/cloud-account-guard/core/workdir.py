@@ -29,6 +29,7 @@ subshell の括弧 (`(cd x && gcloud ...)`) は分解の時点で落ちるため
 from __future__ import annotations
 
 import os
+import re
 import shlex
 from pathlib import Path
 
@@ -47,8 +48,11 @@ _CHDIR_COMMANDS = frozenset({"cd", "pushd"})
 # 行き先を静的に決められないもの (popd はスタック次第)。`chdir` は zsh の cd の同義語で、bash には
 # 無い (v0.29.3)。どちらのシェルで走るか分からないので、行き先は決められない扱いにする。
 _UNKNOWN_DIR_COMMANDS = frozenset({"popd", "chdir"})
-# `cd` の option (`cd -P dir`)。値は取らない。
-_CD_FLAGS = frozenset({"-L", "-P", "-e", "-@"})
+# `cd` の option (`cd -P dir`)。値は取らない。`-e` / `-@` は bash 3.2 が invalid option、zsh が
+# `cd old new` の置換形として失敗するので含めない (引数が 2 つになり、行き先は決められない扱い)。
+_CD_FLAGS = frozenset({"-L", "-P"})
+# 同じコマンドの前のほうで CDPATH を代入する形 (`CDPATH=x; cd sub` / `export CDPATH=x`)。空の代入は除く。
+_CDPATH_ASSIGN = re.compile(r"\bCDPATH=(?![\s;&|)]|$)")
 # 値の中にあると静的に解決できない文字 (展開・glob)。
 _DYNAMIC_CHARS = frozenset("$`*?[{")
 
@@ -254,6 +258,7 @@ def segment_dirs(
     鎖の始まりのディレクトリも残す (`false` が失敗すると `y` は移動前で走る)。
     """
     result: dict[str, set[str | None]] = {}
+    cdpath_assigned = _CDPATH_ASSIGN.search(command) is not None
     for reading in extract_candidate_readings(command):
         current: frozenset[str | None] = frozenset({cwd or None})
         list_start = current
@@ -263,7 +268,8 @@ def segment_dirs(
         for segment, inline_env, sep in reading:
             if prev_sep != "&&":
                 chain_start = current
-            moved = [_chdir_target(segment, here, inline_env) for here in current]
+            env = {**(inline_env or {}), "CDPATH": "?"} if cdpath_assigned else inline_env
+            moved = [_chdir_target(segment, here, env) for here in current]
             if moved and moved[0][0]:
                 targets = frozenset(target for _changes, target in moved)
                 keep = maybe_skipped and segment not in sure
