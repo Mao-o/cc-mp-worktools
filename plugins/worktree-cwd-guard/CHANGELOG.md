@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.4.0
+
+**pipeline の最後の要素の `cd` (`printf a | cd <main> && git commit -m x`) が残った場合も判定し、後ろの別 checkout への
+git の書き込みを止めるようにした (minor bump)。**
+
+### 修正: pipeline の最後の要素の cd を両方の読みで追う
+
+zsh (Claude Code の Bash tool の shell) は pipeline の最後の要素を今の shell で動かすので、そこでの `cd` / `pushd` は
+後ろのコマンドに残る。`printf a | cd <main> && git commit -m x` や `cat <<EOF | cd <main> && git add .` の git は、zsh では
+main checkout で走るのに止まっていなかった (pipeline の要素をすべてサブシェルとして扱っていた。0.3.0 まで)。bash は最後の
+要素もサブシェルで動かすので残らない。
+
+最後の要素の `cd` は、残った場合 (zsh) と残らない場合 (bash) の両方を追い、どちらかで別 checkout への書き込みになれば
+止める。`printf a | { cd <main>; git commit -m x; }` のように、最後の要素の brace group の中で cd の後ろに書いた git
+(どちらの shell でも移動先で走る) も止まる。pipeline の途中の要素の `cd` (`printf a | cd <main> | cat`) は、どちらの shell
+でもサブシェルで動くので、これまでどおり外に残らないものとして扱う。
+
+### テストの追加
+
+- `tests/test_guard.py`: 最後の要素の `cd` / `pushd` / `|&` / brace group で止まること、途中の要素の `cd` は残らない
+  こと、最後の要素で自分の worktree へ戻る `cd` は bash の読みで main のまま判定すること、読み取りを止めないこと
+
+テスト件数: 92 → 93 (追加 1・削除 0・統合 0)。
+
+確認:
+
+- 判定の比較 (14,400 件: 前置き 4 × pipeline の左 7 × `|` / `|&` × 最後の要素 24 形 × 後置き 10 + 途中の要素 960) を
+  0.3.0 と 0.4.0 に流し、偽の git で zsh -f と bash 3.2 の実際の起動と並べた。0.3.0 で止めて 0.4.0 で止めないものは 0 件。
+  0.3.0 で止めず 0.4.0 で止めるものは 3,723 件 (加えて注意だけ出すものが 198 件)。止める側の差は、zsh で別 checkout への
+  書き込みが実際に起動するものと、パイプでない同じ形を 0.3.0 も止めていたもの (`env cd` / `nohup cd` / `sudo cd` /
+  `command cd` / `cd -e`、途中の要素の brace group) だけ
+
 ## 0.3.0
 
 **字句の正規化が閉じない括弧・引用符・backtick か、終端行の無い here-document を残して読み終えたときは、別の読みでも
