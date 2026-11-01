@@ -786,7 +786,8 @@ def _wrapper_moves(cands, wrapper_chdir) -> bool:
 
 
 def _pinned(
-    svc, inline_env: dict, cands, env_changes: dict, directories, trace: dict | None
+    svc, inline_env: dict, cands, env_changes: dict, directories, trace: dict | None,
+    context=None,
 ) -> bool:
     """期待値の代わりに、公式のディレクトリ単位の固定で決まっているか (v0.19.0)。
 
@@ -807,6 +808,10 @@ def _pinned(
     directories 自体が None なら、作業ディレクトリを変える wrapper (`sudo -D <dir>` 等) の
     中で走る target で、どの service でも固定されていない側に倒す (sudo -D の中の環境変数は
     sudo の設定次第で、起動時の env と同じとは限らない)。
+
+    context は target の context option (解決前。相対パスは書かれたまま)。`PIN_USES_CONTEXT` を
+    宣言した service (firebase) にだけ `is_pinned(env, d, context=...)` で渡す (v0.29.4。firebase は
+    `--config` のファイルのあるディレクトリの記録で固定を判定する)。
     """
     fn = getattr(svc, "is_pinned", None)
     if fn is None:
@@ -827,7 +832,10 @@ def _pinned(
     else:
         try:
             env = dict(os.environ)
-            pinned = all(bool(fn(env, d)) for d in (sorted(directories) if by_dir else [None]))
+            kwargs = {"context": context} if getattr(svc, "PIN_USES_CONTEXT", False) else {}
+            pinned = all(
+                bool(fn(env, d, **kwargs)) for d in (sorted(directories) if by_dir else [None])
+            )
         except Exception:  # noqa: BLE001
             pinned = False
     if trace is not None:
@@ -953,14 +961,14 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
         outside_problems: list[str] = []
         remaining = []
         for t in targets:
-            svc, cands, inline_env, _ctx, tier = t
+            svc, cands, inline_env, ctx, tier = t
             dirs = _target_dirs(cands, seg_dirs)
             stops_t = tier != tiers.QUERY
             if not all(workdir.is_inside(d, launch_root) for d in dirs):
                 outside_problems.append(_outside_error(launch_root, stops=stops_t))
                 continue
             if _pinned(
-                svc, inline_env, cands, env_changes, pin_dirs(cands), trace
+                svc, inline_env, cands, env_changes, pin_dirs(cands), trace, context=ctx
             ) or _all_pin_actions(cands, svc):
                 continue
             remaining.append(t)
@@ -1119,7 +1127,7 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
             # 期待値が未登録でも、公式のディレクトリ単位の固定 (env / firebase use) が
             # 効いていれば止めない (v0.19.0)。gh / kubectl は固定の仕組みが無いので登録を促す。
             if _pinned(
-                svc, inline_env, cands, env_changes, pin_dirs(cands), trace
+                svc, inline_env, cands, env_changes, pin_dirs(cands), trace, context=ctx
             ) or _all_pin_actions(cands, svc):
                 continue
             problems.append(_unregistered_error(svc, shell_word.escape_controls(accounts_path), stops=stops))

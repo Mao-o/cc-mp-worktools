@@ -397,7 +397,7 @@ v0.19.0 から、その CLI に**ディレクトリ単位でアカウントを�
 |---|---|---|
 | gcloud | 環境変数 `CLOUDSDK_CORE_ACCOUNT` が空でない、または `CLOUDSDK_ACTIVE_CONFIG_NAME` が account を持つ構成を指している (project は問わない。project が要るコマンドは gcloud 自身が未設定をエラーにする) | deny。固定の方法と期待値の登録を案内 |
 | aws | 環境変数 `AWS_PROFILE` が空でない (認証情報そのものを置く `AWS_ACCESS_KEY_ID` は固定とみなさない) | 同上 |
-| firebase | そのディレクトリで `firebase use` の切替先が記録されている (commit される `.firebaserc` の `default` だけでは固定とみなさない) | 同上。案内した `firebase use <x>` は未登録の間も止めない |
+| firebase | そのディレクトリで `firebase use` の切替先が記録されている (commit される `.firebaserc` の `default` だけでは固定とみなさない)。`--config` / `-c` 付きのコマンドは、そのファイルのあるディレクトリの記録で判定する (v0.29.4。firebase-tools がそこを project root にするため。ファイルが見つからないときは走るディレクトリの記録で判定する)。`--config` が起動したリポジトリの外を指すときも、その先の記録で判定する | 同上。案内した `firebase use <x>` は未登録の間も止めない |
 | gh / kubectl | (固定の公式の仕組みが無い) | 従来どおり deny。期待値の登録を案内 |
 
 - 判定に使うのは **hook が見ている環境変数** (Claude Code を起動したときの値 +
@@ -1000,6 +1000,12 @@ AWS_PROFILE=prod aws s3 ls
   profile B で誤って allow されることはない
 - 値に未展開の変数参照 (`AWS_PROFILE=$SOMEVAR`) を含む場合は静的に解決できない
   ため検証 env には渡さない (コマンドからは剥がす)
+- kubectl の行頭の `KUBECONFIG=a.yaml kubectl apply ...` (起動時の値と違うもの) の deny は、
+  同じ `KUBECONFIG` を前に付けた切替 (`KUBECONFIG=<絶対パス> kubectl config use-context <期待値>`)
+  を案内する (v0.29.4)。相対パスの要素は、そのコマンドが走るディレクトリの絶対パスにする。
+  0.29.3 までは素の `kubectl config use-context` を案内しており、それは Bash の env の kubeconfig に
+  書くので、案内どおりにしても同じ deny に戻った。値が案内に使える形でない (空白・`~` 始まり・
+  空など) ときはコマンドの形では案内せず、文で言う
 
 ### 透過 wrapper を跨ぐときの env 伝播
 
@@ -1399,6 +1405,54 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 出る (再試行すると検証済みサービスは cache hit する)。
 それでも切れるならコマンドをサービスごとに分けるか、遅い CLI (未ログイン・ネットワーク
 待ち) を解消してから再試行する。
+
+## 守る範囲と守らない範囲
+
+この plugin の目的は**うっかり予防**: Claude (や人) が**普段どおりに書くコマンド**で、期待外の
+アカウント・プロジェクト・context に対して書き込んでしまうのを止めること。意図的に検証を
+すり抜けようとする書き方 (シェルの珍しい構文・option の省略形・細工した設定ファイル) は守る
+範囲に入れない。全部を防ぐことは目指さず、間違ったアカウントで進めてしまうのを検出できる範囲で
+防ぐ。シェルの書き方の穴埋めには終わりが無く、直すたびに別の形の読み違い (それまで止めていた形を
+通してしまう退行) を生むため。
+
+**原則: 不一致が確定したときだけ deny し、解析で決められない形は deny しない。** 現行版には、
+決められない形を止める判定がまだ残っている (相対パスの context をどのファイルに解決するかを
+決められない形など)。これは順にこの原則へ揃える。
+
+守る範囲 (例):
+
+- 素のコマンド (`aws s3 rm ...` / `firebase deploy` / `kubectl apply ...`)
+- `cd dir && <CLI>`、`;` / `&&` / `||` / `|` による連結
+- 前置きの環境変数の代入 (`AWS_PROFILE=x aws ...`)
+- よく使う透過 wrapper の素の形 (`sudo` / `env` / `npx` / `mise exec` など)
+- コンテキストを指定する option の正式な綴り (`--profile` / `--project` / `--context` /
+  `--kubeconfig` / `--config` など)
+
+守らない範囲 (検出しない形。どれも普段どおりに書くコマンドではない):
+
+- wrapper の long option の省略形 (`sudo --us root` / `sudo --chd sub` / `npx` の `--prefix` の省略形
+  など) の後ろのクラウド CLI。検証が丸ごと抜ける
+- option 付きの `env` (`env -C dir` / `env -u X`) の後ろのクラウド CLI。候補にならず検証されない
+- 配列の閉じの直後に語の断片が続く代入 (`a=(1 2)y aws ...`) の後ろのクラウド CLI
+- コマンド語の無い heredoc に演算子が続く形 (`<<E && aws ...`) の後ろのクラウド CLI
+- 代入の頭の珍しい形 (`NAME+=`、添字の中の空白、二重引用符の中の `$(` に heredoc を置いたもの)
+  の後ろのクラウド CLI
+- コマンド置換やバッククォートの中だけにあるクラウド CLI (`echo $(aws ...)`)
+- context option の値に `--` や `$(` を使う形 (`kubectl --context '$(id)' apply` /
+  `kubectl --context -- apply`)。指定値として扱わず、現在値で照合する
+- シェル展開で option を作る形 (ブレース展開の `firebase deploy -{j,P} prod` / `{-j,-P} prod`、
+  ANSI-C クォートの `$'-P' prod`)。展開を読まず、既定の文脈で照合する
+- firebase の `-P=prod` / `-c=path` と、`=` で始まる alias を置いた `.firebaserc` の組み合わせ
+  (下の「既知の制限」も参照)
+- kubectl の短い option の結合形で、値を取る文字が末尾にあり後ろの `--context` を値として飲み込む形
+  (`kubectl -An --context x apply`)。hook は `x` で照合し、kubectl は既定の context で動く
+- 読み取り権限の無いディレクトリへの、大文字小文字だけ違う綴りの `cd` (大文字小文字を区別しない
+  FS)。firebase の `firebase use` の記録の照合で、綴りが firebase-tools と食い違いうる
+- `-E` の無い `sudo` の後ろの aws / gcloud。`sudo` は環境変数を消すが、固定の判定は hook の
+  環境変数 (`AWS_PROFILE` など) で固定とみなす
+
+新しい形が見つかったときは「普段どおりに書くコマンドか」で範囲を決める。範囲外ならこの一覧に
+足す (読みや追跡は増やさない)。
 
 ## 既知の制限
 

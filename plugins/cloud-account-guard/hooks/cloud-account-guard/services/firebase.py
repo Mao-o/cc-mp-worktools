@@ -646,20 +646,49 @@ PIN_HINT = (
     "Firebase: project を project root (firebase.json のあるディレクトリ) ごとに固定するには、"
     "そこで firebase use <alias または project ID> を 1 回実行してください "
     "(/cloud-account-guard:project-accounts)。"
+    "--config / -c 付きのコマンドは、そのファイルのあるディレクトリが project root です "
+    "(同じ --config を付けて firebase --config <file> use <alias> を実行すると固定できます)。"
 )
 
 # 固定がディレクトリ (project root) ごとに決まる (v0.29.3)。dispatcher は target が走りうる全部の
 # ディレクトリで `is_pinned` を確かめ、決められないディレクトリがあれば固定されていない側に倒す。
 # 宣言の無い service (aws / gcloud の環境変数の固定) はディレクトリを見ない。
 PIN_DEPENDS_ON_DIR = True
+# 固定の判定に、候補コマンドの context option (`--config`) を使う (v0.29.4)。宣言した service にだけ
+# dispatcher が `context=` を渡す (aws / gcloud の `is_pinned` は context を受け取らない)。
+PIN_USES_CONTEXT = True
 
 
-def is_pinned(env, project_dir: str) -> bool:
+def _pin_root(project_dir: str, context=None) -> str:
+    """固定の判定で configstore を探す起点 (firebase-tools の projectRoot)。
+
+    `--config` 付きのコマンドでは、firebase-tools は project root を `--config` のファイルのある
+    ディレクトリにする (verify() と同じ)。相対パスは project_dir (dispatcher が渡す、そのコマンドが
+    走るディレクトリ) の実体のパス (`_physical_dir`。getcwd と同じ綴り) から、`..` を字句的に畳んで
+    解決する (`resolve_context` と同じ)。絶対パスは join で前半が捨てられ、symlink を解かずにそのまま
+    使う (firebase-tools は `path.resolve` の結果の dirname で切替先を探す)。
+
+    ファイルが見つからないなど決められないときは、0.29.3 までと同じ起点 (`_project_root`) で
+    判定する。決められないことを理由に「固定されていない」側 (未登録の deny) には倒さない
+    (不一致が確定したときだけ deny する方針。ファイルが無ければ firebase-tools 自身がコマンドを
+    始めずに失敗する)。
+    """
+    config = (context or {}).get("config")
+    if isinstance(config, str) and config:
+        path = os.path.abspath(os.path.join(_physical_dir(project_dir), config))
+        if os.path.isfile(path):
+            return os.path.dirname(path)
+    return _project_root(project_dir)
+
+
+def is_pinned(env, project_dir: str, context=None) -> bool:
     """その project root で `firebase use` の切替先が記録されているか (期待値が未登録のときの判定)。
 
     firebase-tools と同じく project root から親方向に configstore を探す。CLI は呼ばない。
+    context に `--config` があれば、そのファイルのあるディレクトリを project root にする (`_pin_root`。
+    0.29.3 までは `--config` を見ず、走るディレクトリの記録で固定とみなしていた)。
     """
-    return bool(_from_configstore(_project_root(project_dir), env))
+    return bool(_from_configstore(_pin_root(project_dir, context), env))
 
 
 def get_active_account(project_dir: str) -> str | None:
