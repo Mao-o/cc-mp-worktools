@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.29.5
+
+### Fixed: 行頭の代入の値の `~` を展開せずに照合していた (誤 deny)
+
+- `KUBECONFIG=~/.kube/prod.yaml kubectl apply ...` の値を `~/.kube/prod.yaml` のまま検証に
+  渡していた。シェルは代入の値の先頭と `:` の後の `~` を HOME に展開するので kubectl は HOME の下の
+  ファイルを読むが、検証は作業ディレクトリの `./~/.kube/prod.yaml` を探し、普段どおりの形で
+  deny になっていた。行頭の代入の値の `~` を、シェルと同じく hook の HOME に展開してから検証に
+  渡す。`KUBECONFIG` 以外の代入 (`AWS_CONFIG_FILE` / `CLOUDSDK_CONFIG` / `GH_CONFIG_DIR` など) も
+  同じ経路で揃う。kubectl の deny の案内 (`KUBECONFIG=<絶対パス> kubectl config use-context ...`) も
+  展開した絶対パスで出す
+- 展開するのは bash 3.2 と zsh -f で読みが一致する形だけ: 値の先頭か引用符の外の `:` の直後にある
+  引用符の外の `~` で、その直後が値の終わり・`/`・`:` のもの (`~/a` / `~` / `x:~/b` / `~/a:~/b`)。
+  引用符の中 (`'~/a'` / `"~/a"` / `\~/a`) と語の途中 (`a~/b`) は、どちらのシェルも展開しない
+- 次の形は展開せず、0.29.4 までと同じ読みのまま (どれも検証は生の値で走る):
+  - zsh だけが展開する形: 引用符付きの `:` の後 (`x':'~/b`)、`~` の直後が引用符 (`~"/a"` / `~''/a` /
+    `~\/a`)
+  - HOME 以外の行き先: `~user` / `~+` / `~-`
+  - wrapper の後ろの代入の形の引数 (`env KUBECONFIG=~/a ...` / `sudo KUBECONFIG=~/a ...`)。bash は
+    展開し zsh は展開しない。シェル経由の wrapper の中身を分割し直した段も展開しない
+  - コマンドが HOME を書き換えうるとき: コマンドに `HOME` の語 (`HOME=/x KUBECONFIG=~/a ...` は
+    bash が元の HOME、zsh が新しい HOME で展開する)、`${HOME:=x}` / `${HOME=x}` / `${HOME::=x}`、
+    ファイルを読む `.` (`. ./env.sh` / `. -- x` / コマンドの位置の `. -x`)、`source` / `eval` が
+    あるとき。名前の一部の `HOME` (`XDG_CONFIG_HOME=~/x`)、読むだけの `$HOME` / `${HOME}`、
+    引数の `.` (`kubectl apply -k .` / `git add . &&` / `find . -name x` / `cd .`) は数えない
+    (どれも bash と zsh の両方で、kubectl が HOME の下のファイルを読むことを実測した)
+  - hook の HOME が空・未設定、または `$` を含むとき
+- 判定の比較 (旧版と新版に同じ 1044 件の入力を、HOME の下のファイルと作業ディレクトリの `~/...` の
+  中身を入れ替えた 2 通りで流した): 変わったのは展開した形だけで、deny → allow 54 件 /
+  allow → deny 52 件。どれも bash と zsh で実際に走らせ、kubectl が読む `KUBECONFIG` が HOME の下の
+  ファイルであることを確かめた (zsh が構文エラーで何も走らせない `KUBECONFIG=... time kubectl` を
+  除く)。候補 (コマンドの断片) の分解は変えていない (生成した 2 万件の入力で旧版と同じ)
+
 ## 0.29.4
 
 ### Docs: 守る範囲と守らない範囲 (うっかり予防)

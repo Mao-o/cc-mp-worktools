@@ -1004,8 +1004,18 @@ AWS_PROFILE=prod aws s3 ls
   同じ `KUBECONFIG` を前に付けた切替 (`KUBECONFIG=<絶対パス> kubectl config use-context <期待値>`)
   を案内する (v0.29.4)。相対パスの要素は、そのコマンドが走るディレクトリの絶対パスにする。
   0.29.3 までは素の `kubectl config use-context` を案内しており、それは Bash の env の kubeconfig に
-  書くので、案内どおりにしても同じ deny に戻った。値が案内に使える形でない (空白・`~` 始まり・
-  空など) ときはコマンドの形では案内せず、文で言う
+  書くので、案内どおりにしても同じ deny に戻った。値が案内に使える形でない (空白・引用符付きの
+  `~` 始まり・空など) ときはコマンドの形では案内せず、文で言う
+- 値の先頭と `:` の後の `~` は、シェルと同じく HOME に展開してから検証に渡す (v0.29.5)。
+  `KUBECONFIG=~/.kube/prod.yaml kubectl apply ...` は HOME の下の `.kube/prod.yaml` で照合する
+  (0.29.4 までは作業ディレクトリの `~/.kube/prod.yaml` を探して誤 deny になっていた)。
+  展開するのは bash と zsh で読みが一致する形 (`~` の直後が値の終わり・`/`・`:`) だけで、
+  引用符の中の `~` (`'~/x'`) はシェルと同じく展開しない。次の形は展開せずに 0.29.4 までと同じ
+  読みにする: `~user` / `~+` / `~-`、引用符付きの `:` の後や `~` の直後が引用符の形 (zsh だけが
+  展開する)、wrapper の後ろの代入の形の引数 (`env KUBECONFIG=~/x ...`。bash だけが展開する)、
+  コマンドが `HOME` を書き換えうるとき (コマンドに `HOME` の語、`${HOME:=x}`、ファイルを読む `.`
+  (`. ./env.sh`)、`source` / `eval` がある。名前の一部の `HOME` (`XDG_CONFIG_HOME`)、読むだけの
+  `$HOME` / `${HOME}`、引数の `.` (`kubectl apply -k .` / `git add .`) は数えない)
 
 ### 透過 wrapper を跨ぐときの env 伝播
 
