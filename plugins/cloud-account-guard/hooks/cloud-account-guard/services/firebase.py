@@ -29,8 +29,8 @@ accounts.local.json の "firebase" は 2 形式を受け付ける:
    (fail-closed。他 service の timeout と同じ扱い)。
 
 コマンドの `--config` / `-c` は project root を指定したファイルのあるディレクトリに移す
-(firebase-tools の detectProjectRoot と同じ。相対パスは project_dir を symlink を解いた実体の
-パスにしてから解決する)。1. の cwd と 2. の起点はそこになる。2. の configstore は、そのパスの
+(firebase-tools の detectProjectRoot と同じ。相対パスは、コマンドが走るディレクトリ (Bash の作業
+ディレクトリ + コマンド中の `cd`) の実体のパスから解決する。`resolve_context`。v0.29.3)。1. の cwd と 2. の起点はそこになる。2. の configstore は、そのパスの
 親方向だけを探す (そのパスの symlink は解かない。firebase-tools と同じ)。
 """
 from __future__ import annotations
@@ -43,6 +43,11 @@ import subprocess
 from pathlib import Path
 
 from core import budget, cli_config, cli_options, shell_word
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
 
 # CLI 名の許容形。`\b` だとハイフン付き別コマンド全般を拾ってしまうので空白/終端に
 # 限定するが、npm 経由の 2 つの正当な形は明示的に許可する:
@@ -243,12 +248,80 @@ def _config_file(project_dir: str, config: str) -> str | None:
     渡す `--config` で configstore の切替先 (`firebase use` が実体のパスで記録したもの) を引き
     当て損ねる。絶対パスの config は join で前半が捨てられ、そのまま使われる (Node と同じ)。
     見つからなければ (シェルが展開する `~` など)、呼び出し側は
-    「どの project で動くかを確かめられない」として deny する。コマンドの中の `cd` は
-    `--config` の無いコマンドと同じく追わない (同じ相対パスのファイルが project_dir の側にも
-    あれば、そちらのディレクトリを root にして照合する)。
+    「どの project で動くかを確かめられない」として deny する。
+
+    dispatcher 経由の照合では、相対パスの config は `resolve_context` がコマンドの走る
+    ディレクトリ (Bash の作業ディレクトリ + コマンド中の `cd`) で絶対パスにしてから渡す
+    (v0.29.3)。ここで project_dir から解決するのは、`resolve_context` を通らない呼び出し
+    (verify() を直接呼ぶ経路) だけ。
     """
     path = os.path.abspath(os.path.join(os.path.realpath(project_dir), config))
     return path if os.path.isfile(path) else None
+
+
+# `resolve_context` が None を返したときの文 (dispatcher が tier に合わせた結びを足す)。
+UNRESOLVED_CONTEXT = (
+    "Firebase: 相対パスの --config がどのディレクトリから開かれるかを決められないため "
+    "(別々のディレクトリで走る複数のコマンドが使っている、括弧・条件・パイプ・背景実行の中の cd と"
+    "同じコマンドにある、または作業ディレクトリを変える sudo の option の中で走る)、どの firebase.json"
+    "で照合するかを決められません。絶対パスで指定するか、ディレクトリごとにコマンドを分けて実行して"
+    "ください。"
+)
+
+
+def resolve_context(context, directories, env, base=None) -> dict | None:
+    """相対パスの `--config` を、コマンドが走るディレクトリで絶対パスにした context を返す (v0.29.3)。
+
+    firebase-tools は `path.resolve(process.cwd(), config)` で config を開く。0.29.2 までの hook は
+    project_dir から解決し、`cd sub && firebase --config firebase.json deploy` を `sub/firebase.json`
+    ではなく起動側の firebase.json で照合した。
+
+    - directories は target のセグメントが走るディレクトリ (dispatcher が `cd` を追ったもの)。
+      ディレクトリは実体のパス (`_physical_dir`。getcwd と同じ綴り) にしてから連結し、`..` は字句的に畳む
+      (`_config_file` と同じ。Node の `process.cwd()` は実体のパスで、`path.resolve` は `..` を
+      字句的に畳む)。verify() は絶対パスの config をそのまま使う
+    - 相対パスが無ければ context をそのまま返す (`cd` の有無で照合も cache も変えない)
+    - 相対パスがあるのに、ディレクトリが 1 つに決まらなければ None (dispatcher が止める)
+    - env / base は使わない (kubectl と同じ呼び出し形にそろえるための引数)
+    """
+    ctx = dict(context or {})
+    config = ctx.get("config")
+    if not isinstance(config, str) or config == "" or os.path.isabs(config):
+        return ctx
+    if len(directories) != 1:
+        return None
+    (directory,) = directories
+    if not isinstance(directory, str):
+        return None
+    ctx["config"] = os.path.abspath(os.path.join(_physical_dir(directory), config))
+    return ctx
+
+
+def _physical_dir(directory: str) -> str:
+    """作業ディレクトリの実体のパス。firebase-tools の `process.cwd()` (getcwd) と同じ綴りにする。
+
+    `os.path.realpath` は symlink を解くが、大文字小文字を区別しない FS で `cd SUB` した名前の
+    綴りはそのまま残す。getcwd はディスク上の綴り (`sub`) を返し、firebase-tools は configstore の
+    切替先をその綴りのパスで記録・検索する (文字列の一致)。綴りが違うと、hook の CLI の無いときの
+    解決 (`_from_configstore`) が `sub` の切替先を見落として親の切替先で照合しうる。
+    macOS は `F_GETPATH` でディスク上の綴りを得る (getcwd と同じ仕組み)。得られなければ realpath。
+    """
+    real = os.path.realpath(directory)
+    getpath = getattr(fcntl, "F_GETPATH", None) if fcntl is not None else None
+    if getpath is None or not os.path.isdir(real):
+        return real
+    try:
+        fd = os.open(real, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NONBLOCK)
+    except OSError:
+        return real
+    try:
+        raw = fcntl.fcntl(fd, getpath, bytes(1024))  # MAXPATHLEN
+    except OSError:
+        return real
+    finally:
+        os.close(fd)
+    path = os.fsdecode(raw.split(b"\0", 1)[0])
+    return path if os.path.isabs(path) else real
 
 
 def _reject_constant(name: str):

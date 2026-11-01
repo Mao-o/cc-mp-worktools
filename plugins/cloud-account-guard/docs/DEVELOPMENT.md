@@ -1369,7 +1369,7 @@ verify() は CLI が出した現在値 (前後の空白を除いた値) と期�
   `_project_root` と同じ見立て)。見つからなければ deny (`_CONFIG_NOT_FOUND`)。firebase-tools
   はコマンドを始めないが、見立てが外れているだけ (シェルが展開する `~` など) なら別の
   ディレクトリで動くので、allow にはしない。コマンドの中の `cd` は、`--config` の無い
-  コマンドと同じく追わない
+  コマンドと同じく追わない (0.29.3 で追うようにした。下の「0.29.3」の節)
 - project_dir は symlink を解いた実体のパスにしてから解決する。detectProjectRoot は
   `path.resolve(process.cwd(), configPath)` で、Node の `process.cwd()` は実体のパス
   (getcwd)。論理パスから解決すると、hook が `firebase use --config` に渡す絶対パスの root が
@@ -1786,6 +1786,48 @@ cache の状態ファイルのうち成功 cache の entry と epoch は、hook 
 - 保険: unlink の後に新パスを読み直し、統合した内容でなくなっていれば新パスに書き戻して exit 1 に
   する。判定をすり抜ける配置が他にあってもデータは残る。消せなかった旧パスは exit 1 と `rm` の行で
   手での削除を案内する
+
+### 0.29.3 (走るディレクトリの追い方の残り)
+
+**firebase の相対パスの `--config` をコマンドが走るディレクトリで解決する**
+
+- kubectl に 0.28.0 で入れた `resolve_context` を firebase にも宣言した。相対パスの `--config` を、
+  dispatcher が渡すディレクトリ (Bash の作業ディレクトリ + コマンド中の `cd`) の実体のパスに連結し、
+  `..` を字句的に畳んだ絶対パスにする (firebase-tools の `path.resolve(process.cwd(), config)` と同じ)。
+  決められない形 (別々のディレクトリで走る複数のコマンド / `cd` が確実に順に走る形でない) は
+  `UNRESOLVED_CONTEXT` で止める。結果の context は成功 cache のキーにも使う
+- ディレクトリの実体のパスは `realpath` ではなく getcwd と同じ綴り (`_physical_dir`。macOS は
+  `F_GETPATH`) にする。`realpath` は大文字小文字を区別しない FS で `cd SUB` の綴りを残すが、
+  firebase-tools は getcwd の綴り (`sub`) で configstore の切替先を記録・検索する (文字列の一致)。
+  綴りが違うと、CLI の無いときのローカル設定の解決が `sub` の切替先を見落とし、親の切替先で
+  照合して allow しえた (配置の fixture で見つけた。`cd SUB` は 0.29.2 では追っていなかったので
+  新しく開きかけた穴)。`--config` の値の部分の綴りは書かれたまま (firebase-tools も字句的に連結する)
+- `--config` の無いコマンドの root は 0.29.2 と同じ (project_dir から探す。`cd` を追わない)
+
+**作業ディレクトリを変える sudo の option**
+
+- `sudo -D <dir>` / `--chdir` / `-R` / `--chroot` / `-i` / `--login` は、後続のコマンドを別の
+  ディレクトリで走らせる。wrapper を剥がした後の候補は、`segment_dirs` の (起動側を起点にした)
+  ディレクトリで走るものとして扱われ、相対パスの kubeconfig を起動側のファイルで照合していた
+- `command_parser.wrapper_chdir_candidates` が、分解と同じ読みで「その option を持つ sudo を
+  剥がして得た候補」を返す (`_normalize_segment_chdir` が flag 領域を共有パーサで読む。分解の結果は
+  変えない)。dispatcher はその候補を含む target で、`resolve_context` には `{None}` を、固定の判定には
+  `{None}` を渡す (相対パスがあれば止める / 固定とみなさない)
+- 内外の判定 (`is_inside`) は変えない。移動先を「決められない」として外扱いにすると、相対パスも固定も
+  関わらない `sudo -D /tmp kubectl get pods` まで止まる。移動先を静的に解決して `cd` と同じに扱う案は、
+  チケットの決定 (決められない側に倒す) に合わせて採らなかった
+- `env -C <dir>` / `env --chdir` は直していない。`env` は option 付きだと剥がさない (0.7.2 からの
+  方針) ので、`env -C sub kubectl ...` は kubectl の候補にならず、そもそも検証されない (別の課題)
+
+**ディレクトリ単位の固定を、走りうる全部のディレクトリで確かめる**
+
+- `_pinned` は target のディレクトリ集合から任意の 1 つ (`next(iter(dirs))`) だけを見ていた。
+  全部で `is_pinned` が真のときだけ固定とみなす。None (決められない) を含むか空なら固定でない
+- `cd` が確実に順に走る形でない (`chdir_is_sequential` が False) ときは、
+  `segment_dirs(..., maybe_skipped=True)` で、どの `cd` も「走らなかった」可能性を残した和で確かめる
+  (`(cd sub && true); firebase deploy` は起動側と sub の両方)。可能性の数は相対パスの `cd` ごとに倍に
+  なりうるので、`MAX_POSSIBLE_DIRS` (32) を超えたら None に畳む (固定でない側)
+- firebase の固定 (configstore の記録) は親方向に探すので、起動側の記録はその下のディレクトリにも効く
 
 ## 既知の制限
 

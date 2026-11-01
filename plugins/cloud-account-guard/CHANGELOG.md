@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.29.3
+
+### Fixed: コマンドが走るディレクトリの追い方の残り (firebase の相対パスの `--config` / sudo の作業ディレクトリの option / 複数ディレクトリでの固定)
+
+どれも 0.29.2 以前からの挙動。
+
+- firebase の相対パスの `--config` / `-c` を、コマンドが走るディレクトリ (Bash の作業ディレクトリ +
+  コマンド中の `cd`) から解決する (kubectl の相対パスの `--kubeconfig` と同じ規則。0.28.0)。
+  `cd sub && firebase --config firebase.json deploy` を、`sub/firebase.json` ではなく起動側の
+  firebase.json (と、そのディレクトリの `firebase use` の切替先) で照合していた。別々のディレクトリで
+  走る複数のコマンドが同じ相対パスを使う形と、括弧・条件・パイプ・背景実行の中の `cd` と同じコマンドに
+  ある形は、どのファイルか決められないので deny (リモート read のみなら警告)。絶対パスの `--config` と
+  `--config` の無いコマンドは今までどおり。deny が案内する切替 (`firebase --config <絶対パス> use ...`)
+  は移動先のファイルを指す
+- ディレクトリの綴りは、大文字小文字を区別しない FS でもディスク上の綴りにする (firebase-tools の
+  作業ディレクトリと同じ)。`cd SUB` の綴りのままだと、CLI の無いときの解決が `sub` で記録された
+  `firebase use` の切替先を見落としうる
+- 作業ディレクトリを変える `sudo` の option (`-D` / `--chdir` / `-R` / `--chroot` / `-i` / `--login`)
+  の中で走るコマンドは、相対パスの kubeconfig / `KUBECONFIG` / firebase の `--config` をどのファイルに
+  解決するかを決められないとして deny する (リモート read のみなら警告)。`sudo -D sub kubectl apply ...
+  --kubeconfig k.yaml` を起動側の `k.yaml` で照合していた。絶対パスのものは今までどおり照合する。
+  ディレクトリ単位の固定 (`firebase use` の記録 / `AWS_PROFILE` などの環境変数) も、この中で走る
+  コマンドでは固定とみなさない (期待値が未登録なら deny)
+- ディレクトリ単位の固定を、コマンドが走りうるすべてのディレクトリで確かめる。任意の 1 つだけを
+  見ていたため、`cd a && firebase deploy; cd ../b && firebase deploy` を a の `firebase use` の
+  記録だけで通していた。括弧・条件・パイプの中の `cd` があるコマンド (`(cd sub && true); firebase deploy`)
+  は、その `cd` が後続に効かない場合も含めて、移動前と移動後の両方で確かめる (0.29.2 は移動後だけ)
+
+直していないもの: `env -C <dir>` / `env --chdir` を前に置いたコマンドは、`env` が option 付きだと
+剥がさない (0.7.2 からの方針) ので、そもそもクラウド CLI の候補にならず検証されない。別の課題として扱う。
+
 ## 0.29.2
 
 ### Fixed: コマンド行の分解で、後ろのクラウド CLI を候補から落とす形 (`#` の手前の読み・ANSI-C 引用符・シェルで割れる読み)

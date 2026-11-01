@@ -23,6 +23,8 @@ subshell の括弧 (`(cd x && gcloud ...)`) は分解の時点で落ちるため
 ファイルか**を決める用途 (kubectl の相対パスの kubeconfig。v0.28.0) では、実際には
 走らない `cd` を追うと別のファイルで照合して誤 allow になる。その用途では
 `chdir_is_sequential` で、`cd` がどれも確実に順に実行される形かを先に確かめる。
+ディレクトリ単位の固定の判定 (v0.29.3) は、確実に順に実行される形でなければ
+`segment_dirs(..., maybe_skipped=True)` で移動前のディレクトリも含めて確かめる。
 """
 from __future__ import annotations
 
@@ -197,7 +199,15 @@ def segment_env_changes(command: str) -> dict[str, set[str]]:
     return result
 
 
-def segment_dirs(command: str, cwd: str) -> dict[str, set[str | None]]:
+# `segment_dirs(..., maybe_skipped=True)` が追う「いまいる可能性のあるディレクトリ」の数の上限
+# (v0.29.3)。`cd` ごとに「走った / 走らなかった」の両方を残すので、相対パスの `cd` が続くと
+# 倍々に増える。超えたら「決められない」(None) に畳む (呼び出し側は固定されていない側に倒す)。
+MAX_POSSIBLE_DIRS = 32
+
+
+def segment_dirs(
+    command: str, cwd: str, *, maybe_skipped: bool = False
+) -> dict[str, set[str | None]]:
     """各セグメント (分解した形の文字列) → それが走るディレクトリの集合。
 
     同じ文字列のセグメントが別のディレクトリで複数回現れることがあるため集合で返す。
@@ -208,17 +218,26 @@ def segment_dirs(command: str, cwd: str) -> dict[str, set[str | None]]:
     その中の `cd` はリストの中の後続にだけ効き、`&` の後ろには効かない (v0.29.0)。
     bash と zsh で分解が割れる形は、読みごとに辿った結果の和を返す
     (`command_parser.extract_candidate_readings`)。
+
+    `maybe_skipped` (v0.29.3) は、どの `cd` も「走らなかった (または後続に効かなかった)」
+    可能性を残す: `cd` の後は、移動前と移動後のディレクトリの和にいるものとする。括弧・条件・
+    パイプの中の `cd` (`chdir_is_sequential` が False の形) で、移動前のディレクトリを落とさない
+    ための見積もり (`(cd sub && true); firebase deploy` の firebase は起動側で走る)。
+    可能性の数が `MAX_POSSIBLE_DIRS` を超えたら None に畳む。
     """
     result: dict[str, set[str | None]] = {}
     for reading in extract_candidate_readings(command):
-        current: str | None = cwd or None
+        current: frozenset[str | None] = frozenset({cwd or None})
         list_start = current
         for segment, _inline_env, sep in reading:
-            changes, target = _chdir_target(segment, current)
-            if changes:
-                current = target
+            moved = [_chdir_target(segment, here) for here in current]
+            if moved and moved[0][0]:
+                targets = frozenset(target for _changes, target in moved)
+                current = (current | targets) if maybe_skipped else targets
+                if len(current) > MAX_POSSIBLE_DIRS:
+                    current = frozenset({None})
             else:
-                result.setdefault(segment, set()).add(current)
+                result.setdefault(segment, set()).update(current)
             if sep == BACKGROUND:
                 current = list_start
             if sep in LIST_TERMINATORS:

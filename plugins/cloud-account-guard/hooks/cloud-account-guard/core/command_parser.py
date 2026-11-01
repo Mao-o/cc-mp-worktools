@@ -1717,8 +1717,51 @@ def _strip_command_path(cmd: str) -> str:
     return name + cmd[m.end():]
 
 
+# sudo の option のうち、後続コマンドの作業ディレクトリを変えるもの (v0.29.3)。
+# [local] sudo(8): `-D directory` / `--chdir=directory` (そのディレクトリで実行)、
+# `-R directory` / `--chroot=directory` (root を変えてから実行)、`-i` / `--login`
+# (対象ユーザーのホームに移ってから login shell で実行)。剥がした後の候補は、コマンド中の
+# `cd` を追った作業ディレクトリ (`core/workdir.py` の `segment_dirs`) とは別のディレクトリで
+# 走るので、相対パスの context をどのファイルに解決するか・ディレクトリ単位の固定が効いて
+# いるかを決められない (`wrapper_chdir_candidates`)。
+_SUDO_CHDIR_FLAGS = frozenset({"-D", "--chdir", "-R", "--chroot", "-i", "--login"})
+
+# `wrapper_chdir_candidates` が分解の間だけ立てる記録先 (候補の文字列の集合)。None なら記録しない。
+_WRAPPER_CHDIR_SEEN: set[str] | None = None
+
+
+def wrapper_chdir_candidates(command: str) -> frozenset[str]:
+    """作業ディレクトリを変える wrapper (`sudo -D <dir>` 等) を剥がして得た候補の集合 (v0.29.3)。
+
+    `extract_candidate_readings` と同じ読み (別の読みも含む) で分解し、剥がした wrapper の
+    flag 領域に `_SUDO_CHDIR_FLAGS` があった候補を返す。シェル経由の wrapper の中身を分割し直した
+    候補は、外側か内側のどちらかで作業ディレクトリが変わっていれば含める。同じ文字列の候補が
+    wrapper 無しでも現れるときも含める (呼び出し側は「決められない」側に倒す)。
+    """
+    global _WRAPPER_CHDIR_SEEN
+    saved = _WRAPPER_CHDIR_SEEN
+    seen: set[str] = set()
+    _WRAPPER_CHDIR_SEEN = seen
+    try:
+        extract_candidate_readings(command)
+    finally:
+        _WRAPPER_CHDIR_SEEN = saved
+    return frozenset(seen)
+
+
 def _normalize_segment(cmd: str, max_iter: int = 8) -> tuple[str, dict[str, str]]:
-    """wrapper と先頭 env を剥がし (正規化コマンド, 収集 env) を返す。
+    """wrapper と先頭 env を剥がし (正規化コマンド, 収集 env) を返す。"""
+    normalized, env, _chdir = _normalize_segment_chdir(cmd, max_iter)
+    return normalized, env
+
+
+def _normalize_segment_chdir(
+    cmd: str, max_iter: int = 8
+) -> tuple[str, dict[str, str], bool]:
+    """wrapper と先頭 env を剥がし (正規化コマンド, 収集 env, 作業ディレクトリを変えたか) を返す。
+
+    3 つ目は、剥がした `sudo` の flag 領域に作業ディレクトリを変える option
+    (`_SUDO_CHDIR_FLAGS`) があったか。
 
     多段 (`FOO=bar sudo time mise exec -- foo`) に対応するため最大 max_iter
     回繰り返し、各段で現れた先頭 env を収集する。同名キーは内側 (後に出現 =
@@ -1740,6 +1783,7 @@ def _normalize_segment(cmd: str, max_iter: int = 8) -> tuple[str, dict[str, str]
     pre-wrapper env を素通しするため従来どおり伝播する。
     """
     collected: dict[str, str] = {}
+    chdir = False
     # heredoc 本文はデータであってコマンドラインではない。先に落としておかないと
     # 後段の option 走査が本文の行を引数として読む (`_strip_heredoc_bodies` 参照)。
     cmd = _strip_heredoc_bodies(cmd)
@@ -1761,6 +1805,8 @@ def _normalize_segment(cmd: str, max_iter: int = 8) -> tuple[str, dict[str, str]
             rest_after_sudo = _drop_tokens(cmd, 1)
             if not _sudo_preserves_env(rest_after_sudo):
                 collected.clear()
+            if _has_flag(rest_after_sudo, "sudo", _SUDO_CHDIR_FLAGS):
+                chdir = True
         stripped = _strip_one_wrapper(cmd)
         if stripped is not None:
             cmd = stripped
@@ -1769,7 +1815,7 @@ def _normalize_segment(cmd: str, max_iter: int = 8) -> tuple[str, dict[str, str]
         # その結果に対してもう一度 wrapper 判定をやり直す。
         if cmd == before:
             break
-    return _strip_trailing_syntax(cmd), collected
+    return _strip_trailing_syntax(cmd), collected, chdir
 
 
 def strip_transparent_wrappers(cmd: str, max_iter: int = 6) -> str:
@@ -1886,7 +1932,7 @@ def extract_candidates_with_separators(
     """
     out: list[tuple[str, dict[str, str], str]] = []
     for seg, sep in split_with_separators(command):
-        normalized, env = _normalize_segment(seg)
+        normalized, env, chdir = _normalize_segment_chdir(seg)
         if not normalized:
             continue
         # シェル経由 wrapper のクォートを剥がすと、中身が複合コマンドのことがある
@@ -1899,9 +1945,17 @@ def extract_candidates_with_separators(
         if len(parts) > 1 or (parts and normalized[0] in ";&|"):
             last = len(parts) - 1
             for k, (part, inner_sep) in enumerate(parts):
-                inner, inner_env = _normalize_segment(part)
+                inner, inner_env, inner_chdir = _normalize_segment_chdir(part)
                 if inner:
+                    _note_chdir(inner, chdir or inner_chdir)
                     out.append((inner, {**env, **inner_env}, sep if k == last else inner_sep))
             continue
+        _note_chdir(normalized, chdir)
         out.append((normalized, env, sep))
     return out
+
+
+def _note_chdir(candidate: str, chdir: bool) -> None:
+    """`wrapper_chdir_candidates` の分解中なら、作業ディレクトリを変えた候補を記録する。"""
+    if chdir and _WRAPPER_CHDIR_SEEN is not None:
+        _WRAPPER_CHDIR_SEEN.add(candidate)
