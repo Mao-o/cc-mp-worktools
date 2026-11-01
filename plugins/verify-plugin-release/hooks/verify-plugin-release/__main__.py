@@ -197,11 +197,16 @@ def _evaluate_one(inv: Invocation, cwd: str, mode: str) -> dict | None:
             return _error(RuntimeError(f"cd の移動先 ({unresolved}) を静的に解決できない。絶対パスで指定する"), soft)
         # cd を 1 つずつ辿る。shell の cd と同じく論理パス (`..` は symlink を辿る前の親) で進め、
         # 途中の移動先が無ければ止める (`cd 無い && cd ..` を `.` と読まないため)
-        for step in inv.cd_steps or (inv.cd,):
-            workdir = Path(os.path.normpath(workdir / os.path.expanduser(step)))
-            if not workdir.is_dir():
-                return _error(RuntimeError(f"cd の移動先 ({workdir}) が存在しない"), soft)
-        workdir = workdir.resolve()
+        # 権限の無い dir・長すぎる名前・symlink の循環は is_dir / resolve が例外を投げる (Python 3.11〜3.13)。
+        # hook が例外で終わるとコマンドがそのまま走るので、止める側に倒す
+        try:
+            for step in inv.cd_steps or (inv.cd,):
+                workdir = Path(os.path.normpath(workdir / os.path.expanduser(step)))
+                if not workdir.is_dir():
+                    return _error(RuntimeError(f"cd の移動先 ({workdir}) が存在しない"), soft)
+            workdir = workdir.resolve()
+        except (OSError, RuntimeError) as e:
+            return _error(RuntimeError(f"cd の移動先 ({workdir}) を確かめられない: {e}"), soft)
 
     probe = Deadline(10)
     try:
@@ -371,7 +376,10 @@ def main() -> None:
     command = (data.get("tool_input") or {}).get("command") or ""
     if not isinstance(command, str) or not command:
         return
-    result = evaluate(command, data.get("cwd") or "")
+    try:
+        result = evaluate(command, data.get("cwd") or "")
+    except Exception as e:  # noqa: BLE001 - ゲートを完了できない → 止める (例外で終わるとコマンドが走る)
+        result = _error(e, _mode() == "warn")
     if result is not None:
         json.dump(result, sys.stdout)
 

@@ -6,7 +6,10 @@
 """
 from __future__ import annotations
 
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 
 import _testutil  # noqa: F401
 
@@ -228,6 +231,92 @@ class HeredocBodyTest(unittest.TestCase):
             with self.subTest(label):
                 self.assertIsNotNone(unresolved_reason(cmd, find_invocations(cmd)))
 
+    def test_quoted_body_text_is_not_counted_by_the_safety_net(self):
+        # 区切り語に引用がある本文は shell が展開しない文字列。PR の本文で使い方を説明しても止めない
+        # (0.3.3 の初版は、安全網が加工前の本文の行頭の gh pr create を数えて止めていた)
+        bodies = (
+            "gh pr create --fill",
+            "$(gh pr create --base x)",
+            "`gh pr ready 3`",
+            "run: gh pr create; gh pr ready",
+        )
+        for op, end in (("<<'EOF'", "EOF"), ('<<"EOF"', "EOF"), ("<<\\EOF", "EOF"), ("<<'END MSG'", "END MSG"),
+                        ("<<-'EOF'", "\tEOF"), ("<<E'O'F", "EOF")):
+            for body in bodies:
+                cmd = f"cat > b.md {op}\nIt's\n{body}\n{end}\ngh pr create --base m1 --body-file b.md"
+                with self.subTest(op=op, body=body):
+                    self.assert_clean(cmd, ["m1"])
+        self.assert_clean("gh pr create --base m1 --body-file - <<'EOF'\ngh pr create --fill\nEOF", ["m1"])
+
+    def test_quoted_body_is_counted_when_something_may_run_it(self):
+        # 本文を標準入力から読んで実行しうるコマンド (sh / bash / eval / source / .) があれば本文も数える
+        for cmd in (
+            "bash <<'EOF'\ngh pr create\nEOF",
+            "sudo sh -s <<'EOF'\ngh pr create\nEOF",
+            "/bin/zsh <<'EOF'\ngh pr ready 3\nEOF",
+            "ssh host <<'EOF'\ngh pr create\nEOF",
+            "source /dev/stdin <<'EOF'\ngh pr create\nEOF",
+            ". /dev/stdin <<'EOF'\ngh pr create\nEOF",
+            "cat <<'EOF' | bash\ngh pr create\nEOF",
+            # 引用の無い区切り語の本文は従来どおり加工前を数える
+            "cat <<EOF\ngh pr create --fill\nEOF\ngh pr create --base m1",
+            # 終わりの行が無い本文は、区切り語の読み違いで shell と本文の範囲がずれていることがあるので数える
+            "cat <<'EOF'\nIt's\ngh pr create --base m1",
+            "cat <<'EOF' ${x:-a\nEOF\n}\ngh pr create --fill\nEO",
+            # 置換の中で本文が始まり全体を従来の読み方に戻したときは、その前の本文も数える
+            "cat > b.md <<'EOF'\n`gh pr ready 3`\nEOF\nx=$(cat <<'E2'\nplain\nE2\n)\ngh pr create --base m1",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(unresolved_reason(cmd, find_invocations(cmd)))
+        # ファイル名の .sh や、実行位置にない . は本文を読むコマンドではない
+        for cmd in (
+            "cat > run.sh <<'EOF'\ngh pr create --fill\nEOF\ngh pr create --base m1",
+            "git add . && cat > b.md <<'EOF'\ngh pr create\nEOF\ngh pr create --base m1",
+            "cd .. && cat > b.md <<'EOF'\ngh pr create\nEOF\ngh pr create --base m1",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_clean(cmd, ["m1"])
+
+    def test_safety_net_reads_words_split_by_a_continuation(self):
+        # `\`+改行でつながる gh / pr は、継続行をつないでから「gh pr を含まない」を判定する (bash / zsh は走らせる)
+        for cmd in ("g\\\nh pr create --base m1", "gh p\\\nr create --base m1"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(unresolved_reason(cmd, find_invocations(cmd)))
+
+    def test_redirect_runs_do_not_take_exponential_time(self):
+        # 実行位置の前置きの繰り返しは、1 つのリダイレクトの読み方が 1 通りでないと、一致しないときの
+        # 後戻りが個数に対して指数時間になる (0.3.3 の初版は 24 個で 5 秒)。hook が時間切れになると
+        # コマンドは素通しになるので、別プロセスで時間を測る
+        script = (
+            "import sys, time\n"
+            "from command import find_invocations, unresolved_reason\n"
+            "worst = 0.0\n"
+            "for tok in ('2>&1 ', '>>build.log ', \">'f' \", '>\"$f\" ', '<<- x ', '>& f '):\n"
+            "    cmd = 'true; ' + tok * 40 + 'make gh pr'\n"
+            "    t = time.perf_counter()\n"
+            "    unresolved_reason(cmd, find_invocations(cmd))\n"
+            "    worst = max(worst, time.perf_counter() - t)\n"
+            "print(worst)\n"
+        )
+        pkg = Path(__file__).resolve().parent.parent
+        try:
+            r = subprocess.run([sys.executable, "-c", script], cwd=pkg, capture_output=True, text=True, timeout=20)
+        except subprocess.TimeoutExpired:
+            self.fail("リダイレクトの繰り返しで 20 秒を超えた")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertLess(float(r.stdout), 1.0)
+
+    def test_safety_net_reads_redirect_operators_as_the_shell_does(self):
+        # shell の演算子どおりに読む: `>- x` の `-` はファイル名、`<<- gh` の gh は区切り語で、どちらも
+        # 後ろの語はコマンド語 (bash / zsh 実測: gh は走らない)。数えすぎると止める理由が事実と合わない
+        for cmd in (">- echo gh pr create", "<<- gh pr create\ngh\n"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(unresolved_reason(cmd, find_invocations(cmd)))
+        for cmd in ("2>- gh pr create --base m1", "<&- gh pr create --base m1", "2>& 1 gh pr create --base m1",
+                    "&>> f gh pr create --base m1", "<<-x gh pr create --base m1\nx"):
+            with self.subTest(cmd=cmd):
+                self.assert_clean(cmd, ["m1"])
+
     def test_redirect_before_the_command_word(self):
         # 本文の ' で止めていた頃は隠れていた: コマンド語の前のリダイレクトで gh を見失わない (bash / zsh 実測)
         cases = {
@@ -365,6 +454,36 @@ class CdCompositionTest(unittest.TestCase):
                 inv = self.first(cmd)
                 self.assertIsNotNone(inv.cd_unresolved)
                 self.assertIn("→", inv.cd_unresolved)
+
+    def test_cd_around_or(self):
+        # `cd A || cd B`: A に移れれば B は走らず、移れなければ起点からの B になる。どちらかに読むと
+        # shell と違う repo を検査しうるので、続く相対の cd とまとめて静的に解決できないとする
+        for cmd in (
+            "cd a || cd b && gh pr create",
+            "cd a || cd b; cd c && gh pr create",
+            "true || cd a; cd b && gh pr create",
+            "cd a || true; cd b && gh pr create",
+            # 走らないかもしれない cd は、絶対パスでも前の移動先を置き換えるとは限らない
+            "cd a || cd /abs && gh pr create",
+            "cd a || cd ~/x; gh pr create",
+            "cd a && (cd /abs && gh pr create)",
+        ):
+            with self.subTest(cmd=cmd):
+                inv = self.first(cmd)
+                self.assertIsNotNone(inv.cd_unresolved)
+                self.assertIn("→", inv.cd_unresolved)
+        # `cd a || exit` は、移れなければ後ろが走らないので a に決まる
+        for cmd in (
+            "cd a || exit; cd b && gh pr create",
+            "cd a || exit 1; cd b && gh pr create",
+            "cd a || return 1\ncd b\ngh pr create",
+            "cd a || { exit 1; }; cd b && gh pr create",
+        ):
+            with self.subTest(cmd=cmd):
+                inv = self.first(cmd)
+                self.assertEqual((inv.cd_steps, inv.cd_unresolved), (("a", "b"), None))
+        inv = self.first("cd a; cd /abs || exit; gh pr create")
+        self.assertEqual((inv.cd_steps, inv.cd_unresolved), (("/abs",), None))
 
     def test_bare_cd_resets_to_the_hook_cwd(self):
         inv = self.first("cd plugins && cd && gh pr create")

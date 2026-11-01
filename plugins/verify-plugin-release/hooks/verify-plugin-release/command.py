@@ -28,7 +28,12 @@ _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # 文中の言及 ("... run gh pr create later") は拾わないよう、直前が区切りか行頭のものに限る
 # コマンド語の前のリダイレクト (`>/dev/null gh` / `2>&1 gh` / `<<'END MSG' gh`) も数える。構文解析は
 # これを gh として見つけるので、数えないと「見つけた数 = 数えた数」が別の gh の見落としを隠す
-_REDIRECT_PREFIX = r"""\d*(?:&>>?|[<>]+[&|-]?)\s*(?:'[^']*'|"[^"]*"|\S+)\s+"""
+# 1 つのリダイレクトは atomic group で読み方を 1 通りに固定する。`>>f` を `>` + `>f` とも読める形の
+# 繰り返しは、一致しないときの後戻りが個数に対して指数時間になり、hook が時間切れで素通しになる。
+# 演算子は shell の演算子そのもの (`-` は `<<-` の一部か、`<&-` / `>&-` の対象。`2>-` の `-` はファイル名)
+_REDIRECT_PREFIX = (
+    r"""(?>\d*(?:&>>?|<<-|<<<?|<>|[<>]&|>>|>\||[<>])\s*(?:'[^']*'|"[^"]*"|[^\s'"])+)\s+"""
+)
 _EXEC_POS = re.compile(
     r"(?:^|[;&|(\n`{]|\$\()\s*(?:(?:if|then|else|elif|do|while|until|!|env|command|exec|time|nohup)\s+"
     r"|[A-Za-z_][A-Za-z0-9_]*=\S*\s+|" + _REDIRECT_PREFIX + r")*(?:\S*/)?gh(?:\.exe)?\s+"
@@ -68,7 +73,7 @@ def _join_continuations(s: str) -> str:
     return re.sub(r"(?<!\\)((?:\\\\)*)\\\n", r"\1", s)
 
 
-def _strip_comments(command: str, heredocs: bool = True) -> str:
+def _strip_comments(command: str, heredocs: bool = True, quoted_bodies: list[tuple[int, int]] | None = None) -> str:
     """shell と同じ規則でコメントを落とし、`\\`+改行の継続行をつなぐ。
 
     shlex の既定の commenters (`#`) は単語の途中の `#` (`feature#1`、`${x##*/}`) でも
@@ -87,6 +92,9 @@ def _strip_comments(command: str, heredocs: bool = True) -> str:
     置換が閉じると本文を持たない (bash / zsh 実測。後ろの行はコマンドとして走る)。置換の中で
     本文が始まるものがあれば、本文の終わりがシェルで割れるので、コマンド全体を従来どおり
     (heredoc を読み飛ばさずに) 読む。heredocs=False はその従来の読み方 (0.3.2 と同じ)。
+
+    quoted_bodies にリストを渡すと、読み飛ばした本文のうち区切り語に引用がある (shell が展開しない)
+    ものの範囲 (command の中の [開始, 終わり)) を足す。従来の読み方に戻したときは空にする。
     """
     out: list[str] = []
     quote = ""  # "" | "'" | '"'
@@ -178,12 +186,19 @@ def _strip_comments(command: str, heredocs: bool = True) -> str:
             # (bash 3.2 は閉じ括弧で切り、zsh は区切り語の行まで読む)。この本文をコードとして読むと
             # 引用符の対応がずれ、後ろの heredoc を読み飛ばした結果が別の形で「解析できる」ことがある。
             # コマンド全体を、heredoc を読み飛ばさない従来の読み方に戻す
+            if quoted_bodies is not None:
+                quoted_bodies.clear()
             return _strip_comments(command, heredocs=False)
         elif ch == "\n" and pending and not brace:
             out.append("\n")
             i += 1
             for delim, strip_tabs, quoted, _level in pending:
-                i = _skip_heredoc_body(command, i, delim, strip_tabs, quoted, out)
+                start = i
+                i, terminated = _skip_heredoc_body(command, i, delim, strip_tabs, quoted, out)
+                # 終わりの行が見つからない本文は、読み方が shell とずれている (区切り語の読み違いなど)
+                # ことがあるので、安全網からは隠さない
+                if quoted and terminated and quoted_bodies is not None:
+                    quoted_bodies.append((start, i))
             pending = []
             continue
         elif ch == "#" and (not out or (out[-1] in _WORD_START_PREV and escaped_end != len(out))):
@@ -254,13 +269,16 @@ def _heredoc_word(command: str, j: int) -> tuple[str, bool, int] | None:
     return text, quoted, j
 
 
-def _skip_heredoc_body(command: str, i: int, delim: str, strip_tabs: bool, quoted: bool, out: list[str]) -> int:
+def _skip_heredoc_body(
+    command: str, i: int, delim: str, strip_tabs: bool, quoted: bool, out: list[str]
+) -> tuple[int, bool]:
     """位置 i から heredoc の本文を終わりの区切り語の行まで読み飛ばし、改行だけを out に足す。
 
     終わりの行は、行全体が区切り語と一致する行 (`<<-` は行頭のタブを除いて比べる)。
     区切り語に引用が無い heredoc では、shell と同じく `\\`+改行で行をつないでから比べる
     (`ab\\`+改行+`EOF` は終わりの行ではなく、`EO\\`+改行+`F` は終わりの行)。
     終わりの行が無ければコマンドの最後までが本文 (shell も同じ)。
+    (読み終えた位置, 終わりの行で終わったか) を返す。
     """
     n = len(command)
     while i < n:
@@ -279,8 +297,8 @@ def _skip_heredoc_body(command: str, i: int, delim: str, strip_tabs: bool, quote
             break
         logical = "".join(parts)
         if (logical.lstrip("\t") if strip_tabs else logical) == delim:
-            return i
-    return i
+            return i, True
+    return i, False
 
 
 def _is_separator(tok: str) -> bool:
@@ -423,6 +441,10 @@ def _next_cd(state: _CdState, arg: str | None, uncertain_here: bool) -> _CdState
     """
     if arg is None:
         return _CdState()
+    if state.steps and uncertain_here and arg.startswith(("/", "~")):
+        # `cd A || cd /abs`: 絶対パスでも、走らないかもしれない cd は前の移動先を置き換えるとは限らない
+        steps = (*state.steps, arg)
+        return _CdState(steps, " → ".join(steps), True)
     if arg.startswith(("/", "~")) or not state.steps:
         return _CdState((arg,), arg if _unstatic(arg) else None, uncertain_here)
     steps = (*state.steps, arg)
@@ -514,6 +536,18 @@ def _split_global_flags(args: list[str]) -> tuple[str | None, list[str]]:
     return repo, args[i:]
 
 
+# `cd A || exit` の右に置かれると、cd に失敗したときに後ろのコマンドを走らせない語
+_TERMINATORS = {"exit", "return"}
+
+
+def _terminates(segments: list[_Segment], index: int) -> bool:
+    """segments[index] が exit / return で始まるか (`cd A || exit 1` の右側)。"""
+    if index >= len(segments):
+        return False
+    rest, _assigns, _wrappers = _strip_prefix(segments[index].tokens)
+    return bool(rest) and rest[0] in _TERMINATORS
+
+
 def find_invocations(command: str) -> list[Invocation]:
     """コマンド中の `gh pr create` / `gh pr ready` をすべて順に返す。
 
@@ -541,7 +575,8 @@ def find_invocations(command: str) -> list[Invocation]:
 
     found: list[Invocation] = []
     cd = _CdState()
-    for segment in _segments(tokens):
+    segments = _segments(tokens)
+    for index, segment in enumerate(segments):
         seg, assigns, wrappers = _strip_prefix(segment.tokens)
         if not seg:
             continue
@@ -551,6 +586,10 @@ def find_invocations(command: str) -> list[Invocation]:
                 or segment.before == "pipe"
                 or segment.after in ("pipe", "bg")
                 or any(w in _DETACHING_WRAPPERS for w in wrappers)
+                # `cd A || cd B`: 右は A に移れたときだけ走らず、左は失敗しても後ろが続く。
+                # `cd A || exit` の左は、失敗すると後ろが走らないので cwd は A に決まる
+                or segment.before == "or"
+                or (segment.after == "or" and not _terminates(segments, index + 1))
             )
             cd = _next_cd(cd, seg[1] if len(seg) > 1 else None, uncertain_here)
             continue
@@ -589,6 +628,37 @@ def find_invocations(command: str) -> list[Invocation]:
     return found
 
 
+# 標準入力をシェルのコードとして読みうるコマンド語 (`bash <<'EOF'` の本文は実行される)
+# (`sudo bash` / `xargs sh` / `/bin/zsh` などは語の位置を問わない。`run.sh` のようなファイル名は除く。
+# `.` は実行位置に置かれたものだけ)
+_SHELL_READER = re.compile(
+    r"(?:^|[^\w.-])(?:(?:ba|z|k|da|a|s)?sh|eval|source)(?:\.exe)?(?![\w.-])"
+    r"|(?:^|[;&|(\n`{]|\$\()\s*\.\s"
+)
+
+
+def _blank_quoted_bodies(command: str) -> str:
+    """区切り語に引用がある heredoc の本文を改行だけにした文字列を返す (安全網の数え上げ用)。
+
+    引用のある区切り語の本文は、shell が `$(` も backtick も展開しないただの文字列なので、PR の本文で
+    `gh pr create` の使い方を説明しても数えない。本文を読みうるコマンド (sh / bash / eval / source 等) が
+    コマンドのどこかにあれば、本文が実行されうるので加工しない。引用の無い区切り語の本文も加工しない。
+    """
+    spans: list[tuple[int, int]] = []
+    _strip_comments(command, quoted_bodies=spans)
+    if not spans:
+        return command
+    parts: list[str] = []
+    prev = 0
+    for start, end in spans:
+        parts.append(command[prev:start])
+        parts.append("\n" * command.count("\n", start, end))
+        prev = end
+    parts.append(command[prev:])
+    blanked = "".join(parts)
+    return command if _SHELL_READER.search(blanked) else blanked
+
+
 def unresolved_reason(command: str, found: list[Invocation]) -> str | None:
     """解析しきれていない PR 操作がありそうなら、その理由を返す。
 
@@ -596,18 +666,22 @@ def unresolved_reason(command: str, found: list[Invocation]) -> str | None:
     実行位置に現れる PR 操作の数と、構文解析で認識できた数が合わない場合は
     「検査対象を特定できない」として扱い、呼び出し側で止める。
     """
-    command = _join_continuations(command)
+    raw = _join_continuations(command)
+    if "gh" not in raw or "pr" not in raw:
+        return None  # 安全網の正規表現はどれも gh と pr を含む (継続行をつないだ後で見る)
     expected = 0
-    for m in _EXEC_POS.finditer(command):
+    # 数え上げは、区切り語に引用がある heredoc の本文を空行にした文字列で行う (構文解析と同じく本文を数えない)
+    for m in _EXEC_POS.finditer(_join_continuations(_blank_quoted_bodies(command))):
         if m.group(1) == "ready" and "--undo" in m.group(2):
             continue
         expected += 1
-    for m in _NESTED_SHELL.finditer(command):
+    # bash -c の中身と pushd / popd は、引用のある本文の中のものも加工前の文字列で見る (止める側)
+    for m in _NESTED_SHELL.finditer(raw):
         if _EXEC_POS.search(m.group(2)):
             return "PR 操作が別の shell (bash -c / eval 等) の中にある"
     if expected > len(found) or any(not inv.parsed for inv in found):
         return "PR 操作の位置を解析できない (コマンド置換・サブシェル等の中にある)"
-    if found and _DIR_CHANGERS.search(command):
+    if found and _DIR_CHANGERS.search(raw):
         return "pushd / popd による移動先を追跡できない"
     return None
 

@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -402,6 +404,67 @@ class UnresolvedCommandTest(unittest.TestCase):
                 self.assertEqual((out or {}).get("hookSpecificOutput", {}).get("permissionDecision"), "deny")
         # 文中の言及は PR 操作ではない
         self.assertIsNone(self.mod.evaluate('git commit -m "run gh pr create later"', self._tmp.name))
+
+
+class FailClosedTest(unittest.TestCase):
+    """hook が例外で終わるとコマンドがそのまま走るので、想定外の例外は止める側に倒す (in-process)。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        (Path(self._tmp.name) / "sub").mkdir()
+        self.mod = _load_entry()
+        self._env = mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": self._tmp.name}, clear=False)
+        self._env.start()
+        os.environ.pop("VERIFY_PLUGIN_RELEASE_MODE", None)
+
+    def tearDown(self):
+        self._env.stop()
+        self._tmp.cleanup()
+
+    def decision(self, out):
+        return (out or {}).get("hookSpecificOutput", {}).get("permissionDecision")
+
+    def test_cd_lookup_errors_are_denied(self):
+        # 権限の無い dir / 長すぎる名前 / symlink の循環で is_dir / resolve が投げる (Python 3.11〜3.13)
+        for name, err in (
+            ("is_dir", PermissionError(13, "Permission denied")),
+            ("is_dir", OSError(63, "File name too long")),
+            ("resolve", OSError(62, "Too many levels of symbolic links")),
+            ("resolve", RuntimeError("Symlink loop")),
+        ):
+            with self.subTest(name=name, err=err):
+                with mock.patch.object(Path, name, side_effect=err):
+                    try:
+                        out = self.mod.evaluate("cd sub && gh pr create -t x", self._tmp.name)
+                    except Exception as e:  # noqa: BLE001
+                        self.fail(f"evaluate が例外を投げた: {e!r}")
+                self.assertEqual(self.decision(out), "deny")
+                self.assertIn("cd の移動先", out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def run_main(self, payload: dict) -> dict | None:
+        stdin = mock.Mock()
+        stdin.buffer.read.return_value = json.dumps(payload).encode("utf-8")
+        stdout = io.StringIO()
+        with mock.patch.object(sys, "stdin", stdin), mock.patch.object(sys, "stdout", stdout), \
+                mock.patch.object(sys, "argv", ["verify-plugin-release"]):
+            try:
+                self.mod.main()
+            except Exception as e:  # noqa: BLE001
+                self.fail(f"main が例外を投げた: {e!r}")
+        return json.loads(stdout.getvalue()) if stdout.getvalue().strip() else None
+
+    def test_unexpected_error_in_evaluate_is_denied(self):
+        payload = {"tool_name": "Bash", "tool_input": {"command": "gh pr create -t x"}, "cwd": self._tmp.name}
+        with mock.patch.object(self.mod, "evaluate", side_effect=ValueError("boom")):
+            out = self.run_main(payload)
+        self.assertEqual(self.decision(out), "deny")
+        self.assertIn("ValueError: boom", out["hookSpecificOutput"]["permissionDecisionReason"])
+        # warn では止めずに伝える
+        os.environ["VERIFY_PLUGIN_RELEASE_MODE"] = "warn"
+        with mock.patch.object(self.mod, "evaluate", side_effect=ValueError("boom")):
+            out = self.run_main(payload)
+        self.assertIsNone(self.decision(out))
+        self.assertIn("ValueError: boom", out["hookSpecificOutput"]["additionalContext"])
 
 
 class ManualCheckTest(unittest.TestCase):
