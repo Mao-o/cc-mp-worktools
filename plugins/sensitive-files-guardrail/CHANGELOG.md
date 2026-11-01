@@ -23,6 +23,27 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.36.1
+
+**テスト整理 (挙動の変更なし)。check-sensitive-files の suite で repo を作る固定費を減らした (patch bump)。**
+hook・`hooks.json`・README の挙動は変わらない。製品コードは変えていない。テスト件数: check 238 → **237**
+(3 件を subTest 1 件に畳み、ケース数は維持。repo の config を見るテストを 1 件足した)。実時間は手元の
+計測で 25.5 → 20.2 秒。
+
+- `tests/_testutil.py` の `init_repo` は、user / gpgsign の設定を `git config` の 3 回の起動ではなく、
+  `git init` が作った `.git/config` への追記 (LF) で書く。repo 1 つあたりの git の起動が 4 → 1 回になる。
+  追記した設定を git が repo の config として読めることは `TestInitRepoWritesTheRepoConfig` が見る
+  (Windows の CI でも流れる)。helper が起動する git の列の前提 (`init` / `add` / `commit`) と docstring を
+  合わせた
+- 外側の `GIT_DIR` が helper に届いて `git init` が外側の repo に向いた形 (`.git/config` に書けない) も、
+  例外のまま crash させず失敗として報告する
+- `test_checker.py`: git を mock するテストと git を呼ばないテスト (`TestGitFailureVisibility` の
+  git 不在 / timeout、`TestSharedGitBudget` 全件、`in_submodule` の完全一致の純関数テスト) を、repo を
+  作らない基底 (`BaseWithTmpDir`) か `unittest.TestCase` へ移した。実際の git で黙ることを見る 2 件は
+  `TestGitFailureVisibilityStaysSilent` に分けた
+- `TestFindSensitiveFiles` の除外 3 件 (`.env.example` / `id_rsa.pub` / `credentials.example.json`) を
+  subTest に畳んだ (ラベルは元のテスト名)
+
 ## 0.36.0
 
 **Stop の再帰防止を「直前の Stop でこの hook が block したとき」に絞った (minor bump)。**
