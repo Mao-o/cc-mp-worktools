@@ -166,6 +166,38 @@ class GuardTest(GuardBase):
                 self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
         self.assertIsNone(evaluate(bash(f'cd "{self.main}" | cat; git reset --hard 2>&1 | tail -1', self.a)))
 
+    def test_last_pipeline_element_cd_may_remain(self):
+        # zsh (Bash tool の shell) は pipeline の最後の要素を今の shell で動かすので、そこでの cd は残る
+        # (bash ではサブシェルで残らない)。両方の読みで追い、どちらかで別 checkout への書き込みなら止める
+        for cmd in (
+            f'printf a | cd "{self.main}" && git commit -m x',
+            f'cat <<EOF | cd "{self.main}" && git add .\nbody\nEOF',
+            f'printf a | cd "{self.main}"; git reset --hard',
+            f'printf a |& pushd "{self.main}" >/dev/null && git stash',
+            f'printf a | {{ cd "{self.main}"; }}; git stash',
+            # brace group の中の後ろの git は、どちらの shell でも移動先で動く
+            f'printf a | {{ cd "{self.main}"; git commit -m x; }}',
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+        # pipeline の途中の要素の cd は、どちらの shell でも残らない (従来どおり)
+        for cmd in (
+            f'printf a | cd "{self.main}" | cat; git reset --hard',
+            f'cd "{self.main}" | cat && git commit -m x',
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(evaluate(bash(cmd, self.a)))
+        # 最後の要素の cd が自分の worktree へ戻っても、bash の読み (残らない) では main のまま
+        for cmd in (
+            f'cd "{self.main}"; printf a | cd "{self.a}"; git reset --hard',
+            # `|` の直後の改行は pipeline の続きなので、次の cd も最後の要素
+            f'cd "{self.main}"; printf a |\n cd "{self.a}"; git reset --hard',
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+        # 読み取りは止めない
+        self.assertIsNone(evaluate(bash(f'printf a | cd "{self.main}" && git status', self.a)))
+
     def test_popd_returns_to_the_pushed_directory(self):
         cmd = f'cd "{self.main}"; pushd "{self.a}"; popd; git reset --hard'
         self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")

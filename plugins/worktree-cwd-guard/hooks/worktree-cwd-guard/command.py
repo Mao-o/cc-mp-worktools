@@ -603,6 +603,8 @@ class _Analyzer:
                 seg.append(tok)  # リダイレクト記号はそのまま
                 continue
             for op in _OPS.findall(tok):
+                if op == "\n" and not seg and self.in_pipe:
+                    continue  # `|` の後ろの改行は pipeline の続き
                 self._flush(seg, next_is_pipe=op in ("|", "|&"))
                 seg = []
                 self._operator(op)
@@ -639,6 +641,8 @@ class _Analyzer:
         self.list_start = self._snapshot()
 
     def _flush(self, seg: list[str], next_is_pipe: bool) -> None:
+        # pipeline の最後の要素は、zsh では今の shell で動き (中の cd が残る)、bash ではサブシェルで動く
+        last = self.in_pipe and not next_is_pipe
         subshell = next_is_pipe or self.in_pipe
         self.in_pipe = next_is_pipe
         if not seg:
@@ -646,8 +650,14 @@ class _Analyzer:
         run, skipped = self._split()
         if run:
             after = self._command(seg, run)
-            # pipeline の要素はサブシェルで動くので、中の cd は外に残らない
-            run = self._both(run) if subshell else after
+            if last:
+                # 残った場合 (zsh) と残らない場合 (bash) の両方を追う
+                run = self._both(run) | after
+            elif subshell:
+                # pipeline の途中の要素はどちらの shell でもサブシェルで動くので、中の cd は外に残らない
+                run = self._both(run)
+            else:
+                run = after
         self.alts = run | skipped
 
     # --- 1 コマンド -----------------------------------------------------------
