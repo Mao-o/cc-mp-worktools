@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.4
+
+**テスト整理 (挙動の変更なし、patch bump)。** 製品コード・`hooks.json`・README の挙動は変わらない。
+
+- 他のテストが同じ変異を殺す重複・包含の 5 件を削除した (`test_detectors` の firebase-functions タグなしの 1 件、`test_new_stack_detectors` の Swift / Scala / Elixir の package manager 3 件、`test_cli` の `--root` ヒントの 1 件)。各変異 (firebase-functions タグの無条件付与、pm の Swift / sbt / mix の脱落、ヒントの `--root` 欠落) は、削除後の suite も assertion の失敗で検出する
+- 表駆動 + subTest に統合した (元のテスト名はケースのラベルとして残し、ケース数は維持): `test_detectors` の Firebase 検出、`test_pm` の優先順位、`test_new_stack_detectors` の dotnet の検出と package manager、`test_domain_types` の除外パスと候補ファイル上限
+- `HasFirebaseMemoizationTest` を、`ctx.results` を直接読み書きする形から「2 回目の呼び出しの前にディスクを変えても結果が変わらない」という振る舞いの検査に書き換えた
+
 ## 0.12.3
 
 icon と導入手順の追加 (挙動の変更なし、patch bump)。

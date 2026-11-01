@@ -60,12 +60,6 @@ class SwiftStackDetectorTest(unittest.TestCase):
             )
             self.assertEqual(_detect(SwiftStackDetector(), root), ["swift"])
 
-    def test_package_swift_is_the_package_manager(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "Package.swift").write_text("// swift-tools-version:5.9\n")
-            self.assertEqual(detect_package_manager(_ctx(root)), "swift")
-
     def test_xcodeproj_alone_is_detected(self):
         # merge-review finding: an Xcode-only app (no Package.swift) has no
         # SwiftPM manifest at all, but *.xcodeproj is still Swift's own
@@ -127,81 +121,62 @@ class SwiftStackDetectorTest(unittest.TestCase):
             self.assertIsNone(detect_package_manager(_ctx(root)))
 
 
+_SDK_PROJECT = '<Project Sdk="Microsoft.NET.Sdk"></Project>\n'
+_VCXPROJ_ONLY_SLN = (
+    'Microsoft Visual Studio Solution File\n'
+    'Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "App", '
+    '"App.vcxproj", "{GUID}"\nEndProject\n'
+)
+
+
 class DotnetStackDetectorTest(unittest.TestCase):
+    """Cases are (label, {file name: content}, expected); the label is the
+    name the case had as a separate test."""
+
     def test_no_signal_is_not_detected(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(_detect(DotnetStackDetector(), Path(tmp)), [])
 
-    def test_root_csproj_is_detected(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "App.csproj").write_text(
-                '<Project Sdk="Microsoft.NET.Sdk"></Project>\n'
-            )
-            self.assertEqual(_detect(DotnetStackDetector(), root), ["dotnet"])
-
-    def test_root_sln_is_detected(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "App.sln").write_text(
-                'Microsoft Visual Studio Solution File\n'
-                'Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "App", '
-                '"App.csproj", "{GUID}"\nEndProject\n'
-            )
-            self.assertEqual(_detect(DotnetStackDetector(), root), ["dotnet"])
-
-    def test_root_slnx_is_detected(self):
-        # merge-review finding (round 5): .slnx (the newer XML-based
-        # solution format, .NET SDK 9+/VS 17.10+) was not recognized at
-        # all -- only the classic .sln suffix was checked.
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "App.slnx").write_text(
-                '<Solution><Project Path="App.csproj" /></Solution>\n'
-            )
-            self.assertEqual(_detect(DotnetStackDetector(), root), ["dotnet"])
-
-    def test_root_sln_referencing_only_vcxproj_is_not_detected(self):
-        # merge-review finding (round 6): a root-level .sln is not proof of
-        # .NET on its own -- a Visual Studio solution can hold only native
-        # C++ projects (*.vcxproj). Only a solution that actually
-        # references a managed (.csproj/.fsproj/.vbproj) project counts.
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "App.sln").write_text(
-                'Microsoft Visual Studio Solution File\n'
-                'Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "App", '
-                '"App.vcxproj", "{GUID}"\nEndProject\n'
-            )
-            self.assertEqual(_detect(DotnetStackDetector(), root), [])
-
-    def test_root_slnx_referencing_fsproj_is_detected(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "App.slnx").write_text(
-                '<Solution><Project Path="src/App.fsproj" /></Solution>\n'
-            )
-            self.assertEqual(_detect(DotnetStackDetector(), root), ["dotnet"])
-
-    def test_root_fsproj_is_detected(self):
-        # merge-review finding: a solutionless F# repo (no .sln, just an
-        # F# project file) was never recognized as dotnet at all -- only
-        # .csproj/.sln were checked.
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "App.fsproj").write_text(
-                '<Project Sdk="Microsoft.NET.Sdk"></Project>\n'
-            )
-            self.assertEqual(_detect(DotnetStackDetector(), root), ["dotnet"])
-
-    def test_root_vbproj_is_detected(self):
-        # Same gap, VB.NET side.
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "App.vbproj").write_text(
-                '<Project Sdk="Microsoft.NET.Sdk"></Project>\n'
-            )
-            self.assertEqual(_detect(DotnetStackDetector(), root), ["dotnet"])
+    def test_detection(self):
+        cases = [
+            ("test_root_csproj_is_detected",
+             {"App.csproj": _SDK_PROJECT}, ["dotnet"]),
+            ("test_root_sln_is_detected",
+             {"App.sln": 'Microsoft Visual Studio Solution File\n'
+                         'Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "App", '
+                         '"App.csproj", "{GUID}"\nEndProject\n'},
+             ["dotnet"]),
+            # merge-review finding (round 5): .slnx (the newer XML-based
+            # solution format, .NET SDK 9+/VS 17.10+) was not recognized at
+            # all -- only the classic .sln suffix was checked.
+            ("test_root_slnx_is_detected",
+             {"App.slnx": '<Solution><Project Path="App.csproj" /></Solution>\n'},
+             ["dotnet"]),
+            # merge-review finding (round 6): a root-level .sln is not proof
+            # of .NET on its own -- a Visual Studio solution can hold only
+            # native C++ projects (*.vcxproj). Only a solution that actually
+            # references a managed (.csproj/.fsproj/.vbproj) project counts.
+            ("test_root_sln_referencing_only_vcxproj_is_not_detected",
+             {"App.sln": _VCXPROJ_ONLY_SLN}, []),
+            ("test_root_slnx_referencing_fsproj_is_detected",
+             {"App.slnx": '<Solution><Project Path="src/App.fsproj" /></Solution>\n'},
+             ["dotnet"]),
+            # merge-review finding: a solutionless F# repo (no .sln, just an
+            # F# project file) was never recognized as dotnet at all -- only
+            # .csproj/.sln were checked.
+            ("test_root_fsproj_is_detected",
+             {"App.fsproj": _SDK_PROJECT}, ["dotnet"]),
+            # Same gap, VB.NET side.
+            ("test_root_vbproj_is_detected",
+             {"App.vbproj": _SDK_PROJECT}, ["dotnet"]),
+        ]
+        for label, files, expected in cases:
+            with self.subTest(label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    for name, content in files.items():
+                        (root / name).write_text(content)
+                    self.assertEqual(_detect(DotnetStackDetector(), root), expected)
 
     def test_nested_csproj_is_not_detected(self):
         # Root-level check only, matching the majority convention among
@@ -210,56 +185,34 @@ class DotnetStackDetectorTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "src").mkdir()
-            (root / "src" / "App.csproj").write_text(
-                '<Project Sdk="Microsoft.NET.Sdk"></Project>\n'
-            )
+            (root / "src" / "App.csproj").write_text(_SDK_PROJECT)
             self.assertEqual(_detect(DotnetStackDetector(), root), [])
 
-    def test_csproj_is_the_package_manager(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "App.csproj").write_text(
-                '<Project Sdk="Microsoft.NET.Sdk"></Project>\n'
-            )
-            self.assertEqual(detect_package_manager(_ctx(root)), "dotnet")
-
-    def test_fsproj_is_the_package_manager(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "App.fsproj").write_text(
-                '<Project Sdk="Microsoft.NET.Sdk"></Project>\n'
-            )
-            self.assertEqual(detect_package_manager(_ctx(root)), "dotnet")
-
-    def test_vbproj_is_the_package_manager(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "App.vbproj").write_text(
-                '<Project Sdk="Microsoft.NET.Sdk"></Project>\n'
-            )
-            self.assertEqual(detect_package_manager(_ctx(root)), "dotnet")
-
-    def test_slnx_is_the_package_manager(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "App.slnx").write_text(
-                '<Solution><Project Path="App.csproj" /></Solution>\n'
-            )
-            self.assertEqual(detect_package_manager(_ctx(root)), "dotnet")
-
-    def test_vcxproj_only_solution_is_not_the_package_manager(self):
-        # merge-review finding (round 6): same vcxproj-only-solution gap as
-        # DotnetStackDetectorTest above, exercised through
-        # detect_package_manager() -- core/pm.py shares has_dotnet_project()
-        # with the detector, so this pins that both call sites agree.
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "App.sln").write_text(
-                'Microsoft Visual Studio Solution File\n'
-                'Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "App", '
-                '"App.vcxproj", "{GUID}"\nEndProject\n'
-            )
-            self.assertIsNone(detect_package_manager(_ctx(root)))
+    def test_package_manager(self):
+        # core/pm.py shares has_dotnet_project() with the detector, so the
+        # vcxproj-only case pins that both call sites agree.
+        cases = [
+            ("test_csproj_is_the_package_manager",
+             {"App.csproj": _SDK_PROJECT}, "dotnet"),
+            ("test_fsproj_is_the_package_manager",
+             {"App.fsproj": _SDK_PROJECT}, "dotnet"),
+            ("test_vbproj_is_the_package_manager",
+             {"App.vbproj": _SDK_PROJECT}, "dotnet"),
+            ("test_slnx_is_the_package_manager",
+             {"App.slnx": '<Solution><Project Path="App.csproj" /></Solution>\n'},
+             "dotnet"),
+            # merge-review finding (round 6): same vcxproj-only-solution gap
+            # as in test_detection, exercised through detect_package_manager().
+            ("test_vcxproj_only_solution_is_not_the_package_manager",
+             {"App.sln": _VCXPROJ_ONLY_SLN}, None),
+        ]
+        for label, files, expected in cases:
+            with self.subTest(label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    for name, content in files.items():
+                        (root / name).write_text(content)
+                    self.assertEqual(detect_package_manager(_ctx(root)), expected)
 
 
 class ScalaStackDetectorTest(unittest.TestCase):
@@ -272,12 +225,6 @@ class ScalaStackDetectorTest(unittest.TestCase):
             root = Path(tmp)
             (root / "build.sbt").write_text('name := "app"\nversion := "0.1.0"\n')
             self.assertEqual(_detect(ScalaStackDetector(), root), ["scala"])
-
-    def test_build_sbt_is_the_package_manager(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "build.sbt").write_text('name := "app"\n')
-            self.assertEqual(detect_package_manager(_ctx(root)), "sbt")
 
 
 class ElixirStackDetectorTest(unittest.TestCase):
@@ -292,12 +239,6 @@ class ElixirStackDetectorTest(unittest.TestCase):
                 "defmodule App.MixProject do\n  use Mix.Project\nend\n"
             )
             self.assertEqual(_detect(ElixirStackDetector(), root), ["elixir"])
-
-    def test_mix_exs_is_the_package_manager(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "mix.exs").write_text("defmodule App.MixProject do\nend\n")
-            self.assertEqual(detect_package_manager(_ctx(root)), "mix")
 
 
 class CmakeStackDetectorTest(unittest.TestCase):
