@@ -413,7 +413,11 @@ v0.19.0 から、その CLI に**ディレクトリ単位でアカウントを�
 - 固定は、そのコマンドが走りうる**すべての**ディレクトリで確かめる (v0.29.3)。
   `cd a && firebase deploy; cd ../b && firebase deploy` は a と b の両方で `firebase use` の記録が
   要る。括弧・条件・パイプの中の `cd` があるコマンド (`(cd sub && npm test); firebase deploy`) は、
-  その `cd` が後続に効かない場合もあるので、移動前と移動後の両方で確かめる。作業ディレクトリを
+  その `cd` が後続に効かない場合もあるので、移動前と移動後の両方で確かめる。`cd` より後ろにだけ
+  パイプ・`||`・背景実行・波括弧・制御構文がある形 (`cd sub && firebase deploy | tee log`) は移動後
+  だけで確かめる。外部プログラムとして走る `cd` (`nohup cd sub` / `env cd sub` など。シェルは移動
+  しない) も、移動前と移動後の両方で確かめる。環境変数で固定する aws / gcloud は、ディレクトリに
+  よらず固定とみなす。作業ディレクトリを
   変える `sudo` の option (`-D` / `--chdir` / `-R` / `--chroot` / `-i` / `--login`) の中で走る
   コマンドは、どのディレクトリで走るかを確かめないので固定とみなさない (環境変数で固定する
   aws / gcloud も同じ)
@@ -451,7 +455,12 @@ PreToolUse hook には届かない ([direnv / CLAUDE_ENV_FILE 経由の env は�
   `&&` の右の `cd` の後に `;` / 改行で次のコマンドが続くコマンドでは、相対パスの kubeconfig を
   決められないとして止める (リモート read のみなら警告。v0.28.0)。`cd a; cd b && kubectl ...` の
   ように `&&` と `;` だけで繋いだ `cd` は移動先で解決する。firebase の相対パスの `--config` も
-  同じ規則で解決する (v0.29.3)
+  同じ規則で解決する (v0.29.3)。外部プログラムとして走る `cd` (`nohup cd sub` / `env cd sub` /
+  `sudo cd sub` / `/usr/bin/cd sub`、zsh の `command cd sub`) があるコマンドも止める (シェルは移動
+  しない。v0.29.3)
+- 行き先を静的に決められない `cd` (`cd "$D"` / `cd -` / `popd`、zsh の `chdir`、`CDPATH` がある
+  ときの相対パスの `cd sub`) の後のコマンドは、起動リポジトリの外かもしれないとして止める。
+  `CDPATH` は環境に export されたものと `CDPATH=x cd sub` の前置きを見る (v0.29.3)
 - 作業ディレクトリを変える `sudo` の option (`-D` / `--chdir` / `-R` / `--chroot` / `-i` /
   `--login`) の中で走るコマンドは、相対パスの kubeconfig / `--config` をどのファイルに解決するかを
   決められないとして止める (リモート read のみなら警告。v0.29.3。0.29.2 までは起動側のファイルで

@@ -38,12 +38,15 @@ from core.command_parser import (
     _ansi_c_quote_end,
     extract_candidate_readings,
     extract_candidates,
+    external_chdir_candidates,
+    split_with_separators,
 )
 
 # 作業ディレクトリを変える組み込みコマンド。`builtin cd` は分解の時点で `cd` になる。
 _CHDIR_COMMANDS = frozenset({"cd", "pushd"})
-# 行き先を静的に決められないもの (popd はスタック次第)。
-_UNKNOWN_DIR_COMMANDS = frozenset({"popd"})
+# 行き先を静的に決められないもの (popd はスタック次第)。`chdir` は zsh の cd の同義語で、bash には
+# 無い (v0.29.3)。どちらのシェルで走るか分からないので、行き先は決められない扱いにする。
+_UNKNOWN_DIR_COMMANDS = frozenset({"popd", "chdir"})
 # `cd` の option (`cd -P dir`)。値は取らない。
 _CD_FLAGS = frozenset({"-L", "-P", "-e", "-@"})
 # 値の中にあると静的に解決できない文字 (展開・glob)。
@@ -95,10 +98,13 @@ def is_inside(directory: str | None, root: Path | None) -> bool:
     return real == root or root in real.parents
 
 
-def _chdir_target(segment: str, current: str | None) -> tuple[bool, str | None]:
+def _chdir_target(
+    segment: str, current: str | None, inline_env: dict | None = None
+) -> tuple[bool, str | None]:
     """`segment` が作業ディレクトリを変えるなら (True, 移動先 or None) を返す。
 
     移動先を静的に決められない形は (True, None)。変えないセグメントは (False, None)。
+    `inline_env` はセグメントの前置きの代入 (`CDPATH=x cd sub` の `CDPATH`)。
     """
     try:
         words = shlex.split(segment)
@@ -147,10 +153,25 @@ def _chdir_target(segment: str, current: str | None) -> tuple[bool, str | None]:
         if not home:
             return True, None
         target = home + target[1:]
+    if _cdpath_applies(target, inline_env):
+        return True, None
     if physical:
         # `cd -P lnk/..` は symlink を解いてから `..` を辿る (実体の親。bash と同じ)。
         return True, os.path.realpath(os.path.join(current, target))
     return True, os.path.normpath(os.path.join(current, target))
+
+
+def _cdpath_applies(target: str, inline_env: dict | None) -> bool:
+    """`CDPATH` が `cd <target>` の行き先を変えうるか (v0.29.3)。
+
+    `CDPATH` (環境か、セグメントの前置きの代入) が空でなく、行き先が `/` で始まらず、最初の
+    要素が `.` / `..` でない相対パスのとき True。bash は `CDPATH` の候補を先に探し、zsh は
+    作業ディレクトリを先に探すので、シェルで行き先が割れる (呼び出し側は決められない扱い)。
+    同じコマンドの中の `export CDPATH=...` は追わない。
+    """
+    if target.startswith("/") or target.split("/", 1)[0] in (".", ".."):
+        return False
+    return bool(os.environ.get("CDPATH") or (inline_env or {}).get("CDPATH"))
 
 
 # 環境変数を変えるセグメント (v0.19.0)。ディレクトリ単位の固定は**起動時の env**で
@@ -206,7 +227,11 @@ MAX_POSSIBLE_DIRS = 32
 
 
 def segment_dirs(
-    command: str, cwd: str, *, maybe_skipped: bool = False
+    command: str,
+    cwd: str,
+    *,
+    maybe_skipped: bool = False,
+    sure: frozenset[str] = frozenset(),
 ) -> dict[str, set[str | None]]:
     """各セグメント (分解した形の文字列) → それが走るディレクトリの集合。
 
@@ -223,25 +248,40 @@ def segment_dirs(
     可能性を残す: `cd` の後は、移動前と移動後のディレクトリの和にいるものとする。括弧・条件・
     パイプの中の `cd` (`chdir_is_sequential` が False の形) で、移動前のディレクトリを落とさない
     ための見積もり (`(cd sub && true); firebase deploy` の firebase は起動側で走る)。
-    可能性の数が `MAX_POSSIBLE_DIRS` を超えたら None に畳む。
+    可能性の数が `MAX_POSSIBLE_DIRS` を超えたら None に畳む。`sure` (`sure_chdirs` の結果) に
+    入っている `cd` のセグメントは、`maybe_skipped` でも移動前を残さない (確実に走って後続に効く)。
+    ただし `&&` の右にある `cd` (`false && cd sub && x; y`) は、その `&&` の鎖が終わったところで
+    鎖の始まりのディレクトリも残す (`false` が失敗すると `y` は移動前で走る)。
     """
     result: dict[str, set[str | None]] = {}
     for reading in extract_candidate_readings(command):
         current: frozenset[str | None] = frozenset({cwd or None})
         list_start = current
-        for segment, _inline_env, sep in reading:
-            moved = [_chdir_target(segment, here) for here in current]
+        chain_start = current
+        conditional = False  # 今の `&&` の鎖の中で、鎖の先頭でない確実な cd が効いた
+        prev_sep = ""
+        for segment, inline_env, sep in reading:
+            if prev_sep != "&&":
+                chain_start = current
+            moved = [_chdir_target(segment, here, inline_env) for here in current]
             if moved and moved[0][0]:
                 targets = frozenset(target for _changes, target in moved)
-                current = (current | targets) if maybe_skipped else targets
-                if len(current) > MAX_POSSIBLE_DIRS:
-                    current = frozenset({None})
+                keep = maybe_skipped and segment not in sure
+                current = (current | targets) if keep else targets
+                if maybe_skipped and not keep and prev_sep == "&&":
+                    conditional = True
             else:
                 result.setdefault(segment, set()).update(current)
+            if sep != "&&" and conditional:
+                current = current | chain_start
+                conditional = False
+            if len(current) > MAX_POSSIBLE_DIRS:
+                current = frozenset({None})
             if sep == BACKGROUND:
                 current = list_start
             if sep in LIST_TERMINATORS:
                 list_start = current
+            prev_sep = sep
     return result
 
 
@@ -329,7 +369,8 @@ def chdir_is_sequential(command: str) -> bool:
     決める用途では誤 allow になる。その用途の呼び出し側は、これが False なら走る
     ディレクトリを「決められない」として扱う。
 
-    False にする形: 作業ディレクトリを変えるセグメントがあり、かつ引用符の外に `(` `)` `{`
+    False にする形: 外部プログラムとして走る `cd` (`nohup cd sub` / `env cd sub` 等。
+    `command_parser.external_chdir_candidates`) がある。作業ディレクトリを変えるセグメントがあり、かつ引用符の外に `(` `)` `{`
     `}` `|` (`||` を含む) backtick・背景実行の `&`・制御構文の語 (`if` / `for` / `case` 等)
     のどれかがある。または `&&` の右の cd の後に `;` / 改行で次のリストが続く
     (`false && cd sub; kubectl ...`)。`cd` が無ければ常に True (`segment_dirs` は移動を
@@ -338,6 +379,10 @@ def chdir_is_sequential(command: str) -> bool:
     """
     if not _changes_dir(command):
         return True
+    # 外部プログラムとして走る cd (`nohup cd sub` / `env cd sub`。v0.29.3) は分解すると `cd sub` に
+    # 見えるが、シェルは移動しない。
+    if external_chdir_candidates(command):
+        return False
     text = _unquoted(command)
     if any(c in _NON_SEQUENTIAL_CHARS for c in text):
         return False
@@ -358,6 +403,94 @@ def _changes_dir(command: str) -> bool:
     return any(
         _chdir_target(segment, "/")[0] for segment, _env in extract_candidates(command)
     )
+
+
+# `cd` の直後にあると、その `cd` が走らなかった (失敗した) まま後続が走りうる区切り。
+_UNSURE_SEPARATORS = frozenset({"|", "||", "|&", "&"})
+# `cd sub || exit` の `exit`: cd が失敗したらシェルが終わるので、後続は移動後で走る。`return` は
+# 関数の外では失敗するだけで後続が走る (bash / zsh で実測) ので入れない。
+_ABORT_WORDS = frozenset({"exit"})
+
+
+def sure_chdirs(command: str) -> frozenset[str]:
+    """確実に走り、後続のセグメントに効く `cd` / `pushd` のセグメント (分解した形) の集合 (v0.29.3)。
+
+    `chdir_is_sequential` はコマンド全体で 1 つの答えを出すので、`cd sub && firebase deploy | tail`
+    のように `cd` より**後ろ**にだけパイプ・`||`・背景実行・波括弧・制御構文がある形でも False に
+    なる。ディレクトリ単位の固定の判定 (`segment_dirs(..., maybe_skipped=True, sure=...)`) では、
+    ここで返す `cd` の後は移動後のディレクトリだけで確かめる。
+
+    `cd` を確実とみなす条件 (どれかを満たさなければ確実でない):
+
+    - それより前 (自分のセグメントを含む) の引用符の外に `(` `)` `{` `}` backtick・制御構文の語が
+      無い (後で閉じる範囲の中かもしれない)。分割したセグメントの中の `|` / 単独の `&` も同じ
+    - 直前の区切りが `|` / `||` / `|&` でない (`echo x | cd sub` はパイプの中。zsh では最後の段が
+      シェル自身で走るので移動し、bash では移動しない)。それより前の、完結したパイプライン
+      (`git status | head; cd sub && ...`) は見ない
+    - 直後の区切りが `&&` / `;` / 改行 / 末尾、または `|| exit`
+    - 外部プログラムとして走る cd ではない (`external_chdir_candidates`)。セグメントが 1 候補だけ
+      (シェル経由の wrapper の中身を分割し直したものでない)
+
+    `&&` の右の `cd` (`false && cd sub && firebase deploy; echo done`) は、同じ `&&` の鎖の中の後続に
+    だけ確実に効く。鎖が終わったら移動前も残すのは `segment_dirs` 側が行う。
+    括弧は分解で落ちるので `(cd sub && firebase deploy)` は確実とみなさない。読みが 2 つ以上ある
+    コマンド (`command_parser.extract_candidate_readings`) は、どの `cd` も確実とみなさない。
+    """
+    if len(extract_candidate_readings(command)) != 1:
+        return frozenset()
+    external = external_chdir_candidates(command)
+    raw = split_with_separators(command)
+    n = len(raw)
+    sure: set[str] = set()
+    unsure: set[str] = set()
+    tainted = False  # ここまでに括弧・波括弧・制御構文の語などがあった (後ろ全部に効く)
+    after_unsure = False  # 直前の区切りがパイプか `||` (直後の 1 セグメントにだけ効く)
+    for i, (seg, sep) in enumerate(raw):
+        seg_tainted = _taints(seg)
+        # `cd sub || exit` (exit がパイプの中なら subshell が終わるだけなので除く)
+        aborts = (
+            sep == "||"
+            and i + 1 < n
+            and _first_word(raw[i + 1][0]) in _ABORT_WORDS
+            and raw[i + 1][1] not in _UNSURE_SEPARATORS
+        )
+        cands = extract_candidates(seg)
+        cds = [c for c, _env in cands if _chdir_target(c, "/")[0]]
+        if cds:
+            ok = (
+                not tainted
+                and not seg_tainted
+                and not after_unsure
+                and len(cands) == 1
+                and (sep not in _UNSURE_SEPARATORS or aborts)
+                and cds[0] not in external
+            )
+            (sure if ok else unsure).update(cds)
+        if seg_tainted:
+            tainted = True
+        after_unsure = sep in _UNSURE_SEPARATORS and sep != BACKGROUND
+    return frozenset(sure - unsure)
+
+
+def _taints(segment: str) -> bool:
+    """分割したセグメントの引用符の外に、括弧・波括弧・パイプ・backtick・背景実行・制御構文の語があるか。"""
+    text = _unquoted(segment)
+    if any(c in _NON_SEQUENTIAL_CHARS for c in text) or _has_lone_ampersand(text):
+        return True
+    word: list[str] = []
+    for c in text + " ":
+        if c in _WORD_BREAKS:
+            if "".join(word) in _CONTROL_WORDS:
+                return True
+            word = []
+        else:
+            word.append(c)
+    return False
+
+
+def _first_word(segment: str) -> str:
+    parts = segment.split(None, 1)
+    return parts[0] if parts else ""
 
 
 def _conditional_chdir_before_next_list(command: str, text: str) -> bool:

@@ -648,6 +648,11 @@ PIN_HINT = (
     "(/cloud-account-guard:project-accounts)。"
 )
 
+# 固定がディレクトリ (project root) ごとに決まる (v0.29.3)。dispatcher は target が走りうる全部の
+# ディレクトリで `is_pinned` を確かめ、決められないディレクトリがあれば固定されていない側に倒す。
+# 宣言の無い service (aws / gcloud の環境変数の固定) はディレクトリを見ない。
+PIN_DEPENDS_ON_DIR = True
+
 
 def is_pinned(env, project_dir: str) -> bool:
     """その project root で `firebase use` の切替先が記録されているか (期待値が未登録のときの判定)。

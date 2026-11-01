@@ -1828,6 +1828,36 @@ cache の状態ファイルのうち成功 cache の entry と epoch は、hook 
   (`(cd sub && true); firebase deploy` は起動側と sub の両方)。可能性の数は相対パスの `cd` ごとに倍に
   なりうるので、`MAX_POSSIBLE_DIRS` (32) を超えたら None に畳む (固定でない側)
 - firebase の固定 (configstore の記録) は親方向に探すので、起動側の記録はその下のディレクトリにも効く
+- 締めすぎないように、`workdir.sure_chdirs` が「確実に走って後続に効く `cd`」を返し、
+  `segment_dirs(..., sure=...)` はその `cd` の後だけ移動前を残さない。確実とみなすのは、それより
+  前と自分のセグメントの引用符の外に括弧・波括弧・backtick・制御構文の語が無く (後で閉じる範囲の
+  中かもしれない)、直前の区切りがパイプ / `||` でなく、直後の区切りが `&&` / `;` / 改行 / 末尾
+  (または `|| exit`) の `cd`。それより前の完結したパイプライン (`git status | head; cd sub`) は
+  見ない。`&&` の右の `cd` (`false && cd sub && x; y`) は、その `&&` の鎖が終わったところで
+  `segment_dirs` が鎖の始まりのディレクトリも残す。読みが 2 つ以上あるコマンドは、どの `cd` も
+  確実とみなさない。`return` は関数の外では失敗するだけで後続が走る (bash) ので `|| exit` だけを
+  数える。`X && cd sub && { firebase deploy; }` は鎖の終わりを `;` で見るため移動前も残る (締めすぎ
+  側。既知)
+- 固定がディレクトリに依存するのは `PIN_DEPENDS_ON_DIR` を宣言した service (firebase) だけ。
+  宣言の無い service (aws / gcloud の環境変数) は、ディレクトリ集合を見ずに `is_pinned(env, None)` を
+  1 回呼ぶ。可能性の数の上限で畳んだ None で環境変数の固定まで消していた (0.29.3 の途中の変更で入った退行)。
+  作業ディレクトリを変える sudo の option の中で走る target は、dispatcher が directories に None
+  (集合ではなく) を渡し、どの service でも固定でないとする
+
+**外部プログラムとして走る `cd` / `CDPATH` / zsh の `chdir`**
+
+- `_normalize_segment_chdir` は、剥がした wrapper がシェル自身で後続を走らせるもの
+  (`_IN_SHELL_WRAPPERS` = `time` / `builtin` / `exec`) 以外か、パス付きのコマンド名を basename に
+  揃えたかを返す。`command_parser.external_chdir_candidates` は、そうして得た候補のうち
+  `cd` / `pushd` / `popd` / `chdir` のものを返す。`chdir_is_sequential` はそれがあれば False
+  (相対パスの context は決められない)、`sure_chdirs` はそれを確実とみなさない (固定は移動前も)。
+  内外の判定は従来どおり移動したものとして扱う (外に倒れるだけ)
+- `command` は bash では組み込みの cd を呼ぶが、zsh では外部コマンドとして走らせ移動しない
+  (`zsh -f` で実測) ので外部側に数える。`\cd` は組み込みのまま
+- `_chdir_target` は、`CDPATH` (環境か前置きの代入) が空でなく、行き先が `/` で始まらず最初の要素が
+  `.` / `..` でない相対パスなら (True, None)。bash は `CDPATH` の候補を先に、zsh は作業ディレクトリを
+  先に探す (実測で割れる)。`segment_dirs` は読みの inline env を渡す
+- zsh の `chdir` は `_UNKNOWN_DIR_COMMANDS` に入れた (bash には無い)
 
 ## 既知の制限
 

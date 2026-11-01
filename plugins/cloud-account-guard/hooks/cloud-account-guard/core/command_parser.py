@@ -1749,19 +1749,58 @@ def wrapper_chdir_candidates(command: str) -> frozenset[str]:
     return frozenset(seen)
 
 
+# 剥がしても後続を**シェル自身**で走らせる wrapper (v0.29.3)。`time` は bash / zsh の予約語、
+# `builtin` は組み込みを呼ぶ (`builtin cd sub` は両方のシェルで移動する)。`exec cd` は外部の cd で
+# シェルを置き換える (後続は走らない) ので、ここに入れて外部扱いにはしない。`command` は bash では
+# 組み込みの cd を呼んで移動するが、zsh では外部コマンドとして走らせ移動しない (bash 3.2 / zsh -f で
+# 実測) ので、外部側に数える (どちらのシェルか分からない)。これ以外の wrapper (`nohup` / `env` /
+# `sudo` / `timeout` / `xargs` / `nice` / `pnpm exec` ...) は外部プログラムで、その引数の `cd` は
+# 別プロセスで走りシェルを移動させない。
+_IN_SHELL_WRAPPERS = frozenset({"time", "builtin", "exec"})
+# 作業ディレクトリを変えるコマンド名 (`core/workdir.py` の `_CHDIR_COMMANDS` と
+# `_UNKNOWN_DIR_COMMANDS` の和)。
+_DIR_COMMAND_NAMES = frozenset({"cd", "pushd", "popd", "chdir"})
+
+# `external_chdir_candidates` が分解の間だけ立てる記録先。None なら記録しない。
+_EXTERNAL_CHDIR_SEEN: set[str] | None = None
+
+
+def external_chdir_candidates(command: str) -> frozenset[str]:
+    """外部プログラムとして走る `cd` の候補の集合 (v0.29.3)。
+
+    `nohup cd sub` / `env cd sub` / `sudo cd sub` / `timeout 5 cd sub` / `/usr/bin/cd sub`
+    のように、外部プロセスで走る wrapper (`_IN_SHELL_WRAPPERS` 以外) を剥がした結果や
+    パス付きのコマンド名を basename に揃えた結果が `cd` / `pushd` / `popd` / `chdir` になった
+    候補を返す。分解すると `cd sub` に見えるが、シェルは移動しない。シェル経由の wrapper の中身を
+    分割し直した候補は、外側が外部プログラムなら含める。読みは `extract_candidate_readings` と同じ。
+    """
+    global _EXTERNAL_CHDIR_SEEN
+    saved = _EXTERNAL_CHDIR_SEEN
+    seen: set[str] = set()
+    _EXTERNAL_CHDIR_SEEN = seen
+    try:
+        extract_candidate_readings(command)
+    finally:
+        _EXTERNAL_CHDIR_SEEN = saved
+    return frozenset(seen)
+
+
 def _normalize_segment(cmd: str, max_iter: int = 8) -> tuple[str, dict[str, str]]:
     """wrapper と先頭 env を剥がし (正規化コマンド, 収集 env) を返す。"""
-    normalized, env, _chdir = _normalize_segment_chdir(cmd, max_iter)
+    normalized, env, _chdir, _external = _normalize_segment_chdir(cmd, max_iter)
     return normalized, env
 
 
 def _normalize_segment_chdir(
     cmd: str, max_iter: int = 8
-) -> tuple[str, dict[str, str], bool]:
-    """wrapper と先頭 env を剥がし (正規化コマンド, 収集 env, 作業ディレクトリを変えたか) を返す。
+) -> tuple[str, dict[str, str], bool, bool]:
+    """wrapper と先頭 env を剥がし (正規化コマンド, 収集 env, 作業ディレクトリを変えたか,
+    外部プログラムを剥がしたか) を返す。
 
     3 つ目は、剥がした `sudo` の flag 領域に作業ディレクトリを変える option
-    (`_SUDO_CHDIR_FLAGS`) があったか。
+    (`_SUDO_CHDIR_FLAGS`) があったか。4 つ目は、シェル自身で走らせる wrapper
+    (`_IN_SHELL_WRAPPERS`) 以外の wrapper を剥がしたか、パス付きのコマンド名を basename に
+    揃えたか (`external_chdir_candidates`)。
 
     多段 (`FOO=bar sudo time mise exec -- foo`) に対応するため最大 max_iter
     回繰り返し、各段で現れた先頭 env を収集する。同名キーは内側 (後に出現 =
@@ -1784,6 +1823,7 @@ def _normalize_segment_chdir(
     """
     collected: dict[str, str] = {}
     chdir = False
+    external = False
     # heredoc 本文はデータであってコマンドラインではない。先に落としておかないと
     # 後段の option 走査が本文の行を引数として読む (`_strip_heredoc_bodies` 参照)。
     cmd = _strip_heredoc_bodies(cmd)
@@ -1796,7 +1836,10 @@ def _normalize_segment_chdir(
         cmd = _strip_leading_syntax(cmd)
         cmd, env = _parse_leading_env(cmd)
         collected.update(env)  # 内側 (後段) が外側を上書きする
+        pathed = cmd
         cmd = _strip_command_path(cmd)
+        if cmd != pathed and "/" in pathed.split(None, 1)[0]:
+            external = True  # `/usr/bin/cd sub` は外部の cd (`\cd` は組み込みのまま)
         # sudo を剥がす直前の判定: preserve-env 指定が無ければ、ここまでに集めた
         # pre-sudo env を sudo が scrub するので破棄する。剥がし自体は
         # _strip_one_wrapper に委ねる (sudo の flag 消費規則と一致させる)。
@@ -1809,13 +1852,15 @@ def _normalize_segment_chdir(
                 chdir = True
         stripped = _strip_one_wrapper(cmd)
         if stripped is not None:
+            if not toks or toks[0] not in _IN_SHELL_WRAPPERS:
+                external = True
             cmd = stripped
             continue
         # wrapper は剥がれなかったが構文 / env / パスの正規化が進んだなら、
         # その結果に対してもう一度 wrapper 判定をやり直す。
         if cmd == before:
             break
-    return _strip_trailing_syntax(cmd), collected, chdir
+    return _strip_trailing_syntax(cmd), collected, chdir, external
 
 
 def strip_transparent_wrappers(cmd: str, max_iter: int = 6) -> str:
@@ -1932,7 +1977,7 @@ def extract_candidates_with_separators(
     """
     out: list[tuple[str, dict[str, str], str]] = []
     for seg, sep in split_with_separators(command):
-        normalized, env, chdir = _normalize_segment_chdir(seg)
+        normalized, env, chdir, external = _normalize_segment_chdir(seg)
         if not normalized:
             continue
         # シェル経由 wrapper のクォートを剥がすと、中身が複合コマンドのことがある
@@ -1945,17 +1990,24 @@ def extract_candidates_with_separators(
         if len(parts) > 1 or (parts and normalized[0] in ";&|"):
             last = len(parts) - 1
             for k, (part, inner_sep) in enumerate(parts):
-                inner, inner_env, inner_chdir = _normalize_segment_chdir(part)
+                inner, inner_env, inner_chdir, inner_external = _normalize_segment_chdir(part)
                 if inner:
-                    _note_chdir(inner, chdir or inner_chdir)
+                    _note_chdir(inner, chdir or inner_chdir, external or inner_external)
                     out.append((inner, {**env, **inner_env}, sep if k == last else inner_sep))
             continue
-        _note_chdir(normalized, chdir)
+        _note_chdir(normalized, chdir, external)
         out.append((normalized, env, sep))
     return out
 
 
-def _note_chdir(candidate: str, chdir: bool) -> None:
-    """`wrapper_chdir_candidates` の分解中なら、作業ディレクトリを変えた候補を記録する。"""
+def _note_chdir(candidate: str, chdir: bool, external: bool) -> None:
+    """`wrapper_chdir_candidates` / `external_chdir_candidates` の分解中なら候補を記録する。"""
     if chdir and _WRAPPER_CHDIR_SEEN is not None:
         _WRAPPER_CHDIR_SEEN.add(candidate)
+    if (
+        external
+        and _EXTERNAL_CHDIR_SEEN is not None
+        and candidate.split(None, 1)[:1]
+        and candidate.split(None, 1)[0] in _DIR_COMMAND_NAMES
+    ):
+        _EXTERNAL_CHDIR_SEEN.add(candidate)

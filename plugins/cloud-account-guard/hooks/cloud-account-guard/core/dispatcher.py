@@ -801,7 +801,12 @@ def _pinned(
     directories は target のセグメントが走りうるディレクトリの集合で、**全部で**固定されて
     いるときだけ True (v0.29.3)。0.29.2 までは任意の 1 つだけを見ていたため、
     `cd a && firebase deploy; cd ../b && firebase deploy` を a の `firebase use` だけで通した。
-    None (決められない) を含むか空なら False。
+    None (決められない) を含むか空なら False。ディレクトリに依存する固定は `PIN_DEPENDS_ON_DIR`
+    を宣言した service (firebase) だけで、宣言の無い service (aws / gcloud の環境変数) は
+    directories を見ずに 1 回だけ確かめる (可能性の数の上限で畳んだ None で消さない)。
+    directories 自体が None なら、作業ディレクトリを変える wrapper (`sudo -D <dir>` 等) の
+    中で走る target で、どの service でも固定されていない側に倒す (sudo -D の中の環境変数は
+    sudo の設定次第で、起動時の env と同じとは限らない)。
     """
     fn = getattr(svc, "is_pinned", None)
     if fn is None:
@@ -812,14 +817,17 @@ def _pinned(
     overridden = {
         k for k, v in (inline_env or {}).items() if os.environ.get(k) != v
     }
+    by_dir = bool(getattr(svc, "PIN_DEPENDS_ON_DIR", False))
     if _touches_identity(svc, changed | overridden):
         pinned = False
-    elif not directories or None in directories:
+    elif directories is None:
+        pinned = False
+    elif by_dir and (not directories or None in directories):
         pinned = False
     else:
         try:
             env = dict(os.environ)
-            pinned = all(bool(fn(env, d)) for d in sorted(directories))
+            pinned = all(bool(fn(env, d)) for d in (sorted(directories) if by_dir else [None]))
         except Exception:  # noqa: BLE001
             pinned = False
     if trace is not None:
@@ -884,16 +892,19 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
     # context の解決と、ディレクトリ単位の固定の判定では「決められない」とする。
     wrapper_chdir = command_parser.wrapper_chdir_candidates(command)
     # ディレクトリ単位の固定を確かめるディレクトリ (v0.29.3)。`cd` が確実に順に走る形なら
-    # seg_dirs と同じ。そうでなければ、どの `cd` も走らなかった可能性を残した和で確かめる
-    # (`(cd sub && true); firebase deploy` は起動側でも確かめる)。
+    # seg_dirs と同じ。そうでなければ、確実に走って後続に効く `cd` (`workdir.sure_chdirs`) 以外は
+    # 走らなかった可能性を残した和で確かめる (`(cd sub && true); firebase deploy` は起動側でも
+    # 確かめ、`cd sub && firebase deploy | tail` は sub だけで確かめる)。
     pin_seg_dirs = (
         seg_dirs if chdir_sequential
-        else workdir.segment_dirs(command, cwd or project_dir, maybe_skipped=True)
+        else workdir.segment_dirs(
+            command, cwd or project_dir, maybe_skipped=True, sure=workdir.sure_chdirs(command)
+        )
     )
 
-    def pin_dirs(cands) -> set:
+    def pin_dirs(cands) -> set | None:
         if _wrapper_moves(cands, wrapper_chdir):
-            return {None}
+            return None
         return _target_dirs(cands, pin_seg_dirs)
 
     # 検証を起動したセグメントが**全て QUERY tier** (リモート read) なら、不一致でも
