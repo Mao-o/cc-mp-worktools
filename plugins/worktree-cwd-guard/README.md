@@ -25,6 +25,7 @@
   - shell 関数・alias・script ファイル (`./deploy.sh` など) の中の git
   - `"$(...)"` や `` `...` `` の中の git
   - `for` / `case` などの制御構文で作業ディレクトリが変わる場合
+- shell が構文エラーにする書き方 (閉じない引用符・括弧、"$(...)" の中の comment など) を含む行から後ろは読みません
 
 ## インストール
 
@@ -46,13 +47,13 @@ main checkout や repo の外で動く session では何もしません。
 
 | ツール | 止める条件 |
 |---|---|
-| Bash | 別の checkout を対象にした git の書き込み操作。対象は `cd` / `pushd` / `popd`、`git -C <dir>` / `--work-tree` / `--git-dir`、環境変数 `GIT_DIR` / `GIT_WORK_TREE` (コマンド前の代入・`env`・`export`。`env -i` / `env -u` による削除も反映) から決める。`&&` / `||` は直前のコマンドの成否ごとに状態を分けて追う (`cd` は成功するものとして扱う)。`&` の付いた AND-OR list 全体はサブシェルとして扱う。pipeline の要素や `&` の中の `cd` は外に残らないものとして扱う。書き込み操作 = `checkout` `switch` `commit` `reset` `restore` `stash` `add` `rm` `mv` `merge` `rebase` `cherry-pick` `revert` `pull` `am` `apply` `bisect` `clean` `checkout-index` `update-index`、`branch -m` / `-M` (checkout 中の branch の改名)、`submodule update` / `add` / `deinit` など、`sparse-checkout set` / `add` / `init` など。here-document の本文 (`cat > x.sh <<'EOF'` の中身) は実行されないので読まない。`env -C <dir>` のように wrapper が作業ディレクトリを変える形と、`&&` / `||` の後ろで実行されないかもしれない `cd` (移動した場合としない場合の両方を判定する) も追う |
+| Bash | 別の checkout を対象にした git の書き込み操作。対象は `cd` / `pushd` / `popd`、`git -C <dir>` / `--work-tree` / `--git-dir`、環境変数 `GIT_DIR` / `GIT_WORK_TREE` (コマンド前の代入・`env`・`export`。`env -i` / `env -u` による削除も反映) から決める。`&&` / `||` は直前のコマンドの成否ごとに状態を分けて追う (`cd` は成功するものとして扱う)。`&` の付いた AND-OR list 全体はサブシェルとして扱う。pipeline の要素や `&` の中の `cd` は外に残らないものとして扱う。書き込み操作 = `checkout` `switch` `commit` `reset` `restore` `stash` (`stash list` / `show` / `create` を除く) `add` `rm` `mv` `merge` `rebase` `cherry-pick` `revert` `pull` `am` `apply` (`--check` / `--stat` / `--numstat` / `--summary` だけで `--apply` を伴わないものを除く) `bisect` `clean` `checkout-index` `update-index`、`branch -m` / `-M` (checkout 中の branch の改名)、`submodule update` / `add` / `deinit` など、`sparse-checkout set` / `add` / `init` など。here-document の本文 (`cat > x.sh <<'EOF'` の中身) は実行されないので読まない。行末の comment (`# ...`) は改行の手前までを読み捨て、`\` + 改行で折り返した行は 1 行につないで読む (どちらも bash / zsh と同じ読み)。`env -C <dir>` のように wrapper が作業ディレクトリを変える形と、`&&` / `||` の後ろで実行されないかもしれない `cd` (移動した場合としない場合の両方を判定する) も追う |
 | Bash | `git worktree remove` / `move` で別の worktree を対象にしたもの |
 | Write / Edit / MultiEdit / NotebookEdit | 別の checkout 配下のファイルへの書き込み |
 
 止めないもの:
 
-- `git log` / `git diff` / `git status` などの読み取り
+- `git log` / `git diff` / `git status` / `git stash list` / `git apply --check` などの読み取り
 - 自分の worktree の中での操作
 - repo の外 (`/tmp`、ホームの設定ファイルなど) への書き込み
 - `git worktree add` (新しい worktree を作るのは別の checkout の書き換えではない)

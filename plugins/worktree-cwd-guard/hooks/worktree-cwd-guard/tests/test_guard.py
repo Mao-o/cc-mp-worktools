@@ -43,7 +43,9 @@ def decision(out: dict | None) -> str | None:
     return None if out is None else out["hookSpecificOutput"].get("permissionDecision", "context")
 
 
-class GuardTest(HermeticGitTestCase):
+class GuardBase(HermeticGitTestCase):
+    """使い捨ての main checkout + linked worktree 2 つを用意する (他の test module も継承する)。"""
+
     def setUp(self):
         super().setUp()
         self._tmp = tempfile.TemporaryDirectory()
@@ -57,6 +59,8 @@ class GuardTest(HermeticGitTestCase):
         self._env.stop()
         self._tmp.cleanup()
 
+
+class GuardTest(GuardBase):
     # --- 対象の判定 ---------------------------------------------------------
 
     def test_detect_only_in_linked_worktree(self):
