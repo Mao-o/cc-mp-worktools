@@ -374,6 +374,10 @@ class _Normalizer:
             return i + 1
         return self._code(i, ch, nxt, top)
 
+    def _code_frame(self) -> str:
+        """いちばん内側の、サブシェルの `(` と単語の `w(` 以外の frame (算術かコマンド置換か)。"""
+        return next((f for f in reversed(self.stack) if f not in ("(", "w(")), "")
+
     def _code(self, i: int, ch: str, nxt: str, top: str) -> int:
         """引用符の外 (括弧や backtick の中を含む) の 1 文字。"""
         if ch in "'\"" or (ch == "$" and nxt == "'"):
@@ -397,7 +401,8 @@ class _Normalizer:
             while j < len(self.src) and self.src[j] != "\n" and not (top == "`" and self.src[j] == "`"):
                 j += 1
             return j
-        if ch == "<":
+        if ch == "<" and self._code_frame() != "((":
+            # 算術の中の `<<` はシフト。here-document として読むと後ろの行を本文として捨てる
             m = _HEREDOC.match(self.src, i)
             if m:
                 self.pending.append((m.group(1) == "-", _heredoc_delim(m.group(2)), len(self.stack)))
@@ -405,7 +410,7 @@ class _Normalizer:
                 self.word_start, self.prev = False, ""
                 return m.end()
         if ch == "(":
-            if self.prev == "(" and top == "(":
+            if self.prev == "(" and top in ("(", "$("):
                 # `((` は算術。中の改行は here-document の本文を始めない (2 つ目の `(` を算術の frame にする)
                 self.stack.append("((")
             elif self.prev in ("$", "<", ">"):

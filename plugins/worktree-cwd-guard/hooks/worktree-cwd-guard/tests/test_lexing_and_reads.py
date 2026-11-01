@@ -169,6 +169,22 @@ class HeredocDelimiterFormsTest(test_guard.GuardBase):
                     with self.subTest(cmd=cmd):
                         self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
 
+    def test_arithmetic_shift_is_not_a_heredoc(self):
+        # 算術の `<<` はシフト。区切り語に数字や `$var` を受け付けるので、here-document と読むと
+        # 後ろの行を本文として捨てていた (zsh でも bash でも後ろの git は実行される)
+        m = self.main
+        for cmd in (
+            f'(( x = 1 << 2 ))\ngit -C "{m}" commit -m x',
+            f'(( mask = 1 << $bit ))\ngit -C "{m}" commit -m x',
+            f'if (( flags & (1 << 3) )); then echo y; fi\ngit -C "{m}" commit -m x',
+            f'(( x <<= 2 ))\ngit -C "{m}" commit -m x',
+            f'for (( i = 1; i < 64; i = i << 1 )); do echo $i; done\ngit -C "{m}" commit -m x',
+            f'echo $((\n  1 << 2\n))\ngit -C "{m}" commit -m x',
+            f'cd "{m}"\n(( i <<= 1 ))\ngit checkout -b feat',
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+
     def test_quoted_delimiter_is_compared_after_quote_removal(self):
         m = self.main
         for op, d in (('<<"EOF"', "EOF"), ("<<-'EOF'", "\tEOF"), ('<<E"O"F', "EOF"), ("<<2EOF", "2EOF"),
