@@ -30,28 +30,40 @@ _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # これを gh として見つけるので、数えないと「見つけた数 = 数えた数」が別の gh の見落としを隠す
 # 1 つのリダイレクトは atomic group で読み方を 1 通りに固定する。`>>f` を `>` + `>f` とも読める形の
 # 繰り返しは、一致しないときの後戻りが個数に対して指数時間になり、hook が時間切れで素通しになる。
+# atomic group の構文 `(?>...)` は Python 3.11 からなので、先読みで捕まえてから後方参照で消費する形
+# (`(?=(?P<g>...))(?P=g)`) で書く。先読みは一度成功すると後戻りしないので、同じく読み方が 1 通りに決まる
+# (3.9 / 3.10 で import が re.error で落ちると、hook がエラー扱いになりゲートが一切走らない)
 # 演算子は shell の演算子そのもの (`-` は `<<-` の一部か、`<&-` / `>&-` の対象。`2>-` の `-` はファイル名)
 # 対象の語は shell と同じく引用の外の `;` `&` `|` `<` `>` で終わる (`&>f&>f` は `&>f` が 2 つ)。区切りをまたいで
 # 読むと、`&>f&>f...` の `&` ごとに残り全部を読み直して個数の 2 乗の時間になる。`$(...)` と backtick の中の
 # 区切りは対象の語の一部として読む。対象の直後は空白か、次のリダイレクトの演算子
 _WORD_PART = r"""(?:'[^']*'|"[^"]*"|\$\([^()]*\)|`[^`]*`|[^\s'";&|<>])"""
+
+
+
+def _atomic(pattern: str, name: str) -> str:
+    """`(?>pattern)` と同じく、一度読んだら後戻りしない group (Python 3.9 / 3.10 でも解釈できる形)。"""
+    return r"(?=(?P<%s>%s))(?P=%s)" % (name, pattern, name)
+
+
 _REDIRECT_PREFIX = (
-    r"(?>\d*(?:&>>?|<<-|<<<?|<>|[<>]&|>>|>\||[<>])\s*" + _WORD_PART + r"+)(?:\s+|(?=\d*(?:&>|[<>])))"
+    _atomic(r"\d*(?:&>>?|<<-|<<<?|<>|[<>]&|>>|>\||[<>])\s*" + _WORD_PART + r"+", "redir")
+    + r"(?:\s+|(?=\d*(?:&>|[<>])))"
 )
 _EXEC_START = r"(?:^|[;&|(\n`{]|\$\()\s*"
 _PREFIX_ITEM = (
     r"(?:(?:if|then|else|elif|do|while|until|!|env|command|exec|time|nohup)\s+"
-    r"|(?>[A-Za-z_][A-Za-z0-9_]*=" + _WORD_PART + r"*)\s+|" + _REDIRECT_PREFIX + r")"
+    r"|" + _atomic(r"[A-Za-z_][A-Za-z0-9_]*=" + _WORD_PART + r"*", "assign") + r"\s+|" + _REDIRECT_PREFIX + r")"
 )
 # 前置きの繰り返しには上限を置く。`&>f&>f ...` のように前置きの中に実行位置の始まり (`&` など) が並ぶと、
 # 始まりごとに残り全部を読み直して個数の 2 乗の時間になるため。上限を超える前置きの後ろの PR 操作は
 # ここでは数えないので、_LONG_PREFIX で別に見つけて止める
 _PREFIX_LIMIT = 32
 _PR_OP = (
-    r"gh(?:\.exe)?\s+(?:(?:-R|--repo)(?:\s+|=)\S+\s+)*pr\s+(?:(?:-R|--repo)(?:\s+|=)\S+\s+)*(create|new|ready)\b"
+    r"gh(?:\.exe)?\s+(?:(?:-R|--repo)(?:\s+|=)\S+\s+)*pr\s+(?:(?:-R|--repo)(?:\s+|=)\S+\s+)*(?P<op>create|new|ready)\b"
 )
 _EXEC_POS = re.compile(
-    _EXEC_START + _PREFIX_ITEM + "{0,%d}" % _PREFIX_LIMIT + r"(?:[^\s;&|<>]*/)?" + _PR_OP + r"([^;&|\n)`]*)"
+    _EXEC_START + _PREFIX_ITEM + "{0,%d}" % _PREFIX_LIMIT + r"(?:[^\s;&|<>]*/)?" + _PR_OP + r"(?P<args>[^;&|\n)`]*)"
 )
 _LONG_PREFIX = re.compile(_EXEC_START + _PREFIX_ITEM + "{%d}" % (_PREFIX_LIMIT + 1))
 _PR_OP_ANYWHERE = re.compile(_PR_OP)
@@ -575,9 +587,12 @@ def _brace_group_exits(segments: list[_Segment], index: int) -> bool:
 
     `cd A || { echo fail >&2; exit 1; }` の右側。数えるのは波括弧の一番外側に `;` / 改行で並んだ
     exit / return だけ。`&&` / `||` / パイプの後ろ、`if` / `while` などの中、入れ子の `{ }` やサブシェルの中の
-    exit は走らないことがあるので数えない (止める側に倒す)。
+    exit は走らないことがあるので数えない (止める側に倒す)。閉じ括弧の後ろがパイプか `&` なら
+    (`{ ...; exit 1; } | tee log`)、波括弧ごとサブシェルで走り shell を終わらせないので数えない。
+    閉じ括弧が見つからないときも数えない。
     """
     depth = 0
+    exits = False
     for j in range(index, len(segments)):
         seg = segments[j]
         rest, _assigns, _wrappers = _strip_prefix(seg.tokens)
@@ -586,7 +601,7 @@ def _brace_group_exits(segments: list[_Segment], index: int) -> bool:
         if rest and rest[0] == "}":
             depth -= 1
             if depth <= 0:
-                return False
+                return exits and seg.after not in ("pipe", "bg")
             continue
         if (
             depth == 1
@@ -597,8 +612,17 @@ def _brace_group_exits(segments: list[_Segment], index: int) -> bool:
             and (j == index or seg.before == "seq")
             and seg.after not in ("pipe", "bg")
         ):
-            return True
+            exits = True
     return False
+
+
+def _tokens(stripped: str) -> list[str]:
+    """_strip_comments を通した文字列を shell の語と記号に分ける (閉じていない引用符は ValueError)。"""
+    lex = shlex.shlex(stripped, posix=True, punctuation_chars=_PUNCT)
+    lex.commenters = ""  # コメントは _strip_comments で落とす (shlex は改行まで食う)
+    lex.whitespace = " \t\r"
+    lex.whitespace_split = True
+    return list(lex)
 
 
 def find_invocations(command: str) -> list[Invocation]:
@@ -611,11 +635,7 @@ def find_invocations(command: str) -> list[Invocation]:
         return []
     joined = _join_continuations(command)
     try:
-        lex = shlex.shlex(_strip_comments(command), posix=True, punctuation_chars=_PUNCT)
-        lex.commenters = ""  # コメントは _strip_comments で落とす (shlex は改行まで食う)
-        lex.whitespace = " \t\r"
-        lex.whitespace_split = True
-        tokens = list(lex)
+        tokens = _tokens(_strip_comments(command))
     except ValueError:
         return [
             Invocation(
@@ -688,23 +708,30 @@ _SHELL_READER = re.compile(
     r"(?:^|[^\w.-])(?:" + _SHELLS + r"|ssh|eval|source)(?:\.exe)?(?![\w.-])"
     r"|(?:^|[;&|(\n`{]|\$\()\s*\.\s"
 )
-# 引用符の中の文字列のうち、空白を含み、区切り・リダイレクト・括弧・置換・エスケープを含まないもの
-# (`--title 'source map を直す'` の類)。中の語はコマンドの位置に来ないので、本文を読むコマンドの判定から外す。
-# それ以外の引用 (`'bash'` の 1 語、`"$(...)"`、区切りを含むもの) は残して止める側に倒す
-_QUOTED_OR_ESCAPED = re.compile(r"""\\.|'[^']*'|"(?:\\.|[^"\\])*\"""", re.S)
-_PLAIN_TEXT = re.compile(r"""[^;&|<>()$`\\'"\n]*\s[^;&|<>()$`\\'"\n]*""")
+# 本文の外の shell の名前は、引用符の中の語 (`--title 'source map を直す'`) でも数える。引用符の対応を
+# 左から取ると、コメントや引用の無い本文にある奇数個の `'` / `"` で対応を取り違え、本文を読む shell を
+# 見失うため (止める側に倒す)
+# 引用符と `\` を外したコマンド語がこれに一致するもの (`b'as'h` / `b\ash` / `/bin/zsh` の類) も本文を読む
+_SHELL_READER_WORD = re.compile(r"(?:" + _SHELLS + r"|ssh|eval|source|\.)(?:\.exe)?")
 
 
-def _without_plain_quoted_text(s: str) -> str:
-    """引用符の対応を左から順に取り、_PLAIN_TEXT に当たる中身の引用だけを `''` にする (`\\'` などは飛ばす)。"""
+def _may_read_stdin_as_code(stripped: str) -> bool:
+    """コマンド語のどれかが shell の名前か、展開で決まる語 (`"$BASH"` / `${SH:-bash}`) か。
 
-    def repl(m: re.Match) -> str:
-        tok = m.group(0)
-        if tok[0] != "\\" and _PLAIN_TEXT.fullmatch(tok[1:-1]):
-            return "''"
-        return tok
-
-    return _QUOTED_OR_ESCAPED.sub(repl, s)
+    stripped は _strip_comments を通した文字列 (本文は空行)。分けられなければ True (止める側)。
+    """
+    try:
+        tokens = _tokens(stripped)
+    except ValueError:
+        return True
+    for segment in _segments(tokens):
+        rest, _assigns, _wrappers = _strip_prefix(segment.tokens)
+        if not rest:
+            continue
+        word = rest[0]
+        if "$" in word or "`" in word or _SHELL_READER_WORD.fullmatch(word.rsplit("/", 1)[-1]):
+            return True
+    return False
 
 
 def _blank_quoted_bodies(command: str) -> str:
@@ -712,11 +739,12 @@ def _blank_quoted_bodies(command: str) -> str:
 
     引用のある区切り語の本文は、shell が `$(` も backtick も展開しないただの文字列なので、PR の本文で
     `gh pr create` の使い方を説明しても数えない。本文を読みうるコマンド (sh / bash / eval / source 等) が
-    コマンドのどこかにあれば、本文が実行されうるので加工しない。引用の無い区切り語の本文も加工しない。
+    コマンドのどこかにあるか、コマンド語が展開で決まるときは、本文が実行されうるので加工しない。
+    引用の無い区切り語の本文も加工しない。
     """
     spans: list[tuple[int, int]] = []
-    _strip_comments(command, quoted_bodies=spans)
-    if not spans:
+    stripped = _strip_comments(command, quoted_bodies=spans)
+    if not spans or _may_read_stdin_as_code(stripped):
         return command
     parts: list[str] = []
     prev = 0
@@ -726,8 +754,7 @@ def _blank_quoted_bodies(command: str) -> str:
         prev = end
     parts.append(command[prev:])
     blanked = "".join(parts)
-    probe = _without_plain_quoted_text(blanked)
-    return command if _SHELL_READER.search(probe) else blanked
+    return command if _SHELL_READER.search(blanked) else blanked
 
 
 def unresolved_reason(command: str, found: list[Invocation]) -> str | None:
@@ -747,7 +774,7 @@ def unresolved_reason(command: str, found: list[Invocation]) -> str | None:
     if long_prefix and _PR_OP_ANYWHERE.search(counted, long_prefix.start()):
         return "PR 操作の前の前置き (リダイレクト・代入など) が長すぎて位置を確かめられない"
     for m in _EXEC_POS.finditer(counted):
-        if m.group(1) == "ready" and "--undo" in m.group(2):
+        if m.group("op") == "ready" and "--undo" in m.group("args"):
             continue
         expected += 1
     # bash -c の中身と pushd / popd は、引用のある本文の中のものも加工前の文字列で見る (止める側)

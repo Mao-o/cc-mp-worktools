@@ -6,8 +6,10 @@
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -248,11 +250,33 @@ class HeredocBodyTest(unittest.TestCase):
                 with self.subTest(op=op, body=body):
                     self.assert_clean(cmd, ["m1"])
         self.assert_clean("gh pr create --base m1 --body-file - <<'EOF'\ngh pr create --fill\nEOF", ["m1"])
-        # 引用符の中の文 (`--title 'source map を直す'`) にある shell の名前は、本文を読むコマンドではない
+        # 本文の外の shell の名前は、引用符の中の語 (`--title 'source map を直す'`) でも数えて止める。
+        # 引用の対応を左から取って中の語を外すと、コメントや本文の奇数個の `'` で対応を取り違えるため
         for title in ("'source map を直す'", '"fix the zsh prompt"', "'use bash and eval here'"):
             cmd = f"cat > b.md <<'EOF'\ngh pr create --fill\nEOF\ngh pr create --base m1 --title {title} --body-file b.md"
             with self.subTest(title=title):
-                self.assert_clean(cmd, ["m1"])
+                self.assertIsNotNone(unresolved_reason(cmd, find_invocations(cmd)))
+
+    def test_quote_mismatch_elsewhere_does_not_hide_the_shell_reading_the_body(self):
+        # コメント・引用の無い本文・`$'\''` の奇数個の引用符があっても、本文を読む shell を見失わない
+        # (bash / zsh とも本文の gh pr create が走る)
+        for cmd in (
+            "# don't\nbash -s 'a b' <<'EOF'\ngh pr create --fill\nEOF",
+            "true # it's\nX='1' bash -s 'a b' <<'EOF'\ngh pr create --fill\nEOF",
+            "cat > n.md <<EOF\nIt's done\nEOF\nX='1' bash -s 'a b' <<'EOF'\ngh pr create --fill\nEOF",
+            'cat <<EOF\nsay "hi\nEOF\nenv "A=1" bash -s "a b" <<\'EOF\'\ngh pr create --fill\nEOF',
+            "echo $'\\'' 'x y'; bash -s 'a b' <<'EOF'\ngh pr create --fill\nEOF",
+            # 引用符や `\` を挟んだ shell の名前、展開で決まるコマンド語
+            "b'as'h -s <<'EOF'\ngh pr create --fill\nEOF",
+            "b\\ash -s <<'EOF'\ngh pr create --fill\nEOF",
+            "${SH:-bash} -s <<'EOF'\ngh pr create --fill\nEOF",
+            '"$BASH" -s <<\'EOF\'\ngh pr create --fill\nEOF',
+            "X=1 b'as'h -s <<'EOF'\ngh pr create --fill\nEOF",
+            "/bin/b'as'h -s <<'EOF'\ngh pr create --fill\nEOF",
+            "X=1 `cat f` -s <<'EOF'\ngh pr create --fill\nEOF",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(unresolved_reason(cmd, find_invocations(cmd)))
 
     def test_quoted_body_is_counted_when_something_may_run_it(self):
         # 本文を標準入力から読んで実行しうるコマンド (sh / bash / eval / source / .) があれば本文も数える
@@ -391,10 +415,27 @@ class HeredocBodyTest(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIsNotNone(unresolved_reason(cmd, find_invocations(cmd)))
 
-    def test_plain_quoted_text_skips_escaped_quotes(self):
-        # 引用符の対応は左から取り、`\'` は引用の始まりにしない
-        self.assertEqual(command._without_plain_quoted_text("a\\' b c 'x y'"), "a\\' b c ''")
-        self.assertEqual(command._without_plain_quoted_text("'a;b' 'a b' 'ab' \"$(x) y\""), "'a;b' '' 'ab' \"$(x) y\"")
+    def test_patterns_use_only_syntax_python_3_9_understands(self):
+        # atomic group `(?>` と possessive の量指定子 (`*+` など) は Python 3.11 から。3.9 (macOS 標準の
+        # python3) で import が re.error で落ちると、hook がエラー扱いになりゲートが一切走らない
+        patterns = {n: v.pattern for n, v in vars(command).items() if isinstance(v, re.Pattern)}
+        self.assertIn("_EXEC_POS", patterns)
+        for name, pattern in patterns.items():
+            with self.subTest(name=name):
+                self.assertNotIn("(?>", pattern)
+                self.assertIsNone(re.search(r"(?<!\\)[*+?}]\+", pattern))
+
+    def test_ambiguous_prefix_items_are_read_one_way(self):
+        # `<<-x` (`<<` + `-x` とも読める)、`>a2>a2` (`2` を前の対象とも次の fd とも読める)、`$(x)` / backtick
+        # (置換とも文字の並びとも読める) は、前置き 1 つの読み方を固定しないと、一致しないときの後戻りが
+        # 個数に対して指数になる (22 個で数秒)。先読み + 後方参照で書いた atomic group が後戻りを止める
+        for unit in ("<<-x ", ">a2", ">$(x)", "A=$(x)"):
+            cmd = "f() { " + unit * 22 + " gh"
+            with self.subTest(unit=unit):
+                start = time.perf_counter()
+                command._EXEC_POS.search(cmd)
+                command._LONG_PREFIX.search(cmd)
+                self.assertLess(time.perf_counter() - start, 0.5)
 
     def test_other_shells_with_c_are_nested_shells(self):
         for sh in ("csh", "tcsh", "fish", "mksh", "yash"):
@@ -578,6 +619,9 @@ class CdCompositionTest(unittest.TestCase):
             "cd a || { echo no >&2; exit 1; }; cd b && gh pr create",
             "cd a || {\n  echo no >&2\n  return 1\n}\ncd b && gh pr create",
             "cd a || { echo no; { echo nested; }; exit 1; }; cd b && gh pr create",
+            # 閉じ括弧の後ろのリダイレクト・&& は波括弧を shell の中で走らせる
+            "cd a || { echo no; exit 1; } 2>/dev/null; cd b && gh pr create",
+            "cd a || { echo no; exit 1; } && true; cd b && gh pr create",
         ):
             with self.subTest(cmd=cmd):
                 inv = self.first(cmd)
@@ -599,6 +643,12 @@ class CdCompositionTest(unittest.TestCase):
             "cd a || ! { exit 1; }; cd b && gh pr create",
             "cd a || exit 1 | tee; cd b && gh pr create",
             "cd a || exit 1 & cd b && gh pr create",
+            # 閉じ括弧の後ろがパイプか & なら、波括弧ごとサブシェルで走り exit は shell を終わらせない
+            "cd a || { echo no; exit 1; } | tee l; cd b && gh pr create",
+            "cd a || { echo no; exit 1; } & cd b && gh pr create",
+            "cd a || { exit 1; } |& tee l; cd b && gh pr create",
+            # 閉じ括弧が無い
+            "cd a || { echo no; exit 1; cd b && gh pr create",
         ):
             with self.subTest(cmd=cmd):
                 inv = self.first(cmd)
