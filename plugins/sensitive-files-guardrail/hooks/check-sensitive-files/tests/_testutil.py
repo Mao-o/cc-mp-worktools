@@ -131,12 +131,20 @@ def git(args: list[str], cwd, *, check: bool = True) -> subprocess.CompletedProc
     return subprocess.run(["git", *args], cwd=cwd, env=hermetic_env(), check=check, capture_output=True)
 
 
+# `init_repo` が repo の config に足す設定。`git config` で 1 件ずつ書くと git の起動が 3 回増える
+# (repo を作るテストの固定費の大半)。書かれる内容は `git config user.name test` などと同じ。
+_REPO_CONFIG = b"[user]\n\tname = test\n\temail = test@example.com\n[commit]\n\tgpgsign = false\n"
+
+
 def init_repo(cwd) -> None:
-    """commit できる状態の空の repo を作る (`git init` と user / gpgsign の設定)。"""
+    """commit できる状態の空の repo を作る (`git init` と user / gpgsign の設定)。
+
+    設定は `git config` を起動せず、`git init` が作った `.git/config` に追記する。改行は LF で書く
+    (Windows でも text mode の CRLF 変換を通さない)。
+    """
     git(["init", "--initial-branch=main"], cwd)
-    git(["config", "user.name", "test"], cwd)
-    git(["config", "user.email", "test@example.com"], cwd)
-    git(["config", "commit.gpgsign", "false"], cwd)
+    with open(os.path.join(cwd, ".git", "config"), "ab") as f:
+        f.write(_REPO_CONFIG)
 
 
 class HermeticGitTestCase(unittest.TestCase):

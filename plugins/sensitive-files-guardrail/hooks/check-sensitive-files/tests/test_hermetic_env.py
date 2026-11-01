@@ -379,12 +379,13 @@ class TestHelpersStopBackgroundMaintenance(unittest.TestCase):
         """repo を作る helper (`init_repo` / `git`) が起動する git の全部が、`HERMETIC_GIT_ENV` の全項目を
         起動の引数 (`env=`) で持つこと。
 
-        trace の床は maintenance を起動する git (commit など) しか見ない。`init` / `config` / `add` を 1 つだけ
+        trace の床は maintenance を起動する git (commit など) しか見ない。`init` / `add` を 1 つだけ
         env を渡さずに起動する形は、maintenance の起動を数える床には差が出ないが、開発者の global の
         `init.templateDir` や `core.hooksPath` を読みうる (`isolate_git_config` の HOME に置くと、`init` の
         template がコピーされ、`defaultObjectFormat` も効く)。そこで起動を全件記録して、`any` ではなく
-        `all` で見る。前提として、起動の件数と種類 (init / config 3 件 / add / commit の 6 件) を確かめる
-        (記録が空や一部だと、`all` は何も見ていない)。
+        `all` で見る。前提として、起動の件数と種類 (init / add / commit の 3 件。`init_repo` は user /
+        gpgsign を `git config` を起動せず `.git/config` に書く) を確かめる (記録が空や一部だと、`all` は
+        何も見ていない)。
 
         床が当てる側の値を持たないことは、helper を呼ぶ直前に見る (`assert_the_floor_stops_nothing`)。この床の
         検査は記録した env の値を key ごとに比べるので、床が `HERMETIC_GIT_ENV` のどの key も同じ値で持たない
@@ -403,8 +404,8 @@ class TestHelpersStopBackgroundMaintenance(unittest.TestCase):
             want = dict(_testutil.HERMETIC_GIT_ENV)
         self.assertEqual(
             [launch.argv[1] for launch in launches],
-            ["init", "config", "config", "config", "add", "commit"],
-            "前提: init / config x3 / add / commit の 6 件を記録できている",
+            ["init", "add", "commit"],
+            "前提: init / add / commit の 3 件を記録できている",
         )
         for launch in launches:
             with self.subTest(argv=launch.argv[1:3]):
@@ -422,6 +423,26 @@ class TestHelpersStopBackgroundMaintenance(unittest.TestCase):
         fixture が埋めて通ってしまう。
         """
         self.assertEqual(self._spawned_by_helpers(with_fixture=False), [])
+
+
+class TestInitRepoWritesTheRepoConfig(unittest.TestCase):
+    """`init_repo` が `git config` を起動せずに `.git/config` へ足した設定を、git が repo の config として
+    読めること (`--local` は repo の config だけを読む。global や env の値では埋まらない)。
+
+    追記の形 (改行・section の書き方) を git が読めない環境 (Windows の CI など) では、ここで落ちる。
+    """
+
+    def test_user_and_gpgsign_are_read_from_the_repo_config(self):
+        with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
+            isolate_git_config(tmp)
+            repo = os.path.join(tmp, "repo")
+            os.makedirs(repo)
+            _testutil.init_repo(repo)
+            got = {
+                key: _testutil.git(["config", "--local", "--get", key], repo, check=False).stdout.decode().strip()
+                for key in ("user.name", "user.email", "commit.gpgsign")
+            }
+        self.assertEqual(got, {"user.name": "test", "user.email": "test@example.com", "commit.gpgsign": "false"})
 
 
 class TestPlainBareOriginStartsNoMaintenance(unittest.TestCase):
@@ -897,10 +918,10 @@ class TestOuterRepoEnvAndTheHelpers(_OuterRepoEnvChecks, unittest.TestCase):
     def test_the_helpers_leave_the_outer_repo_alone(self):
         """外側に別の repo を指す `GIT_DIR` などがあっても、helper が repo を作る間、その repo を変えないこと。
 
-        外さないと、`init` / `config` / `commit` が外側の repo に書き込む (config に user.name などが入り、
-        commit も増える)。外側の repo の全 file の中身が前後で一致すること、旧来の `GIT_CONFIG` が指す file が
-        作られないこと (`git config` の書き込み先になる) で見る。外側の変数が届いた helper の git が失敗する形も
-        検出のうち: 例外のまま crash させず、失敗として報告する。
+        外さないと、`init` / `commit` が外側の repo に書き込む (init し直され、commit も増える)。外側の repo の
+        全 file の中身が前後で一致すること、旧来の `GIT_CONFIG` が指す file が作られないこと (`git config` の
+        書き込み先になる) で見る。外側の変数が届いた helper の git が失敗する形と、`init` が外側に向いて helper が
+        `<work>/.git/config` に書けない形も検出のうち: 例外のまま crash させず、失敗として報告する。
         """
         self.assert_env_unchanged_since_applied()
         before = tree_state(Path(self.other))
@@ -910,6 +931,9 @@ class TestOuterRepoEnvAndTheHelpers(_OuterRepoEnvChecks, unittest.TestCase):
             make_repo_with_one_commit(work)
         except subprocess.CalledProcessError as e:
             self.fail(f"helper の git が失敗した: {' '.join(map(str, e.cmd))}\n{e.stderr!r}")
+        except OSError as e:
+            # `init_repo` は `git init` が作った `<work>/.git/config` に追記する。`init` が外側の repo に向くと無い
+            self.fail(f"helper が repo の config に書けなかった: {e}")
         self.assert_env_unchanged_since_applied()
         self.assertTrue(os.path.isdir(os.path.join(work, ".git")), "前提: repo が自分の場所に作られている")
         self.assertEqual(tree_state(Path(self.other)), before)
@@ -950,6 +974,9 @@ class TestOuterRepoEnvAndTheHelpers(_OuterRepoEnvChecks, unittest.TestCase):
             make_repo_with_one_commit(work)
         except subprocess.CalledProcessError as e:
             self.fail(f"helper の git が失敗した: {' '.join(map(str, e.cmd))}\n{e.stderr!r}")
+        except OSError as e:
+            # `init_repo` は `git init` が作った `<work>/.git/config` に追記する。`init` が外側の repo に向くと無い
+            self.fail(f"helper が repo の config に書けなかった: {e}")
         self.assert_env_unchanged_since_applied()
         self.assertFalse(ran.exists(), "外側の template の pre-commit が helper の commit で走った")
         self.assertEqual(_testutil.git(["ls-files"], work).stdout.split(), [b"seed.txt"])

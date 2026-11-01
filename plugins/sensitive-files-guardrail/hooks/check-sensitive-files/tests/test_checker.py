@@ -29,7 +29,13 @@ from checker import (  # noqa: E402
 )
 
 
-class BaseWithTmpRepo(HermeticGitTestCase):
+class BaseWithTmpDir(HermeticGitTestCase):
+    """tmpdir と HOME / XDG の隔離だけを用意し、repo は作らない。
+
+    git を mock するテストと git を呼ばないテスト用 (repo を作る ``init_repo`` は git を起動する
+    固定費がかかる)。``self.repo`` は空のディレクトリで、git の repo ではない。
+    """
+
     def setUp(self):
         super().setUp()
         self.tmp = tempfile.mkdtemp()
@@ -51,7 +57,6 @@ class BaseWithTmpRepo(HermeticGitTestCase):
 
         self.repo = Path(self.tmp) / "repo"
         self.repo.mkdir()
-        _init_repo(str(self.repo))
         # plugin 内 patterns.txt を流用
         self.patterns_file = (
             Path(__file__).resolve().parent.parent / "patterns.txt"
@@ -60,6 +65,12 @@ class BaseWithTmpRepo(HermeticGitTestCase):
     def _cleanup(self):
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+
+class BaseWithTmpRepo(BaseWithTmpDir):
+    def setUp(self):
+        super().setUp()
+        _init_repo(str(self.repo))
 
     def _write(self, rel: str, content: str = "x\n") -> Path:
         p = self.repo / rel
@@ -103,11 +114,14 @@ class TestRepoContext(BaseWithTmpRepo):
         self.assertIsNone(repo_context(self.tmp))
 
 
-class TestGitFailureVisibility(BaseWithTmpRepo):
+class TestGitFailureVisibility(BaseWithTmpDir):
     """内部バックログ: git 呼出自体の失敗 (git 未インストール / 応答なし) を
     「機密ファイルなし」(cwd が git 管理外、または単に該当ファイルが無い) と
     区別して stderr に報告する。fail-open の挙動 (呼出元は空リストのまま扱う)
     自体は変えない。
+
+    ここの 2 件は git の起動を mock するので repo を作らない。実際の git で
+    黙ることを見る 2 件は ``TestGitFailureVisibilityStaysSilent``。
     """
 
     def test_file_not_found_reports_git_unavailable(self):
@@ -129,6 +143,11 @@ class TestGitFailureVisibility(BaseWithTmpRepo):
         self.assertIsNone(result)
         self.assertIn("git_unavailable: TimeoutExpired", fake_err.getvalue())
 
+
+class TestGitFailureVisibilityStaysSilent(BaseWithTmpRepo):
+    """``TestGitFailureVisibility`` の続き: 実際の git が成功する / cwd が git
+    管理外のときは ``git_unavailable`` を出さない。"""
+
     def test_non_repo_cwd_stays_silent(self):
         # 「cwd が git 管理外」は git 呼出の失敗ではなく正常系。誤って
         # git_unavailable を出してはいけない (可視性を足すだけで判定に
@@ -145,13 +164,15 @@ class TestGitFailureVisibility(BaseWithTmpRepo):
         self.assertNotIn("git_unavailable", fake_err.getvalue())
 
 
-class TestSharedGitBudget(BaseWithTmpRepo):
+class TestSharedGitBudget(BaseWithTmpDir):
     """0.32.0 (内部バックログ): hook 全体で共有する時間予算。
 
     従来は呼出単位の上限 (1 回 10s) しか無く、``rev-parse`` / ``ls-files`` 系 /
     submodule のネスト段数ぶんを直列に呼ぶため合計が hook timeout (15s) を
     容易に超えた。到達すると Claude Code は出力を discard するので、報告が
     1 byte も出ない**無音の fail-open** になる。
+
+    どのテストも git の起動を mock するか git を呼ばないので repo を作らない。
     """
 
     def test_per_call_timeout_is_capped_by_remaining_budget(self):
@@ -340,19 +361,20 @@ class TestFindSensitiveFiles(BaseWithTmpRepo):
         paths = {(r["path"], r["status"]) for r in result}
         self.assertIn((".env.production", "untracked"), paths)
 
-    def test_example_file_excluded(self):
-        self._write(".env.example", "FOO=bar\n")
+    def test_excluded_names_are_not_reported(self):
+        """除外 rule に当たる名前は報告しない。ラベルは統合前のテスト名。"""
+        cases = (
+            ("test_example_file_excluded", ".env.example", "FOO=bar\n"),
+            ("test_public_key_excluded", "id_rsa.pub", "ssh-rsa AAA...\n"),
+            ("test_credentials_example_excluded", "credentials.example.json", "{}\n"),
+        )
         rules = load_patterns(self.patterns_file)
-        result = find_sensitive_files(str(self.repo), rules)
-        paths = {r["path"] for r in result}
-        self.assertNotIn(".env.example", paths)
-
-    def test_public_key_excluded(self):
-        self._write("id_rsa.pub", "ssh-rsa AAA...\n")
-        rules = load_patterns(self.patterns_file)
-        result = find_sensitive_files(str(self.repo), rules)
-        paths = {r["path"] for r in result}
-        self.assertNotIn("id_rsa.pub", paths)
+        for label, name, content in cases:
+            with self.subTest(label):
+                self._write(name, content)
+                result = find_sensitive_files(str(self.repo), rules)
+                paths = {r["path"] for r in result}
+                self.assertNotIn(name, paths)
 
     def test_private_key_detected(self):
         self._write("id_rsa", "-----BEGIN...\n")
@@ -362,13 +384,6 @@ class TestFindSensitiveFiles(BaseWithTmpRepo):
         paths = {r["path"] for r in result}
         self.assertIn("id_rsa", paths)
         self.assertIn("foo.pem", paths)
-
-    def test_credentials_example_excluded(self):
-        self._write("credentials.example.json", "{}\n")
-        rules = load_patterns(self.patterns_file)
-        result = find_sensitive_files(str(self.repo), rules)
-        paths = {r["path"] for r in result}
-        self.assertNotIn("credentials.example.json", paths)
 
     def test_non_ascii_tracked_name_detected_under_default_quotepath(self):
         """0.30.0: git 既定 ``core.quotePath=true`` でも非 ASCII 名を検出する。
@@ -701,31 +716,6 @@ class TestNestedSubmoduleGuidancePaths(BaseWithTmpRepo):
         # vendor 直下のファイルは vendor (deep ではない) が返ること
         self.assertEqual(in_submodule("vendor/README.md", paths), "vendor")
 
-    def test_in_submodule_excludes_exact_match_gitlink_itself(self):
-        """P2-3 回帰 (外部レビュー R3, checker.py:273): submodule の gitlink
-        自身 (``path`` が submodule path と完全一致) は submodule 配下では
-        なく**親 repo の index が持つエントリ**。未初期化 submodule では
-        ``git ls-files --recurse-submodules`` が再帰できず、gitlink の path
-        をそのまま tracked entry として返すため、submodule のマウント名が
-        機密パターンに一致すると (例: ``.env``) この完全一致が発生する。
-        gitlink の実体は親 index にあるので `git rm --cached` は親から
-        直接効き、submodule 配下扱い (空の未初期化ディレクトリへの `cd` 案内)
-        にしてはならない。
-        """
-        self.assertIsNone(in_submodule(".env", {".env"}))
-        # 兄弟 submodule (prefix ではない別名) にも誤って一致しないこと
-        self.assertIsNone(in_submodule(".env", {".env", "vendor"}))
-        # prefix 一致 (submodule 配下の実ファイル) は従来どおり検出すること
-        self.assertEqual(in_submodule(".env/leaf.txt", {".env"}), ".env")
-        # ネストした未初期化 submodule (vendor は初期化済み、vendor/deep は
-        # 未初期化) でも同じ完全一致が起きる。gitlink "vendor/deep" は
-        # vendor/deep 自身の index ではなく vendor の index が持つため、
-        # 完全一致を除外した上で prefix 一致に回すと正しく "vendor" (深い方
-        # ではなく実際の所有者) に解決されることを固定する
-        self.assertEqual(
-            in_submodule("vendor/deep", {"vendor", "vendor/deep"}), "vendor"
-        )
-
     def test_symlinked_submodule_cycle_terminates_without_recursion_error(self):
         """壊れた/悪意ある submodule 構成が symlink で祖先を指す場合の防御
         (``_visited``) が実際に無限再帰を止めること。
@@ -759,6 +749,36 @@ class TestNestedSubmoduleGuidancePaths(BaseWithTmpRepo):
         result = find_sensitive_files(str(self.repo), rules)
         paths = {r["path"] for r in result}
         self.assertIn("vendor/deep/.env", paths)
+
+
+class TestInSubmoduleExactMatch(unittest.TestCase):
+    """``in_submodule`` の純関数としての検査 (repo は要らない)。ネストした
+    submodule の実 repo で見る検査は ``TestNestedSubmoduleGuidancePaths``。"""
+
+    def test_in_submodule_excludes_exact_match_gitlink_itself(self):
+        """P2-3 回帰 (外部レビュー R3, checker.py:273): submodule の gitlink
+        自身 (``path`` が submodule path と完全一致) は submodule 配下では
+        なく**親 repo の index が持つエントリ**。未初期化 submodule では
+        ``git ls-files --recurse-submodules`` が再帰できず、gitlink の path
+        をそのまま tracked entry として返すため、submodule のマウント名が
+        機密パターンに一致すると (例: ``.env``) この完全一致が発生する。
+        gitlink の実体は親 index にあるので `git rm --cached` は親から
+        直接効き、submodule 配下扱い (空の未初期化ディレクトリへの `cd` 案内)
+        にしてはならない。
+        """
+        self.assertIsNone(in_submodule(".env", {".env"}))
+        # 兄弟 submodule (prefix ではない別名) にも誤って一致しないこと
+        self.assertIsNone(in_submodule(".env", {".env", "vendor"}))
+        # prefix 一致 (submodule 配下の実ファイル) は従来どおり検出すること
+        self.assertEqual(in_submodule(".env/leaf.txt", {".env"}), ".env")
+        # ネストした未初期化 submodule (vendor は初期化済み、vendor/deep は
+        # 未初期化) でも同じ完全一致が起きる。gitlink "vendor/deep" は
+        # vendor/deep 自身の index ではなく vendor の index が持つため、
+        # 完全一致を除外した上で prefix 一致に回すと正しく "vendor" (深い方
+        # ではなく実際の所有者) に解決されることを固定する
+        self.assertEqual(
+            in_submodule("vendor/deep", {"vendor", "vendor/deep"}), "vendor"
+        )
 
 
 class TestParsePatternsText(unittest.TestCase):
