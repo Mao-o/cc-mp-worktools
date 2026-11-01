@@ -120,6 +120,40 @@ class TestSymlinkMap(GitScanTestCase):
         git(self.repo, "commit", "-qm", "deep link")
         self.assertEqual(gitscan.symlink_map(self.repo), {deep: "ordinary"})
 
+    def test_written_targets_keep_the_link_text_spelling(self):
+        """2 つ目の一覧の target は realpath の綴り (リンク文字列の大文字小文字のまま)。"""
+        write(self.repo, "secrets/a.txt", "x\n")
+        os.symlink("SECRETS", os.path.join(self.repo, "public"))
+        if not os.path.exists(os.path.join(self.repo, "SECRETS")):
+            self.skipTest("大文字小文字を区別する FS では同じ実体を指す別名にならない")
+        self.assertEqual(
+            gitscan.symlink_maps(self.repo), ({"public": "secrets"}, {"public": "SECRETS"})
+        )
+        self.assertEqual(gitscan.symlink_map(self.repo), {"public": "secrets"})
+
+    def test_written_relative_is_the_realpath_relative(self):
+        write(self.repo, "secrets/a.txt", "x\n")
+        self.assertEqual(
+            gitscan.written_relative(self.repo, os.path.join(self.repo, "secrets", "a.txt")),
+            os.path.join("secrets", "a.txt"),
+        )
+        self.assertIsNone(gitscan.written_relative(self.repo, self.repo))
+        self.assertIsNone(gitscan.written_relative(self.repo, ""))
+        self.assertIsNone(gitscan.written_relative(self.repo, "/elsewhere/x.py"))
+        upper = os.path.join(self.repo, "SECRETS", "a.txt")
+        if os.path.exists(upper):
+            self.assertEqual(
+                gitscan.written_relative(self.repo, upper), os.path.join("SECRETS", "a.txt")
+            )
+
+    def test_caps_apply_to_each_map(self):
+        write(self.repo, "ordinary/data.json", "{}\n")
+        for i in range(6):
+            self._link(f"link{i}", "ordinary")
+        with mock.patch.object(gitscan, "MAX_SYMLINKS", 2):
+            disk, written = gitscan.symlink_maps(self.repo)
+        self.assertEqual((len(disk), len(written)), (2, 2))
+
     def test_caps_limit_the_scan(self):
         write(self.repo, "ordinary/data.json", "{}\n")
         for i in range(6):
@@ -186,6 +220,106 @@ class TestToRelative(GitScanTestCase):
 
     def test_empty_path(self):
         self.assertIsNone(gitscan.to_relative(self.repo, ""))
+
+
+class TestToRelativeCaseOnlyAlias(GitScanTestCase):
+    """大文字小文字だけ違う名前を、ディスク上の (index と同じ) 綴りの root 相対にする。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        write(self.repo, "pkg/mod.py", "x\n")
+        if not os.path.exists(os.path.join(self.repo, "PKG", "MOD.py")):
+            self.skipTest("大文字小文字を区別する FS では同じ実体を指す別名にならない")
+        self.upper_root = os.path.join(os.path.dirname(self.repo), "REPO")
+
+    def test_file_and_directory_parts(self):
+        self.assertEqual(gitscan.to_relative(self.repo, os.path.join(self.repo, "PKG", "Mod.py")),
+                         "pkg/mod.py")
+
+    def test_root_written_in_another_case(self):
+        self.assertEqual(gitscan.to_relative(self.upper_root, os.path.join(self.repo, "pkg/mod.py")),
+                         "pkg/mod.py")
+        self.assertEqual(gitscan.to_relative(self.repo, os.path.join(self.upper_root, "pkg/mod.py")),
+                         "pkg/mod.py")
+
+    def test_root_itself_in_another_case_is_none(self):
+        self.assertIsNone(gitscan.to_relative(self.repo, self.upper_root))
+        self.assertIsNone(gitscan.to_relative(self.upper_root, self.repo))
+
+    def test_case_only_diff_reaches_the_tracked_file(self):
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "seed")
+        write(self.repo, "pkg/mod.py", "y\n")
+        rel = gitscan.to_relative(self.repo, os.path.join(self.repo, "pkg", "MOD.PY"))
+        diff = gitscan.path_diff(self.repo, rel, untracked=False, has_head=True)
+        self.assertIn("+y", diff or "")
+
+    def _commit_seed(self) -> None:
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "seed")
+
+    def test_written_index_spelling_after_case_rename_outside_git(self):
+        """git を通さずに `mod.py` → `Mod.py` と rename した後、index の綴りで書いたら index の綴り。
+
+        git status (Bash 経由の claim) は index の綴り `pkg/mod.py` を返す。ディスクの綴り
+        `pkg/Mod.py` に揃えると literal pathspec が index に当たらず、0.18.1 で取れていた差分が空になる。
+        """
+        self._commit_seed()
+        d = os.path.join(self.repo, "pkg")
+        os.rename(os.path.join(d, "mod.py"), os.path.join(d, "tmp"))
+        os.rename(os.path.join(d, "tmp"), os.path.join(d, "Mod.py"))
+        write(self.repo, "pkg/Mod.py", "y\n")
+        rel = gitscan.to_relative(self.repo, os.path.join(self.repo, "pkg", "mod.py"))
+        self.assertEqual(rel, "pkg/mod.py")
+        diff = gitscan.path_diff(self.repo, rel, untracked=False, has_head=True)
+        self.assertIn("+y", diff or "")
+
+    def test_index_with_both_spellings_keeps_the_written_one(self):
+        """index に大文字小文字違いの 2 entry があれば、書かれた綴りだけを渡す (範囲を広げない)。"""
+        self._commit_seed()
+        sha = git(self.repo, "rev-parse", "HEAD:pkg/mod.py").stdout.strip()
+        git(self.repo, "update-index", "--add", "--cacheinfo", f"100644,{sha},pkg/Mod.py")
+        self.assertEqual(
+            gitscan.to_relative(self.repo, os.path.join(self.repo, "pkg", "Mod.py")), "pkg/Mod.py"
+        )
+        self.assertEqual(
+            gitscan.to_relative(self.repo, os.path.join(self.repo, "pkg", "mod.py")), "pkg/mod.py"
+        )
+
+    def test_git_failure_keeps_the_written_spelling(self):
+        """index を引けなければ 0.18.1 までと同じ書かれた綴り。"""
+        self._commit_seed()
+        for res in (None, mock.Mock(returncode=128, stdout=b"")):
+            with self.subTest(res=res), mock.patch.object(gitscan, "_git", return_value=res):
+                self.assertEqual(
+                    gitscan.to_relative(self.repo, os.path.join(self.repo, "PKG", "Mod.py")),
+                    "PKG/Mod.py",
+                )
+
+    def test_untracked_alias_uses_the_disk_spelling(self):
+        """index に無い (untracked) なら、`ls-files --others` が返すディスク上の綴り。"""
+        self.assertEqual(
+            gitscan.to_relative(self.repo, os.path.join(self.repo, "PKG", "Mod.py")), "pkg/mod.py"
+        )
+
+    def test_git_is_not_called_when_the_spelling_matches(self):
+        self._commit_seed()
+        with mock.patch.object(gitscan, "_git", side_effect=AssertionError("git を呼んだ")):
+            self.assertEqual(
+                gitscan.to_relative(self.repo, os.path.join(self.repo, "pkg", "mod.py")),
+                "pkg/mod.py",
+            )
+
+    def test_relative_names_lists_both_spellings(self):
+        self.assertEqual(
+            gitscan.relative_names(self.repo, os.path.join(self.repo, "PKG", "Mod.py")),
+            ["PKG/Mod.py", "pkg/mod.py"],
+        )
+        self.assertEqual(
+            gitscan.relative_names(self.repo, os.path.join(self.repo, "pkg", "mod.py")),
+            ["pkg/mod.py"],
+        )
+        self.assertEqual(gitscan.relative_names(self.repo, "/elsewhere/x.py"), [])
 
 
 class TestStatusSnapshot(GitScanTestCase):

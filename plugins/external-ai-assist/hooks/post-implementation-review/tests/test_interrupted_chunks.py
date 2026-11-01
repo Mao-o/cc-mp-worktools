@@ -421,6 +421,48 @@ class TestSymlinkedPath(InterruptedTestCase):
             link_a, self.raw_state()["fingerprints"], "symlink 経由で回収した塊の指紋も消す"
         )
 
+    def test_returned_chunk_not_resent_when_claimed_by_case_only_alias(self):
+        """実体 `a.py` を `A.py` の名前で claim した (大文字小文字を区別しない FS だけ)。"""
+        _testutil.write(self.repo, "a.py", "old\n")
+        if not os.path.exists(os.path.join(self.repo, "A.py")):
+            self.skipTest("大文字小文字を区別する FS では同じ実体を指す別名にならない")
+        _testutil.git(self.repo, "add", "a.py")
+        _testutil.git(self.repo, "commit", "-q", "-m", "seed a.py")
+        self.edit_via(self.repo, "A.py", self.content(30, "a"))
+        self.edit_via(self.repo, "b.py", self.content(30, "b"))
+        self.killed_stop([FINDING], kill_at=2)
+
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertIn(FINDING, self.reason(output))
+        self.assertEqual(len(self.review_calls), 1, "返った塊 (a.py) を送り直さない")
+        self.assertIn("b.py", self.review_calls[0])
+        self.assertNotIn("a.py", self.review_calls[0])
+        self.assertEqual(self.raw_state()["in_flight"], {})
+
+    def test_returned_chunk_not_resent_when_claimed_by_index_spelling(self):
+        """git を通さずに `a.py` → `A.py` と rename した後、index の綴り `a.py` で claim した。
+
+        返った塊のキーは index の綴り (`a.py`)、ディスク上の綴りは `A.py`。ディスク上の綴りだけで
+        比べると返った塊を送り直す。
+        """
+        _testutil.write(self.repo, "a.py", "old\n")
+        if not os.path.exists(os.path.join(self.repo, "A.py")):
+            self.skipTest("大文字小文字を区別する FS では同じ実体を指す別名にならない")
+        _testutil.git(self.repo, "add", "a.py")
+        _testutil.git(self.repo, "commit", "-q", "-m", "seed a.py")
+        os.rename(os.path.join(self.repo, "a.py"), os.path.join(self.repo, "tmp"))
+        os.rename(os.path.join(self.repo, "tmp"), os.path.join(self.repo, "A.py"))
+        self.edit_via(self.repo, "a.py", self.content(30, "a"))
+        self.edit_via(self.repo, "b.py", self.content(30, "b"))
+        self.killed_stop([FINDING], kill_at=2)
+
+        output = self.stop(SESSION_A, "REVIEW_CLEAN")
+        self.assertIn(FINDING, self.reason(output))
+        self.assertEqual(len(self.review_calls), 1, "返った塊 (a.py) を送り直さない")
+        self.assertIn("b.py", self.review_calls[0])
+        self.assertNotIn("a.py", self.review_calls[0])
+        self.assertEqual(self.raw_state()["in_flight"], {})
+
 
 class TestOwnerGone(unittest.TestCase):
     """`state._owner_gone`: 居ないと言い切れるときだけ True。"""

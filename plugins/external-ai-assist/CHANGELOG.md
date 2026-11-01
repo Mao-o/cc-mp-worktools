@@ -5,6 +5,30 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.18.2
+
+**`post-implementation-review` で、大文字小文字だけが違う名前で編集したファイルを、Stop も commit レビューも送らずに誤った理由を通知していたのを直した。**
+
+### 修正
+
+- 大文字小文字を区別しない FS (macOS の既定) で、実体と大文字小文字だけが違う名前 (実体は `b.py`、Write / Edit のパスは `B.py`) で編集すると、作業ツリー相対のパスが `B.py` のまま literal pathspec で git に渡り、index の `b.py` に当たらなかった。Stop は「差分が空で取得できませんでした (commit 済みの可能性)」と誤った理由を通知し、commit レビューはファイル名だけを通知して、内容は一度もレビューされなかった (送らない側の失敗で、他の内容を送る漏れではない)。作業ツリー相対にするとき、書かれた綴りとディスク上の綴りが大文字小文字だけ違えば、**index にある方**を git に渡すようにした (0.18.1 の「既知の限界」の解消)
+  - 書かれた綴りが index にあれば書かれた綴り (0.18.1 までと同じ値)。無ければディスク上の綴り (untracked のときも、`ls-files --others` が返すディスク上の綴り)。git を通さずに大文字小文字だけ rename したファイル (index は `mod.py`、ディスクは `Mod.py`) を index の綴りで書いた場合も、0.18.1 までどおり index の綴りで取れる
+  - index に大文字小文字違いの 2 entry がある repo でも、書かれた綴りの方だけを渡す (大文字小文字を無視する pathspec は使わず、送る範囲を広げない)
+  - index を引くのは綴りが食い違ったときだけ (`git ls-files` 1 回)。git が失敗したら書かれた綴り (0.18.1 までと同じ)
+  - ディスク上の綴りは `_common/physpath.py` で求める。ディレクトリ部分は macOS の `F_GETPATH`、末尾の名前はディレクトリの一覧から「畳むと同じ名前」かつ「同じ inode」の項目が 1 つのときにその綴り。hard link の別の名前 (同じ inode で綴りが違う名前) には化けない。揃えられないとき (`F_GETPATH` の無い OS、存在しないパス、一覧の読めないディレクトリ、大文字小文字と正規化以外で違う答え) は realpath の結果。大文字小文字を区別する FS では結果は変わらない
+  - **Unicode の正規化形 (NFC / NFD) は書かれた形のまま残す**。ディスク上が NFD の名前 (Finder で作ったディレクトリなど) でも、git は `core.precomposeunicode` で index に NFC を持ち、`cat-file --batch` の stdin と編集記録の照合は precompose されない。NFC で書いたパスをディスク上の NFD に揃えると 0.18.1 で送れていた commit レビューが「記録が無い」で送らなくなる (マージ前レビューの指摘)
+  - 作業ツリーの root を大文字小文字だけ違う綴りで書いたパスも作業ツリー内として扱い、除外判定に渡す書かれたままの名前 (lexical 名) も同じ同定で残す。symlink の別名は両方の綴りから作る (symlink の target はディスク上の綴りなので、書かれた綴りからは別名に届かないことがある)
+  - **否定 glob (`!glob`) を当てる名前は 0.18.1 と同じものに限る**。否定 glob は判定に渡す名前のどれか 1 つに当たれば除外を解除するので、除外のために名前 (ディスク上の綴り、その綴りの symlink の別名) を足すと、そのぶん送る範囲も広がる。たとえば `secrets/a.txt` とリンク文字列だけ大文字の symlink `public -> SECRETS`、`EXTERNAL_AI_POST_REVIEW_EXCLUDE="secrets/**,!public/**"` で、ディスク上の綴りの target から別名 `public/a.txt` ができ、0.18.1 が除外していた `secrets/a.txt` を送るようになっていた (マージ前レビューの指摘)。除外は広げた名前で判定し、否定 glob は書かれた綴りの相対パス・realpath で root を同定した lexical 名・realpath の target から作った symlink の別名にだけ当てる。0.18.1 で除外していたファイルを送ることはない
+  - 塊の途中で kill されたレビューの回収で、返った塊のパスを claim したときの名前と突き合わせる比較は、書かれた綴りとディスク上の綴りの両方で行う (どちらで claim したファイルの返った塊も送り直さない)
+  - ディレクトリの一覧は (パス, inode, mtime) をキーに memo する (5000 項目のディレクトリで 1 件ごとに一覧を読み直すと約 100 倍遅かった)
+
+### テスト
+
+- `tests/test_claimed_name_carry.py`: 0.18.1 で現状の挙動を固定していた `TestCaseOnlyAlias` を「Stop も commit レビューも内容を送る」に書き換え (2 件)、pending に戻す出口 6 つの直積に大文字小文字だけ違う名前の配置を足した (6 件)。`TestSpellingsThatGitKeepsAsWritten` (5 件): ディスク上が NFD のディレクトリ・ファイル名を NFC で書いた commit レビューと Stop、git を通さずに rename したファイルを index の綴りで書いた commit レビューと Stop
+- `hooks/_common/tests/test_physpath.py` (24 件): 実名・symlink (対象と親)・hard link・存在しないパス・大文字小文字の別名 (ファイル名・ディレクトリ・hard link の別名)・正規化形を保つこと (ファイル名・ディレクトリ・大文字小文字と同時)・読めないディレクトリ・`F_GETPATH` の失敗と食い違う答え・一覧の memo (読み直さない・rename で読み直す・上限)
+- `tests/test_gitscan.py` (13 件)・`tests/test_review_set.py` (6 件)・`tests/test_interrupted_chunks.py` (2 件)・`tests/test_exclusion.py` (1 件): 作業ツリー相対・root の綴り違い・index の綴りの選択 (rename 後・2 entry・git の失敗・untracked・綴りが同じなら git を呼ばない)・両方の綴りの symlink 別名による除外・kill 後の回収・否定 glob を当てる名前 (リンク文字列だけ大文字の symlink で除外を解除しない / ディスクと同じ綴りのリンクでは 0.18.1 どおり解除する / root を別の綴りで書いた claim の書かれた名前)・symlink の 2 通りの target
+- 変えた箇所ごとに元に戻す変異を流し、等価なもの (書いた名前と同じ形の近道・root は git がディスク上の綴りで返す) を除いて assertion の失敗で落ちることを確かめた
+
 ## 0.18.1
 
 **`post-implementation-review` で、symlink を通る名前で編集したファイルを Stop が送らずに繰り越したとき、その内容がどこにも送られなくなっていたのを直した。**

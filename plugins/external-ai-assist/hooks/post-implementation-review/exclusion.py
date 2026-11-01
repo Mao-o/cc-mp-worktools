@@ -18,7 +18,9 @@ glob は **basename と作業ツリー相対パスの両方**に、**大文字�
 「英数字以外で区切られた単語」として相対パス全体に当てる (`config/secrets/db.yaml` や
 `client_secret.json` は当たり、`secretary.py` / `secretsanta.ts` は当たらない)。
 symlink は `__main__._resolve_paths` がリンク名と実体パスの両方を候補として渡す
-(どちらかが当たれば除外)。
+(どちらかが当たれば除外)。否定 glob を当てる候補は別に渡す (`Policy.explain` の
+`include_names`): 否定は候補のどれか 1 つに当たれば除外を解除するので、除外のために足した
+候補 (0.18.2 のディスク上の綴りとその symlink の別名) には当てない。
 
 除外は恒久で、除外されたパスは claim から落とし pending にも reviewed にも残さない
 (作業ツリー外のパスと同じ扱い)。他 plugin (sensitive-files-guardrail 等) には依存しない —
@@ -196,24 +198,28 @@ class Policy:
     include_globs: tuple[str, ...]
     code_only: bool
 
-    def explain(self, rels: Iterable[str | None]) -> tuple[str, str] | None:
+    def explain(
+        self,
+        rels: Iterable[str | None],
+        include_names: Iterable[str | None] | None = None,
+    ) -> tuple[str, str] | None:
         """候補パス (作業ツリー相対) のどれかが除外対象なら (当たった候補, 理由) を返す。
 
         理由にはパターン名だけを入れ、ファイル内容は決して含めない (systemMessage /
         stderr にそのまま出すため)。当たった候補を返すのは、symlink で実体名とリンク名が
         違う時に「どの名前が理由に当たったか」を通知に出すため。
+
+        `include_names` を渡すと、否定 glob (`!glob`) はその名前にだけ当てる (省略時は
+        `rels`)。否定 glob は候補のどれか 1 つに当たれば除外を解除するので、除外の候補を
+        広げるとそのぶん送る範囲も広がる。除外は広い候補 (`rels`)、解除は狭い候補で判定する
+        ことで、候補を足しても送る範囲が広がらないようにする。
         """
-        candidates: list[tuple[str, str]] = []  # (表示名, 小文字の相対パス)
-        for rel in rels:
-            if not rel:
-                continue
-            shown = rel.replace(os.sep, "/")
-            if all(shown != s for s, _ in candidates):
-                candidates.append((shown, shown.lower()))
+        candidates = _candidates(rels)
         if not candidates:
             return None
 
-        for shown, lowered in candidates:
+        includes = candidates if include_names is None else _candidates(include_names)
+        for _shown, lowered in includes:
             if any(_glob_hit(lowered, glob) for glob in self.include_globs):
                 return None
 
@@ -239,6 +245,18 @@ class Policy:
     def reason(self, rels: Iterable[str | None]) -> str | None:
         hit = self.explain(rels)
         return hit[1] if hit else None
+
+
+def _candidates(rels: Iterable[str | None]) -> list[tuple[str, str]]:
+    """(表示名, 小文字の相対パス) の並び。空の候補と重複を除く。"""
+    out: list[tuple[str, str]] = []
+    for rel in rels:
+        if not rel:
+            continue
+        shown = rel.replace(os.sep, "/")
+        if all(shown != s for s, _ in out):
+            out.append((shown, shown.lower()))
+    return out
 
 
 def _glob_hit(lowered_rel: str, glob: str) -> bool:

@@ -201,6 +201,25 @@ class TestNegation(unittest.TestCase):
         policy = exclusion.load_policy({exclusion.ENV_EXCLUDE: "!vault/*"})
         self.assertIsNone(policy.explain(("vault/c.json", "credentials.json")))
 
+    def test_include_names_limit_where_negation_applies(self):
+        """`include_names` を渡すと否定 glob はその名前にだけ当て、除外は全候補で判定する。"""
+        policy = exclusion.load_policy(
+            {exclusion.ENV_EXCLUDE_DEFAULTS: "0", exclusion.ENV_EXCLUDE: "secrets/**,!public/**"}
+        )
+        names = ("secrets/a.txt", "public/a.txt")
+        self.assertIsNone(policy.explain(names), "省略時は全候補に否定 glob を当てる")
+        self.assertEqual(
+            policy.explain(names, include_names=("secrets/a.txt",)),
+            ("secrets/a.txt", f"{exclusion.ENV_EXCLUDE}: secrets/**"),
+        )
+        self.assertIsNone(policy.explain(names, include_names=("public/a.txt", None)))
+        self.assertEqual(
+            policy.explain(names, include_names=()),
+            ("secrets/a.txt", f"{exclusion.ENV_EXCLUDE}: secrets/**"),
+            "空なら否定 glob は当たらない (全候補に戻さない)",
+        )
+        self.assertIsNone(policy.explain((), include_names=("public/a.txt",)))
+
 
 class TestAliases(unittest.TestCase):
     """`expand_aliases`: 実体パスを repo 内 symlink 経由の別名に展開する (Codex R2 P1)。"""

@@ -33,7 +33,7 @@ import os
 import re
 import subprocess
 
-from _common import gitroot
+from _common import gitroot, physpath
 
 #: object id として受理する形 (SHA-1 40 桁 / SHA-256 64 桁。短縮形も一応許す)。
 _SHA_RE = re.compile(r"^[0-9a-f]{7,64}$")
@@ -148,17 +148,91 @@ def to_relative(root: str, path: str) -> str | None:
 
     git のパススペックは root 相対でなければ黙って何にもマッチしないため、
     ここで確実に相対化しておく。
+
+    大文字小文字を区別しない FS では、書かれた綴り (realpath の相対。0.18.1 までの値) と
+    ディスク上の綴り (`_common.physpath`) が大文字小文字だけ違うことがある。literal
+    pathspec は大文字小文字を区別するので、git には **index にある方** を渡す
+    (`_index_spelling`)。`B.py` と書いた名前の実体が `b.py` なら `b.py`、git を通さずに
+    `mod.py` を `Mod.py` へ rename した後に index の綴り `mod.py` で書いたなら `mod.py`。
+    root を大文字小文字だけ違う綴りで書いたパスも作業ツリー内として扱う。
+    """
+    names = _relative_spellings(root, path)
+    if names is None:
+        return None
+    written, disk = names
+    if written == disk:
+        return disk
+    return _index_spelling(root, written, disk)
+
+
+def relative_names(root: str, path: str) -> list[str]:
+    """`to_relative` が選びうる作業ツリー相対の綴りすべて (書かれた綴り・ディスク上の綴り)。
+
+    除外判定に両方を渡すために使う (どちらの綴りが機密に見えても送らない)。git は呼ばない。
+    """
+    names = _relative_spellings(root, path)
+    if names is None:
+        return []
+    return list(dict.fromkeys(names))
+
+
+def written_relative(root: str, path: str) -> str | None:
+    """realpath だけで作業ツリー相対にした名前 (0.18.1 までの `to_relative` の値)。ツリー外なら None。
+
+    大文字小文字・正規化形を揃えない。除外判定のうち **否定 glob (`!glob`) を当てる候補**に
+    使う (`symlinks_written` の target もこれ)。否定 glob は候補のどれか 1 つに当たれば除外を
+    解除するので、候補を増やすと送る範囲が広がる。0.18.1 と同じ候補だけに当てる。
     """
     if not path:
         return None
     real = os.path.realpath(path)
-    root_real = os.path.realpath(root)
-    if real == root_real:
-        return None
-    prefix = root_real.rstrip(os.sep) + os.sep
+    prefix = os.path.realpath(root).rstrip(os.sep) + os.sep
     if not real.startswith(prefix):
-        return None
+        return None  # root 自身も (末尾の区切りが無いので) ここで落ちる
     return real[len(prefix) :]
+
+
+def _relative_spellings(root: str, path: str) -> tuple[str, str] | None:
+    """(書かれた綴りの相対, ディスク上の綴りの相対)。作業ツリー外なら None。
+
+    書かれた綴りは realpath の末尾から、ディスク上の綴りと同じ数の構成要素を取ったもの。
+    `physpath` は realpath と構成要素の数が同じで、各構成要素が畳むと等しいパスしか返さない
+    (`physpath._align`) ので、2 つは構成要素ごとに大文字小文字だけが違う。
+    """
+    if not path:
+        return None
+    phys = physpath.physical_path(path)
+    root_phys = physpath.physical_dir(root)
+    if phys == root_phys:
+        return None
+    prefix = root_phys.rstrip(os.sep) + os.sep
+    if not phys.startswith(prefix):
+        return None
+    disk = phys[len(prefix) :]
+    count = len(disk.split(os.sep))
+    written = os.sep.join(os.path.realpath(path).split(os.sep)[-count:])
+    return written, disk
+
+
+def _index_spelling(root: str, written: str, disk: str) -> str:
+    """大文字小文字だけ違う 2 つの綴りのうち、git に渡す方を選ぶ。
+
+    - index に書かれた綴りがあれば書かれた綴り (0.18.1 までと同じ値。index に大文字小文字
+      違いの 2 entry がある repo でも、書かれた方だけを送る)
+    - 無ければディスク上の綴り (index にあるのは通常こちら。untracked なら `ls-files --others`
+      が返す名前)。ディスク上の綴りも index に無い (git を通さずに rename した後に第 3 の綴りで
+      書いた) ときは 0.18.1 までと同じく git に当たらない
+    - git が失敗したら書かれた綴り (0.18.1 までと同じ)
+
+    `:(icase)` は使わない (大文字小文字違いの別 entry に当たり、送る範囲が広がる)。
+    大文字小文字の別名を書いたときだけ走る (通常の名前では git を呼ばない)。
+    """
+    res = _git(root, ["ls-files", "-z", "--", written], timeout=REV_PARSE_TIMEOUT_SEC)
+    if res is None or res.returncode != 0:
+        return written
+    if os.fsencode(written) in res.stdout.split(b"\0"):
+        return written
+    return disk
 
 
 # --------------------------------------------------------------------------
@@ -167,7 +241,18 @@ def to_relative(root: str, path: str) -> str | None:
 
 
 def symlink_map(root: str) -> dict[str, str]:
-    """作業ツリー内の symlink を {link_rel: target_rel} で返す (target は realpath の root 相対)。
+    """`symlink_maps` の 1 つ目 (target は `to_relative` の値)。"""
+    return symlink_maps(root)[0]
+
+
+def symlink_maps(root: str) -> tuple[dict[str, str], dict[str, str]]:
+    """作業ツリー内の symlink を {link_rel: target_rel} の 2 通りで返す。
+
+    1 つ目の target は `to_relative` の値 (大文字小文字だけ違うときは index かディスクの綴り)、
+    2 つ目は `written_relative` の値 (realpath の root 相対。0.18.1 までの target)。除外判定は
+    1 つ目、否定 glob の判定は 2 つ目から作った別名に当てる (`symlink public -> SECRETS` の
+    target を `secrets` に揃えると、`secrets/a.txt` に 0.18.1 には無かった別名 `public/a.txt`
+    ができ、`!public/**` で除外が解除される)。列挙は 1 回で、件数の上限はそれぞれに当てる。
 
     Bash 経由の変更は pre/post の `git status` 比較で拾うが、status は実体パス
     (`ordinary/data.json`) しか返さない。`credentials/` → `ordinary/` の symlink 経由で
@@ -183,6 +268,11 @@ def symlink_map(root: str) -> dict[str, str]:
     なるが、Stop を止めるより優先)。
     """
     links: dict[str, str] = {}
+    written: dict[str, str] = {}
+
+    def full() -> bool:
+        return len(links) >= MAX_SYMLINKS and len(written) >= MAX_SYMLINKS
+
     res = _git(root, ["ls-files", "-s", "-z"], timeout=LS_FILES_TIMEOUT_SEC)
     if res is not None and res.returncode == 0:
         for entry in _decode(res.stdout).split("\0"):
@@ -190,24 +280,24 @@ def symlink_map(root: str) -> dict[str, str]:
                 continue
             _meta, _tab, rel = entry.partition("\t")  # "<mode> <sha> <stage>\t<path>"
             if rel:
-                _add_link(root, links, rel)
-            if len(links) >= MAX_SYMLINKS:
-                return links
+                _add_link(root, links, written, rel)
+            if full():
+                return links, written
 
     queue: list[tuple[str, int]] = [("", 0)]
     scanned = 0
-    while queue and scanned < SYMLINK_SCAN_BUDGET and len(links) < MAX_SYMLINKS:
+    while queue and scanned < SYMLINK_SCAN_BUDGET and not full():
         rel_dir, depth = queue.pop(0)
         try:
             with os.scandir(os.path.join(root, rel_dir) if rel_dir else root) as it:
                 for entry in it:
                     scanned += 1
-                    if scanned > SYMLINK_SCAN_BUDGET or len(links) >= MAX_SYMLINKS:
+                    if scanned > SYMLINK_SCAN_BUDGET or full():
                         break
                     rel = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
                     try:
                         if entry.is_symlink():
-                            _add_link(root, links, rel)
+                            _add_link(root, links, written, rel)
                         elif (
                             entry.name != ".git"
                             and depth + 1 < SYMLINK_SCAN_DEPTH
@@ -218,13 +308,21 @@ def symlink_map(root: str) -> dict[str, str]:
                         continue
         except OSError:
             continue
-    return links
+    return links, written
 
 
-def _add_link(root: str, links: dict[str, str], rel: str) -> None:
-    target = to_relative(root, os.path.join(root, rel))
-    if target and target != rel:
-        links[rel] = target
+def _add_link(
+    root: str, links: dict[str, str], written: dict[str, str], rel: str
+) -> None:
+    path = os.path.join(root, rel)
+    if len(links) < MAX_SYMLINKS:
+        target = to_relative(root, path)
+        if target and target != rel:
+            links[rel] = target
+    if len(written) < MAX_SYMLINKS:
+        target = written_relative(root, path)
+        if target and target != rel:
+            written[rel] = target
 
 
 # --------------------------------------------------------------------------

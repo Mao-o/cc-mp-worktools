@@ -223,6 +223,84 @@ class TestResolvePathsExclusion(ReviewSetTestCase):
             "self/secret.txt",
         )
 
+    def test_lexical_relative_with_root_written_in_another_case(self):
+        """root を大文字小文字だけ違う綴りで書いた claim でも、root 配下の書かれた名前を残す。"""
+        upper = os.path.join(os.path.dirname(self.repo), os.path.basename(self.repo).upper())
+        if not os.path.isdir(upper):
+            self.skipTest("大文字小文字を区別する FS では同じ実体を指す別名にならない")
+        root = os.path.realpath(self.repo)
+        self.assertEqual(
+            self.entry._lexical_relative(root, os.path.join(upper, "Keys", "c.py")), "Keys/c.py"
+        )
+
+    def test_case_variant_root_claim_keeps_the_written_name_for_exclusion(self):
+        """root を別の綴りで書き、symlink ディレクトリ `credentials/` 経由で claim しても除外する。"""
+        self._symlinked_credentials_dir()
+        upper = os.path.join(os.path.dirname(self.repo), os.path.basename(self.repo).upper())
+        if not os.path.isdir(upper):
+            self.skipTest("大文字小文字を区別する FS では同じ実体を指す別名にならない")
+        with mock.patch.object(self.entry.gitscan, "symlink_maps", return_value=({}, {})):
+            rels, _, excluded = self.resolve(
+                [os.path.join(upper, "credentials", "data.json")], exclusion.load_policy({})
+            )
+        self.assertEqual(rels, [], "書かれた名前 (credentials) が除外判定に届いていない")
+        self.assertEqual([name for name, _ in excluded], ["credentials/data.json"])
+
+    def test_symlink_alias_of_the_other_spelling_is_judged(self):
+        """git に渡す綴りが書かれた綴り (`ORDINARY/...`) でも、ディスク上の綴りの symlink 別名で除外する。
+
+        symlink の target はディスク上の綴り (`ordinary`) なので、書かれた綴りからは別名
+        `credentials/...` が作れない。両方の綴りを判定に入れる。
+        """
+        self._symlinked_credentials_dir()
+        upper = os.path.join(self.repo, "ORDINARY", "data.json")
+        if not os.path.exists(upper):
+            self.skipTest("大文字小文字を区別する FS では同じ実体を指す別名にならない")
+        with mock.patch.object(
+            self.entry.gitscan, "_index_spelling", side_effect=lambda root, w, d: w
+        ):
+            rels, _, excluded = self.resolve([upper], exclusion.load_policy({}))
+        self.assertEqual(rels, [], "ディスク上の綴りの別名 (credentials) が除外判定に届いていない")
+        self.assertEqual([name for name, _ in excluded], ["credentials/data.json"])
+
+    def test_case_variant_symlink_text_does_not_turn_exclusion_into_send(self):
+        """リンク文字列だけ大文字の symlink (`public -> SECRETS`) で、否定 glob が除外を解除しない。
+
+        target をディスク上の綴り (`secrets`) に揃えた別名 `public/a.txt` は 0.18.1 には無い。
+        否定 glob はどれか 1 つの候補に当たれば除外を解除するので、その別名に当てると 0.18.1 が
+        除外していた `secrets/a.txt` を送る。
+        """
+        os.makedirs(os.path.join(self.repo, "secrets"))
+        write(self.repo, "secrets/a.txt", "x\n")
+        os.symlink("SECRETS", os.path.join(self.repo, "public"))
+        if not os.path.exists(os.path.join(self.repo, "SECRETS")):
+            self.skipTest("大文字小文字を区別する FS では同じ実体を指す別名にならない")
+        pol = exclusion.load_policy({exclusion.ENV_EXCLUDE: "secrets/**,!public/**"})
+        rels, _, excluded = self.resolve([os.path.join(self.repo, "secrets", "a.txt")], pol)
+        self.assertEqual(rels, [], "ディスクの綴りの別名で否定 glob が当たった")
+        self.assertEqual([name for name, _ in excluded], ["secrets/a.txt"])
+
+    def test_negated_glob_through_symlink_with_the_disk_spelling_still_sends(self):
+        """リンク文字列がディスクと同じ綴りなら、0.18.1 と同じく別名の否定 glob で送る (対照)。"""
+        os.makedirs(os.path.join(self.repo, "secrets"))
+        write(self.repo, "secrets/a.txt", "x\n")
+        os.symlink("secrets", os.path.join(self.repo, "public"))
+        pol = exclusion.load_policy({exclusion.ENV_EXCLUDE: "secrets/**,!public/**"})
+        rels, _, excluded = self.resolve([os.path.join(self.repo, "secrets", "a.txt")], pol)
+        self.assertEqual(rels, ["secrets/a.txt"])
+        self.assertEqual(excluded, [])
+
+    def test_negated_glob_matches_the_written_name_under_a_case_variant_root(self):
+        """root を別の綴りで書いた claim でも、書かれた綴りの rel に否定 glob を当てる。"""
+        upper = os.path.join(os.path.dirname(self.repo), os.path.basename(self.repo).upper())
+        if not os.path.isdir(upper):
+            self.skipTest("大文字小文字を区別する FS では同じ実体を指す別名にならない")
+        write(self.repo, "keep/a.txt", "x\n")
+        pol = exclusion.load_policy({exclusion.ENV_EXCLUDE: "*.txt,!keep/**"})
+        rels, _, excluded = self.resolve([os.path.join(upper, "keep", "a.txt")], pol)
+        self.assertEqual(rels, ["keep/a.txt"])
+        self.assertEqual(excluded, [])
+
     def test_link_name_is_judged_through_symlinked_root(self):
         """claim 側が symlink 経由の root 表記 (macOS の /tmp → /private/tmp 等) でもリンク名を見る。"""
         os.makedirs(os.path.join(self.repo, "vault"))
