@@ -427,8 +427,6 @@ _BASH_READING = False
 # CLI を落とす (差分 fuzz で 6 万件中 7 件)。そこで別の読みとして足す (bash / zsh の読みも
 # ANSI-C で読む)。
 _ANSI_C_READING = False
-# `split_with_separators` が配列代入の `(` を読んだか (bash の読みが要るか)。
-_SAW_ARRAY = [False]
 
 # トップレベルの `(` の種類。閉じ `)` の直後が語の続きかを決める。
 _PAREN_SUBSHELL = "subshell"  # サブシェル・関数定義の `()`。閉じの後ろは語の先頭
@@ -973,7 +971,6 @@ def split_with_separators(command: str) -> list[tuple[str, str]]:
                 kind = _PAREN_PROCESS
             elif prev_plain == "=":
                 kind = _PAREN_ARRAY
-                _SAW_ARRAY[0] = True
             else:
                 kind = _PAREN_SUBSHELL
             parens.append((kind, len(segments)))
@@ -1101,9 +1098,16 @@ def _parse_leading_env(cmd: str) -> tuple[str, dict[str, str]]:
         m = _ASSIGNMENT_HEAD.match(cmd)
         if not m:
             return cmd, collected
+        # 配列の値 `(...)` は閉じ `)` の直後が空白のときだけ配列として剥がす。閉じの直後に語の
+        # 断片が続く形 (`a=(x)y` / `a=(x)""`) や閉じない形 (`a=(1 2 aws ...`) は、0.29.1 までと
+        # 同じく `_scan_value_end` で値を読む (配列の経路だけにすると剥がすのをやめ、
+        # `a=(x)y aws s3 rm ...` の aws を検証しなくなる。bash 3.2 では aws は走る)。
+        end = None
         if cmd.startswith("(", m.end()):
             end = _array_value_end(cmd, m.end())
-        else:
+            if end is not None and cmd[end:end + 1] not in (" ", "\t"):
+                end = None
+        if end is None:
             end = _scan_value_end(cmd, m.end())
         if end is None:
             return cmd, collected
@@ -1796,7 +1800,15 @@ def extract_candidates(command: str) -> list[tuple[str, dict[str, str]]]:
     bash と zsh で分解が割れる形 (`extract_candidate_readings`) は、どの読みの候補も返す
     (既定の読みの候補の後ろに、別の読みにだけある候補を足す)。
     """
-    first, *others = extract_candidate_readings(command)
+    return merge_readings(extract_candidate_readings(command))
+
+
+def merge_readings(
+    readings: list[list[tuple[str, dict[str, str], str]]],
+) -> list[tuple[str, dict[str, str]]]:
+    """`extract_candidate_readings` の結果を `extract_candidates` の形に畳む (既定の読みの候補の後ろに、
+    別の読みにだけある候補を足す)。並びは読みをまたいだ出現順ではない (順序が要る判定は読みごとに辿る)。"""
+    first, *others = readings
     out = [(cand, env) for cand, env, _sep in first]
     seen = {(cand, tuple(sorted(env.items()))) for cand, env in out}
     for reading in others:
@@ -1817,7 +1829,7 @@ def extract_candidate_readings(
 
     - zsh の読み: パラメータ展開の中に素の `{` があるとき。`${...}` の中の素の `{` を数える
       (`echo ${x:-{} #}; aws ...` の aws は zsh でだけ走る)
-    - bash の読み: 配列代入 `name=(` を読んだとき。閉じの直後の `#` を語の続きと読み
+    - bash の読み: `=(` があるとき (配列代入 `name=(`)。閉じの直後の `#` を語の続きと読み
       (`a=(1 2)# ; aws ...` の aws は bash でだけ走る)、中の `(` で行の残りを読み捨てる
     - ANSI-C の読み: `$'` があるとき。`$'...'` の中の `\'` で引用符を閉じない
       (`echo $'\'' ; aws ...` の aws は bash / zsh とも走る)。bash / zsh の読みも ANSI-C で読む
@@ -1825,12 +1837,14 @@ def extract_candidate_readings(
     どれも既定の読みに足す側で、既定の読みの候補は減らない。読みごとに区切りの並びを保つので、
     `cd` の追跡 (`core/workdir.py`) は読みごとに辿る。
     """
-    _SAW_ARRAY[0] = False
     readings = [extract_candidates_with_separators(command)]
     alternatives = []
     if "$'" in command:
         alternatives.append((False, False))
-    if _SAW_ARRAY[0]:
+    # bash の読みの起動は、zsh / ANSI-C と同じく文字列の中身で決める (配列代入の `(` は必ず `=(` と
+    # 並ぶ)。既定の読みが配列代入を読んだかで決めると、既定の読みが `$'\''` の 3 つ目の `'` から
+    # 後ろを引用符の中と読む `echo $'\'' ; a=(1 2)# ; aws ...` で起動せず、aws を落とす (bash 3.2 で走る)。
+    if "=(" in command:
         alternatives.append((False, True))
     if "${" in command and command.count("{") > command.count("${"):
         alternatives.append((True, False))
@@ -1875,8 +1889,11 @@ def extract_candidates_with_separators(
         # シェル経由 wrapper のクォートを剥がすと、中身が複合コマンドのことがある
         # (`watch 'gh pr create && aws s3 rm x'`)。剥がした結果をもう一度分割して
         # 各段を候補にする。分割が要らない通常のセグメントはここを素通りする。
+        # 前置きの代入を剥がした結果が区切りで始まるとき (分割が閉じない配列代入の中と読んだ
+        # `a=(<<E \` + 改行 + `a+=(x)y ; aws ...` の代入を剥がすと `; aws ...` が残る) も分割し直す。
+        # 区切りの付いたままの形を候補にすると、後ろの CLI に一致しない。
         parts = split_with_separators(normalized)
-        if len(parts) > 1:
+        if len(parts) > 1 or (parts and normalized[0] in ";&|"):
             last = len(parts) - 1
             for k, (part, inner_sep) in enumerate(parts):
                 inner, inner_env = _normalize_segment(part)

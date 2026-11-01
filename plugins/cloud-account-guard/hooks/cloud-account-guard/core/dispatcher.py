@@ -13,7 +13,7 @@ from pathlib import Path
 from core import (
     auto_switch, budget, cache, cli_config, cli_options, mode, output, paths, shell_word, tiers, workdir,
 )
-from core.command_parser import extract_candidates
+from core.command_parser import extract_candidate_readings, merge_readings
 from services import ALL as SERVICES
 
 _BUILDER_PATH = (
@@ -300,6 +300,8 @@ def _analyze_command(
     検出コマンド表示、後者は self-remediation 判定に使う。
 
     segments は**出現順**の全セグメント (readonly / サービス未マッチも含む) で、
+    別の読み (`extract_candidate_readings`) があるときは、既定の読みの列の後ろに
+    `_READING_BREAK` を挟んで読みごとの列を続ける (各列の中は出現順)。
     各要素は (svc または None, tier または None, 剥がした形, そのセグメントが状態を
     変える service の組)。targets は (service, env, ctx) ごとに畳まれて順序を失うため、
     「切替 → write の連結」(`_unexpected_switch_before_write`) の判定にはこちらを使う。
@@ -333,12 +335,10 @@ def _analyze_command(
     tier_map: dict = {}
     switching: list = []
     segments: list[tuple] = []
-    for cand, inline_env in extract_candidates(command):
-        svc = _match_service(cand)
-        # `aws --profile prod sso login` のような CLI 名直後の global option は剥がした
-        # 形でも判定する (anchored pattern は `aws sso login` の形を前提にしている)。
-        forms = _candidate_forms(cand, svc)
-        tier = _segment_tier(forms, svc) if svc is not None else None
+    readings = extract_candidate_readings(command)
+    default_count = len(readings[0])
+    for index, (cand, inline_env) in enumerate(merge_readings(readings)):
+        svc, tier, forms, changed = _segment_facts(cand)
         is_ro = tier == tiers.READONLY
         if trace is not None:
             trace["segments"].append(
@@ -349,18 +349,15 @@ def _analyze_command(
                     "tier": tier,
                 }
             )
-        # STATE_CHANGING は PATTERNS に一致しない候補にも全 service 分を当てる。
-        # `gcloud container clusters get-credentials` / `aws eks update-kubeconfig` /
-        # `kubectx other` のように別 CLI / plugin が kubeconfig を書き換える形で
-        # kubectl の cache を破棄するため (kubectl.STATE_CHANGING 参照)。
-        changed = tuple(other for other in SERVICES if _is_state_changing(forms, other))
         for other in changed:
             if other not in switching:
                 switching.append(other)
         # readonly / サービス未マッチのセグメントも segments には残す。切替側
         # (`gh auth login` は readonly、`gcloud ... get-credentials` は kubectl の
-        # PATTERNS に一致しない) が落ちると連結の判定ができない。
-        segments.append((svc, tier, forms[-1], changed))
+        # PATTERNS に一致しない) が落ちると連結の判定ができない。既定の読みの分だけをここで
+        # 足し、別の読みは下で読みごとに足す (畳んだ並びは出現順ではない)。
+        if index < default_count:
+            segments.append((svc, tier, forms[-1], changed))
         if svc is None or is_ro:
             continue
         # コンテキスト option (`aws --profile other ...`) は inline env と同じく
@@ -385,7 +382,36 @@ def _analyze_command(
         targets.append(
             (svc, cand_map[key], dict(env_items), dict(ctx_items), tier_map[key])
         )
+    # 別の読み (`extract_candidate_readings`) は、境界の印に続けてその読みの出現順のまま全セグメントを
+    # 足す。畳んだ候補の並び (別の読みにだけある候補が末尾) で作ると、別の読みにだけある切替が既定の
+    # 読みの write の後ろに付き、「切替 → write の連結」を見落とす
+    # (`a=(1 2)# ; gh auth switch --user other` + 改行 + `gh pr create` は bash で切替 → write の順に走る)。
+    for reading in readings[1:]:
+        segments.append(_READING_BREAK)
+        for cand, _env, _sep in reading:
+            svc, tier, forms, changed = _segment_facts(cand)
+            segments.append((svc, tier, forms[-1], changed))
     return targets, switching, segments
+
+
+# `segments` の読みの境目。`_unexpected_switch_before_write` は境目で切替の記録を捨てる
+# (読みをまたいで切替と write を組にしない)。
+_READING_BREAK = None
+
+
+def _segment_facts(cand: str) -> tuple:
+    """候補 1 つの (service, tier, 判定に使う形の列, 状態を変える service の組)。"""
+    svc = _match_service(cand)
+    # `aws --profile prod sso login` のような CLI 名直後の global option は剥がした
+    # 形でも判定する (anchored pattern は `aws sso login` の形を前提にしている)。
+    forms = _candidate_forms(cand, svc)
+    tier = _segment_tier(forms, svc) if svc is not None else None
+    # STATE_CHANGING は PATTERNS に一致しない候補にも全 service 分を当てる。
+    # `gcloud container clusters get-credentials` / `aws eks update-kubeconfig` /
+    # `kubectx other` のように別 CLI / plugin が kubeconfig を書き換える形で
+    # kubectl の cache を破棄するため (kubectl.STATE_CHANGING 参照)。
+    changed = tuple(other for other in SERVICES if _is_state_changing(forms, other))
+    return svc, tier, forms, changed
 
 
 def _all_self_remediation(cands: list, service, entry) -> bool:
@@ -462,7 +488,8 @@ def _unexpected_switch_before_write(
 ) -> tuple[str, str] | None:
     """`(切替セグメント, write セグメント)` の最初の組を返す (無ければ None)。
 
-    `segments` は `_analyze_command` が作る出現順のセグメント列。
+    `segments` は `_analyze_command` が作る出現順のセグメント列。`_READING_BREAK` は
+    読みの境目で、そこで切替の記録を捨てる (組にするのは同じ読みの中の切替と write だけ)。
 
     - **切替側**: その service の状態を変えるセグメント (別 CLI 経由の
       `gcloud container clusters get-credentials` 等も含む) のうち、
@@ -484,7 +511,11 @@ def _unexpected_switch_before_write(
     自己 flag しないよう、**write 判定を先に、pending への追加を後に**行う。
     """
     pending: list[str] = []
-    for seg_service, tier, form, changed in segments:
+    for seg in segments:
+        if seg is _READING_BREAK:
+            pending = []
+            continue
+        seg_service, tier, form, changed = seg
         if (
             seg_service is service
             and tier == tiers.WRITE

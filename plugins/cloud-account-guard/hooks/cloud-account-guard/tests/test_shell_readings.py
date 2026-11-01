@@ -75,6 +75,9 @@ ANSI_C_FORMS = [
     ("echo ${x:-$$'\\''} ; {a}", True),  # bash / zsh (展開の中の `$$'` は `$` + `$'`)
     ("echo $(echo $'\\'') ; {a}", True),  # bash / zsh
     ("echo `echo $'\\''` ; {a}", True),  # bash / zsh
+    # 先頭の `$(` の中の `$'` (別の読みの入口で `$(` の終端の memo を捨てないと、既定の読みの終端を引く)
+    ("$(echo $'\\'') ; {a}", True),  # bash / zsh
+    ("$(true $'\\'') ; {a}", True),  # bash / zsh
     ("cat <<$'E\\'F'\nbody\nE'F\n{a}", True),  # bash / zsh (delimiter は `E'F`)
     # `$$'` は `$$` の後ろの普通の引用符・引用符の中の `$'` は ANSI-C ではない (どちらでも走らない)
     ("echo $$'\\'' ; {a} '", False),
@@ -109,6 +112,11 @@ ARRAY_FORMS = [
     ("a=(x (y) 'q\n{a}", True),  # bash
     ("a=(=(x 'q ; b\n{a}", True),  # bash
     ("a=(1 2) # ; {a}", False),
+    # 既定の読みが `$'\''` の 3 つ目の `'` から後ろを引用符の中と読み、配列代入を読まない形
+    # (bash の読みの起動を既定の読みの結果に頼ると落ちる)
+    ("echo $'\\'' ; a=(1 2)# ; {a}", True),  # bash
+    ("echo $'\\'' ; a+=(1)# ; {a}", True),  # bash
+    ("b=$'\\'' a=(1 2)# ; {a}", True),  # bash
 ]
 
 
@@ -181,8 +189,8 @@ class ArrayAssignmentPrefixTests(unittest.TestCase):
 
     def test_prefix_is_stripped(self):
         for prefix in ("a=(1 2)", "a+=(x)", "a=()", "a=(1 \"x)\" $'\\')')", "a[1]=x", "a+=x",
-                       "b=1 a=(x)", "a=(x) b=1"):
-            command = prefix + " " + AWS
+                       "b=1 a=(x)", "a=(x) b=1", "a=(1 2)\t"):
+            command = prefix + ("" if prefix.endswith("\t") else " ") + AWS
             with self.subTest(command=command):
                 cands = extract_candidates(command)
                 self.assertIn(AWS, [c for c, _e in cands])
@@ -198,9 +206,31 @@ class ArrayAssignmentPrefixTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(extract_candidates(command), [(AWS, env)])
 
-    def test_unclosed_array_is_not_stripped(self):
-        command = "a=(1 2 " + AWS
-        self.assertEqual(_cands(command), [command])
+    def test_unclosed_array_reads_plain_value(self):
+        """閉じない配列は 0.29.1 と同じく普通の値として読む (`a=(1` を剥がす)。"""
+        self.assertEqual(_cands("a=(1 2 " + AWS), ["2 " + AWS])
+
+    def test_word_after_closer_reads_plain_value(self):
+        """閉じ `)` の直後に語の断片が続く値は、0.29.1 と同じく普通の値として剥がす (aws は bash 3.2 で走る)。
+
+        配列の経路だけで読むと剥がすのをやめ、後ろの aws を候補にしない。値は集めない。
+        """
+        for prefix in ("a=(x)y ", 'a=(x)"" ', "a=(x)'' ", "a=(x)\\  ", "a+=(x)y ", "a=(<<E \\\n"):
+            command = prefix + AWS
+            with self.subTest(command=command):
+                self.assertIn((AWS, {}), extract_candidates(command))
+
+    def test_stripped_rest_starting_with_separator_is_split_again(self):
+        """分割が閉じない配列代入の中と読んだ区切りまで代入を剥がしたら、残りを分割し直す。
+
+        剥がした残りが `; aws ...` になり、区切りの付いた形のままだと aws に一致しない (0.29.1 は候補にしていた)。
+        """
+        for command in (
+            "a=(<<E \\\n \\\na+=(x)y ; " + AWS,  # bash
+            "a+=(x)y<<-EOFtruea=(<<E \\\n; " + AWS,  # zsh
+        ):
+            with self.subTest(command=command):
+                self.assertIn(AWS, _cands(command))
 
 
 class ReadingTests(unittest.TestCase):
@@ -267,6 +297,19 @@ class ReadingTests(unittest.TestCase):
         first = extract_candidate_readings(command)
         self.assertEqual(len(first), 2)
         self.assertEqual(extract_candidate_readings(command), first)
+        # 別の読みの出口で memo を捨てないと、後の既定の読みの分割が別の読みの終端を引く
+        # (zsh の読みでは `${x:-echo |...{<(}` が閉じ、既定の読みでは閉じない)
+        command = "<(${x:-echo |" + AWS + "{<(}"
+        before = split_on_operators(command)
+        first = extract_candidates(command)
+        self.assertEqual(split_on_operators(command), before)
+        self.assertEqual(extract_candidates(command), first)
+
+    def test_candidate_in_several_readings_is_listed_once(self):
+        """どの読みにもある候補は 1 回だけ返す (検出コマンドの表示に重ねて出さない)。"""
+        command = AWS + " ; echo ${x:-{} #}; gh pr list"
+        self.assertEqual(len(extract_candidate_readings(command)), 2)
+        self.assertEqual(_cands(command).count(AWS), 1)
 
     def test_cd_is_tracked_per_reading(self):
         """別の読みにだけある候補も、その読みの `cd` を辿ったディレクトリで走るものとして扱う。"""
@@ -342,6 +385,13 @@ class DispatchTests(BaseWithTmpProject):
             "echo $(true)# ; {a}",
             "echo \\)# ; {a}",
             "echo $'\\'' ; {a}",
+            # 配列代入の閉じの直後に語の断片が続く・閉じない (0.29.1 と同じく deny。bash 3.2 で走る)
+            "a=(x)y {a}",
+            'a=(x)"" {a}',
+            "a=(x)'' {a}",
+            "a=(x)\\  {a}",
+            "a=(<<E \\\n{a}",
+            "echo $'\\'' ; a=(1 2)# ; {a}",
         ]
         for form in forms:
             command = form.replace("{a}", AWS)
@@ -349,6 +399,49 @@ class DispatchTests(BaseWithTmpProject):
                 decision, v = self._decide(command)
                 self.assertTrue(v.called, f"検証されていない: {command!r}")
                 self.assertEqual(decision, "deny")
+
+
+class ChainAcrossReadingsTests(BaseWithTmpProject):
+    """別の読みにだけある切替も、同じ読みの中の後ろの write と組にして「切替 → write の連結」を deny する。"""
+
+    def test_switch_only_in_alternative_reading_before_write_is_denied(self):
+        self._write_accounts({"github": "Mao-o"})
+        for command in (
+            "echo ${x:-{} #}; gh auth switch --user other\ngh pr create",  # zsh
+            "a=(1 2)# ; gh auth switch --user other\ngh pr create",  # bash
+            "echo $'\\'' ; gh auth switch --user other\ngh pr create",  # bash / zsh
+        ):
+            with self.subTest(command=command):
+                with self.isolated_cache(), mock.patch("services.github.verify", return_value=None):
+                    result = dispatch(command, str(self.project_dir))
+                self.assertIsNotNone(result, "allow された")
+                self.assertEqual(result["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_switch_and_write_in_different_readings_are_not_chained(self):
+        """読みの境目で切替の記録を捨てる (既定の読みの切替を、別の読みの write と組にしない)。"""
+        from core import tiers
+        from core.dispatcher import _READING_BREAK, _unexpected_switch_before_write
+        from services import github
+
+        switch = (github, None, "gh auth switch --user other", (github,))
+        write = (github, tiers.WRITE, "gh pr create", ())
+        self.assertIsNotNone(_unexpected_switch_before_write(github, "Mao-o", [switch, write]))
+        self.assertIsNone(
+            _unexpected_switch_before_write(github, "Mao-o", [switch, _READING_BREAK, write])
+        )
+
+    def test_default_only_switch_is_not_chained_to_alternative_only_write(self):
+        """既定の読みにだけある切替と、別の読みにだけある write は組にしない。
+
+        bash 3.2 / zsh は ANSI-C の読みのとおり `gh pr create` だけを走らせ、切替は引用符の中。
+        畳んだ候補の並び (別の読みにだけある write が末尾) で組にすると誤って deny する。
+        """
+        self._write_accounts({"github": "Mao-o"})
+        command = "echo $'\\'' ; gh pr create ; echo ' ; gh auth switch --user other '"
+        with self.isolated_cache(), mock.patch("services.github.verify", return_value=None) as v:
+            result = dispatch(command, str(self.project_dir))
+        self.assertTrue(v.called)
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":
