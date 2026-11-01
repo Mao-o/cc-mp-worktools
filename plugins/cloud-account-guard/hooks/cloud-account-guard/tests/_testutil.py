@@ -315,8 +315,9 @@ def _leaky_names(env) -> list[str]:
 def _drop_leaky_env_for_the_process() -> None:
     """テスト実行プロセスの env から「判定を変えうる env」を落とす (import 時に 1 回)。
 
-    `start_isolation()` を呼ばないモジュール (cd の追跡のテストなど) も、外側の `CDPATH` や
-    `AWS_PROFILE` で結果が変わる (実際に、外側に `CDPATH` があると 200 件が落ちた)。
+    現在の suite では、どのモジュールも `start_isolation()` / `sanitized_env()` を通して外側の env
+    から切り離されている。import 時の除去は、隔離を呼ばないモジュールが今後増えたときの保険
+    (外側に `CDPATH` があり、`CDPATH` が除外リストに無かったときは 200 件が落ちた)。
     """
     for name in _leaky_names(os.environ):
         os.environ.pop(name, None)

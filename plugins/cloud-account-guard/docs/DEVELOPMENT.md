@@ -850,7 +850,10 @@ write 自体が通らないため、別アカウントでの書き込みには�
 `test_accounts_builder.py`)。`test_main.py` は子プロセスを起動するので
 `os.environ` ではなく**渡す env を組む**側だが、除去規則は共有する
 (`_testutil.sanitized_env()`) — prefix ループを各所で再実装すると
-`LEAKY_ENV_VARS` に足したときに一方だけ更新される。
+`LEAKY_ENV_VARS` に足したときに一方だけ更新される。各 service が宣言する
+`IDENTITY_ENV_VARS` / `IDENTITY_ENV_PREFIXES` は、`cli_config_env()` が設定し直すものを
+除いて全部外す (`test_testutil.TestOuterCloudEnvIsDropped` が宣言との一致を検査する)。
+保険として `_testutil` は import 時にテスト実行プロセスの env からも同じものを外す。
 
 隔離そのものにも負テストを置く (`tests/test_testutil.py`)。現在のマシンに
 `GH_TOKEN` 等が無いと、pop ループを消しても全 suite が green のまま通る

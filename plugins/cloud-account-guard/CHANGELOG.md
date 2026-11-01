@@ -11,8 +11,8 @@
 - 各 service が CLI のアカウントを決める env として宣言するもの (`IDENTITY_ENV_VARS` /
   `IDENTITY_ENV_PREFIXES`) は、隔離が設定し直すもの (`HOME` など) を除いてすべて外す。宣言との一致を
   `tests/test_testutil.py` が検査する
-- 隔離 (`start_isolation()`) を呼ばないモジュールのために、`_testutil` の import の時点でテスト実行
-  プロセスの env からも外す。外側に `AWS_CONFIG_FILE` / `AWS_PROFILE` / `KUBECONFIG` / `CDPATH` を
+- 保険として、`_testutil` の import の時点でテスト実行プロセスの env からも外す (今の suite は
+  どのモジュールも隔離を通っているが、隔離を呼ばないモジュールが増えたときのため)。外側に `AWS_CONFIG_FILE` / `AWS_PROFILE` / `KUBECONFIG` / `CDPATH` を
   export したまま、実際に落ちたテストが green になることを子プロセスで確かめるテストを足した
 - `test_command_parser.py` の 5 クラス (`TestSplitOnOperators` / `TestStripLeadingEnv` /
   `TestStripTransparentWrappers` / `TestExtractCandidates` / `TestSudoEnvScrub`) の、入力と期待だけが違う
