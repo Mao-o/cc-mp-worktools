@@ -50,6 +50,55 @@ class Invocation:
     parsed: bool = True  # False = shlex で分解できず文字列一致で検出した
 
 
+# shell が単語の先頭と読む位置の直前に来る文字 (これらの直後の `#` からがコメント)
+_WORD_START_PREV = frozenset(" \t\r\n;&|()<>")
+
+
+def _strip_comments(command: str) -> str:
+    """shell と同じ規則でコメントを落とし、`\\`+改行の継続行をつなぐ。
+
+    shlex の既定の commenters (`#`) は単語の途中の `#` (`feature#1`、`${x##*/}`) でも
+    コメントと読み、しかも読み捨てるときに改行まで消費するので、次の行の
+    `gh pr create` が前の行につながって見失われる。そこで shlex には commenters を
+    使わせず、ここで単語の先頭 (直前が空白か区切り) の `#` から改行の手前までだけを落とす。
+    引用符の中の `#` と、単語の途中の `#` は落とさない。改行そのものは残す
+    (複数行のコマンドを 1 セグメントに潰さないため)。
+    """
+    out: list[str] = []
+    quote = ""  # "" | "'" | '"'
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if quote == "'":
+            out.append(ch)
+            if ch == "'":
+                quote = ""
+        elif ch == "\\" and i + 1 < n:
+            if command[i + 1] == "\n":
+                pass  # 継続行: 両方とも捨てて前後をつなぐ (単一引用符の外ならどこでも)
+            else:
+                out.append(ch)
+                out.append(command[i + 1])
+            i += 2
+            continue
+        elif quote == '"':
+            out.append(ch)
+            if ch == '"':
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+            out.append(ch)
+        elif ch == "#" and (not out or out[-1] in _WORD_START_PREV):
+            while i < n and command[i] != "\n":
+                i += 1
+            continue
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _is_separator(tok: str) -> bool:
     """punctuation だけの token が区切りを含むか。
 
@@ -182,7 +231,8 @@ def find_invocations(command: str) -> list[Invocation]:
     if "gh" not in command or "pr" not in command:
         return []
     try:
-        lex = shlex.shlex(command, posix=True, punctuation_chars=_PUNCT)
+        lex = shlex.shlex(_strip_comments(command), posix=True, punctuation_chars=_PUNCT)
+        lex.commenters = ""  # コメントは _strip_comments で落とす (shlex は改行まで食う)
         lex.whitespace = " \t\r"
         lex.whitespace_split = True
         tokens = list(lex)
