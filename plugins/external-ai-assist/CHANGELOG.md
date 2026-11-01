@@ -5,6 +5,25 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.18.2
+
+**`post-implementation-review` で、大文字小文字だけが違う名前で編集したファイルを、Stop も commit レビューも送らずに誤った理由を通知していたのを直した。**
+
+### 修正
+
+- 大文字小文字を区別しない FS (macOS の既定) で、実体と大文字小文字だけが違う名前 (実体は `b.py`、Write / Edit のパスは `B.py`) で編集すると、作業ツリー相対のパスが `B.py` のまま literal pathspec で git に渡り、index の `b.py` に当たらなかった。Stop は「差分が空で取得できませんでした (commit 済みの可能性)」と誤った理由を通知し、commit レビューはファイル名だけを通知して、内容は一度もレビューされなかった (送らない側の失敗で、他の内容を送る漏れではない)。作業ツリー相対にするときにディスク上の綴りに揃えるようにした (0.18.1 の「既知の限界」の解消)
+  - ディレクトリ部分は macOS の `F_GETPATH` (getcwd と同じ綴り)。末尾の名前はディレクトリの一覧から、書かれた名前がそのまま無いときだけ「大文字小文字と Unicode の正規化を無視して同じ名前」かつ「同じ inode」の項目が 1 つのときにその綴りを使う。hard link の別の名前 (同じ inode で綴りが違う名前) には化けない
+  - 揃えられないとき (`F_GETPATH` の無い OS、存在しないパス、一覧の読めないディレクトリ) は従来どおり realpath の結果を使う。大文字小文字を区別する FS では結果は変わらない
+  - 作業ツリーの root を大文字小文字だけ違う綴りで書いたパスも作業ツリー内として扱い、除外判定に渡す書かれたままの名前 (lexical 名) も同じ同定で残す
+  - 塊の途中で kill されたレビューの回収で、返った塊のパスを claim したときの名前と突き合わせる比較も同じ綴りで行う (大文字小文字だけ違う名前で claim したファイルの返った塊を送り直さない)
+
+### テスト
+
+- `tests/test_claimed_name_carry.py`: 0.18.1 で現状の挙動を固定していた `TestCaseOnlyAlias` を「Stop も commit レビューも内容を送る」に書き換え (2 件)、pending に戻す出口 6 つの直積に大文字小文字だけ違う名前の配置を足した (6 件)
+- `hooks/_common/tests/test_physpath.py` (18 件追加): 綴りの解決を、実名・symlink (対象と親)・hard link・存在しないパス・大文字小文字の別名 (ファイル名・ディレクトリ・hard link の別名)・Unicode の正規化の別名・読めないディレクトリ・`F_GETPATH` の失敗と相対の答えで確かめる
+- `tests/test_gitscan.py` (4 件追加)・`tests/test_review_set.py` (2 件追加)・`tests/test_interrupted_chunks.py` (1 件追加): 作業ツリー相対・root の綴り違い・lexical 名による除外・kill 後の回収
+- 変えた箇所ごとに元に戻す変異 19 件を流し、16 件が assertion の失敗で落ちる。残る 3 件は等価 (根拠は書いた名前がそのまま一覧にある近道・畳んで同じ名前が 1 つしか共存しない FS・root は git がディスク上の綴りで返す)
+
 ## 0.18.1
 
 **`post-implementation-review` で、symlink を通る名前で編集したファイルを Stop が送らずに繰り越したとき、その内容がどこにも送られなくなっていたのを直した。**

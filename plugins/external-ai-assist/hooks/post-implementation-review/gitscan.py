@@ -33,7 +33,7 @@ import os
 import re
 import subprocess
 
-from _common import gitroot
+from _common import gitroot, physpath
 
 #: object id として受理する形 (SHA-1 40 桁 / SHA-256 64 桁。短縮形も一応許す)。
 _SHA_RE = re.compile(r"^[0-9a-f]{7,64}$")
@@ -148,11 +148,15 @@ def to_relative(root: str, path: str) -> str | None:
 
     git のパススペックは root 相対でなければ黙って何にもマッチしないため、
     ここで確実に相対化しておく。
+
+    symlink を解くだけでなく、大文字小文字を区別しない FS ではディスク上の綴りに揃える
+    (`_common.physpath`)。`B.py` と書いた名前の実体が `b.py` のとき、`B.py` のまま
+    literal pathspec に渡すと index の `b.py` に当たらず差分が空になるため。
     """
     if not path:
         return None
-    real = os.path.realpath(path)
-    root_real = os.path.realpath(root)
+    real = physpath.physical_path(path)
+    root_real = physpath.physical_dir(root)
     if real == root_real:
         return None
     prefix = root_real.rstrip(os.sep) + os.sep

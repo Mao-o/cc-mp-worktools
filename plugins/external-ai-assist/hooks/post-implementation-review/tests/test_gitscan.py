@@ -188,6 +188,39 @@ class TestToRelative(GitScanTestCase):
         self.assertIsNone(gitscan.to_relative(self.repo, ""))
 
 
+class TestToRelativeCaseOnlyAlias(GitScanTestCase):
+    """大文字小文字だけ違う名前を、ディスク上の (index と同じ) 綴りの root 相対にする。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        write(self.repo, "pkg/mod.py", "x\n")
+        if not os.path.exists(os.path.join(self.repo, "PKG", "MOD.py")):
+            self.skipTest("大文字小文字を区別する FS では同じ実体を指す別名にならない")
+        self.upper_root = os.path.join(os.path.dirname(self.repo), "REPO")
+
+    def test_file_and_directory_parts(self):
+        self.assertEqual(gitscan.to_relative(self.repo, os.path.join(self.repo, "PKG", "Mod.py")),
+                         "pkg/mod.py")
+
+    def test_root_written_in_another_case(self):
+        self.assertEqual(gitscan.to_relative(self.upper_root, os.path.join(self.repo, "pkg/mod.py")),
+                         "pkg/mod.py")
+        self.assertEqual(gitscan.to_relative(self.repo, os.path.join(self.upper_root, "pkg/mod.py")),
+                         "pkg/mod.py")
+
+    def test_root_itself_in_another_case_is_none(self):
+        self.assertIsNone(gitscan.to_relative(self.repo, self.upper_root))
+        self.assertIsNone(gitscan.to_relative(self.upper_root, self.repo))
+
+    def test_case_only_diff_reaches_the_tracked_file(self):
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "seed")
+        write(self.repo, "pkg/mod.py", "y\n")
+        rel = gitscan.to_relative(self.repo, os.path.join(self.repo, "pkg", "MOD.PY"))
+        diff = gitscan.path_diff(self.repo, rel, untracked=False, has_head=True)
+        self.assertIn("+y", diff or "")
+
+
 class TestStatusSnapshot(GitScanTestCase):
     def test_untracked_files_are_listed_individually(self):
         """`-uall` を使わないと新規ディレクトリが `dir/` に畳まれて個別に拾えない。"""

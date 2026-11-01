@@ -161,7 +161,7 @@ _HOOKS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _HOOKS_DIR not in sys.path:
     sys.path.insert(0, _HOOKS_DIR)
 
-from _common import backends, flock, hooklog, notify, sentinel, settings  # noqa: E402
+from _common import backends, flock, hooklog, notify, physpath, sentinel, settings  # noqa: E402
 
 import cursor  # noqa: E402
 import exclusion  # noqa: E402
@@ -2315,7 +2315,7 @@ def _resolve_paths(
     戻した) パスは次ターンの先頭に来るので、予算超過で繰り越されたファイルが新しい編集に
     毎回追い越されて永久に残ることがない。
     """
-    root_real = os.path.realpath(root).rstrip(os.sep) or os.sep
+    root_real = physpath.physical_dir(root).rstrip(os.sep) or os.sep
     symlinks = gitscan.symlink_map(root)
     # 実体 (realpath 相対) ごとに判定候補を集める。同じ実体が別名 (symlink) で複数回 claim
     # されていても、どの名前が機密に見えるかを全部見てから判定する
@@ -2394,14 +2394,18 @@ def _lexical_relative(root_real: str, path: str) -> str | None:
     ディレクトリ経由の claim が `ordinary/data.json` になり、除外判定から `credentials` が
     消える (マージ前レビューの指摘)。親ディレクトリだけ realpath する方式も同じ穴があった。
     ここでは **root の別名** (`/tmp` → `/private/tmp`、symlink された親ディレクトリ) だけを
-    realpath で同定し、その下の構成要素は名前のまま残す。祖先を浅い方から試して最初に root と
+    実体のパスで同定し、その下の構成要素は名前のまま残す。祖先を浅い方から試して最初に root と
     一致したところで切るので、root 配下に root 自身へ戻る symlink があっても途中の名前は残る。
     root の別名が見つからなければ None (作業ツリー外)。
+
+    同定は `physpath.physical_dir` (realpath に加えて、大文字小文字を区別しない FS ではディスク上の
+    綴り) で行い、`root_real` もそれで渡す。root を大文字小文字だけ違う綴りで書いた claim は
+    `to_relative` が作業ツリー内と判定するので、ここでも root と同定して書かれた名前を残す。
     """
     parts = os.path.normpath(path).split(os.sep)
     for cut in range(1, len(parts)):
         prefix = os.sep.join(parts[:cut]) or os.sep
-        if os.path.realpath(prefix) == root_real:
+        if physpath.physical_dir(prefix) == root_real:
             return os.sep.join(parts[cut:]) or None
     return None
 

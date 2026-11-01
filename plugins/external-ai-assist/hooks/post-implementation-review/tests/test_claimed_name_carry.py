@@ -143,10 +143,7 @@ class _CarryCase(CommitFlowTestCase):
         )
 
 
-# 大文字小文字だけ違う名前は直積に入れない: realpath は大文字小文字を正規化しないので、
-# 最初の Stop の時点で `git diff-index` が実体 (b.py) に当たらず「差分が空」になり、繰り越しの
-# 経路に入らない。その挙動は下の `TestCaseOnlyAlias` で固定する
-LAYOUTS = ("real", "in_repo_symlink", "symlinked_ancestor", "hard_link")
+LAYOUTS = ("real", "in_repo_symlink", "symlinked_ancestor", "hard_link", "case_alias")
 EXITS = ("unsent_chunk", "failed_chunk", "all_failed", "overflow", "deferred_time", "min_lines")
 
 
@@ -155,22 +152,35 @@ class TestCarriedPathKeepsClaimedName(_CarryCase):
 
 
 class TestCaseOnlyAlias(_CarryCase):
-    """大文字小文字だけ違う名前 (`B.py` で編集、実体は `b.py`) の現状の挙動 (characterization)。
+    """大文字小文字だけ違う名前 (`B.py` で編集、実体は `b.py`) の内容を Stop も commit レビューも送る。
 
-    この形は繰り越し以前に、Stop も commit レビューも内容を送らない (ファイル名だけを通知する)。
-    送信範囲が広がる側の失敗ではないので、ここでは「送らない・通知する」を固定する。
+    0.18.1 までは realpath が大文字小文字を正規化せず、`B.py` のまま literal pathspec で git に
+    渡って index の `b.py` に当たらなかった。Stop は「差分が空で取得できませんでした」と誤った理由を
+    通知し、commit レビューはファイル名だけを通知して、内容はどこにも送られなかった。
     """
 
-    def test_case_only_alias_is_reported_not_sent(self):
-        base, _a, b_name, b_rel = self.layout_case_alias()
+    def test_stop_sends_case_only_alias(self):
+        base, _a, b_name, _b_rel = self.layout_case_alias()
         self.edit_as(b_name, OURS + "\nx\n", base)
         stop_out = self.stop_with(["REVIEW_CLEAN"])
-        self.assertFalse(any(OURS in body for body in self.review_calls))
-        self.assertIn("差分が空で取得できませんでした", self.notice(stop_out))
+        self.assertTrue(
+            any(OURS in body for body in self.review_calls),
+            f"Stop が内容を送っていない (通知: {self.notice(stop_out)})",
+        )
+        self.assertNotIn("差分が空で取得できませんでした", self.notice(stop_out))
+        # 送った本文は index の綴り (b.py) の差分
+        self.assertTrue(any("b/b.py" in body for body in self.review_calls))
+        self.assertEqual(self.pending(SESSION_A), [])
+
+    def test_commit_review_sends_case_only_alias(self):
+        base, _a, b_name, b_rel = self.layout_case_alias()
         self.edit_as(b_name, OURS + "\ny\n", base)
         output = self.window("tu_commit", lambda: self.commit("c", b_rel))
-        self.assertFalse(any(OURS in body for body in self.review_calls))
-        self.assertIn("ファイル名のみ", self.notice(output))
+        self.assertTrue(
+            any(OURS in body for body in self.review_calls),
+            f"commit レビューが内容を送っていない (通知: {self.notice(output)})",
+        )
+        self.assertNotIn("ファイル名のみ", self.notice(output))
 
 
 def _make(layout: str, exit_: str):

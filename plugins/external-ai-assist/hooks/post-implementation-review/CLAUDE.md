@@ -246,7 +246,11 @@ docstring と README を参照。判定には実体 (realpath 相対。git に�
 渡し、どれかが当たれば除外する。`credentials/` → `ordinary/` の symlink ディレクトリ経由でも
 機密名のリンクでも、root の別名 (`/tmp` → `/private/tmp`) 経由でも落ちない。別名が要るのは
 Bash 経由の変更で、`git status` は実体名 (`ordinary/data.json`) しか返さないため lexical 名が
-claim に現れない (マージ前レビューの指摘)。symlink の列挙は tracked が index (mode 120000)、untracked が
+claim に現れない (マージ前レビューの指摘)。実体の相対パスは、大文字小文字を区別しない FS では
+ディスク上の綴りに揃える (0.18.2。`_common/physpath.py`: ディレクトリ部分は macOS の `F_GETPATH`、
+末尾の名前はディレクトリの一覧から「畳むと同じ名前」かつ「同じ inode」の項目。hard link の別の名前には
+化けない)。`B.py` と書いた名前のまま literal pathspec で渡すと index の `b.py` に当たらず、差分が空に
+なっていた。書かれた綴りは lexical 名として除外判定に残る。symlink の列挙は tracked が index (mode 120000)、untracked が
 root から 3 階層の BFS scandir (5000 エントリ / 500 件で打ち切り)。Stop の git 予算は
 rev-parse 2秒×2 (worktree_root + head_exists) + ls-files (symlink) 10秒
 + ls-files (untracked) 10秒 + diff 収集 30秒 + 予算判定後の最後の 1 パス分 diff 5秒
@@ -1081,6 +1085,7 @@ pytest tests/                          # pytest でも動く (conftest.py で sy
 | **入れ子の作業ツリー / git リポジトリ / submodule の中のファイルを黙って落とす (誤通知しない)** | `TestNestedWorktree` |
 | 上限超過パスを黙って捨てない | `TestOverflowCarryOver` |
 | **繰り越し・失敗で pending に戻すパスは claim したときの名前 (symlink を通る名前) のまま戻し、指紋を失わない (0.18.1)** | `test_claimed_name_carry.py` |
+| **大文字小文字だけ違う名前 (`B.py` で編集、実体は `b.py`) を index の綴りに揃えて Stop も commit レビューも送る (0.18.2)** | `test_claimed_name_carry.py::TestCaseOnlyAlias` (綴りの解決は `hooks/_common/tests/test_physpath.py`) |
 | コードフェンス付き REVIEW_CLEAN (+ 前置き) を指摘扱いしない | `TestFencedCleanSentinel` (判定規則の網羅は `hooks/_common/tests/test_sentinel.py`) |
 | 機密・非コードファイルの差分を外部に送らない (恒久除外 + 通知) | `TestExclusion` (判定規則の網羅は `tests/test_exclusion.py`) |
 | glob に見えるファイル名で他セッションの差分が混入しない | `TestLiteralPathspecFlow` (git 単体は `test_gitscan.py::TestLiteralPathspec`) |

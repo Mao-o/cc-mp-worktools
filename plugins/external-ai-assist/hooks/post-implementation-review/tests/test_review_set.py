@@ -223,6 +223,29 @@ class TestResolvePathsExclusion(ReviewSetTestCase):
             "self/secret.txt",
         )
 
+    def test_lexical_relative_with_root_written_in_another_case(self):
+        """root を大文字小文字だけ違う綴りで書いた claim でも、root 配下の書かれた名前を残す。"""
+        upper = os.path.join(os.path.dirname(self.repo), os.path.basename(self.repo).upper())
+        if not os.path.isdir(upper):
+            self.skipTest("大文字小文字を区別する FS では同じ実体を指す別名にならない")
+        root = os.path.realpath(self.repo)
+        self.assertEqual(
+            self.entry._lexical_relative(root, os.path.join(upper, "Keys", "c.py")), "Keys/c.py"
+        )
+
+    def test_case_variant_root_claim_keeps_the_written_name_for_exclusion(self):
+        """root を別の綴りで書き、symlink ディレクトリ `credentials/` 経由で claim しても除外する。"""
+        self._symlinked_credentials_dir()
+        upper = os.path.join(os.path.dirname(self.repo), os.path.basename(self.repo).upper())
+        if not os.path.isdir(upper):
+            self.skipTest("大文字小文字を区別する FS では同じ実体を指す別名にならない")
+        with mock.patch.object(self.entry.gitscan, "symlink_map", return_value={}):
+            rels, _, excluded = self.resolve(
+                [os.path.join(upper, "credentials", "data.json")], exclusion.load_policy({})
+            )
+        self.assertEqual(rels, [], "書かれた名前 (credentials) が除外判定に届いていない")
+        self.assertEqual([name for name, _ in excluded], ["credentials/data.json"])
+
     def test_link_name_is_judged_through_symlinked_root(self):
         """claim 側が symlink 経由の root 表記 (macOS の /tmp → /private/tmp 等) でもリンク名を見る。"""
         os.makedirs(os.path.join(self.repo, "vault"))
