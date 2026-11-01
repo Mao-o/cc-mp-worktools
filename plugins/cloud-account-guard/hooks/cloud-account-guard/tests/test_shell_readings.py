@@ -73,6 +73,7 @@ ANSI_C_FORMS = [
     ("A=$'\\'' ; {a}", True),  # bash / zsh
     ("echo ${x:-$'\\''} ; {a}", True),  # bash / zsh
     ("echo ${x:-$$'\\''} ; {a}", True),  # bash / zsh (展開の中の `$$'` は `$` + `$'`)
+    ("echo $\\\n'\\'' ; {a}", True),  # bash / zsh (行の継続をまたいだ `$'`)
     ("echo $(echo $'\\'') ; {a}", True),  # bash / zsh
     ("echo `echo $'\\''` ; {a}", True),  # bash / zsh
     # 先頭の `$(` の中の `$'` (別の読みの入口で `$(` の終端の memo を捨てないと、既定の読みの終端を引く)
@@ -105,6 +106,7 @@ BRACE_FORMS = [
 # エラーにして行の残りを読み捨てる)。
 ARRAY_FORMS = [
     ("a=(1 2)# ; {a}", True),  # bash
+    ("a=\\\n(1 2)# ; {a}", True),  # bash / zsh (行の継続をまたいだ `=(`)
     ("a+=(1 2)# ; {a}", True),  # bash
     ("a[1]=(1)# ; {a}", True),  # bash
     ("a=(1 2)#'\n{a}", True),  # zsh
@@ -227,6 +229,8 @@ class ArrayAssignmentPrefixTests(unittest.TestCase):
         """
         for command in (
             "a=(<<E \\\n \\\na+=(x)y ; " + AWS,  # bash
+            "a=(<<E \\\n \\\na+=(x)y | " + AWS,  # bash
+            "a=(<<E \\\n \\\na+=(x)y & " + AWS,  # bash
             "a+=(x)y<<-EOFtruea=(<<E \\\n; " + AWS,  # zsh
         ):
             with self.subTest(command=command):
@@ -410,6 +414,7 @@ class ChainAcrossReadingsTests(BaseWithTmpProject):
             "echo ${x:-{} #}; gh auth switch --user other\ngh pr create",  # zsh
             "a=(1 2)# ; gh auth switch --user other\ngh pr create",  # bash
             "echo $'\\'' ; gh auth switch --user other\ngh pr create",  # bash / zsh
+            "a=\\\n(1 2)# ; gh auth switch --user other\ngh pr create",  # bash / zsh
         ):
             with self.subTest(command=command):
                 with self.isolated_cache(), mock.patch("services.github.verify", return_value=None):

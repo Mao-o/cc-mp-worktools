@@ -1839,14 +1839,17 @@ def extract_candidate_readings(
     """
     readings = [extract_candidates_with_separators(command)]
     alternatives = []
-    if "$'" in command:
+    # 起動条件は、分割器と同じく行の継続 (`\` + 改行) を取り除いた文字列で見る (`a=\` + 改行 + `(` も
+    # 配列代入)。多めに起動しても候補が増えるだけで、既定の読みは変わらない。
+    probe = command.replace("\\\n", "")
+    if "$'" in probe:
         alternatives.append((False, False))
     # bash の読みの起動は、zsh / ANSI-C と同じく文字列の中身で決める (配列代入の `(` は必ず `=(` と
     # 並ぶ)。既定の読みが配列代入を読んだかで決めると、既定の読みが `$'\''` の 3 つ目の `'` から
     # 後ろを引用符の中と読む `echo $'\'' ; a=(1 2)# ; aws ...` で起動せず、aws を落とす (bash 3.2 で走る)。
-    if "=(" in command:
+    if "=(" in probe:
         alternatives.append((False, True))
-    if "${" in command and command.count("{") > command.count("${"):
+    if "${" in probe and probe.count("{") > probe.count("${"):
         alternatives.append((True, False))
     for zsh, bash in alternatives:
         with _reading(zsh, bash):
