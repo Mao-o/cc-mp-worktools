@@ -120,6 +120,40 @@ class TestSymlinkMap(GitScanTestCase):
         git(self.repo, "commit", "-qm", "deep link")
         self.assertEqual(gitscan.symlink_map(self.repo), {deep: "ordinary"})
 
+    def test_written_targets_keep_the_link_text_spelling(self):
+        """2 つ目の一覧の target は realpath の綴り (リンク文字列の大文字小文字のまま)。"""
+        write(self.repo, "secrets/a.txt", "x\n")
+        os.symlink("SECRETS", os.path.join(self.repo, "public"))
+        if not os.path.exists(os.path.join(self.repo, "SECRETS")):
+            self.skipTest("大文字小文字を区別する FS では同じ実体を指す別名にならない")
+        self.assertEqual(
+            gitscan.symlink_maps(self.repo), ({"public": "secrets"}, {"public": "SECRETS"})
+        )
+        self.assertEqual(gitscan.symlink_map(self.repo), {"public": "secrets"})
+
+    def test_written_relative_is_the_realpath_relative(self):
+        write(self.repo, "secrets/a.txt", "x\n")
+        self.assertEqual(
+            gitscan.written_relative(self.repo, os.path.join(self.repo, "secrets", "a.txt")),
+            os.path.join("secrets", "a.txt"),
+        )
+        self.assertIsNone(gitscan.written_relative(self.repo, self.repo))
+        self.assertIsNone(gitscan.written_relative(self.repo, ""))
+        self.assertIsNone(gitscan.written_relative(self.repo, "/elsewhere/x.py"))
+        upper = os.path.join(self.repo, "SECRETS", "a.txt")
+        if os.path.exists(upper):
+            self.assertEqual(
+                gitscan.written_relative(self.repo, upper), os.path.join("SECRETS", "a.txt")
+            )
+
+    def test_caps_apply_to_each_map(self):
+        write(self.repo, "ordinary/data.json", "{}\n")
+        for i in range(6):
+            self._link(f"link{i}", "ordinary")
+        with mock.patch.object(gitscan, "MAX_SYMLINKS", 2):
+            disk, written = gitscan.symlink_maps(self.repo)
+        self.assertEqual((len(disk), len(written)), (2, 2))
+
     def test_caps_limit_the_scan(self):
         write(self.repo, "ordinary/data.json", "{}\n")
         for i in range(6):

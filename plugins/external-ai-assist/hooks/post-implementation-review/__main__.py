@@ -154,6 +154,7 @@ import re
 import stat
 import subprocess
 import time
+from collections.abc import Callable
 
 # hooks/_common を解決するため、hook 内モジュールより先に hooks/ を sys.path に載せる
 # (plugin root 内の相対配置なので ${CLAUDE_PLUGIN_ROOT} が cache コピーでも壊れない)。
@@ -2316,11 +2317,13 @@ def _resolve_paths(
     毎回追い越されて永久に残ることがない。
     """
     root_real = physpath.physical_dir(root).rstrip(os.sep) or os.sep
-    symlinks = gitscan.symlink_map(root)
+    root_written = os.path.realpath(root).rstrip(os.sep) or os.sep
+    symlinks, symlinks_written = gitscan.symlink_maps(root)
     # 実体 (realpath 相対) ごとに判定候補を集める。同じ実体が別名 (symlink) で複数回 claim
     # されていても、どの名前が機密に見えるかを全部見てから判定する
     nested: dict[str, bool] = {}
     candidates: dict[str, list[str]] = {}
+    include_candidates: dict[str, list[str]] = {}
     for path in claimed:
         rel = gitscan.to_relative(root, path)
         if not rel or os.path.isdir(os.path.join(root, rel)):
@@ -2335,14 +2338,29 @@ def _resolve_paths(
         # だけの違いで、除外判定は小文字にして比べるので足さない
         spellings = gitscan.relative_names(root, path)
         aliases = [a for s in spellings for a in exclusion.expand_aliases(s, symlinks)]
-        for name in [lexical, *aliases]:
+        # 否定 glob (`!glob`) を当てる候補は 0.18.1 と同じ作り方に限る: 書かれた綴りの rel、
+        # realpath で root を同定した lexical 名、書かれた綴りと realpath の target から作った
+        # symlink の別名。否定 glob は候補のどれか 1 つに当たれば除外を解除するので、上の広い
+        # 候補に当てると、0.18.1 が除外していたファイルを送る (`public -> SECRETS` の symlink と
+        # `secrets/**,!public/**`)。これらは除外の候補にも足す (除外の候補を 0.18.1 より狭めない)
+        written = gitscan.written_relative(root, path) or (spellings[0] if spellings else None)
+        kept = [
+            written,
+            _lexical_relative(root_written, path, resolve=os.path.realpath),
+            *(exclusion.expand_aliases(written, symlinks_written) if written else []),
+        ]
+        includes = include_candidates.setdefault(rel, [])
+        for name in kept:
+            if name and name not in includes:
+                includes.append(name)
+        for name in [lexical, *aliases, *kept]:
             if name and name not in names:
                 names.append(name)
 
     rels: list[str] = []
     excluded: list[tuple[str, str]] = []
     for rel, names in candidates.items():
-        hit = policy.explain(names)
+        hit = policy.explain(names, include_names=include_candidates[rel])
         if hit is not None:
             excluded.append(hit)  # (当たった名前, 理由)
             continue
@@ -2393,7 +2411,9 @@ def _in_nested_git(root: str, rel: str, memo: dict[str, bool]) -> bool:
     return found
 
 
-def _lexical_relative(root_real: str, path: str) -> str | None:
+def _lexical_relative(
+    root_real: str, path: str, resolve: Callable[[str], str] | None = None
+) -> str | None:
     """claim されたパスを、root 配下の symlink を解決せずに (lexical に) root 相対へ変換する。
 
     `to_relative` (全体を realpath) だと `credentials/` → `ordinary/` のような symlink
@@ -2407,11 +2427,15 @@ def _lexical_relative(root_real: str, path: str) -> str | None:
     同定は `physpath.physical_dir` (realpath に加えて、大文字小文字を区別しない FS ではディスク上の
     綴り) で行い、`root_real` もそれで渡す。root を大文字小文字だけ違う綴りで書いた claim は
     `to_relative` が作業ツリー内と判定するので、ここでも root と同定して書かれた名前を残す。
+    `resolve=os.path.realpath` (と realpath の root) は 0.18.1 までの同定で、否定 glob を当てる
+    候補を作るときに使う (`_resolve_paths`)。
     """
+    if resolve is None:
+        resolve = physpath.physical_dir
     parts = os.path.normpath(path).split(os.sep)
     for cut in range(1, len(parts)):
         prefix = os.sep.join(parts[:cut]) or os.sep
-        if physpath.physical_dir(prefix) == root_real:
+        if resolve(prefix) == root_real:
             return os.sep.join(parts[cut:]) or None
     return None
 

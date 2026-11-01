@@ -256,7 +256,13 @@ claim に現れない (マージ前レビューの指摘)。大文字小文字�
 末尾の名前はディレクトリの一覧から「畳むと同じ名前」かつ「同じ inode」の項目。hard link の別の名前には
 化けない)。**Unicode の正規化形は書かれた形を保つ**: git は `core.precomposeunicode` で index に NFC を持ち、
 `cat-file --batch` の stdin と P1 の照合は precompose されないので、ディスク上の NFD に揃えると index から
-外れる。symlink の別名は両方の綴りから作る。書かれた綴りは lexical 名として除外判定に残る。symlink の列挙は tracked が index (mode 120000)、untracked が
+外れる。symlink の別名は両方の綴りから作る。書かれた綴りは lexical 名として除外判定に残る。
+**否定 glob (`!glob`) は 0.18.1 と同じ候補にだけ当てる** (書かれた綴りの rel・realpath で root を同定した
+lexical 名・realpath の target から作った symlink の別名。`gitscan.symlink_maps` の 2 つ目と
+`Policy.explain(..., include_names=)`)。否定は候補のどれか 1 つに当たれば除外を解除するので、除外のために
+足した候補に当てると送る範囲が広がる (`public -> SECRETS` の symlink と `secrets/**,!public/**` で、
+ディスクの綴りの別名 `public/a.txt` が 0.18.1 の除外を解除した。マージ前レビューの指摘)。床は
+`tests/test_review_set.py::TestResolvePathsExclusion::test_case_variant_symlink_text_does_not_turn_exclusion_into_send`。symlink の列挙は tracked が index (mode 120000)、untracked が
 root から 3 階層の BFS scandir (5000 エントリ / 500 件で打ち切り)。Stop の git 予算は
 rev-parse 2秒×2 (worktree_root + head_exists) + ls-files (symlink) 10秒
 + ls-files (untracked) 10秒 + diff 収集 30秒 + 予算判定後の最後の 1 パス分 diff 5秒
