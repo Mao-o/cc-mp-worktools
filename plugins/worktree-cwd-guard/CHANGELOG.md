@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.2.0
+
+**行末の comment や `\` + 改行の折り返しをはさんだ別 checkout への git の書き込みを止めるようにし、別 checkout を
+指す `git stash list` / `show` / `create` と `git apply --check` などの読み取りを止めないようにした (minor bump)。**
+
+### 修正: comment が次の行を前の行につないでいた
+
+`git status  # 状態を確認` の次の行に `git -C <main> checkout -b x` を書くと、2 行が 1 つのコマンドとして読まれ、
+2 行目の書き込みが止まらなかった。`cd <main>  # main へ移る` の次の行の `git checkout` も同じ。字句に分ける
+shlex は comment を改行ごと読み捨てるうえ、`feature#1` のような単語の途中の `#` からも comment を始めていた。
+
+字句に分ける前の正規化 (`_Normalizer`) を足し、comment を bash / zsh と同じ規則で捨てるようにした。
+
+- comment は単語の始まり (先頭・空白・タブ・改行・`;` `&` `|` `(` `)` `<` `>` の直後) の `#` から改行の手前まで。
+  改行はコマンドの区切りとして残す。backtick の中では閉じの手前まで
+- 単語の途中 (`feature#1`、`$(pwd)#x`)・引用符の中・`\#` の `#` は comment ではない
+- comment の中の `\` は行を継続しない
+
+### 修正: `\` + 改行の折り返しで git の引数が別のコマンドになっていた
+
+`git -C <main> \` + 改行 + `  checkout -b x` は、`git -C <main>` だけが 1 つのコマンドとして読まれ、止まらなかった
+(`cd <main> && git \` + 改行 + `  commit -m msg` も同じ)。引用符の外と二重引用符の中の `\` + 改行を取り除いて
+1 行につなぐ。単一引用符と `$'...'` の中では文字どおり残す。継続は単語の始まりかどうかを変えない
+(`--hard \` + 改行 + `# c` の `#` は comment)。
+
+### 修正: 字句の読みを shell に揃えたことに伴う周辺の読み
+
+- here-document の開始 (`<<EOF`) は引用符と comment の外でだけ認める。`echo "<<E"` や `git status  # a<<E` の後ろの
+  行が本文として読み飛ばされていた。同じ行で閉じるコマンド置換の中で始まったもの (`echo $(cat <<E) && ...`) は、
+  外の行を本文にしない
+- 二重引用符の中の `$(...)` は中身を読まずに `$()` として扱う。`git commit -m "$(cat <<'EOF' ...)"` の本文に
+  `"` や `'` があっても、外の引用符の対応が崩れない (中の git を読まないのは従来どおり)
+- `$'...'` の中の `\'` は引用符を閉じない。`echo $'it\'s' && git -C <main> reset --hard` が分解できずに素通りしていた
+- 閉じない引用符があると、従来はコマンド全体を判定しなかった。bash はその引用符を含む行の手前までを実行するので、
+  その手前の行までを判定する。末尾の `\` は shell と同じく捨てる
+
+### 修正: 別 checkout を指す読み取りの `git stash` / `git apply` を書き込みとして止めていた
+
+`git -C <main> stash list` / `stash show -p` / `cd <main> && git stash list` と `git -C <main> apply --check` /
+`--stat` が deny され、文面も「`git stash` が別の checkout を書き換える」と誤っていた。
+
+- `git stash` は最初の引数が `list` / `show` / `create` のときだけ読み取り (subcommand は最初の引数にしか書けない。
+  `git stash -m list` は message が `list` の push で、書き込みのまま)。引数なし・`push` / `pop` / `apply` / `drop`
+  などは書き込みのまま
+- `git apply` は `--check` / `--stat` / `--numstat` / `--summary` のどれかがあり、`--apply` (略記 `--ap` / `--app` /
+  `--appl` を含む) が無いときだけ読み取り。`--` の後ろは option として読まない
+
+### テストの追加・変更
+
+- `tests/test_lexing_and_reads.py` (新規): comment・行の継続・here-document・`$'...'`・閉じない引用符・コマンド置換と
+  backtick の読み、stash / apply の読み取りと書き込み
+- `tests/test_guard.py`: 使い捨ての repo を用意する部分を `GuardBase` に分けた (新しい module が `GuardTest` の
+  テストを重複して走らせないため)
+
+テスト件数: 61 → 72 (追加 11・削除 0・統合 0)。
+
+確認:
+
+- comment・行の継続・`#` の位置ごとの読みを `/bin/bash` (3.2) と `zsh -f` で実測し、両方で同じ読みに揃えた
+- 0.1.5 と 0.2.0 に同じコマンドを流し、git として読んだコマンドの引数列を、実際に bash / zsh で偽の git を
+  走らせた引数列と突き合わせた (平らな断片 2 万件 + 入れ子の文法型 3 万件 × 2 seed)。「どちらかのシェルで
+  実際に走り、0.1.5 は読めて 0.2.0 は読めない」ものは平らな生成で 0 件、文法型で 5 件残った。5 件はどれも
+  zsh が構文エラーで何も実行せず、bash 3.2 だけがコマンド置換の中の comment / here-document を独自に読んで
+  後ろの git を実行する形 (例: `true"$(#)<<E" ; git x`)
+- 判定の比較 (3,826 件): 0.1.5 で deny / 注意 → 0.2.0 で止めないのは、別 checkout を指す stash / apply の
+  読み取りだけ (1,064 件)。0.1.5 で止めない → 0.2.0 で deny は 497 件で、すべて comment・行の継続・
+  `$'...'`・引用符の中の `<<E` を前に置いた別 checkout への書き込み
+
 ## 0.1.5
 
 icon と導入手順の追加 (挙動の変更なし、patch bump)。

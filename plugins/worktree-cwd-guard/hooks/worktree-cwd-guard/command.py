@@ -40,12 +40,30 @@ _NESTED_MUTATING = {
 }
 
 
+# `git stash` の subcommand のうち、ref も作業ツリーも変えないもの。subcommand は最初の引数に
+# しか書けない (`git stash -m list` は `list` という message の push)。それ以外は書き込みとして扱う
+_STASH_READ = {"list", "show", "create"}
+# `git apply` を「適用せずに表示・検査するだけ」にする option。`--apply` (略記を含む) と併用したら適用する
+_APPLY_READ = {"--check", "--stat", "--numstat", "--summary"}
+
+
+def _apply_is_read(args: list[str]) -> bool:
+    opts = args[: args.index("--")] if "--" in args else args
+    if any(a.startswith("--ap") and "--apply".startswith(a) for a in opts):
+        return False
+    return any(a in _APPLY_READ for a in opts)
+
+
 def _is_mutating(sub: str, args: list[str]) -> bool:
     if sub == "branch":
         return any(a in _BRANCH_MOVE for a in args)
     if sub in _NESTED_MUTATING:
         action = next((a for a in args if not a.startswith("-")), None)
         return action in _NESTED_MUTATING[sub]
+    if sub == "stash":
+        return not (args and args[0] in _STASH_READ)
+    if sub == "apply":
+        return not _apply_is_read(args)
     return sub in _MUTATING
 
 
@@ -236,38 +254,171 @@ def _cd_target(args: list[str]) -> str | None:
 _HEREDOC = re.compile(r"(?<!<)<<(-?)[ \t]*(['\"]?)([A-Za-z_][\w.-]*)\2")
 
 
-def _strip_heredocs(command: str) -> str:
-    """here-document の本文を取り除く。
+# この文字の直後 (と文字列の先頭) は単語の始まり。`#` は単語の始まりでだけ comment になる
+_WORD_BREAK = " \t\n;&|()<>"
+# 引用符の frame。`$'` は `$'...'` (中で `\'` が引用符を守る)。それ以外の frame は
+# `(` = サブシェル、`$(` = コマンド置換・プロセス置換 (単語の一部)、
+# `"$(` = 二重引用符の中のコマンド置換 (中身は出さない)、`` ` `` = backtick
+_QUOTES = ("'", '"', "$'")
 
-    本文はコマンドの標準入力に渡る文字列で、shell は実行しない (`cat > x.sh <<'EOF'` で git を
-    含む script を書くだけのことが多い)。shlex は here-document を知らないので、字句に分ける前に
-    外しておかないと本文をコマンドとして読んでしまう。
+
+def _skip_heredoc_body(command: str, i: int, strip_tabs: bool, delim: str) -> int:
+    """i 行目から始まる here-document の本文と終端行を飛ばし、その次の位置を返す。"""
+    while i < len(command):
+        end = command.find("\n", i)
+        end = len(command) if end < 0 else end
+        line = command[i:end]
+        i = end + 1
+        if (line.lstrip("\t") if strip_tabs else line) == delim:
+            break
+    return min(i, len(command))
+
+
+class _Normalizer:
+    """shlex に渡す前に、shell が字句に分ける前後で行うことを済ませる。
+
+    - 行の継続 (`\\` + 改行) をつなぐ。単一引用符と `$'...'` の中では文字どおり残す
+    - comment (単語の始まりの `#` から改行の手前まで。backtick の中では閉じの手前まで) を捨てる。
+      改行はコマンドの区切りなので残す。単語の途中 (`feature#1`、`$(...)#`)・引用符の中・`\\#` は
+      comment ではない
+    - here-document の本文を取り除く。本文はコマンドの標準入力に渡る文字列で、shell は実行しない
+      (`cat > x.sh <<'EOF'` で git を含む script を書くだけのことが多い)。引用符や comment の中の
+      `<<` は here-document ではない。同じ行で閉じる `$(...)` の中で始まったものは、外の行を本文に
+      しない
+    - 二重引用符の中の `$(...)` は中身を出さずに `$()` にする (中の git は読まない。`git commit -m
+      "$(cat <<'EOF' ...)"` の本文の引用符で、外の引用符の対応が崩れないように)
+    - `$'...'` は、shlex が読める単一引用符の形に書き換える
+    - 閉じない引用符があれば、その引用符を含む行から後ろを捨てる (bash はその手前の行までを実行する)
+
+    引用符の規則は後段の shlex (posix) に合わせる (`'...'` の中に escape は無い / `"..."` と引用符の
+    外では `\\` が次の 1 文字を守る)。shlex の comment は単語の途中の `#` でも始まり、改行まで
+    読み捨てるため、`#` の次の行が前の行につながっていた。
     """
-    lines = command.split("\n")
-    out: list[str] = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        out.append(line)
-        i += 1
-        for m in _HEREDOC.finditer(line):
-            strip_tabs, delim = m.group(1) == "-", m.group(3)
-            while i < len(lines):
-                body = lines[i]
-                i += 1
-                if (body.lstrip("\t") if strip_tabs else body) == delim:
-                    break
-    return "\n".join(out)
+
+    def __init__(self, command: str):
+        self.src = command
+        self.out: list[str] = []
+        self.stack: list[str] = []  # 開いている引用符・括弧の frame (_QUOTES の説明を参照)
+        self.pending: list[tuple[bool, str, int]] = []  # 本文が次の行から始まる here-document
+        self.quiet = 0  # 二重引用符の中の `$(` の深さ。0 でないときは出さない
+        self.line_start = 0  # 引用符の外の改行の直後の out の位置
+        self.word_start = True
+        self.prev = ""  # 直前に読んだ素の 1 文字 (escape や引用符の後は空)
+
+    def emit(self, s: str) -> None:
+        if not self.quiet:
+            self.out.append(s)
+
+    def run(self) -> str:
+        src, n = self.src, len(self.src)
+        i = 0
+        while i < n:
+            i = self._step(i, src[i], src[i + 1 : i + 2])
+        if any(f in _QUOTES for f in self.stack):
+            return "".join(self.out[: self.line_start])
+        return "".join(self.out)
+
+    def _step(self, i: int, ch: str, nxt: str) -> int:
+        top = self.stack[-1] if self.stack else ""
+        if top == "'":
+            self.emit(ch)
+            if ch == "'":
+                self.stack.pop()
+            return i + 1
+        if top == "$'":
+            if ch == "\\":
+                self.emit("'\\''" if nxt == "'" else ch + nxt)
+                return i + 2
+            self.emit(ch)
+            if ch == "'":
+                self.stack.pop()
+            return i + 1
+        if ch == "\\":
+            # 行の継続 (引用符の外と二重引用符の中) は消すだけで、単語の始まりかどうかを変えない。
+            # 末尾の `\` は shell も捨てる
+            if nxt not in ("\n", ""):
+                self.emit(ch + nxt)
+                self.word_start, self.prev = False, ""
+            return i + 2
+        if top == '"':
+            if ch == "$" and nxt == "(":
+                self.emit("$(")
+                self.quiet += 1
+                self.stack.append('"$(')
+                self.word_start, self.prev = True, ""
+                return i + 2
+            self.emit(ch)
+            if ch == '"':
+                self.stack.pop()
+            return i + 1
+        return self._code(i, ch, nxt, top)
+
+    def _code(self, i: int, ch: str, nxt: str, top: str) -> int:
+        """引用符の外 (括弧や backtick の中を含む) の 1 文字。"""
+        if ch in "'\"" or (ch == "$" and nxt == "'"):
+            quote = "$'" if ch == "$" else ch
+            self.stack.append(quote)
+            self.emit("'" if quote == "$'" else ch)
+            self.word_start, self.prev = False, ""
+            return i + len(quote)
+        if ch == "`":
+            if top == "`":
+                self.stack.pop()
+                self.word_start = False
+            else:
+                self.stack.append("`")
+                self.word_start = True
+            self.emit(ch)
+            self.prev = ""
+            return i + 1
+        if ch == "#" and self.word_start:
+            j = i
+            while j < len(self.src) and self.src[j] != "\n" and not (top == "`" and self.src[j] == "`"):
+                j += 1
+            return j
+        if ch == "<":
+            m = _HEREDOC.match(self.src, i)
+            if m:
+                self.pending.append((m.group(1) == "-", m.group(3), len(self.stack)))
+                self.emit(m.group(0))
+                self.word_start, self.prev = False, ""
+                return m.end()
+        if ch == "(":
+            self.stack.append("$(" if self.prev in ("$", "<", ">") else "(")
+        elif ch == ")" and top in ("(", "$(", '"$('):
+            self.stack.pop()
+            if top != "(":
+                # 同じ行で閉じたコマンド置換の中の here-document は、外の行を本文にしない
+                self.pending = [p for p in self.pending if p[2] <= len(self.stack)]
+            if top == '"$(':
+                self.quiet -= 1
+            self.emit(ch)
+            self.word_start, self.prev = top == "(", ""
+            return i + 1
+        self.emit(ch)
+        self.word_start, self.prev = ch in _WORD_BREAK, ch
+        if ch == "\n":
+            if not any(f in _QUOTES for f in self.stack):
+                self.line_start = len(self.out)
+            for strip_tabs, delim, _depth in self.pending:
+                i = _skip_heredoc_body(self.src, i + 1, strip_tabs, delim) - 1
+            self.pending = []
+        return i + 1
+
+
+def _normalize(command: str) -> str:
+    return _Normalizer(command).run()
 
 
 def analyze(command: str, cwd: str, fam: Family) -> list[Finding]:
     if "git" not in command:
         return []
-    command = _strip_heredocs(command)
+    command = _normalize(command)
     try:
         lex = shlex.shlex(command, posix=True, punctuation_chars=_PUNCT)
         lex.whitespace = " \t\r"
         lex.whitespace_split = True
+        lex.commenters = ""  # comment は _normalize で捨てた。残った `#` は単語の一部
         tokens = list(lex)
     except ValueError:
         return []  # 分解できないコマンドは判定しない (git 自身もまず動かない)
