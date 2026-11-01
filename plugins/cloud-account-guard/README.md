@@ -957,6 +957,21 @@ flag** は、その値を検証に反映する。従来は hook の既定コン�
   構成ではコマンドが失敗する。`=` で始まる alias やファイルを細工したリポジトリでは、照合先と
   実行先が食い違いうる ([既知の制限](#既知の制限))。`--` 以降は後続コマンドの
   引数なので見ない (`kubectl exec pod -- cmd --context x` の `--context` は採用しない)
+- 値が `~` で始まる独立した語 (`--kubeconfig ~/.kube/prod.yaml` / `-c ~/x/firebase.json`) は、
+  シェルと同じく HOME に展開してから照合する (v0.29.6。0.29.5 までは作業ディレクトリの
+  `~/...` を探して誤 deny になっていた)。展開するのは bash と zsh で読みが一致する形 (語の先頭の
+  引用符の外の `~` で、直後が語の終わりか `/`) だけ。次の形は展開せずに 0.29.5 までと同じ読みにする:
+  引用符の中 (`'~/x'`)、`=` や短い option に続けた形 (`--kubeconfig=~/x` / `-c~/x`。どちらの
+  シェルも展開しない)、`~user` / `~+` / `~-` / `~:x` / `~"/x"`、コマンドが `HOME` を書き換えうるとき
+  (行頭の代入の `~` と同じ条件)、シェル経由の wrapper の中身 (`watch '...'` / `sudo -i ...` /
+  `npx -c '...'`)。引用符で包んだ中身は wrapper が起動するシェルが読み直す。引用符で包まずに並べた形
+  (`watch kubectl ... ~/x` / `sudo -i kubectl ... ~/x`) は Bash のシェルが先に展開するが、wrapper を
+  剥がした後の文字列からは包んだ形かどうかを区別できないので、展開しない側に倒す (0.29.5 と同じ読み)。
+  heredoc を置いた行の後ろの段 (`cat <<EOF && kubectl --kubeconfig ~/x ...`) は Bash のシェルが読む語
+  なので展開する
+- ユーザーの zsh で `setopt magic_equal_subst` が有効だと、`--kubeconfig=~/x` の `~` も zsh が HOME に
+  展開する。hook は展開しない読み (bash と `zsh -f` の既定) で照合するので、この設定では照合先と
+  CLI が読むファイルが食い違いうる
 - **短いオプションを結合したトークンに、照合先を決める短い option が含まれる形は deny する**
   (v0.20.0)。Firebase の `-jP prod` / `-iPprod` / `-jc sub/firebase.json` は、firebase-tools
   (commander) では `-j -P prod` などに分かれる。hook は結合形を展開しない (CLI ごとの展開の規則を

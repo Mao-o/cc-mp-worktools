@@ -1320,7 +1320,9 @@ class TestContextOptionSwitchRoundTrip(BaseWithTmpProject):
 
     def test_kubectl_unusable_kubeconfig_path_falls_back_to_the_sentence(self):
         self._write_accounts({"kubectl": "ctx"})
-        for path in ("'a b.yaml'", "~/k.yaml", "'k*.yaml'"):
+        # 引用符の中の `~` はシェルが展開しない (引用符の外の `~/k.yaml` は 0.29.6 から HOME に
+        # 展開して絶対パスで案内する。test_option_tilde.py)
+        for path in ("'a b.yaml'", "'~/k.yaml'", "'k*.yaml'"):
             raw = shlex.split(path)[0]
             for situation in ("mismatch", "unset"):
                 with self.subTest(path=path, situation=situation):
