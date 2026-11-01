@@ -114,11 +114,27 @@ class ExpansionTableTests(unittest.TestCase):
             "KUBECONFIG=~/a kubectl apply -l tier=retrieval",
             "KUBECONFIG=~/a kubectl apply -l tier=opensource",
             "KUBECONFIG=~/a kubectl apply -f a.",
-            # 名前の一部の HOME と、読むだけの `$HOME` は HOME を変えない
+            # 引数の `.` はファイルを読まない (bash 3.2 / zsh -f とも kubectl は $HOME/a を読む)
+            "KUBECONFIG=~/a kubectl apply -k .",
+            "KUBECONFIG=~/a kubectl apply -f .",
+            "KUBECONFIG=~/a kubectl apply -f . && echo ok",
+            "KUBECONFIG=~/a kubectl apply -f .|cat",
+            "KUBECONFIG=~/a kubectl get po; cd .",
+            "KUBECONFIG=~/a kubectl get po; cd . # x",
+            "git add . && KUBECONFIG=~/a kubectl get po",
+            "git add .; KUBECONFIG=~/a kubectl get po",
+            "find . -name x; KUBECONFIG=~/a kubectl get po",
+            "docker build . -t x && KUBECONFIG=~/a kubectl get po",
+            "(cd .) && KUBECONFIG=~/a kubectl get po",
+            "cd ..; KUBECONFIG=~/a kubectl get po",
+            # 名前の一部の HOME と、読むだけの `$HOME` / `${HOME}` は HOME を変えない
             "XDG_CONFIG_HOME=~/c KUBECONFIG=~/a kubectl apply",
             "FOO_HOME=x KUBECONFIG=~/a kubectl apply",
             "HOMEBREW_X=1 KUBECONFIG=~/a kubectl apply",
             "echo $HOME && KUBECONFIG=~/a kubectl apply",
+            "KUBECONFIG=~/a kubectl apply -f ${HOME}/x.yaml",
+            'KUBECONFIG=~/a kubectl apply -f "${HOME}/x.yaml"',
+            "KUBECONFIG=~/a kubectl apply -f ${HOME:-/x}/y.yaml",
         ):
             with self.subTest(command=command):
                 envs = [e for c, e in _env(command) if c.startswith("kubectl")]
@@ -135,8 +151,28 @@ class ExpansionTableTests(unittest.TestCase):
             "export HOME=/y && KUBECONFIG=~/a kubectl apply",
             "read HOME < f; KUBECONFIG=~/a kubectl apply",
             ": ${HOME:=/y}; KUBECONFIG=~/a kubectl apply",
+            ": ${HOME=/y}; KUBECONFIG=~/a kubectl apply",
+            ": ${HOME::=/y}; KUBECONFIG=~/a kubectl apply",
             "unset HOME; KUBECONFIG=~/a kubectl apply",
+            # ファイルを読む `.` (bash 3.2 / zsh -f で読んだファイルの HOME が効くことを実測)
             ". ./env.sh && KUBECONFIG=~/a kubectl apply",
+            ". env; KUBECONFIG=~/a kubectl apply",
+            "(. x) ; KUBECONFIG=~/a kubectl apply",
+            ". -- ./env.sh; KUBECONFIG=~/a kubectl apply",
+            '. "./env.sh"; KUBECONFIG=~/a kubectl apply',
+            ".\t./env.sh; KUBECONFIG=~/a kubectl apply",
+            ". ~/env.sh; KUBECONFIG=~/a kubectl apply",
+            "A=1 . ./env.sh; KUBECONFIG=~/a kubectl apply",
+            "A=1 . -- ./env.sh; KUBECONFIG=~/a kubectl apply",
+            "if . ./env.sh; then KUBECONFIG=~/a kubectl apply; fi",
+            "true && . ./env.sh && KUBECONFIG=~/a kubectl apply",
+            "! . ./env.sh; KUBECONFIG=~/a kubectl apply",
+            "{ . ./env.sh; }; KUBECONFIG=~/a kubectl apply",
+            "builtin . ./env.sh; KUBECONFIG=~/a kubectl apply",
+            # コマンドの位置の `. -x` (zsh は `-x` という名前のファイルを読む)
+            "true; . -x; KUBECONFIG=~/a kubectl apply",
+            "if . -x; then KUBECONFIG=~/a kubectl apply; fi",
+            "! . -x; KUBECONFIG=~/a kubectl apply",
             "source env.sh; KUBECONFIG=~/a kubectl apply",
             "eval x; KUBECONFIG=~/a kubectl apply",
             # wrapper の後ろの代入の形の引数: bash は展開し zsh は展開しない
@@ -192,7 +228,7 @@ class ExpansionTableTests(unittest.TestCase):
                 self.assertEqual(command_parser._expand_assignment_tilde(raw, "/H"), raw)
 
 
-@unittest.skipUnless(_SHELLS, "bash / zsh が無い")
+@unittest.skipUnless(len(_SHELLS) == 2, "bash と zsh の両方が要る")
 class ShellAgreementTests(unittest.TestCase):
     """表の各行を bash 3.2 と zsh -f で実際に走らせ、展開した値が両方のシェルの値と一致し、
     展開しない値はどちらかのシェルの値と一致する (0.29.4 までの値のまま) ことを確かめる。"""
@@ -212,14 +248,12 @@ class ShellAgreementTests(unittest.TestCase):
         return values
 
     def test_expanded_values_match_both_shells(self):
-        self.assertEqual(len(_SHELLS), 2, "bash と zsh の両方が要る")
         for raw, want in EXPANDED:
             with self.subTest(raw=raw):
                 values = self._shell_values(raw)
                 self.assertEqual(set(values.values()), {want}, values)
 
     def test_kept_values_are_not_expanded_by_both_shells(self):
-        self.assertEqual(len(_SHELLS), 2, "bash と zsh の両方が要る")
         for raw, kept in KEPT:
             with self.subTest(raw=raw):
                 values = self._shell_values(raw)

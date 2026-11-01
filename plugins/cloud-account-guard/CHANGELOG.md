@@ -21,8 +21,11 @@
   - wrapper の後ろの代入の形の引数 (`env KUBECONFIG=~/a ...` / `sudo KUBECONFIG=~/a ...`)。bash は
     展開し zsh は展開しない。シェル経由の wrapper の中身を分割し直した段も展開しない
   - コマンドが HOME を書き換えうるとき: コマンドに `HOME` の語 (`HOME=/x KUBECONFIG=~/a ...` は
-    bash が元の HOME、zsh が新しい HOME で展開する) か、`.` / `source` / `eval` があるとき。
-    名前の一部の `HOME` (`XDG_CONFIG_HOME=~/x`) と読むだけの `$HOME` は数えない
+    bash が元の HOME、zsh が新しい HOME で展開する)、`${HOME:=x}` / `${HOME=x}` / `${HOME::=x}`、
+    ファイルを読む `.` (`. ./env.sh` / `. -- x` / コマンドの位置の `. -x`)、`source` / `eval` が
+    あるとき。名前の一部の `HOME` (`XDG_CONFIG_HOME=~/x`)、読むだけの `$HOME` / `${HOME}`、
+    引数の `.` (`kubectl apply -k .` / `git add . &&` / `find . -name x` / `cd .`) は数えない
+    (どれも bash と zsh の両方で、kubectl が HOME の下のファイルを読むことを実測した)
   - hook の HOME が空・未設定、または `$` を含むとき
 - 判定の比較 (旧版と新版に同じ 1044 件の入力を、HOME の下のファイルと作業ディレクトリの `~/...` の
   中身を入れ替えた 2 通りで流した): 変わったのは展開した形だけで、deny → allow 54 件 /

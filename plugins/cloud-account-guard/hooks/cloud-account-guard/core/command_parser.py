@@ -1139,12 +1139,20 @@ def _expand_assignment_tilde(raw: str, home: str) -> str:
 
 # `~` の展開を見送るコマンドの印 (v0.29.5)。`HOME` の語 (前の段の `HOME=/x;` / `export HOME=...` /
 # 同じ行頭の `HOME=/x KUBECONFIG=~/a` (bash は元の HOME、zsh は新しい HOME で展開する) など) か、
-# 別のファイルや文字列をシェルとして読むコマンド (`.` / `source` / `eval`。HOME を変えうる) があると、
+# 別のファイルや文字列をシェルとして読むコマンド (`. <file>` / `source` / `eval`。HOME を変えうる) があると、
 # 実行時の `~` が hook の HOME と同じだと言えない。多めに当たっても 0.29.4 までの読みに戻るだけ。
-# `HOME` は名前の一部 (`XDG_CONFIG_HOME` / `FOO_HOME` / `HOMEBREW_PREFIX`) と、読むだけの `$HOME` には
-# 当てない (HOME を変えない)。`${HOME:=x}` は代入しうるので当てる。
+# `HOME` は名前の一部 (`XDG_CONFIG_HOME` / `FOO_HOME` / `HOMEBREW_PREFIX`) と、読むだけの `$HOME` /
+# `${HOME}` には当てない (HOME を変えない)。`${HOME:=x}` / `${HOME=x}` / zsh の `${HOME::=x}` は
+# 代入しうるので当てる。
+# `.` はファイルを読むときだけ数える: 後ろに空白と読み込むファイル名らしい語 (`-` / `#` / 区切りで
+# 始まらない語) が続くとき、`. --` のとき、コマンドの位置 (行頭・区切りや予約語の後) で `-` 始まりの
+# 語が続くとき。引数の `.` (`kubectl apply -k .` / `git add . &&` / `find . -name x` / `cd .`) は
+# HOME を変えないので数えない (数えると普段の形で 0.29.4 と同じ誤 deny が残る)。
 _TILDE_UNSURE = re.compile(
-    r"(?<![A-Za-z0-9_$])HOME(?![A-Za-z0-9_])|(?:^|[\s;&|(){}`])(?:\.|source|eval)(?=[\s;&|)]|$)"
+    r"(?<![A-Za-z0-9_${])HOME(?![A-Za-z0-9_])|\$\{HOME:{0,2}="
+    r"|(?:^|[\s;&|(){}`])\.(?=\s+(?:[^\s;&|)#-]|--(?:\s|$)))"
+    r"|(?:^|[;&|(){}`!]|\b(?:then|do|else|elif|if|while|until|command|builtin|time)\s)\s*\.\s+-"
+    r"|(?:^|[\s;&|(){}`])(?:source|eval)(?=[\s;&|)]|$)"
 )
 
 

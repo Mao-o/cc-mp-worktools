@@ -1013,8 +1013,9 @@ AWS_PROFILE=prod aws s3 ls
   引用符の中の `~` (`'~/x'`) はシェルと同じく展開しない。次の形は展開せずに 0.29.4 までと同じ
   読みにする: `~user` / `~+` / `~-`、引用符付きの `:` の後や `~` の直後が引用符の形 (zsh だけが
   展開する)、wrapper の後ろの代入の形の引数 (`env KUBECONFIG=~/x ...`。bash だけが展開する)、
-  コマンドが `HOME` を書き換えうるとき (コマンドに `HOME` の語、`.` / `source` / `eval` がある。
-  名前の一部の `HOME` (`XDG_CONFIG_HOME`) と読むだけの `$HOME` は数えない)
+  コマンドが `HOME` を書き換えうるとき (コマンドに `HOME` の語、`${HOME:=x}`、ファイルを読む `.`
+  (`. ./env.sh`)、`source` / `eval` がある。名前の一部の `HOME` (`XDG_CONFIG_HOME`)、読むだけの
+  `$HOME` / `${HOME}`、引数の `.` (`kubectl apply -k .` / `git add .`) は数えない)
 
 ### 透過 wrapper を跨ぐときの env 伝播
 
