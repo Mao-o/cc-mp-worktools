@@ -214,5 +214,39 @@ class CommentHandlingTest(unittest.TestCase):
         self.assertTrue(inv.draft)
 
 
+    def test_escaped_space_before_hash_is_not_a_comment(self):
+        inv = find_invocation("gh pr create --title a\\ #b --base dev")
+        self.assertIsNotNone(inv)
+        self.assertEqual(inv.base, "dev")
+
+    def test_continuation_is_not_replaced_by_a_space(self):
+        # `\`+改行は消えるだけ。空白に置き換えると `#1` が単語の先頭になりコメントと読まれる
+        inv = find_invocation("gh pr create --title a\\\n#1 --base dev")
+        self.assertIsNotNone(inv)
+        self.assertEqual(inv.base, "dev")
+
+    def test_redirect_operator_is_a_word_start_for_comments(self):
+        self.assertEqual(self._kinds("git log ># don't\ngh pr create"), ["create"])
+
+    def test_safety_nets_see_joined_continuations(self):
+        # shlex が ValueError になる (奇数個の ') 本文の後でも、継続行をまたいだ gh pr create を検出する
+        cmd = "cat > b.md <<'EOF'\nIt's done\nEOF\ngh pr \\\n  create --body-file b.md"
+        found = find_invocations(cmd)
+        self.assertEqual([i.kind for i in found], ["create"])
+        self.assertIsNotNone(unresolved_reason(cmd, found))
+
+    def test_ready_undo_across_a_continuation_is_not_counted(self):
+        cmd = "gh pr ready \\\n  --undo"
+        self.assertIsNone(unresolved_reason(cmd, find_invocations(cmd)))
+
+    def test_fallback_joins_only_real_continuations(self):
+        # 閉じていない引用符 -> 安全網。`\\`+改行は継続行ではない (バックスラッシュ自体のエスケープ)
+        found = find_invocations("echo it's \\\\\ngh pr create")
+        self.assertEqual([i.kind for i in found], ["create"])
+        # 継続行でつないだ結果 `t--draft` は --draft ではない
+        found = find_invocations("echo it's\ngh pr create --title t\\\n--draft")
+        self.assertEqual([(i.kind, i.draft) for i in found], [("create", False)])
+
+
 if __name__ == "__main__":
     unittest.main()
