@@ -5,6 +5,23 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.18.1
+
+**`post-implementation-review` で、symlink を通る名前で編集したファイルを Stop が送らずに繰り越したとき、その内容がどこにも送られなくなっていたのを直した。**
+
+### 修正
+
+- Write / Edit のパスが symlink を通る名前 (作業ツリーの中の `link -> real`、または作業ツリーの祖先が symlink: 別ボリュームに置いた作業ディレクトリ、macOS の `/tmp -> /private/tmp` など) のとき、Stop が pending に戻すパスが実体名になっていた。内容指紋のキーは編集時の名前のままなので、指紋が消えるか引けなくなり、そのファイルを書き換えずに commit すると commit レビューは「ツールが最後に書いた内容と一致しない」としてファイル名だけを通知し、次の Stop は「差分が空で取得できませんでした」と通知して、内容は一度もレビューされなかった。対象の経路は、1 回の Stop の待ち時間の上限で送れなかった塊、結果を返さなかった塊、全部の塊の失敗、パス数の上限 (`MAX_REVIEW_PATHS`) と diff 収集の時間予算による繰り越し、`EXTERNAL_AI_POST_REVIEW_MIN_LINES` による見送り。pending に戻すときは claim したときの名前に写し戻すようにした (同じ実体を複数の名前で claim していれば全部を戻す)
+
+### 既知の限界
+
+- 大文字小文字だけが違う名前 (大文字小文字を区別しない FS で `B.py` と書いたが実体は `b.py`) で編集したファイルは、繰り越しとは関係なく、Stop も commit レビューも内容を送らずファイル名だけを通知する (symlink の解決では大文字小文字が正規化されないため)。送信範囲が広がる側の失敗ではないので今回は直さず、挙動をテストで固定した
+
+### テスト
+
+- `tests/test_claimed_name_carry.py` (27 件追加): pending に戻す出口 6 つ × 配置 4 形 (実名の対照 / 作業ツリーの中の symlink / 祖先の symlink / hard link) で、繰り越したファイルが編集時の名前で pending と指紋に残り、書き換えずに commit すると commit レビューが内容を送ること。大文字小文字だけ違う名前の現状の挙動。写し戻しの単体 (別名を全部戻す・知らないパスはそのまま)
+- 変えた箇所ごとに元に戻す変異 8 件を流し、8 件とも assertion の失敗で落ちる
+
 ## 0.18.0
 
 **`post-implementation-review` の差分の取得を `.git/index` を書かない git の呼び方 (plumbing) に替え、応答の途中のレビューの「実行中」の印を、印を立てた hook が居なくなった時点で失効させるようにした。差分の本文が利用者の porcelain 向けの設定 (textconv など) を読まなくなるので minor bump。**
