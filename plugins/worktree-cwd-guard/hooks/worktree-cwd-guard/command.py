@@ -304,8 +304,8 @@ class _Normalizer:
       comment ではない
     - here-document の本文を取り除く。本文はコマンドの標準入力に渡る文字列で、shell は実行しない
       (`cat > x.sh <<'EOF'` で git を含む script を書くだけのことが多い)。引用符や comment の中の
-      `<<` は here-document ではない。同じ行で閉じる `$(...)` の中で始まったものは、外の行を本文に
-      しない
+      `<<` は here-document ではない。同じ行で閉じる `$(...)` や backtick の中で始まったものは、外の行を
+      本文にしない
     - 二重引用符の中の `$(...)` は中身を出さずに `$()` にする (中の git は読まない。`git commit -m
       "$(cat <<'EOF' ...)"` の本文の引用符で、外の引用符の対応が崩れないように)
     - `$'...'` は、shlex が読める単一引用符の形に書き換える
@@ -399,6 +399,8 @@ class _Normalizer:
         if ch == "`":
             if top == "`":
                 self.stack.pop()
+                # `$(` の閉じと同じく、同じ行で閉じた backtick の中の here-document は外の行を本文にしない
+                self.pending = [p for p in self.pending if p[2] <= len(self.stack)]
                 self.word_start = False
             else:
                 self.stack.append("`")
