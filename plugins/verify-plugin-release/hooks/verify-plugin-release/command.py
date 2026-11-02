@@ -37,8 +37,9 @@ _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # 演算子は shell の演算子そのもの (`-` は `<<-` の一部か、`<&-` / `>&-` の対象。`2>-` の `-` はファイル名)
 # 対象の語は shell と同じく引用の外の `;` `&` `|` `<` `>` で終わる (`&>f&>f` は `&>f` が 2 つ)。区切りをまたいで
 # 読むと、`&>f&>f...` の `&` ごとに残り全部を読み直して個数の 2 乗の時間になる。`$(...)` と backtick の中の
-# 区切りは対象の語の一部として読む。対象の直後は空白か、次のリダイレクトの演算子
-_WORD_PART = r"""(?:'[^']*'|"[^"]*"|\$\([^()]*\)|`[^`]*`|[^\s'";&|<>])"""
+# 区切りは対象の語の一部として読む。対象の直後は空白か、次のリダイレクトの演算子。`\X` と `$'...'` は shell と同じ
+# 組で読む (`V=\ y gh` の `\ ` は語の途中で、`V=\\ gh` の `\\` の後ろの空白は語の区切り)
+_WORD_PART = r"""(?:\$'(?:\\.|[^'\\])*'|\\.|'[^']*'|"[^"]*"|\$\([^()]*\)|`[^`]*`|[^\s'";&|<>])"""
 
 
 def _atomic(pattern: str, name: str) -> str:
@@ -402,7 +403,8 @@ def _dq_substitution_bodies(command: str, start: int) -> tuple[dict[int, int], i
     """二重引用符の中の `$(` の直後 (start) から置換の終わりまで読み、中で本文が始まる heredoc の範囲を返す。
 
     ({本文の開始: 終わりの行の次}, 置換の直後の位置)。置換が閉じなければ位置はコマンドの長さ。
-    本文の終わりの行が無い・本文の範囲が shell で割れる・本文があるのに置換が閉じないときは None
+    本文の終わりの行が無い・本文の範囲が shell で割れる・引用の無い区切り語の本文に置換がある・本文があるのに
+    置換が閉じないときは None
     (bash 3.2 は閉じ括弧で本文を切り、zsh は区切り語の行まで読む。どちらかに決めずに従来の読み方に戻す)。
     算術や `${...}` の中の `<<` は区別しない。本文と読み違えても、終わりの行が無ければ None になり、
     あっても二重引用符の中の文字列を空行にするだけで、安全網は加工前を数える。
@@ -454,7 +456,11 @@ def _dq_substitution_bodies(command: str, start: int) -> tuple[dict[int, int], i
                 body_start = i
                 # 終わりの行が無い本文はコマンドの最後まで読むので、置換が閉じずに下の None に届く
                 i, _terminated = _skip_heredoc_body(command, i, delim, strip_tabs, quoted, [])
-                if _closes_early(command[body_start:i]):
+                body = command[body_start:i]
+                # 引用の無い区切り語の本文の置換は shell が走らせるので、読み飛ばさない
+                if not quoted and ("$(" in body or "`" in body):
+                    return None
+                if _closes_early(body):
                     return None
                 bodies[body_start] = i
             pending = []
@@ -788,15 +794,17 @@ class _AssignWord:
     in_dq: bool  # 二重引用符の中のコマンド置換にある
 
 
-def _scan_assignments(s: str) -> tuple[list[_AssignWord], list[tuple[int, int]]]:
+def _scan_assignments(s: str) -> tuple[list[_AssignWord], list[tuple[int, int]], list[tuple[int, int]]]:
     """コマンド語の前置きの位置にある代入語のうち、値にコマンド置換などを含み、後ろに語が続くものを見つける。
 
     シェルの語の読み方 (引用符・`$(` / `${` / backtick の入れ子) で最後まで 1 回だけ走査する。戻り値の 2 つ目は、
-    一番外側のコマンド置換 (`$(` / backtick) の中身の範囲。引用符や置換が閉じないと、そこで読むのをやめる
+    一番外側のコマンド置換 (`$(` / backtick) の中身の範囲。3 つ目は、深さを問わず backtick の中身の範囲 (走査は
+    backtick の中の語を読まない)。引用符や置換が閉じないと、そこで読むのをやめる
     (それまでに見つけたものだけを返す。読めなかった部分は従来の読み方と安全網に任せる)。
     """
     words: list[_AssignWord] = []
     subs: list[tuple[int, int]] = []
+    backticks: list[tuple[int, int]] = []
     stack = [_Frame("code")]
     dq_level = 0
     sub_level = 0
@@ -818,6 +826,8 @@ def _scan_assignments(s: str) -> tuple[list[_AssignWord], list[tuple[int, int]]]
                 # 語の直後に続けて書けるのはリダイレクトだけ (`X=$(a)>f gh`。`X=$(a)(b)` は後ろにコマンド語が無い)
                 if k < n and s[k] not in _NO_COMMAND_AFTER and (k > end or s[k] in "<>"):
                     words.append(_AssignWord(frame.word, end, dq_level > 0))
+        elif word == "{":
+            frame.in_command = True  # `function f { ...`
         elif word not in _WRAPPERS and word not in _KEYWORDS:
             frame.in_command = False
         frame.word = -1
@@ -836,6 +846,7 @@ def _scan_assignments(s: str) -> tuple[list[_AssignWord], list[tuple[int, int]]]
             if ch == "`":
                 stack.pop()
                 sub_level -= 1
+                backticks.append((frame.start, i))
                 if sub_level == 0:
                     subs.append((frame.start, i))
             i += 1
@@ -920,7 +931,7 @@ def _scan_assignments(s: str) -> tuple[list[_AssignWord], list[tuple[int, int]]]
                     if sub_level == 0:
                         subs.append((frame.start, i))
                 elif frame.kind == "paren":
-                    stack[-1].in_command = True  # `f() { ...`
+                    stack[-1].in_command = True  # zsh の `f() X=$(a) gh ...` (波括弧の無い本文)
             else:
                 frame.in_command = True  # `case` の分岐の `a)`
             i += 1
@@ -936,7 +947,7 @@ def _scan_assignments(s: str) -> tuple[list[_AssignWord], list[tuple[int, int]]]
         if frame.word < 0:
             frame.word = i
         i += 1
-    return words, subs
+    return words, subs, backticks
 
 
 def _opaque_assignments(s: str) -> tuple[str, frozenset[str]]:
@@ -961,21 +972,28 @@ def _opaque_assignments(s: str) -> tuple[str, frozenset[str]]:
     return "".join(parts), frozenset(opaque)
 
 
+# backtick の中でエスケープとして読むもの
+_BACKTICK_ESCAPE = re.compile(r"\\([`$\\])")
+
+
 def _split_assignments(s: str) -> str:
     """見つけた代入語の直後と、一番外側のコマンド置換の直前に区切りを入れる (安全網の数え上げ用)。
 
     値の中の置換の入れ子は正規表現で読めないので、代入語の後ろのコマンド語を、区切りの後ろのコマンド語として
     数えられるようにする。置換の直前の区切りは、PR 操作の引数の中の PR 操作 (`gh pr create "$(gh pr ready)"`)
     を引数として読み飛ばさないため。単一引用符の中は走査で読み飛ばすので、説明の文字列は数えない。
+    backtick の中身は、エスケープを 1 段外して同じように読む (shell も中身をそう読み直す)。
     """
-    words, subs = _scan_assignments(s)
+    words, subs, backticks = _scan_assignments(s)
+    sep = " ;_=_ "
     # 置換の開始の 1 文字前は `(` か backtick の直前 (`$` の直後でも、正規表現は `(` を実行位置の始まりと読む)
-    cuts = sorted([w.end for w in words] + [start - 1 for start, _end in subs])
+    edits = [(w.end, w.end, sep) for w in words] + [(start - 1, start - 1, sep) for start, _end in subs]
+    edits += [(start, end, _split_assignments(_BACKTICK_ESCAPE.sub(r"\1", s[start:end]))) for start, end in backticks]
     parts: list[str] = []
     prev = 0
-    for cut in cuts:
-        parts += [s[prev:cut], " ;_=_ "]
-        prev = cut
+    for start, end, text in sorted(edits):
+        parts += [s[prev:start], text]
+        prev = end
     parts.append(s[prev:])
     return "".join(parts)
 
@@ -1002,12 +1020,12 @@ def _has_pr_op(args: list[str]) -> bool:
     )
 
 
-def _collect(tokens: list[str], opaque: frozenset[str], found: list[Invocation], cd: _CdState, level: int) -> _CdState:
+def _collect(tokens: list[str], opaque: frozenset[str], found: list[Invocation], cd: _CdState, level: int) -> None:
     """tokens の PR 操作を順に found に足し、cd を進める。level は代入の値の中のコマンド置換の深さ。"""
     segments = _segments(tokens)
     for index, segment in enumerate(segments):
         if level < _NESTED_LIMIT:
-            # 値の中の置換は、代入の後ろのコマンドより先に走る
+            # 値の中の置換は、代入の後ろのコマンドより先に走る。サブシェルなので、中の cd は外へ持ち出さない
             for tok in segment.tokens:
                 if tok not in opaque:
                     continue
@@ -1016,7 +1034,7 @@ def _collect(tokens: list[str], opaque: frozenset[str], found: list[Invocation],
                         inner, inner_opaque = _tokens_opaque(tok[start:end])
                     except ValueError:
                         continue  # 読めない置換の中の PR 操作は安全網が数える
-                    cd = _collect(inner, inner_opaque, found, cd, level + 1)
+                    _collect(inner, inner_opaque, found, cd, level + 1)
         seg, assigns, wrappers = _strip_prefix(segment.tokens)
         if not seg:
             continue
@@ -1053,6 +1071,9 @@ def _collect(tokens: list[str], opaque: frozenset[str], found: list[Invocation],
                 continue
         else:
             continue
+        # 値を 1 語に読むと、これまで「解析できない」で止めていた形が読める。シェルの cwd を変えないかもしれない cd の
+        # 後ろでは、その移動先を検査先にすると repo の外への移動と読んで素通しになるので、これまでどおり止める
+        unresolved = cd.unresolved or (cd.display if cd.uncertain and opaque else None)
         found.append(
             Invocation(
                 kind=inv.kind,
@@ -1066,10 +1087,9 @@ def _collect(tokens: list[str], opaque: frozenset[str], found: list[Invocation],
                 # 分けられない (後ろの --base が前の値を上書きしている)
                 parsed=not _has_pr_op(rest[2:]),
                 cd_steps=cd.steps,
-                cd_unresolved=cd.unresolved,
+                cd_unresolved=unresolved,
             )
         )
-    return cd
 
 
 def find_invocations(command: str) -> list[Invocation]:

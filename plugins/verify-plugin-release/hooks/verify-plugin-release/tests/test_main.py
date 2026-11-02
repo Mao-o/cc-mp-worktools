@@ -296,6 +296,26 @@ class MainTest(unittest.TestCase):
                 self.assertEqual(self.decision(out), "deny")
                 self.assertIn("cd の移動先", out["hookSpecificOutput"]["permissionDecisionReason"])
 
+    def test_cd_in_an_assignment_value_keeps_the_gate_on_the_cwd(self):
+        # 値の中の cd はサブシェルで走り、gh は元の cwd で走る (repo の外への移動と読むと素通しになる)
+        write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
+        commit_all(self.root, "change without bump")
+        for cmd in (
+            'ROOT="$(cd .. && pwd)" gh pr create --base main -t x',
+            f'ROOT="$(cd {self._tmp.name} && pwd)" gh pr create --base main -t x',
+            f"X=$(cd {self._tmp.name} && pwd) gh pr create --base main -t x",
+            f"X=`cd {self._tmp.name}` gh pr create --base main -t x",
+            f'X="$(cd {self._tmp.name})" gh pr create --base main -t x',
+        ):
+            with self.subTest(cmd=cmd):
+                out = run_hook(bash(cmd, self.root))
+                self.assertEqual(self.decision(out), "deny")
+                self.assertIn("version[alpha]", out["hookSpecificOutput"]["permissionDecisionReason"])
+        # cwd を変えないかもしれない cd の後ろは、repo の外への移動と読まずに止める
+        out = run_hook(bash(f"(cd {self._tmp.name}) && X=$(a b) gh pr create --base main -t x", self.root))
+        self.assertEqual(self.decision(out), "deny")
+        self.assertIn("静的に解決できない", out["hookSpecificOutput"]["permissionDecisionReason"])
+
     def test_japanese_payload_as_utf8_bytes(self):
         # Windows では stdin の既定 codec が UTF-8 でないため、日本語タイトルで
         # decode に失敗して素通りする経路があった。bytes で渡して確かめる

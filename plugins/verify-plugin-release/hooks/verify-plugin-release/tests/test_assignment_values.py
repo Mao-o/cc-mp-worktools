@@ -144,11 +144,9 @@ class AssignmentValueTest(_Base):
         self.assert_clean("x=$(V=$(echo $(echo a)) gh pr create --base m1)", ["m1"])
 
     def test_cd_inside_and_around_the_value(self):
-        # 値の中の cd はサブシェルで走るので、続く相対の cd の起点が決まらない
+        # 値の中の cd はサブシェルで走るので、後ろのコマンドの cwd を変えない
         found = find_invocations("X=$(cd a) gh pr create; cd b && gh pr ready")
-        self.assertEqual(len(found), 2)
-        inv = found[1]
-        self.assertIsNotNone(inv.cd_unresolved)
+        self.assertEqual([(i.cd_steps, i.cd_unresolved) for i in found], [((), None), (("b",), None)])
         # 代入の後ろの cd も cd として読み、区切りの種類は元のまま
         inv = _first("X=$(a b) cd sub && gh pr create")
         self.assertEqual((inv.cd_steps, inv.cd_unresolved), (("sub",), None))
@@ -159,6 +157,115 @@ class AssignmentValueTest(_Base):
         # `cd a || X=$(b) exit 1` の exit は shell を終わらせるので a に決まる
         inv = _first("cd a || X=$(b c) exit 1; cd d && gh pr create")
         self.assertEqual((inv.cd_steps, inv.cd_unresolved), (("a", "d"), None))
+
+    def test_cd_in_the_value_does_not_move_the_command_behind_it(self):
+        for cmd in (
+            'ROOT="$(cd .. && pwd)" gh pr create --base m1',
+            'ROOT="$(cd /elsewhere && pwd)" gh pr create --base m1',
+            "X=$(cd /elsewhere && pwd) gh pr create --base m1",
+            "X=$(cd a; pwd) gh pr create --base m1",
+            "X=`cd a` gh pr create --base m1",
+            "X=`cd a; pwd` gh pr create --base m1",
+            'X="$(cd a)" gh pr create --base m1',
+            "X=${y:-$(cd a)} gh pr create --base m1",
+            "X=<(cd a) gh pr create --base m1",
+            "X=(a $(cd b)) gh pr create --base m1",
+            "X=$(echo $(cd a)) gh pr create --base m1",
+            "X=$(Y=$(cd a) true) gh pr create --base m1",
+            "X=$(cd a) Y=$(cd b) gh pr create --base m1",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_clean(cmd, ["m1"])
+                inv = _first(cmd)
+                self.assertEqual((inv.cd_steps, inv.cd_unresolved), ((), None))
+
+    def test_cd_in_the_value_applies_only_inside_the_value(self):
+        # 中の呼び出しの検査先は値の中の cd、後ろの呼び出しは元の cwd
+        found = find_invocations("X=$(cd a; gh pr create --base m1) gh pr ready m2")
+        self.assertEqual([(i.base or i.target, i.cd_steps, i.cd_unresolved) for i in found], [("m1", ("a",), None), ("m2", (), None)])
+        # 値の前の cd は引き続き効く
+        inv = _first("cd b; X=$(cd a) gh pr create --base m1")
+        self.assertEqual((inv.cd_steps, inv.cd_unresolved), (("b",), None))
+        # 値の後ろの cd は元の cwd から辿る
+        inv = _first("X=$(cd a) cd b; gh pr create --base m1")
+        self.assertEqual((inv.cd_steps, inv.cd_unresolved), (("b",), None))
+        # 外の移動先に続く値の中の cd は、確かめずに解決できないとして止める
+        inv = _first("cd b; X=$(cd a; gh pr create --base m1) true")
+        self.assertEqual(inv.cd_steps, ("b", "a"))
+        self.assertIsNotNone(inv.cd_unresolved)
+
+    def test_uncertain_cd_before_a_value_is_not_the_inspected_dir(self):
+        # どれも gh は元の cwd で走る。移動先を検査すると、repo の外への移動で素通しになる
+        for cmd in (
+            "(cd /elsewhere) && X=$(a b) gh pr create --base m1",
+            "cd /elsewhere | cat; X=$(a b) gh pr create --base m1",
+            "env cd /elsewhere; X=$(cd a) gh pr create --base m1",
+            "X=$(a b) Y=$(true; cd /elsewhere); gh pr create --base m1",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(_first(cmd).cd_unresolved)
+        # 確かな cd の後ろと、値の中で完結する cd は止めない
+        inv = _first("cd /elsewhere && X=$(a b) gh pr create --base m1")
+        self.assertEqual((inv.cd_steps, inv.cd_unresolved), (("/elsewhere",), None))
+        found = find_invocations("X=$(cd a; gh pr create --base m1) gh pr create --base m2")
+        self.assertEqual([i.cd_unresolved for i in found], [None, None])
+        # 値を 1 語に読まない形は従来の読みのまま
+        self.assertIsNone(_first("(cd /elsewhere) && gh pr create --base m1").cd_unresolved)
+
+    def test_escaped_character_in_a_value_is_counted(self):
+        # 二重引用符の中の置換は構文解析が読まないので、安全網が数える (本文を読み飛ばすと、ほかに止める理由が無い)
+        self.assert_stops('echo "$(V=\\ y gh pr create --base m1)"')
+        self.assert_stops('echo "$(2>&1 V=\\\n\\ y gh pr create --base m1)"')
+        # `$'a\\'\\''` は 1 語で、後ろの gh は引用の中ではない
+        self.assert_stops(">f V=$'a\\'\\''y gh pr create --base m1 '&$(|\\'")
+        # `\\\\` の後ろの空白は語の区切り (`$'` があると値を 1 語に読まないので、安全網が数える)
+        self.assert_stops("gh pr create --base m1 | env V=`cd a` gh pr create --base m2 ''# $''\n2>&1 V=\\\\ gh pr create --base m3")
+        self.assert_stops('echo "$(>f\\ g gh pr create --base m1)"')
+        self.assert_clean("V=a\\ b gh pr create --base m1", ["m1"])
+
+    def test_assignment_in_backticks_is_counted(self):
+        # backtick の中の代入語の後ろの gh も、$( の中と同じく見失わない (旧新とも走る形)
+        for cmd in (
+            "echo `V=$(echo $(echo a)) gh pr create --base m1`",
+            "x=`V=$(echo $(echo a)) gh pr create --base m1`",
+            'x="`V=$(echo $(echo a)) gh pr create --base m1`"',
+            "echo `true; V=$(echo $(echo a)) gh pr create --base m1`",
+            # $( の中の backtick と、エスケープした入れ子の backtick
+            "x=$(echo `V=$(echo $(echo a)) gh pr create --base m1`)",
+            "echo `echo \\`V=$(echo $(echo a)) gh pr create --base m1\\``",
+            "echo `V=\\$(echo \\$(echo a)) gh pr create --base m1`",
+            "echo `echo \\`echo \\\\\\`V=$(echo $(echo a)) gh pr create --base m1\\\\\\`\\``",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_stops(cmd)
+        # 引数の言及は数えない
+        for cmd in (
+            "echo `echo gh pr create`",
+            "echo `V=$(a b) echo gh pr create`",
+            "echo `echo V=$(a b) gh pr create`",
+            "echo `echo 'V=$(a b) gh pr create'`",
+            "echo 'x `V=$(echo $(echo a)) gh pr create`'",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(find_invocations(cmd), [])
+                self.assertIsNone(unresolved_reason(cmd, []))
+        # 値の中の backtick は読めるので止めない
+        self.assert_clean("X=`V=$(echo $(echo a)) gh pr create --base m1` gh pr ready m2", ["m1", "m2"])
+
+    def test_function_keyword_body_is_read_like_a_function_definition(self):
+        for cmd in (
+            "function f { X=$(echo $(echo a)) gh pr create --base m1; }; f",
+            "f() { X=$(echo $(echo a)) gh pr create --base m1; }; f",
+            # 波括弧の無い本文 (zsh は走らせる)
+            "f() X=$(echo $(echo a)) gh pr create --base m1; f",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_stops(cmd)
+        # 改行の後ろは区切りの後ろのコマンドとして見つける
+        self.assert_clean("function f {\nX=$(echo $(echo a)) gh pr create --base m1\n}; f", ["m1"])
+        # { の無い引数は前置きと読まない
+        self.assertEqual(find_invocations("echo f X=$(a b) gh pr create"), [])
+        self.assertIsNone(unresolved_reason("echo f X=$(a b) gh pr create", []))
 
     def test_assignment_that_is_not_in_the_prefix_is_left_alone(self):
         # 引数の位置の NAME=... はコマンド語の前置きではない (後ろの gh は echo の引数)
@@ -330,7 +437,7 @@ class AssignmentValueTest(_Base):
         self.assert_stops("true $'x'; V=$(a $(b)) gh pr create --base m1")
 
     def test_time_is_linear(self):
-        # 走査を 1 回で終わらせる。1000 個と 4000 個の時間の比で見る
+        # 走査を 1 回で終わらせる。500 個と 2000 個の時間の比で見る
         script = (
             "import time\n"
             "from command import find_invocations, unresolved_reason\n"
@@ -343,6 +450,10 @@ class AssignmentValueTest(_Base):
             "  'dq heredoc': ('\"$(cat <<E\\nb\\nE\\n)\" ', 'gh pr create'),\n"
             "  'quote': (\"X=$(a ' \", ''),\n"
             "  'brace': ('${', ''),\n"
+            "  'escape': ('X=a\\\\\\\\ ', 'gh pr create'),\n"
+            "  'ansi': (\"X=$'a\\\\\\\\'b' \", 'gh pr create'),\n"
+            "  'backtick': ('`V=$(a $(b)) c` ', 'gh pr create'),\n"
+            "  'nested backtick': ('`a \\\\\\\\`V=$(b) c\\\\\\\\`` ', 'gh pr create'),\n"
             "}\n"
             "def run(k):\n"
             "    best = {}\n"
@@ -481,6 +592,20 @@ class SubstitutionInDoubleQuotesHeredocTest(_Base):
         self.assertEqual(_marks("gh pr create --base m0 -b \"$(cat <<'EOF'\nfoo)\"\ngh pr create --base mA\nEOF\n\")\""), ["m0", "mA"])
         self.assertIsNotNone(command._dq_substitution_bodies("a)<<x\ny\nx\n)", 0))
         self.assertIsNone(command._dq_substitution_bodies("<<x\ny\n)", 0))
+
+    def test_substitution_in_an_unquoted_body_keeps_the_old_reading(self):
+        # 引用の無い区切り語の本文の置換は shell が走らせる (zsh で m2 が走る)
+        for op in ("<<EOF", "<<-EOF"):
+            with self.subTest(op=op):
+                self.assert_stops(f"gh pr create --base m0 --body \"$(cat {op}\n$(\n'gh' pr create --base m2 )\"\nEOF\n)\"")
+        self.assertIsNone(command._dq_substitution_bodies("cat <<EOF\n$(a)\nEOF\n)", 0))
+        self.assertIsNone(command._dq_substitution_bodies("cat <<EOF\n`a`\nEOF\n)", 0))
+        # 置換の無い本文と、引用のある区切り語の本文は読み飛ばす
+        self.assertIsNotNone(command._dq_substitution_bodies("cat <<EOF\nsay $x\nEOF\n)", 0))
+        for op in ("<<'EOF'", '<<"EOF"', "<<\\EOF"):
+            with self.subTest(op=op):
+                self.assertIsNotNone(command._dq_substitution_bodies(f"cat {op}\n$(a) `b`\nEOF\n)", 0))
+                self.assert_clean(f"gh pr create --base m1 --body \"$(cat {op}\nuse `b` and say \"hi\nEOF\n)\"", ["m1"])
 
     def test_closes_early(self):
         for body in ('a)"', '1) "', 'x)\n"', "foo) 'a' \"", '(a))"', '")" ) "'):
