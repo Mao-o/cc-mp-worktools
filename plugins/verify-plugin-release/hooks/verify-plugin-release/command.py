@@ -4,6 +4,7 @@
 `cd <dir> && gh pr create` の `cd` は追跡する (ゲートを走らせる repo が変わるため)。
 cd が何度もあるときは順に合成する (`cd plugins/x && ... && cd ../..` は repo root に戻る)。
 heredoc の本文はシェルのコードではないので、構文解析の前に空行にする。
+代入語 (`NAME=...`) の値は、コマンド置換・引用符の対応で 1 語として読む (値の中の空白で語を分けない)。
 
 shlex で分解できないコマンド (クォートの閉じ忘れ等) でも、文字列に
 `gh pr create` / `gh pr ready` が現れるなら検出扱いにする。ゲートは異常時に
@@ -102,7 +103,12 @@ def _join_continuations(s: str) -> str:
     return re.sub(r"(?<!\\)((?:\\\\)*)\\\n", r"\1", s)
 
 
-def _strip_comments(command: str, heredocs: bool = True, quoted_bodies: list[tuple[int, int]] | None = None) -> str:
+def _strip_comments(
+    command: str,
+    heredocs: bool = True,
+    quoted_bodies: list[tuple[int, int]] | None = None,
+    dq_bodies: bool = True,
+) -> str:
     """shell と同じ規則でコメントを落とし、`\\`+改行の継続行をつなぐ。
 
     shlex の既定の commenters (`#`) は単語の途中の `#` (`feature#1`、`${x##*/}`) でも
@@ -124,19 +130,31 @@ def _strip_comments(command: str, heredocs: bool = True, quoted_bodies: list[tup
 
     quoted_bodies にリストを渡すと、読み飛ばした本文のうち区切り語に引用がある (shell が展開しない)
     ものの範囲 (command の中の [開始, 終わり)) を足す。従来の読み方に戻したときは空にする。
+
+    二重引用符の中のコマンド置換 (`--body "$(cat <<'EOF' ...)"`) で本文が始まる heredoc も、本文を空行にする
+    (_dq_substitution_bodies)。本文の範囲を確かめられないときは、この読み飛ばしだけをやめて読み直す
+    (dq_bodies=False)。ここで空行にした本文は quoted_bodies に足さない (安全網は加工前を数える)。
     """
     out: list[str] = []
     quote = ""  # "" | "'" | '"'
-    escaped_end = -1  # 直近の `\\X` を足した直後の len(out) (エスケープした空白は単語の区切りではない)
+    # 語の途中である out の長さ (直前が `\\X` か、置換の閉じ括弧のとき。直後の `#` はコメントの始まりではない)
+    escaped_end = -1
     # 本文を待っている heredoc (区切り語, <<-, 引用あり, 登録したときのコマンド置換の深さ)
     pending: list[tuple[str, bool, bool, int]] = []
     arith = 0  # `((` / `$((` の中の括弧の深さ。中の `<<` はシフト演算子で heredoc ではない
+    arith_in_word = False  # 今の `((` は `$((` (閉じた後ろも同じ語)
     brace = 0  # `${` の中の波括弧の深さ。中の `<<` は展開の語で heredoc ではない
     subs: list[list] = []  # 開いているコマンド置換 (`$(` は ["(", 括弧の深さ]、backtick は ["`", 0])
     i = 0
     n = len(command)
+    blanks: dict[int, int] = {}  # 二重引用符の中の置換で読み飛ばす本文 (開始 → 終わり)
+    # この位置より前の `$(` は読み終えている (同じ範囲を読み直すと個数の 2 乗の時間になる)
+    dq_scan_from = 0 if heredocs and dq_bodies else n
     while i < n:
         ch = command[i]
+        if quote == '"' and i in blanks:
+            i = blanks[i]  # 本文は引用符の中の文字列なので、改行を残す必要が無い
+            continue
         if quote == "'":
             out.append(ch)
             if ch == "'":
@@ -151,6 +169,14 @@ def _strip_comments(command: str, heredocs: bool = True, quoted_bodies: list[tup
             i += 2
             continue
         elif quote == '"':
+            if i >= dq_scan_from and command.startswith("$(", i):
+                read = _dq_substitution_bodies(command, i + 2)
+                if read is None:
+                    if quoted_bodies is not None:
+                        quoted_bodies.clear()
+                    return _strip_comments(command, heredocs, quoted_bodies, dq_bodies=False)
+                blanks.update(read[0])
+                dq_scan_from = read[1]
             out.append(ch)
             if ch == '"':
                 quote = ""
@@ -163,8 +189,11 @@ def _strip_comments(command: str, heredocs: bool = True, quoted_bodies: list[tup
             elif ch == ")":
                 arith -= 1
             out.append(ch)
+            if arith == 0 and arith_in_word:
+                escaped_end = len(out)  # `$((1))#x` の `#` は語の途中
         elif heredocs and command.startswith("((", i):
             arith = 2
+            arith_in_word = bool(out) and out[-1] == "$"
             out.append("((")
             i += 2
             continue
@@ -189,9 +218,10 @@ def _strip_comments(command: str, heredocs: bool = True, quoted_bodies: list[tup
             out.append(ch)
         elif heredocs and ch in "()" and subs and subs[-1][0] == "(":
             subs[-1][1] += 1 if ch == "(" else -1
+            out.append(ch)
             if subs[-1][1] == 0:
                 pending = _close_substitution(subs, pending)
-            out.append(ch)
+                escaped_end = len(out)  # `$(a)#x` の `#` は語の途中 (`(a)#x` の `#` はコメント)
         elif heredocs and command.startswith("<<<", i):
             out.append("<<<")  # here-string は本文を持たない
             i += 3
@@ -238,6 +268,15 @@ def _strip_comments(command: str, heredocs: bool = True, quoted_bodies: list[tup
             out.append(ch)
         i += 1
     return "".join(out)
+
+
+def _strip_for_parsing(command: str, quoted_bodies: list[tuple[int, int]] | None = None) -> str:
+    """構文解析に渡す文字列。`$'` があるコマンドは、二重引用符の中の置換の本文を読み飛ばさない。
+
+    shlex は `$'\\''` の引用符の対応を shell と違う形で読む。ずれた読みを本文の `"` が止めていることがあるので、
+    本文を消して「解析できる」にしない。
+    """
+    return _strip_comments(command, quoted_bodies=quoted_bodies, dq_bodies="$'" not in command)
 
 
 def _close_substitution(subs: list[list], pending: list[tuple[str, bool, bool, int]]) -> list:
@@ -328,6 +367,100 @@ def _skip_heredoc_body(
         if (logical.lstrip("\t") if strip_tabs else logical) == delim:
             return i, True
     return i, False
+
+
+def _closes_early(body: str) -> bool:
+    """本文の途中の `)` で置換が閉じ、続く `"` で外側の引用符も閉じる読み方がありうるか。
+
+    bash 3.2 はコマンド置換を括弧と引用符の対応だけで読むので、本文の `)` で置換を閉じる
+    (`foo)"` + 改行 + `cd x` の後ろの行はコードとして走る。zsh は区切り語の行まで本文と読む)。
+    """
+    quote = ""
+    depth = 0
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                return '"' in body[i:]
+            depth -= 1
+        i += 1
+    return False
+
+
+def _dq_substitution_bodies(command: str, start: int) -> tuple[dict[int, int], int] | None:
+    """二重引用符の中の `$(` の直後 (start) から置換の終わりまで読み、中で本文が始まる heredoc の範囲を返す。
+
+    ({本文の開始: 終わりの行の次}, 置換の直後の位置)。置換が閉じなければ位置はコマンドの長さ。
+    本文の終わりの行が無い・本文の範囲が shell で割れる・本文があるのに置換が閉じないときは None
+    (bash 3.2 は閉じ括弧で本文を切り、zsh は区切り語の行まで読む。どちらかに決めずに従来の読み方に戻す)。
+    算術や `${...}` の中の `<<` は区別しない。本文と読み違えても、終わりの行が無ければ None になり、
+    あっても二重引用符の中の文字列を空行にするだけで、安全網は加工前を数える。
+    """
+    n = len(command)
+    bodies: dict[int, int] = {}
+    pending: list[tuple[str, bool, bool]] = []
+    quote = ""
+    depth = 1
+    i = start
+    while i < n:
+        ch = command[i]
+        if quote == "'":
+            if ch == "'":
+                quote = ""
+        elif ch == "\\":
+            i += 2
+            continue
+        elif quote == '"':
+            if ch == '"':
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return bodies, i + 1
+        elif ch == "#" and command[i - 1] in _WORD_START_PREV:
+            while i < n and command[i] != "\n":
+                i += 1
+            continue
+        elif command.startswith("<<<", i):
+            i += 3
+            continue
+        elif command.startswith("<<", i):
+            j = i + 2
+            strip_tabs = j < n and command[j] == "-"
+            word = _heredoc_word(command, j + 1 if strip_tabs else j)
+            if word is None:
+                return None
+            pending.append((word[0], strip_tabs, word[1]))
+            i = word[2]
+            continue
+        elif ch == "\n" and pending:
+            i += 1
+            for delim, strip_tabs, quoted in pending:
+                body_start = i
+                # 終わりの行が無い本文はコマンドの最後まで読むので、置換が閉じずに下の None に届く
+                i, _terminated = _skip_heredoc_body(command, i, delim, strip_tabs, quoted, [])
+                if _closes_early(command[body_start:i]):
+                    return None
+                bodies[body_start] = i
+            pending = []
+            continue
+        i += 1
+    return None if bodies else ({}, n)
 
 
 def _is_separator(tok: str) -> bool:
@@ -624,37 +757,273 @@ def _tokens(stripped: str) -> list[str]:
     return list(lex)
 
 
-def find_invocations(command: str) -> list[Invocation]:
-    """コマンド中の `gh pr create` / `gh pr ready` をすべて順に返す。
+_ASSIGN_HEAD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+# 配列の代入 (`X=(a b)`) の値の始まり
+_ARRAY_HEAD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\(")
+# 値に語の区切りを含みうるもの (shlex は 1 語に読めない)
+_VALUE_WITH_CODE = re.compile(r"[$<>]\(|`|\$\{|^[A-Za-z_][A-Za-z0-9_]*=\(")
+# 語を終わらせる文字 (引用の外)
+_WORD_END = frozenset(" \t\r\n;&|<>")
+# 代入語の直後がこれ (かコマンドの終わり) なら、代入の後ろにコマンド語は無い
+_NO_COMMAND_AFTER = frozenset(";&|\n)")
 
-    `gh pr create --draft && gh pr ready` のように 1 つのコマンドで draft 作成と
-    ready 化を続ける形があるため、最初の 1 つだけを見て判定してはいけない。
+
+@dataclass
+class _Frame:
+    kind: str  # "code" | "sub" (`$(`) | "paren" (`(`) | "array" | "dq" | "brace" (`${`) | "bt" (backtick)
+    start: int = 0  # 中身の開始位置
+    word: int = -1  # 読んでいる語の開始位置 (コードの frame だけ)
+    in_command: bool = True  # 次の語がコマンド語か、その前置きの位置にある
+    redirect: bool = False  # 次の語はリダイレクトの対象
+    literal_sq: bool = False  # `'` は文字 (二重引用符の中の `${`)
+
+
+_CODE_KINDS = frozenset({"code", "sub", "paren", "array"})
+
+
+@dataclass(frozen=True)
+class _AssignWord:
+    start: int
+    end: int
+    in_dq: bool  # 二重引用符の中のコマンド置換にある
+
+
+def _scan_assignments(s: str) -> tuple[list[_AssignWord], list[tuple[int, int]]]:
+    """コマンド語の前置きの位置にある代入語のうち、値にコマンド置換などを含み、後ろに語が続くものを見つける。
+
+    シェルの語の読み方 (引用符・`$(` / `${` / backtick の入れ子) で最後まで 1 回だけ走査する。戻り値の 2 つ目は、
+    一番外側のコマンド置換 (`$(` / backtick) の中身の範囲。引用符や置換が閉じないと、そこで読むのをやめる
+    (それまでに見つけたものだけを返す。読めなかった部分は従来の読み方と安全網に任せる)。
     """
-    if "gh" not in command or "pr" not in command:
-        return []
-    joined = _join_continuations(command)
-    try:
-        tokens = _tokens(_strip_comments(command))
-    except ValueError:
-        return [
-            Invocation(
-                kind="ready" if m.group(1) == "ready" else "create",
-                draft=bool(re.search(r"\s(?:--draft|-d)\b", joined)) and m.group(1) != "ready",
-                parsed=False,
-            )
-            for m in _FALLBACK.finditer(joined)
-        ]
+    words: list[_AssignWord] = []
+    subs: list[tuple[int, int]] = []
+    stack = [_Frame("code")]
+    dq_level = 0
+    sub_level = 0
+    n = len(s)
 
-    found: list[Invocation] = []
-    cd = _CdState()
+    def end_word(frame: _Frame, end: int, next_ch: str) -> None:
+        if frame.word < 0:
+            return
+        word = s[frame.word : end]
+        if frame.redirect:
+            frame.redirect = False
+        elif word.isdigit() and next_ch in "<>":
+            pass  # `2>f` の fd 番号
+        elif _ASSIGN_HEAD.match(word):
+            if frame.in_command and _VALUE_WITH_CODE.search(word):
+                k = end
+                while k < n and s[k] in " \t\r":
+                    k += 1
+                # 語の直後に続けて書けるのはリダイレクトだけ (`X=$(a)>f gh`。`X=$(a)(b)` は後ろにコマンド語が無い)
+                if k < n and s[k] not in _NO_COMMAND_AFTER and (k > end or s[k] in "<>"):
+                    words.append(_AssignWord(frame.word, end, dq_level > 0))
+        elif word not in _WRAPPERS and word not in _KEYWORDS:
+            frame.in_command = False
+        frame.word = -1
+
+    i = 0
+    while i < n:
+        frame = stack[-1]
+        ch = s[i]
+        code = frame.kind in _CODE_KINDS
+        if ch == "\\":
+            if code and frame.word < 0:
+                frame.word = i
+            i += 2
+            continue
+        if frame.kind == "bt":
+            if ch == "`":
+                stack.pop()
+                sub_level -= 1
+                if sub_level == 0:
+                    subs.append((frame.start, i))
+            i += 1
+            continue
+        if code and frame.word >= 0 and (s.startswith("<(", i) or s.startswith(">(", i)):
+            # 代入の値のプロセス置換 (`X=<(a b) gh pr create`)。語の途中でないものはリダイレクトと同じ扱い
+            stack.append(_Frame("sub", i + 2))
+            sub_level += 1
+            i += 2
+            continue
+        if ch == "`" or s.startswith("$(", i) or s.startswith("${", i):
+            if code and frame.word < 0:
+                frame.word = i
+            if ch == "`":
+                stack.append(_Frame("bt", i + 1))
+                sub_level += 1
+                i += 1
+            elif s[i + 1] == "(":
+                stack.append(_Frame("sub", i + 2))
+                sub_level += 1
+                i += 2
+            else:
+                stack.append(_Frame("brace", i + 2, literal_sq=frame.kind == "dq" or frame.literal_sq))
+                i += 2
+            continue
+        if frame.kind == "dq":
+            if ch == '"':
+                stack.pop()
+                dq_level -= 1
+            i += 1
+            continue
+        if s.startswith("$'", i) and code:
+            # `$'...'` の中の `\\'` は文字
+            if frame.word < 0:
+                frame.word = i
+            i += 2
+            while i < n and s[i] != "'":
+                i += 2 if s[i] == "\\" else 1
+            i += 1
+            continue
+        if ch == "'" and not frame.literal_sq:
+            close = s.find("'", i + 1)
+            if close < 0:
+                break
+            if code and frame.word < 0:
+                frame.word = i
+            i = close + 1
+            continue
+        if ch == '"':
+            if code and frame.word < 0:
+                frame.word = i
+            stack.append(_Frame("dq", i + 1))
+            dq_level += 1
+            i += 1
+            continue
+        if frame.kind == "brace":
+            if ch == "{":
+                stack.append(_Frame("brace", i + 1, literal_sq=frame.literal_sq))
+            elif ch == "}":
+                stack.pop()
+            i += 1
+            continue
+        # ここから先はコードの frame
+        if ch == "#" and frame.word < 0:
+            while i < n and s[i] != "\n":
+                i += 1
+            continue
+        if ch == "(":
+            if frame.word >= 0 and _ARRAY_HEAD.fullmatch(s, frame.word, i + 1):
+                stack.append(_Frame("array", i + 1, in_command=False))
+            else:
+                end_word(frame, i, ch)
+                stack.append(_Frame("paren", i + 1))
+            i += 1
+            continue
+        if ch == ")":
+            end_word(frame, i, ch)
+            if len(stack) > 1:
+                stack.pop()
+                if frame.kind == "sub":
+                    sub_level -= 1
+                    if sub_level == 0:
+                        subs.append((frame.start, i))
+                elif frame.kind == "paren":
+                    stack[-1].in_command = True  # `f() { ...`
+            else:
+                frame.in_command = True  # `case` の分岐の `a)`
+            i += 1
+            continue
+        if ch in _WORD_END:
+            end_word(frame, i, ch)
+            if ch in "<>":
+                frame.redirect = True
+            elif ch in ";&|\n" and s[i - 1 : i] not in ("<", ">"):
+                frame.in_command = True
+            i += 1
+            continue
+        if frame.word < 0:
+            frame.word = i
+        i += 1
+    return words, subs
+
+
+def _opaque_assignments(s: str) -> tuple[str, frozenset[str]]:
+    """見つけた代入語を引用して 1 語にした文字列と、その語の集合を返す (二重引用符の中のものは対象外)。
+
+    二重引用符の中に置くと引用が文字になる。別の代入語の値の中のものは、外側の語を読むときに _collect が読む。
+    """
+    if "$'" in s:
+        # shlex は `$'\\''` の引用符の対応を shell と違う形で読むので、語を書き換えても後ろの読みが合わない
+        return s, frozenset()
+    parts: list[str] = []
+    opaque: set[str] = set()
+    prev = 0
+    for word in sorted(_scan_assignments(s)[0], key=lambda w: w.start):
+        if word.in_dq or word.start < prev:
+            continue
+        text = s[word.start : word.end]
+        parts += [s[prev : word.start], shlex.quote(text)]
+        opaque.add(text)
+        prev = word.end
+    parts.append(s[prev:])
+    return "".join(parts), frozenset(opaque)
+
+
+def _split_assignments(s: str) -> str:
+    """見つけた代入語の直後と、一番外側のコマンド置換の直前に区切りを入れる (安全網の数え上げ用)。
+
+    値の中の置換の入れ子は正規表現で読めないので、代入語の後ろのコマンド語を、区切りの後ろのコマンド語として
+    数えられるようにする。置換の直前の区切りは、PR 操作の引数の中の PR 操作 (`gh pr create "$(gh pr ready)"`)
+    を引数として読み飛ばさないため。単一引用符の中は走査で読み飛ばすので、説明の文字列は数えない。
+    """
+    words, subs = _scan_assignments(s)
+    # 置換の開始の 1 文字前は `(` か backtick の直前 (`$` の直後でも、正規表現は `(` を実行位置の始まりと読む)
+    cuts = sorted([w.end for w in words] + [start - 1 for start, _end in subs])
+    parts: list[str] = []
+    prev = 0
+    for cut in cuts:
+        parts += [s[prev:cut], " ;_=_ "]
+        prev = cut
+    parts.append(s[prev:])
+    return "".join(parts)
+
+
+def _tokens_opaque(stripped: str) -> tuple[list[str], frozenset[str]]:
+    """_tokens と同じ。後ろに語が続く代入語の値を 1 語として読み、その語の集合も返す。"""
+    text, opaque = _opaque_assignments(stripped)
+    if opaque:
+        try:
+            return _tokens(text), opaque
+        except ValueError:
+            pass  # 従来の読み方に任せる
+    return _tokens(stripped), frozenset()
+
+
+# 代入の値の中のコマンド置換を読む深さの上限。これより深いものは構文解析で読まない (安全網が数えて止める)
+_NESTED_LIMIT = 8
+
+
+def _has_pr_op(args: list[str]) -> bool:
+    """語の並びの中に `gh pr create / new / ready` があるか。"""
+    return any(
+        _is_gh(a) and b == "pr" and (c in _CREATE or c == "ready") for a, b, c in zip(args, args[1:], args[2:])
+    )
+
+
+def _collect(tokens: list[str], opaque: frozenset[str], found: list[Invocation], cd: _CdState, level: int) -> _CdState:
+    """tokens の PR 操作を順に found に足し、cd を進める。level は代入の値の中のコマンド置換の深さ。"""
     segments = _segments(tokens)
     for index, segment in enumerate(segments):
+        if level < _NESTED_LIMIT:
+            # 値の中の置換は、代入の後ろのコマンドより先に走る
+            for tok in segment.tokens:
+                if tok not in opaque:
+                    continue
+                for start, end in _scan_assignments(tok)[1]:
+                    try:
+                        inner, inner_opaque = _tokens_opaque(tok[start:end])
+                    except ValueError:
+                        continue  # 読めない置換の中の PR 操作は安全網が数える
+                    cd = _collect(inner, inner_opaque, found, cd, level + 1)
         seg, assigns, wrappers = _strip_prefix(segment.tokens)
         if not seg:
             continue
         if seg[0] == "cd":
             uncertain_here = (
-                segment.depths[len(segment.tokens) - len(seg)] > 0
+                level > 0
+                or segment.depths[len(segment.tokens) - len(seg)] > 0
                 or segment.before == "pipe"
                 or segment.after in ("pipe", "bg")
                 or any(w in _DETACHING_WRAPPERS for w in wrappers)
@@ -693,10 +1062,39 @@ def find_invocations(command: str) -> list[Invocation]:
                 draft=inv.draft,
                 target=inv.target,
                 cd=cd.display,
+                # 引数の中の PR 操作 (`--base a >(gh pr create --base b)`) は別の呼び出しで、この構文解析では
+                # 分けられない (後ろの --base が前の値を上書きしている)
+                parsed=not _has_pr_op(rest[2:]),
                 cd_steps=cd.steps,
                 cd_unresolved=cd.unresolved,
             )
         )
+    return cd
+
+
+def find_invocations(command: str) -> list[Invocation]:
+    """コマンド中の `gh pr create` / `gh pr ready` をすべて順に返す。
+
+    `gh pr create --draft && gh pr ready` のように 1 つのコマンドで draft 作成と
+    ready 化を続ける形があるため、最初の 1 つだけを見て判定してはいけない。
+    """
+    if "gh" not in command or "pr" not in command:
+        return []
+    joined = _join_continuations(command)
+    try:
+        tokens, opaque = _tokens_opaque(_strip_for_parsing(command))
+    except ValueError:
+        return [
+            Invocation(
+                kind="ready" if m.group(1) == "ready" else "create",
+                draft=bool(re.search(r"\s(?:--draft|-d)\b", joined)) and m.group(1) != "ready",
+                parsed=False,
+            )
+            for m in _FALLBACK.finditer(joined)
+        ]
+
+    found: list[Invocation] = []
+    _collect(tokens, opaque, found, _CdState(), 0)
     return found
 
 
@@ -720,16 +1118,18 @@ def _may_read_stdin_as_code(stripped: str) -> bool:
     stripped は _strip_comments を通した文字列 (本文は空行)。分けられなければ True (止める側)。
     """
     try:
-        tokens = _tokens(stripped)
+        # 代入の値を 1 語にした読みと、値の中の語も見る従来の読みの両方で探す (`X=$(a b) b'as'h <<'EOF'`)
+        token_lists = [_tokens(stripped), _tokens_opaque(stripped)[0]]
     except ValueError:
         return True
-    for segment in _segments(tokens):
-        rest, _assigns, _wrappers = _strip_prefix(segment.tokens)
-        if not rest:
-            continue
-        word = rest[0]
-        if "$" in word or "`" in word or _SHELL_READER_WORD.fullmatch(word.rsplit("/", 1)[-1]):
-            return True
+    for tokens in token_lists:
+        for segment in _segments(tokens):
+            rest, _assigns, _wrappers = _strip_prefix(segment.tokens)
+            if not rest:
+                continue
+            word = rest[0]
+            if "$" in word or "`" in word or _SHELL_READER_WORD.fullmatch(word.rsplit("/", 1)[-1]):
+                return True
     return False
 
 
@@ -742,7 +1142,7 @@ def _blank_quoted_bodies(command: str) -> str:
     引用の無い区切り語の本文も加工しない。
     """
     spans: list[tuple[int, int]] = []
-    stripped = _strip_comments(command, quoted_bodies=spans)
+    stripped = _strip_for_parsing(command, quoted_bodies=spans)
     if not spans or _may_read_stdin_as_code(stripped):
         return command
     parts: list[str] = []
@@ -756,6 +1156,13 @@ def _blank_quoted_bodies(command: str) -> str:
     return command if _SHELL_READER.search(blanked) else blanked
 
 
+def _count_pr_ops(text: str) -> int:
+    """実行位置にある PR 操作を数える (draft に戻す `gh pr ready --undo` は除く)。"""
+    return sum(
+        1 for m in _EXEC_POS.finditer(text) if not (m.group("op") == "ready" and "--undo" in m.group("args"))
+    )
+
+
 def unresolved_reason(command: str, found: list[Invocation]) -> str | None:
     """解析しきれていない PR 操作がありそうなら、その理由を返す。
 
@@ -766,16 +1173,15 @@ def unresolved_reason(command: str, found: list[Invocation]) -> str | None:
     raw = _join_continuations(command)
     if "gh" not in raw or "pr" not in raw:
         return None  # 安全網の正規表現はどれも gh と pr を含む (継続行をつないだ後で見る)
-    expected = 0
     # 数え上げは、区切り語に引用がある heredoc の本文を空行にした文字列で行う (構文解析と同じく本文を数えない)
     counted = _join_continuations(_blank_quoted_bodies(command))
     long_prefix = _LONG_PREFIX.search(counted)
     if long_prefix and _PR_OP_ANYWHERE.search(counted, long_prefix.start()):
         return "PR 操作の前の前置き (リダイレクト・代入など) が長すぎて位置を確かめられない"
-    for m in _EXEC_POS.finditer(counted):
-        if m.group("op") == "ready" and "--undo" in m.group("args"):
-            continue
-        expected += 1
+    expected = _count_pr_ops(counted)
+    # 代入の値の入れ子は正規表現で読めないので、構文解析と同じ語の読みで分けた文字列でも数える
+    # (構文解析が見つけるようになった gh を数えないと、別の場所の見落としと数が合ってしまう)
+    expected = max(expected, _count_pr_ops(_split_assignments(_strip_comments(command))))
     # bash -c の中身と pushd / popd は、引用のある本文の中のものも加工前の文字列で見る (止める側)
     for m in _NESTED_SHELL.finditer(raw):
         if _EXEC_POS.search(m.group(2)):

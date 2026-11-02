@@ -196,6 +196,14 @@ class MainTest(unittest.TestCase):
         self.assertEqual(self.decision(out), "deny")
         out = run_hook(bash("gh pr create -t x", self.root), {"GH_REPO": "other/project"})
         self.assertEqual(self.decision(out), "deny")
+        # 値が動的な GH_REPO は、origin と同じか確認できないので止める (draft は止めずに伝える)
+        out = run_hook(bash("GH_REPO=$(basename $(pwd)) gh pr create -t x", self.root))
+        self.assertEqual(self.decision(out), "deny")
+        self.assertIn("origin と同じ repo か確認できない", out["hookSpecificOutput"]["permissionDecisionReason"])
+        out = run_hook(bash("GH_REPO=$(basename $(pwd)) gh pr create --draft -t x", self.root))
+        self.assertIn("origin と同じ repo か確認できない", out["hookSpecificOutput"]["additionalContext"])
+        # gh のトークンなどの代入は検査の対象を変えない。ゲートが走って PASS する
+        self.assertNotEqual(self.decision(run_hook(bash("GH_TOKEN=$(gh auth token) gh pr create -t x", self.root))), "deny")
         self.assertNotEqual(
             self.decision(run_hook(bash("gh pr create -t x", self.root), {"GH_REPO": "Demo-Org/demo-market"})),
             "deny",
