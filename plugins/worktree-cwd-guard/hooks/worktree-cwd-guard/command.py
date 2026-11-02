@@ -704,6 +704,10 @@ class _Analyzer:
     `&&` / `||` の後ろのコマンドは、直前が成功 / 失敗した状態でだけ実行する。cd は成功するものとして
     扱い、git や一般のコマンドは成功・失敗の両方がありうるとする。git を実行しうる状態のどれかで
     対象が別の checkout なら止める。
+
+    移動が失敗して `||` の右に進む経路は、`failed_moves` で別に持つ。`alts` に混ぜないのは、右辺の後ろに残さないため
+    (`cd <main>; cd <worktree> || exit 1; git add .` の `git add .` を main で動くと読まないように)。
+    右辺が終わると (`&&` / `;` / 改行 / `&`) 捨てるので、`alts` の読みは減らない。
     """
 
     def __init__(self, cwd: str, fam: Family, shell: str):
@@ -716,9 +720,13 @@ class _Analyzer:
         self.shvars: dict[str, str] = {}  # 代入したが export していないもの
         self.op: str | None = None  # 次のコマンドの前にある && / ||
         self.in_pipe = False  # 今のコマンドが `|` の後ろ (pipeline の要素) か
-        self.list_start = self._snapshot()  # 今の AND-OR list の開始時点 (`&` で戻す)
+        # `&` で戻す時点。bash は `&` が AND-OR list 全体を background にするので list の開始時点、
+        # zsh は最後の pipeline だけを background にするので、list の開始時点からその pipeline の開始時点までの候補
+        self.list_start = self._snapshot()
         self.scopes: list[tuple] = []  # `( ... )` に入るときの状態
         self.braces = 0  # 開いている `{` の数 (語の末尾の `}` を閉じと読むか)
+        self.failed_moves: set[_Alt] = set()  # 移動が失敗した状態と、それを `||` の右で実行した後の状態
+        self.after_or = False  # `||` の後ろで、まだコマンドを読んでいない
 
     # --- 状態 -------------------------------------------------------------
 
@@ -740,6 +748,16 @@ class _Analyzer:
         want = "ok" if self.op == "&&" else "fail"
         run = {a for a in self.alts if a[2] == want}
         return run, self.alts - run
+
+    def _failed_moves_to_run(self) -> set[_Alt]:
+        """今のコマンドを実行する、移動が失敗した経路の状態。`||` の後ろでなければ `|` の後ろか語に続く `$(` で、どの状態でも実行する。"""
+        if self.after_or:
+            return {a for a in self.failed_moves if a[2] == "fail"}
+        return set(self.failed_moves)
+
+    def _forget_failed_moves(self) -> None:
+        self.failed_moves = set()
+        self.after_or = False
 
     # --- 字句の走査 ---------------------------------------------------------
 
@@ -764,26 +782,45 @@ class _Analyzer:
     def _operator(self, op: str) -> None:
         if op in ("&&", "||"):
             self.op = op
+            if self.shell == "zsh":
+                # zsh の `&` は最後の pipeline だけを background にする。手前の `cd <dir> &&` は今の shell に残る。
+                # その cd が失敗すれば手前の場所に残るので、それまでの候補も持つ (`cd -q <main>; cd <無いパス> && x & git ...`)
+                alts, env, shvars = self._snapshot()
+                self.list_start = (self.list_start[0] | alts, env, shvars)
+            if op == "||":
+                self.after_or = True
+            else:
+                # `cd <main>; cd <worktree> && false || git ...` の `||` を、移動の失敗の右辺と読まない
+                self._forget_failed_moves()
         elif op in ("|", "|&"):
             self.op = None
         elif op == "&":
-            # AND-OR list 全体が非同期 (サブシェル) で動く。親 shell の状態は list の開始時点のまま
+            # background で動いたものは今の shell に残らない。親 shell の状態はその手前の時点のまま
             self._restore(self.list_start)
             self.alts = {(h, s, "ok") for h, s, _ in self.alts}
+            self._forget_failed_moves()
             self._new_list()
         elif op == "(":
             run, skipped = self._split()
-            self.scopes.append((frozenset(run), skipped, dict(self.env), dict(self.shvars), self.list_start))
-            self.alts = run
+            # `|| (...)` の括弧と、`|| x=$(...)` の手前の語を実行した経路の中身
+            moved = self._failed_moves_to_run()
+            self.scopes.append((frozenset(run), skipped, dict(self.env), dict(self.shvars), self.list_start, moved))
+            self.alts = run | moved
+            self._forget_failed_moves()
             self._new_list()
         elif op == ")":
             if self.scopes:
-                entered, skipped, env, shvars, list_start = self.scopes.pop()
+                entered, skipped, env, shvars, list_start, moved = self.scopes.pop()
                 # 中の cd / export は外に残らない。成否は中身次第なので両方ありうる
                 self.alts = self._both(entered) | skipped
                 self.env, self.shvars, self.list_start = env, shvars, list_start
+                self.failed_moves = self._both(moved)
             self.op = None
         else:  # ; ;; 改行
+            # `||` の直後の改行は右辺の続き。list は切るが、移動の失敗の経路は次のコマンドまで持ち越す
+            # (`||` の直後の `;` は構文エラーで何も走らない)
+            if not self.after_or:
+                self._forget_failed_moves()
             self._new_list()
 
     def _new_list(self) -> None:
@@ -801,18 +838,39 @@ class _Analyzer:
         rest = _strip_prefix(seg)[0]
         self.braces += seg[: len(seg) - len(rest)].count("{")
         run, skipped = self._split()
+        # 予約語だけの語 (`|| {` / `|| if` / `|| !`) はまだコマンドではなく、右辺の最初のコマンドはこの後ろにある
+        if rest or not all(t in _KEYWORDS for t in seg):
+            self._step_failed_moves(seg, rest, run, last, subshell)
         if run:
-            after = self._command(seg, run)
-            if last:
-                run = after if self.shell == "zsh" else self._both(run)
-            elif subshell:
-                # pipeline の途中の要素はどちらの shell でもサブシェルで動くので、中の cd は外に残らない
-                run = self._both(run)
-            else:
-                run = after
+            run = self._settle(seg, run, last, subshell)
         if self.braces and _before_redirect(rest)[-1:] == ["}"]:
             self.braces -= 1
         self.alts = run | skipped
+
+    def _settle(self, seg: list[str], alts: set[_Alt], last: bool, subshell: bool) -> set[_Alt]:
+        after = self._command(seg, alts)
+        if last:
+            return after if self.shell == "zsh" else self._both(alts)
+        # pipeline の途中の要素はどちらの shell でもサブシェルで動くので、中の cd は外に残らない
+        return self._both(alts) if subshell else after
+
+    def _step_failed_moves(self, seg: list[str], rest: list[str], run: set[_Alt], last: bool, subshell: bool) -> None:
+        """移動が失敗した経路で今のコマンドを読み、今のコマンドが移動なら失敗した経路を足す。
+
+        今の shell で動かない移動 (`env cd`) や pipeline の要素の移動も足すが、`alts` に同じ失敗の状態が既にあるので読みは変わらない。
+        """
+        moved = self._failed_moves_to_run()
+        self.after_or = False
+        after: set[_Alt] = set()
+        if moved:
+            # この経路は右辺の中で捨てるので、`|| unset GIT_DIR` のような変更を `alts` の読みに持ち込まない
+            env, shvars = dict(self.env), dict(self.shvars)
+            after = self._settle(seg, moved, last, subshell)
+            self.env, self.shvars = env, shvars
+        # `!` の後ろの移動の失敗は読まない (`!` の成否を読まないのと同じ)
+        if rest[:1] and rest[0] in _MOVERS and "!" not in seg[: len(seg) - len(rest)]:
+            after |= {(h, s, "fail") for h, s, _ in run | moved}
+        self.failed_moves = after
 
     # --- 1 コマンド -----------------------------------------------------------
 

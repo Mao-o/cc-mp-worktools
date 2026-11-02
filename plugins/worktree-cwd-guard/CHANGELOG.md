@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.7.0
+
+**zsh の `&` が最後の pipeline だけを background にすることと、移動の失敗で `||` の右に進む経路を読み、別 checkout への git の書き込みを止めるようにした (minor bump)。**
+`cd <main> && true & git reset --hard` (zsh) と `cd <main>; cd <無いパス> || git reset --hard` は別 checkout に書くのに止まらなかった (0.6.0 まで)。
+どちらも読みを足す変更で、0.6.0 が止めていた形は止まったまま。
+
+### 修正: zsh の `&` は最後の pipeline だけを background にする
+
+`a && b &` を、bash は AND-OR list 全体を background で動かすが、zsh は `b` だけを background で動かし、`a` は今の shell で動かす。
+0.6.0 までは list 全体をサブシェルと読んでいたので、手前の `cd` が残らないと読んでいた。zsh の読みでは `&&` / `||` の手前の `cd` / `pushd` / `chdir` と `export` を残す
+(bash の読みは変えていない)。手前の移動が失敗すればその前の場所に残るので、list の開始時点からの候補をすべて判定する。
+
+| 形 | zsh | bash |
+|---|---|---|
+| `cd <main> && true & git reset --hard` | main で走る (止める) | worktree で走る |
+| `cd <main> \|\| true & git reset --hard` | main で走る (止める) | worktree で走る |
+| `true && cd <main> & git reset --hard` / `cd <main> & git reset --hard` | worktree で走る | worktree で走る |
+| `export GIT_DIR=<main>/.git && true & git reset --hard` | main へ書く (止める) | worktree で走る |
+
+### 修正: 移動の失敗で `||` の右に進む経路を読む
+
+`cd` は成功するものとして読むので、`||` の右は実行されないと読んでいた。`cd` / `chdir` / `pushd` / `popd` の直後の `||` の右辺を、移動が失敗してその場に残った状態でも判定する
+(`cd <main>; cd <無いパス> || git reset --hard` / `cd <無いパス> || git -C <main> reset --hard` / `cd }` / `cd +1` / `popd +9`)。
+`||` の後ろの改行とコメント、`(` と改行、`! (`、`{` と改行、`if`、`x=$(...)` / `echo $(...)` の中も右辺として読む。
+移動の行き先の語の `$(...)` も移動の手前の場所で読む (`cd <main>; cd $(git reset --hard)` は main で走るので、注意だけでなく止める)。
+
+この経路は右辺の中だけで読み、後ろには残さない。移動が成功する前提の普段の形は止めない:
+`cd <worktree> || exit 1; git add .` / `cd <main>; cd <worktree> || { echo no; exit 1; }; git add .` / `if ! cd <worktree>; then exit 1; fi; git add .` / `cd <worktree> && git add .`。
+
+次の形は読みが実際と違うが、受け入れている:
+
+- 右辺に別 checkout への書き込みそのものを書いた形は、行き先が移動できる場所でも止まる: `cd <main>; cd <worktree> || git add .` (`<worktree>` があれば走らない。静的には区別しない)
+- 右辺の外の経路は読まない (見逃し。0.6.0 と同じ): `cd <main>; cd <無いパス> || true; git reset --hard` / `... || true && git reset --hard` / `... && false || git reset --hard`
+  (最後の形は `cd <main>; cd <worktree> && false || git ...` を止めないため) / `... || { echo x; git reset --hard; }` の 2 つ目以降のコマンド / `cd <無いパス> || cd <main>; git reset --hard` / `{ cd <無いパス>; } || git reset --hard`
+- `!` の後ろの移動の失敗は読まない (0.6.0 と同じ): `cd <main>; ! ! cd <無いパス> || git reset --hard`
+- `"$(...)"` と backtick の中の git は、右辺でも読まない (これまでどおり対象外)
+- zsh の `&` の手前の候補は和集合なので、`cd <main> && cd <worktree> && true & git add .` は worktree で走るが止まる。`chdir <main>; chdir <worktree> && true & git reset --hard` も同じ (0.6.0 と同じ deny)
+
+### テストの追加
+
+- `tests/test_chdir_readings.py`: `BackgroundListTest` / `FailedMoveTest`
+- `tests/test_guard.py`: `cd <main> && true & wait; git reset --hard` の期待値を、zsh の実測に合わせて deny に変更
+
+テスト件数: 143 → 157 (追加 14・削除 0・統合 0)。
+
 ## 0.6.0
 
 **`cd` / `chdir` / `pushd` / `popd` を、今の shell で動くかと shell ごとの違いまで含めて読むようにした (minor bump)。**

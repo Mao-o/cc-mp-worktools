@@ -586,5 +586,208 @@ class PipelineTest(ChdirReadingBase):
         self.assertAllowed((f'printf a | command cd "{m}"; {GIT}',))
 
 
+class BackgroundListTest(ChdirReadingBase):
+    """zsh の `&` は最後の pipeline だけを background にする。bash は AND-OR list 全体を background にする。"""
+
+    def test_move_before_the_last_pipeline_stays_in_zsh(self):
+        m = self.main
+        self.assertDenied((
+            f'cd "{m}" && sleep 0 & {GIT}',
+            f'cd "{m}" && true & wait; {GIT}',
+            f'pushd "{m}" && true & {GIT}',
+            f'chdir "{m}" && true & {GIT}',
+            f'cd "{m}" || true & {GIT}',
+            # 最後の pipeline が複数の要素や括弧でも同じ
+            f'cd "{m}" && true | cat & {GIT}',
+            f'cd "{m}" && (true) & {GIT}',
+            f'(cd "{m}" && true & {GIT})',
+            # 環境変数も残る
+            f'export GIT_DIR="{m}/.git" && true & {GIT}',
+        ))
+
+    def test_the_last_pipeline_itself_does_not_stay(self):
+        m, a = self.main, self.a
+        self.assertAllowed((
+            f'cd "{m}" & {GIT}',
+            f'cd "{m}" &\n{GIT}',
+            f'true && cd "{m}" & {GIT}',
+            f'false || cd "{m}" & {GIT}',
+            f'cd "{a}" && cd "{m}" & {GIT}',
+            # サブシェルの中で残っても、外には残らない
+            f'(cd "{m}" && true &); {GIT}',
+            # 普段の形
+            f'cd "{a}" && make & wait; git add .',
+            f'cd "{a}" && git add . && git commit -m x &',
+        ))
+
+    def test_each_shell_reads_its_own_start(self):
+        m, a = self.main, self.a
+        # bash は list の開始時点へ戻るので main (実際に main で走る)
+        self.assertDenied((f'cd "{m}"; cd "{a}" && true & {GIT}', f'export GIT_DIR="{m}/.git"; unset GIT_DIR && true & {GIT}'))
+        # zsh の手前の移動が失敗すれば、手前の場所に残る (0.6.0 と同じ deny。bash は chdir / cd -q が失敗して worktree)
+        self.assertDenied((
+            f'cd -q "{m}"; cd /nonexistent && true & {GIT}',
+            f'chdir "{m}"; ! cd /nonexistent && true & {GIT}',
+            f'cd -q "{m}"; cd /nonexistent || true & {GIT}',
+            # 移動できていても読みは変わらない (実際には zsh も worktree で走る)
+            f'chdir "{m}"; chdir "{a}" && true & {GIT}',
+            f'cd -q "{m}"; cd -q "{a}" && true & {GIT}',
+        ))
+        # 自分の worktree の中の移動は止めない
+        self.assertAllowed(('cd sub && true & git add .',))
+
+
+class FailedMoveTest(ChdirReadingBase):
+    """移動が失敗して `||` の右に進む経路は読む。右辺の後ろには残さない。"""
+
+    def test_right_of_or_runs_where_the_move_failed(self):
+        m = self.main
+        gm = f'git -C "{m}" reset --hard'
+        self.assertDenied((
+            f'cd "{m}"; cd /nonexistent || {GIT}',
+            f'cd /nonexistent || {gm}',
+            f'cd "{m}"; cd }} || {GIT}',
+            f'cd "{m}"; cd +1 || {GIT}',
+            f'cd "{m}"; popd +9 || {GIT}',
+            f'cd }} || {gm}',
+            f'cd +1 || {gm}',
+            f'popd +9 || {gm}',
+            f'pushd /nonexistent || {gm}',
+            # 語彙
+            f'cd "{m}"; builtin cd /nonexistent || {GIT}',
+            f'cd "{m}"; time cd /nonexistent || {GIT}',
+            f'cd "{m}"; FOO=1 cd /nonexistent || {GIT}',
+            f'cd "{m}"; cd -- /nonexistent || {GIT}',
+            f'cd "{m}"; cd -P /nonexistent || {GIT}',
+            f'cd "{m}"; cd /nonexistent >/dev/null 2>&1 || {GIT}',
+            # 続けて失敗する
+            f'cd "{m}"; cd /nonexistent || cd /n2 || {GIT}',
+            f'cd "{m}" && cd /nonexistent || {GIT}',
+            # pipeline の要素
+            f'cd "{m}"; cd /nonexistent || git status | {GIT}',
+        ))
+
+    def test_layout_of_the_right_side(self):
+        m = self.main
+        gm = f'git -C "{m}" reset --hard'
+        for head, git in ((f'cd "{m}"; cd /nonexistent', GIT), ('cd /nonexistent', gm)):
+            self.assertDenied((
+                f'{head} ||\n{git}',
+                f'{head} ||\n\n{git}',
+                f'{head} || # c\n{git}',
+                f'{head} || ({git})',
+                f'{head} || (\n{git}\n)',
+                f'{head} || ( # c\n{git}\n)',
+                f'{head} ||\n({git})',
+                f'{head} || ! ({git})',
+                f'{head} || ! (\n{git}\n)',
+                f'{head} ||\n! ({git})',
+                f'{head} || {{ {git}; }}',
+                f'{head} || {{\n{git}\n}}',
+                f'{head} ||\n{{\n{git}\n}}',
+                f'{head} || {{ ({git}); }}',
+                f'{head} || if {git}; then :; fi',
+                f'{head} || if ({git}); then :; fi',
+                f'{head} || x=$({git})',
+                f'{head} || echo $({git})',
+            ))
+
+    def test_right_side_does_not_outlive_itself(self):
+        # 普段の形。失敗の経路は右辺の中でしか読まないので、移動できる前提の後ろの git を止めない
+        m, a = self.main, self.a
+        self.assertAllowed((
+            f'cd "{a}" || exit 1; git add .',
+            f'cd "{a}" || exit 1\ngit add .',
+            f'cd "{a}" ||\nexit 1\ngit add .',
+            f'cd "{m}"; cd "{a}" || exit 1; git add .',
+            f'cd "{m}"; cd "{a}" || exit 1\ngit add .',
+            f'cd "{m}"; cd "{a}" ||\nexit 1\ngit add .',
+            f'cd "{m}"; cd "{a}" ||\n\nexit 1\ngit add .',
+            f'cd "{m}"; cd "{a}" || exit 1 && git add .',
+            f'cd "{m}"; cd "{a}" || {{ echo no; exit 1; }}; git add .',
+            f'cd "{m}"; cd "{a}" || {{\necho no\nexit 1\n}}\ngit add .',
+            f'cd "{m}"; cd "{a}" || true; git add .',
+            f'cd "{m}"; cd "{a}" || (exit 1); git add .',
+            f'cd "{m}"; cd "{a}" || x=$(echo no); git add .',
+            f'cd "{m}"; if ! cd "{a}"; then exit 1; fi; git add .',
+            f'cd "{m}"; cd "{a}" && git add .',
+            f'cd "{a}" && git add .',
+            'cd sub 2>/dev/null || exit 1; git add .',
+            f'pushd "{a}" >/dev/null || exit 1; git add .; popd >/dev/null',
+        ))
+
+    def test_and_forgets_the_failed_move(self):
+        m, a = self.main, self.a
+        self.assertAllowed((
+            f'cd "{m}"; cd "{a}" && false || {GIT}',
+            f'cd "{m}"; cd "{a}" && true || {GIT}',
+        ))
+
+    def test_substitution_in_the_move_runs_before_it(self):
+        # `cd $(...)` の中は移動の手前の場所で走る。行き先の語の `$(` も同じ経路で読む
+        m, a = self.main, self.a
+        self.assertDenied((f'cd "{m}"; cd $({GIT})',))
+        # 読み取りと、自分の worktree に戻る形は止めない
+        self.assertAllowed((f'cd "{m}"; cd $(git status); cd "{a}"; git add .',))
+
+    def test_success_of_the_right_side_is_read(self):
+        m = self.main
+        # 右辺が移動で、成功すれば次の `||` には進まない。失敗すれば元の場所に残る
+        self.assertAllowed((f'cd /nonexistent || cd "{m}" || git add .',))
+        # 右辺の括弧の成否は両方ありうる
+        self.assertDenied((f'cd "{m}"; cd /nonexistent || (true) || {GIT}',))
+
+    def test_background_ends_the_right_side(self):
+        # `&` の後ろは右辺ではない。bash は list ごと background で動くので、`command cd` の移動は今の shell に残らない
+        # (zsh の `command cd` は外部コマンドで移動しない)
+        m, a = self.main, self.a
+        self.assertAllowed((f'command cd "{m}" && cd "{a}" || true & git add .',))
+
+    def test_or_after_a_pipeline_or_a_negation_reads_as_before(self):
+        m, a = self.main, self.a
+        # `!` の後ろの移動の失敗は読まない (`! !` も同じ)
+        self.assertAllowed((f'cd "{m}"; ! ! cd "{a}" || {GIT}', f'cd "{m}"; ! cd /nonexistent || {GIT}'))
+        # 外部コマンドとして動く移動は成否の両方を読む (従来どおり)
+        self.assertDenied((f'cd "{m}"; env cd /nonexistent || {GIT}', f'cd "{m}"; cd /nonexistent | cat || {GIT}'))
+        # pipeline の途中の移動は `||` の相手ではない
+        self.assertAllowed((f'cd "{a}" | cat || git add .',))
+        # zsh だけ移動する pipeline の最後の要素も、失敗すれば手前の場所に残る
+        self.assertDenied((f'chdir "{m}"; printf a | chdir /nonexistent || {GIT}',))
+
+    def test_right_side_does_not_change_what_follows(self):
+        m, a = self.main, self.a
+        # 右辺の変数の変更は読みの本筋に持ち込まない。export 済みの GIT_DIR は後ろの git に届く (cd が成功すれば右辺は動かない)
+        self.assertDenied((
+            f'export GIT_DIR="{m}/.git"; cd "{a}" || unset GIT_DIR; git add .',
+            f'export GIT_DIR="{m}/.git"; cd /nonexistent || unset GIT_DIR\ngit add .',
+        ))
+        self.assertAllowed((f'cd "{a}" || export GIT_DIR="{m}/.git"; git add .',))
+        # 右辺の中の読みは、手前の変数のまま
+        self.assertDenied((f'export GIT_DIR="{m}/.git"; cd /nonexistent || git add .',))
+
+    def test_only_shell_that_moves_reads_it(self):
+        m, a = self.main, self.a
+        # `command cd` は zsh では外部コマンドで成否の両方を読む (従来どおり)。bash は移動の失敗を読む
+        self.assertDenied((f'cd "{m}"; command cd "{a}" || {GIT}',))
+        # `&&` で失敗の経路を捨てるので、後ろの git は成功した移動先で読む
+        self.assertAllowed((f'cd "{m}"; cd /nonexistent || cd "{a}" && git add .',))
+
+    def test_accepted_misses(self):
+        # 受け入れている見逃し: 右辺の外の経路は読まない (従来どおり)
+        m = self.main
+        self.assertAllowed((
+            f'cd "{m}"; cd /nonexistent || true; {GIT}',
+            f'cd "{m}"; cd /nonexistent || true && {GIT}',
+            f'cd "{m}"; cd /nonexistent || git status && {GIT}',
+            f'cd "{m}"; cd /nonexistent && false || {GIT}',
+            f'cd "{m}"; cd /nonexistent || {{ echo x; {GIT}; }}',
+            f'cd "{m}"; {{ cd /nonexistent; }} || {GIT}',
+            f'cd "{m}"; cd /nonexistent || echo `{GIT}`',
+            f'cd "{m}"; cd /nonexistent || echo "$({GIT})"',
+            f'cd /nonexistent || cd "{m}"; {GIT}',
+            f'cd /nonexistent || cd "{m}" && {GIT}',
+        ))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -210,14 +210,15 @@ class GuardTest(GuardBase):
         for cmd in (
             f'cd "{self.main}" && cd "{self.a}"; git reset --hard',
             f'false || cd "{self.a}"; git reset --hard',
-            f'cd "{self.main}" && true & wait; git reset --hard',
             f'cd "{self.main}" && (false || cd "{self.a}"; git stash)',
         ):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(evaluate(bash(cmd, self.a)))
-        # 背景 list の外に出たあとは元の作業ディレクトリ。list の中の git は判定する
-        cmd = f'cd "{self.main}" && git stash & wait'
-        self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+        # zsh の `&` は最後の pipeline だけを background にするので、手前の cd が今の shell に残る
+        # (bash は list 全体が background で残らない)。list の中の git は判定する
+        for cmd in (f'cd "{self.main}" && true & wait; git reset --hard', f'cd "{self.main}" && git stash & wait'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
 
     def test_every_target_is_checked_against_the_allowlist(self):
         os.environ["WORKTREE_CWD_GUARD_ALLOW"] = str(self.main)
