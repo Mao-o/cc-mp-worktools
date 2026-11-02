@@ -3,6 +3,7 @@
     "nextjs": {
       "url": "https://nextjs.org/docs/llms-full.txt",
       "split": "frontmatter",
+      "frontmatter_key": "url",
       "page_url": "frontmatter:url",
       "description": "Next.js"
     },

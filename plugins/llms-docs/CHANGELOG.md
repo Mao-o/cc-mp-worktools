@@ -2,6 +2,30 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.50.0] - 2026-11-03
+
+### 追加: タイトルの部分一致が、同じ slug で終わる別ページを隠したとき stderr で知らせる
+
+- **症状**: `ai-sdk` は `page_ref_forms` で `title` を `slug` より先に試すので、`sections acp` は「ACP (Agent Client Protocol)」に
+  一意に一致し、URL が `/acp` で終わる別ページ (`providers/ai-sdk-harnesses/acp`) に届かなかった。しかも黙って片方を開く
+- **変更**: タイトルの一意な一致でページが決まり、かつ参照 (slug) で URL が終わる別のページがあるとき、stderr に 1 行の
+  `Note:` を出す。開いたページと、別のページ、そのページを開くコマンド (`sections` / `content` / `search-content --page-ref` の
+  どれでも、今の呼び出しをそのページで打ち直したもの) を載せる。開くページと終了コード (0) は変えていない。`slug` を
+  持たない profile、完全 URL の参照、別ページが無いときは何も出さない
+- 手元の `ai-sdk` のキャッシュ (541 ページ) の全ページを自分の URL の末尾で引き直し、Note が出たのは `acp` だけだった
+  (このキャッシュでは「ACP (Agent Client Protocol)」自身の URL も `/acp` で終わるので、slug だけなら曖昧エラーになる形)
+
+### 修正: nextjs preset が `url:` の無い frontmatter の形のブロックでページを切りうる
+
+- 0.48.1 で `claude-platform` に入れたのと同じ修正を `nextjs` preset にも入れた (`frontmatter_key: "url"`)。`title:` はあるが
+  `url:` の無いブロック (コードブロックの外の YAML の例) が新しいページにならず、前のページの本文に残る
+- 手元のキャッシュ (473 ページ) で変更前後の全ページの (タイトル・URL・本文の hash) は同一、URL の無いページは 0 件
+- テスト: そのようなブロックを挟んだ 2 ページが 2 ページのまま分かれること
+
+### 修正: README の前提条件が script 名を `parse-*.py` と複数形で書いていた
+
+- 0.48.0 で旧 script を削除しており、実在するのは `parse-llms-txt.py` の 1 本だけ。記述を直した (動作の変更なし)
+
 ## [0.49.0] - 2026-11-03
 
 ### 変更: 長すぎる節では一致する行の前後だけを示し、`Next:` は本文の検索に導く

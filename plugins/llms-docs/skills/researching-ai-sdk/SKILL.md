@@ -141,7 +141,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" fetch-index --compact 
   候補ごとのコマンド付きで曖昧エラーになるので、長い slug か完全 URL を渡す
 
 タイトルの部分一致が先に効くので、slug がどれかのタイトルの一部にも当たると、そのタイトルのページが開く
-(同じ slug で終わる別ページがあっても開かない。例 `acp`)。開いたページの `URL:` 行が目的のページかを確かめる。
+(同じ slug で終わる別ページがあっても開かない。例 `acp`)。ただし、その別ページがあるときは stderr に `Note: '<ref>' matched the title of [N], and the URL of [M] … also ends in it` と、
+そのページを開くコマンドが出る (終了コードは 0 のまま)。Note が出たら、開いたページの `URL:` 行が目的のページかを確かめ、違えば出力のコマンドを使う。
 どの形式にも当たらなければ `No document found for: <ref>` で exit 1。
 
 ## コマンドリファレンス
