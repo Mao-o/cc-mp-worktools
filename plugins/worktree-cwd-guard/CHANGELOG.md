@@ -33,20 +33,16 @@ bash では残らない)。
 | `cd -n` / `cd -x` / `cd -@` など読めない option | どの shell でも失敗して移動しない |
 | `cd <a> <b>` / `pushd <a> <b>` | bash 3.2 は a へ移動し、bash 5.2 と zsh は失敗する |
 | `{ cd <dir> }` の語の末尾の `}` | zsh は閉じとして読むので語に数えない (bash は構文エラーで何も走らせない)。開き括弧が無い `cd }` の `}` はただの語で、`}` というディレクトリへの移動と読む |
-| `time -p ! x` / `time -- ! x` / `time time ! x` の `!` | 後ろのコマンドが今の shell で動く shell でだけ反転する (それ以外の shell では外部の time の引数) |
-| `FOO=1 ! x` の `!` | どの shell でもコマンド名で、反転せず、後ろの `x` も動かない (`! FOO=1 x` の `!` は予約語) |
+| `time -p ! x` / `time -- ! x` / `time time ! x` の `!` | 後ろのコマンドが今の shell で動く shell でだけ予約語になる (それ以外の shell では外部の time の引数) |
+| `FOO=1 ! x` の `!` | どの shell でもコマンド名で、後ろの `x` も動かない (`! FOO=1 x` の `!` は予約語) |
 
 ### 修正: 同じ読み落としの近くにあったもの
 
 - `popd >/dev/null` のように redirect を付けた `popd` を、行き先の分からない `popd` と読んでいた。語の無い `popd` と同じに読む
 - スタックが空に見える `popd` は、行き先が分からないという注意に加えて、失敗してその場に残る読みでも判定する
   (`cd <main>; popd; git reset --hard` は main で走るので止める)
-- `! <コマンド>` の成否を反転する (`! cd <main> || git reset --hard` は main で走る)。`!` の後ろの移動は、失敗して動かない読みも足す
-  (`cd <main>; ! cd <無いパス> && git reset --hard` は main で走る)
-- `!` の反転と失敗の読みが、同じ行か改行か、括弧の有無で割れないようにした。実行する状態が無くなって、後ろの git を読まなくなっていた:
-  - `&&` / `||` の後ろの改行は list を切らない (`cd <main>; ! cd <無いパス> &&` + 改行 + `git reset --hard` は同じ行と同じに止める)
-  - `! cd <無いパス> && (` + 改行 + `git ...` は、括弧を実行した時点で失敗の読みを普通の状態にする
-  - `true && ! ( git ... )` / `true && if ( git ... ); then ...` の予約語はコマンドとして実行せず、`&&` / `||` を括弧まで持ち越す
+- `! <コマンド>` の成否は読まず、続く `&&` / `||` の後ろはどちらも実行しうるとする (`! cd <main> || git reset --hard` は main で走るので止める)。
+  移動の読みは `!` の無い形と同じで、`cd <main>; ! cd <worktree> && exit 1; git reset --hard` は止めない。2 回書いた `! !` は打ち消す
 - 今の shell で動かない `env export GIT_DIR=...` / `nohup unset GIT_DIR` / `env GIT_DIR=...` (コマンドなし) は、変数を変えたと読まない。
   zsh の `command export` / `command unset` も同じ
 
@@ -54,21 +50,22 @@ bash では残らない)。
 
 - `cd -e`: bash 3.2 と zsh は失敗するが、bash 5.2 は移動するので、新しい bash の読みで判定する。
   `cd -e <main>; git reset --hard` は bash 3.2 と zsh では worktree で走るが止まる (0.5.0 と同じ deny)
-- `! cd <dir> && ...` の移動の失敗: 直後の `&&` の後ろだけ、失敗して動かなかった読みも判定する。`cd <main>; ! cd <worktree> && git reset --hard` は
-  worktree があれば git が走らないが止まる。`;` や改行の後ろは plain の `cd` と同じで移動は成功すると読むので、
-  `cd <main>; if ! cd /tmp/<無いパス>; then git reset --hard; fi` は main で走るが止まらない (0.5.0 と同じ)
-- `cd <main>; ! cd +0 || git reset --hard` のように `!` の後ろで dir stack を指す形は、行き先が分からないので注意だけ出す (`cd +0` と同じ読み)。
-  `chdir +0` は 0.5.0 が読まなかったので止まっていたが、`cd +0` に揃えた
+- `!` の成否を読まないので、実際には git が走らない形も止まる: `! cd <main> && git reset --hard` / `! true && git -C <main> reset --hard` (0.5.0 と同じ)、
+  `! chdir <main> && git reset --hard` (zsh は移動して git が走らず、bash は worktree で走る。0.5.0 は止めなかった)
+- `!` の後ろの移動の失敗は読まない (見逃し): plain の `cd` と同じで移動は成功すると読むので、`cd <main>; ! cd <無いパス> && git reset --hard` と
+  `cd <main>; if ! cd <無いパス>; then git reset --hard; fi` は main で走るが止まらない (0.5.0 と同じ。絶対パスの行き先。相対パスは main の下への移動と読むので止まる)
+- `cd <main>; ! cd +0 || git reset --hard` のように `!` の後ろで dir stack を指す形は、行き先が分からないので注意だけ出す
+- `(` の手前の予約語は成功したコマンドと読むので、`false || if ( git -C <main> reset --hard ); then :; fi` / `false || { ( git ... ); }` /
+  `false || ! ! ( git ... )` の括弧の中は読まない (0.5.0 と同じ)
+- `&&` / `||` の後ろの改行は list を切るので、`false &&` + 改行 + `git -C <main> reset --hard` は git が走らないが止まり、
+  `cd <無いパス> ||` + 改行 + `git -C <main> reset --hard` は同じ行の形と違って止まる (どちらも 0.5.0 と同じ)
 - bash 3.2 と 5 を 1 つの読みにまとめている: 版で移動の組が変わる形を、どちらかの版の組として区別しない
 - `exec cd <dir>; git ...`: shell が置き換わるので実際には後ろの git は走らないが、読まない (`cd <main>; exec cd <worktree>; git ...` は止まる)
 - 今の shell で動かない `cd` の成否: 外部コマンド次第として両方を判定する。`cd <main>; env cd <worktree> || git reset --hard` は
   macOS では `/usr/bin/cd` が成功して git が走らないが止まる
 - `command builtin cd` / `builtin pushd` / `builtin popd`: 0.5.0 と同じで読まない
-- 引用した `!` (`'!' x` / `"!" x` / `\! x`): コマンド名として動くが、shlex が引用を外すので予約語の `!` と区別できず、反転と読む。
-  `'!' false || git -C <main> reset --hard` は main で走るが止まらない (`\time` と同じ)
-- `||` の後ろの改行は list を切らないので、plain の `cd <無いパス> ||` + 改行 + `git -C <main> reset --hard` は同じ行の `cd <無いパス> || git ...` と同じ読み
-  (移動は成功すると読むので `||` の後ろを実行しない) になった。main で走るが止まらない。0.5.0 は改行で演算子が消えて偶然止まっていた。
-  `! ! cd <無いパス> ||` + 改行も同じ
+- 引用した `!` (`'!' x` / `"!" x` / `\! x`): コマンド名として動くが、shlex が引用を外すので予約語の `!` と区別できず、後ろを移動として読む。
+  `cd <main>; '!' cd <worktree>; git reset --hard` は main で走るが止まらない (`\time` と同じ)
 - `FOO=1 ! x` の `!` は一般のコマンドと同じく成否の両方を読む。実際には見つからず失敗するので、`FOO=1 ! x && git ...` は git が走らないが止まる
 - `cd <main>; cd <worktree> }; git ...` の `}` は語で、語が 2 つの `cd` (bash 3.2 だけ移動する) になる
 
@@ -76,7 +73,7 @@ bash では残らない)。
 
 - `tests/test_chdir_readings.py`: 上の読みごとの判定
 
-テスト件数: 104 → 140 (追加 36・削除 0・統合 0)。
+テスト件数: 104 → 143 (追加 39・削除 0・統合 0)。
 
 ## 0.5.0
 

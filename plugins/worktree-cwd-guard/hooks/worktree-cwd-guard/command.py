@@ -99,7 +99,7 @@ _NEITHER: frozenset[str] = frozenset()
 _CD_OPT_SHELLS = {"L": _BOTH, "P": _BOTH, "q": _ZSH, "s": _ZSH, "e": _BASH}
 # `pushd` の option の文字。bash の pushd は `-n` しか受け付けないので、`-L` / `-P` も zsh だけ
 _PUSHD_OPT_SHELLS = {"L": _ZSH, "P": _ZSH, "q": _ZSH, "s": _ZSH}
-# 移動の組み込み。読めない行き先でも失敗して動かない場合がある (`!` の反転で使う)
+# 今の shell で動くときだけ移動として読む組み込み
 _MOVERS = {"cd", "chdir", "pushd", "popd"}
 # `builtin` の後ろで読む語。今の shell の組み込みとして動くもののうち、_command が読むものだけ。
 # `builtin git` は組み込みが無いのでどちらの shell でも走らない。`builtin -- cd` は bash だけ、`builtin - cd` は zsh だけ
@@ -163,7 +163,7 @@ def _strip_prefix(seg: list[str]) -> tuple[list[str], str | None, dict[str, str 
     """先頭の予約語 / 代入 / wrapper (とそのオプション) を外す。
 
     返り値は (残り, wrapper が指定した作業ディレクトリ, コマンドに渡す環境変数の代入, 環境を
-    空にして起動するか, 残りのコマンドが今の shell で動く shell の集合, `!` で成否を反転する shell の集合)。代入の値 None は `env -u NAME` による削除。
+    空にして起動するか, 残りのコマンドが今の shell で動く shell の集合, `!` が予約語になる shell の集合)。代入の値 None は `env -u NAME` による削除。
     `env -C <dir> git ...` のように wrapper が移動先を持つ場合、その後の git はそのディレクトリで動く。
     `GIT_DIR=<dir> git ...` の代入は git の対象を変えるので呼び出し側で使う。
 
@@ -177,15 +177,15 @@ def _strip_prefix(seg: list[str]) -> tuple[list[str], str | None, dict[str, str 
     `builtin` は両方の shell で今の shell で動くときだけ外す。`\\time` / `'time'` は外部の time で動くが、shlex が引用を外すので
     keyword の time と区別できず、今の shell で動くものとして読む。bash 3.2 の `! time` / `if time` も外部の time になるが、
     同じに読む (どちらも見逃す側で、受け入れている)。
-    `!` は、後ろのコマンドが今の shell で動く shell でだけ予約語として反転する (`time -p ! false` の zsh と `time -- ! false` の bash 3.2 は
-    外部コマンドの引数になる)。代入の後ろの `!` はどの shell でもコマンド名で、そこで止める
+    `!` は、後ろのコマンドが今の shell で動く shell でだけ予約語になる (`time -p ! false` の zsh と `time -- ! false` の bash 3.2 は
+    外部コマンドの引数になる)。2 回書くと打ち消す。代入の後ろの `!` はどの shell でもコマンド名で、そこで止める
     """
     chdir = None
     assigns: dict[str, str | None] = {}
     clear = False
     shells = _BOTH
     after_command = False  # `command` の後ろ。代入や予約語も、ただのコマンド名になる
-    negated = _NEITHER  # `!` で成否を反転する shell の集合
+    negated = _NEITHER  # `!` が予約語になる shell の集合
     i = 0
     while i < len(seg):
         tok = seg[i]
@@ -693,11 +693,8 @@ def analyze(command: str, cwd: str, fam: Family) -> list[Finding]:
 
 
 # 1 つの「実行時にありうる状態」: (作業ディレクトリ, pushd のスタック, 直前のコマンドの成否)。
-# 作業ディレクトリが静的に決まらなければ None。成否は "ok" / "fail" / _STAYED
+# 作業ディレクトリが静的に決まらなければ None。成否は "ok" / "fail"
 _Alt = tuple
-# `! cd x` の x への移動が失敗した読み。成否は成功で、続く `&&` の後ろを実行する。`;` や改行まで残ると `! cd x; git ...` が
-# plain の `cd x; git ...` より厳しい読みになるので、そこで消す
-_STAYED = "stayed"
 _OPS = re.compile(r"&&|\|\||\|&|;;|[|&;()\n]")
 
 
@@ -740,8 +737,8 @@ class _Analyzer:
         """今のコマンドを実行する状態と、`&&` / `||` で飛ばす状態に分ける。"""
         if self.op is None:
             return set(self.alts), set()
-        want = ("ok", _STAYED) if self.op == "&&" else ("fail",)
-        run = {a for a in self.alts if a[2] in want}
+        want = "ok" if self.op == "&&" else "fail"
+        run = {a for a in self.alts if a[2] == want}
         return run, self.alts - run
 
     # --- 字句の走査 ---------------------------------------------------------
@@ -756,13 +753,8 @@ class _Analyzer:
                 seg.append(tok)  # リダイレクト記号はそのまま
                 continue
             for op in _OPS.findall(tok):
-                if op == "\n" and not seg and (self.in_pipe or self.op):
-                    continue  # `|` / `&&` / `||` の後ろの改行はコマンドの続き
-                if op == "(" and all(t in _KEYWORDS for t in seg):
-                    # `! ( ... )` / `if ( ... )` の予約語はコマンドではない。`&&` / `||` を括弧まで持ち越す
-                    # (`!` の反転を先に適用すると、`true && ! ( git ... )` の括弧を実行する状態が無くなる)
-                    self.braces += seg.count("{")
-                    seg = []
+                if op == "\n" and not seg and self.in_pipe:
+                    continue  # `|` の後ろの改行は pipeline の続き
                 self._flush(seg, next_is_pipe=op in ("|", "|&"))
                 seg = []
                 self._operator(op)
@@ -781,9 +773,6 @@ class _Analyzer:
             self._new_list()
         elif op == "(":
             run, skipped = self._split()
-            # 括弧の中は新しい list なので、`! cd x && (` の失敗の読みは、括弧を実行した時点で普通の状態にする
-            # (`_STAYED` のまま入ると、直後の改行で状態が空になる)
-            run = {(h, s, "ok" if st == _STAYED else st) for h, s, st in run}
             self.scopes.append((frozenset(run), skipped, dict(self.env), dict(self.shvars), self.list_start))
             self.alts = run
             self._new_list()
@@ -795,7 +784,6 @@ class _Analyzer:
                 self.env, self.shvars, self.list_start = env, shvars, list_start
             self.op = None
         else:  # ; ;; 改行
-            self.alts = {a for a in self.alts if a[2] != _STAYED}
             self._new_list()
 
     def _new_list(self) -> None:
@@ -831,14 +819,8 @@ class _Analyzer:
     def _command(self, seg: list[str], alts: set[_Alt]) -> set[_Alt]:
         rest, chdir, assigns, clear, shells, negated = _strip_prefix(seg)
         after = self._simple(rest, chdir, assigns, clear, shells, alts)
-        if self.shell not in negated:
-            return after
-        # `! cmd` は成否を反転する (反転しないと `! chdir <worktree> && git ...` の git を、main で走るのに飛ばす)
-        flipped = {(h, s, "fail" if st == "ok" else "ok") for h, s, st in after}
-        if rest and rest[0] in _MOVERS:
-            # `! cd x && git ...` の git は移動が失敗したときに走る。cd を成功と読む前提は、この形では使えない
-            flipped |= {(h, s, _STAYED) for h, s, _ in alts}
-        return flipped
+        # `!` の成否は読まない。移動の読みはそのままで、`&&` / `||` の後ろはどちらも実行しうるとする
+        return self._both(after) if negated else after
 
     def _simple(
         self,
