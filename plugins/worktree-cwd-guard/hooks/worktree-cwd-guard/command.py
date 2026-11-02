@@ -640,11 +640,15 @@ def _analyze_tokens(tokens: list[str], cwd: str, fam: Family) -> list[Finding]:
 
     Bash tool の shell は環境で違い、`command cd` / `chdir` / `cd -q` などは shell で動きが割れる。shell ごとに通して読むので、
     片方の shell でしか起きない移動を、もう片方の失敗と組み合わせて読むことはない。
+
+    bash は折り返した list を切らない読みと切る読みの両方を通す。切らない読みは、`&` で手前の list の開始時点の変数に戻すので、
+    改行のあとの git が見る変数を取り違えることがある (`export GIT_DIR=<worktree>/.git; command export GIT_DIR=<main>/.git &&` と
+    改行のあとの `true & git -C <main> reset --hard`)。
     """
     findings: list[Finding] = []
     seen: set[str] = set()
-    for shell in ("zsh", "bash"):
-        for f in _Analyzer(cwd, fam, shell).run(tokens):
+    for shell, fold in (("zsh", True), ("bash", True), ("bash", False)):
+        for f in _Analyzer(cwd, fam, shell, fold).run(tokens):
             if f.message not in seen:
                 seen.add(f.message)
                 findings.append(f)
@@ -710,8 +714,9 @@ class _Analyzer:
     右辺が終わると (`&&` / `;` / 改行 / `&`) 捨てるので、`alts` の読みは減らない。
     """
 
-    def __init__(self, cwd: str, fam: Family, shell: str):
+    def __init__(self, cwd: str, fam: Family, shell: str, fold: bool = True):
         self.shell = shell  # この読みの shell ("zsh" / "bash")
+        self.fold = fold  # `&&` / `||` の直後の区切りで list を切らない読みか
         self.fam = fam
         self.findings: list[Finding] = []
         self._seen: set[str] = set()
@@ -820,10 +825,10 @@ class _Analyzer:
             self.op = None
         else:  # ; ;; 改行
             # `||` の直後の改行は右辺の続き。list は切るが、移動の失敗の経路は次のコマンドまで持ち越す
-            # (`||` の直後の `;` は構文エラーで何も走らない)
+            # (`&&` / `||` の直後の `;` は、bash は構文エラー。zsh は `;` を読み飛ばして右辺が続く)
             if not self.after_or:
                 self._forget_failed_moves()
-            start = self.list_start if self.list_continues else None
+            start = self.list_start if self.fold and self.list_continues else None
             self._new_list()
             if start is not None:
                 # `a &&\nb &` は 1 つの list。`&` で戻す候補に、改行の手前の list の開始時点も残す

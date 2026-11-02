@@ -653,6 +653,17 @@ class BackgroundListTest(ChdirReadingBase):
             # 改行の時点の候補も残す (0.6.0 と同じ deny。`command` は bash だけ今の shell で動く)
             f'command cd "{m}" &&\ntrue & {GIT}',
             f'command export GIT_DIR="{m}/.git" &&\ntrue & {GIT}',
+            # 切らない読みは `&` で手前の値に戻す。bash は改行の時点の値で git を動かすので、切る読みも通す
+            f'export GIT_DIR="{a}/.git"; command export GIT_DIR="{m}/.git" &&\ntrue & git -C "{m}" reset --hard',
+            f'export GIT_DIR="{a}/.git"; command export GIT_DIR="{m}/.git" &&\ntrue & cd "{m}"; {GIT}',
+            f'export GIT_DIR="{a}/.git"; command export GIT_DIR="{m}/.git" &&\ntrue &\nwait\ngit -C "{m}" reset --hard',
+            f'export GIT_DIR="{a}/.git"; command export GIT_DIR="{m}/.git" && # c\ntrue & git -C "{m}" reset --hard',
+            f'export GIT_DIR="{a}/.git"; command export GIT_DIR="{m}/.git" ||\ntrue & git -C "{m}" reset --hard',
+            # zsh は `||` の直後の `;` を読み飛ばして右辺が続く (bash は構文エラー)
+            f'cd "{m}"; cd /nonexistent || ; true & {GIT}',
+            f'cd -q "{m}"; cd /nonexistent || ; true & {GIT}',
+            # zsh だけの移動の折り返しは zsh の読みでしか止まらない (`cd -q` は bash では失敗する)
+            f'cd -q "{m}"; cd /nonexistent ||\ntrue & {GIT}',
         ))
         self.assertAllowed((
             f'cd "{a}" &&\nmake &\nwait\ngit add .',

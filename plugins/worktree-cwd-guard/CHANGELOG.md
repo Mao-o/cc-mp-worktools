@@ -4,7 +4,7 @@
 
 **zsh の `&` が最後の pipeline だけを background にすることと、移動の失敗で `||` の右に進む経路を読み、別 checkout への git の書き込みを止めるようにした (minor bump)。**
 `cd <main> && true & git reset --hard` (zsh) と `cd <main>; cd <無いパス> || git reset --hard` は別 checkout に書くのに止まらなかった (0.6.0 まで)。
-どちらも読みを足す変更で、0.6.0 が止めていた形は止まったまま。例外は `export GIT_DIR=<worktree>/.git; command export GIT_DIR=<main>/.git &&` と改行のあとの `true & git add .` で、実際に worktree へ書くので止まらなくなる。
+どちらも読みを足す変更で、0.6.0 が止めていた形は止まったまま。
 
 ### 修正: zsh の `&` は最後の pipeline だけを background にする
 
@@ -21,6 +21,7 @@
 
 `&&` / `||` の直後の改行とコメントでは list は切れないので、折り返した形も同じ行の形と同じに読む
 (`cd <main>; cd <worktree> &&` と改行のあとの `true & git reset --hard` は bash では main で走る。`cd <無いパス> ||` と改行で折り返した形は zsh でも main で走る)。
+bash は折り返しを切る読みも通し、どちらかで見つかれば止める (`export GIT_DIR=<worktree>/.git; command export GIT_DIR=<main>/.git &&` と改行のあとの `true & git -C <main> reset --hard` は main の作業ツリーを上書きする)。
 
 ### 修正: 移動の失敗で `||` の右に進む経路を読む
 
