@@ -155,6 +155,12 @@ class ParseRobotsTest(unittest.TestCase):
                                  _common.parse_robots(text, self.AGENT))
                 self.assertFalse(self.allows("\ufeff" + text, "/auth/sign-in"))
 
+    def test_a_wildcard_does_not_split_a_kept_escape(self):
+        for rules, path in (("Disallow: /a/\nAllow: /a*F", "/a%2F"),
+                            ("Disallow: /private/\nAllow: /private*2Fsecret", "/private%2Fsecret")):
+            with self.subTest(rules=rules):
+                self.assertFalse(self.allows(f"User-agent: *\n{rules}\n", path))
+
     def test_a_named_group_decides_even_with_no_rule(self):
         me = "User-agent: Claude-Code-LLMS-Docs-Generic"
         for text in (f"User-agent: *\nDisallow: /\n\n{me}\nDisallow:\n",

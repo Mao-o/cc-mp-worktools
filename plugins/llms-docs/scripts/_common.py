@@ -1212,13 +1212,16 @@ def robots_allows(rules: list[tuple[bool, str]], path: str) -> bool:
     a refusal), for ``Allow`` with them kept (``Allow: /private%2Fpub`` must
     not lift ``Disallow: /private/`` from ``/private/pub``). The length of a
     match is always that of the decoded pattern, so keeping an escape does not
-    make an ``Allow`` longer."""
+    make an ``Allow`` longer. An ``Allow`` must also match the decoded spelling,
+    so a ``*`` cannot end inside a kept escape (``Allow: /a*F`` on ``/a%2F``)."""
     decoded = _robots_canonical(path)
     kept = _robots_canonical(path, keep_reserved=True)
     best_len, allowed = -1, True
     for allow, pattern in rules:
-        if _robots_pattern_matches(pattern, kept if allow else decoded):
-            size = len(_robots_canonical_pattern(pattern))
+        plain = _robots_canonical_pattern(pattern)
+        if _robots_pattern_matches(plain, decoded) and (
+                not allow or _robots_pattern_matches(pattern, kept)):
+            size = len(plain)
             if size > best_len or (size == best_len and allow):
                 best_len, allowed = size, allow
     return allowed
