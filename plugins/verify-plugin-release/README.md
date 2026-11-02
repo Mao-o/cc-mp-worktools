@@ -98,6 +98,14 @@ repo root を検査します)。サブシェルやパイプの中など shell �
 heredoc の本文はコマンドとして読まないので、本文に `'` があっても止めません。区切り語に引用がある
 heredoc (`<<'EOF'` など) の本文に `gh pr create` の使い方を書いても止めません (引用の無い区切り語の
 本文の `$(...)` は shell が実行するので、従来どおり止めます)。
+`--body "$(cat <<'EOF' ...)"` の形の本文も、奇数個の `"` / `'` があっても止めません (こちらは本文の行頭に
+`gh pr create` があると止めます)。ただし、コマンドのどこか (本文を含む) に `cd` / `chdir` / `pushd` / `popd` /
+`eval` / `source` / `builtin` / `trap` / `HOME=` / `CDPATH=` の文字列があると本文を読み飛ばさず、奇数個の引用符で
+止めます (本文を分けて単独の `gh pr create` にすると通ります)。
+
+`X=$(echo a b) gh pr create` や `GH_REPO=$(basename $(pwd)) gh pr create` のように、代入の値に空白や置換がある形の
+後ろの PR 操作は「解析できない」で止めます。先に別の行で変数に入れてください (`X=$(echo a b); gh pr create`)。
+引用符の中に閉じた値 (`ROOT="$(git rev-parse --show-toplevel)" gh pr create`) は検査します。
 
 同様に、PR 操作がコマンド置換 (`url="$(gh pr create ...)"`)・関数・`pushd` の後などにあって
 検査対象を特定できない場合も止めます。**`gh pr create` / `gh pr ready` は単独のコマンド
