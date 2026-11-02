@@ -56,6 +56,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" content <doc_idx> "<he
 
 迷ったら `search` から始める。`--source firebase` は毎回付ける (省略できない)。詳細は下記「調査フロー」以降。
 `search` / `search-content` の末尾の `Next:` は上位ヒットの `doc_idx` と heading_path が埋まっている (そのまま実行できる)。
+長すぎて `content` 1 回に収まらない節 (24000 文字超) で、見出しが検索語を含まないときは、`Next:` は `content` ではなく `search-content --page-ref N` を出す (一致する行を一覧する。スニペットも語が多く揃う行の前後だけを示す)。
 
 ## 調査の進め方 (手数の目安)
 
@@ -225,6 +226,8 @@ reference ページの多くは H2 のみのフラット構造、guide ページ
 - **search-content の全ページ横断は重い**: `--page-ref` 省略すると 7000 ページ近い HTTP fetch を発火する (初回のみ)。明示指定を推奨
 
 ## 禁止事項
+
+`allowed-tools` の `Bash` を完全一致の `Bash(<コマンド>)` に絞らず単独で付与しているのは、打つコマンドの語・見出し・ページ番号・`--cache-dir` などが質問ごとに変わり、事前に列挙できないため (絞ると `context: fork` の手順が確認待ちで止まる)。
 
 `allowed-tools` に Read/Bash があるため技術的には実行できてしまうが、
 段階的絞り込みを迂回し全文読み込み相当になるため使用しない:

@@ -1599,6 +1599,13 @@ def _section_heading_texts(sections, page_title: str) -> list[tuple[str, str]]:
 
 
 SNIPPET_MARK_WIDTH = 2  # "→ " / "  " in front of each snippet line
+MAX_SNIPPET_HITS = 3  # hit lines shown for one section
+# Hit lines shown for one long section when the search is limited to one page
+# (``search-content --page-ref``, where the ``Next:`` line of a long section
+# leads): the first search shows the best few, this one lists the rest.
+LONG_SECTION_HITS = 15
+# Stands for the lines left out between two hits of a long section.
+_SNIPPET_GAP = ("  ...", False, None)
 
 
 def _cut_hit_line(text: str, width: int, span) -> str:
@@ -1668,7 +1675,9 @@ def _fit_snippet(lines, max_chars, tail: str = "") -> str:
     out = []
     prev = None
     for i in sorted(keep):
-        if prev is not None and i != prev + 1:
+        # a kept _SNIPPET_GAP already says lines are left out there
+        if (prev is not None and i != prev + 1
+                and lines[i] is not _SNIPPET_GAP and lines[prev] is not _SNIPPET_GAP):
             out.append("  ...")
         out.append(lines[i][0])
         prev = i
@@ -1693,10 +1702,46 @@ def _first_keyword_span(line: str, keywords):
     return min(spans) if spans else None
 
 
+def _section_chars(si, sections, body_lines) -> int:
+    """Characters of the lines that belong to section *si* itself (up to the
+    next heading of any level; ``None`` is the text before the first heading)."""
+    if si is None:
+        start, end = 0, sections[0]["line_start"] if sections else len(body_lines)
+    else:
+        start, end = sections[si]["line_start"], sections[si]["line_end"]
+    return sum(len(body_lines[j]) for j in range(start, end))
+
+
+def _best_hit_lines(hits, limit: int) -> list:
+    """The line numbers of the *limit* hits that match the most keywords (the
+    earlier line of a tie), in line order. In a long section the first hits
+    are whatever comes first in it: its heading, its introduction."""
+    best = sorted(hits, key=lambda h: (-len(set(h[1])), h[0]))[:limit]
+    return sorted(h[0] for h in best)
+
+
+def _hit_windows(visible, context_lines: int, total: int) -> list:
+    """``(start, end)`` line ranges around each of the *visible* hit lines,
+    merged where they touch."""
+    windows: list = []
+    for line in visible:
+        start, end = max(0, line - context_lines), min(total, line + context_lines + 1)
+        if windows and start <= windows[-1][1]:
+            windows[-1] = (windows[-1][0], end)
+        else:
+            windows.append((start, end))
+    return windows
+
+
 def _build_section_results(section_hits, sections, body_lines, keywords,
                            min_coverage, context_lines, max_snippet_chars,
-                           page_title=""):
+                           page_title="", long_section_hits=MAX_SNIPPET_HITS):
     """Build result list from sections matching >= *min_coverage* keywords.
+
+    ``long_section`` is whether the section's own text is too long for one
+    ``content`` call (over ``DEFAULT_MAX_CONTENT_CHARS``): its snippet shows
+    the *long_section_hits* lines that match the most keywords, each with its
+    own context, instead of the first hits and everything between them.
 
     ``heading_count`` is how many sections of the page share the result's
     heading_path (a command that names it reads the first of them).
@@ -1722,22 +1767,29 @@ def _build_section_results(section_hits, sections, body_lines, keywords,
         heading_path = sections[si]["heading_path"] if si is not None else "(top)"
         hit_line_numbers = [h[0] for h in hits]
 
-        MAX_SNIPPET_HITS = 3
-        if len(hit_line_numbers) > MAX_SNIPPET_HITS:
-            visible_hits = hit_line_numbers[:MAX_SNIPPET_HITS]
-            truncated = len(hit_line_numbers) - MAX_SNIPPET_HITS
+        long_section = _section_chars(si, sections, body_lines) > DEFAULT_MAX_CONTENT_CHARS
+        if long_section:
+            visible_hits = _best_hit_lines(hits, long_section_hits)
         else:
-            visible_hits = hit_line_numbers
-            truncated = 0
-
-        snippet_start = max(0, visible_hits[0] - context_lines)
-        snippet_end = min(len(body_lines), visible_hits[-1] + context_lines + 1)
+            visible_hits = hit_line_numbers[:MAX_SNIPPET_HITS]
+        truncated = len(hit_line_numbers) - len(visible_hits)
         hit_set = set(visible_hits)
 
+        def snippet_rows(start, end):
+            return [(f"{'→ ' if j in hit_set else '  '}{body_lines[j].rstrip()}", j in hit_set,
+                     _first_keyword_span(body_lines[j], keywords) if j in hit_set else None)
+                    for j in range(start, end)]
+
+        if long_section:
+            rows = []
+            for start, end in _hit_windows(visible_hits, context_lines, len(body_lines)):
+                rows += ([_SNIPPET_GAP] if rows else []) + snippet_rows(start, end)
+        else:
+            rows = snippet_rows(max(0, visible_hits[0] - context_lines),
+                                min(len(body_lines), visible_hits[-1] + context_lines + 1))
+
         snippet = _fit_snippet(
-            [(f"{'→ ' if j in hit_set else '  '}{body_lines[j].rstrip()}", j in hit_set,
-              _first_keyword_span(body_lines[j], keywords) if j in hit_set else None)
-             for j in range(snippet_start, snippet_end)],
+            rows,
             max_snippet_chars,
             tail=f"  ... ({truncated} more hits in this section)" if truncated else "",
         )
@@ -1761,6 +1813,7 @@ def _build_section_results(section_hits, sections, body_lines, keywords,
             "heading_count": path_counts.get(heading_path, 1),
             "heading_match": heading_match,
             "heading_own": heading_match and not names_every_keyword(inherited_text, keywords),
+            "long_section": long_section,
         })
     return results, total
 
@@ -1801,7 +1854,8 @@ def search_content_in_body(body_lines, query: str, *,
                            max_matches_per_doc: int = 5,
                            min_level: int = 2,
                            max_snippet_chars: int | None = None,
-                           page_title: str = ""):
+                           page_title: str = "",
+                           long_section_hits: int = MAX_SNIPPET_HITS):
     """Search *body_lines* for *query* keywords (soft-AND, case-insensitive).
 
     First tries strict AND (all keywords in same section). If no results and
@@ -1811,6 +1865,8 @@ def search_content_in_body(body_lines, query: str, *,
     Keywords come from ``query_terms`` (function words dropped). Sections
     are ordered by ``section_rank_key``; *page_title* (the page's H1 when the
     body does not carry it) counts as a heading of every section.
+    *long_section_hits* caps the hit lines of a long section's snippet (see
+    ``_build_section_results``); it changes the snippet, never the order.
 
     Returns a dict with ``total_matches``, ``results``, ``match_mode``
     (``"and"`` | ``"partial"`` | ``"none"``), ``overflow_sections`` and
@@ -1843,7 +1899,7 @@ def search_content_in_body(body_lines, query: str, *,
 
     build_args = (section_hits, sections, body_lines, keywords)
     build_kw = dict(context_lines=context_lines, max_snippet_chars=max_snippet_chars,
-                    page_title=page_title)
+                    page_title=page_title, long_section_hits=long_section_hits)
 
     # Strict AND
     results, total_matches = _build_section_results(*build_args, len(keywords), **build_kw)

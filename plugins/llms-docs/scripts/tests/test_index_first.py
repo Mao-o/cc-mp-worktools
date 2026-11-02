@@ -1053,6 +1053,66 @@ class QueryDecisionTableTest(_Case):
         self.assertEqual(self.full_fetches(), 0)
 
 
+class AmbiguousSlugRetryTest(QueryDecisionTableTest):
+    """The slug a listing gives before ``llms-full.txt`` is cached can name
+    several pages (``SLUG_SPLIT``). It stays ambiguous, and the error lists
+    each candidate with the command that opens it, for all three commands
+    that take a page: each line, run as printed, exits 0 on that page."""
+
+    def test_every_cell_keeps_the_invariants(self):
+        pass  # run by QueryDecisionTableTest
+
+    COMMANDS = (["sections", "x"], ["content", "x", "Body"], ["search-content", "--page-ref", "x", "zzq"])
+
+    def test_each_candidate_of_the_error_opens_its_page(self):
+        for e_name, p_name in sorted(self.SLUG_SPLIT):
+            page_qs = self.PAGE_SHAPES[p_name]
+            index, full = self._corpus(self.ENTRY_SHAPES[e_name], page_qs)
+            corpora = {"cache": ("--cache-dir", self.tmp)}
+            for path, text, opt in ((os.path.join(self.tmp, "f.txt"), full, "--file"),
+                                    (os.path.join(self.tmp, "i.txt"), index, "--index-file")):
+                Path(path).write_text(text, encoding="utf-8")
+                corpora.setdefault("file", ())
+                corpora["file"] += (opt, path)
+            self.write(index, full)
+            # the ref is the slug the listing gives before the bodies are cached
+            self.full_cache().unlink()
+            code, out, err = self.run_g("fetch-index")
+            self.assertEqual(code, 0, err)
+            self.assertIn("[x] Entry 0", out)
+            self.write(None, full)
+            for way, corpus in corpora.items():
+                for argv in self.COMMANDS:
+                    with self.subTest(pages=p_name, way=way, command=argv[0]):
+                        code, out, err = self.run_g(*argv, corpus=corpus)
+                        self.assertEqual((code, out), (1, ""), err)
+                        self.assertIn("Ambiguous slug 'x'", err)
+                        lines = [ln.strip() for ln in err.splitlines() if ln.startswith(f"      {SCRIPT} ")]
+                        rows = re.findall(r"(?m)^  \[(\d+)\] ", err)
+                        self.assertEqual(len(lines), len(page_qs), err)
+                        self.assertEqual(rows, [str(i) for i in range(len(page_qs))], err)
+                        for page, line in zip(rows, lines):
+                            code, opened, err2 = self.run_argv(shlex.split(line, comments=True))
+                            self.assertEqual(code, 0, (line, err2))
+                            q = page_qs[int(page)]
+                            self.assertIn(f"Page {q or 'none'}", opened, line)
+                            self.assertNotIn("Ambiguous", err2, line)
+        self.assertEqual(self.full_fetches(), 0)
+
+    def test_the_options_of_the_invocation_are_kept(self):
+        index, full = self._corpus((None,), (None, "cli"))
+        self.write(index, full)
+        code, _out, err = self.run_g("content", "x", "Body", "--max-chars", "5")
+        self.assertEqual(code, 1, err)
+        lines = [ln.strip() for ln in err.splitlines() if ln.startswith(f"      {SCRIPT} ")]
+        self.assertEqual(len(lines), 2, err)
+        for line in lines:
+            argv = shlex.split(line, comments=True)
+            self.assertIn("--max-chars", argv, line)
+            self.assertEqual(argv[argv.index("--max-chars") + 1], "5", line)
+            self.assertEqual(argv[-1], "Body", line)
+
+
 class RepeatedEntryTest(_Case):
     """``llms.txt`` lists some pages twice (under two headings, once with
     ``.md``): ``search`` and ``search-index`` show such a page once, and the

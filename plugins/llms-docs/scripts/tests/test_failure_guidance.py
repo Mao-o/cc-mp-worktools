@@ -717,28 +717,28 @@ class HitCandidatesTest(unittest.TestCase):
 
     def test_best_section_of_each_top_page_first(self):
         ranked = [(3, self.hits("A", "A2"), ()), (7, self.hits("B"), ()), (9, self.hits("C"), ())]
-        self.assertEqual([(r, h) for r, h, _e, _n in _commands.hit_candidates(ranked)],
+        self.assertEqual([(r, h) for r, h, *_ in _commands.hit_candidates(ranked)],
                          [(3, "A"), (7, "B"), (9, "C")])
 
     def test_single_page_fills_with_its_next_sections(self):
         ranked = [(3, self.hits("A", "A2", "A3", "A4"), ())]
-        self.assertEqual([h for _r, h, _e, _n in _commands.hit_candidates(ranked)], ["A", "A2", "A3"])
+        self.assertEqual([h for _r, h, *_ in _commands.hit_candidates(ranked)], ["A", "A2", "A3"])
 
     def test_index_only_page_has_no_heading(self):
-        self.assertEqual(_commands.hit_candidates([(4, {"results": []}, ())]), [(4, None, (), 1)])
+        self.assertEqual(_commands.hit_candidates([(4, {"results": []}, ())]), [(4, None, (), 1, False)])
 
     def test_index_only_pages_are_dropped_when_a_page_has_body_hits(self):
         ranked = [(4, {"results": []}, ()), (5, self.hits("A"), ())]
-        self.assertEqual(_commands.hit_candidates(ranked), [(5, "A", (), 1)])
+        self.assertEqual(_commands.hit_candidates(ranked), [(5, "A", (), 1, False)])
 
     def test_per_page_source_is_kept(self):
         ranked = [(1, self.hits("A"), ("--source", "platform"))]
-        self.assertEqual(_commands.hit_candidates(ranked), [(1, "A", ("--source", "platform"), 1)])
+        self.assertEqual(_commands.hit_candidates(ranked), [(1, "A", ("--source", "platform"), 1, False)])
 
     def test_keep_takes_the_last_line_when_pages_above_fill_every_line(self):
         ranked = [(1, self.hits("A"), ()), (2, self.hits("B"), ()), (3, self.hits("C"), ()),
                   (7, self.hits("K"), ())]
-        self.assertEqual([r for r, _h, _e, _n in _commands.hit_candidates(ranked, keep=(7, ()))],
+        self.assertEqual([r for r, *_ in _commands.hit_candidates(ranked, keep=(7, ()))],
                          [1, 2, 7])
 
     def test_keep_already_picked_changes_nothing(self):
@@ -750,17 +750,17 @@ class HitCandidatesTest(unittest.TestCase):
         ranked = [(1, self.hits("A"), ("--source", "code")), (2, self.hits("B"), ()),
                   (3, self.hits("C"), ()), (1, self.hits("P"), ("--source", "platform"))]
         got = _commands.hit_candidates(ranked, keep=(1, ("--source", "platform")))
-        self.assertEqual(got[-1], (1, "P", ("--source", "platform"), 1))
+        self.assertEqual(got[-1], (1, "P", ("--source", "platform"), 1, False))
 
     def test_keep_without_body_hits_is_not_offered(self):
         ranked = [(1, self.hits("A"), ()), (2, self.hits("B"), ()), (3, self.hits("C"), ()),
                   (7, {"results": []}, ())]
-        self.assertEqual([r for r, _h, _e, _n in _commands.hit_candidates(ranked, keep=(7, ()))],
+        self.assertEqual([r for r, *_ in _commands.hit_candidates(ranked, keep=(7, ()))],
                          [1, 2, 3])
 
     def test_heading_count_is_carried(self):
         ranked = [(2, {"results": [{"heading_path": "R/I", "heading_count": 2}]}, ())]
-        self.assertEqual(_commands.hit_candidates(ranked), [(2, "R/I", (), 2)])
+        self.assertEqual(_commands.hit_candidates(ranked), [(2, "R/I", (), 2, False)])
 
     def test_spare_sections_come_only_from_the_top_page_of_its_own_source(self):
         """Page numbers are per source: page 1 of another source is not the
@@ -768,20 +768,20 @@ class HitCandidatesTest(unittest.TestCase):
         ranked = [(1, self.hits("A"), ("--source", "code")),
                   (1, self.hits("P", "P2"), ("--source", "platform"))]
         got = _commands.hit_candidates(ranked)
-        self.assertEqual([(r, h, e) for r, h, e, _n in got],
+        self.assertEqual([(r, h, e) for r, h, e, *_ in got],
                          [(1, "A", ("--source", "code")), (1, "P", ("--source", "platform"))])
 
     def test_same_heading_of_another_source_does_not_hide_the_top_pages_section(self):
         ranked = [(1, self.hits("A", "X"), ("--source", "code")),
                   (1, self.hits("X"), ("--source", "platform"))]
         got = _commands.hit_candidates(ranked)
-        self.assertEqual([(h, e) for _r, h, e, _n in got],
+        self.assertEqual([(h, e) for _r, h, e, *_ in got],
                          [("A", ("--source", "code")), ("X", ("--source", "platform")),
                           ("X", ("--source", "code"))])
 
     def test_repeated_heading_of_the_same_source_is_still_offered_once(self):
         ranked = [(1, self.hits("A", "A", "A2"), ("--source", "code"))]
-        self.assertEqual([h for _r, h, _e, _n in _commands.hit_candidates(ranked)], ["A", "A2"])
+        self.assertEqual([h for _r, h, *_ in _commands.hit_candidates(ranked)], ["A", "A2"])
 
 
 class ZeroHitsQueryHintTest(unittest.TestCase):

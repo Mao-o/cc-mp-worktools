@@ -159,6 +159,7 @@ llms-full.txt にページ URL が無く、`llms.txt` とタイトルが一致�
 
 `sections` / `search` / `content` の出力にある完全なパス (スラッシュ区切り) をそのままコピーする
 (`search` の `Next:` には最上位ヒットのパスが埋まっている)。
+長すぎて `content` 1 回に収まらない節 (24000 文字超) で、見出しが検索語を含まないときは、`Next:` は `content` ではなく `search-content --page-ref N` を出す (一致する行を一覧する。スニペットも語が多く揃う行の前後だけを示す)。
 部分一致も受け付けるが、候補が 2 件以上なら `ambiguous heading` で候補一覧を出して止まる。
 `Section: (top)` は最初の見出しより前の本文を指す。
 
@@ -180,6 +181,8 @@ llms-full.txt にページ URL が無く、`llms.txt` とタイトルが一致�
 スクリプトパス: `${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py`
 
 ## 禁止事項
+
+`allowed-tools` の `Bash` を完全一致の `Bash(<コマンド>)` に絞らず単独で付与しているのは、打つコマンドの語・見出し・ページ番号・`--cache-dir` などが質問ごとに変わり、事前に列挙できないため (絞ると `context: fork` の手順が確認待ちで止まる)。
 
 `allowed-tools` に Read/Bash があるため技術的には実行できてしまうが、段階的絞り込みを迂回し
 全文読み込み相当になるため使用しない:
