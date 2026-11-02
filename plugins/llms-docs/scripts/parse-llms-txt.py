@@ -138,7 +138,7 @@ _PROFILE_KEYS = {
     "link_annotations", "link_path_aliases", "members", "body", "page_cache_dir",
     "page_fetch_workers", "page_fetch_timeout", "search_content_warn_pages", "index_page_size",
     "list_page_urls", "index_heading_level", "heading_line_pattern", "url_prefix",
-    "respect_robots", "search_content_needs_page_ref",
+    "respect_robots", "search_content_needs_page_ref", "h3_only_keeps_full_search",
 }
 # A profile with ``members`` is an alias of several sources for ``search``;
 # it reads no file of its own, so it takes no other key but these.
@@ -597,6 +597,13 @@ def _validate_index_keys(path: str, name: str, raw: dict, profile: dict) -> None
         if profile["join_rate_guard"]:
             _bad(path, f'sources.{name}.join_rate_guard is redundant with index_join "url" '
                        f"(search always checks the join rate then)")
+    keeps_full_search = _bool_key(path, name, raw, "h3_only_keeps_full_search", False)
+    if keeps_full_search and rank_from != "pages":
+        _bad(path, f'sources.{name}.h3_only_keeps_full_search is only valid with rank_from "pages" (the default)')
+    if keeps_full_search and profile["index_heading_level"] != 3:
+        _bad(path, f"sources.{name}.h3_only_keeps_full_search needs index_heading_level 3 "
+                   f"(with 2 no candidate comes from an H3)")
+    profile["h3_only_keeps_full_search"] = keeps_full_search
     profile["rank_from"] = rank_from
     profile["list_page_urls"] = list_urls
     profile["index_join"] = index_join
@@ -2935,6 +2942,19 @@ def _demote_h3_only(results: list[dict], h3_only: set, full_match: set, *,
     return kept + [results[i] for i in moved] + results[last + 1:]
 
 
+def _place_below_hits(results: list[dict], extras: list[dict], *,
+                      include_changelog_priority: bool = False) -> list[dict]:
+    """*results* with *extras* (``h3_only_keeps_full_search``) under the rows
+    with body hits and above the rows with none, so that the order of *results*
+    and its first row do not change. A Changelog / Release notes page stays
+    last unless *include_changelog_priority*, as ``search_rank_key`` has it."""
+    def low(r):
+        return not include_changelog_priority and is_low_priority(r.get("title", ""))
+    at = next((i for i, r in enumerate(results) if low(r) or r["body_hits"]["total_matches"] == 0), len(results))
+    return (results[:at] + [r for r in extras if not low(r)] + results[at:]
+            + [r for r in extras if low(r)])
+
+
 def cmd_search_index(args):
     profile = _get_profile(args)
     if profile["rank_from"] == "index":
@@ -3064,19 +3084,31 @@ def _search_results(args, profile: dict) -> tuple:
     # It takes one min_level for the whole corpus; every page of a profile
     # shares its split, so the first page's is used.
     level = (docs[0]["min_level"] or 2) if docs else 2
-    for idx, hits in full_corpus_extra_hits(
-        results, [d["body_lines"] for d in docs], args.query, context_lines=args.context,
-        max_matches_per_doc=args.max_hits, max_snippet_chars=args.max_snippet_chars,
-        min_level=level, limit=args.top_n,
-        include_changelog_priority=args.include_changelog_priority,
-        titles=[d["title"] or "" for d in docs],
-    ):
-        results.append({"doc_idx": idx, "index_score": None, "body_hits": hits, "body_only": True,
-                        "title": docs[idx]["title"] or "(untitled)", "url": None})
+
+    def extra_rows(rows, skip=()):
+        return [{"doc_idx": idx, "index_score": None, "body_hits": hits, "body_only": True,
+                 "title": docs[idx]["title"] or "(untitled)", "url": None}
+                for idx, hits in full_corpus_extra_hits(
+                    rows, [d["body_lines"] for d in docs], args.query, context_lines=args.context,
+                    max_matches_per_doc=args.max_hits, max_snippet_chars=args.max_snippet_chars,
+                    min_level=level, limit=args.top_n,
+                    include_changelog_priority=args.include_changelog_priority,
+                    titles=[d["title"] or "" for d in docs],
+                ) if idx not in skip]
+
+    usual = extra_rows(results)
+    below = []
+    if profile["h3_only_keeps_full_search"] and h3_only:
+        # what the full-corpus search adds when the H3-only candidates are not
+        # counted: their body hits must not stop it, but they keep their place
+        below = extra_rows([r for r in results if r["doc_idx"] not in h3_only],
+                           skip={r["doc_idx"] for r in results + usual})
+    results += usual
     results.sort(key=lambda r: search_rank_key(r, include_changelog_priority=args.include_changelog_priority))
     # empty unless the profile's index reads H3: the order is then search_rank_key's
     results = _demote_h3_only(results, h3_only, full_match,
                               include_changelog_priority=args.include_changelog_priority)
+    results = _place_below_hits(results, below, include_changelog_priority=args.include_changelog_priority)
     return profile, path, docs, results, from_index, 0
 
 

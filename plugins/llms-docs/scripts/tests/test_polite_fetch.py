@@ -190,6 +190,51 @@ class ParseRobotsTest(unittest.TestCase):
             with self.subTest(pattern=pattern, path=path):
                 self.assertEqual(self.allows(f"User-agent: *\nDisallow: {pattern}\n", path), not matches)
 
+    def test_a_reserved_escape_in_allow_does_not_lift_a_refusal(self):
+        # (rules, path, allowed)
+        cases = [
+            ("Disallow: /private/\nAllow: /private%2Fpub", "/private/pub/x", False),
+            ("Disallow: /a?\nAllow: /a%3F", "/a?x", False),
+            ("Disallow: /a/b\nAllow: /a%2Fb", "/a/b", False),
+            ("Disallow: /a?\nAllow: /a%3f", "/a?x", False),
+            ("Disallow: /x/\nAllow: /x%2F*.md$", "/x/a.md", False),
+            # the spelling the rule names is still allowed, whatever the hex case
+            ("Disallow: /\nAllow: /a%2Fb", "/a%2Fb", True),
+            ("Disallow: /\nAllow: /a%2fb", "/a%2Fb", True),
+            ("Disallow: /\nAllow: /a%2Fb", "/a%2fb", True),
+            ("Disallow: /x/\nAllow: /x%2F*.md$", "/x%2Fa.md", True),
+            # a literal reserved character in Allow names only itself
+            ("Disallow: /\nAllow: /a/b", "/a/b", True),
+            ("Disallow: /\nAllow: /a/b", "/a%2Fb", False),
+            # a character that is not reserved compares as before
+            ("Disallow: /\nAllow: /%7Euser", "/~user", True),
+            ("Disallow: /\nAllow: /~user", "/%7Euser", True),
+            ("Disallow: /\nAllow: /a%20b", "/a b", True),
+            ("Disallow: /\nAllow: /%E3%83%84", "/ツ", True),
+            ("Disallow: /\nAllow: /%41", "/A", True),
+            # Disallow still decodes: no encoding slips past it
+            ("Allow: /\nDisallow: /private%2F", "/private/x", False),
+            ("Allow: /\nDisallow: /private/", "/private%2Fx", False),
+            ("Allow: /\nDisallow: /a%3F", "/a?x", False),
+            ("Allow: /\nDisallow: /a?", "/a%3Fx", False),
+            # the longest match is counted decoded: the kept escape adds nothing
+            ("Disallow: /a/b/c\nAllow: /a%2Fb", "/a%2Fb/c", False),
+            ("Disallow: /a/b\nAllow: /a%2Fb", "/a%2Fb", True),
+        ]
+        for rules, path, allowed in cases:
+            with self.subTest(rules=rules, path=path):
+                self.assertEqual(self.allows(f"User-agent: *\n{rules}\n", path), allowed)
+
+    def test_every_reserved_character_stays_escaped_in_allow(self):
+        for ch in ":/?[]@!&'()+,;=":
+            escape = f"%{ord(ch):02X}"
+            with self.subTest(ch=ch):
+                self.assertFalse(self.allows(f"User-agent: *\nDisallow: /a{ch}\nAllow: /a{escape}\n", f"/a{ch}x"))
+                self.assertTrue(self.allows(f"User-agent: *\nDisallow: /\nAllow: /a{escape}\n", f"/a{escape}x"))
+        # "#" starts a comment in robots.txt, so only the escape can be written
+        self.assertFalse(self.allows("User-agent: *\nDisallow: /a\nAllow: /a%23\n", "/a#x"))
+        self.assertTrue(self.allows("User-agent: *\nDisallow: /a\nAllow: /a%23\n", "/a%23x"))
+
     def test_the_longest_match_is_counted_on_one_spelling(self):
         # the same path written twice ties, and a tie goes to Allow, whichever is the longer text
         self.assertTrue(self.allows("User-agent: *\nDisallow: /%7Euser\nAllow: /~user\n", "/~user"))

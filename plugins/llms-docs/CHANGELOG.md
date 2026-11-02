@@ -7,7 +7,7 @@ All notable changes to this plugin will be documented here.
 ### 追加: Zed / Amp を読む (`llms-full.txt` が無く、ページごとに取得するサイト)
 
 - `zed` / `amp` の preset を足した (`body: fetch`)。`llms.txt` の項目がページで、本文は必要なページだけを 1 ページずつ取得する
-- `respect_robots` (`body: fetch` 専用): `robots.txt` が拒否する `llms.txt`・ページ・転送先を要求しない。Amp は未知のパスを拒否対象の `/auth/` へ転送するので、転送の前に止める。読み方は RFC 9309 の最長一致で、`urllib.robotparser` (先勝ち) は `Allow: /` で始まる両サイトで使えない。先頭の BOM は読み飛ばし、`%7E` と `~` のようなエンコードの違いでは拒否が抜けない。自分宛てのグループは空でも `*` より優先する。読めないときも取得しないが、文面は拒否と分ける
+- `respect_robots` (`body: fetch` 専用): `robots.txt` が拒否する `llms.txt`・ページ・転送先を要求しない。Amp は未知のパスを拒否対象の `/auth/` へ転送するので、転送の前に止める。読み方は RFC 9309 の最長一致で、`urllib.robotparser` (先勝ち) は `Allow: /` で始まる両サイトで使えない。先頭の BOM は読み飛ばし、`%7E` と `~` のようなエンコードの違いでは拒否が抜けない。`%2F` のような予約文字の escape は `Allow` では復号しない (`Allow: /a%2Fb` が `Disallow: /a/b` を打ち消さない)。自分宛てのグループは空でも `*` より優先する。読めないときも取得しないが、文面は拒否と分ける
 - `search_content_needs_page_ref` (`body: fetch` 専用): `--page-ref` の無い `search-content` を、ページを取得せずに終了コード 2 で止める。0 件のときの案内も全ページの走査を勧めない
 - `body: fetch` で `drop_lines` と `heading_line_pattern` を使えるようにした (Zed の定型の 1 行、Amp の `<h2 id="…">` の行)
 - `robots.txt` が拒否する Kiro と、全件の取得が前提の Cursor は対応しない。`sitemap.xml` はどのサイトにもタイトルが無く、索引に採用しない (実測は `docs/generic-llms-txt-source.md`)
@@ -21,7 +21,9 @@ All notable changes to this plugin will be documented here.
 
 ### 変更: `ai-sdk` の索引が H3 も読む
 
-- `### maxOutputTokens` のように API 名を H3 にだけ書くページが、その名前の `search` で上位 5 件に入らなかった。手元のキャッシュで、該当する 71 語のうち届くページが 44 語から 63 語に増え、消えたものは 0 語。`search-index --show-sections` の一覧にも H3 が出る
+- `### maxOutputTokens` のように API 名を H3 にだけ書くページが、その名前の `search` で上位 5 件に入らなかった。手元のキャッシュで、H3 にだけ書かれた API 名 71 語のうち持ち主が上位 5 件に入る語が 44 語から 63 語に増え、その 71 語で持ち主を失った語は 0 語 (この数字は API 名に限る)。`search-index --show-sections` の一覧にも H3 が出る
+- `h3_only_keeps_full_search` (profile キー、既定 `false`、同梱 presets では `ai-sdk` だけ): H3 だけで候補に入ったページに本文のヒットがあっても、全文検索の補いを止めない。補いで増えた行はヒットのある候補の下、ヒット 0 の行の上に置くので 1 位は変わらない。`citations` で `Anthropic` / `OpenAI` / `xAI Grok` が通知なく消えていた
+- 残る悪化: H3 の +1 で上がったページが候補の上位 5 件の枠を取る。手元のキャッシュの 1,282 クエリのうち 189 で本文のヒットがあるページが一覧から消え (286 ページ、すべてこの押し出し)、11 で H2 までの索引の 1 位を失う。多くは同点の順の入れ替わりで、タイトルや H3 の持ち主が上がるものを含む。内訳は `docs/generic-llms-txt-source.md` の「悪化の型」
 - `search` の H3 の規則で、本文のヒットが 0 の候補を基準にしない。全キーワードが description に当たるだけのページの下に、本文のヒットがあるページを下げていた。`index_heading_level` が 3 の他の preset も順位が変わるが、ヒット 0 のページが下に移るだけ (実測は `docs/generic-llms-txt-source.md`)
 
 ### 修正: 200 で返った HTML を本文として読まない

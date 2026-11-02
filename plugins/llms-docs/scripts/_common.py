@@ -1107,9 +1107,11 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
 # ---------------------------------------------------------------------------
 
 _ROBOTS_ESCAPE_RE = re.compile(r"%[0-9A-Fa-f]{2}|[^\x00-\x7f]+|[%*$]")
+# RFC 3986 reserved characters, less ``*`` and ``$``, which stay escaped anyway.
+_ROBOTS_RESERVED = ":/?#[]@!&'()+,;="
 
 
-def _robots_canonical(text: str) -> str:
+def _robots_canonical(text: str, *, keep_reserved: bool = False) -> str:
     """*text* (a path, or a piece of a pattern between its ``*``) in the one
     spelling two encodings of it share, so that ``/%7Euser`` and ``/~user``,
     ``/a%20b`` and ``/a b``, or ``%2f`` and ``/`` compare equal (RFC 9309 2.2.2).
@@ -1117,7 +1119,9 @@ def _robots_canonical(text: str) -> str:
     which stay escaped so that they are never read as an escape's start or
     as a pattern's wildcard and end; the same characters written literally
     get the same escape. A non-ASCII character becomes its UTF-8 escapes.
-    Hex digits are upper case. One pass, so ``%2541`` stays ``%2541``."""
+    Hex digits are upper case. One pass, so ``%2541`` stays ``%2541``.
+    With *keep_reserved*, an escape of a reserved character also stays, so that
+    ``%2F`` and ``/`` differ: the spelling ``Allow`` is compared in."""
     def spell(m):
         found = m.group(0)
         if found in ("%", "*", "$"):
@@ -1125,15 +1129,16 @@ def _robots_canonical(text: str) -> str:
         if found[0] != "%":
             return "".join(f"%{b:02X}" for b in found.encode("utf-8", "surrogatepass"))
         code = int(found[1:], 16)
-        return f"%{code:02X}" if code >= 0x80 or chr(code) in "%*$" else chr(code)
+        keep = code >= 0x80 or chr(code) in "%*$" or (keep_reserved and chr(code) in _ROBOTS_RESERVED)
+        return f"%{code:02X}" if keep else chr(code)
     return _ROBOTS_ESCAPE_RE.sub(spell, text)
 
 
-def _robots_canonical_pattern(pattern: str) -> str:
+def _robots_canonical_pattern(pattern: str, *, keep_reserved: bool = False) -> str:
     """``_robots_canonical`` of a pattern: its ``*`` and a final ``$`` stay."""
     anchored = pattern.endswith("$")
     pieces = (pattern[:-1] if anchored else pattern).split("*")
-    return "*".join(_robots_canonical(p) for p in pieces) + ("$" if anchored else "")
+    return "*".join(_robots_canonical(p, keep_reserved=keep_reserved) for p in pieces) + ("$" if anchored else "")
 
 
 def parse_robots(text: str, agent: str) -> list[tuple[bool, str]]:
@@ -1143,7 +1148,8 @@ def parse_robots(text: str, agent: str) -> list[tuple[bool, str]]:
     (``Disallow:`` alone means nothing is disallowed). A ``Disallow:`` with an
     empty path allows everything and is no rule. A byte order mark before the
     first line is not part of it. The patterns come back in
-    ``_robots_canonical`` spelling. Not ``urllib.robotparser``: it takes the
+    ``_robots_canonical`` spelling (``keep_reserved`` for ``Allow``, see
+    ``robots_allows``). Not ``urllib.robotparser``: it takes the
     first rule that matches, so ``Allow: /`` on the first line (ampcode.com,
     zed.dev) would allow every ``Disallow:`` below it; RFC 9309 takes the
     longest match."""
@@ -1168,7 +1174,7 @@ def parse_robots(text: str, agent: str) -> list[tuple[bool, str]]:
             in_rules = True
             if not value:
                 continue
-            rule = (key == "allow", _robots_canonical_pattern(value))
+            rule = (key == "allow", _robots_canonical_pattern(value, keep_reserved=key == "allow"))
             if token in agents:
                 named.append(rule)
             if "*" in agents:
@@ -1201,14 +1207,20 @@ def _robots_pattern_matches(pattern: str, path: str) -> bool:
 def robots_allows(rules: list[tuple[bool, str]], path: str) -> bool:
     """True when *rules* (``parse_robots``) let *path* (path and query) be
     fetched: the longest matching pattern decides, ``Allow`` wins a tie, and no
-    matching rule allows. *path* is compared in ``_robots_canonical`` spelling,
-    as the rules are."""
-    path = _robots_canonical(path)
+    matching rule allows. *path* is compared in the spelling of each rule: for
+    ``Disallow`` with reserved escapes decoded (an encoding must not slip past
+    a refusal), for ``Allow`` with them kept (``Allow: /private%2Fpub`` must
+    not lift ``Disallow: /private/`` from ``/private/pub``). The length of a
+    match is always that of the decoded pattern, so keeping an escape does not
+    make an ``Allow`` longer."""
+    decoded = _robots_canonical(path)
+    kept = _robots_canonical(path, keep_reserved=True)
     best_len, allowed = -1, True
     for allow, pattern in rules:
-        if _robots_pattern_matches(pattern, path):
-            if len(pattern) > best_len or (len(pattern) == best_len and allow):
-                best_len, allowed = len(pattern), allow
+        if _robots_pattern_matches(pattern, kept if allow else decoded):
+            size = len(_robots_canonical_pattern(pattern))
+            if size > best_len or (size == best_len and allow):
+                best_len, allowed = size, allow
     return allowed
 
 

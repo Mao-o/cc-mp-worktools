@@ -228,7 +228,7 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading
 | `ai-sdk` | AI SDK (Vercel AI SDK) | あり (`search` / `sections` / `content` に出す。`fetch-index` / `search-index` の一覧には出さない) |
 | `firebase` | Firebase (`llms-full.txt` が無いので、`llms.txt` の各ページを必要なときに取得する。`body: fetch`) | あり (`.md.txt`) |
 
-`claude-code` / `claude-platform` / `claude` / `ai-sdk` / `firebase` は 0.45.0 までの専用 script と同じ出力になるよう設定した preset で、キャッシュも専用 script と同じファイル (下の「キャッシュ」の表) を読み書きする。それぞれの skill (`researching-claude-docs` / `researching-ai-sdk` / `researching-firebase`) が使う (0.46.0 から)。`ai-sdk` は 0.51.0 から H3 も索引に読む (`index_heading_level` の既定。`### maxOutputTokens` のように H3 にだけ API 名を書くページが見つかるため)。
+`claude-code` / `claude-platform` / `claude` / `ai-sdk` / `firebase` は 0.45.0 までの専用 script と同じ出力になるよう設定した preset で、キャッシュも専用 script と同じファイル (下の「キャッシュ」の表) を読み書きする。それぞれの skill (`researching-claude-docs` / `researching-ai-sdk` / `researching-firebase`) が使う (0.46.0 から)。`ai-sdk` は 0.51.0 から H3 も索引に読む (`index_heading_level` の既定。`### maxOutputTokens` のように H3 にだけ API 名を書くページが見つかるため)。H3 だけで候補に入ったページが全文検索の補いを止めないよう、`h3_only_keeps_full_search` も有効にしている。
 
 **取得先のホスト** (`scripts/presets.json` の `url` / `index_url` から出した一覧。ネットワークの出口を決める根拠にする。
 1 行に 1 ホスト、次のコードブロックはテストが読む):
@@ -333,6 +333,7 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `heading_line_pattern` | | 正規表現 (グループをちょうど 1 つ持つ)。コードブロックの外で、行全体 (改行を除く) がこれに一致する本文の行を、グループを題にした H2 (`## <グループ>`) として読む。見出しを使わず太字の行で節を区切るページ (Claude Code の changelog の `**2.1.310**`) で、検索の hit・`sections`・`content` が節を持つ。`content` の本文ではその行が `## <グループ>` と出る。`Section:` 行には、ほかの見出しと同じ規則で anchor が付く (公開中の changelog は版ごとに `id="2-1-310"` の形の anchor を持つ)。グループが空になる行はそのまま。`strip_trailing_headings` の後に適用する。`claude-code` preset は `^\*\*(\d+\.\d+\.\d+)\*\*\s*$` |
 | `min_heading_level` | | `sections` / `content` / 本文検索で節として数える最も浅い見出し (`1` か `2`)。既定は `split: h1` で `2`、ほかは `1`。本文にコードブロック外の `# …` 行があるサイトでは `2` にする |
 | `index_heading_level` | | `search-index` / `search` のランキングと `--show-sections` の一覧に使う見出しの最も深い段 (`2` か `3`。既定 `3`)。コードブロック外の見出しだけを読む。H3 はキーワード 1 語ごとに +1 するが、全キーワード一致の加点 (+10) には数えない (API を H3 で並べるページが関数名で見つかり、選択肢の H3 を並べるだけのページが、タイトルがその語そのもののページを押し出さないため)。`2` で H1 / H2 だけを読む (Claude docs / Firebase の preset。`rank_from: index` ではランキングに見出しを使わないので `--show-sections` の一覧にだけ効く。`body: fetch` ではどちらにも効かない (`--show-sections` を無視するため)) |
+| `h3_only_keeps_full_search` | | `true` で、`search` の全文検索の補いの要否を判定するときに、H3 だけで候補に入ったページ (タイトル・description・tags・H1 / H2 のどれにも当たらないページ) を数えない。そのページに本文のヒットがあっても補いが止まらず、補いで増えた行はヒットのある候補の下、ヒット 0 の行の上に置く (1 位は変わらない)。`rank_from: pages` (既定) かつ `index_heading_level: 3` でだけ書ける。`body: fetch` では書けない。既定 `false`。同梱 presets では `ai-sdk` だけが使う (実測は `docs/generic-llms-txt-source.md`) |
 | `protect_tables` | | `false` で、`content` の節の切り出しを表の途中で止めることを許す (既定 `true`) |
 | `compact_pack` | | `true` で、`fetch-index --compact` を 1 行 80 桁以内に数件ずつ詰めて出す |
 | `untitled_warn_ratio` | | `split: frontmatter` のとき、frontmatter に `title:` の無いページがこの割合 (0〜1) を超えたら、`fetch-index` / `search-index` / `search` で stderr に WARNING を出す (本文の見出しで補ったタイトルも「無い」に数える) |
@@ -354,7 +355,7 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `page_fetch_workers` | | `body: fetch` の `search` が同時に取得するページ数 (1〜32。既定 8) |
 | `page_fetch_timeout` | | `body: fetch` の `search` / `search-content` が 1 ページの取得を待つ秒数 (1〜600。既定 30。`sections` / `content` は 120) |
 | `search_content_warn_pages` | | `body: fetch` で `--page-ref` の無い `search-content` が、ページ数がこれを超えると stderr に WARNING を出す (既定 30) |
-| `respect_robots` | | `body: fetch` で `true` のとき、取得する前に対象のホストの `robots.txt` を読み (キャッシュは `--max-age` に従う)、拒否された `llms.txt`・ページと転送先を要求しない。読み方は RFC 9309 (最も長く一致した規則で決め、同じ長さなら `Allow`。`%7E` と `~` のようなエンコードの違いは同じものとして比べる。自分宛てのグループがあれば、規則が無くてもそちらで決める)。`robots.txt` が 4xx か HTML なら制限なし、それ以外で読めないときは取得せず、拒否とは別の文面 (`could not read …/robots.txt`) で知らせる。古いキャッシュがあれば、拒否のときも読めないときも WARNING を出してそれを返す。既定 `false` |
+| `respect_robots` | | `body: fetch` で `true` のとき、取得する前に対象のホストの `robots.txt` を読み (キャッシュは `--max-age` に従う)、拒否された `llms.txt`・ページと転送先を要求しない。読み方は RFC 9309 (最も長く一致した規則で決め、同じ長さなら `Allow`。`%7E` と `~` のようなエンコードの違いは同じものとして比べる。ただし `%2F` のような予約文字の escape は、`Disallow` では復号して比べ、`Allow` では復号しない (符号化の違いで拒否が抜けず、`Allow: /a%2Fb` が `/a/b` の拒否を打ち消さない)。自分宛てのグループがあれば、規則が無くてもそちらで決める)。`robots.txt` が 4xx か HTML なら制限なし、それ以外で読めないときは取得せず、拒否とは別の文面 (`could not read …/robots.txt`) で知らせる。古いキャッシュがあれば、拒否のときも読めないときも WARNING を出してそれを返す。既定 `false` |
 | `search_content_needs_page_ref` | | `body: fetch` で `true` のとき、`--page-ref` の無い `search-content` を終了コード 2 で止める (ページを 1 つも取得しない)。既定 `false` |
 | `index_page_size` | | `fetch-index` が既定で出す項目数 (0 以上の整数。無いか 0 なら全件)。`fetch-index --offset N --limit M` で範囲を選べ (`--limit 0` は全件)、範囲が全件でないときは末尾に `(M of N documents shown, offset=K)` と、次の範囲を出す `  Next page: --offset … --limit …` (同じコマンドに足して使う) を出す。全件を出すときの出力は変わらない |
 | `cache_name` | | 同梱 presets 専用 (`sources.json` に書くとエラー)。キャッシュのファイル名を `<cache_name>-llms-full.txt` / `<cache_name>-llms.txt` にする |
@@ -495,6 +496,8 @@ tags・H1 / H2 で全キーワードが当たり、本文にもヒットがあ�
 ページ (タイトルがその語そのもの) を 2 位に下げないため。一部のキーワードだけが当たった候補の上には残る
 (H3 がクエリをそのまま名指すことがあるため)。Changelog / Release notes のページは、全キーワードが当たっても
 この基準にしない (末尾に置く並びを保つため。`--include-changelog-priority` を付けたときは基準にする)。
+`h3_only_keeps_full_search` の source では、H3 だけの候補を除いて全文検索の補いの要否を判定し、それで増えた行を
+ヒットのある候補の下、ヒット 0 の行の上に置く。
 
 `--show-sections` の一覧は `index_heading_level` の段までの見出しを並べる。既定の `3` では、同梱 presets
 (汎用ローダーの source。2026-10 時点の各サイトの `llms-full.txt` で計測) の見出しの行数は全体で H1 / H2 だけのときの約 1.7 倍

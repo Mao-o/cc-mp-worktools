@@ -518,6 +518,7 @@
       "tags_key": "tags",
       "frontmatter_yaml_values": true,
       "cache_name": "ai-sdk",
+      "h3_only_keeps_full_search": true,
       "description": "AI SDK (Vercel AI SDK)"
     },
     "firebase": {

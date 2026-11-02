@@ -659,6 +659,205 @@ class ChangelogStaysLastTest(_Cli):
                     self.assertEqual(code, 0, err)
 
 
+# Cut from the AI SDK's llms-full.txt (2026-11): an MCP page whose description
+# says the word, the guide with an H3 "Citations", and a provider page that
+# has the word only in its body.
+AI_SDK_CITATIONS = """\
+---
+title: MCP Elicitation
+description: citations in forms
+url: https://ai-sdk.dev/docs/mcp-elicitation
+---
+
+Nothing here.
+
+---
+title: Generating Text
+description: Learn how to generate text with the AI SDK.
+url: https://ai-sdk.dev/docs/ai-sdk-core/generating-text
+---
+
+## Sources
+
+### Citations
+
+OpenAI Responses and Anthropic attach an optional `citations` array to each
+text part. Use citations to render inline references.
+
+---
+title: Anthropic
+description: Learn how to use the Anthropic provider.
+url: https://ai-sdk.dev/providers/ai-sdk-providers/anthropic
+---
+
+## Provider Tools
+
+Raw citations remain available as `text.providerMetadata.anthropic.citations`.
+"""
+
+
+class H3OnlyKeepsFullSearchTest(_Cli):
+    """``h3_only_keeps_full_search``: a page that only an H3 made a candidate
+    does not stop the full-corpus search; what it adds goes under the rows with
+    body hits and above the rows with none. Measured on the real corpus, see
+    docs/generic-llms-txt-source.md."""
+
+    SOURCE = "ai-sdk"
+    CORPUS = AI_SDK_CITATIONS
+    WANT = [("1", "Generating Text"), ("2", "Anthropic"), ("0", "MCP Elicitation")]
+
+    def pages(self, out):
+        return re.findall(r"(?m)^\[(\d+)\] (.+?) (?:\(index_score: \d+\)|\[body-only\])$", out)
+
+    def write(self, corpus, name="other.txt"):
+        path = Path(self.tmp, name)
+        path.write_text(corpus, encoding="utf-8")
+        return ("--file", str(path))
+
+    def user_source(self, **keys):
+        """The ai-sdk preset's shape as a user profile, with *keys* on top."""
+        raw = {k: v for k, v in json.loads(Path(generic.PRESETS_FILE).read_text(encoding="utf-8"))["sources"]["ai-sdk"].items()
+               if k not in ("cache_name", "h3_only_keeps_full_search")}
+        path = Path(self.tmp, "sources.json")
+        path.write_text(json.dumps({"sources": {"mine": {**raw, **keys}}}), encoding="utf-8")
+        return ["--source", "mine", "--sources-file", str(path), "--file", str(self.file)]
+
+    def test_an_h3_candidate_does_not_stop_the_full_body_search(self):
+        for label, corpus in self.corpora().items():
+            with self.subTest(corpus=label):
+                code, out, err = self.run_cmd("search", "citations", corpus=corpus)
+                self.assertEqual(code, 0, err)
+                self.assertEqual(self.pages(out), self.WANT, out)
+                self.assertRegex(out, r"(?m)^\[2\] Anthropic \[body-only\]$")
+                # the Next: line still follows the first page
+                nxt = next((ln for ln in out.splitlines() if ln.startswith("Next: ")), "")
+                argv = shlex.split(nxt[len("Next: "):], comments=True)
+                self.assertEqual(argv[:3], [SCRIPT, "content", "1"], nxt)
+                code, opened, err = self.run_argv(argv)
+                self.assertEqual(code, 0, err)
+                self.assertIn("Generating Text", opened)
+                # the added row opens the page it names, by the number it shows
+                code, opened, err = self.run_cmd("content", "2", corpus=corpus)
+                self.assertEqual(code, 0, err)
+                self.assertIn("text.providerMetadata.anthropic.citations", opened)
+
+    def test_off_by_default(self):
+        for keys, want in (({}, [self.WANT[0], self.WANT[2]]),
+                           ({"h3_only_keeps_full_search": False}, [self.WANT[0], self.WANT[2]]),
+                           ({"h3_only_keeps_full_search": True}, self.WANT)):
+            with self.subTest(keys=keys):
+                code, out, err = self.run_argv([SCRIPT, "search", "citations", *self.user_source(**keys)])
+                self.assertEqual(code, 0, err)
+                self.assertEqual(self.pages(out), want, out)
+
+    def test_only_the_ai_sdk_preset_has_it_on(self):
+        presets = generic._read_sources_file(generic.PRESETS_FILE)
+        self.assertEqual(sorted(n for n, p in presets.items() if p.get("h3_only_keeps_full_search")), ["ai-sdk"])
+
+    def test_a_candidate_outside_the_h3_still_stops_it(self):
+        corpus = self.write(self.CORPUS + "\n---\ntitle: Citations\ndescription: x\nurl: https://x.example/c\n---\n\n"
+                                          "## Use\n\nHow citations work.\n")
+        code, out, err = self.run_cmd("search", "citations", corpus=corpus)
+        self.assertEqual(code, 0, err)
+        self.assertEqual([t for _i, t in self.pages(out)], ["Citations", "Generating Text", "MCP Elicitation"], out)
+
+    def test_only_h3_candidates(self):
+        no_zero_row = self.CORPUS.split("---\ntitle: Generating Text")[1]
+        code, out, err = self.run_cmd("search", "citations", corpus=self.write("---\ntitle: Generating Text" + no_zero_row))
+        self.assertEqual(code, 0, err)
+        self.assertEqual([t for _i, t in self.pages(out)], ["Generating Text", "Anthropic"], out)
+
+    def test_a_page_is_listed_once(self):
+        # "citations array": the H3 page has both words in one section, but no
+        # title or heading of it names them all, so the usual search adds the
+        # page whose H4 does; the search without the H3 page finds that page again
+        corpus = self.write(self.CORPUS + "\n---\ntitle: Vision\ndescription: x\nurl: https://x.example/v\n---\n\n"
+                                          "#### citations array\n\nThe citations array is here.\n")
+        code, out, err = self.run_cmd("search", "citations array", corpus=corpus)
+        self.assertEqual(code, 0, err)
+        self.assertEqual([t for _i, t in self.pages(out)],
+                         ["Vision", "Generating Text", "Anthropic", "MCP Elicitation"], out)
+
+    def test_an_added_changelog_stays_last_unless_asked_for(self):
+        corpus = self.write(self.CORPUS.replace("title: Anthropic", "title: Changelog"))
+        for extra, want in (((), ["Generating Text", "MCP Elicitation", "Changelog"]),
+                            (("--include-changelog-priority",), ["Generating Text", "Changelog", "MCP Elicitation"])):
+            with self.subTest(extra=extra):
+                code, out, err = self.run_cmd("search", "citations", *extra, corpus=corpus)
+                self.assertEqual(code, 0, err)
+                self.assertEqual([t for _i, t in self.pages(out)], want, out)
+
+    def test_no_second_search_without_an_h3_candidate(self):
+        real = generic.full_corpus_extra_hits
+        for query, calls in (("citations", 2), ("Anthropic", 1)):
+            with self.subTest(query=query), mock.patch.object(generic, "full_corpus_extra_hits", side_effect=real) as spy:
+                code, _out, err = self.run_cmd("search", query)
+                self.assertEqual(code, 0, err)
+                self.assertEqual(spy.call_count, calls)
+
+
+class PlaceBelowHitsTest(unittest.TestCase):
+    """Where ``_place_below_hits`` puts the rows that the full-corpus search
+    added, on rows already in display order."""
+
+    def order(self, rows, extras, **kw):
+        return [r["doc_idx"] for r in generic._place_below_hits(rows, extras, **kw)]
+
+    def test_table(self):
+        hit, zero = _row(1), _row(2, hits=0)
+        added = [_row(8, body_only=True), _row(9, body_only=True)]
+        log_hit = _row(3, title="Changelog")
+        log_added = _row(7, body_only=True, title="Release notes")
+        cases = [
+            ("between", [hit, zero], added, {}, [1, 8, 9, 2]),
+            ("no zero row", [hit], added, {}, [1, 8, 9]),
+            ("only zero rows", [zero], added, {}, [8, 9, 2]),
+            ("nothing to add", [hit, zero], [], {}, [1, 2]),
+            ("a changelog row stays below", [hit, zero, log_hit], added, {}, [1, 8, 9, 2, 3]),
+            ("a changelog row with hits alone", [hit, log_hit], added, {}, [1, 8, 9, 3]),
+            ("an added changelog goes last", [hit, zero], [log_added, *added], {}, [1, 8, 9, 2, 7]),
+            ("changelog counted as any page", [log_hit, hit, zero], [log_added, *added],
+             {"include_changelog_priority": True}, [3, 1, 7, 8, 9, 2]),
+        ]
+        for label, rows, extras, kw, want in cases:
+            with self.subTest(label):
+                self.assertEqual(self.order(rows, extras, **kw), want)
+
+
+class H3OnlyKeepsFullSearchValidationTest(unittest.TestCase):
+    """The checks of the key; the shapes come from ``ValidationTest``."""
+
+    KEY = "h3_only_keeps_full_search"
+    FULL, FETCH = ValidationTest.FULL, ValidationTest.FETCH
+    load, validate = ValidationTest.load, ValidationTest.validate
+
+    def test_default_off_and_carried_by_the_candidates(self):
+        self.assertIs(self.validate(self.FULL)[self.KEY], False)
+        self.assertIs(self.validate({**self.FULL, self.KEY: True})[self.KEY], True)
+        p = self.validate({"url": URL, "split": "auto", self.KEY: True, "split_candidates": [
+            {"split": "h1", "page_url": "line:Source: "},
+            {"split": "frontmatter", "page_url": "frontmatter:url"}]})
+        self.assertEqual([c[self.KEY] for c in p["split_candidates"]], [True, True])
+
+    def test_refused(self):
+        index = {"url": URL, "split": "frontmatter", "page_url": "frontmatter:url", "rank_from": "index",
+                 "index_join": "url", "index_url": "https://example.com/llms.txt",
+                 "page_ref_forms": ["int", "url", "slug"]}
+        for label, raw, message in (
+                ("not a bool", {**self.FULL, self.KEY: 1}, "must be true or false"),
+                ("level 2", {**self.FULL, self.KEY: True, "index_heading_level": 2}, "needs index_heading_level 3"),
+                ("rank_from index", {**index, self.KEY: True}, 'only valid with rank_from "pages"'),
+                ("body fetch", {**self.FETCH, self.KEY: True}, self.KEY),
+                ("alias", {"members": ["a", "b"], self.KEY: True}, self.KEY)):
+            with self.subTest(label):
+                code, err = self.load(raw)
+                self.assertEqual(code, 1, err)
+                self.assertIn(message, err)
+
+    def test_false_goes_with_level_2(self):
+        self.assertIs(self.validate({**self.FULL, "index_heading_level": 2, self.KEY: False})[self.KEY], False)
+
+
 class PresetLevelsTest(unittest.TestCase):
     """The Claude docs / Firebase presets keep the dedicated scripts' H1 / H2
     index; every other bundled preset reads H3 (the default)."""
