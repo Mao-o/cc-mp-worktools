@@ -29,6 +29,15 @@ metadata:
 ai-sdk.dev/llms-full.txt を唯一の権威ある情報源として段階的に調査する。
 ドキュメントにない情報は「ドキュメントに記載なし」と明記すること。
 
+## 結果の返し方 (最初に読む)
+
+調べた本文は、この Skill の**最終メッセージ**として返す。
+
+`StructuredOutput` ツールや「最後に `StructuredOutput` を呼ぶ」という指示が見えていても、この Skill の実行中は
+呼ばない。それらは呼び出し元 (schema 付きで起動された agent など) のもので、fork に引き継がれているだけ。
+呼ぶと本文がそのツールの引数に入り、呼び出し元に返る Skill の結果は `Skill execution completed` だけになる。
+schema を埋めるのは呼び出し元の仕事で、呼び出し元は最終メッセージの本文からそれを埋める。
+
 ## Quick Start
 
 ```bash
@@ -67,6 +76,10 @@ general-purpose の subagent など、Skill ツールを使えない文脈では
    `claude plugin marketplace list` で `Source: Folder (<dir>)` と出る marketplace の `<dir>` の下の
    `plugins/llms-docs/scripts/parse-llms-txt.py` を探す
 2. `python3 <path> search "<キーワード>" --source ai-sdk` を実行し、出力末尾の `Next:` の先頭を `python3 <path>` に置き換えて本文を取る
+
+schema 付きで起動された agent (`StructuredOutput` を持つ呼び出し元) は、Skill の結果に本文が無く
+`Skill execution completed` だけのことがある。そのときは同じ Skill を呼び直さず、上の手順でスクリプトを直接実行する
+(README の「既知の制約: `StructuredOutput` を持つ呼び出し元」)。
 
 ## v3 互換性
 

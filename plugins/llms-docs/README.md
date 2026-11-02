@@ -56,6 +56,23 @@ field が抜ける)。
 調査の手数の目安 (1 論点は `search` 1 回 → `content` 1〜2 回、3 回外したら言い換えずに構造から当たる、
 `--max-chars 0` は上限で切れたと確かめてから) は各 skill の「調査の進め方」にある。
 
+### 既知の制約: `StructuredOutput` を持つ呼び出し元
+
+schema 付きで起動された agent (Workflow の `agent(prompt, {schema})` など、`StructuredOutput` ツールを持つもの) が
+4 skill のどれかを Skill ツールで呼ぶと、調べた本文が返らないことがある。
+
+- **再現** (2026-11-03、Claude Code 2.1.316、Workflow 1 体で 1 回): Workflow で
+  `agent("<Claude Code の仕様の質問>。必ず Skill ツールで llms-docs:researching-claude-docs を使う", {schema: {...}})`
+  を起動し、その agent が Skill を呼んだ結果を見る
+- **結果**: Skill の結果は `Skill "llms-docs:researching-claude-docs" completed (forked execution). Result: Skill execution completed`
+  だけだった。fork 側の transcript では、fork の agent が Bash で調査したあと、本文を `StructuredOutput` の引数 `raw_result`
+  に入れて呼んでいた。`raw_result` は呼び出し元の schema のフィールド名なので、fork は呼び出し元のツールと schema を引き継いでいる。
+  原因の本体は harness 側で、公式 docs の `StructuredOutput` の記述に fork の skill の話は無い (2026-11-03 確認)
+- **plugin 側の対策**: 4 つの SKILL.md の冒頭で、`StructuredOutput` を呼ばず本文を最終メッセージとして返すよう fork に指示している
+  (0.51.1)。指示なので確実ではなく、この指示で返るようになるかは未確認
+- **回避**: schema 付きの呼び出し元は、Skill を使わずに上の手順でスクリプトを Bash で直接実行する。Skill の結果に本文が無く
+  `Skill execution completed` だけだったときも、同じ Skill を呼び直さずにスクリプトへ切り替える
+
 ### エラー・0 件のあとの出力
 
 失敗や 0 件のあとに「次に打つコマンド」をそのまま出す (エラーと 0 件の exit code は
