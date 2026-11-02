@@ -2369,6 +2369,8 @@ def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
             needle = page_ref.lower()
             found = [(i, d) for i, d in enumerate(docs) if d[field_name] and needle in d[field_name].lower()]
             if len(found) == 1:
+                if form == "title":
+                    _note_slug_page_shadowed(docs, page_ref, found[0][0], forms, strip_suffix, retry)
                 return found[0][0]
             if len(found) > 1:
                 rows = [(i, d["title"] + (f" ({d['url']})" if d["url"] else "")) for i, d in found[:20]]
@@ -2379,6 +2381,37 @@ def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
         die(f"No page found for slug: {page_ref}")
     die(f"No document found for: {page_ref}")
     return -1
+
+
+def _note_slug_page_shadowed(docs: list[dict], page_ref: str, chosen: int, forms: tuple,
+                             strip_suffix: str | None, retry=None) -> None:
+    """A title that matched one page ahead of the slug form (``title`` comes
+    first in ai-sdk's ``page_ref_forms``) hides the page whose URL ends in
+    the reference: ``acp`` is a substring of the title "ACP (Agent Client
+    Protocol)", so it never reaches ``providers/ai-sdk-harnesses/acp`` (and
+    when the matched page's URL ends in ``/acp`` too, the slug form would have
+    listed both). When another page's URL ends in the reference, name that
+    page and its command on stderr. The result and the exit code stay as
+    they were."""
+    if "slug" not in forms or re.match(r"https?://", page_ref):
+        return
+    slug = page_ref.strip("/")
+    if strip_suffix and slug.endswith(strip_suffix):
+        slug = slug[:-len(strip_suffix)]
+    if not slug:
+        return
+    pattern = re.compile(rf"/{re.escape(slug)}/?$")
+
+    def ends_with_slug(doc: dict) -> bool:
+        return bool(doc["url"]) and pattern.search(_ref_url_key(doc["url"], strip_suffix)) is not None
+
+    others = [(i, d["url"]) for i, d in enumerate(docs) if i != chosen and ends_with_slug(d)]
+    if not others:
+        return
+    listed = ", ".join(f"[{i}] {u}" for i, u in others)
+    tail = f" For [{others[0][0]}]: {retry(others[0][0])}" if retry is not None else ""
+    print(f"Note: '{page_ref}' matched the title of [{chosen}], and the URL of {listed} also ends in it; "
+          f"opened [{chosen}].{tail}", file=sys.stderr)
 
 
 def _copies(docs: list[dict], pages: list[int]) -> bool:

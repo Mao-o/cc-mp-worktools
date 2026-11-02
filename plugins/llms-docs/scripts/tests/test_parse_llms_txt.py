@@ -867,6 +867,21 @@ class PresetsTest(unittest.TestCase):
             return " ".join(line.strip() for line in block.splitlines())
         self.assertLess(len(flat(desc)) + len(flat(when)), 1536 - 50, "leave room for one more preset")
 
+    def test_nextjs_preset_does_not_cut_a_page_at_a_titled_block_without_url(self):
+        # a YAML example in the prose (outside a code fence) that has a title
+        # but no url is not a page; the preset's pages all carry a url
+        text = (
+            '---\ntitle: First\nurl: "https://example.com/docs/first"\n---\n\n# First\n\n'
+            "Config looks like this:\n\n---\ntitle: Example without url\ndescription: sample\n---\n\n"
+            "still the first page\n\n"
+            '---\ntitle: Second\nurl: "https://example.com/docs/second"\n---\n\n# Second\n\nBody.\n'
+        )
+        docs = generic.split_documents(_lines(text), generic._read_sources_file(generic.PRESETS_FILE)["nextjs"])
+        self.assertEqual([d["title"] for d in docs], ["First", "Second"])
+        self.assertEqual([d["url"] for d in docs],
+                         ["https://example.com/docs/first", "https://example.com/docs/second"])
+        self.assertIn("still the first page\n", docs[0]["body_lines"])
+
     def test_preset_shapes_split_their_fixtures(self):
         # one fixture per shape, read through the shipped preset
         presets = generic._read_sources_file(generic.PRESETS_FILE)

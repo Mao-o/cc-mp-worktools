@@ -3,6 +3,9 @@ no other suite covers on the generic loader (moved here when its tests were
 removed in 0.48.0): which ``---`` lines start a page, how frontmatter values
 are read, a page reference holding a quote, and two messages."""
 
+import contextlib
+import io
+import shlex
 import shutil
 import tempfile
 import unittest
@@ -81,6 +84,103 @@ class EscapedQuoteTitleTest(_AiSdk):
         code, out, err = self.run_cmd("sections", 'React error "Maximum update depth exceeded"')
         self.assertEqual(code, 0, err)
         self.assertIn('"React error "Maximum update depth exceeded""', out.splitlines()[0])
+
+
+class SlugShadowedByTitleTest(_AiSdk):
+    """``acp`` is a substring of the title "ACP (Agent Client Protocol)", and
+    the preset tries ``title`` before ``slug``, so the page whose URL ends in
+    ``/acp`` is never opened. The result stays; stderr names that page."""
+
+    def docs_of(self, text):
+        self.write(text)
+        return self.docs()
+
+    CORPUS = (
+        '---\ntitle: ACP (Agent Client Protocol)\nurl: "https://ai-sdk.dev/docs/protocols/agent-client"\n---\n\n'
+        "## Setup\n\nzzq overview body\n\n"
+        '---\ntitle: Agent Client Protocol\nurl: "https://ai-sdk.dev/providers/ai-sdk-harnesses/acp"\n---\n\n'
+        "## Setup\n\nzzq harness body\n\n"
+        '---\ntitle: Streaming\nurl: "https://ai-sdk.dev/docs/streaming"\n---\n\n'
+        "## Setup\n\nzzq streaming body\n"
+    )
+
+    def test_the_page_that_ends_in_the_slug_is_named_and_the_result_stays(self):
+        self.write(self.CORPUS)
+        code, out, err = self.run_cmd("sections", "acp")
+        self.assertEqual(code, 0, err)
+        self.assertIn("docs/protocols/agent-client", out)  # still the title match
+        notes = [ln for ln in err.splitlines() if ln.startswith("Note: 'acp'")]
+        self.assertEqual(len(notes), 1, err)
+        self.assertIn("[1] https://ai-sdk.dev/providers/ai-sdk-harnesses/acp", notes[0])
+        self.assertIn("opened [0]", notes[0])
+        self.assertTrue(notes[0].startswith("Note: 'acp' matched the title of [0]"), notes[0])
+
+    def test_the_printed_command_reaches_the_named_page_for_each_subcommand(self):
+        self.write(self.CORPUS)
+        for cmd in (("sections", "acp"), ("content", "acp", "Setup"),
+                    ("search-content", "zzq", "--page-ref", "acp")):
+            with self.subTest(cmd=cmd[0]):
+                code, out, err = self.run_cmd(*cmd)
+                notes = [ln for ln in err.splitlines() if ln.startswith("Note: 'acp'")]
+                self.assertEqual(len(notes), 1, err)
+                self.assertIn("For [1]: ", notes[0])
+                printed = notes[0].split("For [1]: ", 1)[1]
+                code, out, err = _loader.run_cli(generic, shlex.split(printed, comments=True))
+                self.assertEqual(code, 0, (printed, err))
+                self.assertIn("zzq harness body" if cmd[0] != "sections" else "ai-sdk-harnesses/acp", out)
+
+    def test_no_note_when_the_title_match_is_the_slug_page_or_nothing_else_ends_in_it(self):
+        self.write(self.CORPUS)
+        for ref in ("streaming", "Agent Client Protocol"):
+            with self.subTest(ref):
+                code, out, err = self.run_cmd("sections", ref)
+                self.assertNotIn("Note:", err)
+        self.write(self.CORPUS.replace("ai-sdk-harnesses/acp", "ai-sdk-harnesses/other"))
+        code, out, err = self.run_cmd("sections", "acp")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Note:", err)
+
+    def test_a_title_page_whose_own_url_ends_in_the_slug_is_noted_too(self):
+        # the shape of the real corpus: both pages end in /acp, the title picks one
+        self.write(self.CORPUS.replace("docs/protocols/agent-client", "providers/community-providers/acp"))
+        code, out, err = self.run_cmd("sections", "acp")
+        self.assertEqual(code, 0, err)
+        self.assertIn("community-providers/acp", out)
+        notes = [ln for ln in err.splitlines() if ln.startswith("Note: 'acp'")]
+        self.assertEqual(len(notes), 1, err)
+        self.assertIn("[1] https://ai-sdk.dev/providers/ai-sdk-harnesses/acp", notes[0])
+
+    def test_slashes_and_regex_characters_in_the_reference(self):
+        # a title can hold "/acp/" or "a.p"; neither is a regex or a path here
+        extra = ('---\ntitle: Using /acp/ in prose\nurl: "https://ai-sdk.dev/docs/prose"\n---\n\n## Setup\n\nzzq prose\n\n'
+                 '---\ntitle: Using a.p syntax\nurl: "https://ai-sdk.dev/docs/dotted"\n---\n\n## Setup\n\nzzq dotted\n\n')
+        self.write(extra + self.CORPUS)
+        code, out, err = self.run_cmd("sections", "/acp/")
+        self.assertEqual(code, 0, err)
+        self.assertIn("docs/prose", out)
+        self.assertIn("also ends in it", err)  # the slashes come off the reference
+        code, out, err = self.run_cmd("sections", "a.p")
+        self.assertEqual(code, 0, err)
+        self.assertIn("docs/dotted", out)
+        self.assertNotIn("Note:", err)  # "." is literal: no URL ends in "/a.p"
+
+    def test_no_note_when_the_profile_has_no_slug_form(self):
+        docs = self.docs_of(self.CORPUS)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            idx = generic._resolve_page_ref(docs, "acp", None, ("int", "title", "url_substring"))
+        self.assertEqual(idx, 0)
+        self.assertEqual(err.getvalue(), "")
+
+    def test_slug_forms_that_match_no_title_open_the_slug_page_without_a_note(self):
+        self.write(self.CORPUS)
+        for ref in ("ai-sdk-harnesses/acp", "acp/", "/acp"):
+            with self.subTest(ref):
+                code, out, err = self.run_cmd("sections", ref)
+                # "acp/" and "/acp" are no title substring; the slug form takes them
+                self.assertEqual(code, 0, err)
+                self.assertIn("ai-sdk-harnesses/acp", out)
+                self.assertNotIn("Note:", err)
 
 
 class MessagesTest(_AiSdk):
