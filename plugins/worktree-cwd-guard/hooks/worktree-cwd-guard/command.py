@@ -149,20 +149,21 @@ def _before_redirect(args: list[str]) -> list[str]:
     return args
 
 
-def _words(args: list[str]) -> list[str]:
-    """移動の組み込みの語。redirect より後ろと、末尾の `}` を除く。
+def _words(args: list[str], closes: bool = True) -> list[str]:
+    """移動の組み込みの語。redirect より後ろと、閉じとして読む末尾の `}` を除く。
 
-    zsh は `{ cd <dir> }` の `}` を閉じとして読む (bash は構文エラーで何も走らせない)。
+    zsh は `{ cd <dir> }` の `}` を閉じとして読む (bash は構文エラーで何も走らせない)。開き括弧が無ければ `}` はただの語で、
+    `cd }` は `}` という名前のディレクトリへの移動になる (closes=False)。
     """
     words = _before_redirect(args)
-    return words[:-1] if words[-1:] == ["}"] else words
+    return words[:-1] if closes and words[-1:] == ["}"] else words
 
 
-def _strip_prefix(seg: list[str]) -> tuple[list[str], str | None, dict[str, str | None], bool, frozenset[str], bool]:
+def _strip_prefix(seg: list[str]) -> tuple[list[str], str | None, dict[str, str | None], bool, frozenset[str], frozenset[str]]:
     """先頭の予約語 / 代入 / wrapper (とそのオプション) を外す。
 
     返り値は (残り, wrapper が指定した作業ディレクトリ, コマンドに渡す環境変数の代入, 環境を
-    空にして起動するか, 残りのコマンドが今の shell で動く shell の集合, `!` で成否を反転するか)。代入の値 None は `env -u NAME` による削除。
+    空にして起動するか, 残りのコマンドが今の shell で動く shell の集合, `!` で成否を反転する shell の集合)。代入の値 None は `env -u NAME` による削除。
     `env -C <dir> git ...` のように wrapper が移動先を持つ場合、その後の git はそのディレクトリで動く。
     `GIT_DIR=<dir> git ...` の代入は git の対象を変えるので呼び出し側で使う。
 
@@ -175,14 +176,16 @@ def _strip_prefix(seg: list[str]) -> tuple[list[str], str | None, dict[str, str 
     外部コマンドになる (zsh は代入の後ろの `time` を構文エラーにする)。
     `builtin` は両方の shell で今の shell で動くときだけ外す。`\\time` / `'time'` は外部の time で動くが、shlex が引用を外すので
     keyword の time と区別できず、今の shell で動くものとして読む。bash 3.2 の `! time` / `if time` も外部の time になるが、
-    同じに読む (どちらも見逃す側で、受け入れている)
+    同じに読む (どちらも見逃す側で、受け入れている)。
+    `!` は、後ろのコマンドが今の shell で動く shell でだけ予約語として反転する (`time -p ! false` の zsh と `time -- ! false` の bash 3.2 は
+    外部コマンドの引数になる)。代入の後ろの `!` はどの shell でもコマンド名で、そこで止める
     """
     chdir = None
     assigns: dict[str, str | None] = {}
     clear = False
     shells = _BOTH
     after_command = False  # `command` の後ろ。代入や予約語も、ただのコマンド名になる
-    negated = False  # `!` で成否を反転するか
+    negated = _NEITHER  # `!` で成否を反転する shell の集合
     i = 0
     while i < len(seg):
         tok = seg[i]
@@ -196,8 +199,10 @@ def _strip_prefix(seg: list[str]) -> tuple[list[str], str | None, dict[str, str 
         if tok == "(" or tok in _KEYWORDS:
             if after_command:
                 shells = _NEITHER
-            elif tok == "!" and shells:
-                negated = not negated
+            elif tok == "!":
+                if assigns:
+                    break  # 代入の後ろの `!` は予約語ではなく、コマンド名
+                negated ^= shells
             i += 1
             continue
         if tok == "builtin":
@@ -341,7 +346,7 @@ def _worktree_targets(rest: list[str], here: str | None) -> list[str]:
     return out
 
 
-def _chdir_form(cmd: str, args: list[str]) -> tuple[frozenset[str], list[str]]:
+def _chdir_form(cmd: str, args: list[str], closes: bool = True) -> tuple[frozenset[str], list[str]]:
     """`cd` / `chdir` / `pushd` の option を読み、(option と語の数の上で移動する shell の集合, 語) を返す。
 
     redirect の直前の数字の語は fd として外すが、語がそれだけのとき (`cd 2>x` と `cd 2 >x` は字句に分けた後では区別できない) は
@@ -362,7 +367,7 @@ def _chdir_form(cmd: str, args: list[str]) -> tuple[frozenset[str], list[str]]:
             shells &= table.get(letter, _NEITHER)
         i += 1
     rest = args[i:]
-    words = _words(rest) or [t for t in rest[:1] if t != "}" and (cmd != "pushd" or t.isdigit())]
+    words = _words(rest, closes) or [t for t in rest[:1] if t != "}" and (cmd != "pushd" or t.isdigit())]
     if len(words) > 1:
         shells &= _BASH  # 語が 2 つの `cd a b` は bash 3.2 が a へ移動し (bash 5 は失敗する)、zsh は置換として読んで失敗する
     return shells, words
@@ -716,6 +721,7 @@ class _Analyzer:
         self.in_pipe = False  # 今のコマンドが `|` の後ろ (pipeline の要素) か
         self.list_start = self._snapshot()  # 今の AND-OR list の開始時点 (`&` で戻す)
         self.scopes: list[tuple] = []  # `( ... )` に入るときの状態
+        self.braces = 0  # 開いている `{` の数 (語の末尾の `}` を閉じと読むか)
 
     # --- 状態 -------------------------------------------------------------
 
@@ -750,8 +756,13 @@ class _Analyzer:
                 seg.append(tok)  # リダイレクト記号はそのまま
                 continue
             for op in _OPS.findall(tok):
-                if op == "\n" and not seg and self.in_pipe:
-                    continue  # `|` の後ろの改行は pipeline の続き
+                if op == "\n" and not seg and (self.in_pipe or self.op):
+                    continue  # `|` / `&&` / `||` の後ろの改行はコマンドの続き
+                if op == "(" and all(t in _KEYWORDS for t in seg):
+                    # `! ( ... )` / `if ( ... )` の予約語はコマンドではない。`&&` / `||` を括弧まで持ち越す
+                    # (`!` の反転を先に適用すると、`true && ! ( git ... )` の括弧を実行する状態が無くなる)
+                    self.braces += seg.count("{")
+                    seg = []
                 self._flush(seg, next_is_pipe=op in ("|", "|&"))
                 seg = []
                 self._operator(op)
@@ -770,6 +781,9 @@ class _Analyzer:
             self._new_list()
         elif op == "(":
             run, skipped = self._split()
+            # 括弧の中は新しい list なので、`! cd x && (` の失敗の読みは、括弧を実行した時点で普通の状態にする
+            # (`_STAYED` のまま入ると、直後の改行で状態が空になる)
+            run = {(h, s, "ok" if st == _STAYED else st) for h, s, st in run}
             self.scopes.append((frozenset(run), skipped, dict(self.env), dict(self.shvars), self.list_start))
             self.alts = run
             self._new_list()
@@ -795,6 +809,9 @@ class _Analyzer:
         self.in_pipe = next_is_pipe
         if not seg:
             return
+        # 括弧の数は、そのコマンドを実行する状態が無くても数える (`false && { x }` の `{` と `}`)
+        rest = _strip_prefix(seg)[0]
+        self.braces += seg[: len(seg) - len(rest)].count("{")
         run, skipped = self._split()
         if run:
             after = self._command(seg, run)
@@ -805,6 +822,8 @@ class _Analyzer:
                 run = self._both(run)
             else:
                 run = after
+        if self.braces and _before_redirect(rest)[-1:] == ["}"]:
+            self.braces -= 1
         self.alts = run | skipped
 
     # --- 1 コマンド -----------------------------------------------------------
@@ -812,7 +831,7 @@ class _Analyzer:
     def _command(self, seg: list[str], alts: set[_Alt]) -> set[_Alt]:
         rest, chdir, assigns, clear, shells, negated = _strip_prefix(seg)
         after = self._simple(rest, chdir, assigns, clear, shells, alts)
-        if not negated:
+        if self.shell not in negated:
             return after
         # `! cmd` は成否を反転する (反転しないと `! chdir <worktree> && git ...` の git を、main で走るのに飛ばす)
         flipped = {(h, s, "fail" if st == "ok" else "ok") for h, s, st in after}
@@ -895,7 +914,7 @@ class _Analyzer:
             if words and not words[0].startswith(("+", "-")):
                 return {(here, stack + (_resolve(here, words[0]),), "ok")}
             return {(here, stack + (None,), "ok")}  # 語なしと `+1` はスタックを回す。次の popd の行き先は分からない
-        shells, words = _chdir_form(cmd, args)
+        shells, words = _chdir_form(cmd, args, self.braces > 0)
         if self.shell not in shells:
             return failed
         if cmd == "pushd" and not words:
@@ -906,7 +925,7 @@ class _Analyzer:
         return {(new, stack + (here,) if cmd == "pushd" else stack, "ok")}
 
     def _popd(self, args: list[str], here: str | None, stack: tuple) -> set[_Alt]:
-        words = _words(args)
+        words = _words(args, self.braces > 0)
         if words[:1] == ["-q"]:  # zsh だけ受け付ける (bash は失敗して動かない)
             if self.shell != "zsh":
                 return {(here, stack, "fail")}

@@ -417,6 +417,123 @@ class ClosingBraceTest(ChdirReadingBase):
         self.assertEqual(decision(evaluate(bash(f'cd "{m}"; {{ pushd }}; {GIT}', self.a))), "context")
 
 
+class LayoutTest(ChdirReadingBase):
+    """`!` の反転と失敗の読みは、同じ行か改行か、括弧の有無で割れない。実行する状態が空になって後ろの git を黙って読まなくなることがない。"""
+
+    FAILING = ("! cd /nonexistent", "! pushd /nonexistent", "! popd +9", "! cd +1")
+
+    def test_newline_right_after_opening_paren(self):
+        # 失敗の読みは括弧を実行した時点で普通の状態になる。括弧の直後の改行で状態が消えない
+        m = self.main
+        gm = f'git -C "{m}" reset --hard'
+        for head in self.FAILING:
+            self.assertDenied((
+                f'{head} && (\n{gm}\n)',
+                f'{head} && ( # c\n{gm}\n)',
+                f'{head} && ( (\n{gm}\n) )',
+                f'if {head} && (\n{gm}\n); then true; fi',
+                f'{head} && ({gm})',
+            ))
+        self.assertDenied((f'cd "{m}"; ! cd /nonexistent && (\n{GIT}\n)', f'cd "{m}"; ! cd /nonexistent && ({GIT})'))
+
+    def test_negated_paren_keeps_the_operator(self):
+        # `!` だけの語をコマンドとして実行して失敗にすると、`&&` の括弧を実行する状態が無くなる
+        m = self.main
+        gm = f'git -C "{m}" reset --hard'
+        self.assertDenied((
+            f'true && ! ( {gm} )',
+            f'cd "{m}" && ! ( {GIT} )',
+            f'cd "{m}" && ! ({GIT})',
+            f'git status && ! ( {gm} )',
+            f'false || ! ( {gm} )',
+            f'true && ! ! ( {gm} )',
+            f'true && if ( {gm} ); then true; fi',
+            f'false || if ( {gm} ); then true; fi',
+            f'true && ! ( {gm} ); true',
+        ))
+        # 演算子は持ち越すので、実際に飛ばす形は飛ばしたまま
+        self.assertAllowed((f'false && ! ( {gm} )', f'true || ! ( {gm} )', f'false && ! ! ( {gm} )'))
+
+    def test_newline_after_and_or_continues_the_list(self):
+        m, a = self.main, self.a
+        self.assertDenied((
+            f'cd "{m}"; ! cd /nonexistent &&\n{GIT}',
+            f'cd "{m}"; ! cd /nonexistent && \n\n{GIT}',
+            f'cd "{m}"; ! cd /nonexistent && # c\n{GIT}',
+            f'cd "{m}"; ! cd /nonexistent && {GIT}',
+            f'cd "{m}"; ! cd /nonexistent && \\\n{GIT}',
+            f'cd "{m}" &&\n! cd /nonexistent &&\n{GIT}',
+            f'pushd "{m}"; ! cd /nonexistent &&\n{GIT}',
+            f'! false &&\ngit -C "{m}" reset --hard',
+            f'false ||\ngit -C "{m}" reset --hard',
+        ))
+        # 演算子が改行で消えないので、同じ行と同じ形は同じ読み
+        self.assertAllowed((
+            f'false &&\ngit -C "{m}" reset --hard',
+            f'true ||\ngit -C "{m}" reset --hard',
+            f'cd "{m}"; ! cd "{a}" ||\n{GIT}',
+            f'cd "{m}"; ! ! cd "{a}" &&\n{GIT}',
+        ))
+        # 普通の改行は従来どおり list を区切る (失敗の読みは残らない)
+        self.assertAllowed((f'cd "{m}"; ! cd "{a}"\n{GIT}',))
+        # `!` だけの行はコマンドが無いまま反転する。次の行は別の list
+        self.assertDenied((f'true && !\ngit -C "{m}" reset --hard',))
+        # `|` の後ろの改行は pipeline の続き (zsh の `command cd` は外部コマンドで、bash は要素をサブシェルで動かす)
+        self.assertAllowed((f'printf a |\ncommand cd "{m}"; {GIT}',))
+
+
+class ReservedBangTest(ChdirReadingBase):
+    def test_bang_after_external_time_does_not_flip(self):
+        # 外部の time の引数になる shell があるので、その shell の読みでは反転しない
+        m = self.main
+        gm = f'git -C "{m}" reset --hard'
+        self.assertDenied((
+            f'time -- ! false || {gm}',
+            f'time time ! false || {gm}',
+            f'time -p -- ! false || {gm}',
+            f'time -p ! false || {gm}',
+            f'cd "{m}"; time -- ! cd /nonexistent && {GIT}',
+            # bash は `time -p` の後ろを今の shell で動かして反転し、zsh は外部の time が失敗する。どちらも git が走る
+            f'time -p ! true || {gm}',
+        ))
+        self.assertAllowed((f'time ! false || {gm}', f'! time false || {gm}', f'! ! false && {gm}'))
+
+    def test_bang_after_assignment_is_a_command_name(self):
+        m, a = self.main, self.a
+        gm = f'git -C "{m}" reset --hard'
+        self.assertDenied((f'FOO=1 ! false || {gm}', f'cd "{m}"; FOO=1 ! cd "{a}"; {GIT}', f'cd "{m}"; FOO=1 ! cd "{a}" || {GIT}'))
+        # 代入の前の `!` は予約語
+        self.assertAllowed((f'! FOO=1 false || {gm}',))
+
+
+class LoneClosingBraceTest(ChdirReadingBase):
+    def test_brace_without_opening_is_a_word(self):
+        # 開き括弧が無い `}` は閉じではなく、`}` という名前のディレクトリへの移動 (無ければ失敗して動かない)
+        m, a = self.main, self.a
+        self.assertDenied((
+            f'cd "{m}"; cd }}; {GIT}',
+            f'cd "{m}"; pushd }}; {GIT}',
+            f'cd "{m}"; builtin cd }}; {GIT}',
+            f"cd \"{m}\"; cd '}}'; {GIT}",
+            f'cd "{m}"; cd \\}}; {GIT}',
+            # 閉じた後の `}` も語
+            f'{{ true; }}; cd "{m}"; cd }}; {GIT}',
+            f'{{ true }} >/dev/null; cd "{m}"; cd }}; {GIT}',
+            # 語が 2 つになる。bash 3.2 だけ移動する
+            f'cd "{m}"; cd "{a}" }}; {GIT}',
+        ))
+        # `popd }` は `popd +N` と同じく語のある popd で、行き先は読まない (語の無い popd の、スタックが空の読みにしない)
+        self.assertEqual(decision(evaluate(bash(f'cd "{m}"; popd }}; {GIT}', a))), "context")
+
+    def test_opening_brace_is_counted_where_the_command_is_not_run(self):
+        m, a = self.main, self.a
+        # `(` の手前の `{` も数える
+        self.assertAllowed((f'cd "{m}"; {{ (true); cd "{a}" }}; {GIT}',))
+        # 実行されないコマンドの括弧も数える (開きと閉じの対が崩れない)
+        self.assertDenied((f'{{ false && true }}; cd "{m}"; cd }}; {GIT}',))
+        self.assertAllowed((f'cd "{m}"; false && {{ true }}; {{ cd "{a}" }}; {GIT}', f'cd "{m}"; {{ false && {{ true }}; cd "{a}" }}; {GIT}'))
+
+
 class PipelineTest(ChdirReadingBase):
     def test_last_element_moves_in_zsh_only(self):
         m, a = self.main, self.a
