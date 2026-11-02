@@ -1,27 +1,26 @@
 ---
 name: researching-library-docs
 description: |
-  Next.js / Vite / Vitest / Drizzle ORM / Zod / Hono / Bun / Vercel / Render /
-  MCP (Model Context Protocol) / OpenAI Codex / OpenAI Plugins・API docs / Ollama / Agent Skills (SKILL.md 仕様) /
-  Agent Plugins / ACP (Agent Client Protocol) / Cline / Factory / Devin / Cloudflare 製品別 (Workers / D1 ほか)
-  の公式ドキュメント調査スキル。各サイトの llms-full.txt を段階的に読み込み、API 仕様・
-  設定・コード例を verbatim で取得する。Skill ツールで起動し、メインの会話コンテキストを
-  消費しない。これらの仕様確認には WebFetch ではなくこのスキルを使う (要約モデル経由では
-  ないため field の抜け落とし・幻覚が起きない)。利用者が sources.json に追加したサイトも読める。
+  AI SDK (Vercel AI SDK) / Firebase / Next.js / Vite / Vitest / Drizzle / Zod / Hono / Bun /
+  Vercel / Render / MCP (Model Context Protocol) / OpenAI Codex・Plugins・API・Agents SDK / Ollama / Agent Skills /
+  Agent Plugins / ACP / AI コーディングツール (Cline / Factory / Devin / Gemini CLI /
+  Kilo Code / Continue / Zed / Amp) の公式ドキュメント調査スキル。llms.txt を段階的に読み、
+  API 仕様・設定・コード例を verbatim で取得する。Skill ツールで起動し、会話コンテキストを
+  消費しない。WebFetch (要約で field が抜ける) の代わりに使う。sources.json のサイトも読める。
 when_to_use: |
-  Use when building with, debugging, or designing on the services above, and
-  proactively before answering spec questions about them — especially before
-  editing next.config.*, vite.config.*, vitest.config.*,
-  drizzle.config.*, wrangler.toml / wrangler.jsonc, or code that imports from
-  `next` / `vite` / `vitest` / `drizzle-orm` / `zod` / `hono` /
-  `@modelcontextprotocol/sdk`, or vercel.json / render.yaml / bunfig.toml.
-  Triggers: "Next.js", "App Router", "Vite", "Vitest", "Drizzle", "drizzle-orm",
-  "Zod", "Hono", "Bun", "Vercel", "Render", "MCP", "Codex CLI", "Ollama", "Cloudflare Workers", "wrangler", "D1", "R2", "Workers KV",
-  "Durable Objects", "Cloudflare Pages", "Queues", "Workers AI", "Vectorize",
-  "Hyperdrive", "Cloudflare Agents", "Cloudflare Workflows", "AI Gateway",
-  "Browser Rendering", "Cloudflare Containers", "agentskills.io", "SKILL.md spec",
-  "Agent Plugins", "OpenAI Plugins", "OpenAI API", "ACP", "Cline", "Factory Droid", "Devin",
-  "researching-library-docs"
+  Use when building with, debugging, or designing on the above, and proactively
+  before spec questions about them — especially before editing code that imports
+  `ai` / `@ai-sdk/*` / `firebase` / `firebase-admin` / `firebase-functions` / `next` /
+  `drizzle-orm` / `zod` / `hono` / `@modelcontextprotocol/sdk`, or firebase.json / *.rules /
+  next.config.* / vite.config.* / vitest.config.* / drizzle.config.* / vercel.json.
+  Triggers: "AI SDK", "ai-sdk", "@ai-sdk", "streamText", "generateText", "useChat",
+  "streamObject", "generateObject", "useObject", "embedMany", "convertToModelMessages",
+  "Firebase", "Firestore", "Firebase Auth", "Cloud Functions", "FCM", "Firebase Hosting",
+  "App Hosting", "Realtime Database", "Cloud Storage", "App Check", "Remote Config",
+  "Crashlytics", "Data Connect", "Genkit", "AI Logic", "security rules", "firestore.rules",
+  "storage.rules", "App Router", "Codex CLI", "OpenAI API", "OpenAI Agents SDK",
+  "agentskills.io", "SKILL.md spec", "Factory Droid", "researching-ai-sdk",
+  "researching-firebase"
 argument-hint: "[source] <question>"
 context: fork
 model: sonnet
@@ -31,18 +30,17 @@ allowed-tools:
   - WebFetch
 metadata:
   author: mao
-  version: "1.2.0"
+  version: "2.0.0"
 ---
 
 # ライブラリ公式ドキュメント調査 (汎用 llms-full.txt)
 
-各サイトの `llms-full.txt` を唯一の権威ある情報源として段階的に調査する。
+各サイトの `llms-full.txt` (無いサイトは `llms.txt` と各ページ) を唯一の権威ある情報源として段階的に調査する。
 ドキュメントにない情報は「ドキュメントに記載なし」と明記すること。
 
-Claude Code / Claude API・AI SDK・Firebase は専用 skill (`researching-claude-docs` /
-`researching-ai-sdk` / `researching-firebase`) の対象で、この skill では扱わない。script は同じ
-`parse-llms-txt.py` で、source 名 (`claude-code` / `claude-platform` / `claude` / `ai-sdk` / `firebase`) と
-読み方は各 skill にある。
+Claude Code / Claude API は `researching-claude-docs`、Cloudflare の各製品は `researching-cloudflare-docs` の対象。
+script は同じ `parse-llms-txt.py` で、source 名 (`claude-code` / `claude-platform` / `claude` / `cloudflare-<製品>`) と
+読み方はそれぞれの skill にある。AI SDK と Firebase はこの skill で読む (下の「source ごとの注意」も読む)。
 
 ## 結果の返し方 (最初に読む)
 
@@ -59,6 +57,8 @@ schema を埋めるのは呼び出し元の仕事で、呼び出し元は最終�
 
 | 対象 | `--source` |
 |---|---|
+| AI SDK (Vercel AI SDK、`ai` / `@ai-sdk/*`) | `ai-sdk` |
+| Firebase (ページごとに取得する。下の「source ごとの注意」) | `firebase` |
 | Next.js | `nextjs` |
 | Vite / Vitest | `vite` / `vitest` |
 | Drizzle ORM | `drizzle` |
@@ -83,11 +83,8 @@ schema を埋めるのは呼び出し元の仕事で、呼び出し元は最終�
 | OpenAI Agents SDK (TypeScript) | `openai-agents-js` |
 | Continue | `continue` |
 | Zed / Amp (ページごとに取得する。`search-content` は `--page-ref` が必須) | `zed` / `amp` |
-| Cloudflare の各製品 | `cloudflare-<製品>`: `workers` / `d1` / `r2` / `kv` / `durable-objects` / `pages` / `queues` / `workers-ai` / `vectorize` / `hyperdrive` / `agents` / `workflows` / `ai-gateway` / `browser-rendering` / `containers` |
 
 - 引数の先頭語が上の source 名、または `sources` の一覧にある名前ならそれを使う
-- Cloudflare の質問が複数製品にまたがる (例: Workers から D1 を使う) ときは、主題の製品から
-  始め、足りなければ別の source で `search` し直す。wrangler の設定は `cloudflare-workers`
 - 表に無いサイトは、まず一覧を確かめる (利用者が `sources.json` に足した profile も出る):
 
 ```bash
@@ -152,8 +149,8 @@ schema 付きで起動された agent (`StructuredOutput` を持つ呼び出し�
 ```
 
 - `search`: スペース区切りの複数キーワード (AND。揃わなければ半分以上が揃うセクションへ
-  緩め、`[partial match]` と表示)。未取得なら自動で取得してキャッシュする (Vercel は 10MB、
-  Cloudflare Workers は 5MB あるので初回は数秒かかる)。キーワードは英語のドキュメント用語で書く。
+  緩め、`[partial match]` と表示)。未取得なら自動で取得してキャッシュする (Vercel は 10MB
+  あるので初回は数秒かかる)。キーワードは英語のドキュメント用語で書く。
   index の上位 N 件に本文ヒットが 1 件も無いときは、全文検索のヒットを `--top-n` 件まで (全キーワードが揃うページを先に、部分一致のページも含めて) `[body-only]` として足す。上位 N 件がどれも部分一致 (`[partial match]`) のときは、全文検索で全キーワードが 1 セクションに揃うページを最大 2 件探して `[body-only]` として足す (既存の行は残り、`Next:` には index の最上位候補の行も残る。全キーワードが揃う候補が Changelog / Release notes だけのときも探す。全キーワードが揃う候補があっても、どの候補もページタイトルと見出しに全キーワードを語として含まなければ、含むページを同じく最大 2 件足す。キーワードが 1 語のときは足さない)。足したページは末尾に追記されるのではなく、`search` の並び順の中に入る (本文ヒットのあるページは本文ヒットの無い index の候補より上に並ぶので、1 位になることが多い。その index の候補は `(no body hits — index match only)` で下位に回る)。H3 だけで候補に入ったページ (タイトル・description・tags・H1 / H2 のどれにも当たらないページ) は、それらで全キーワードが当たった候補 (Changelog / Release notes を除く) の下に置かれる
 - `content`: `heading_path` を省略するとページ全体。本文は既定 24000 文字で切り詰め、
   前後にサブセクション一覧と次の呼び出し例を出す。子見出しの無い節が切り詰められたときは、
@@ -174,6 +171,59 @@ llms-full.txt にページ URL が無く、`llms.txt` とタイトルが一致�
 `agent-plugins` と `openai-agents-js` は URL が全く無い。URL の無いページの引用元はタイトル + heading_path で表す。
 `openai-agents-js` は同じタイトルのページがあるので、整数 index で開く。
 
+`zed` / `amp` は整数 index・完全 URL・URL の末尾 (slug) を受け付ける (タイトルの部分一致は無い)。`search` に全文検索の補い (`[body-only]`) は無く、上位 N 件の外のページは取得しない。`ai-sdk` / `firebase` も形が違うので、下の「source ごとの注意」を読む。
+
+## source ごとの注意
+
+### AI SDK (`--source ai-sdk`)
+
+`page_ref` は 4 形式を受け付け、上から順に試す:
+
+- **整数 index** (推奨): `42`
+- **タイトルの部分一致**: `"Event Callbacks"`。一意に決まる場合のみ。曖昧ならエラーになる (候補ごとのコマンド付き)
+- **完全 URL**: `https://ai-sdk.dev/docs/ai-sdk-core/generating-text`。各ページの frontmatter の `url:` (`sections` /
+  `content` / `search` / `search-content` が `URL:` 行に表示する) と正規化して一致するページ。末尾の `/` や `.md` は
+  無視する。一致するページが無ければ `No page found for URL` で exit 1
+- **URL の末尾 (slug)**: `generating-text`, `ai-sdk-core/generating-text`。URL がその段で終わるページ。複数あれば
+  候補ごとのコマンド付きで曖昧エラーになるので、長い slug か完全 URL を渡す
+
+タイトルの部分一致が先に効くので、slug がどれかのタイトルの一部にも当たると、そのタイトルのページが開く
+(同じ slug で終わる別ページがあっても開かない。例 `acp`)。ただし、その別ページがあるときは stderr に `Note: '<ref>' matched the title of [N], and the URL of [M] … also ends in it` と、
+そのページを開くコマンドが出る (終了コードは 0 のまま)。Note が出たら、開いたページの `URL:` 行が目的のページかを確かめ、違えば出力のコマンドを使う。
+どの形式にも当たらなければ `No document found for: <ref>` で exit 1 (整数 index を `search` / `search-index` で調べ直す)。
+
+- **引用元**: `search` / `search-content` の結果に、ページの URL が `URL:` 行で付く。`Section:` 行の `URL#anchor` は付かない
+  (AI SDK サイトの見出し id の規則を確かめていないため) ので、URL + タイトル + heading_path で表す
+- **本文の読み方**: `<Snippet>`, `<Note>` 等の JSX 記法はテキストとして読む。見出しレベルの飛びが多い (`#` の直下に `###`)
+- **WebFetch フォールバックの先**: `ai-sdk.dev/docs/<slug>`
+- ファイルの物理構造・frontmatter・見出しの詳細: [references/ai-sdk-llms-txt-structure.md](references/ai-sdk-llms-txt-structure.md)
+
+### Firebase (`--source firebase`)
+
+**`llms-full.txt` が無い**ので、`llms.txt` の項目でランキングし、個別の `.md.txt` ページを on-demand で取得する。
+
+| 項目 | 値 |
+|------|----|
+| ページ数 | ~6970 (Android/iOS/JS/C++ 各 SDK の API reference を含む) |
+| インデックスサイズ | ~1.8MB |
+| キャッシュ | `<cache-dir>/firebase-llms.txt` (index) + `<cache-dir>/firebase-docs/` (per-page) |
+
+- `search` は上位候補 N 件 (既定 5、`--top-n`) だけを取得して本文を検索する。初回は N 件分の HTTP 取得で数秒〜十数秒かかり、
+  2 回目以降はキャッシュで速い。`sections` / `content` は該当ページを自動で取得する。全文検索の補い (`[body-only]`) は無く、上位 N 件の外のページは取得しない
+- **`search-content` は `--page-ref` を付ける**。省略すると 7000 ページ近くを取得する (初回は非常に重い)。7000 ページを
+  盲目的に一覧せず、`search` を入口にする
+- `fetch-index` は既定で先頭 100 件。続きは `--offset 100 --limit 100`。`--limit 0` は全件 (7000 行近い) なので通常は避ける
+- `page_ref` は 3 形式: 整数 index (推奨)、URL の末尾 (`"vector-search"`。一意に決まる場合のみ)、完全 URL
+  (`"https://firebase.google.com/docs/firestore/vector-search"`)。タイトルの部分一致は無い
+- **引用元の anchor**: `Section:` 行に `[<URL>#<anchor>]` が付く。Google DevSite の規則で、単語の結合は `-` ではなく `_`
+  (`.../firestore/manage-data/add-data` の見出し「Set a document」は `id="set_a_document"`。見出しに `/` を含む `## Read / write data` は `#read_write_data`)。
+  slug は見出しのレンダリング後テキストから作る (小文字化・記号除去・空白を `_` で結合)。正規化するのは インライン / 参照形式リンク・画像 (alt を採用)・脚注マーカー・HTML タグ・HTML 実体参照・コードスパン (中身は逐語)・`*` `~` と単語境界の `_` 強調記号。
+  同名見出しの連番、ページ側の独自 ID 指定、それ以外の記法は再現しない best-effort で、解決しないときは URL 本体 (`#` の前) でページを開いて見出しを目視で探す
+- reference ページの多くは H2 のみのフラット構造、guide ページは H2/H3 の階層を持つ
+- **一部のページの取得失敗** (`search` / `search-content`): 失敗したページだけ `(skip: fetch failed <url>: ...)` を stderr に出して読み飛ばし、残りで続ける (exit 0)。末尾に `(N documents skipped — fetch failed, see stderr)` が出る。全ページ失敗したときだけ結果が 0 件になる
+- **結果ゼロ**: `Why nothing matched:` の語ごとのページ数は、`search` ならタイトル / 説明の index、`search-content` なら取得済みのページが対象。`--page-ref` で絞っていると数えるのはそのページだけなので、外して再実行する
+- **WebFetch フォールバックの先**: `https://firebase.google.com/docs/<product>`
+
 ## heading_path の指定方法
 
 `sections` / `search` / `content` の出力にある完全なパス (スラッシュ区切り) をそのままコピーする
@@ -189,11 +239,11 @@ llms-full.txt にページ URL が無く、`llms.txt` とタイトルが一致�
 
 | コマンド | 主な引数 | 説明 |
 |---|---|---|
-| `search` | `<query> [--top-n N] [--max-hits N] [--context N]` | 推奨入口。候補 top N + 本文 hits |
+| `search` | `<query> [--top-n N] [--max-hits N] [--context N] [--max-snippet-chars N] [--include-changelog-priority]` | 推奨入口。候補 top N + 本文 hits。changelog / release notes は既定で末尾 (`--include-changelog-priority` で解除) |
 | `search-index` | `<query> [--limit N] [--show-sections]` | タイトル・見出しで候補だけ取得 |
-| `search-content` | `<query> [--page-ref REF] [--limit N] [--max-hits N] [--include-changelog-priority]` | 本文を横断検索 |
+| `search-content` | `<query> [--page-ref REF] [--limit N] [--context N] [--max-hits N] [--max-snippet-chars N] [--include-changelog-priority]` | 本文を横断検索 |
 | `sections` | `<page_ref>` | ページの見出し一覧 |
-| `content` | `<page_ref> [heading_path] [--max-chars N]` | 本文を表示 |
+| `content` | `<page_ref> [heading_path] [--max-chars N] [--no-subsection-hints]` | 本文を表示。前後にサブセクション一覧、既定 24000 文字で切り詰め |
 | `fetch-index` | `[--compact] [--offset N] [--limit N]` | 全ページ一覧 (フォールバック) |
 | `sources` | | 使える source の一覧 (presets と利用者の sources.json) |
 
@@ -219,7 +269,9 @@ llms-full.txt にページ URL が無く、`llms.txt` とタイトルが一致�
 | `unknown --source` | `sources` で一覧を確認して選び直す |
 | ネットワーク失敗 | 既存キャッシュがあれば WARNING を出して続行。無ければ Error。復旧後は `--max-age 0` で再取得。例外: preset の取得 URL が変わった直後 (キャッシュの `.meta.json` の URL と違う) は、既存キャッシュがあっても Error |
 | 結果ゼロ (`No matching ...` の下に `Why nothing matched:` で語ごとのページ数) | 全語が 0 件なら言い換えを続けず、別の語・`search-index`・別の `--source` に切り替える。一部の語だけ 0 件ならその語を落とす。全語があるのに 0 件 (同じセクションに揃わない) なら語を減らす。続けて出る `Next:` がそのまま実行できる |
-| 曖昧な page_ref (`Ambiguous title substring` / `Ambiguous url substring`) | 候補ごとに実行できるコマンドが付く。選んでそのまま実行する |
+| キャッシュ破損 (パースエラー / 不正なインデックス) | `--max-age 0` で強制再取得 (キャッシュは既定 `~/.cache/llms-docs`、`--cache-dir` で変更可。7 日超のキャッシュは自動で取り直す) |
+| 曖昧な page_ref (`Ambiguous title substring` / `Ambiguous url substring` / `Ambiguous slug`) | 候補ごとに実行できるコマンドが付く。選んでそのまま実行する |
+| どのページの URL でもない URL を page_ref に渡した (`No page found for URL: <URL>`) | URL の綴りを確かめる。分からなければ URL の最後の段の語で `search` する |
 | `Error: heading '...' not found.` | `Closest sections:` の候補 (コマンド付き) を先に使う。全見出しは `Available sections:` に続く |
 | 起動直後の `TypeError: unsupported operand type(s)` | Python 3.11 以上が必要 |
 | `Error: <path>/sources.json: …`、または同じファイルを名指す `WARNING: …` | `Error` と、`left out` / `not used` を含む `WARNING` は利用者の `sources.json` の誤りなので、そのファイルを直す (README「任意の llms-full.txt を読む」の `sources.json` の節)。`replaces the bundled preset` の `WARNING` は同梱 preset の上書きで、利用者が意図したものなら対処不要 (意図しないときだけ直す)。直せなければ下の WebFetch フォールバック |
