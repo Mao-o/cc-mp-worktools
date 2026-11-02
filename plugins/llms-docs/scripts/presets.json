@@ -135,6 +135,81 @@
       "h1_needs_url": true,
       "description": "Devin"
     },
+    "gemini-cli": {
+      "url": "https://geminicli.com/llms.txt",
+      "split": "h1",
+      "page_url": "h1-link",
+      "h1_needs_url": true,
+      "skip_empty": true,
+      "drop_lines": [
+        "^import \\{.*\\} from '@astrojs/starlight/components';\\s*$"
+      ],
+      "description": "Gemini CLI"
+    },
+    "kilo-code": {
+      "url": "https://kilo.ai/docs/llms.txt",
+      "split": "line",
+      "line_prefix": "## Source: ",
+      "url_prefix": "https://kilo.ai/docs",
+      "drop_lines": [
+        "^# \\{% \\$markdoc\\.frontmatter\\.title %\\}\\s*$"
+      ],
+      "description": "Kilo Code"
+    },
+    "openai-agents-js": {
+      "url": "https://openai.github.io/openai-agents-js/llms-full.txt",
+      "split": "h1",
+      "description": "OpenAI Agents SDK (TypeScript)"
+    },
+    "continue": {
+      "url": "https://continue-docs.mintlify.app/llms-full.txt",
+      "split": "h1",
+      "page_url": "line:Source: ",
+      "h1_needs_url": true,
+      "description": "Continue (docs.continue.dev の内容。llms ファイルは Mintlify の既定ホストにだけある)"
+    },
+    "zed": {
+      "body": "fetch",
+      "rank_from": "index",
+      "index_url": "https://zed.dev/docs/llms.txt",
+      "label": "Zed",
+      "page_ref_forms": [
+        "int",
+        "url",
+        "slug"
+      ],
+      "min_heading_level": 2,
+      "page_fetch_workers": 1,
+      "respect_robots": true,
+      "search_content_needs_page_ref": true,
+      "drop_lines": [
+        "^> For the complete documentation index and Markdown links, see \\[llms\\.txt\\]"
+      ],
+      "description": "Zed (llms.txt + per-page fetch)"
+    },
+    "amp": {
+      "body": "fetch",
+      "rank_from": "index",
+      "index_url": "https://ampcode.com/llms.txt",
+      "label": "Amp",
+      "page_ref_forms": [
+        "int",
+        "url",
+        "slug"
+      ],
+      "min_heading_level": 2,
+      "page_fetch_workers": 1,
+      "respect_robots": true,
+      "search_content_needs_page_ref": true,
+      "heading_line_pattern": "^<h2 id=\"[^\"]*\">(.+)</h2>\\s*$",
+      "drop_lines": [
+        "^---\\s*$",
+        "^lastModified: \\d",
+        "^</?script>\\s*$",
+        "^\\s*import .* from '[^']*'\\s*;?\\s*$"
+      ],
+      "description": "Amp (llms.txt + per-page fetch)"
+    },
     "cloudflare-workers": {
       "url": "https://developers.cloudflare.com/workers/llms-full.txt",
       "split": "frontmatter",
@@ -442,8 +517,8 @@
       "label": "AI SDK",
       "tags_key": "tags",
       "frontmatter_yaml_values": true,
-      "index_heading_level": 2,
       "cache_name": "ai-sdk",
+      "h3_only_keeps_full_search": true,
       "description": "AI SDK (Vercel AI SDK)"
     },
     "firebase": {

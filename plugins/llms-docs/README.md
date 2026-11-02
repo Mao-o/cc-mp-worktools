@@ -218,12 +218,17 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading
 | `cline` | Cline | あり |
 | `factory` | Factory (Droid) | あり (`llms.txt` とタイトルで突き合わせ。104 中 104) |
 | `devin` | Devin | あり |
+| `gemini-cli` | Gemini CLI (`geminicli.com/llms.txt` が全文を含む) | あり (`.md`。サイトの書いたとおり `http://`) |
+| `kilo-code` | Kilo Code (`kilo.ai/docs/llms.txt` が全文を含む) | あり |
+| `openai-agents-js` | OpenAI Agents SDK (TypeScript) | なし (1256 ページ。同じタイトルのページがあるので番号で開く) |
+| `continue` | Continue (公式の `docs.continue.dev` に llms ファイルが無く、Mintlify の既定ホスト `continue-docs.mintlify.app` から読む。公式からのリンクは無いので、消えたら `check-preset-urls.py` の点検で分かる) | あり (既定ホストの URL) |
+| `zed` / `amp` | Zed / Amp (`llms-full.txt` が無いので、`llms.txt` の各ページを必要なときに 1 ページずつ取得する。`body: fetch`。`robots.txt` が拒否する場所は取得せず、全ページを走査する `search-content` は `--page-ref` が無いと止める) | あり (`.md` / `/docs/markdown/…`) |
 | `cloudflare-<製品>` | Cloudflare の製品別 `/<製品>/llms-full.txt`。製品は `workers` / `d1` / `r2` / `kv` / `durable-objects` / `pages` / `queues` / `workers-ai` / `vectorize` / `hyperdrive` / `agents` / `workflows` / `ai-gateway` / `browser-rendering` / `containers` | あり (`index.md`)。`browser-rendering` は製品名が Browser Run に変わり、取得先は `/browser-run/llms-full.txt` (52 ページ中 51 でページ内に URL。URL の無い 1 件は他の製品と同じ API リファレンスのページ)。source 名は変えていない |
 | `claude-code` / `claude-platform` | Claude Code (`code.claude.com/docs`) / Claude Developer Platform (`platform.claude.com`)。`llms.txt` の項目でランキングし、本文は `llms-full.txt` から読む (`rank_from: index`)。`claude` は両方をまとめて `search` する別名 (`members`) | あり |
 | `ai-sdk` | AI SDK (Vercel AI SDK) | あり (`search` / `sections` / `content` に出す。`fetch-index` / `search-index` の一覧には出さない) |
 | `firebase` | Firebase (`llms-full.txt` が無いので、`llms.txt` の各ページを必要なときに取得する。`body: fetch`) | あり (`.md.txt`) |
 
-`claude-code` / `claude-platform` / `claude` / `ai-sdk` / `firebase` は 0.45.0 までの専用 script と同じ出力になるよう設定した preset で、キャッシュも専用 script と同じファイル (下の「キャッシュ」の表) を読み書きする。それぞれの skill (`researching-claude-docs` / `researching-ai-sdk` / `researching-firebase`) が使う (0.46.0 から)。
+`claude-code` / `claude-platform` / `claude` / `ai-sdk` / `firebase` は 0.45.0 までの専用 script と同じ出力になるよう設定した preset で、キャッシュも専用 script と同じファイル (下の「キャッシュ」の表) を読み書きする。それぞれの skill (`researching-claude-docs` / `researching-ai-sdk` / `researching-firebase`) が使う (0.46.0 から)。`ai-sdk` は 0.51.0 から H3 も索引に読む (`index_heading_level` の既定。`### maxOutputTokens` のように H3 にだけ API 名を書くページが見つかるため)。H3 だけで候補に入ったページが全文検索の補いを止めないよう、`h3_only_keeps_full_search` も有効にしている。
 
 **取得先のホスト** (`scripts/presets.json` の `url` / `index_url` から出した一覧。ネットワークの出口を決める根拠にする。
 1 行に 1 ホスト、次のコードブロックはテストが読む):
@@ -233,8 +238,10 @@ agent-plugins.org
 agentclientprotocol.com
 agentskills.io
 ai-sdk.dev
+ampcode.com
 bun.com
 code.claude.com
+continue-docs.mintlify.app
 developers.cloudflare.com
 developers.openai.com
 docs.cline.bot
@@ -242,16 +249,20 @@ docs.devin.ai
 docs.factory.com
 docs.ollama.com
 firebase.google.com
+geminicli.com
 hono.dev
+kilo.ai
 learn.chatgpt.com
 modelcontextprotocol.io
 nextjs.org
+openai.github.io
 orm.drizzle.team
 platform.claude.com
 render.com
 vercel.com
 vite.dev
 vitest.dev
+zed.dev
 zod.dev
 ```
 
@@ -310,17 +321,19 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `frontmatter_key` | | `split: frontmatter` のとき、ページの frontmatter に必ずあるキー (既定 `title`)。これが無い `---` の組は区切りとみなさない (本文の水平線を誤認しないため) |
 | `frontmatter_delimiter` | | `split: frontmatter` のとき、frontmatter を囲む行 (既定 `---`。`-` か `+` を 3 個以上)。Vercel は `-` 80 個 |
 | `line_prefix` | `split: line` で必須 | 区切り行の接頭辞。接頭辞のあとに URL が 1 つだけ続く行を区切りにする |
-| `page_url` | | ページ URL の取り方。`none` (既定) / `frontmatter:<key>` / `line:<接頭辞>` (本文の先頭 10 行から探す) / `link:<リンク文字列>` (本文の先頭 20 行にある Markdown リンク `[<リンク文字列>](<url>)` の URL)。`split: line` では区切り行の URL を使う |
-| `url_base` | | ページ URL が相対 (`/guide.md`) のときに前に付ける基点 |
+| `page_url` | | ページ URL の取り方。`none` (既定) / `h1-link` (`split: h1` 専用。H1 全体が 1 つの `[タイトル](<url>)` のとき、リンクの文字をタイトル、リンク先を URL にする。リンクが 2 つある H1 やリンクの後ろに語がある H1 は読まない) / `frontmatter:<key>` / `line:<接頭辞>` (本文の先頭 10 行から探す) / `link:<リンク文字列>` (本文の先頭 20 行にある Markdown リンク `[<リンク文字列>](<url>)` の URL)。`split: line` では区切り行の URL を使う |
+| `url_base` | | ページ URL が相対 (`/guide.md`) のときに前に付ける基点 (URL として解決するので、基点のパスは `/…` で置き換わる) |
+| `url_prefix` | | ページ URL が相対のときに、そのまま前につなぐ文字列 (`https://kilo.ai/docs` + `/automate`)。`url_base` とは一緒に書けない |
 | `drop_lines` | | 本文から除く行の正規表現のリスト (行頭から照合したいときは `^` を付ける)。全ページに付く定型行 (「Skip to content」など) が検索に当たらないようにする。コードブロック内の行は除かない。ページ URL は除く前に読む |
 | `skip_empty` | | `true` で、本文が空 (空行と水平線だけ) のページを捨てる (Hono の `# Start of Hono documentation`、Codex のカテゴリ見出しのような見出しだけの行) |
 | `index_url` | | `url` の `llms-full.txt` と同じ範囲の `llms.txt` (他の `llms.txt` へのリンク集になっている 2 段の索引は指さない。下の「対象外」)。URL を持たないページに、タイトルが完全に一致する (大文字小文字・空白・`*_` の記号は無視) 項目の URL を付ける。同じタイトルの項目が 2 つ以上あるページ (ただし `?` か `#` を含む項目 (節への `?id=…` / `#…` など) を除いて、ページの項目がちょうど 1 つならそれを使う。Zod の `Codecs` はこの形)、同じタイトルのページが 2 つ以上あるとき (Zod はサイト冒頭と `packages/zod` のページがどちらも `Zod`)、近いだけのタイトル (`Basic Auth` と `Basic Auth Middleware`) には付けない (誤った URL は URL が無いより悪いため)。`llms.txt` は絶対 URL の項目だけを読み、`llms.txt` や `llms-<名前>.txt` (`llms-full.txt` / `llms-small.txt` など) を指す項目はページではないので除く。取得に失敗しても警告だけで本文は読める |
 | `join_rate_guard` | | `true` で、`index_url` の `llms.txt` の項目のうち、ページ自身の URL (`page_url` で読んだもの。タイトルの突き合わせで付けた URL は数えない) と一致するものの割合を見る (`.md`・クエリ・`#…`・末尾の `/` は無視)。50% 未満なら終了コード 2 で止め、80% 未満なら stderr に WARNING を出す。区切り方が合っていない profile (frontmatter 形式のファイルを `split: h1` で読むなど) ではページに URL が無く、ここで止まる。`index_url` と `page_url` が要る。`llms.txt` を読めない (取得に失敗した) とき、または絶対 URL のページ項目が 0 件 (相対リンクだけなど) のときは見ない (stderr に WARNING を出し、止めない)。`--file` で `--index-file` を渡さないときは `llms.txt` を読まないので見ない |
-| `h1_needs_url` | | `split: h1` で `true` のとき、`page_url` (`line:` / `link:`) の URL が見つからない H1 をページの区切りにせず、前のページの見出しとして残す (ページ本文の中で H1 を使うサイト向け) |
+| `h1_needs_url` | | `split: h1` で `true` のとき、`page_url` (`h1-link` / `line:` / `link:`) の URL が見つからない H1 をページの区切りにせず、前のページの見出しとして残す (ページ本文の中で H1 を使うサイト向け) |
 | `strip_trailing_headings` | | `true` で、ページ末尾に本文の無いまま並ぶ見出し行 (ページ間に置かれたナビの見出し `## Messages` など) を除く。`drop_lines` の後に適用する。コードブロックの状態は見ない |
 | `heading_line_pattern` | | 正規表現 (グループをちょうど 1 つ持つ)。コードブロックの外で、行全体 (改行を除く) がこれに一致する本文の行を、グループを題にした H2 (`## <グループ>`) として読む。見出しを使わず太字の行で節を区切るページ (Claude Code の changelog の `**2.1.310**`) で、検索の hit・`sections`・`content` が節を持つ。`content` の本文ではその行が `## <グループ>` と出る。`Section:` 行には、ほかの見出しと同じ規則で anchor が付く (公開中の changelog は版ごとに `id="2-1-310"` の形の anchor を持つ)。グループが空になる行はそのまま。`strip_trailing_headings` の後に適用する。`claude-code` preset は `^\*\*(\d+\.\d+\.\d+)\*\*\s*$` |
 | `min_heading_level` | | `sections` / `content` / 本文検索で節として数える最も浅い見出し (`1` か `2`)。既定は `split: h1` で `2`、ほかは `1`。本文にコードブロック外の `# …` 行があるサイトでは `2` にする |
-| `index_heading_level` | | `search-index` / `search` のランキングと `--show-sections` の一覧に使う見出しの最も深い段 (`2` か `3`。既定 `3`)。コードブロック外の見出しだけを読む。H3 はキーワード 1 語ごとに +1 するが、全キーワード一致の加点 (+10) には数えない (API を H3 で並べるページが関数名で見つかり、選択肢の H3 を並べるだけのページが、タイトルがその語そのもののページを押し出さないため)。`2` で H1 / H2 だけを読む (Claude docs / AI SDK / Firebase の preset。`rank_from: index` ではランキングに見出しを使わないので `--show-sections` の一覧にだけ効く。`body: fetch` ではどちらにも効かない (`--show-sections` を無視するため)) |
+| `index_heading_level` | | `search-index` / `search` のランキングと `--show-sections` の一覧に使う見出しの最も深い段 (`2` か `3`。既定 `3`)。コードブロック外の見出しだけを読む。H3 はキーワード 1 語ごとに +1 するが、全キーワード一致の加点 (+10) には数えない (API を H3 で並べるページが関数名で見つかり、選択肢の H3 を並べるだけのページが、タイトルがその語そのもののページを押し出さないため)。`2` で H1 / H2 だけを読む (Claude docs / Firebase の preset。`rank_from: index` ではランキングに見出しを使わないので `--show-sections` の一覧にだけ効く。`body: fetch` ではどちらにも効かない (`--show-sections` を無視するため)) |
+| `h3_only_keeps_full_search` | | `true` で、`search` の全文検索の補いの要否を判定するときに、H3 だけで候補に入ったページ (タイトル・description・tags・H1 / H2 のどれにも当たらないページ) を数えない。そのページに本文のヒットがあっても補いが止まらず、補いで増えた行はヒットのある候補の下、ヒット 0 の行の上に置く (1 位は変わらない)。`rank_from: pages` (既定) かつ `index_heading_level: 3` でだけ書ける。`body: fetch` では書けない。既定 `false`。同梱 presets では `ai-sdk` だけが使う (実測は `docs/generic-llms-txt-source.md`) |
 | `protect_tables` | | `false` で、`content` の節の切り出しを表の途中で止めることを許す (既定 `true`) |
 | `compact_pack` | | `true` で、`fetch-index --compact` を 1 行 80 桁以内に数件ずつ詰めて出す |
 | `untitled_warn_ratio` | | `split: frontmatter` のとき、frontmatter に `title:` の無いページがこの割合 (0〜1) を超えたら、`fetch-index` / `search-index` / `search` で stderr に WARNING を出す (本文の見出しで補ったタイトルも「無い」に数える) |
@@ -337,11 +350,13 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `link_annotations` | | `true` で、`content` の本文にある Markdown リンクのうち、この source の別のページを指すものの後ろに ` → [doc_idx N]` を付ける (`content N` でリンク先を開ける)。読むリンクは `(https://…)` と `(/…)` (ページ自身のホストで読む。ページに URL が無ければ `url` のホスト) で、`beta` や `./beta` のような相対リンクは読まない。URL は `.md`・`page_url_strip_suffix`・`#…`・末尾の `/` を無視して比べ、同じ URL のページが複数あるときの選び方は `index_join: url` と同じ (一覧に出る番号と一致する)。コードブロックの中、`\|` で始まり `\|` で終わる行 (表の行)、ページ自身の URL へのリンク、どのページでもない URL には付けない。`content --no-link-annotations` で 1 回だけ止められる。`page_url` か `index_url` が要る (`page_url` が無く `index_url` で URL を付ける profile は、`--file` のとき `--index-file` も渡さないと注釈が付かない。ページの URL が `/…` の相対のままになる profile (`url_base` が無い) も付かない)。URL が `#…` だけ違うページどうしは区別しない (旧 parser と同じく後ろのページを指す)。既定は付けない |
 | `link_path_aliases` | | `link_annotations` のとき、同じページを指す別のパスの接頭辞の組のリスト (例 `[["/docs/en/", "/en/"]]`)。`(/…)` のリンクがそのままではどのページにも当たらないとき、組の片方の接頭辞をもう片方に置き換えて探す (両方向)。完全な URL のリンクには使わない。接頭辞は `/` で始まり `/` で終わる |
 | `label` | | 結果のヘッダに出す表示名 |
-| `body` | | `full` (既定) = 本文は `url` の `llms-full.txt` から読む / `fetch` = `llms-full.txt` の無いサイト (Firebase) 用。`index_url` の `llms.txt` の項目がそのままページになり (ページ番号は `llms.txt` での並び順)、本文はコマンドが必要としたときに項目の URL から 1 ページずつ取得してページの cache に置く (`--max-age` は他のファイルと同じ)。`rank_from: index` と `index_url`、`page_ref_forms` の `slug` と `url` (`rank_from: index` の条件) が要り、`url` と、`llms-full.txt` の区切り方・読み方のキー (`split` / `page_url` / `index_join` / `link_annotations` / `drop_lines` など) は書けない。`fetch-index` / `search-index` は `llms.txt` だけを読み、ページを取得しない (`search-index --show-sections` は無視して stderr に知らせる)。`sections` / `content` は指定したページだけを取得する (失敗して cache も無ければ終了コード 1)。`search` は上位 `--top-n` 件の候補だけを `page_fetch_workers` 件ずつ並行に取得し、候補が 0 件なら何も取得しない。本文の全文検索への fallback はしない (全ページの取得になるため)。`search-content` は `--page-ref` のページ、無ければ全ページを `llms.txt` の順に 1 ページずつ取得し、ページごとに結果を出す (並行にすると全ページの取得が済むまで何も出ないため、並べ替えもしない。`--include-changelog-priority` は効かず stderr に知らせる)。取得に失敗したページは stderr に `(skip: fetch failed …)` と出して飛ばし、件数を `(N documents skipped — fetch failed, see stderr)` の行に出す (`llms.txt` に同じ URL の項目が 2 つあっても取得は 1 回)。`search-content` が 1 ページも取得できなかったとき (`--page-ref` のページの取得に失敗し cache も無いときなど) は 0 件の案内を出さず、終了コード 1。`--file` は使えない (手元の `llms.txt` は `--index-file` で渡す) |
+| `body` | | `full` (既定) = 本文は `url` の `llms-full.txt` から読む / `fetch` = `llms-full.txt` の無いサイト (Firebase) 用。`index_url` の `llms.txt` の項目がそのままページになり (ページ番号は `llms.txt` での並び順)、本文はコマンドが必要としたときに項目の URL から 1 ページずつ取得してページの cache に置く (`--max-age` は他のファイルと同じ)。`rank_from: index` と `index_url`、`page_ref_forms` の `slug` と `url` (`rank_from: index` の条件) が要り、`url` と、`llms-full.txt` の区切り方・読み方のキー (`split` / `page_url` / `index_join` / `link_annotations` など) は書けない (`drop_lines` と `heading_line_pattern` は取得した各ページに適用する)。`fetch-index` / `search-index` は `llms.txt` だけを読み、ページを取得しない (`search-index --show-sections` は無視して stderr に知らせる)。`sections` / `content` は指定したページだけを取得する (失敗して cache も無ければ終了コード 1)。`search` は上位 `--top-n` 件の候補だけを `page_fetch_workers` 件ずつ並行に取得し、候補が 0 件なら何も取得しない。本文の全文検索への fallback はしない (全ページの取得になるため)。`search-content` は `--page-ref` のページ、無ければ全ページを `llms.txt` の順に 1 ページずつ取得し、ページごとに結果を出す (並行にすると全ページの取得が済むまで何も出ないため、並べ替えもしない。`--include-changelog-priority` は効かず stderr に知らせる)。取得に失敗したページは stderr に `(skip: fetch failed …)` と出して飛ばし、件数を `(N documents skipped — fetch failed, see stderr)` の行に出す (`llms.txt` に同じ URL の項目が 2 つあっても取得は 1 回)。`search-content` が 1 ページも取得できなかったとき (`--page-ref` のページの取得に失敗し cache も無いときなど) は 0 件の案内を出さず、終了コード 1。`--file` は使えない (手元の `llms.txt` は `--index-file` で渡す) |
 | `page_cache_dir` | | 同梱 presets 専用 (`sources.json` に書くとエラー)。`body: fetch` のページの cache を置くディレクトリ名 (キャッシュのディレクトリの下)。無ければ `<cache_name>-pages`、`cache_name` も無ければ `generic-<source 名>-<index_url のハッシュ>-pages`。ファイル名は URL からホストを除いて `/` を `_` に置き換え、180 字で切り、URL の sha1 の先頭 16 桁を付けたもの (0.45.0 までの Firebase 専用 script と同じ。URL ごとに別のファイルになる) |
 | `page_fetch_workers` | | `body: fetch` の `search` が同時に取得するページ数 (1〜32。既定 8) |
 | `page_fetch_timeout` | | `body: fetch` の `search` / `search-content` が 1 ページの取得を待つ秒数 (1〜600。既定 30。`sections` / `content` は 120) |
 | `search_content_warn_pages` | | `body: fetch` で `--page-ref` の無い `search-content` が、ページ数がこれを超えると stderr に WARNING を出す (既定 30) |
+| `respect_robots` | | `body: fetch` で `true` のとき、取得する前に対象のホストの `robots.txt` を読み (キャッシュは `--max-age` に従う)、拒否された `llms.txt`・ページと転送先を要求しない。読み方は RFC 9309 (最も長く一致した規則で決め、同じ長さなら `Allow`。`%7E` と `~` のようなエンコードの違いは同じものとして比べる。ただし `%2F` のような予約文字の escape は、`Disallow` では復号して比べ、`Allow` では復号しない (符号化の違いで拒否が抜けず、`Allow: /a%2Fb` が `/a/b` の拒否を打ち消さない)。自分宛てのグループがあれば、規則が無くてもそちらで決める)。`robots.txt` が 4xx か HTML なら制限なし、それ以外で読めないときは取得せず、拒否とは別の文面 (`could not read …/robots.txt`) で知らせる。古いキャッシュがあれば、拒否のときも読めないときも WARNING を出してそれを返す。既定 `false` |
+| `search_content_needs_page_ref` | | `body: fetch` で `true` のとき、`--page-ref` の無い `search-content` を終了コード 2 で止める (ページを 1 つも取得しない)。既定 `false` |
 | `index_page_size` | | `fetch-index` が既定で出す項目数 (0 以上の整数。無いか 0 なら全件)。`fetch-index --offset N --limit M` で範囲を選べ (`--limit 0` は全件)、範囲が全件でないときは末尾に `(M of N documents shown, offset=K)` と、次の範囲を出す `  Next page: --offset … --limit …` (同じコマンドに足して使う) を出す。全件を出すときの出力は変わらない |
 | `cache_name` | | 同梱 presets 専用 (`sources.json` に書くとエラー)。キャッシュのファイル名を `<cache_name>-llms-full.txt` / `<cache_name>-llms.txt` にする |
 | `members` | | 2 つ以上の source 名のリスト (例 `["cloudflare-workers", "cloudflare-d1"]`)。この profile はファイルを読まない別名になり、`search --source <この名前>` が各 source を書いた順に検索する。結果は source ごとに `--- <label> (--source <source>) ---` の見出しの下に並び、各行の先頭に `[<source>]` が付く。ページ番号は source ごとなので、`Next:` の行はそのページの `--source` を持つ (別名のままではページを開けない)。`search` 以外のコマンドは終了コード 2 で止まり、選べる source を出す。`--file` / `--index-file` (1 つの source のファイル) とは一緒に使えない (終了コード 2)。どれか 1 つの source を読めない (キャッシュが無く取得にも失敗した、対応づけの割合が下限を下回った) ときは、何も出さずにその source のエラーで止まる。書けるキーは `members` と `description` だけ。別名 (`members` を持つ profile) と自分自身は書けない (`sources.json` で同梱 preset の source を別名に置き換えた場合も、その source を `members` に書いた別名はエラーになる。ただし `--source` がその別名を読まない同梱 preset のときは、上の「`sources.json` に誤りがあるとき」のとおり WARNING を出して別名を外す)。存在しない source を書いた別名 (plugin の更新で同梱 preset の名前が変わった・無くなった場合を含む) は、その別名を `--source` に指定したときだけ、存在しない名前を出して止まる。ほかの source のコマンドはそのまま動き、`sources` の一覧ではその別名を `[user, members, broken: <存在しない名前>]` と出す |
@@ -363,6 +378,9 @@ source 名は `^[a-z0-9][a-z0-9-]*$` (キャッシュのファイル名になる
 | H1 で区切り URL なし | `split: h1` (見出しだけのページがあれば `skip_empty`) | Zod / Hono / Render / Codex / OpenAI Plugins・API docs / Factory |
 | `llms-full.txt` が無く、`llms.txt` が全ページ (ページごとの `.md.txt`) を並べる | `body: fetch` + `rank_from: index` + `index_url` + `page_ref_forms: ["int", "url", "slug"]` (+ `page_url_strip_suffix: ".md.txt"` / `anchor_style: devsite` / `min_heading_level: 2`) | Firebase |
 | frontmatter (`title:` / `description:`) で区切り URL なし | `split: frontmatter` (既定の `frontmatter_key: title`) | Agent Plugins |
+| H1 全体が `[タイトル](<url>)` | `split: h1` + `page_url: h1-link` + `h1_needs_url` | Gemini CLI |
+| `## Source: /<path>` 行で区切り、パスがサイトの下の階層 | `split: line` + `line_prefix` + `url_prefix` | Kilo Code |
+| `llms-full.txt` が無く、`llms.txt` が全ページを並べ、サイトへの負荷を抑えたい | 上の `body: fetch` に `page_fetch_workers: 1` + `respect_robots` + `search_content_needs_page_ref` | Zed / Amp |
 
 対象外: `llms.txt` が別の `llms.txt` へのリンク集になっている 2 段 index (Cloudflare のルート
 `/llms.txt`。製品別の `llms-full.txt` は上のとおり読める)、ページごとに別ファイルで公開し、
@@ -377,6 +395,7 @@ source 名は `^[a-z0-9][a-z0-9-]*$` (キャッシュのファイル名になる
 
 ## 既知の制約
 
+- 取得した本文が HTML の文書 (`<!doctype html` か `<html` で始まる) のときは、取得の失敗として扱いキャッシュしない (200 で HTML を返す soft 404 を本文として読まないため)。古いキャッシュがあれば WARNING を出してそれを使う
 - 全文読み込み禁止: 必ず段階的に絞り込むこと
 - コードフェンス保護: コードブロックの途中分割を自動防止
 - テーブル保護 (claude-docs / firebase): Markdown テーブルの途中分割を自動防止
@@ -471,11 +490,14 @@ description と、`researching-library-docs` の対応表・この README の pr
 `search` の候補 (`--top-n`) は、タイトル・description・tags・見出し (`index_heading_level` の段まで) の
 ランキングで選び、本文のヒットの良い順に並べる。`index_heading_level` が `3` の source では、H3 だけで候補に
 入ったページ (タイトル・description・tags・H1 / H2 のどれにも当たらないページ) を、タイトル・description・
-tags・H1 / H2 で全キーワードが当たった候補より上には置かない (その最後の候補の直後に移す。全文検索で補った
-`[body-only]` の行は動かさない)。CLI のページが設定の選択肢を H3 で並べ、本文のヒットも多いとき、その選択肢の
+tags・H1 / H2 で全キーワードが当たり、本文にもヒットがある候補より上には置かない (その最後の候補の直後に移す。
+全文検索で補った `[body-only]` の行は動かさない)。本文のヒットが 0 の候補はこの基準にしない (ヒットのあるページはもともと
+その上に並び、下げると 0 件のページが 1 位になるため)。CLI のページが設定の選択肢を H3 で並べ、本文のヒットも多いとき、その選択肢の
 ページ (タイトルがその語そのもの) を 2 位に下げないため。一部のキーワードだけが当たった候補の上には残る
 (H3 がクエリをそのまま名指すことがあるため)。Changelog / Release notes のページは、全キーワードが当たっても
 この基準にしない (末尾に置く並びを保つため。`--include-changelog-priority` を付けたときは基準にする)。
+`h3_only_keeps_full_search` の source では、H3 だけの候補を除いて全文検索の補いの要否を判定し、それで増えた行を
+ヒットのある候補の下、ヒット 0 の行の上に置く。
 
 `--show-sections` の一覧は `index_heading_level` の段までの見出しを並べる。既定の `3` では、同梱 presets
 (汎用ローダーの source。2026-10 時点の各サイトの `llms-full.txt` で計測) の見出しの行数は全体で H1 / H2 だけのときの約 1.7 倍

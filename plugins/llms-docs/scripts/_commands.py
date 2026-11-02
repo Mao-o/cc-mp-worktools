@@ -418,7 +418,7 @@ def _query_hint(subcommand: str, query: str, hint_args: tuple) -> None:
 def render_zero_hits(query: str, texts, *, subcommand: str, hint_args: tuple,
                      scope: str = "pages", restricted_to=None,
                      restricted_only: bool = False, alt_hint_args=None,
-                     index_hint_args=None) -> None:
+                     index_hint_args=None, can_drop_page_ref: bool = True) -> None:
     """Explain an empty search result and print the next commands to try.
 
     Shows how many pages contain each term, so "the word is not in these
@@ -433,6 +433,8 @@ def render_zero_hits(query: str, texts, *, subcommand: str, hint_args: tuple,
     *index_hint_args* is the option tuple for the ``search-index`` hint; when
     ``None`` that hint is not printed (claude-docs' ``search-index`` has no
     ``--file``, so with ``--file`` there is no ``search-index`` to point at).
+    *can_drop_page_ref* false: the source refuses ``search-content`` with no
+    ``--page-ref``, so the report does not offer that.
     """
     counts, checked = term_page_counts(texts, query)
     if not counts:
@@ -451,8 +453,9 @@ def render_zero_hits(query: str, texts, *, subcommand: str, hint_args: tuple,
     if restricted_only:
         # Only the --page-ref page was loaded (Firebase fetches lazily), so
         # the counts say nothing about the other pages.
+        tail = " Drop --page-ref to search them all." if can_drop_page_ref else ""
         print(f"The counts cover only the --page-ref {restricted_to} page; "
-              f"other pages were not fetched. Drop --page-ref to search them all.")
+              f"other pages were not fetched.{tail}")
         restricted_to = None
     elif not present:
         index = "'search-index' (titles / descriptions), " if index_hint_args is not None else ""

@@ -69,6 +69,11 @@ Claude Code / Claude API・AI SDK・Firebase は専用 skill (`researching-claud
 | Cline | `cline` |
 | Factory (Droid) | `factory` |
 | Devin | `devin` |
+| Gemini CLI | `gemini-cli` |
+| Kilo Code | `kilo-code` |
+| OpenAI Agents SDK (TypeScript) | `openai-agents-js` |
+| Continue | `continue` |
+| Zed / Amp (ページごとに取得する。`search-content` は `--page-ref` が必須) | `zed` / `amp` |
 | Cloudflare の各製品 | `cloudflare-<製品>`: `workers` / `d1` / `r2` / `kv` / `durable-objects` / `pages` / `queues` / `workers-ai` / `vectorize` / `hyperdrive` / `agents` / `workflows` / `ai-gateway` / `browser-rendering` / `containers` |
 
 - 引数の先頭語が上の source 名、または `sources` の一覧にある名前ならそれを使う
@@ -153,7 +158,8 @@ general-purpose の subagent など、Skill ツールを使えない文脈では
 `zod` / `hono` / `render` / `codex` / `openai-plugins` / `openai-api-docs` / `factory` は
 llms-full.txt にページ URL が無く、`llms.txt` とタイトルが一致したページにだけ URL が付く
 (付く割合は source で違う。Hono は 4 分の 1 程度、`factory` は全ページ。README の presets 表)。
-`agent-plugins` は URL が全く無い。URL の無いページの引用元はタイトル + heading_path で表す。
+`agent-plugins` と `openai-agents-js` は URL が全く無い。URL の無いページの引用元はタイトル + heading_path で表す。
+`openai-agents-js` は同じタイトルのページがあるので、整数 index で開く。
 
 ## heading_path の指定方法
 

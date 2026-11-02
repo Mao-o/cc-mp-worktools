@@ -51,7 +51,9 @@ import os
 import re
 import shlex
 import sys
-from urllib.parse import urljoin
+import threading
+import urllib.error
+from urllib.parse import urljoin, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
@@ -60,6 +62,10 @@ from _common import (  # noqa: E402
     FetchError,
     LONG_SECTION_HITS,
     MAX_SNIPPET_HITS,
+    NotTextError,
+    _handle_fetch_failure,
+    _load_fetch_meta,
+    _meta_names_other_url,
     _norm,
     add_cache_dir_arg,
     add_heading_path_arg,
@@ -85,9 +91,11 @@ from _common import (  # noqa: E402
     page_cache_filename,
     note_other_candidates,
     parse_llms_index,
+    parse_robots,
     prefer_lang_exact,
     query_terms,
     retry_for_page_ref,
+    robots_allows,
     score_entry,
     search_content_in_body,
     search_content_rank_key,
@@ -129,7 +137,8 @@ _PROFILE_KEYS = {
     "anchor_style", "show_overflow", "rank_from", "index_join", "index_group_variants",
     "link_annotations", "link_path_aliases", "members", "body", "page_cache_dir",
     "page_fetch_workers", "page_fetch_timeout", "search_content_warn_pages", "index_page_size",
-    "list_page_urls", "index_heading_level", "heading_line_pattern",
+    "list_page_urls", "index_heading_level", "heading_line_pattern", "url_prefix",
+    "respect_robots", "search_content_needs_page_ref", "h3_only_keeps_full_search",
 }
 # A profile with ``members`` is an alias of several sources for ``search``;
 # it reads no file of its own, so it takes no other key but these.
@@ -150,10 +159,11 @@ _FETCH_PROFILE_KEYS = {
     "protect_tables", "compact_pack", "page_ref_forms", "page_url_strip_suffix", "anchor_style",
     "show_overflow", "rank_from", "index_group_variants", "page_cache_dir", "page_fetch_workers",
     "page_fetch_timeout", "search_content_warn_pages", "index_page_size", "index_heading_level",
+    "drop_lines", "heading_line_pattern", "respect_robots", "search_content_needs_page_ref",
 }
 # Keys of the per-page fetch itself (only with body "fetch").
 _FETCH_ONLY_KEYS = ("page_cache_dir", "page_fetch_workers", "page_fetch_timeout",
-                    "search_content_warn_pages")
+                    "search_content_warn_pages", "respect_robots", "search_content_needs_page_ref")
 _MIN_HEADING_LEVELS = (1, 2)
 # The deepest heading the index reads (the ranking of ``search-index`` /
 # ``search`` and ``--show-sections``). 3 by default: reference pages name each
@@ -170,7 +180,7 @@ _DEFAULT_PAGE_REF_FORMS = ("int", "title", "url_substring")
 _ANCHOR_STYLES = ("github", "devsite")
 _PAGE_REF_HELP = "Page number, or what the profile's page_ref_forms allow (title / URL substring by default)"
 PRESETS_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "presets.json")
-_PAGE_URL_FORMS = '"none", "frontmatter:<key>", "line:<prefix>" or "link:<link text>"'
+_PAGE_URL_FORMS = '"none", "h1-link", "frontmatter:<key>", "line:<prefix>" or "link:<link text>"'
 _FM_KEY_NAME_RE = re.compile(r"^[A-Za-z_][\w-]*$")
 _FM_DELIM_RE = re.compile(r"^(-{3,}|\+{3,})$")
 
@@ -199,10 +209,12 @@ def _bad(path: str, msg: str) -> None:
 
 
 def _parse_page_url(path: str, name: str, value) -> tuple[str, str] | None:
-    """``"none"`` / ``"frontmatter:<key>"`` / ``"line:<prefix>"`` /
+    """``"none"`` / ``"h1-link"`` / ``"frontmatter:<key>"`` / ``"line:<prefix>"`` /
     ``"link:<link text>"`` -> (kind, arg)."""
     if value is None or value == "none":
         return None
+    if value == "h1-link":
+        return ("h1-link", "")
     if not isinstance(value, str) or ":" not in value:
         _bad(path, f"sources.{name}.page_url must be {_PAGE_URL_FORMS}")
     kind, arg = value.split(":", 1)
@@ -297,8 +309,8 @@ def _validate_profile(path: str, name: str, raw, at: str | None = None) -> dict:
         _bad(path, f"sources.{at}.h1_needs_url must be true or false")
     if needs_url and split != "h1":
         _bad(path, f'sources.{at}.h1_needs_url is only valid with split "h1"')
-    if needs_url and not (profile["page_url"] and profile["page_url"][0] in ("line", "link")):
-        _bad(path, f'sources.{at}.h1_needs_url needs page_url "line:<prefix>" or "link:<link text>"')
+    if needs_url and not (profile["page_url"] and profile["page_url"][0] in ("line", "link", "h1-link")):
+        _bad(path, f'sources.{at}.h1_needs_url needs page_url "h1-link", "line:<prefix>" or "link:<link text>"')
     profile["h1_needs_url"] = needs_url
     if split == "line":
         prefix = raw.get("line_prefix")
@@ -312,11 +324,20 @@ def _validate_profile(path: str, name: str, raw, at: str | None = None) -> dict:
         _bad(path, f'sources.{at}.line_prefix is only valid with split "line"')
     if profile["page_url"] and profile["page_url"][0] == "frontmatter" and split != "frontmatter":
         _bad(path, f'sources.{at}.page_url "frontmatter:<key>" is only valid with split "frontmatter"')
+    if profile["page_url"] and profile["page_url"][0] == "h1-link" and split != "h1":
+        _bad(path, f'sources.{at}.page_url "h1-link" is only valid with split "h1"')
     base = raw.get("url_base")
     if base is not None:
         if not isinstance(base, str) or not re.match(r"^https?://\S+$", base):
             _bad(path, f"sources.{at}.url_base must be an http(s) URL")
         profile["url_base"] = base
+    prefix = raw.get("url_prefix")
+    if prefix is not None:
+        if not isinstance(prefix, str) or not re.match(r"^https?://\S+$", prefix):
+            _bad(path, f"sources.{at}.url_prefix must be an http(s) URL")
+        if base is not None:
+            _bad(path, f"sources.{at} has both url_base and url_prefix (use one)")
+    profile["url_prefix"] = prefix
     index_url = raw.get("index_url")
     if index_url is not None and (not isinstance(index_url, str) or not re.match(r"^https?://\S+$", index_url)):
         _bad(path, f"sources.{at}.index_url must be an http(s) URL of the llms.txt for the same docs as url (not a 2-level index)")
@@ -348,7 +369,8 @@ def _validate_fetch_profile(path: str, name: str, raw: dict) -> dict:
         "name": name, "url": None, "split": "fetch", "body": "fetch",
         "description": raw.get("description", ""), "frontmatter_key": "title",
         "frontmatter_delimiter": "---", "line_prefix": None, "page_url": None, "url_base": None,
-        "drop_lines": [], "skip_empty": False, "h1_needs_url": False, "index_url": index_url,
+        "url_prefix": None, "drop_lines": _parse_drop_lines(path, name, raw.get("drop_lines")),
+        "skip_empty": False, "h1_needs_url": False, "index_url": index_url,
         "origin": path,
     }
     _validate_display_keys(path, name, raw, profile)
@@ -362,6 +384,8 @@ def _validate_fetch_profile(path: str, name: str, raw: dict) -> dict:
     profile["page_fetch_workers"] = _int_key(path, name, raw, "page_fetch_workers", 8, 1, 32)
     profile["page_fetch_timeout"] = _int_key(path, name, raw, "page_fetch_timeout", 30, 1, 600)
     profile["search_content_warn_pages"] = _int_key(path, name, raw, "search_content_warn_pages", 30, 0)
+    profile["respect_robots"] = _bool_key(path, name, raw, "respect_robots", False)
+    profile["search_content_needs_page_ref"] = _bool_key(path, name, raw, "search_content_needs_page_ref", False)
     return profile
 
 
@@ -573,6 +597,13 @@ def _validate_index_keys(path: str, name: str, raw: dict, profile: dict) -> None
         if profile["join_rate_guard"]:
             _bad(path, f'sources.{name}.join_rate_guard is redundant with index_join "url" '
                        f"(search always checks the join rate then)")
+    keeps_full_search = _bool_key(path, name, raw, "h3_only_keeps_full_search", False)
+    if keeps_full_search and rank_from != "pages":
+        _bad(path, f'sources.{name}.h3_only_keeps_full_search is only valid with rank_from "pages" (the default)')
+    if keeps_full_search and profile["index_heading_level"] != 3:
+        _bad(path, f"sources.{name}.h3_only_keeps_full_search needs index_heading_level 3 "
+                   f"(with 2 no candidate comes from an H3)")
+    profile["h3_only_keeps_full_search"] = keeps_full_search
     profile["rank_from"] = rank_from
     profile["list_page_urls"] = list_urls
     profile["index_join"] = index_join
@@ -949,9 +980,44 @@ def split_h1(lines: list[str], profile: dict) -> list[dict]:
     for d in docs:
         d["url"] = _body_url(d["body_lines"], rule)
         d["min_level"] = None  # the H1 is the delimiter, so sections start at H2
+        if rule and rule[0] == "h1-link":
+            d["title"], d["url"] = _h1_link(d["title"])
     if profile["h1_needs_url"]:
         docs = _merge_urlless_h1(docs)
     return docs
+
+
+def _closing(text: str, start: int, opener: str, closer: str) -> int:
+    """Index of the *closer* that balances the *opener* at *text[start]*, or
+    -1. A backslash escapes the next character."""
+    depth = 0
+    i = start
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == opener:
+            depth += 1
+        elif text[i] == closer:
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def _h1_link(title: str) -> tuple[str, str]:
+    """``page_url: "h1-link"``: ``[Title](<url>)`` as a whole H1 is the page's
+    title and URL (Gemini CLI), the title may hold brackets of its own. Anything
+    else is the title as written, no URL: two links in one H1, or a link with
+    words after it, name no one page."""
+    if title.startswith("["):
+        close = _closing(title, 0, "[", "]")
+        if close > 0 and title[close + 1:close + 2] == "(" and _closing(title, close + 1, "(", ")") == len(title) - 1:
+            url = title[close + 2:-1]
+            if _URLISH_RE.match(url) and title[1:close].strip():
+                return title[1:close].strip(), url
+    return title, ""
 
 
 def _merge_urlless_h1(docs: list[dict]) -> list[dict]:
@@ -1256,6 +1322,20 @@ class _Fence:
             self.open = None
 
 
+def _untemplated_title(title: str, body: list[str]) -> str:
+    """A heading that is a template expression (Kilo Code's Markdoc
+    ``# {% $markdoc.frontmatter.title %}``) was never rendered: the title is
+    the ``title:`` of the frontmatter the page opens with, when it has one
+    (a byte order mark before it does not count: Kilo Code has one such page)."""
+    if "{%" not in title and "{{" not in title:
+        return title
+    pos = next((i for i, line in enumerate(body) if line.strip("\ufeff \t\r\n")), None)
+    if pos is None:
+        return title
+    hit = _frontmatter_at([body[pos].lstrip("\ufeff"), *body[pos + 1:]], 0, "title")
+    return (hit[0]["title"] if hit else "") or title
+
+
 def split_line(lines: list[str], profile: dict) -> list[dict]:
     """One page per ``<prefix><url>`` line, skipping fenced examples of it.
 
@@ -1302,7 +1382,8 @@ def split_line(lines: list[str], profile: dict) -> list[dict]:
             url = delimiter_url
         else:
             url = _body_url(body, rule)
-        title = _first_heading(body, fence=_Fence()) or delimiter_url.rstrip("/").rsplit("/", 1)[-1] or "(untitled)"
+        title = _untemplated_title(_first_heading(body, fence=_Fence()), body)
+        title = title or delimiter_url.rstrip("/").rsplit("/", 1)[-1] or "(untitled)"
         docs.append({"title": title, "url": url, "body_lines": body, "min_level": 1})
     return docs
 
@@ -1400,11 +1481,16 @@ def split_documents(lines: list[str], profile: dict) -> list[dict]:
         return resolve_split(lines, profile)[2]
     docs = _SPLITTERS[profile["split"]](lines, profile)
     base = profile["url_base"]
+    prefix = profile.get("url_prefix")
     level = profile.get("min_heading_level")
     for d in docs:
         d.setdefault("description", "")
         if d["url"] and base and not re.match(r"^https?://", d["url"]):
             d["url"] = urljoin(base, d["url"])
+        elif d["url"] and prefix and not re.match(r"^https?://", d["url"]):
+            # put in front as written: urljoin would drop the prefix's path
+            # for a /path (Kilo Code's /docs)
+            d["url"] = prefix.rstrip("/") + "/" + d["url"].lstrip("/")
         if profile["drop_lines"]:
             d["body_lines"] = _drop_boilerplate(d["body_lines"], profile["drop_lines"])
         if profile.get("strip_trailing_headings"):
@@ -1704,8 +1790,8 @@ def _load_index(args, profile: dict) -> tuple[str, list[dict]]:
         die(f"--source {args.source} ranks its llms.txt (rank_from \"index\"): with --file, "
             f"also pass --index-file (a local copy of {profile['index_url']})")
     else:
-        path = fetch_url(profile["index_url"], _index_cache_path(args.cache_dir, profile),
-                         user_agent=USER_AGENT, timeout=60, max_age=args.max_age)
+        path = _polite_fetch(args, profile, profile["index_url"], _index_cache_path(args.cache_dir, profile),
+                             timeout=60)
     entries = [e for e in parse_llms_index(load_lines(path)) if not _is_index_file_url(e["url"])]
     assert_parsed(f"{_label(profile)} index", len(entries), path)
     return path, entries
@@ -1842,6 +1928,8 @@ def _ranked_entries(entries: list[dict], query: str, limit: int, keys: list) -> 
 
 _FETCH_ZERO_TIP = ("Tip: try broader keywords, or 'search-content -- \"<query>\"' (omit --page-ref to "
                    "scan every page — slow on first run) to search page bodies directly")
+_PAGE_REF_ZERO_TIP = ("Tip: try broader keywords, or 'search-content --page-ref <page_ref> -- \"<query>\"' "
+                      "to search the body of one page (this source does not scan every page)")
 _SLUG_REF_NOTE = ("Note: llms-full.txt is not cached yet, so [ref] above is a URL slug, "
                   "not an integer doc_idx. Run 'search' once (or 'sections <slug>' directly) "
                   "to populate doc_idx numbering here too.")
@@ -1945,7 +2033,7 @@ def _search_index_from_index(args, profile: dict) -> None:
     if not scored:
         print("No matching documents found.")
         print()
-        print(_FETCH_ZERO_TIP if fetch else
+        print(_fetch_zero_tip(profile) if fetch else
               "Tip: try broader keywords, 'search' for an automatic full-text fallback, "
               "or 'search-content' to search bodies directly")
     for score, i, entry in scored:
@@ -1997,6 +2085,71 @@ def _fetches_pages(profile: dict) -> bool:
     return profile.get("body") == "fetch"
 
 
+def _fetch_zero_tip(profile: dict) -> str:
+    return _PAGE_REF_ZERO_TIP if profile.get("search_content_needs_page_ref") else _FETCH_ZERO_TIP
+
+
+_ROBOTS_LOCK = threading.Lock()
+
+
+def _robots_rules(args, profile: dict, origin: str) -> list | str:
+    """The rules of *origin*'s ``robots.txt`` for this loader, read once per
+    run (and kept in the page cache for ``--max-age``); the reason as a string
+    when it could not be read. RFC 9309: a 4xx means no restrictions, an
+    unreachable file means nothing may be fetched. An HTML answer is a site's
+    page for a missing file, so it counts as the 404 it stands for. The lock
+    keeps ``search``'s workers from fetching it twice."""
+    with _ROBOTS_LOCK:
+        known = args.__dict__.setdefault("robots_rules", {})
+        if origin not in known:
+            url = origin + "/robots.txt"
+            try:
+                path = fetch_url(url, _page_cache_path(args.cache_dir, profile, url), user_agent=USER_AGENT,
+                                 timeout=30, max_age=args.max_age, raise_on_error=True)
+                known[origin] = parse_robots("".join(load_lines(path)), USER_AGENT)
+            except FetchError as e:
+                missing = (isinstance(e.cause, urllib.error.HTTPError) and 400 <= e.cause.code < 500
+                           or isinstance(e.cause, NotTextError))
+                known[origin] = [] if missing else str(e.cause)
+        return known[origin]
+
+
+def _robots_refusal(args, profile: dict, url: str) -> str | None:
+    """Why *url* must not be fetched, or ``None`` when the ``robots.txt`` of its
+    host lets this loader fetch it. A site that forbids the URL and a file that
+    could not be read stop the fetch alike, and read differently: the second
+    says nothing about what the site allows, and may pass on a later run."""
+    parts = urlsplit(url)
+    origin = f"{parts.scheme}://{parts.netloc}"
+    rules = _robots_rules(args, profile, origin)
+    if isinstance(rules, str):
+        return f"could not read {origin}/robots.txt ({rules}), so nothing is fetched from that host for now"
+    if robots_allows(rules, (parts.path or "/") + (f"?{parts.query}" if parts.query else "")):
+        return None
+    return f"robots.txt disallows {url}"
+
+
+def _polite_fetch(args, profile: dict, url: str, cache_path: str, *, timeout: int,
+                  raise_on_error: bool = False) -> str:
+    """``fetch_url``, and with ``respect_robots`` nothing ``robots.txt``
+    disallows is requested, a redirect's target included (Amp sends an unknown
+    path to /auth/, which its robots.txt disallows). A file the cache serves
+    costs no request, so ``robots.txt`` is not read for it. A refusal is a
+    failed fetch: it may answer with the stale copy of this URL, never with a
+    cache whose sidecar names another URL (``fetch_url``)."""
+    check = None
+    if profile.get("respect_robots"):
+        def check(target):
+            return _robots_refusal(args, profile, target)
+        if cached_if_fresh(cache_path, args.max_age, url) is None:
+            refusal = check(url)
+            if refusal:
+                return _handle_fetch_failure(url, cache_path, OSError(refusal), raise_on_error,
+                                             cache_usable=not _meta_names_other_url(_load_fetch_meta(cache_path), url))
+    return fetch_url(url, cache_path, user_agent=USER_AGENT, timeout=timeout, max_age=args.max_age,
+                     raise_on_error=raise_on_error, redirect_check=check)
+
+
 def _refuse_file(args, profile: dict) -> None:
     """``--file`` is a local ``llms-full.txt``, which a ``body: "fetch"``
     source does not have."""
@@ -2021,12 +2174,23 @@ def _fetch_entry_docs(args, profile: dict) -> tuple[str, list[dict]]:
 def _fetch_page(args, profile: dict, url: str, *, timeout: int, raise_on_error: bool = False) -> str:
     """Cache path of the page at *url*, fetched unless the page cache serves
     it (``--max-age`` as for the other files)."""
-    return fetch_url(url, _page_cache_path(args.cache_dir, profile, url), user_agent=USER_AGENT,
-                     timeout=timeout, max_age=args.max_age, raise_on_error=raise_on_error)
+    return _polite_fetch(args, profile, url, _page_cache_path(args.cache_dir, profile, url),
+                         timeout=timeout, raise_on_error=raise_on_error)
 
 
-def _with_body(doc: dict, path: str) -> dict:
-    return dict(doc, body_lines=load_lines(path))
+def _page_lines(profile: dict, path: str) -> list[str]:
+    """The cached page at *path*, read as ``split_documents`` reads a page of
+    an ``llms-full.txt`` (``drop_lines``, then ``heading_line_pattern``)."""
+    lines = load_lines(path)
+    if profile["drop_lines"]:
+        lines = _drop_boilerplate(lines, profile["drop_lines"])
+    if profile["heading_line_pattern"] is not None:
+        lines = _promote_heading_lines(lines, profile["heading_line_pattern"])
+    return lines
+
+
+def _with_body(profile: dict, doc: dict, path: str) -> dict:
+    return dict(doc, body_lines=_page_lines(profile, path))
 
 
 def _fetch_pages_concurrently(args, profile: dict, indexed_urls) -> tuple[dict, list]:
@@ -2092,7 +2256,7 @@ def _fetch_search_results(args, profile: dict) -> tuple:
     for score, i, entry in scored:
         if i in paths:
             results.append({"doc_idx": i, "index_score": score,
-                            "body_hits": _body_hits(args, _with_body(docs[i], paths[i])),
+                            "body_hits": _body_hits(args, _with_body(profile, docs[i], paths[i])),
                             "body_only": False, "title": entry["title"], "url": entry["url"]})
     results.sort(key=lambda r: search_rank_key(r, include_changelog_priority=args.include_changelog_priority))
     return profile, index_path, docs, results, True, len(skipped)
@@ -2113,6 +2277,10 @@ def _search_content_fetch(args, profile: dict) -> None:
     if args.page_ref is not None:
         targets = [_resolve_ref(profile, docs, args)]
     else:
+        if profile["search_content_needs_page_ref"]:
+            die(f"--source {args.source} fetches only the pages a command needs, so 'search-content' "
+                f"does not scan all its {len(docs)} pages: use 'search' (fetches the top candidates), "
+                f"or give --page-ref <page_ref> (see 'search-index')", code=2)
         targets = range(len(docs))
         if len(docs) > profile["search_content_warn_pages"]:
             print(f"WARNING: --page-ref not given. About to fetch and search all {len(docs)} pages "
@@ -2139,7 +2307,7 @@ def _search_content_fetch(args, profile: dict) -> None:
             _print_skip(e.url, e.cause)
             continue
         searched.append(path)
-        hits = _body_hits(args, _with_body(d, path))
+        hits = _body_hits(args, _with_body(profile, d, path))
         if hits["total_matches"] == 0:
             continue
         total += hits["total_matches"]
@@ -2169,11 +2337,12 @@ def _search_content_fetch(args, profile: dict) -> None:
     if total == 0:
         # only the pages fetched can be counted (from the page cache, not
         # the network)
-        render_zero_hits(args.query, (load_lines(p) for p in searched), subcommand="search-content",
+        render_zero_hits(args.query, (_page_lines(profile, p) for p in searched), subcommand="search-content",
                          hint_args=_source_hint_args(args) + corpus_hint_args(args),
                          index_hint_args=(None if _no_index_hint(args, profile)
                                           else _source_hint_args(args) + corpus_hint_args(args)), scope="documents",
-                         restricted_to=args.page_ref, restricted_only=args.page_ref is not None)
+                         restricted_to=args.page_ref, restricted_only=args.page_ref is not None,
+                         can_drop_page_ref=not profile["search_content_needs_page_ref"])
         return
     render_next_content(hit_candidates(shown), hint_args=_source_hint_args(args) + corpus_hint_args(args),
                         query=args.query, one_page=args.page_ref is not None)
@@ -2189,7 +2358,7 @@ def _fetch_page_view(args, profile: dict) -> tuple[dict, list[dict], PageView]:
     return profile, docs, PageView(
         idx=idx,
         title=d["title"] or "(untitled)",
-        body_lines=load_lines(path),
+        body_lines=_page_lines(profile, path),
         header_lines=[f"  URL: {d['url']}", f"  Cache: {path}"],
         min_level=d["min_level"],
         protect_tables=None if profile.get("protect_tables", True) else False,
@@ -2757,9 +2926,13 @@ def _demote_h3_only(results: list[dict], h3_only: set, full_match: set, *,
 
     A Changelog / Release notes page (``is_low_priority``) is not an anchor
     unless *include_changelog_priority*: search_rank_key puts it last, and
-    moving an ordinary page below it would undo that order."""
+    moving an ordinary page below it would undo that order. Nor is a page with
+    no body hits: search_rank_key puts it below every page with hits, and the
+    H3 page with hits (``citations``: Generating Text, against MCP pages whose
+    description says the word) is the answer there."""
     def matched(r):
         return (not r["body_only"] and r["doc_idx"] in full_match and r["doc_idx"] not in h3_only
+                and r["body_hits"]["total_matches"] > 0
                 and (include_changelog_priority or not is_low_priority(r.get("title", ""))))
     last = max((i for i, r in enumerate(results) if matched(r)), default=-1)
     moved = [i for i in range(last) if not results[i]["body_only"] and results[i]["doc_idx"] in h3_only]
@@ -2767,6 +2940,19 @@ def _demote_h3_only(results: list[dict], h3_only: set, full_match: set, *,
         return results
     kept = [results[i] for i in range(last + 1) if i not in moved]
     return kept + [results[i] for i in moved] + results[last + 1:]
+
+
+def _place_below_hits(results: list[dict], extras: list[dict], *,
+                      include_changelog_priority: bool = False) -> list[dict]:
+    """*results* with *extras* (``h3_only_keeps_full_search``) under the rows
+    with body hits and above the rows with none, so that the order of *results*
+    and its first row do not change. A Changelog / Release notes page stays
+    last unless *include_changelog_priority*, as ``search_rank_key`` has it."""
+    def low(r):
+        return not include_changelog_priority and is_low_priority(r.get("title", ""))
+    at = next((i for i, r in enumerate(results) if low(r) or r["body_hits"]["total_matches"] == 0), len(results))
+    return (results[:at] + [r for r in extras if not low(r)] + results[at:]
+            + [r for r in extras if low(r)])
 
 
 def cmd_search_index(args):
@@ -2898,19 +3084,31 @@ def _search_results(args, profile: dict) -> tuple:
     # It takes one min_level for the whole corpus; every page of a profile
     # shares its split, so the first page's is used.
     level = (docs[0]["min_level"] or 2) if docs else 2
-    for idx, hits in full_corpus_extra_hits(
-        results, [d["body_lines"] for d in docs], args.query, context_lines=args.context,
-        max_matches_per_doc=args.max_hits, max_snippet_chars=args.max_snippet_chars,
-        min_level=level, limit=args.top_n,
-        include_changelog_priority=args.include_changelog_priority,
-        titles=[d["title"] or "" for d in docs],
-    ):
-        results.append({"doc_idx": idx, "index_score": None, "body_hits": hits, "body_only": True,
-                        "title": docs[idx]["title"] or "(untitled)", "url": None})
+
+    def extra_rows(rows, skip=()):
+        return [{"doc_idx": idx, "index_score": None, "body_hits": hits, "body_only": True,
+                 "title": docs[idx]["title"] or "(untitled)", "url": None}
+                for idx, hits in full_corpus_extra_hits(
+                    rows, [d["body_lines"] for d in docs], args.query, context_lines=args.context,
+                    max_matches_per_doc=args.max_hits, max_snippet_chars=args.max_snippet_chars,
+                    min_level=level, limit=args.top_n,
+                    include_changelog_priority=args.include_changelog_priority,
+                    titles=[d["title"] or "" for d in docs],
+                ) if idx not in skip]
+
+    usual = extra_rows(results)
+    below = []
+    if profile["h3_only_keeps_full_search"] and h3_only:
+        # what the full-corpus search adds when the H3-only candidates are not
+        # counted: their body hits must not stop it, but they keep their place
+        below = extra_rows([r for r in results if r["doc_idx"] not in h3_only],
+                           skip={r["doc_idx"] for r in results + usual})
+    results += usual
     results.sort(key=lambda r: search_rank_key(r, include_changelog_priority=args.include_changelog_priority))
     # empty unless the profile's index reads H3: the order is then search_rank_key's
     results = _demote_h3_only(results, h3_only, full_match,
                               include_changelog_priority=args.include_changelog_priority)
+    results = _place_below_hits(results, below, include_changelog_priority=args.include_changelog_priority)
     return profile, path, docs, results, from_index, 0
 
 
@@ -2956,7 +3154,7 @@ def cmd_search(args):
     if not results and not skipped:
         print("No matching documents found.")
         print()
-        print(_FETCH_ZERO_TIP if fetch else "Tip: try broader keywords or 'search-content' for a full-body scan")
+        print(_fetch_zero_tip(profile) if fetch else "Tip: try broader keywords or 'search-content' for a full-body scan")
         print()
         texts, scope = _zero_hit_texts(profile, docs)
         render_zero_hits(args.query, texts,

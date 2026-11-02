@@ -14,8 +14,8 @@ preset を置き換える。
 
 - 対応する形状のサイトで、ページの分割・タイトル・URL が誤る (実測した Next.js / Vite /
   Vitest / Drizzle / Zod / Hono / Bun / Vercel / Render / MCP / Codex / Ollama / Agent Skills /
-  Agent Plugins / OpenAI Plugins・API docs / ACP / Cline / Factory / Devin /
-  Cloudflare 製品別ファイルと同じ形のもの)。
+  Agent Plugins / OpenAI Plugins・API docs / ACP / Cline / Factory / Devin / Gemini CLI / Kilo Code /
+  OpenAI Agents SDK (TypeScript) / Continue / Cloudflare 製品別ファイルと同じ形のもの)。
   本文の水平線やコードブロック内の見本を区切りと誤認する、`drop_lines` がコードブロック内の
   行を消す、ページ URL を読む前に行を消す、など
 - `index_url` の突き合わせで、別のページの URL が付く (完全一致・一意以外で付けている、別の
@@ -27,6 +27,9 @@ preset を置き換える。
 - `body: "fetch"` の source で、取得するページが増える (`fetch-index` / `search-index` がページを
   取る、`search` が候補の外のページを取る・全文 fallback をする、`search-content` を並行にして
   最初の結果が全件の取得を待つ)。ページの cache で、別の URL のページの本文を返す
+- `respect_robots` の source (Zed / Amp) で、`robots.txt` が拒否する場所 (転送先を含む) を要求する。
+  `search_content_needs_page_ref` の source の出力が、`--page-ref` の無い `search-content` を勧める
+- 200 で返った HTML の文書を本文としてキャッシュする
 - `Next:` ヒントが `--source` / `--sources-file` / `--file` / `--cache-dir` / `--max-age` を
   落とし、別の corpus を指すコマンドになる
 - `sources.json` の検証漏れで、source 名がキャッシュディレクトリの外を指せる・不正な値で

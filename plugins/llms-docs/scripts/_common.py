@@ -795,8 +795,15 @@ class _NoValidatorRedirectHandler(urllib.request.HTTPRedirectHandler):
     """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        check = getattr(req, "redirect_check", None)
+        # ``fetch_url(..., redirect_check=)``: refused before the target is
+        # requested. A URLError is handled as any failed fetch.
+        refusal = check(newurl) if check is not None else None
+        if refusal:
+            raise urllib.error.URLError(f"redirect to {newurl} refused: {refusal}")
         new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new_req is not None:
+            new_req.redirect_check = check  # the next hop is checked too
             for header in ("If-none-match", "If-modified-since"):
                 new_req.headers.pop(header, None)
                 new_req.unredirected_hdrs.pop(header, None)
@@ -844,10 +851,35 @@ def cached_if_fresh(path: str, max_age: int | None, url: str | None = None) -> s
         return None
 
 
+# An HTML document, not the Markdown / text this module fetches: a "soft 404"
+# (Cursor's llms-full.txt answers 200 with its site page, Amp sends an unknown
+# path to its sign-in page).
+_HTML_START_RE = re.compile(rb"(?:\xef\xbb\xbf)?\s*<(?:!doctype\s+html|html)[\s>]", re.IGNORECASE)
+
+
+class NotTextError(ValueError):
+    """``fetch_url``: the response is an HTML document, not the text file."""
+
+
+def looks_like_html(data: bytes) -> bool:
+    """True when *data* opens as an HTML document. A Markdown page that only
+    holds HTML (``<h2 id="x">``, ``<script>``) does not."""
+    return _HTML_START_RE.match(data[:1024]) is not None
+
+
 def fetch_url(url: str, cache_path: str, *, user_agent: str,
               timeout: int = 120, create_parent: bool = True,
-              max_age: int | None = None, raise_on_error: bool = False) -> str:
+              max_age: int | None = None, raise_on_error: bool = False,
+              redirect_check=None) -> str:
     """Return path to cached file, fetching from *url* if it doesn't exist yet.
+
+    A response that is an HTML document (``looks_like_html``) is a failed
+    fetch, handled as below, and never cached: every file this reads is
+    Markdown or text, and a 200 with HTML is the site's page for a missing one.
+
+    *redirect_check* (a function of the target URL) is asked before each
+    redirect is followed; when it returns a reason (a string) the fetch fails
+    with that reason without requesting the target. ``None`` lets it through.
 
     When *max_age* is given (seconds), re-fetches if the existing cache is
     older than that. ``max_age=None`` (default) keeps the original behaviour
@@ -984,6 +1016,7 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
 
     try:
         req = urllib.request.Request(url, headers=headers)
+        req.redirect_check = redirect_check
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = resp.read()
             content_length = resp.headers.get("Content-Length")
@@ -999,6 +1032,8 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
                 )
             if resp.headers.get("Content-Encoding", "").lower() == "gzip":
                 data = gzip.decompress(data)
+            if looks_like_html(data):
+                raise NotTextError("the server answered with an HTML page, not the text file")
             etag = resp.headers.get("ETag")
             last_modified = resp.headers.get("Last-Modified")
             # Defense-in-depth alongside _NoValidatorRedirectHandler
@@ -1065,6 +1100,131 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
             EOFError, zlib.error, ValueError) as e:
         return _handle_fetch_failure(url, cache_path, e, raise_on_error,
                                      cache_usable=not url_changed)
+
+
+# ---------------------------------------------------------------------------
+# robots.txt (RFC 9309)
+# ---------------------------------------------------------------------------
+
+_ROBOTS_ESCAPE_RE = re.compile(r"%[0-9A-Fa-f]{2}|[^\x00-\x7f]+|[%*$]")
+# RFC 3986 reserved characters, less ``*`` and ``$``, which stay escaped anyway.
+_ROBOTS_RESERVED = ":/?#[]@!&'()+,;="
+
+
+def _robots_canonical(text: str, *, keep_reserved: bool = False) -> str:
+    """*text* (a path, or a piece of a pattern between its ``*``) in the one
+    spelling two encodings of it share, so that ``/%7Euser`` and ``/~user``,
+    ``/a%20b`` and ``/a b``, or ``%2f`` and ``/`` compare equal (RFC 9309 2.2.2).
+    An escape of an ASCII character is decoded, except ``%``, ``*`` and ``$``,
+    which stay escaped so that they are never read as an escape's start or
+    as a pattern's wildcard and end; the same characters written literally
+    get the same escape. A non-ASCII character becomes its UTF-8 escapes.
+    Hex digits are upper case. One pass, so ``%2541`` stays ``%2541``.
+    With *keep_reserved*, an escape of a reserved character also stays, so that
+    ``%2F`` and ``/`` differ: the spelling ``Allow`` is compared in."""
+    def spell(m):
+        found = m.group(0)
+        if found in ("%", "*", "$"):
+            return f"%{ord(found):02X}"
+        if found[0] != "%":
+            return "".join(f"%{b:02X}" for b in found.encode("utf-8", "surrogatepass"))
+        code = int(found[1:], 16)
+        keep = code >= 0x80 or chr(code) in "%*$" or (keep_reserved and chr(code) in _ROBOTS_RESERVED)
+        return f"%{code:02X}" if keep else chr(code)
+    return _ROBOTS_ESCAPE_RE.sub(spell, text)
+
+
+def _robots_canonical_pattern(pattern: str, *, keep_reserved: bool = False) -> str:
+    """``_robots_canonical`` of a pattern: its ``*`` and a final ``$`` stay."""
+    anchored = pattern.endswith("$")
+    pieces = (pattern[:-1] if anchored else pattern).split("*")
+    return "*".join(_robots_canonical(p, keep_reserved=keep_reserved) for p in pieces) + ("$" if anchored else "")
+
+
+def parse_robots(text: str, agent: str) -> list[tuple[bool, str]]:
+    """``(allow, pattern)`` rules of *text* that apply to *agent*: the groups
+    naming its product token (case-insensitive, the token before ``/``), else
+    the ``*`` groups. A group naming the token decides even with no rule in it
+    (``Disallow:`` alone means nothing is disallowed). A ``Disallow:`` with an
+    empty path allows everything and is no rule. A byte order mark before the
+    first line is not part of it. The patterns come back in
+    ``_robots_canonical`` spelling (``keep_reserved`` for ``Allow``, see
+    ``robots_allows``). Not ``urllib.robotparser``: it takes the
+    first rule that matches, so ``Allow: /`` on the first line (ampcode.com,
+    zed.dev) would allow every ``Disallow:`` below it; RFC 9309 takes the
+    longest match."""
+    token = agent.split("/", 1)[0].strip().lower()
+    named: list = []
+    star: list = []
+    agents: list = []
+    in_rules = False
+    saw_named = False
+    for raw in text.removeprefix("\ufeff").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        key, sep, value = line.partition(":")
+        key, value = key.strip().lower(), value.strip()
+        if not sep:
+            continue
+        if key == "user-agent":
+            if in_rules:
+                agents, in_rules = [], False
+            agents.append(value.lower())
+            saw_named = saw_named or value.lower() == token
+        elif key in ("allow", "disallow"):
+            in_rules = True
+            if not value:
+                continue
+            rule = (key == "allow", _robots_canonical_pattern(value, keep_reserved=key == "allow"))
+            if token in agents:
+                named.append(rule)
+            if "*" in agents:
+                star.append(rule)
+    return named if saw_named else star
+
+
+def _robots_pattern_matches(pattern: str, path: str) -> bool:
+    """*pattern* (``*`` = any run of characters, a final ``$`` = the end of the
+    path) against the start of *path*. Greedy left to right, not a regular
+    expression: a line of ``*`` from a server must not cost backtracking."""
+    anchored = pattern.endswith("$")
+    parts = (pattern[:-1] if anchored else pattern).split("*")
+    if not path.startswith(parts[0]):
+        return False
+    if len(parts) == 1:
+        return path == parts[0] if anchored else True
+    pos = len(parts[0])
+    for part in parts[1:-1]:
+        found = path.find(part, pos)
+        if found < 0:
+            return False
+        pos = found + len(part)
+    last = parts[-1]
+    if anchored:
+        return path.endswith(last) and len(path) - len(last) >= pos
+    return path.find(last, pos) >= 0
+
+
+def robots_allows(rules: list[tuple[bool, str]], path: str) -> bool:
+    """True when *rules* (``parse_robots``) let *path* (path and query) be
+    fetched: the longest matching pattern decides, ``Allow`` wins a tie, and no
+    matching rule allows. *path* is compared in the spelling of each rule: for
+    ``Disallow`` with reserved escapes decoded (an encoding must not slip past
+    a refusal), for ``Allow`` with them kept (``Allow: /private%2Fpub`` must
+    not lift ``Disallow: /private/`` from ``/private/pub``). The length of a
+    match is always that of the decoded pattern, so keeping an escape does not
+    make an ``Allow`` longer. An ``Allow`` must also match the decoded spelling,
+    so a ``*`` cannot end inside a kept escape (``Allow: /a*F`` on ``/a%2F``)."""
+    decoded = _robots_canonical(path)
+    kept = _robots_canonical(path, keep_reserved=True)
+    best_len, allowed = -1, True
+    for allow, pattern in rules:
+        plain = _robots_canonical_pattern(pattern)
+        if _robots_pattern_matches(plain, decoded) and (
+                not allow or _robots_pattern_matches(pattern, kept)):
+            size = len(plain)
+            if size > best_len or (size == best_len and allow):
+                best_len, allowed = size, allow
+    return allowed
 
 
 def load_lines(path: str):
