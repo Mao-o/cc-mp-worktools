@@ -35,6 +35,7 @@ class BuiltinPrefixTest(test_guard.GuardBase):
             f'builtin cd -- "{m}"; git reset --hard',
             f'builtin cd -L -- "{m}"; git reset --hard',
             f'builtin cd "{m}" >/dev/null; git reset --hard',
+            f'builtin cd "{m}" &>/dev/null; git reset --hard',
             f'builtin cd "{m}" 2>/dev/null; git reset --hard',
             f'builtin cd "{m}" >/dev/null 2>&1; git reset --hard',
             # 引用符や `\` で綴っても同じコマンド
@@ -181,6 +182,7 @@ class BuiltinPrefixTest(test_guard.GuardBase):
             # option 付きと値の決まらない形は読まない。`unset -f` は関数を消すので GIT_DIR は残り、main で走る
             f'export GIT_DIR="{m}/.git"; builtin unset -f GIT_DIR; git reset --hard',
             f'export GIT_DIR="{m}/.git"; builtin export -x GIT_DIR="{a}/.git"; git reset --hard',
+            f'export GIT_DIR="{m}/.git"; builtin export +x GIT_DIR="{a}/.git"; git reset --hard',
             f'KEEP="{m}/.git"; export GIT_DIR="{m}/.git"; builtin export GIT_DIR=$KEEP; git reset --hard',
         ))
         self.assertAllowed((

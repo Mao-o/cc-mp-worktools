@@ -109,8 +109,8 @@ def _builtin_reads(word: str, args: list[str]) -> bool:
     if word not in _BUILTIN_READS:
         return False
     if word in ("export", "unset"):
-        # `unset -f` は関数を消す。`export -x` は bash 3.2 で失敗する。`$x` は値が決まらない
-        return not any(a.startswith("-") or _dynamic(a) for a in args)
+        # `unset -f` は関数を消す。`export -x` / `+x` は shell で割れる。`$x` は値が決まらない
+        return not any(a.startswith(("-", "+")) or _dynamic(a) for a in args)
     if word != "cd":
         return True
     operands = _before_redirect(args)

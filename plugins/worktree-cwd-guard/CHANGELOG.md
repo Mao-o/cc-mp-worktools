@@ -24,7 +24,7 @@ shell が展開しないもの (`~` と `~/...` は読む)。option は `-L` / `
 - `builtin popd`: スタックが空だと失敗して移動しない形を、読むと止められなくなる
 - `builtin pushd`: 対の `builtin popd` を読まないので、読むと戻り先を取り違える。`builtin pushd <main>; git reset --hard` は見逃す
 - 移動しない形と行き先の分からない形: `builtin cd +1` / `-1` / `-` / `-x <dir>` / `-e <dir>`、`$` / `` ` `` / glob / `{` を含む語
-- 変数の扱いが違う形: `builtin unset -f GIT_DIR` (関数を消すだけ)、`builtin export -x` / `-n`、`builtin export GIT_DIR=$x`
+- 変数の扱いが違う形: `builtin unset -f GIT_DIR` (関数を消すだけ)、`builtin export -x` / `+x` / `-n`、`builtin export GIT_DIR=$x`
 
 `cd <main>; builtin cd <worktree>; git reset --hard` のように `builtin` で自分の worktree へ戻る形は、実際には自分の worktree で
 走るので、誤って止めなくなる (実測で確認)。
@@ -36,6 +36,8 @@ shell が展開しないもの (`~` と `~/...` は読む)。option は `-L` / `
 - bash 3.2 の `! time builtin cd` / `if time builtin cd`: 外部の `time` になるが、Bash tool の zsh に合わせて今の shell で動くものとして読む
 - `builtin cd <dir>/missing` や開けない redirect の付いた `builtin cd` など失敗する形、`builtin cd -` の行き先、`HOME=` を書き換えた
   後の `builtin cd`: `builtin` の無い `cd` と同じ読み (`cd` は成功するものとして扱う)
+- 引用した行き先の `[` / `{` を含むパス (`builtin cd "a[1]"`): shlex が引用を外すので glob と区別できず、読まない
+- `builtin cd <dir> >/dev/null extra` (redirect の後ろの語を数えない): zsh だけ失敗する形で、読む
 
 ### テストの追加
 
