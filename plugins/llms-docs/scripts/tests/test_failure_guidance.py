@@ -609,6 +609,50 @@ class SkillGuidanceTest(unittest.TestCase):
                 with self.subTest(skill=name, needle=needle):
                     self.assertIn(needle, text)
 
+    @staticmethod
+    def section(text, heading):
+        """The body under a level-2 heading, up to the next level-2 heading."""
+        start = text.index(heading) + len(heading)
+        following = re.search(r"^## ", text[start:], re.M)
+        return text[start:start + following.start()] if following else text[start:]
+
+    def test_fork_is_told_first_to_return_the_body_as_its_final_message(self):
+        # A fork inherits StructuredOutput from a caller started with a schema.
+        # Calling it puts the body into the tool's arguments and the caller gets
+        # only "Skill execution completed". The instruction competes with the
+        # inherited "call StructuredOutput last", so it stays the first section.
+        heading = "## 結果の返し方 (最初に読む)"
+        sections = {}
+        for name in SKILL_NAMES:
+            text = self.text(name)
+            with self.subTest(skill=name):
+                self.assertEqual(re.findall(r"^## .*$", text, re.M)[0], heading)
+                sections[name] = self.section(text, heading)
+                for needle in ("**最終メッセージ**", "`StructuredOutput`", "呼ばない",
+                               "`Skill execution completed`"):
+                    self.assertIn(needle, sections[name])
+        self.assertEqual(len(set(sections.values())), 1, "the four skills drifted apart")
+
+    def test_skill_names_the_way_out_when_the_body_does_not_come_back(self):
+        heading = "## Skill を呼べない文脈 (subagent など)"
+        for name in SKILL_NAMES:
+            body = self.section(self.text(name), heading)
+            with self.subTest(skill=name):
+                self.assertIn("`Skill execution completed`", body)
+                self.assertIn("呼び直さず、上の手順でスクリプトを直接実行する", body)
+
+    def test_readme_keeps_the_reproduction_and_the_way_out(self):
+        readme = (SKILLS_DIR.parent / "README.md").read_text(encoding="utf-8")
+        body = self.section(readme, "## Skill を呼べない文脈 (subagent など) から使う")
+        heading = "### 既知の制約: `StructuredOutput` を持つ呼び出し元"
+        self.assertIn(heading, body)
+        limit = body[body.index(heading):].split("\n### ")[0]
+        for needle in ("**再現**", "agent(prompt, {schema})", "**結果**", "`raw_result`",
+                       "Result: Skill execution completed", "未確認", "**回避**",
+                       "スクリプトを Bash で直接実行する"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, limit)
+
     def test_failure_table_names_what_the_scripts_print(self):
         # The strings the table quotes must be strings the scripts still print
         # (all four skills run parse-llms-txt.py).

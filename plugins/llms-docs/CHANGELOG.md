@@ -2,6 +2,14 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.51.1] - 2026-11-03
+
+### 修正: schema 付きの agent から Skill で呼ぶと本文が返らない
+
+- **症状**: schema 付きで起動された agent (Workflow の `agent(prompt, {schema})`) が `researching-claude-docs` を Skill ツールで呼ぶと、結果が `Skill execution completed` だけになる。2026-11-03 に Claude Code 2.1.316 の Workflow 1 体で 1 回再現した。fork 側の transcript では、本文が呼び出し元の schema のフィールド (`raw_result`) として `StructuredOutput` の引数に入っていた。fork が呼び出し元のツールと schema を引き継いでいるためで、原因の本体は harness 側
+- **変更**: 4 つの SKILL.md の冒頭に「`StructuredOutput` を呼ばず、本文を最終メッセージとして返す」を書いた。この指示で本文が返るようになるかは未確認
+- **回避の手順**: Skill の結果に本文が無いときは呼び直さず、同梱のスクリプトを Bash で直接実行する。4 つの SKILL.md と README の「既知の制約: `StructuredOutput` を持つ呼び出し元」に、再現の手順と結果とあわせて書いた
+
 ## [0.51.0] - 2026-11-03
 
 ### 追加: Zed / Amp を読む (`llms-full.txt` が無く、ページごとに取得するサイト)
