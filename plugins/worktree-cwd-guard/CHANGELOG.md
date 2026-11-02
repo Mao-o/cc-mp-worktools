@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.5.0
+
+**`builtin cd <main>; git reset --hard` のように `builtin` を前に付けた形を読み、別 checkout への git の書き込みを止めるようにした
+(minor bump)。**
+
+### 修正: `builtin` を前に付けた組み込みを読む
+
+`builtin cd <dir>` は bash でも zsh でも今の shell の `cd` で移動が残るのに、`builtin` を一般のコマンドとして読んでいたので、
+後ろの git を元のディレクトリで動くものとして判定していた (0.4.0 まで)。`builtin` の後ろの `cd` / `pushd` / `export` / `unset` /
+`true` / `false` / `:` を、`builtin` の無い形と同じに読む。
+
+次の形は、bash 3.2 と `zsh -f` で偽の git を走らせた実測に合わせて、移動として読まない (これまでの読みのまま):
+
+- 外部プロセスで動く形: `env builtin cd` / `nohup builtin cd` / `sudo builtin cd` / `exec builtin cd` (macOS の外部コマンド
+  `builtin` が子プロセスで走るので移動は残らない)。`time -p builtin cd` / `time time builtin cd` も同じ。先頭の `time builtin cd`
+  は今の shell で動くので読む
+- shell によって読みが割れる形: `command builtin cd` / `builtin command cd` / `builtin -- cd` / `builtin - cd` / `builtin chdir`
+- どちらの shell でも走らない形: `builtin git` / `builtin env git` など (組み込みが無い)
+- `builtin popd`: スタックが空だと失敗して移動しない形を、読むと止められなくなる
+
+`cd <main>; builtin cd <worktree>; git reset --hard` のように `builtin` で自分の worktree へ戻る形は、実際には自分の worktree で
+走るので、誤って止めなくなる (実測で確認)。
+
+### テストの追加
+
+- `tests/test_builtin_prefix.py`: 上の読みごとの判定
+
+テスト件数: 93 → 101 (追加 8・削除 0・統合 0)。
+
 ## 0.4.0
 
 **pipeline の最後の要素の `cd` (`printf a | cd <main> && git commit -m x`) が残った場合も判定し、後ろの別 checkout への

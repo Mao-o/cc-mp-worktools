@@ -88,6 +88,11 @@ _WRAPPER_VALUE_OPTS = {
     "exec": {"-a"},
 }
 _CHDIR_OPTS = {"env": {"-C", "--chdir"}, "sudo": {"-D", "--chdir"}}
+# `builtin` の後ろで読む語。bash 3.2 と zsh の両方で今の shell の組み込みとして動くもののうち、_command が読むものだけ。
+# `builtin git` は組み込みが無いのでどちらの shell でも走らない。`builtin -- cd` は bash だけ、`builtin - cd` は zsh だけ
+# 動くので読まない。`builtin command cd` は bash では残り zsh では外部の cd になって残らないので読まない。
+# `builtin popd` は読まない (スタックが空だと失敗して動かないが、_chdir はそれを「分からない」と読むので止まらなくなる)
+_BUILTIN_READS = {"cd", "pushd", "export", "unset", "true", "false", ":", "builtin"}
 
 
 def _strip_prefix(seg: list[str]) -> tuple[list[str], str | None, dict[str, str | None], bool]:
@@ -97,10 +102,15 @@ def _strip_prefix(seg: list[str]) -> tuple[list[str], str | None, dict[str, str 
     空にして起動するか)。代入の値 None は `env -u NAME` による削除。
     `env -C <dir> git ...` のように wrapper が移動先を持つ場合、その後の git はそのディレクトリで動く。
     `GIT_DIR=<dir> git ...` の代入は git の対象を変えるので呼び出し側で使う。
+    `builtin` は今の shell で動くときだけ外す。`env builtin cd <dir>` などは外部の builtin コマンド
+    (macOS の /usr/bin/builtin) を子プロセスで走らせるので、移動は後ろに残らない。先頭の `time` は bash でも
+    zsh でも今の shell で動かす。ただし zsh の `time -p ...` は `-p` をコマンドとして起動し、2 つ目の `time`
+    は外部コマンドになり、bash は代入の後ろの `time` を外部コマンドとして起動する
     """
     chdir = None
     assigns: dict[str, str | None] = {}
     clear = False
+    in_shell = True  # ここまでの wrapper の後ろのコマンドが、今の shell で動くか
     i = 0
     while i < len(seg):
         tok = seg[i]
@@ -112,8 +122,19 @@ def _strip_prefix(seg: list[str]) -> tuple[list[str], str | None, dict[str, str 
         if tok == "(" or tok in _KEYWORDS:
             i += 1
             continue
+        if tok == "builtin":
+            if in_shell and i + 1 < len(seg) and seg[i + 1] in _BUILTIN_READS:
+                i += 1
+                continue
+            break
         if tok in _WRAPPERS:
             opts = _WRAPPER_VALUE_OPTS.get(tok, set())
+            if (
+                tok != "time"
+                or "".join(seg[i + 1 : i + 2]).startswith("-")
+                or any(t != "(" and t not in _KEYWORDS for t in seg[:i])
+            ):
+                in_shell = False
             i += 1
             while i < len(seg) and seg[i].startswith("-"):
                 name, eq, value = seg[i].partition("=")
