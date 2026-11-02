@@ -258,6 +258,15 @@ def print_search_result(head: str, hits: dict, *, extra_lines=(), anchor_for=Non
 NEXT_CONTENT_LIMIT = 3
 
 
+def _search_inside(result: dict) -> bool:
+    """True for a section that is too long to read (``long_section``) and that
+    the query is not about: no heading names its words, so they only happen to
+    appear somewhere in it, and ``content`` would show its first part rather
+    than those lines. A section whose headings do name them (``All commands``
+    for "all commands") is what the query asks for, and it is read."""
+    return result.get("long_section", False) and not result.get("heading_match", False)
+
+
 def hit_candidates(ranked, *, limit: int = NEXT_CONTENT_LIMIT, keep=None) -> list:
     """Pick the ``content`` targets to suggest from ranked search results.
 
@@ -265,11 +274,13 @@ def hit_candidates(ranked, *, limit: int = NEXT_CONTENT_LIMIT, keep=None) -> lis
     the page reference the ``content`` command takes, *hits* the page's
     ``search_content_in_body`` result, *extra_args* any per-page option (the
     ``--source`` of that page). Returns ``[(ref, heading_path | None,
-    extra_args, heading_count), ...]``, at most *limit*: the best section of
-    each top page first, then the next sections of the top page if there is
-    room. A page ranked on the index only (no body hits) is offered, without
-    a heading, only when no page has a body hit. *heading_count* is how many
-    sections of the page share that heading_path (1 when unique or unknown).
+    extra_args, heading_count, search_inside), ...]``, at most *limit*: the
+    best section of each top page first, then the next sections of the top
+    page if there is room. A page ranked on the index only (no body hits) is
+    offered, without a heading, only when no page has a body hit.
+    *heading_count* is how many sections of the page share that heading_path
+    (1 when unique or unknown). *search_inside* (``_search_inside``) says the
+    line should search the page rather than read the section.
 
     *keep* is ``(ref, extra_args)`` of a page whose best section must stay
     among the picks when it has one (``search`` passes its top index
@@ -282,11 +293,11 @@ def hit_candidates(ranked, *, limit: int = NEXT_CONTENT_LIMIT, keep=None) -> lis
     for ref, hits, extra in ranked:
         sections = hits.get("results") or []
         if not sections:
-            index_only.append((ref, None, extra, 1))
+            index_only.append((ref, None, extra, 1, False))
             continue
-        firsts.append((ref, sections[0]["heading_path"], extra,
-                       sections[0].get("heading_count", 1)))
-        spare += [(ref, r["heading_path"], extra, r.get("heading_count", 1))
+        firsts += [(ref, sections[0]["heading_path"], extra,
+                    sections[0].get("heading_count", 1), _search_inside(sections[0]))]
+        spare += [(ref, r["heading_path"], extra, r.get("heading_count", 1), _search_inside(r))
                   for r in sections[1:]]
     # A page that only ranked on the index is worth suggesting only when no
     # page has a body hit to point at.
@@ -319,8 +330,14 @@ def dropped_terms_note(query: str) -> None:
         print()
 
 
+# The search a long section's ``Next:`` line runs: room for a few hits to show
+# the lines around them, and for many to stay readable when only they fit.
+SEARCH_INSIDE_OPTIONS = ("--context", "3", "--max-snippet-chars", "2000")
+SEARCH_INSIDE_NOTE = "# long section: this lists its matching lines; change the terms to narrow"
+
+
 def render_next_content(candidates: list, *, hint_args: tuple,
-                        query: str | None = None) -> None:
+                        query: str | None = None, one_page: bool = False) -> None:
     """Print up to three ``Next: ... content <page> "<heading>"`` lines, filled
     in from the search results just shown (no placeholders to copy by hand).
     With *query*, the function words it was searched without are named first
@@ -328,17 +345,32 @@ def render_next_content(candidates: list, *, hint_args: tuple,
 
     Falls back to the generic placeholder hint when *candidates* is empty.
     Each candidate is ``(ref, heading_path | None, extra_args,
-    heading_count)``; *extra_args* goes before *hint_args* (a per-page
-    ``--source``). A heading_path the page has more than once gets a note
-    after the command: the command reads the first, which may not be the
+    heading_count, search_inside)``; *extra_args* goes before *hint_args* (a
+    per-page ``--source``). A heading_path the page has more than once gets a
+    note after the command: the command reads the first, which may not be the
     section that matched.
+
+    A *search_inside* candidate gets a ``search-content --page-ref`` line
+    with the same query instead of ``content``, which would stop long before
+    most of the matching lines. Two long sections of one page give one line.
+    *one_page* says this output already is that search: it would only repeat
+    itself, so the section is offered to ``content`` as any other.
     """
     if query is not None:
         dropped_terms_note(query)
     if not candidates:
         next_hint("content", *hint_args, "--", "<page_ref>", '"<heading_path>"')
         return
-    for ref, heading, extra, count in candidates[:NEXT_CONTENT_LIMIT]:
+    searched = set()
+    for ref, heading, extra, count, search_inside in candidates[:NEXT_CONTENT_LIMIT]:
+        if search_inside and query is not None and not one_page:
+            if (ref, extra) not in searched:
+                searched.add((ref, extra))
+                # the query goes last after "--": it may start with "-", and
+                # the reader may swap in a word that does
+                next_hint("search-content", "--page-ref", str(ref), *SEARCH_INSIDE_OPTIONS,
+                          *extra, *hint_args, "--", shlex.quote(query), SEARCH_INSIDE_NOTE)
+            continue
         note = duplicate_heading_note(count)
         note_args = (note.strip(),) if note else ()
         if heading is not None and heading.startswith("-"):

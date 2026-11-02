@@ -58,6 +58,8 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from _common import (  # noqa: E402
     FenceTracker,
     FetchError,
+    LONG_SECTION_HITS,
+    MAX_SNIPPET_HITS,
     _norm,
     add_cache_dir_arg,
     add_heading_path_arg,
@@ -992,11 +994,15 @@ _FM_LOOKAHEAD = 400
 
 def _frontmatter_at(lines: list[str], pos: int, required_key: str,
                     delimiter: str = "---", *,
-                    yaml_values: bool = False) -> tuple[dict, int, dict] | None:
+                    yaml_values: bool = False,
+                    cut_off: list | None = None) -> tuple[dict, int, dict] | None:
     """Parse a frontmatter block opening at *pos*; return (fields, end, lists)
     or None. *fields* maps each key to its value as one line of text;
     *lists* maps a key written as a block list (``key:`` then ``- item``
-    lines) to its items (quotes removed as in ``_fm_unquote``).
+    lines) to its items (quotes removed as in ``_fm_unquote``). *pos* is
+    added to *cut_off* when a block with *required_key* was still going at
+    the end of the ``_FM_LOOKAHEAD`` lines: it may be a page cut off by the
+    bound rather than a rule followed by other text.
 
     A ``---`` (or the profile's ``frontmatter_delimiter``) opens a block
     only when a closing one follows within ``_FM_LOOKAHEAD`` lines, every
@@ -1111,6 +1117,8 @@ def _frontmatter_at(lines: list[str], pos: int, required_key: str,
         elif not (value[0] in "'\"" and len(value) > 1 and value[-1] == value[0]):
             # unquoted, a flow ``[a, b]`` / ``{…}`` or an open single quote
             cont_key, cont_mode, parts[key] = key, "plain", [value]
+    if cut_off is not None and pos + _FM_LOOKAHEAD < len(lines) and required_key in fields:
+        cut_off.append(pos)
     return None
 
 
@@ -1148,17 +1156,28 @@ def split_frontmatter(lines: list[str], profile: dict) -> list[dict]:
     key = profile["frontmatter_key"]
     blocks: list[tuple[dict, int, int, dict]] = []  # (fields, block_start, body_start, lists)
     fence = FenceTracker()
+    fence_line = 0
+    cut_off: list[int] = []
     i = 0
     while i < len(lines):
         if not fence.in_fence:
             hit = _frontmatter_at(lines, i, key, profile["frontmatter_delimiter"],
-                                  yaml_values=profile.get("frontmatter_yaml_values", False))
+                                  yaml_values=profile.get("frontmatter_yaml_values", False),
+                                  cut_off=cut_off)
             if hit is not None:
                 blocks.append((hit[0], i, hit[1], hit[2]))
                 i = hit[1]
                 continue
+            fence_line = i
         fence.update(lines[i])
         i += 1
+    # What _warn_if_split_suspect reports; only a page that needs it says so
+    # (with split "auto", only the candidate that wins is reported).
+    notes: dict = {}
+    if fence.in_fence:
+        notes["unclosed_fence_line"] = fence_line + 1
+    if cut_off:
+        notes["cut_off_lines"] = [pos + 1 for pos in cut_off]
     rule = profile["page_url"]
     tags_key = profile.get("tags_key")
     docs = []
@@ -1177,6 +1196,7 @@ def split_frontmatter(lines: list[str], profile: dict) -> list[dict]:
             "body_lines": body,
             "min_level": 1,
             "tags": _fm_tags(fields, lists, tags_key) if tags_key else [],
+            **({"split_notes": notes} if notes else {}),
         })
     return docs
 
@@ -1473,9 +1493,11 @@ def _load_docs(args, profile: dict | None = None) -> tuple[dict, str, list[dict]
     # index_join "url": every page has its own URL, which is what the index
     # entries are joined to (``_entry_docs``); the title join below only
     # gives URL-less pages one, so it is not used then
-    if profile["index_url"] and profile["index_join"] != "url":
+    title_join = profile["index_url"] and profile["index_join"] != "url"
+    index_lines = _load_index_lines(args, profile) if title_join else _local_index_lines(args, profile)
+    _warn_if_split_suspect(profile, docs, path, index_lines)
+    if title_join:
         label = profile.get("label") or profile["name"]
-        index_lines = _load_index_lines(args, profile)
         if index_lines is not None:
             if profile["join_rate_guard"]:
                 # before join_index_urls: the URLs it copies from the index
@@ -1501,6 +1523,60 @@ def _load_docs(args, profile: dict | None = None) -> tuple[dict, str, list[dict]
 _GUARD_ADVICE = ("The profile may not match the file (check split / page_url: the pages' "
                  "URLs are not the index's), or the upstream format changed. Retry with "
                  "--max-age 0; if it persists, fix the profile or report an issue.")
+
+
+# A page split this far below the index's count is not a matter of a few pages
+# missing from the full text. Measured on the cached corpora with an index:
+# 0.97 to 1.06. The broken file that made this check (a Next.js llms-full.txt
+# whose closing fences ran into the next line): 9 of 474, about 0.02.
+_FEW_PAGES_RATIO = 0.5
+_SPLIT_ADVICE = ("The file may be broken upstream (--max-age 0 gets a fresh copy), or the profile "
+                 "may not match it; if it persists, report an issue.")
+
+
+def _warn_if_split_suspect(profile: dict, docs: list[dict], path: str, index_lines: list[str] | None) -> None:
+    """Say on stderr when the split looks wrong; the split itself stands.
+
+    * a code fence open at the end of the file: every page boundary after it
+      went into one page (``split_frontmatter`` does not look for boundaries
+      inside a fence, which keeps a frontmatter example in a code block from
+      being a page)
+    * a frontmatter block cut off by ``_FM_LOOKAHEAD``: not read as a page
+    * far fewer pages than the index has distinct page URLs (*index_lines*,
+      ``None`` when it is not at hand)"""
+    label = _label(profile)
+    notes = docs[0].get("split_notes", {}) if docs else {}
+    if "unclosed_fence_line" in notes:
+        print(f"WARNING: {label}: a code block opened near line {notes['unclosed_fence_line']} of {path} "
+              f"never closes, so any page after it is part of that page. {_SPLIT_ADVICE}", file=sys.stderr)
+    if "cut_off_lines" in notes:
+        lines = notes["cut_off_lines"]
+        print(f"WARNING: {label}: {len(lines)} frontmatter block(s) of {path} did not close within "
+              f"{_FM_LOOKAHEAD} lines (first near line {lines[0]}) and were not read as pages. "
+              f"{_SPLIT_ADVICE}", file=sys.stderr)
+    if index_lines is None:
+        return
+    listed = {normalize_doc_url(e["url"]) for e in parse_llms_index(index_lines)
+              if not _is_index_file_url(e["url"])}
+    if len(docs) < len(listed) * _FEW_PAGES_RATIO:
+        print(f"WARNING: {label}: {path} split into {len(docs)} pages, but its llms.txt lists "
+              f"{len(listed)}. {_SPLIT_ADVICE}", file=sys.stderr)
+
+
+def _local_index_lines(args, profile: dict) -> list[str] | None:
+    """The profile's ``llms.txt`` when reading it costs no download:
+    ``--index-file``, or a cache ``fetch_url`` would serve as is. For a
+    command that does not otherwise need the index, so ``None`` also when
+    there is none or ``--index-file`` is missing (a command that needs it
+    reports that)."""
+    if not profile["index_url"]:
+        return None
+    if args.index_file is not None:
+        return load_lines(args.index_file) if os.path.exists(args.index_file) else None
+    if args.file is not None:
+        return None
+    path = cached_if_fresh(_index_cache_path(args.cache_dir, profile), args.max_age, profile["index_url"])
+    return load_lines(path) if path is not None else None
 
 
 def index_join_rate(docs: list[dict], index_lines: list[str]) -> tuple[int, int]:
@@ -1646,13 +1722,16 @@ def _cached_docs(args, profile: dict) -> list[dict] | None:
     if args.file is not None:
         if not os.path.exists(args.file):
             die(f"--file '{args.file}' does not exist. Drop --file to auto-fetch to the cache.")
-        docs = resolve_split(load_lines(args.file), profile)[2]
+        _choice, used, docs = resolve_split(load_lines(args.file), profile)
         assert_parsed(profile["name"], len(docs), args.file)
+        _warn_if_split_suspect(used, docs, args.file, _local_index_lines(args, used))
         return docs
     path = cached_if_fresh(_cache_path(args.cache_dir, profile), args.max_age, profile["url"])
     if path is None:
         return None
-    return resolve_split(load_lines(path), profile)[2]
+    _choice, used, docs = resolve_split(load_lines(path), profile)
+    _warn_if_split_suspect(used, docs, path, _local_index_lines(args, used))
+    return docs
 
 
 def _entry_docs(entries: list[dict], docs: list[dict] | None, profile: dict) -> list:
@@ -2097,7 +2176,7 @@ def _search_content_fetch(args, profile: dict) -> None:
                          restricted_to=args.page_ref, restricted_only=args.page_ref is not None)
         return
     render_next_content(hit_candidates(shown), hint_args=_source_hint_args(args) + corpus_hint_args(args),
-                        query=args.query)
+                        query=args.query, one_page=args.page_ref is not None)
 
 
 def _fetch_page_view(args, profile: dict) -> tuple[dict, list[dict], PageView]:
@@ -2690,10 +2769,13 @@ def cmd_search_index(args):
 
 
 def _body_hits(args, d: dict):
+    # a search limited to one page is where a long section's Next: line leads
+    one_page = getattr(args, "page_ref", None) is not None
     return search_content_in_body(
         d["body_lines"], args.query, context_lines=args.context,
         max_matches_per_doc=args.max_hits, min_level=d["min_level"] or 2,
         max_snippet_chars=args.max_snippet_chars, page_title=d["title"] or "",
+        long_section_hits=LONG_SECTION_HITS if one_page else MAX_SNIPPET_HITS,
     )
 
 
@@ -2752,7 +2834,7 @@ def cmd_search_content(args):
     print()
     render_next_content(hit_candidates(shown),
                         hint_args=_source_hint_args(args) + corpus_hint_args(args),
-                        query=args.query)
+                        query=args.query, one_page=args.page_ref is not None)
 
 
 def _search_results(args, profile: dict) -> tuple:

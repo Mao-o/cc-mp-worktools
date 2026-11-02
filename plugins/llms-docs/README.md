@@ -70,6 +70,13 @@ field が抜ける)。
   実行できるコマンド付きで出す
 - **`search` / `search-content` の `Next:`**: 上位ヒットの `doc_idx` と heading_path を埋めたコマンドを
   最大 3 行出す (`--source` などは引き継ぐ)。ヒットが無いときはプレースホルダを出さない
+- **長すぎる節のヒット**: 節自身の本文が `content` の既定の上限 (24000 文字) を超える節 (CLI の環境変数の表など) では、
+  スニペットは語が多く揃う行の前後だけを示し、節の見出しが検索語を含まないときは `Next:` が `content` ではなく
+  `search-content --page-ref N --context 3 --max-snippet-chars 2000 -- '<同じ語>'` になる (`# long section: ...` は shell のコメントなので、行ごと打てる)。
+  その検索はこの節の一致する行を最大 15 行出す。語を差し替えて絞れる。ページと節の順位は変わらない
+- **ページの分割が怪しいとき**: `split: frontmatter` のファイルでコードブロックが閉じないまま終わる、frontmatter が
+  先読みの上限 (400 行) までに閉じない、または手元に `llms.txt` があってページ数がその異なる URL 数の半分を下回るときは、
+  stderr に WARNING を出す。分割の規則は変わらず、出力もそのまま続く
 - **同じ heading_path が 1 ページに 2 回以上ある見出し**: コマンドは 1 つ目を読む (2 つ目以降を指す手段は
   無い)。そうした見出しのコマンドには `# heading appears N times; this reads the first` (shell のコメントなので、行ごと打てる) が付く
 - **0 件**: `Why nothing matched:` に語ごとのページ数を出し、「語が corpus に無い」「語は有るが同じ
