@@ -67,6 +67,11 @@ _EXEC_POS = re.compile(
     _EXEC_START + _PREFIX_ITEM + "{0,%d}" % _PREFIX_LIMIT + r"(?:[^\s;&|<>]*/)?" + _PR_OP + r"(?P<args>[^;&|\n)`]*)"
 )
 _LONG_PREFIX = re.compile(_EXEC_START + _PREFIX_ITEM + "{%d}" % (_PREFIX_LIMIT + 1))
+# `\X` を組で読まない読み方。二重引用符の中の `V=\"p q\" gh` は、中身を読み直す shell では代入語で、組で読むと
+# 語が割れて数えられない。組で読んだ数と大きい方を採る (組で読む方が見つける形もある)
+_WORD_PART_NO_PAIR = r"""(?:'[^']*'|"[^"]*"|\$\([^()]*\)|`[^`]*`|[^\s'";&|<>])"""
+_EXEC_POS_NO_PAIR = re.compile(_EXEC_POS.pattern.replace(_WORD_PART, _WORD_PART_NO_PAIR))
+_LONG_PREFIX_NO_PAIR = re.compile(_LONG_PREFIX.pattern.replace(_WORD_PART, _WORD_PART_NO_PAIR))
 _PR_OP_ANYWHERE = re.compile(_PR_OP)
 # shell の名前 (sh / bash / zsh / ksh / dash / ash / ssh / csh / tcsh / mksh / yash / fish)
 _SHELLS = r"(?:ba|z|k|da|a|c|tc|mk|ya|fi)?sh"
@@ -1020,8 +1025,57 @@ def _has_pr_op(args: list[str]) -> bool:
     )
 
 
-def _collect(tokens: list[str], opaque: frozenset[str], found: list[Invocation], cd: _CdState, level: int) -> None:
-    """tokens の PR 操作を順に found に足し、cd を進める。level は代入の値の中のコマンド置換の深さ。"""
+# cwd を変えうるコマンド語 (引数の位置は見ない。`git add .` の `.` は移動ではない)
+# (`cd` / `chdir` は語の位置を問わず見る。pushd / popd は unresolved_reason が止める)
+_CWD_COMMANDS = frozenset({"eval", "source", ".", "builtin"})
+# 以降の `;` で繋いだ cd が、走るかどうか分からない本体の中にありうる構文の始まり
+_BLOCK_WORDS = frozenset({"if", "while", "until", "for", "case", "select", "repeat", "foreach", "{"})
+
+
+def _cd_unsure(tokens: list[str]) -> bool:
+    """cd の結果が静的に確かでないか。確かなのは、トップレベルの素の `cd <dir>` を `;` か `&&` で繋いだものだけ。
+
+    これ以外の cd (サブシェル・パイプ・`&`・`||`・条件の後ろ・構文の本体・wrapper や前置きの付いたもの・
+    引数なし) や、cwd を変えうるコマンド語、展開で決まるコマンド語があれば True。形を 1 つずつ数えず、
+    確かな形だけを通す。
+    """
+    in_block = False
+    prev_bare = False
+    for segment in _segments(tokens):
+        toks = segment.tokens
+        bare = False
+        if "cd" in toks or "chdir" in toks:
+            bare = (
+                not in_block
+                and len(toks) == 2
+                and toks[0] == "cd"
+                and not _unstatic(toks[1])
+                and not any(segment.depths)
+                # `cd 無い && cd /abs; ...` は左が失敗すると元の cwd に残るのに、絶対パスは前の移動先を置き換えて、
+                # 無い移動先を確かめる機会を消す (相対パスなら合成した先が無いので止まる)
+                and (
+                    segment.before in ("", "seq")
+                    or (segment.before == "and" and prev_bare and not toks[1].startswith(("/", "~")))
+                )
+                and segment.after in ("", "seq", "and")
+            )
+            if not bare:
+                return True
+        rest, _assigns, _wrappers = _strip_prefix(toks)
+        if rest and (rest[0] in _CWD_COMMANDS or "$" in rest[0] or "`" in rest[0]):
+            return True
+        in_block = in_block or any(tok in _BLOCK_WORDS for tok in toks)
+        prev_bare = bare
+    return False
+
+
+def _collect(
+    tokens: list[str], opaque: frozenset[str], found: list[Invocation], cd: _CdState, level: int, unsure: bool
+) -> None:
+    """tokens の PR 操作を順に found に足し、cd を進める。level は代入の値の中のコマンド置換の深さ。
+
+    unsure は「cd が確かでないので、新しい読み方で見つけたものの検査先を信じない」(_cd_unsure)。
+    """
     segments = _segments(tokens)
     for index, segment in enumerate(segments):
         if level < _NESTED_LIMIT:
@@ -1034,7 +1088,7 @@ def _collect(tokens: list[str], opaque: frozenset[str], found: list[Invocation],
                         inner, inner_opaque = _tokens_opaque(tok[start:end])
                     except ValueError:
                         continue  # 読めない置換の中の PR 操作は安全網が数える
-                    _collect(inner, inner_opaque, found, cd, level + 1)
+                    _collect(inner, inner_opaque, found, cd, level + 1, unsure or _cd_unsure(inner))
         seg, assigns, wrappers = _strip_prefix(segment.tokens)
         if not seg:
             continue
@@ -1071,9 +1125,6 @@ def _collect(tokens: list[str], opaque: frozenset[str], found: list[Invocation],
                 continue
         else:
             continue
-        # 値を 1 語に読むと、これまで「解析できない」で止めていた形が読める。シェルの cwd を変えないかもしれない cd の
-        # 後ろでは、その移動先を検査先にすると repo の外への移動と読んで素通しになるので、これまでどおり止める
-        unresolved = cd.unresolved or (cd.display if cd.uncertain and opaque else None)
         found.append(
             Invocation(
                 kind=inv.kind,
@@ -1085,9 +1136,9 @@ def _collect(tokens: list[str], opaque: frozenset[str], found: list[Invocation],
                 cd=cd.display,
                 # 引数の中の PR 操作 (`--base a >(gh pr create --base b)`) は別の呼び出しで、この構文解析では
                 # 分けられない (後ろの --base が前の値を上書きしている)
-                parsed=not _has_pr_op(rest[2:]),
+                parsed=not unsure and not _has_pr_op(rest[2:]),
                 cd_steps=cd.steps,
-                cd_unresolved=unresolved,
+                cd_unresolved=cd.unresolved,
             )
         )
 
@@ -1102,7 +1153,8 @@ def find_invocations(command: str) -> list[Invocation]:
         return []
     joined = _join_continuations(command)
     try:
-        tokens, opaque = _tokens_opaque(_strip_for_parsing(command))
+        stripped = _strip_for_parsing(command)
+        tokens, opaque = _tokens_opaque(stripped)
     except ValueError:
         return [
             Invocation(
@@ -1113,8 +1165,11 @@ def find_invocations(command: str) -> list[Invocation]:
             for m in _FALLBACK.finditer(joined)
         ]
 
+    # 値を 1 語に読むことと、二重引用符の中の本文を読み飛ばすことで、これまで「解析できない」で止めていた形が読める。
+    # cd が確かでなければ、その移動先を検査先にすると実際の $PWD と違うことがあるので、これまでどおり止める
+    new_reading = bool(opaque) or stripped != _strip_comments(command, dq_bodies=False)
     found: list[Invocation] = []
-    _collect(tokens, opaque, found, _CdState(), 0)
+    _collect(tokens, opaque, found, _CdState(), 0, new_reading and _cd_unsure(tokens))
     return found
 
 
@@ -1178,8 +1233,11 @@ def _blank_quoted_bodies(command: str) -> str:
 
 def _count_pr_ops(text: str) -> int:
     """実行位置にある PR 操作を数える (draft に戻す `gh pr ready --undo` は除く)。"""
-    return sum(
-        1 for m in _EXEC_POS.finditer(text) if not (m.group("op") == "ready" and "--undo" in m.group("args"))
+    # `\` が無ければ 2 つの読みは同じ (同じ走査を 2 回しない)
+    patterns = (_EXEC_POS, _EXEC_POS_NO_PAIR) if "\\" in text else (_EXEC_POS,)
+    return max(
+        sum(1 for m in pattern.finditer(text) if not (m.group("op") == "ready" and "--undo" in m.group("args")))
+        for pattern in patterns
     )
 
 
@@ -1195,16 +1253,17 @@ def unresolved_reason(command: str, found: list[Invocation]) -> str | None:
         return None  # 安全網の正規表現はどれも gh と pr を含む (継続行をつないだ後で見る)
     # 数え上げは、区切り語に引用がある heredoc の本文を空行にした文字列で行う (構文解析と同じく本文を数えない)
     counted = _join_continuations(_blank_quoted_bodies(command))
-    long_prefix = _LONG_PREFIX.search(counted)
-    if long_prefix and _PR_OP_ANYWHERE.search(counted, long_prefix.start()):
-        return "PR 操作の前の前置き (リダイレクト・代入など) が長すぎて位置を確かめられない"
+    for pattern in (_LONG_PREFIX, _LONG_PREFIX_NO_PAIR):
+        long_prefix = pattern.search(counted)
+        if long_prefix and _PR_OP_ANYWHERE.search(counted, long_prefix.start()):
+            return "PR 操作の前の前置き (リダイレクト・代入など) が長すぎて位置を確かめられない"
     expected = _count_pr_ops(counted)
     # 代入の値の入れ子は正規表現で読めないので、構文解析と同じ語の読みで分けた文字列でも数える
     # (構文解析が見つけるようになった gh を数えないと、別の場所の見落としと数が合ってしまう)
     expected = max(expected, _count_pr_ops(_split_assignments(_strip_comments(command))))
     # bash -c の中身と pushd / popd は、引用のある本文の中のものも加工前の文字列で見る (止める側)
     for m in _NESTED_SHELL.finditer(raw):
-        if _EXEC_POS.search(m.group(2)):
+        if _EXEC_POS.search(m.group(2)) or _EXEC_POS_NO_PAIR.search(m.group(2)):
             return "PR 操作が別の shell (bash -c / eval 等) の中にある"
     if expected > len(found) or any(not inv.parsed for inv in found):
         return "PR 操作の位置を解析できない (コマンド置換・サブシェル等の中にある)"

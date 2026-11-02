@@ -314,7 +314,7 @@ class MainTest(unittest.TestCase):
         # cwd を変えないかもしれない cd の後ろは、repo の外への移動と読まずに止める
         out = run_hook(bash(f"(cd {self._tmp.name}) && X=$(a b) gh pr create --base main -t x", self.root))
         self.assertEqual(self.decision(out), "deny")
-        self.assertIn("静的に解決できない", out["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertIn("解析できない", out["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_japanese_payload_as_utf8_bytes(self):
         # Windows では stdin の既定 codec が UTF-8 でないため、日本語タイトルで
