@@ -17,6 +17,8 @@ REPO_ROOT = SCRIPT.parent.parent
 
 # スクリプトの ALLOWLIST に載っている skill の相対パス (例外が効く範囲の確認用)
 ALLOWED_REL = "plugins/llms-docs/skills/researching-ai-sdk/SKILL.md"
+ALLOWED_SCOPE = "plugins/llms-docs/skills/"
+CODEX_REL = "plugins/codex-pr-review/skills/iterating-pr-codex-reviews/SKILL.md"
 
 try:
     import yaml  # type: ignore[import-untyped]
@@ -211,10 +213,10 @@ class AllowlistScope(FixtureCase):
         self.assertIn("`Bash(ls *)`", r.stderr)
 
     def test_allowlist_does_not_cover_same_entry_in_other_skill(self) -> None:
-        self.skill("plugins/llms-docs/skills/other/SKILL.md", "allowed-tools:\n  - Bash\n")
+        self.skill("plugins/other/skills/x/SKILL.md", "allowed-tools:\n  - Bash\n")
         r = _run(self.root)
         self.assertEqual(r.returncode, 1)
-        self.assertIn("plugins/llms-docs/skills/other/SKILL.md", r.stderr)
+        self.assertIn("plugins/other/skills/x/SKILL.md", r.stderr)
 
     def test_stale_allowlist_entry_fails(self) -> None:
         self.skill(ALLOWED_REL, "allowed-tools:\n  - Read\n")
@@ -230,7 +232,57 @@ class AllowlistScope(FixtureCase):
         self.ok_skill()
         r = _run(self.root, script, explicit_root=False)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertIn(f"{ALLOWED_REL}: ALLOWLIST", r.stderr)
+        self.assertIn(f"{ALLOWED_SCOPE}: ALLOWLIST", r.stderr)
+
+    def test_new_skill_under_scope_passes_without_allowlist_edit(self) -> None:
+        # skill の追加・削除で ALLOWLIST の変更が要らない
+        self.skill("plugins/llms-docs/skills/brand-new/SKILL.md", "allowed-tools:\n  - Bash\n")
+        r = _run(self.root)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_one_skill_without_bash_is_fine_while_another_uses_it(self) -> None:
+        self.skill(ALLOWED_REL, "allowed-tools:\n  - Bash\n")
+        self.skill("plugins/llms-docs/skills/gone-exact/SKILL.md", "allowed-tools:\n  - Read\n")
+        r = _run(self.root)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_scope_does_not_cover_wildcard_in_scope_skill(self) -> None:
+        self.skill("plugins/llms-docs/skills/new/SKILL.md", "allowed-tools:\n  - Bash(ls *)\n")
+        self.skill(ALLOWED_REL, "allowed-tools:\n  - Bash\n")
+        r = _run(self.root)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("plugins/llms-docs/skills/new/SKILL.md: `Bash(ls *)`", r.stderr)
+
+    def test_scope_does_not_cover_other_plugins(self) -> None:
+        self.skill(ALLOWED_REL, "allowed-tools:\n  - Bash\n")
+        for rel in (
+            "plugins/llms-docs2/skills/a/SKILL.md",
+            "plugins/xllms-docs/skills/a/SKILL.md",
+            "plugins/other/skills/a/SKILL.md",
+        ):
+            with self.subTest(rel):
+                self.skill(rel, "allowed-tools:\n  - Bash\n")
+                r = _run(self.root)
+                self.assertEqual(r.returncode, 1)
+                self.assertIn(f"{rel}: `Bash`", r.stderr)
+                (self.root / rel).unlink()
+
+    def test_codex_pr_review_grant_stays_per_skill(self) -> None:
+        self.skill(ALLOWED_REL, "allowed-tools:\n  - Bash\n")
+        self.skill(CODEX_REL, "allowed-tools:\n  - Bash\n")
+        r = _run(self.root)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.skill("plugins/codex-pr-review/skills/other/SKILL.md", "allowed-tools:\n  - Bash\n")
+        r = _run(self.root)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("plugins/codex-pr-review/skills/other/SKILL.md", r.stderr)
+
+    def test_stale_codex_entry_fails(self) -> None:
+        self.skill(ALLOWED_REL, "allowed-tools:\n  - Bash\n")
+        self.skill(CODEX_REL, "allowed-tools:\n  - Read\n")
+        r = _run(self.root)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn(f"{CODEX_REL}: ALLOWLIST", r.stderr)
 
     def test_missing_allowlisted_skill_is_skipped_under_explicit_root(self) -> None:
         self.ok_skill()
