@@ -84,7 +84,7 @@ class BuiltinPrefixTest(test_guard.GuardBase):
                     "exec ", "time -p ", "time time ", "time env ", "FOO=1 time ")
         self.assertDenied(tuple(f'cd "{m}"; {p}builtin cd "{a}"; git reset --hard' for p in prefixes))
         # bash は `command builtin cd` を今の shell で動かすが、Bash tool の zsh は動かさない。
-        # `FOO=1 time` は逆で、zsh だけ今の shell で動かす (読まないので見逃す側。ここでは固定しない)
+        # `FOO=1 time` は bash が外部の time で動かし、zsh は構文エラーで何も走らせない (実測。ここでは固定しない)
         self.assertAllowed(tuple(f'{p}builtin cd "{m}"; git reset --hard' for p in prefixes if p != "FOO=1 time "))
 
     def test_forms_a_shell_does_not_read_as_cd_keep_the_cwd(self):

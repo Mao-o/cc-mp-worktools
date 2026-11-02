@@ -2,7 +2,7 @@
 
 見るのは git の書き込み操作だけ (checkout / commit / reset など、HEAD・index・作業ツリーを
 変えるもの)。`git log` などの読み取りは対象外。git の対象ディレクトリは
-`cd` / `pushd` / `popd` と `git -C <dir>` / `--work-tree` / `--git-dir`、
+`cd` / `chdir` / `pushd` / `popd` と `git -C <dir>` / `--work-tree` / `--git-dir`、
 環境変数 `GIT_DIR` / `GIT_WORK_TREE` から決める。
 
 行き先が変数などで静的に決まらない場合は「解決できない」として返し、呼び出し側は止めずに
@@ -88,14 +88,27 @@ _WRAPPER_VALUE_OPTS = {
     "exec": {"-a"},
 }
 _CHDIR_OPTS = {"env": {"-C", "--chdir"}, "sudo": {"-D", "--chdir"}}
-# `builtin` の後ろで読む語。bash 3.2 と zsh の両方で今の shell の組み込みとして動くもののうち、_command が読むものだけ。
+# 移動の組み込みが、どの shell の読みで移動するか。bash 3.2 と `zsh -f` で偽の git を走らせた実測に合わせている
+# (`_analyze_tokens` が zsh の読みと bash の読みの両方で判定する)
+_BOTH = frozenset({"bash", "zsh"})
+_BASH = frozenset({"bash"})
+_ZSH = frozenset({"zsh"})
+_NEITHER: frozenset[str] = frozenset()
+# `cd` / `chdir` の option の文字。`-q` / `-s` は zsh だけ受け付ける (bash は失敗して移動しない)。`-e` / `-@` は bash 3.2 と zsh が
+# 失敗するが、bash 4.2 / 4.3 以降は移動するので bash の読みに入れる。表に無い文字 (`-n` / `-x`) はどちらの shell でも失敗する
+_CD_OPT_SHELLS = {"L": _BOTH, "P": _BOTH, "q": _ZSH, "s": _ZSH, "e": _BASH, "@": _BASH}
+# `pushd` の option の文字。bash の pushd は `-n` しか受け付けないので、`-L` / `-P` も zsh だけ
+_PUSHD_OPT_SHELLS = {"L": _ZSH, "P": _ZSH, "q": _ZSH, "s": _ZSH}
+# `builtin` の後ろで読む語。今の shell の組み込みとして動くもののうち、_command が読むものだけ。
 # `builtin git` は組み込みが無いのでどちらの shell でも走らない。`builtin -- cd` は bash だけ、`builtin - cd` は zsh だけ
 # 動くので読まない。`builtin command cd` は bash では残り zsh では外部の cd になって残らないので読まない。
 # `builtin popd` は読まない (スタックが空だと失敗して動かないが、_chdir はそれを「分からない」と読むので止まらなくなる)。
-# `builtin pushd` も読まない (対の `builtin popd` を読まないので、戻り先を取り違える)
-_BUILTIN_READS = {"cd", "export", "unset", "true", "false", ":", "builtin"}
-# `builtin cd` の option のうち、bash 3.2 と zsh の両方で移動するもの (`-e` / `-@` / `-n` / `-q` / `-s` は片方か両方で失敗する)
-_BUILTIN_CD_OPTS = {"-L", "-P"}
+# `builtin pushd` も読まない (対の `builtin popd` を読まないので、戻り先を取り違える)。
+# `builtin chdir` は zsh だけ動くが、`chdir` の読みが両方の shell を判定する
+_BUILTIN_READS = {"cd", "chdir", "export", "unset", "true", "false", ":", "builtin"}
+# `builtin cd` で読む option。`-L` / `-P` は bash 3.2 と zsh の両方で移動し、`-q` / `-s` は zsh だけ移動する
+# (`_chdir_form` が両方の読みにする)。`-e` / `-@` / `-n` は bash 3.2 と zsh で失敗するので読まない
+_BUILTIN_CD_OPT = re.compile(r"-[LPqs]+")
 # shell が展開してから cd に渡す語。行き先を文字列から決められない
 _EXPANDED_WORD = re.compile(r"[$`*?\[{]")
 
@@ -111,11 +124,11 @@ def _builtin_reads(word: str, args: list[str]) -> bool:
     if word in ("export", "unset"):
         # `unset -f` は関数を消す。`export -x` / `+x` は shell で割れる。`$x` は値が決まらない
         return not any(a.startswith(("-", "+")) or _dynamic(a) for a in args)
-    if word != "cd":
+    if word not in ("cd", "chdir"):
         return True
     operands = _before_redirect(args)
     i = 0
-    while i < len(operands) and operands[i] in _BUILTIN_CD_OPTS:
+    while i < len(operands) and _BUILTIN_CD_OPT.fullmatch(operands[i]):
         i += 1
     if i < len(operands) and operands[i] == "--":
         i += 1
@@ -135,51 +148,66 @@ def _before_redirect(args: list[str]) -> list[str]:
     return args
 
 
-def _strip_prefix(seg: list[str]) -> tuple[list[str], str | None, dict[str, str | None], bool]:
+def _strip_prefix(seg: list[str]) -> tuple[list[str], str | None, dict[str, str | None], bool, frozenset[str], bool]:
     """先頭の予約語 / 代入 / wrapper (とそのオプション) を外す。
 
     返り値は (残り, wrapper が指定した作業ディレクトリ, コマンドに渡す環境変数の代入, 環境を
-    空にして起動するか)。代入の値 None は `env -u NAME` による削除。
+    空にして起動するか, 残りのコマンドが今の shell で動く shell の集合, `!` で成否を反転するか)。代入の値 None は `env -u NAME` による削除。
     `env -C <dir> git ...` のように wrapper が移動先を持つ場合、その後の git はそのディレクトリで動く。
     `GIT_DIR=<dir> git ...` の代入は git の対象を変えるので呼び出し側で使う。
-    `builtin` は今の shell で動くときだけ外す。`env builtin cd <dir>` などは外部の builtin コマンド
-    (macOS の /usr/bin/builtin) を子プロセスで走らせるので、移動は後ろに残らない。先頭の `time` は bash でも
-    zsh でも今の shell で動かす。ただし zsh の `time -p ...` は `-p` をコマンドとして起動し、2 つ目の `time`
-    は外部コマンドになり、bash は代入の後ろの `time` を外部コマンドとして起動する。
-    `\\time` / `'time'` は外部の time で動くが、shlex が引用を外すので keyword の time と区別できず、今の shell で
-    動くものとして読む。bash 3.2 の `! time` / `if time` も外部の time になるが、同じに読む (どちらも見逃す側で、受け入れている)
+
+    今の shell で動かないコマンド (`env cd <dir>` / `nohup cd` / `sudo cd` / `exec cd` / `time time cd`) の移動は後ろに残らない
+    (macOS の /usr/bin/cd などを子プロセスで走らせるか、組み込みが無くて失敗する)。`command` は bash では今の shell で動き、
+    zsh では外部コマンドを起動する。`command -v` などの他の option は何も起動しない。
+    先頭の `time` は bash でも zsh でも今の shell で動かす。ただし zsh の `time -p ...` は `-p` をコマンドとして起動し、
+    `-p` 以外の option は両方の shell でコマンドとして起動する。2 つ目の `time` と代入の後ろの `time` は外部コマンドになる
+    (zsh は代入の後ろの `time` を構文エラーにする)。
+    `builtin` は両方の shell で今の shell で動くときだけ外す。`\\time` / `'time'` は外部の time で動くが、shlex が引用を外すので
+    keyword の time と区別できず、今の shell で動くものとして読む。bash 3.2 の `! time` / `if time` も外部の time になるが、
+    同じに読む (どちらも見逃す側で、受け入れている)
     """
     chdir = None
     assigns: dict[str, str | None] = {}
     clear = False
-    in_shell = True  # ここまでの wrapper の後ろのコマンドが、今の shell で動くか
+    shells = _BOTH
+    after_command = False  # `command` の後ろ。代入や予約語も、ただのコマンド名になる
+    negated = False  # `!` で成否を反転するか
     i = 0
     while i < len(seg):
         tok = seg[i]
         if _ASSIGNMENT.match(tok):
             name, _, value = tok.partition("=")
             assigns[name] = value
+            if after_command:
+                shells = _NEITHER
             i += 1
             continue
         if tok == "(" or tok in _KEYWORDS:
+            if after_command:
+                shells = _NEITHER
+            elif tok == "!" and shells:
+                negated = not negated
             i += 1
             continue
         if tok == "builtin":
-            if in_shell and i + 1 < len(seg) and _builtin_reads(seg[i + 1], seg[i + 2 :]):
+            if shells == _BOTH and i + 1 < len(seg) and _builtin_reads(seg[i + 1], seg[i + 2 :]):
                 i += 1
                 continue
             break
         if tok in _WRAPPERS:
             opts = _WRAPPER_VALUE_OPTS.get(tok, set())
-            if (
-                tok != "time"
-                or "".join(seg[i + 1 : i + 2]).startswith("-")
-                or any(t != "(" and t not in _KEYWORDS for t in seg[:i])
-            ):
-                in_shell = False
+            if tok == "command":
+                shells &= _BASH
+                after_command = True
+            elif tok != "time" or any(t != "(" and t not in _KEYWORDS for t in seg[:i]):
+                shells = _NEITHER
             i += 1
             while i < len(seg) and seg[i].startswith("-"):
                 name, eq, value = seg[i].partition("=")
+                if tok == "time":
+                    shells = shells & _BASH if seg[i] == "-p" else _NEITHER
+                elif tok == "command" and seg[i] not in ("-p", "--"):
+                    shells = _NEITHER
                 if seg[i] == "--":
                     i += 1
                     break
@@ -200,7 +228,7 @@ def _strip_prefix(seg: list[str]) -> tuple[list[str], str | None, dict[str, str 
                     assigns[value] = None
             continue
         break
-    return seg[i:], chdir, assigns, clear
+    return seg[i:], chdir, assigns, clear, shells, negated
 
 
 def _is_git(tok: str) -> bool:
@@ -296,21 +324,40 @@ def _worktree_targets(rest: list[str], here: str | None) -> list[str]:
     return out
 
 
-_CD_OPTS = {"-L", "-P", "-e", "-@", "-n"}
+def _chdir_form(cmd: str, args: list[str]) -> tuple[frozenset[str], list[str]]:
+    """`cd` / `chdir` / `pushd` の option を読み、(option と語の数の上で移動する shell の集合, 語) を返す。
 
-
-def _cd_target(args: list[str]) -> str | None:
-    """`cd` / `pushd` の移動先。`cd -` (直前のディレクトリ) など決められなければ None。"""
+    redirect の直前の数字の語は fd として外すが、語がそれだけのとき (`cd 2>x` と `cd 2 >x` は字句に分けた後では区別できない) は
+    行き先として残す。語の無い `cd >x` は redirect の記号を語として返す (行き先は今の場所の下になり、旧来と同じ読み)。
+    `pushd >x` は語なしとして返す (スタックの入れ替えで、行き先が分からない)。
+    """
+    table = _PUSHD_OPT_SHELLS if cmd == "pushd" else _CD_OPT_SHELLS
+    shells = _ZSH if cmd == "chdir" else _BOTH  # bash に chdir は無い
     i = 0
-    while i < len(args) and args[i] in _CD_OPTS:
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            i += 1
+            break
+        if not a.startswith("-") or a == "-" or a[1:].isdigit():
+            break  # `-` と `-1` は option ではなく、直前のディレクトリ / dir stack の参照
+        for letter in a[1:]:
+            shells &= table.get(letter, _NEITHER)
         i += 1
-    if i < len(args) and args[i] == "--":
-        i += 1
-    if i >= len(args):
+    rest = args[i:]
+    words = _before_redirect(rest) or [t for t in rest[:1] if cmd != "pushd" or t.isdigit()]
+    if len(words) > 1:
+        shells &= _BASH  # 語が 2 つの `cd a b` は bash 3.2 が a へ移動し、zsh は置換として読んで失敗する
+    return shells, words
+
+
+def _cd_target(words: list[str]) -> str | None:
+    """`cd` / `pushd` の移動先。`cd -` (直前のディレクトリ) など決められなければ None。"""
+    if not words:
         return "~"
-    if args[i] == "-" or args[i].startswith(("+", "-")):
+    if words[0].startswith(("+", "-")):
         return None  # 直前のディレクトリ / dir stack の参照
-    return args[i]
+    return words[0]
 
 
 # here-document の開始 (`<<EOF` / `<<-'EOF'` / `<< "EOF"` / `<<\EOF` / `<<'END MSG'` / `<<'2EOF'`)。
@@ -566,10 +613,26 @@ def _tokens(command: str, commenters: str) -> list[str] | None:
 _REREAD_LIMIT = 8
 
 
+def _analyze_tokens(tokens: list[str], cwd: str, fam: Family) -> list[Finding]:
+    """zsh の読みと bash の読みの両方で判定し、どちらかで見つかったものを返す。
+
+    Bash tool の shell は環境で違い、`command cd` / `chdir` / `cd -q` などは shell で動きが割れる。shell ごとに通して読むので、
+    片方の shell でしか起きない移動を、もう片方の失敗と組み合わせて読むことはない。
+    """
+    findings: list[Finding] = []
+    seen: set[str] = set()
+    for shell in ("zsh", "bash"):
+        for f in _Analyzer(cwd, fam, shell).run(tokens):
+            if f.message not in seen:
+                seen.add(f.message)
+                findings.append(f)
+    return findings
+
+
 def _read(normalized: str, cwd: str, fam: Family) -> list[Finding]:
     # comment は正規化で捨てた。残った `#` は単語の一部
     tokens = _tokens(normalized, commenters="")
-    return [] if tokens is None else _Analyzer(cwd, fam).run(tokens)
+    return [] if tokens is None else _analyze_tokens(tokens, cwd, fam)
 
 
 def analyze(command: str, cwd: str, fam: Family) -> list[Finding]:
@@ -588,7 +651,7 @@ def analyze(command: str, cwd: str, fam: Family) -> list[Finding]:
     readings = []
     legacy = _tokens(_legacy_strip_heredocs(command), commenters="#")
     if legacy is not None:
-        readings.append(_Analyzer(cwd, fam).run(legacy))
+        readings.append(_analyze_tokens(legacy, cwd, fam))
     ignore = frozenset(normalizer.open_heredocs)
     for _ in range(_REREAD_LIMIT):
         if not ignore:
@@ -621,7 +684,8 @@ class _Analyzer:
     対象が別の checkout なら止める。
     """
 
-    def __init__(self, cwd: str, fam: Family):
+    def __init__(self, cwd: str, fam: Family, shell: str):
+        self.shell = shell  # この読みの shell ("zsh" / "bash")
         self.fam = fam
         self.findings: list[Finding] = []
         self._seen: set[str] = set()
@@ -714,8 +778,7 @@ class _Analyzer:
         if run:
             after = self._command(seg, run)
             if last:
-                # 残った場合 (zsh) と残らない場合 (bash) の両方を追う
-                run = self._both(run) | after
+                run = after if self.shell == "zsh" else self._both(run)
             elif subshell:
                 # pipeline の途中の要素はどちらの shell でもサブシェルで動くので、中の cd は外に残らない
                 run = self._both(run)
@@ -726,9 +789,25 @@ class _Analyzer:
     # --- 1 コマンド -----------------------------------------------------------
 
     def _command(self, seg: list[str], alts: set[_Alt]) -> set[_Alt]:
-        seg, chdir, assigns, clear = _strip_prefix(seg)
+        rest, chdir, assigns, clear, shells, negated = _strip_prefix(seg)
+        after = self._simple(rest, chdir, assigns, clear, shells, alts)
+        # `! cmd` は成否を反転する (反転しないと `! chdir <worktree> && git ...` の git を、main で走るのに飛ばす)
+        return {(h, s, "fail" if st == "ok" else "ok") for h, s, st in after} if negated else after
+
+    def _simple(
+        self,
+        seg: list[str],
+        chdir: str | None,
+        assigns: dict[str, str | None],
+        clear: bool,
+        shells: frozenset[str],
+        alts: set[_Alt],
+    ) -> set[_Alt]:
         ok = {(h, s, "ok") for h, s, _ in alts}
+        in_shell = self.shell in shells  # wrapper の後ろのコマンドが、この shell では今の shell で動くか
         if not seg:  # 代入だけ
+            if not in_shell:
+                return ok  # `env GIT_DIR=x` は今の shell の変数を変えない
             for k, v in assigns.items():
                 if k in _GIT_ENV and v is not None:
                     self.shvars[k] = v
@@ -740,7 +819,8 @@ class _Analyzer:
             return ok
         if cmd == "false":
             return {(h, s, "fail") for h, s, _ in alts}
-        if cmd == "export":
+        # 今の shell で動かない `env export` / `nohup unset` / zsh の `command export` は変数を変えない
+        if cmd == "export" and in_shell:
             for tok in seg[1:]:
                 name, eq, value = tok.partition("=")
                 if name not in _GIT_ENV:
@@ -750,13 +830,17 @@ class _Analyzer:
                 elif name in self.shvars:
                     self.env[name] = self.shvars[name]
             return ok
-        if cmd == "unset":
+        if cmd == "unset" and in_shell:
             for name in seg[1:]:
                 self.env.pop(name, None)
                 self.shvars.pop(name, None)
             return ok
-        if cmd in ("cd", "pushd", "popd"):
-            return {self._chdir(cmd, seg[1:], h, s) for h, s, _ in alts}
+        # 今の shell で動かない移動は後ろに残らない (一般のコマンドと同じ。成否は外部コマンド次第)
+        if cmd in ("cd", "chdir", "pushd", "popd") and in_shell:
+            out: set[_Alt] = set()
+            for h, s, _ in alts:
+                out |= self._chdir(cmd, seg[1:], h, s)
+            return out
         if _is_git(cmd):
             env = {} if clear else dict(self.env)
             for k, v in assigns.items():
@@ -771,17 +855,41 @@ class _Analyzer:
             self._check_git(seg[1:], heres, env)
         return self._both(alts)
 
-    @staticmethod
-    def _chdir(cmd: str, args: list[str], here: str | None, stack: tuple) -> _Alt:
+    def _chdir(self, cmd: str, args: list[str], here: str | None, stack: tuple) -> set[_Alt]:
+        """今の shell で動く移動の組み込みを、1 つの状態から実行した後の状態。"""
         if cmd == "popd":
-            if not args and stack:
-                return (stack[-1], stack[:-1], "ok")
-            return (None, stack[:-1], "ok")  # 呼び出し前のスタック / `popd +N` は分からない
-        if cmd == "pushd" and not args:
-            return (None, stack + (here,), "ok")  # 引数なしの pushd はスタックの先頭と入れ替える
-        dest = _cd_target(args)
+            return self._popd(args, here, stack)
+        failed = {(here, stack, "fail")}  # option や語の数を受け付けない shell は失敗して動かない
+        if cmd == "pushd" and args[:1] == ["-n"]:
+            # bash は移動せずにスタックへ積み (次の popd がそこへ移動する)、zsh は bad option で失敗する
+            if self.shell == "zsh":
+                return failed
+            words = _before_redirect(args[2:] if args[1:2] == ["--"] else args[1:])
+            if words and not words[0].startswith(("+", "-")):
+                return {(here, stack + (_resolve(here, words[0]),), "ok")}
+            return {(here, stack + (None,), "ok")}  # 語なしと `+1` はスタックを回す。次の popd の行き先は分からない
+        shells, words = _chdir_form(cmd, args)
+        if self.shell not in shells:
+            return failed
+        if cmd == "pushd" and not words:
+            # 語の無い pushd はスタックの先頭と入れ替える (`pushd >x` / `pushd -q` も同じ)
+            return {(None, stack + (here,), "ok")}
+        dest = _cd_target(words)
         new = _resolve(here, dest) if dest is not None else None
-        return (new, stack + (here,) if cmd == "pushd" else stack, "ok")
+        return {(new, stack + (here,) if cmd == "pushd" else stack, "ok")}
+
+    def _popd(self, args: list[str], here: str | None, stack: tuple) -> set[_Alt]:
+        words = _before_redirect(args)
+        if words[:1] == ["-q"]:  # zsh だけ受け付ける (bash は失敗して動かない)
+            if self.shell != "zsh":
+                return {(here, stack, "fail")}
+            words = words[1:]
+        if words:
+            return {(None, stack[:-1], "ok")}  # `popd +N` は分からない
+        if stack:
+            return {(stack[-1], stack[:-1], "ok")}
+        # スタックが空に見える。呼び出し前のスタックは分からないが、新しい shell では失敗してその場に残る
+        return {(None, (), "ok"), (here, (), "fail")}
 
     def _add(self, finding: Finding) -> None:
         if finding.message not in self._seen:

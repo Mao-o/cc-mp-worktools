@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.6.0
+
+**`cd` / `chdir` / `pushd` / `popd` を、今の shell で動くかと shell ごとの違いまで含めて読むようにした (minor bump)。**
+`cd <main>; env cd <worktree>; git reset --hard` や `chdir <main>; git reset --hard` のように、別 checkout へ書くのに止まらなかった形を
+止め、`env cd <main>; git reset --hard` のように自分の worktree で走るのに止まっていた形を止めなくなる。
+
+### 修正: 判定を zsh の読みと bash の読みの両方で通す
+
+Bash tool の shell は環境で違い、次の形は shell で動きが割れる。コマンド全体を zsh の読みと bash の読みでそれぞれ通して判定し、
+どちらかで別 checkout への書き込みになれば止める。片方の shell の移動ともう片方の失敗を組み合わせて読むことは無いので、
+`chdir <main>; chdir <worktree>; git reset --hard` は止まらない。pipeline の最後の要素の `cd` も、この読みに移した (zsh では残り、
+bash では残らない)。
+
+どの形をどう読むかは、bash 3.2 と `zsh -f` で偽の git を走らせた実測に合わせている:
+
+| 形 | 読み |
+|---|---|
+| `env` / `nohup` / `sudo` / `exec` の後ろの `cd` / `chdir` / `pushd` / `popd` | どちらの shell でも移動しない (0.5.0 までは移動として読んでいた) |
+| 2 つ目の `time` / 代入の後ろの `time` / `time --` / `time -f x` の後ろ | どちらの shell でも移動しない |
+| `command cd` / `command -p cd` / `command -- cd` | bash は移動し、zsh は外部コマンドで移動しない |
+| `command -v cd` / `command -V cd` / `command <代入> cd` | どちらの shell でも移動しない |
+| `time -p cd` | bash は移動し、zsh は `-p` をコマンドとして起動して失敗する |
+| `chdir` | zsh は `cd` と同じに移動し、bash は失敗する (`builtin chdir` も同じ) |
+| `cd -q` / `cd -s` (`builtin cd` も) | zsh は移動し、bash は失敗する |
+| `pushd -q` / `-s` / `-L` / `-P` | zsh は移動し、bash は失敗する |
+| `pushd -n <dir>` | bash は移動せずスタックに積む (次の `popd` がそこへ移動する)。zsh は失敗する |
+| `popd -q` | zsh は戻り、bash は失敗する |
+| `cd -n` / `cd -x` など読めない option | どちらの shell でも失敗して移動しない |
+| `cd <a> <b>` / `pushd <a> <b>` | bash 3.2 は a へ移動し、zsh は失敗する |
+
+### 修正: 同じ読み落としの近くにあったもの
+
+- `popd >/dev/null` のように redirect を付けた `popd` を、行き先の分からない `popd` と読んでいた。語の無い `popd` と同じに読む
+- スタックが空に見える `popd` は、行き先が分からないという注意に加えて、失敗してその場に残る読みでも判定する
+  (`cd <main>; popd; git reset --hard` は main で走るので止める)
+- `! <コマンド>` の成否を反転する (`! cd <main> || git reset --hard` は main で走る)
+- 今の shell で動かない `env export GIT_DIR=...` / `nohup unset GIT_DIR` / `env GIT_DIR=...` (コマンドなし) は、変数を変えたと読まない。
+  zsh の `command export` / `command unset` も同じ
+
+次の形は読みが実際と違うが、受け入れている:
+
+- `cd -e` / `cd -@`: bash 3.2 と zsh は失敗するが、新しい bash (4.2 / 4.3 以降) は移動するので、新しい bash の読みで判定する。
+  `cd -e <main>; git reset --hard` は bash 3.2 と zsh では worktree で走るが止まる (0.5.0 と同じ deny)
+- `exec cd <dir>; git ...`: shell が置き換わるので実際には後ろの git は走らないが、読まない (`cd <main>; exec cd <worktree>; git ...` は止まる)
+- 今の shell で動かない `cd` の成否: 外部コマンド次第として両方を判定する。`cd <main>; env cd <worktree> || git reset --hard` は
+  macOS では `/usr/bin/cd` が成功して git が走らないが止まる
+- `command builtin cd` / `builtin pushd` / `builtin popd`: 0.5.0 と同じで読まない
+
+### テストの追加
+
+- `tests/test_chdir_readings.py`: 上の読みごとの判定
+
+テスト件数: 104 → 129 (追加 25・削除 0・統合 0)。
+
 ## 0.5.0
 
 **`builtin cd <main>; git reset --hard` のように `builtin` を前に付けた形を読み、別 checkout への git の書き込みを止めるようにした
