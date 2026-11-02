@@ -636,6 +636,33 @@ class BackgroundListTest(ChdirReadingBase):
         # 自分の worktree の中の移動は止めない
         self.assertAllowed(('cd sub && true & git add .',))
 
+    def test_list_folded_after_the_operator_is_one_list(self):
+        m, a = self.main, self.a
+        self.assertDenied((
+            f'cd "{m}"; cd "{a}" &&\ntrue & {GIT}',
+            f'cd "{m}"; cd "{a}" &&\n\ntrue & {GIT}',
+            f'cd "{m}"; cd "{a}" && # c\ntrue & {GIT}',
+            f'cd "{m}"; cd /nonexistent ||\ntrue & {GIT}',
+            f'cd "{m}"; cd "{a}" &&\ntrue &&\ntrue & {GIT}',
+            f'cd "{m}"; cd "{a}" &&\nmake &\nwait\ngit add .',
+            f'export GIT_DIR="{m}/.git"; unset GIT_DIR &&\ntrue & {GIT}',
+            f'GIT_DIR="{m}/.git"; unset GIT_DIR &&\ntrue & export GIT_DIR; git add .',
+            # 値が割れたら list の開始時点の値を読む (bash は list ごと background で動くので、今の shell の値はそちら)
+            f'export GIT_DIR="{m}/.git"; export GIT_DIR="{a}/.git" &&\ntrue & git add .',
+            f'GIT_DIR="{m}/.git"; GIT_DIR="{a}/.git" &&\ntrue & export GIT_DIR; git add .',
+            # 改行の時点の候補も残す (0.6.0 と同じ deny。`command` は bash だけ今の shell で動く)
+            f'command cd "{m}" &&\ntrue & {GIT}',
+            f'command export GIT_DIR="{m}/.git" &&\ntrue & {GIT}',
+        ))
+        self.assertAllowed((
+            f'cd "{a}" &&\nmake &\nwait\ngit add .',
+            'cd sub &&\nmake &\ngit add .',
+            'git add . &&\ngit commit -m x &\nwait',
+            # 改行の手前にコマンドがある (`&&` の後ろの list はそこで終わる) なら切れる
+            f'cd "{m}"; cd "{a}"\nmake &\ngit add .',
+            f'cd "{m}"; cd "{a}" &&\nmake\nmake &\ngit add .',
+        ))
+
 
 class FailedMoveTest(ChdirReadingBase):
     """移動が失敗して `||` の右に進む経路は読む。右辺の後ろには残さない。"""
@@ -761,7 +788,10 @@ class FailedMoveTest(ChdirReadingBase):
             f'export GIT_DIR="{m}/.git"; cd "{a}" || unset GIT_DIR; git add .',
             f'export GIT_DIR="{m}/.git"; cd /nonexistent || unset GIT_DIR\ngit add .',
         ))
-        self.assertAllowed((f'cd "{a}" || export GIT_DIR="{m}/.git"; git add .',))
+        self.assertAllowed((
+            f'cd "{a}" || export GIT_DIR="{m}/.git"; git add .',
+            f'cd "{a}" || GIT_DIR="{m}/.git"; export GIT_DIR; git add .',
+        ))
         # 右辺の中の読みは、手前の変数のまま
         self.assertDenied((f'export GIT_DIR="{m}/.git"; cd /nonexistent || git add .',))
 
@@ -786,6 +816,11 @@ class FailedMoveTest(ChdirReadingBase):
             f'cd "{m}"; cd /nonexistent || echo "$({GIT})"',
             f'cd /nonexistent || cd "{m}"; {GIT}',
             f'cd /nonexistent || cd "{m}" && {GIT}',
+            f'cd "{m}"; cd /nonexistent || if true; then {GIT}; fi',
+            f'cd "{m}"; cd /nonexistent || while true; do {GIT}; break; done',
+            f'cd "{m}"; if ! cd /nonexistent; then {GIT}; fi',
+            f'cd "{m}"; if cd /nonexistent; then :; else {GIT}; fi',
+            f'cd "{m}"; until cd /nonexistent; do {GIT}; break; done',
         ))
 
 

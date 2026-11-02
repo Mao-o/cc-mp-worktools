@@ -724,6 +724,7 @@ class _Analyzer:
         # zsh は最後の pipeline だけを background にするので、list の開始時点からその pipeline の開始時点までの候補
         self.list_start = self._snapshot()
         self.scopes: list[tuple] = []  # `( ... )` に入るときの状態
+        self.list_continues = False  # `&&` / `||` の直後で、まだコマンドを読んでいない (次の改行で list は切れない)
         self.braces = 0  # 開いている `{` の数 (語の末尾の `}` を閉じと読むか)
         self.failed_moves: set[_Alt] = set()  # 移動が失敗した状態と、それを `||` の右で実行した後の状態
         self.after_or = False  # `||` の後ろで、まだコマンドを読んでいない
@@ -782,6 +783,7 @@ class _Analyzer:
     def _operator(self, op: str) -> None:
         if op in ("&&", "||"):
             self.op = op
+            self.list_continues = True
             if self.shell == "zsh":
                 # zsh の `&` は最後の pipeline だけを background にする。手前の `cd <dir> &&` は今の shell に残る。
                 # その cd が失敗すれば手前の場所に残るので、それまでの候補も持つ (`cd -q <main>; cd <無いパス> && x & git ...`)
@@ -821,7 +823,13 @@ class _Analyzer:
             # (`||` の直後の `;` は構文エラーで何も走らない)
             if not self.after_or:
                 self._forget_failed_moves()
+            start = self.list_start if self.list_continues else None
             self._new_list()
+            if start is not None:
+                # `a &&\nb &` は 1 つの list。`&` で戻す候補に、改行の手前の list の開始時点も残す
+                # (改行の時点の候補も捨てない。0.6.0 が止めていた形を緩めないため)
+                alts, env, shvars = self.list_start
+                self.list_start = (start[0] | alts, {**env, **start[1]}, {**shvars, **start[2]})
 
     def _new_list(self) -> None:
         self.op = None
@@ -834,12 +842,13 @@ class _Analyzer:
         self.in_pipe = next_is_pipe
         if not seg:
             return
+        self.list_continues = False
         # 括弧の数は、そのコマンドを実行する状態が無くても数える (`false && { x }` の `{` と `}`)
         rest = _strip_prefix(seg)[0]
         self.braces += seg[: len(seg) - len(rest)].count("{")
         run, skipped = self._split()
         # 予約語だけの語 (`|| {` / `|| if` / `|| !`) はまだコマンドではなく、右辺の最初のコマンドはこの後ろにある
-        if rest or not all(t in _KEYWORDS for t in seg):
+        if not all(t in _KEYWORDS for t in seg):
             self._step_failed_moves(seg, rest, run, last, subshell)
         if run:
             run = self._settle(seg, run, last, subshell)
