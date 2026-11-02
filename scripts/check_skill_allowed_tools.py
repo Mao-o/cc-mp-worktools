@@ -17,9 +17,9 @@
 - `Bash(... *)` のように、括弧の中に `*` を含む形 (`Bash(git:*)` の旧記法も同じ)
 - `Bash` 単独 (括弧なし)
 
-例外が要る skill は ALLOWLIST に (SKILL.md の相対パス, 付与の文字列) を足す。
-許可リストは「その skill のその付与」だけに効く。他の skill や、同じ skill の別の
-ワイルドカード付与は通さない。
+例外が要る skill は ALLOWLIST に (SKILL.md の相対パスか `/` 終わりのディレクトリ,
+付与の文字列) を足す。許可リストは「その範囲のその付与」だけに効く。他の skill や、
+同じ skill の別のワイルドカード付与は通さない。
 
 ## 読めない形は FAIL にする (fail closed)
 
@@ -47,19 +47,28 @@ import pathlib
 import re
 import sys
 
-# 例外 (SKILL.md の root からの相対パス, 付与の文字列)。
-# 現状はすべて「Bash 単独」で、この検査の導入前から付いていたもの。完全一致の形へ
-# 絞る改修は各 plugin 側の課題で、絞り終えたらここから外す (外し忘れは下の
-# 「実体の無い許可リスト」検査が拾う)。
+# 例外 (許可の範囲, 付与の文字列)。範囲が `/` で終わるものは、そのディレクトリ配下の
+# SKILL.md すべてに効く (skill の追加・削除で書き換えが要らない)。それ以外は
+# その SKILL.md の 1 件だけに効く。root からの相対パスで書く。
+# 現状はすべて「Bash 単独」で、この検査の導入前から付いていたもの。
+# - llms-docs の skill は、引数が質問ごとに変わるスクリプトを打つので完全一致に絞れない
+#   (各 SKILL.md に理由がある)。skill 単位でなく skills 配下で許可する
+# - codex-pr-review は 1 skill 単位の許可で、絞り終えたら外す
+# 付与が 1 件も無い許可は、下の「実体の無い許可リスト」検査が FAIL にする。
 ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
     {
-        ("plugins/llms-docs/skills/researching-ai-sdk/SKILL.md", "Bash"),
-        ("plugins/llms-docs/skills/researching-claude-docs/SKILL.md", "Bash"),
-        ("plugins/llms-docs/skills/researching-firebase/SKILL.md", "Bash"),
-        ("plugins/llms-docs/skills/researching-library-docs/SKILL.md", "Bash"),
+        ("plugins/llms-docs/skills/", "Bash"),
         ("plugins/codex-pr-review/skills/iterating-pr-codex-reviews/SKILL.md", "Bash"),
     }
 )
+
+
+def _allow_covers(scope: str, rel: str) -> bool:
+    """許可の範囲が SKILL.md の相対パスに効くか (`/` 終わりは配下、他は完全一致)。"""
+    if scope.endswith("/"):
+        return rel.startswith(scope)
+    return rel == scope
+
 
 # `allowed-tools:` のキー行 (引用符付きのキー、コロンの前の空白も同じキーとして扱う)
 _KEY_RE = re.compile(r"""^\ufeff?["']?allowed-tools["']?\s*:""")
@@ -261,6 +270,10 @@ def main() -> int:
     used_allow: set[tuple[str, str]] = set()
     for path in skills:
         rel = path.relative_to(root).as_posix()
+        # symlink で範囲の外の実体を指す SKILL.md には、範囲の許可を効かせない
+        real = path.resolve()
+        real_root = root.resolve()
+        real_rel = real.relative_to(real_root).as_posix() if real.is_relative_to(real_root) else ""
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
@@ -275,21 +288,27 @@ def main() -> int:
             reason = violation(entry)
             if reason is None:
                 continue
-            if (rel, entry) in ALLOWLIST:
-                used_allow.add((rel, entry))
+            covering = {
+                a
+                for a in ALLOWLIST
+                if a[1] == entry and _allow_covers(a[0], rel) and _allow_covers(a[0], real_rel)
+            }
+            if covering:
+                used_allow.update(covering)
                 continue
             failures.append(f"{rel}: `{entry}` — {reason}")
 
     # 実体の無い許可リストは残さない (ワイルドカードを直したのに例外だけ残ると、
-    # 後で同じ付与が戻っても黙って通ってしまう)。既定の root では、許可リストにある
-    # skill の rename・削除も FAIL にする。--root で別のツリーを指したときだけ、
-    # 検査した SKILL.md に限る (fixture のツリーでの誤検出を避ける)
+    # 後で同じ付与が戻っても黙って通ってしまう)。既定の root では、範囲に該当する付与が
+    # 1 件も無ければ FAIL にする (1 件指定の許可は、その skill の rename・削除でも FAIL)。
+    # --root で別のツリーを指したときだけ、範囲に該当する SKILL.md を検査した許可に
+    # 限る (fixture のツリーでの誤検出を避ける)
     scanned = {p.relative_to(root).as_posix() for p in skills}
-    for rel, entry in sorted(ALLOWLIST - used_allow):
-        if explicit_root and rel not in scanned:
+    for scope, entry in sorted(ALLOWLIST - used_allow):
+        if explicit_root and not any(_allow_covers(scope, r) for r in scanned):
             continue
         failures.append(
-            f"{rel}: ALLOWLIST の `{entry}` に対応する付与が無い (許可リストから外す)"
+            f"{scope}: ALLOWLIST の `{entry}` に対応する付与が無い (許可リストから外す)"
         )
 
     if failures:
