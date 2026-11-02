@@ -4,7 +4,6 @@
 `cd <dir> && gh pr create` の `cd` は追跡する (ゲートを走らせる repo が変わるため)。
 cd が何度もあるときは順に合成する (`cd plugins/x && ... && cd ../..` は repo root に戻る)。
 heredoc の本文はシェルのコードではないので、構文解析の前に空行にする。
-代入語 (`NAME=...`) の値は、コマンド置換・引用符の対応で 1 語として読む (値の中の空白で語を分けない)。
 
 shlex で分解できないコマンド (クォートの閉じ忘れ等) でも、文字列に
 `gh pr create` / `gh pr ready` が現れるなら検出扱いにする。ゲートは異常時に
@@ -68,7 +67,8 @@ _EXEC_POS = re.compile(
 )
 _LONG_PREFIX = re.compile(_EXEC_START + _PREFIX_ITEM + "{%d}" % (_PREFIX_LIMIT + 1))
 # `\X` を組で読まない読み方。二重引用符の中の `V=\"p q\" gh` は、中身を読み直す shell では代入語で、組で読むと
-# 語が割れて数えられない。組で読んだ数と大きい方を採る (組で読む方が見つける形もある)
+# 語が割れて数えられない。組で読んだ数と大きい方を採る。本文を読み飛ばすと本文の奇数個の引用符で止まらなくなるので、
+# 二重引用符の中の `"$(V=\ y gh pr create)"` のように構文解析が読まない gh は、ここで数えないと素通しになる
 _WORD_PART_NO_PAIR = r"""(?:'[^']*'|"[^"]*"|\$\([^()]*\)|`[^`]*`|[^\s'";&|<>])"""
 _EXEC_POS_NO_PAIR = re.compile(_EXEC_POS.pattern.replace(_WORD_PART, _WORD_PART_NO_PAIR))
 _LONG_PREFIX_NO_PAIR = re.compile(_LONG_PREFIX.pattern.replace(_WORD_PART, _WORD_PART_NO_PAIR))
@@ -114,6 +114,7 @@ def _strip_comments(
     heredocs: bool = True,
     quoted_bodies: list[tuple[int, int]] | None = None,
     dq_bodies: bool = True,
+    word_hash: bool = True,
 ) -> str:
     """shell と同じ規則でコメントを落とし、`\\`+改行の継続行をつなぐ。
 
@@ -140,6 +141,8 @@ def _strip_comments(
     二重引用符の中のコマンド置換 (`--body "$(cat <<'EOF' ...)"`) で本文が始まる heredoc も、本文を空行にする
     (_dq_substitution_bodies)。本文の範囲を確かめられないときは、この読み飛ばしだけをやめて読み直す
     (dq_bodies=False)。ここで空行にした本文は quoted_bodies に足さない (安全網は加工前を数える)。
+
+    `$(a)#b` / `$((1))#b` の `#` は語の途中。word_hash=False は `#` をコメントと読む従来の読み方。
     """
     out: list[str] = []
     quote = ""  # "" | "'" | '"'
@@ -195,7 +198,7 @@ def _strip_comments(
             elif ch == ")":
                 arith -= 1
             out.append(ch)
-            if arith == 0 and arith_in_word:
+            if arith == 0 and arith_in_word and word_hash:
                 escaped_end = len(out)  # `$((1))#x` の `#` は語の途中
         elif heredocs and command.startswith("((", i):
             arith = 2
@@ -227,7 +230,8 @@ def _strip_comments(
             out.append(ch)
             if subs[-1][1] == 0:
                 pending = _close_substitution(subs, pending)
-                escaped_end = len(out)  # `$(a)#x` の `#` は語の途中 (`(a)#x` の `#` はコメント)
+                if word_hash:
+                    escaped_end = len(out)  # `$(a)#x` の `#` は語の途中 (`(a)#x` の `#` はコメント)
         elif heredocs and command.startswith("<<<", i):
             out.append("<<<")  # here-string は本文を持たない
             i += 3
@@ -276,13 +280,31 @@ def _strip_comments(
     return "".join(out)
 
 
-def _strip_for_parsing(command: str, quoted_bodies: list[tuple[int, int]] | None = None) -> str:
-    """構文解析に渡す文字列。`$'` があるコマンドは、二重引用符の中の置換の本文を読み飛ばさない。
+# cwd を変えうる語。引用符と `\\` を外した文字列のどこかにあれば移動がありうるものとして扱う (語の位置は問わない)
+_MOVES = re.compile(r"cd|chdir|pushd|popd|eval|source|builtin|trap|HOME=|CDPATH=")
 
-    shlex は `$'\\''` の引用符の対応を shell と違う形で読む。ずれた読みを本文の `"` が止めていることがあるので、
-    本文を消して「解析できる」にしない。
+
+def _may_move(command: str) -> bool:
+    return _MOVES.search(re.sub(r"""['"\\]""", "", _join_continuations(command))) is not None
+
+
+def _strip_for_parsing(command: str, quoted_bodies: list[tuple[int, int]] | None = None) -> str:
+    """構文解析に渡す文字列。
+
+    二重引用符の中の置換の本文を読み飛ばすことと `$(a)#b` の `#` を語の途中と読むことで、これまで「解析できない」で
+    止めていた形が読める。cwd を変えうる語がコマンドにあると、読めた cd が確かかどうかを語から判定しきれないので、
+    どちらの読みも使わない (従来と同じ読み、同じ判定)。cwd が変わらなければ、検査先を取り違えない。
+
+    `$'` があるときも本文を読み飛ばさない。shlex は `$'\\''` の引用符の対応を shell と違う形で読み、ずれた読みを
+    本文の `"` が止めていることがあるので、本文を消して「解析できる」にしない。
     """
-    return _strip_comments(command, quoted_bodies=quoted_bodies, dq_bodies="$'" not in command)
+    moves = _may_move(command)
+    return _strip_comments(
+        command,
+        quoted_bodies=quoted_bodies,
+        dq_bodies="$'" not in command and not moves,
+        word_hash=not moves,
+    )
 
 
 def _close_substitution(subs: list[list], pending: list[tuple[str, bool, bool, int]]) -> list:
@@ -792,26 +814,20 @@ class _Frame:
 _CODE_KINDS = frozenset({"code", "sub", "paren", "array"})
 
 
-@dataclass(frozen=True)
-class _AssignWord:
-    start: int
-    end: int
-    in_dq: bool  # 二重引用符の中のコマンド置換にある
-
-
-def _scan_assignments(s: str) -> tuple[list[_AssignWord], list[tuple[int, int]], list[tuple[int, int]]]:
+def _scan_assignments(s: str) -> tuple[list[tuple[int, int]], list[tuple[int, int]], list[tuple[int, int]]]:
     """コマンド語の前置きの位置にある代入語のうち、値にコマンド置換などを含み、後ろに語が続くものを見つける。
 
-    シェルの語の読み方 (引用符・`$(` / `${` / backtick の入れ子) で最後まで 1 回だけ走査する。戻り値の 2 つ目は、
+    安全網の数え上げ用で、構文解析はこの結果を読まない。代入語の値を読んで後ろのコマンドの検査先を決めることはしない
+    (語の位置と cd の確かさを語の並びから完全には判定できない)。後ろの PR 操作を数えて、見つけられなければ止める。
+    シェルの語の読み方 (引用符・`$(` / `${` / backtick の入れ子) で最後まで 1 回だけ走査する。戻り値の 1 つ目は語の範囲、2 つ目は、
     一番外側のコマンド置換 (`$(` / backtick) の中身の範囲。3 つ目は、深さを問わず backtick の中身の範囲 (走査は
     backtick の中の語を読まない)。引用符や置換が閉じないと、そこで読むのをやめる
-    (それまでに見つけたものだけを返す。読めなかった部分は従来の読み方と安全網に任せる)。
+    (それまでに見つけたものだけを返す。読めなかった部分は正規表現の数え上げに任せる)。
     """
-    words: list[_AssignWord] = []
+    words: list[tuple[int, int]] = []
     subs: list[tuple[int, int]] = []
     backticks: list[tuple[int, int]] = []
     stack = [_Frame("code")]
-    dq_level = 0
     sub_level = 0
     n = len(s)
 
@@ -830,7 +846,7 @@ def _scan_assignments(s: str) -> tuple[list[_AssignWord], list[tuple[int, int]],
                     k += 1
                 # 語の直後に続けて書けるのはリダイレクトだけ (`X=$(a)>f gh`。`X=$(a)(b)` は後ろにコマンド語が無い)
                 if k < n and s[k] not in _NO_COMMAND_AFTER and (k > end or s[k] in "<>"):
-                    words.append(_AssignWord(frame.word, end, dq_level > 0))
+                    words.append((frame.word, end))
         elif word == "{":
             frame.in_command = True  # `function f { ...`
         elif word not in _WRAPPERS and word not in _KEYWORDS:
@@ -880,7 +896,6 @@ def _scan_assignments(s: str) -> tuple[list[_AssignWord], list[tuple[int, int]],
         if frame.kind == "dq":
             if ch == '"':
                 stack.pop()
-                dq_level -= 1
             i += 1
             continue
         if s.startswith("$'", i) and code:
@@ -904,7 +919,6 @@ def _scan_assignments(s: str) -> tuple[list[_AssignWord], list[tuple[int, int]],
             if code and frame.word < 0:
                 frame.word = i
             stack.append(_Frame("dq", i + 1))
-            dq_level += 1
             i += 1
             continue
         if frame.kind == "brace":
@@ -955,28 +969,6 @@ def _scan_assignments(s: str) -> tuple[list[_AssignWord], list[tuple[int, int]],
     return words, subs, backticks
 
 
-def _opaque_assignments(s: str) -> tuple[str, frozenset[str]]:
-    """見つけた代入語を引用して 1 語にした文字列と、その語の集合を返す (二重引用符の中のものは対象外)。
-
-    二重引用符の中に置くと引用が文字になる。別の代入語の値の中のものは、外側の語を読むときに _collect が読む。
-    """
-    if "$'" in s:
-        # shlex は `$'\\''` の引用符の対応を shell と違う形で読むので、語を書き換えても後ろの読みが合わない
-        return s, frozenset()
-    parts: list[str] = []
-    opaque: set[str] = set()
-    prev = 0
-    for word in sorted(_scan_assignments(s)[0], key=lambda w: w.start):
-        if word.in_dq or word.start < prev:
-            continue
-        text = s[word.start : word.end]
-        parts += [s[prev : word.start], shlex.quote(text)]
-        opaque.add(text)
-        prev = word.end
-    parts.append(s[prev:])
-    return "".join(parts), frozenset(opaque)
-
-
 # backtick の中でエスケープとして読むもの
 _BACKTICK_ESCAPE = re.compile(r"\\([`$\\])")
 
@@ -992,7 +984,7 @@ def _split_assignments(s: str) -> str:
     words, subs, backticks = _scan_assignments(s)
     sep = " ;_=_ "
     # 置換の開始の 1 文字前は `(` か backtick の直前 (`$` の直後でも、正規表現は `(` を実行位置の始まりと読む)
-    edits = [(w.end, w.end, sep) for w in words] + [(start - 1, start - 1, sep) for start, _end in subs]
+    edits = [(end, end, sep) for _start, end in words] + [(start - 1, start - 1, sep) for start, _end in subs]
     edits += [(start, end, _split_assignments(_BACKTICK_ESCAPE.sub(r"\1", s[start:end]))) for start, end in backticks]
     parts: list[str] = []
     prev = 0
@@ -1003,21 +995,6 @@ def _split_assignments(s: str) -> str:
     return "".join(parts)
 
 
-def _tokens_opaque(stripped: str) -> tuple[list[str], frozenset[str]]:
-    """_tokens と同じ。後ろに語が続く代入語の値を 1 語として読み、その語の集合も返す。"""
-    text, opaque = _opaque_assignments(stripped)
-    if opaque:
-        try:
-            return _tokens(text), opaque
-        except ValueError:
-            pass  # 従来の読み方に任せる
-    return _tokens(stripped), frozenset()
-
-
-# 代入の値の中のコマンド置換を読む深さの上限。これより深いものは構文解析で読まない (安全網が数えて止める)
-_NESTED_LIMIT = 8
-
-
 def _has_pr_op(args: list[str]) -> bool:
     """語の並びの中に `gh pr create / new / ready` があるか。"""
     return any(
@@ -1025,77 +1002,37 @@ def _has_pr_op(args: list[str]) -> bool:
     )
 
 
-# cwd を変えうるコマンド語 (引数の位置は見ない。`git add .` の `.` は移動ではない)
-# (`cd` / `chdir` は語の位置を問わず見る。pushd / popd は unresolved_reason が止める)
-_CWD_COMMANDS = frozenset({"eval", "source", ".", "builtin"})
-# 以降の `;` で繋いだ cd が、走るかどうか分からない本体の中にありうる構文の始まり
-_BLOCK_WORDS = frozenset({"if", "while", "until", "for", "case", "select", "repeat", "foreach", "{"})
+def find_invocations(command: str) -> list[Invocation]:
+    """コマンド中の `gh pr create` / `gh pr ready` をすべて順に返す。
 
-
-def _cd_unsure(tokens: list[str]) -> bool:
-    """cd の結果が静的に確かでないか。確かなのは、トップレベルの素の `cd <dir>` を `;` か `&&` で繋いだものだけ。
-
-    これ以外の cd (サブシェル・パイプ・`&`・`||`・条件の後ろ・構文の本体・wrapper や前置きの付いたもの・
-    引数なし) や、cwd を変えうるコマンド語、展開で決まるコマンド語があれば True。形を 1 つずつ数えず、
-    確かな形だけを通す。
+    `gh pr create --draft && gh pr ready` のように 1 つのコマンドで draft 作成と
+    ready 化を続ける形があるため、最初の 1 つだけを見て判定してはいけない。
     """
-    in_block = False
-    prev_bare = False
-    for segment in _segments(tokens):
-        toks = segment.tokens
-        bare = False
-        if "cd" in toks or "chdir" in toks:
-            bare = (
-                not in_block
-                and len(toks) == 2
-                and toks[0] == "cd"
-                and not _unstatic(toks[1])
-                and not any(segment.depths)
-                # `cd 無い && cd /abs; ...` は左が失敗すると元の cwd に残るのに、絶対パスは前の移動先を置き換えて、
-                # 無い移動先を確かめる機会を消す (相対パスなら合成した先が無いので止まる)
-                and (
-                    segment.before in ("", "seq")
-                    or (segment.before == "and" and prev_bare and not toks[1].startswith(("/", "~")))
-                )
-                and segment.after in ("", "seq", "and")
+    if "gh" not in command or "pr" not in command:
+        return []
+    joined = _join_continuations(command)
+    try:
+        tokens = _tokens(_strip_for_parsing(command))
+    except ValueError:
+        return [
+            Invocation(
+                kind="ready" if m.group(1) == "ready" else "create",
+                draft=bool(re.search(r"\s(?:--draft|-d)\b", joined)) and m.group(1) != "ready",
+                parsed=False,
             )
-            if not bare:
-                return True
-        rest, _assigns, _wrappers = _strip_prefix(toks)
-        if rest and (rest[0] in _CWD_COMMANDS or "$" in rest[0] or "`" in rest[0]):
-            return True
-        in_block = in_block or any(tok in _BLOCK_WORDS for tok in toks)
-        prev_bare = bare
-    return False
+            for m in _FALLBACK.finditer(joined)
+        ]
 
-
-def _collect(
-    tokens: list[str], opaque: frozenset[str], found: list[Invocation], cd: _CdState, level: int, unsure: bool
-) -> None:
-    """tokens の PR 操作を順に found に足し、cd を進める。level は代入の値の中のコマンド置換の深さ。
-
-    unsure は「cd が確かでないので、新しい読み方で見つけたものの検査先を信じない」(_cd_unsure)。
-    """
+    found: list[Invocation] = []
+    cd = _CdState()
     segments = _segments(tokens)
     for index, segment in enumerate(segments):
-        if level < _NESTED_LIMIT:
-            # 値の中の置換は、代入の後ろのコマンドより先に走る。サブシェルなので、中の cd は外へ持ち出さない
-            for tok in segment.tokens:
-                if tok not in opaque:
-                    continue
-                for start, end in _scan_assignments(tok)[1]:
-                    try:
-                        inner, inner_opaque = _tokens_opaque(tok[start:end])
-                    except ValueError:
-                        continue  # 読めない置換の中の PR 操作は安全網が数える
-                    _collect(inner, inner_opaque, found, cd, level + 1, unsure or _cd_unsure(inner))
         seg, assigns, wrappers = _strip_prefix(segment.tokens)
         if not seg:
             continue
         if seg[0] == "cd":
             uncertain_here = (
-                level > 0
-                or segment.depths[len(segment.tokens) - len(seg)] > 0
+                segment.depths[len(segment.tokens) - len(seg)] > 0
                 or segment.before == "pipe"
                 or segment.after in ("pipe", "bg")
                 or any(w in _DETACHING_WRAPPERS for w in wrappers)
@@ -1136,40 +1073,11 @@ def _collect(
                 cd=cd.display,
                 # 引数の中の PR 操作 (`--base a >(gh pr create --base b)`) は別の呼び出しで、この構文解析では
                 # 分けられない (後ろの --base が前の値を上書きしている)
-                parsed=not unsure and not _has_pr_op(rest[2:]),
+                parsed=not _has_pr_op(rest[2:]),
                 cd_steps=cd.steps,
                 cd_unresolved=cd.unresolved,
             )
         )
-
-
-def find_invocations(command: str) -> list[Invocation]:
-    """コマンド中の `gh pr create` / `gh pr ready` をすべて順に返す。
-
-    `gh pr create --draft && gh pr ready` のように 1 つのコマンドで draft 作成と
-    ready 化を続ける形があるため、最初の 1 つだけを見て判定してはいけない。
-    """
-    if "gh" not in command or "pr" not in command:
-        return []
-    joined = _join_continuations(command)
-    try:
-        stripped = _strip_for_parsing(command)
-        tokens, opaque = _tokens_opaque(stripped)
-    except ValueError:
-        return [
-            Invocation(
-                kind="ready" if m.group(1) == "ready" else "create",
-                draft=bool(re.search(r"\s(?:--draft|-d)\b", joined)) and m.group(1) != "ready",
-                parsed=False,
-            )
-            for m in _FALLBACK.finditer(joined)
-        ]
-
-    # 値を 1 語に読むことと、二重引用符の中の本文を読み飛ばすことで、これまで「解析できない」で止めていた形が読める。
-    # cd が確かでなければ、その移動先を検査先にすると実際の $PWD と違うことがあるので、これまでどおり止める
-    new_reading = bool(opaque) or stripped != _strip_comments(command, dq_bodies=False)
-    found: list[Invocation] = []
-    _collect(tokens, opaque, found, _CdState(), 0, new_reading and _cd_unsure(tokens))
     return found
 
 
@@ -1193,18 +1101,16 @@ def _may_read_stdin_as_code(stripped: str) -> bool:
     stripped は _strip_comments を通した文字列 (本文は空行)。分けられなければ True (止める側)。
     """
     try:
-        # 代入の値を 1 語にした読みと、値の中の語も見る従来の読みの両方で探す (`X=$(a b) b'as'h <<'EOF'`)
-        token_lists = [_tokens(stripped), _tokens_opaque(stripped)[0]]
+        tokens = _tokens(stripped)
     except ValueError:
         return True
-    for tokens in token_lists:
-        for segment in _segments(tokens):
-            rest, _assigns, _wrappers = _strip_prefix(segment.tokens)
-            if not rest:
-                continue
-            word = rest[0]
-            if "$" in word or "`" in word or _SHELL_READER_WORD.fullmatch(word.rsplit("/", 1)[-1]):
-                return True
+    for segment in _segments(tokens):
+        rest, _assigns, _wrappers = _strip_prefix(segment.tokens)
+        if not rest:
+            continue
+        word = rest[0]
+        if "$" in word or "`" in word or _SHELL_READER_WORD.fullmatch(word.rsplit("/", 1)[-1]):
+            return True
     return False
 
 
@@ -1258,8 +1164,9 @@ def unresolved_reason(command: str, found: list[Invocation]) -> str | None:
         if long_prefix and _PR_OP_ANYWHERE.search(counted, long_prefix.start()):
             return "PR 操作の前の前置き (リダイレクト・代入など) が長すぎて位置を確かめられない"
     expected = _count_pr_ops(counted)
-    # 代入の値の入れ子は正規表現で読めないので、構文解析と同じ語の読みで分けた文字列でも数える
-    # (構文解析が見つけるようになった gh を数えないと、別の場所の見落としと数が合ってしまう)
+    # 代入の値の入れ子は正規表現で読めないので、語の読みで分けた文字列でも数える。構文解析は値を読まないので、
+    # 値に空白や置換がある形の後ろの gh は、見つからずに数だけ合わなくなって止まる。cwd を変えうる語があっても新しい読みの
+    # 文字列で数える (従来の読みのコメントや本文の引用符に隠れた値も数える)
     expected = max(expected, _count_pr_ops(_split_assignments(_strip_comments(command))))
     # bash -c の中身と pushd / popd は、引用のある本文の中のものも加工前の文字列で見る (止める側)
     for m in _NESTED_SHELL.finditer(raw):

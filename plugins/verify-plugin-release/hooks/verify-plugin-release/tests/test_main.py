@@ -196,14 +196,15 @@ class MainTest(unittest.TestCase):
         self.assertEqual(self.decision(out), "deny")
         out = run_hook(bash("gh pr create -t x", self.root), {"GH_REPO": "other/project"})
         self.assertEqual(self.decision(out), "deny")
-        # 値が動的な GH_REPO は、origin と同じか確認できないので止める (draft は止めずに伝える)
-        out = run_hook(bash("GH_REPO=$(basename $(pwd)) gh pr create -t x", self.root))
-        self.assertEqual(self.decision(out), "deny")
-        self.assertIn("origin と同じ repo か確認できない", out["hookSpecificOutput"]["permissionDecisionReason"])
-        out = run_hook(bash("GH_REPO=$(basename $(pwd)) gh pr create --draft -t x", self.root))
-        self.assertIn("origin と同じ repo か確認できない", out["hookSpecificOutput"]["additionalContext"])
-        # gh のトークンなどの代入は検査の対象を変えない。ゲートが走って PASS する
-        self.assertNotEqual(self.decision(run_hook(bash("GH_TOKEN=$(gh auth token) gh pr create -t x", self.root))), "deny")
+        # 値に置換や空白がある代入の後ろは、解析できないので止める (入れ子の形を素通しにしない)
+        for cmd in (
+            "GH_REPO=$(basename $(pwd)) gh pr create -t x",
+            "GH_TOKEN=$(gh auth token) gh pr create -t x",
+        ):
+            with self.subTest(cmd=cmd):
+                out = run_hook(bash(cmd, self.root))
+                self.assertEqual(self.decision(out), "deny")
+                self.assertIn("解析できない", out["hookSpecificOutput"]["permissionDecisionReason"])
         self.assertNotEqual(
             self.decision(run_hook(bash("gh pr create -t x", self.root), {"GH_REPO": "Demo-Org/demo-market"})),
             "deny",
@@ -303,18 +304,23 @@ class MainTest(unittest.TestCase):
         for cmd in (
             'ROOT="$(cd .. && pwd)" gh pr create --base main -t x',
             f'ROOT="$(cd {self._tmp.name} && pwd)" gh pr create --base main -t x',
-            f"X=$(cd {self._tmp.name} && pwd) gh pr create --base main -t x",
-            f"X=`cd {self._tmp.name}` gh pr create --base main -t x",
             f'X="$(cd {self._tmp.name})" gh pr create --base main -t x',
         ):
             with self.subTest(cmd=cmd):
                 out = run_hook(bash(cmd, self.root))
                 self.assertEqual(self.decision(out), "deny")
                 self.assertIn("version[alpha]", out["hookSpecificOutput"]["permissionDecisionReason"])
-        # cwd を変えないかもしれない cd の後ろは、repo の外への移動と読まずに止める
-        out = run_hook(bash(f"(cd {self._tmp.name}) && X=$(a b) gh pr create --base main -t x", self.root))
-        self.assertEqual(self.decision(out), "deny")
-        self.assertIn("解析できない", out["hookSpecificOutput"]["permissionDecisionReason"])
+        # 値を読めない形は、検査先を決めずに止める
+        for cmd in (
+            f"X=$(cd {self._tmp.name} && pwd) gh pr create --base main -t x",
+            f"X=`cd {self._tmp.name}` gh pr create --base main -t x",
+            f"(cd {self._tmp.name}) && X=$(a b) gh pr create --base main -t x",
+            f"cd {self._tmp.name} && X=$(a b) gh pr create --base main -t x",
+        ):
+            with self.subTest(cmd=cmd):
+                out = run_hook(bash(cmd, self.root))
+                self.assertEqual(self.decision(out), "deny")
+                self.assertIn("解析できない", out["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_japanese_payload_as_utf8_bytes(self):
         # Windows では stdin の既定 codec が UTF-8 でないため、日本語タイトルで
