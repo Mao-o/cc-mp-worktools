@@ -84,7 +84,7 @@ class BuiltinPrefixTest(test_guard.GuardBase):
                     "exec ", "time -p ", "time time ", "time env ", "FOO=1 time ")
         self.assertDenied(tuple(f'cd "{m}"; {p}builtin cd "{a}"; git reset --hard' for p in prefixes))
         # bash は `command builtin cd` を今の shell で動かすが、Bash tool の zsh は動かさない。
-        # `FOO=1 time` は逆で、zsh だけ今の shell で動かす (読まないので見逃す側。ここでは固定しない)
+        # `FOO=1 time` は bash が外部の time で動かし、zsh は構文エラーで何も走らせない (実測。ここでは固定しない)
         self.assertAllowed(tuple(f'{p}builtin cd "{m}"; git reset --hard' for p in prefixes if p != "FOO=1 time "))
 
     def test_forms_a_shell_does_not_read_as_cd_keep_the_cwd(self):
@@ -140,7 +140,7 @@ class BuiltinPrefixTest(test_guard.GuardBase):
             f'cd "{m}"; builtin cd -x "{a}"; git reset --hard',
             f'cd "{m}"; builtin cd -e "{a}"; git reset --hard',
             f'cd "{m}"; builtin cd -@ "{a}"; git reset --hard',
-            # `-q` は bash だけ、語が 2 つの形は zsh だけ main に残る
+            # `-e` は bash 3.2 と zsh、`-q` は bash だけ、語が 2 つの形は zsh だけ main に残る
             f'cd "{m}"; builtin cd -q "{a}"; git reset --hard',
             f'cd "{m}"; builtin cd "{a}" extra; git reset --hard',
             # shell が展開する語
@@ -157,9 +157,10 @@ class BuiltinPrefixTest(test_guard.GuardBase):
             # これだけは実際には HOME へ移動する。redirect を行き先と読むので誤 deny (旧版も同じ deny)
             f'cd "{m}"; builtin cd >/dev/null; git reset --hard',
         ))
+        # `-e` は bash 5.2 だけ移動する (`cd -e` と同じ読み)。`-@` はどの shell でも失敗して移動しない
+        self.assertDenied((f'builtin cd -e "{m}"; git reset --hard', f'builtin cd -Pe "{m}"; git reset --hard'))
         self.assertAllowed((
-            # `-e` はどちらのシェルでも失敗して移動しない
-            f'builtin cd -e "{m}"; git reset --hard',
+            f'builtin cd -@ "{m}"; git reset --hard',
             # 行き先を読まないので見逃す側 (旧版も同じ)
             f'builtin cd {parent}/{name[:-1]}*; git reset --hard',
             f'builtin cd "{m}" extra; git reset --hard',
