@@ -88,6 +88,51 @@ _WRAPPER_VALUE_OPTS = {
     "exec": {"-a"},
 }
 _CHDIR_OPTS = {"env": {"-C", "--chdir"}, "sudo": {"-D", "--chdir"}}
+# `builtin` の後ろで読む語。bash 3.2 と zsh の両方で今の shell の組み込みとして動くもののうち、_command が読むものだけ。
+# `builtin git` は組み込みが無いのでどちらの shell でも走らない。`builtin -- cd` は bash だけ、`builtin - cd` は zsh だけ
+# 動くので読まない。`builtin command cd` は bash では残り zsh では外部の cd になって残らないので読まない。
+# `builtin popd` は読まない (スタックが空だと失敗して動かないが、_chdir はそれを「分からない」と読むので止まらなくなる)。
+# `builtin pushd` も読まない (対の `builtin popd` を読まないので、戻り先を取り違える)
+_BUILTIN_READS = {"cd", "export", "unset", "true", "false", ":", "builtin"}
+# `builtin cd` の option のうち、bash 3.2 と zsh の両方で移動するもの (`-e` / `-@` / `-n` / `-q` / `-s` は片方か両方で失敗する)
+_BUILTIN_CD_OPTS = {"-L", "-P"}
+# shell が展開してから cd に渡す語。行き先を文字列から決められない
+_EXPANDED_WORD = re.compile(r"[$`*?\[{]")
+
+
+def _builtin_reads(word: str, args: list[str]) -> bool:
+    """`builtin <word> <args>` を `<word> <args>` と同じに読むか。
+
+    読まない形は旧来の読み (移動も環境の変更も無かったもの) のまま。移動しない形や行き先の分からない形を読むと、
+    手前の `cd <main>` が消えて、main で動く git を見逃す。
+    """
+    if word not in _BUILTIN_READS:
+        return False
+    if word in ("export", "unset"):
+        # `unset -f` は関数を消す。`export -x` / `+x` は shell で割れる。`$x` は値が決まらない
+        return not any(a.startswith(("-", "+")) or _dynamic(a) for a in args)
+    if word != "cd":
+        return True
+    operands = _before_redirect(args)
+    i = 0
+    while i < len(operands) and operands[i] in _BUILTIN_CD_OPTS:
+        i += 1
+    if i < len(operands) and operands[i] == "--":
+        i += 1
+    operands = operands[i:]
+    if not operands:
+        return True
+    # 語が 2 つの `cd a b` は bash 3.2 が a へ移動し、zsh は置換として読んで失敗する。
+    # `-` / `+1` / `-1` は直前のディレクトリや dir stack の参照で、`-x` は読めない option
+    return len(operands) == 1 and not operands[0].startswith(("-", "+")) and not _EXPANDED_WORD.search(operands[0])
+
+
+def _before_redirect(args: list[str]) -> list[str]:
+    """redirect より前の語。redirect の直前の数字の語は fd として外す。"""
+    for i, tok in enumerate(args):
+        if tok.startswith(("<", ">")) or tok.endswith(">"):
+            return args[: i - 1] if i and args[i - 1].isdigit() else args[:i]
+    return args
 
 
 def _strip_prefix(seg: list[str]) -> tuple[list[str], str | None, dict[str, str | None], bool]:
@@ -97,10 +142,17 @@ def _strip_prefix(seg: list[str]) -> tuple[list[str], str | None, dict[str, str 
     空にして起動するか)。代入の値 None は `env -u NAME` による削除。
     `env -C <dir> git ...` のように wrapper が移動先を持つ場合、その後の git はそのディレクトリで動く。
     `GIT_DIR=<dir> git ...` の代入は git の対象を変えるので呼び出し側で使う。
+    `builtin` は今の shell で動くときだけ外す。`env builtin cd <dir>` などは外部の builtin コマンド
+    (macOS の /usr/bin/builtin) を子プロセスで走らせるので、移動は後ろに残らない。先頭の `time` は bash でも
+    zsh でも今の shell で動かす。ただし zsh の `time -p ...` は `-p` をコマンドとして起動し、2 つ目の `time`
+    は外部コマンドになり、bash は代入の後ろの `time` を外部コマンドとして起動する。
+    `\\time` / `'time'` は外部の time で動くが、shlex が引用を外すので keyword の time と区別できず、今の shell で
+    動くものとして読む。bash 3.2 の `! time` / `if time` も外部の time になるが、同じに読む (どちらも見逃す側で、受け入れている)
     """
     chdir = None
     assigns: dict[str, str | None] = {}
     clear = False
+    in_shell = True  # ここまでの wrapper の後ろのコマンドが、今の shell で動くか
     i = 0
     while i < len(seg):
         tok = seg[i]
@@ -112,8 +164,19 @@ def _strip_prefix(seg: list[str]) -> tuple[list[str], str | None, dict[str, str 
         if tok == "(" or tok in _KEYWORDS:
             i += 1
             continue
+        if tok == "builtin":
+            if in_shell and i + 1 < len(seg) and _builtin_reads(seg[i + 1], seg[i + 2 :]):
+                i += 1
+                continue
+            break
         if tok in _WRAPPERS:
             opts = _WRAPPER_VALUE_OPTS.get(tok, set())
+            if (
+                tok != "time"
+                or "".join(seg[i + 1 : i + 2]).startswith("-")
+                or any(t != "(" and t not in _KEYWORDS for t in seg[:i])
+            ):
+                in_shell = False
             i += 1
             while i < len(seg) and seg[i].startswith("-"):
                 name, eq, value = seg[i].partition("=")
