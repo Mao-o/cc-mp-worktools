@@ -1,7 +1,7 @@
 """移動の組み込み (`cd` / `chdir` / `pushd` / `popd`) を、今の shell で動くかと shell ごとの違いまで含めて読む。
 
-期待値は、偽の git を置いて bash 3.2 と `zsh -f` で実測した結果に合わせている (git がどの checkout を対象に走ったかを見た)。
-どちらかの shell で main に書く形は止め、どちらの shell でも main に書かない形は止めない。
+期待値は、偽の git を置いて bash 3.2 / 5.2 と `zsh -f` で実測した結果に合わせている (git がどの checkout を対象に走ったかを見た)。
+どれかの shell で main に書く形は止め、どの shell でも main に書かない形は止めない (plain の cd を成功と読む前提は除く)。
 """
 from __future__ import annotations
 
@@ -14,15 +14,21 @@ GIT = "git reset --hard"
 
 
 class ChdirReadingBase(test_guard.GuardBase):
+    def _evaluate(self, cmd):
+        try:
+            return evaluate(bash(cmd, self.a))
+        except Exception as e:  # noqa: BLE001 - 判定が例外で落ちるのも読みの失敗として数える
+            self.fail(f"{cmd}: {e!r}")
+
     def assertDenied(self, cmds):
         for cmd in cmds:
             with self.subTest(cmd=cmd):
-                self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+                self.assertEqual(decision(self._evaluate(cmd)), "deny")
 
     def assertAllowed(self, cmds):
         for cmd in cmds:
             with self.subTest(cmd=cmd):
-                self.assertIsNone(evaluate(bash(cmd, self.a)))
+                self.assertIsNone(self._evaluate(cmd))
 
 
 class WrappedCdTest(ChdirReadingBase):
@@ -30,15 +36,15 @@ class WrappedCdTest(ChdirReadingBase):
     # `exec` は shell を置き換えるので実測では後ろの git が走らないが、それは読まない (`cd <main>; exec cd <worktree>; git ...` は止まる側)
     NO_MOVE = (
         "env", "env --", "env FOO=1", "env -i", "env -", "env -u X", "nohup", "nohup --", "sudo", "sudo -u me", "sudo -n",
-        "sudo --", "exec", "exec -a x", "exec -c", "exec --", "time time", "time env", "time nohup", "time exec",
+        "sudo --", "exec", "exec -a x", "exec -c", "exec --", "time env", "time nohup", "time exec",
         "FOO=1 time", "FOO=1 time -p", "FOO=1 env", "FOO=1 nohup", "command -v", "command -V", "command -x", "command FOO=1",
         "command time", "command env", "command exec", "command nohup", "env command", "nohup command", "sudo command",
-        "env time", "nohup time", "exec command", "exec time", "time --", "time -p --", "time -f x", "time -x", "\\env",
+        "env time", "nohup time", "exec command", "exec time", "time -f x", "time -x", "time -f x time", "FOO=1 time --", "\\env",
     )
-    # bash だけ今の shell で動く
+    # bash だけ今の shell で動く。`time --` と 2 つ目の `time` は bash 5.2 だけ (bash 3.2 は外部の time)
     BASH_ONLY = (
         "command", "command --", "command -p", "\\command", "'command'", "FOO=1 command", "command command", "time command",
-        "time -p",
+        "time -p", "time --", "time -p --", "time time", "time -p time", "time -- time",
     )
 
     def test_wrapper_that_leaves_the_shell_does_not_move(self):
@@ -62,6 +68,10 @@ class WrappedCdTest(ChdirReadingBase):
         self.assertDenied(tuple(f'cd "{m}"; {p} cd "{a}"; {GIT}' for p in self.BASH_ONLY))
         self.assertDenied(tuple(f'{p} cd "{m}"; {GIT}' for p in self.BASH_ONLY))
         self.assertDenied((
+            f'time -- pushd "{m}"; {GIT}',
+            f'time time pushd "{m}"; {GIT}',
+            f'time -- export GIT_DIR="{m}/.git"; {GIT}',
+            f'time time export GIT_DIR="{m}/.git"; {GIT}',
             f'if command cd "{m}"; then {GIT}; fi',
             f'(command cd "{m}"; {GIT})',
             f'git add . && command cd "{m}" && git commit -m x',
@@ -191,7 +201,7 @@ class CdOptionTest(ChdirReadingBase):
 
     def test_options_neither_shell_accepts_do_not_move(self):
         m, a = self.main, self.a
-        for opt in ("-n", "-x"):
+        for opt in ("-n", "-x", "-@"):
             self.assertDenied((f'cd "{m}"; cd {opt} "{a}"; {GIT}', f'cd "{m}"; cd {opt}; {GIT}', f'cd "{m}"; cd {opt} "{a}" || {GIT}'))
             self.assertAllowed((f'cd {opt} "{m}"; {GIT}', f'cd "{m}"; cd {opt} "{a}" && {GIT}'))
         for opt in ("-e", "-@", "-x", "-n"):
@@ -200,9 +210,9 @@ class CdOptionTest(ChdirReadingBase):
             self.assertAllowed((f'pushd {opt} "{m}"; {GIT}',))
 
     def test_options_of_newer_bash_are_read_as_moving_there(self):
-        # `cd -e` / `cd -@` は bash 3.2 と zsh が失敗し、bash 4.2 / 4.3 以降は移動する。新しい bash を見逃さない側に倒す
+        # `cd -e` は bash 3.2 と zsh が失敗し、bash 5.2 は移動する。新しい bash を見逃さない側に倒す
         m, a = self.main, self.a
-        for opt in ("-e", "-@", "-P -e"):
+        for opt in ("-e", "-P -e"):
             self.assertDenied((f'cd {opt} "{m}"; {GIT}', f'cd "{m}"; cd {opt} "{a}"; {GIT}'))
         self.assertAllowed((f'cd -e "{a}"; {GIT}',))
 
@@ -291,9 +301,17 @@ class PushdPopdTest(ChdirReadingBase):
         m = self.main
         for cmd in (f'cd "{m}"; pushd >/dev/null; {GIT}', f'pushd >/dev/null; {GIT}', f'pushd; {GIT}', f'pushd -q; {GIT}'):
             with self.subTest(cmd=cmd):
-                self.assertIn(decision(evaluate(bash(cmd, self.a))), ("context", "deny"))
-        self.assertEqual(decision(evaluate(bash(f'pushd >/dev/null; {GIT}', self.a))), "context")
+                self.assertEqual(decision(evaluate(bash(cmd, self.a))), "context")
         self.assertDenied((f'cd "{m}"; pushd 2 >/dev/null; {GIT}',))
+
+    def test_stack_is_tracked_through_each_step(self):
+        m, a = self.main, self.a
+        # 語の無い pushd は今の場所をスタックに積む。ここは main と worktree が入れ替わり、次の popd で worktree に戻る
+        self.assertAllowed((f'cd "{m}"; pushd "{a}"; pushd; popd; {GIT}',))
+        # `popd +1` はスタックの要素を消す。行き先は読まないので注意だけ出す (消さないと次の popd を worktree に戻ると読む)
+        self.assertEqual(decision(evaluate(bash(f'pushd "{m}"; popd +1; popd; {GIT}', self.a))), "context")
+        # 語の無い popd も消す。2 つ目の popd はスタックが空に見える
+        self.assertEqual(decision(evaluate(bash(f'pushd "{m}"; popd; popd; {GIT}', self.a))), "context")
 
 
 class NegationTest(ChdirReadingBase):
@@ -317,6 +335,55 @@ class NegationTest(ChdirReadingBase):
             f'! chdir "{m}" && {GIT}',
         ))
 
+    def test_failed_move_after_negation_stays(self):
+        # `! cd x && git ...` の git は移動が失敗したときに走る。行き先に関係なく、手前の場所で git を読む
+        m, a = self.main, self.a
+        for dest in ("nonexistent", "+1", "-", "-1", '"$NOPE"', '-- nonexistent', '-x'):
+            with self.subTest(dest=dest):
+                self.assertDenied((f'! cd {dest} && git -C "{m}" reset --hard', f'cd "{m}"; ! cd {dest} && {GIT}', f'cd "{m}" && ! cd {dest} && {GIT}'))
+        self.assertDenied((
+            f'! pushd nonexistent && git -C "{m}" reset --hard',
+            f'! popd && git -C "{m}" reset --hard',
+            f'! chdir nonexistent && git -C "{m}" reset --hard',
+            f'! time cd nonexistent && git -C "{m}" reset --hard',
+            f'! builtin cd nonexistent && git -C "{m}" reset --hard',
+            f'cd "{m}"; ! pushd nonexistent && {GIT}',
+            f'cd "{m}"; ! popd && {GIT}',
+            f'cd "{m}"; ! popd +1 && {GIT}',
+            # zsh だけ main にいる。zsh の chdir の失敗も読む (bash の読みは手前の `cd -q` が失敗して worktree に残る)
+            f'cd -q "{m}"; ! chdir nowhere && {GIT}',
+            # worktree が消えていれば main で走る。cd の失敗を読むので止まる (普段は走らない)
+            f'cd "{m}"; ! cd "{a}" && {GIT}',
+        ))
+        self.assertAllowed((
+            # 手前の場所が自分の worktree なら、移動が失敗してもそこで走る
+            f'! cd nonexistent && {GIT}',
+            f'! cd "{a}" && {GIT}',
+            # 2 回反転すると plain の cd と同じ読み (失敗を読まない)
+            f'cd "{m}"; ! ! cd "{a}" && {GIT}',
+        ))
+        # 移動でないコマンドは足さない (`! true` は失敗にしかならない)
+        self.assertAllowed((f'! true && git -C "{m}" reset --hard', f'! : && git -C "{m}" reset --hard'))
+
+    def test_failed_move_is_read_only_for_the_next_and(self):
+        # `;` の後ろは plain の `cd x; git ...` と同じ読み (移動は成功する)。実測で worktree に戻っている
+        m, a = self.main, self.a
+        self.assertAllowed((
+            f'cd "{m}"; ! cd "{a}"; {GIT}',
+            f'cd "{m}"; ! cd "{a}"\n{GIT}',
+            f'cd "{m}"; if ! cd "{a}"; then exit 1; fi; {GIT}',
+            f'cd "{m}"; ! pushd "{a}"; {GIT}',
+            f'cd "{m}"; ! cd "{a}" || true; {GIT}',
+            # サブシェルを伴う `!` は移動の読みを足さない
+            f'! (cd "{m}") && {GIT}',
+        ))
+        # `&&` の先のサブシェルや続きの `&&` にも届く
+        self.assertDenied((
+            f'cd "{m}"; ! cd nowhere && ({GIT})',
+            f'cd "{m}"; ! cd "{a}" && true && {GIT}',
+            f'cd "{m}"; ! cd "{a}" && true; {GIT}',
+        ))
+
     def test_bang_after_command_is_a_command_name(self):
         m = self.main
         # `command !` の `!` はコマンド名で、反転しない (どちらの shell でも見つからず失敗する)
@@ -324,6 +391,30 @@ class NegationTest(ChdirReadingBase):
         self.assertDenied((f'command ! cd "{m}" || git -C "{m}" reset --hard',))
         # `env !` も同じ
         self.assertAllowed((f'env ! false && git -C "{m}" reset --hard',))
+
+
+class ClosingBraceTest(ChdirReadingBase):
+    # zsh は `{ cd <dir> }` の語の末尾の `}` を閉じとして読む (bash は構文エラーで何も走らせない)
+    def test_closing_brace_is_not_a_word(self):
+        m, a = self.main, self.a
+        self.assertDenied((
+            f'{{ chdir "{m}" }}; {GIT}',
+            f'{{ cd -q "{m}" }}; {GIT}',
+            f'{{ pushd -q "{m}" }}; {GIT}',
+            f'{{ cd "{m}" }}; {GIT}',
+            f'{{ builtin cd "{m}" }}; {GIT}',
+            f'{{ cd "{m}" }} >/dev/null; {GIT}',
+            f'cd "{m}"; {{ pushd "{a}" }}; {{ popd }}; {GIT}',
+            f'cd "{m}"; {{ cd "{a}" extra }}; {GIT}',
+        ))
+        self.assertAllowed((
+            f'cd "{m}"; {{ cd "{a}" }}; {GIT}',
+            f'cd "{m}"; {{ builtin cd "{a}" }}; {GIT}',
+            f'{{ pushd "{m}" }}; {{ popd }}; {GIT}',
+            # 語の無い `cd` は HOME へ移動する
+            f'cd "{m}"; {{ cd }}; {GIT}',
+        ))
+        self.assertEqual(decision(evaluate(bash(f'cd "{m}"; {{ pushd }}; {GIT}', self.a))), "context")
 
 
 class PipelineTest(ChdirReadingBase):

@@ -88,27 +88,28 @@ _WRAPPER_VALUE_OPTS = {
     "exec": {"-a"},
 }
 _CHDIR_OPTS = {"env": {"-C", "--chdir"}, "sudo": {"-D", "--chdir"}}
-# 移動の組み込みが、どの shell の読みで移動するか。bash 3.2 と `zsh -f` で偽の git を走らせた実測に合わせている
-# (`_analyze_tokens` が zsh の読みと bash の読みの両方で判定する)
+# 移動の組み込みが、どの shell の読みで移動するか。bash 3.2 / 5.2 と `zsh -f` で偽の git を走らせた実測に合わせている
+# (`_analyze_tokens` が zsh の読みと bash の読みの両方で判定する)。bash の読みは bash 3.2 と 5 の和で、どちらかで移動するなら移動する
 _BOTH = frozenset({"bash", "zsh"})
 _BASH = frozenset({"bash"})
 _ZSH = frozenset({"zsh"})
 _NEITHER: frozenset[str] = frozenset()
-# `cd` / `chdir` の option の文字。`-q` / `-s` は zsh だけ受け付ける (bash は失敗して移動しない)。`-e` / `-@` は bash 3.2 と zsh が
-# 失敗するが、bash 4.2 / 4.3 以降は移動するので bash の読みに入れる。表に無い文字 (`-n` / `-x`) はどちらの shell でも失敗する
-_CD_OPT_SHELLS = {"L": _BOTH, "P": _BOTH, "q": _ZSH, "s": _ZSH, "e": _BASH, "@": _BASH}
+# `cd` / `chdir` の option の文字。`-q` / `-s` は zsh だけ受け付ける (bash は失敗して移動しない)。`-e` は bash 3.2 と zsh が
+# 失敗するが、bash 4.2 以降は移動するので bash の読みに入れる。表に無い文字 (`-n` / `-x` / `-@`) はどちらの shell でも失敗する
+_CD_OPT_SHELLS = {"L": _BOTH, "P": _BOTH, "q": _ZSH, "s": _ZSH, "e": _BASH}
 # `pushd` の option の文字。bash の pushd は `-n` しか受け付けないので、`-L` / `-P` も zsh だけ
 _PUSHD_OPT_SHELLS = {"L": _ZSH, "P": _ZSH, "q": _ZSH, "s": _ZSH}
+# 移動の組み込み。読めない行き先でも失敗して動かない場合がある (`!` の反転で使う)
+_MOVERS = {"cd", "chdir", "pushd", "popd"}
 # `builtin` の後ろで読む語。今の shell の組み込みとして動くもののうち、_command が読むものだけ。
 # `builtin git` は組み込みが無いのでどちらの shell でも走らない。`builtin -- cd` は bash だけ、`builtin - cd` は zsh だけ
 # 動くので読まない。`builtin command cd` は bash では残り zsh では外部の cd になって残らないので読まない。
-# `builtin popd` は読まない (スタックが空だと失敗して動かないが、_chdir はそれを「分からない」と読むので止まらなくなる)。
-# `builtin pushd` も読まない (対の `builtin popd` を読まないので、戻り先を取り違える)。
+# `builtin pushd` / `builtin popd` は対でしか読めないので、どちらも読まない (`_chdir` の読みに入れず、手前の場所のままにする)。
 # `builtin chdir` は zsh だけ動くが、`chdir` の読みが両方の shell を判定する
 _BUILTIN_READS = {"cd", "chdir", "export", "unset", "true", "false", ":", "builtin"}
-# `builtin cd` で読む option。`-L` / `-P` は bash 3.2 と zsh の両方で移動し、`-q` / `-s` は zsh だけ移動する
-# (`_chdir_form` が両方の読みにする)。`-e` / `-@` / `-n` は bash 3.2 と zsh で失敗するので読まない
-_BUILTIN_CD_OPT = re.compile(r"-[LPqs]+")
+# `builtin cd` で読む option。`-L` / `-P` は両方の shell で移動し、`-q` / `-s` は zsh だけ、`-e` は bash 4.2 以降だけ移動する
+# (`_chdir_form` が両方の読みにする)。`-@` / `-n` はどちらの shell でも失敗するので読まない
+_BUILTIN_CD_OPT = re.compile(r"-[LPqse]+")
 # shell が展開してから cd に渡す語。行き先を文字列から決められない
 _EXPANDED_WORD = re.compile(r"[$`*?\[{]")
 
@@ -126,7 +127,7 @@ def _builtin_reads(word: str, args: list[str]) -> bool:
         return not any(a.startswith(("-", "+")) or _dynamic(a) for a in args)
     if word not in ("cd", "chdir"):
         return True
-    operands = _before_redirect(args)
+    operands = _words(args)
     i = 0
     while i < len(operands) and _BUILTIN_CD_OPT.fullmatch(operands[i]):
         i += 1
@@ -148,6 +149,15 @@ def _before_redirect(args: list[str]) -> list[str]:
     return args
 
 
+def _words(args: list[str]) -> list[str]:
+    """移動の組み込みの語。redirect より後ろと、末尾の `}` を除く。
+
+    zsh は `{ cd <dir> }` の `}` を閉じとして読む (bash は構文エラーで何も走らせない)。
+    """
+    words = _before_redirect(args)
+    return words[:-1] if words[-1:] == ["}"] else words
+
+
 def _strip_prefix(seg: list[str]) -> tuple[list[str], str | None, dict[str, str | None], bool, frozenset[str], bool]:
     """先頭の予約語 / 代入 / wrapper (とそのオプション) を外す。
 
@@ -156,12 +166,13 @@ def _strip_prefix(seg: list[str]) -> tuple[list[str], str | None, dict[str, str 
     `env -C <dir> git ...` のように wrapper が移動先を持つ場合、その後の git はそのディレクトリで動く。
     `GIT_DIR=<dir> git ...` の代入は git の対象を変えるので呼び出し側で使う。
 
-    今の shell で動かないコマンド (`env cd <dir>` / `nohup cd` / `sudo cd` / `exec cd` / `time time cd`) の移動は後ろに残らない
+    今の shell で動かないコマンド (`env cd <dir>` / `nohup cd` / `sudo cd` / `exec cd`) の移動は後ろに残らない
     (macOS の /usr/bin/cd などを子プロセスで走らせるか、組み込みが無くて失敗する)。`command` は bash では今の shell で動き、
     zsh では外部コマンドを起動する。`command -v` などの他の option は何も起動しない。
     先頭の `time` は bash でも zsh でも今の shell で動かす。ただし zsh の `time -p ...` は `-p` をコマンドとして起動し、
-    `-p` 以外の option は両方の shell でコマンドとして起動する。2 つ目の `time` と代入の後ろの `time` は外部コマンドになる
-    (zsh は代入の後ろの `time` を構文エラーにする)。
+    `-p` 以外の option は両方の shell でコマンドとして起動する。`time --` と 2 つ目の `time` (`time time` / `time -p time` / `time -- time`)
+    は新しい bash だけ今の shell で動かす (bash 3.2 と zsh は外部コマンド)。`time -f x` の後ろと代入の後ろの `time` はどの版でも
+    外部コマンドになる (zsh は代入の後ろの `time` を構文エラーにする)。
     `builtin` は両方の shell で今の shell で動くときだけ外す。`\\time` / `'time'` は外部の time で動くが、shlex が引用を外すので
     keyword の time と区別できず、今の shell で動くものとして読む。bash 3.2 の `! time` / `if time` も外部の time になるが、
     同じに読む (どちらも見逃す側で、受け入れている)
@@ -199,13 +210,19 @@ def _strip_prefix(seg: list[str]) -> tuple[list[str], str | None, dict[str, str 
             if tok == "command":
                 shells &= _BASH
                 after_command = True
-            elif tok != "time" or any(t != "(" and t not in _KEYWORDS for t in seg[:i]):
+            elif tok == "time":
+                before = [t for t in seg[:i] if t != "(" and t not in _KEYWORDS]
+                if any(t not in ("time", "-p", "--") for t in before):
+                    shells = _NEITHER
+                elif before:
+                    shells &= _BASH  # 2 つ目の `time`
+            else:
                 shells = _NEITHER
             i += 1
             while i < len(seg) and seg[i].startswith("-"):
                 name, eq, value = seg[i].partition("=")
                 if tok == "time":
-                    shells = shells & _BASH if seg[i] == "-p" else _NEITHER
+                    shells = shells & _BASH if seg[i] in ("-p", "--") else _NEITHER
                 elif tok == "command" and seg[i] not in ("-p", "--"):
                     shells = _NEITHER
                 if seg[i] == "--":
@@ -345,9 +362,9 @@ def _chdir_form(cmd: str, args: list[str]) -> tuple[frozenset[str], list[str]]:
             shells &= table.get(letter, _NEITHER)
         i += 1
     rest = args[i:]
-    words = _before_redirect(rest) or [t for t in rest[:1] if cmd != "pushd" or t.isdigit()]
+    words = _words(rest) or [t for t in rest[:1] if t != "}" and (cmd != "pushd" or t.isdigit())]
     if len(words) > 1:
-        shells &= _BASH  # 語が 2 つの `cd a b` は bash 3.2 が a へ移動し、zsh は置換として読んで失敗する
+        shells &= _BASH  # 語が 2 つの `cd a b` は bash 3.2 が a へ移動し (bash 5 は失敗する)、zsh は置換として読んで失敗する
     return shells, words
 
 
@@ -671,8 +688,11 @@ def analyze(command: str, cwd: str, fam: Family) -> list[Finding]:
 
 
 # 1 つの「実行時にありうる状態」: (作業ディレクトリ, pushd のスタック, 直前のコマンドの成否)。
-# 作業ディレクトリが静的に決まらなければ None。成否は "ok" / "fail"
+# 作業ディレクトリが静的に決まらなければ None。成否は "ok" / "fail" / _STAYED
 _Alt = tuple
+# `! cd x` の x への移動が失敗した読み。成否は成功で、続く `&&` の後ろを実行する。`;` や改行まで残ると `! cd x; git ...` が
+# plain の `cd x; git ...` より厳しい読みになるので、そこで消す
+_STAYED = "stayed"
 _OPS = re.compile(r"&&|\|\||\|&|;;|[|&;()\n]")
 
 
@@ -714,8 +734,8 @@ class _Analyzer:
         """今のコマンドを実行する状態と、`&&` / `||` で飛ばす状態に分ける。"""
         if self.op is None:
             return set(self.alts), set()
-        want = "ok" if self.op == "&&" else "fail"
-        run = {a for a in self.alts if a[2] == want}
+        want = ("ok", _STAYED) if self.op == "&&" else ("fail",)
+        run = {a for a in self.alts if a[2] in want}
         return run, self.alts - run
 
     # --- 字句の走査 ---------------------------------------------------------
@@ -761,6 +781,7 @@ class _Analyzer:
                 self.env, self.shvars, self.list_start = env, shvars, list_start
             self.op = None
         else:  # ; ;; 改行
+            self.alts = {a for a in self.alts if a[2] != _STAYED}
             self._new_list()
 
     def _new_list(self) -> None:
@@ -791,8 +812,14 @@ class _Analyzer:
     def _command(self, seg: list[str], alts: set[_Alt]) -> set[_Alt]:
         rest, chdir, assigns, clear, shells, negated = _strip_prefix(seg)
         after = self._simple(rest, chdir, assigns, clear, shells, alts)
+        if not negated:
+            return after
         # `! cmd` は成否を反転する (反転しないと `! chdir <worktree> && git ...` の git を、main で走るのに飛ばす)
-        return {(h, s, "fail" if st == "ok" else "ok") for h, s, st in after} if negated else after
+        flipped = {(h, s, "fail" if st == "ok" else "ok") for h, s, st in after}
+        if rest and rest[0] in _MOVERS:
+            # `! cd x && git ...` の git は移動が失敗したときに走る。cd を成功と読む前提は、この形では使えない
+            flipped |= {(h, s, _STAYED) for h, s, _ in alts}
+        return flipped
 
     def _simple(
         self,
@@ -836,7 +863,7 @@ class _Analyzer:
                 self.shvars.pop(name, None)
             return ok
         # 今の shell で動かない移動は後ろに残らない (一般のコマンドと同じ。成否は外部コマンド次第)
-        if cmd in ("cd", "chdir", "pushd", "popd") and in_shell:
+        if cmd in _MOVERS and in_shell:
             out: set[_Alt] = set()
             for h, s, _ in alts:
                 out |= self._chdir(cmd, seg[1:], h, s)
@@ -879,7 +906,7 @@ class _Analyzer:
         return {(new, stack + (here,) if cmd == "pushd" else stack, "ok")}
 
     def _popd(self, args: list[str], here: str | None, stack: tuple) -> set[_Alt]:
-        words = _before_redirect(args)
+        words = _words(args)
         if words[:1] == ["-q"]:  # zsh だけ受け付ける (bash は失敗して動かない)
             if self.shell != "zsh":
                 return {(here, stack, "fail")}

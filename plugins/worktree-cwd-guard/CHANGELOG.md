@@ -13,12 +13,14 @@ Bash tool の shell は環境で違い、次の形は shell で動きが割れ�
 `chdir <main>; chdir <worktree>; git reset --hard` は止まらない。pipeline の最後の要素の `cd` も、この読みに移した (zsh では残り、
 bash では残らない)。
 
-どの形をどう読むかは、bash 3.2 と `zsh -f` で偽の git を走らせた実測に合わせている:
+どの形をどう読むかは、bash 3.2 / 5.2 と `zsh -f` で偽の git を走らせた実測に合わせている。bash の読みは bash 3.2 と 5 の和で、
+どちらかで移動するなら移動すると読む:
 
 | 形 | 読み |
 |---|---|
-| `env` / `nohup` / `sudo` / `exec` の後ろの `cd` / `chdir` / `pushd` / `popd` | どちらの shell でも移動しない (0.5.0 までは移動として読んでいた) |
-| 2 つ目の `time` / 代入の後ろの `time` / `time --` / `time -f x` の後ろ | どちらの shell でも移動しない |
+| `env` / `nohup` / `sudo` / `exec` の後ろの `cd` / `chdir` / `pushd` / `popd` | どの shell でも移動しない (0.5.0 までは移動として読んでいた) |
+| 代入の後ろの `time` / `time -f x` の後ろ | どの shell でも移動しない |
+| `time --` / `time -p --` / 2 つ目の `time` (`time time` / `time -p time` / `time -- time`) の後ろ | bash 5.2 は移動し、bash 3.2 と zsh は外部コマンドで移動しない |
 | `command cd` / `command -p cd` / `command -- cd` | bash は移動し、zsh は外部コマンドで移動しない |
 | `command -v cd` / `command -V cd` / `command <代入> cd` | どちらの shell でも移動しない |
 | `time -p cd` | bash は移動し、zsh は `-p` をコマンドとして起動して失敗する |
@@ -27,22 +29,31 @@ bash では残らない)。
 | `pushd -q` / `-s` / `-L` / `-P` | zsh は移動し、bash は失敗する |
 | `pushd -n <dir>` | bash は移動せずスタックに積む (次の `popd` がそこへ移動する)。zsh は失敗する |
 | `popd -q` | zsh は戻り、bash は失敗する |
-| `cd -n` / `cd -x` など読めない option | どちらの shell でも失敗して移動しない |
-| `cd <a> <b>` / `pushd <a> <b>` | bash 3.2 は a へ移動し、zsh は失敗する |
+| `cd -e` (`builtin cd` も) | bash 5.2 は移動し、bash 3.2 と zsh は失敗する |
+| `cd -n` / `cd -x` / `cd -@` など読めない option | どの shell でも失敗して移動しない |
+| `cd <a> <b>` / `pushd <a> <b>` | bash 3.2 は a へ移動し、bash 5.2 と zsh は失敗する |
+| `{ cd <dir> }` の語の末尾の `}` | zsh は閉じとして読むので語に数えない (bash は構文エラーで何も走らせない) |
 
 ### 修正: 同じ読み落としの近くにあったもの
 
 - `popd >/dev/null` のように redirect を付けた `popd` を、行き先の分からない `popd` と読んでいた。語の無い `popd` と同じに読む
 - スタックが空に見える `popd` は、行き先が分からないという注意に加えて、失敗してその場に残る読みでも判定する
   (`cd <main>; popd; git reset --hard` は main で走るので止める)
-- `! <コマンド>` の成否を反転する (`! cd <main> || git reset --hard` は main で走る)
+- `! <コマンド>` の成否を反転する (`! cd <main> || git reset --hard` は main で走る)。`!` の後ろの移動は、失敗して動かない読みも足す
+  (`cd <main>; ! cd <無いパス> && git reset --hard` は main で走る)
 - 今の shell で動かない `env export GIT_DIR=...` / `nohup unset GIT_DIR` / `env GIT_DIR=...` (コマンドなし) は、変数を変えたと読まない。
   zsh の `command export` / `command unset` も同じ
 
 次の形は読みが実際と違うが、受け入れている:
 
-- `cd -e` / `cd -@`: bash 3.2 と zsh は失敗するが、新しい bash (4.2 / 4.3 以降) は移動するので、新しい bash の読みで判定する。
+- `cd -e`: bash 3.2 と zsh は失敗するが、bash 5.2 は移動するので、新しい bash の読みで判定する。
   `cd -e <main>; git reset --hard` は bash 3.2 と zsh では worktree で走るが止まる (0.5.0 と同じ deny)
+- `! cd <dir> && ...` の移動の失敗: 直後の `&&` の後ろだけ、失敗して動かなかった読みも判定する。`cd <main>; ! cd <worktree> && git reset --hard` は
+  worktree があれば git が走らないが止まる。`;` や改行の後ろは plain の `cd` と同じで移動は成功すると読むので、
+  `cd <main>; if ! cd /tmp/<無いパス>; then git reset --hard; fi` は main で走るが止まらない (0.5.0 と同じ)
+- `cd <main>; ! cd +0 || git reset --hard` のように `!` の後ろで dir stack を指す形は、行き先が分からないので注意だけ出す (`cd +0` と同じ読み)。
+  `chdir +0` は 0.5.0 が読まなかったので止まっていたが、`cd +0` に揃えた
+- bash 3.2 と 5 を 1 つの読みにまとめている: 版で移動の組が変わる形を、どちらかの版の組として区別しない
 - `exec cd <dir>; git ...`: shell が置き換わるので実際には後ろの git は走らないが、読まない (`cd <main>; exec cd <worktree>; git ...` は止まる)
 - 今の shell で動かない `cd` の成否: 外部コマンド次第として両方を判定する。`cd <main>; env cd <worktree> || git reset --hard` は
   macOS では `/usr/bin/cd` が成功して git が走らないが止まる
@@ -52,7 +63,7 @@ bash では残らない)。
 
 - `tests/test_chdir_readings.py`: 上の読みごとの判定
 
-テスト件数: 104 → 129 (追加 25・削除 0・統合 0)。
+テスト件数: 104 → 133 (追加 29・削除 0・統合 0)。
 
 ## 0.5.0
 
