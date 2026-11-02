@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import os
 import unittest
 
 import test_guard
@@ -32,7 +33,10 @@ class BuiltinPrefixTest(test_guard.GuardBase):
             f'builtin cd "{m}"\ngit reset --hard',
             f'builtin cd -P "{m}"; git reset --hard',
             f'builtin cd -- "{m}"; git reset --hard',
-            f'builtin pushd "{m}"; git reset --hard',
+            f'builtin cd -L -- "{m}"; git reset --hard',
+            f'builtin cd "{m}" >/dev/null; git reset --hard',
+            f'builtin cd "{m}" 2>/dev/null; git reset --hard',
+            f'builtin cd "{m}" >/dev/null 2>&1; git reset --hard',
             # 引用符や `\` で綴っても同じコマンド
             f'\\builtin cd "{m}"; git reset --hard',
             f'\'builtin\' cd "{m}"; git reset --hard',
@@ -60,7 +64,7 @@ class BuiltinPrefixTest(test_guard.GuardBase):
             f'builtin cd "{a}"; git reset --hard',
             f'cd "{m}"; builtin cd "{a}"; git reset --hard',
             f'cd "{m}"; time builtin cd "{a}"; git reset --hard',
-            f'cd "{m}"; builtin pushd "{a}"; git reset --hard',
+            f'cd "{m}"; builtin cd "{a}" >/dev/null 2>&1; git reset --hard',
             f'builtin cd "{m}"; builtin cd "{a}"; git reset --hard',
             # 読み取りは止めない
             f'builtin cd "{m}"; git log -1',
@@ -72,7 +76,8 @@ class BuiltinPrefixTest(test_guard.GuardBase):
         ))
 
     def test_builtin_in_a_child_process_does_not_move_the_shell(self):
-        # 外部の builtin コマンド (macOS の /usr/bin/builtin) が子プロセスで走る
+        # 外部の builtin コマンド (macOS の /usr/bin/builtin) が子プロセスで走る。
+        # ただし `time -p` は bash だけ今の shell で動く (zsh は `-p` をコマンドとして起動する)。読みが割れるので読まない
         m, a = self.main, self.a
         prefixes = ("env ", "env -- ", "env FOO=1 ", "nohup ", "sudo ", "sudo -u me ", "command ", "command -- ",
                     "exec ", "time -p ", "time time ", "time env ", "FOO=1 time ")
@@ -97,17 +102,92 @@ class BuiltinPrefixTest(test_guard.GuardBase):
         m = self.main
         self.assertDenied((
             f'cd "{m}"; builtin popd; git reset --hard',
+            # スタックがあっても読まないので、ここは誤 deny を固定している。
+            # `pushd m; pushd w; builtin popd` は見逃す (旧版も同じ)
             f'pushd "{m}"; builtin popd; git reset --hard',
         ))
 
-    def test_builtin_changes_git_environment(self):
+    def test_builtin_pushd_is_not_read(self):
+        # 対の `builtin popd` を読まないので、読むと戻り先を取り違える。どれも実測で main に残る
+        m, a = self.main, self.a
+        self.assertDenied((
+            f'cd "{m}"; builtin pushd "{a}"; builtin popd; git reset --hard',
+            f'cd "{m}" && builtin pushd "{a}" && builtin popd && git reset --hard',
+            f'cd "{m}"; builtin pushd +1; git reset --hard',
+            f'cd "{m}"; builtin pushd -0; git reset --hard',
+            f'cd "{m}"; builtin pushd -n "{a}"; git reset --hard',
+            # 次の 2 つは bash だけ main に残る (zsh は移動する)
+            f'cd "{m}"; builtin pushd; git reset --hard',
+            f'cd "{m}"; builtin pushd -q "{a}"; git reset --hard',
+        ))
+        self.assertAllowed((
+            f'builtin pushd "{m}"; builtin popd; git reset --hard',
+            f'builtin pushd -n "{m}"; git reset --hard',
+            # 実際には main で走るが読まない (旧版も同じ)。見逃す側
+            f'builtin pushd "{m}"; git reset --hard',
+        ))
+
+    def test_builtin_cd_that_does_not_reach_the_operand_is_not_read(self):
+        # 移動しない形や行き先の分からない形を読むと、手前の `cd <main>` が消える。どれも実測で両シェル main に残る
+        m, a = self.main, self.a
+        parent = os.path.dirname(m)
+        name = os.path.basename(m)
+        self.assertDenied((
+            f'cd "{m}"; builtin cd +1; git reset --hard',
+            f'cd "{m}"; builtin cd -1; git reset --hard',
+            f'cd "{m}"; builtin cd -n; git reset --hard',
+            f'cd "{m}"; builtin cd -x "{a}"; git reset --hard',
+            f'cd "{m}"; builtin cd -e "{a}"; git reset --hard',
+            f'cd "{m}"; builtin cd -@ "{a}"; git reset --hard',
+            # `-q` は bash だけ、語が 2 つの形は zsh だけ main に残る
+            f'cd "{m}"; builtin cd -q "{a}"; git reset --hard',
+            f'cd "{m}"; builtin cd "{a}" extra; git reset --hard',
+            # shell が展開する語
+            f'cd "{m}"; builtin cd "$PWD"; git reset --hard',
+            f'cd "{m}"; builtin cd $(pwd); git reset --hard',
+            f'cd "{m}"; builtin cd `pwd`; git reset --hard',
+            f'cd "{m}"; builtin cd {parent}/{name[:-1]}*; git reset --hard',
+            f'cd "{m}"; builtin cd {parent}/{name[:-1]}?; git reset --hard',
+            f'cd "{m}"; builtin cd {parent}/[{name[0]}]{name[1:]}; git reset --hard',
+            f'cd "{m}"; builtin cd {parent}/{{{name},x}}; git reset --hard',
+            f'cd "{m}"; builtin cd ~+; git reset --hard',
+            # 数字の語は redirect の fd と区別しないが、読んだ行き先は実際と同じ
+            f'cd "{m}"; builtin cd 2 >/dev/null; git reset --hard',
+            # これだけは実際には HOME へ移動する。redirect を行き先と読むので誤 deny (旧版も同じ deny)
+            f'cd "{m}"; builtin cd >/dev/null; git reset --hard',
+        ))
+        self.assertAllowed((
+            # `-e` はどちらのシェルでも失敗して移動しない
+            f'builtin cd -e "{m}"; git reset --hard',
+            # 行き先を読まないので見逃す側 (旧版も同じ)
+            f'builtin cd {parent}/{name[:-1]}*; git reset --hard',
+            f'builtin cd "{m}" extra; git reset --hard',
+        ))
+
+    def test_builtin_cd_home_is_read(self):
+        # 引数なしと `~` は HOME へ移動する (`HOME=` の書き換えは追わない。`cd` と同じ読み)
         m = self.main
+        self.assertAllowed((
+            f'cd "{m}"; builtin cd; git reset --hard',
+            f'cd "{m}"; builtin cd ~; git reset --hard',
+            f'cd "{m}"; builtin cd --; git reset --hard',
+        ))
+
+    def test_builtin_changes_git_environment(self):
+        m, a = self.main, self.a
         self.assertDenied((
             f'builtin export GIT_DIR="{m}/.git"; git reset --hard',
             f'GIT_DIR="{m}/.git"; builtin export GIT_DIR; git reset --hard',
+            # option 付きと値の決まらない形は読まない。`unset -f` は関数を消すので GIT_DIR は残り、main で走る
+            f'export GIT_DIR="{m}/.git"; builtin unset -f GIT_DIR; git reset --hard',
+            f'export GIT_DIR="{m}/.git"; builtin export -x GIT_DIR="{a}/.git"; git reset --hard',
+            f'KEEP="{m}/.git"; export GIT_DIR="{m}/.git"; builtin export GIT_DIR=$KEEP; git reset --hard',
         ))
         self.assertAllowed((
             f'export GIT_DIR="{m}/.git"; builtin unset GIT_DIR; git reset --hard',
+            f'export GIT_DIR="{m}/.git"; builtin export GIT_DIR="{a}/.git"; git reset --hard',
+            # `export -n` は export を外すので、読むと誤って止める
+            f'GIT_DIR="{m}/.git"; builtin export -n GIT_DIR; git reset --hard',
         ))
 
     def test_builtin_true_and_false_decide_the_next_command(self):

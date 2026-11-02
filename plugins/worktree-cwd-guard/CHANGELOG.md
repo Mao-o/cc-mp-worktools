@@ -8,26 +8,40 @@
 ### 修正: `builtin` を前に付けた組み込みを読む
 
 `builtin cd <dir>` は bash でも zsh でも今の shell の `cd` で移動が残るのに、`builtin` を一般のコマンドとして読んでいたので、
-後ろの git を元のディレクトリで動くものとして判定していた (0.4.0 まで)。`builtin` の後ろの `cd` / `pushd` / `export` / `unset` /
-`true` / `false` / `:` を、`builtin` の無い形と同じに読む。
+後ろの git を元のディレクトリで動くものとして判定していた (0.4.0 まで)。`builtin` の後ろの `cd` / `export` / `unset` /
+`true` / `false` / `:` を、`builtin` の無い形と同じに読む。`builtin cd` は、次の形だけを読む: 引数なし、または行き先の語が 1 つで
+shell が展開しないもの (`~` と `~/...` は読む)。option は `-L` / `-P` / `--` だけ。`builtin export` / `builtin unset` は、option と
+`$` を含む語が無いときだけ読む。
 
-次の形は、bash 3.2 と `zsh -f` で偽の git を走らせた実測に合わせて、移動として読まない (これまでの読みのまま):
+次の形は、bash 3.2 と `zsh -f` で偽の git を走らせた実測に合わせて読まない (これまでの読みのまま):
 
 - 外部プロセスで動く形: `env builtin cd` / `nohup builtin cd` / `sudo builtin cd` / `exec builtin cd` (macOS の外部コマンド
-  `builtin` が子プロセスで走るので移動は残らない)。`time -p builtin cd` / `time time builtin cd` も同じ。先頭の `time builtin cd`
-  は今の shell で動くので読む
-- shell によって読みが割れる形: `command builtin cd` / `builtin command cd` / `builtin -- cd` / `builtin - cd` / `builtin chdir`
+  `builtin` が子プロセスで走るので移動は残らない)。`time time builtin cd` も同じ。先頭の `time builtin cd` は今の shell で動くので読む
+- shell によって読みが割れる形: `command builtin cd` / `builtin command cd` / `builtin -- cd` / `builtin - cd` / `builtin chdir` /
+  `time -p builtin cd` (bash の `time -p` は今の shell で動き、zsh は `-p` をコマンドとして起動する) / `builtin cd -q` /
+  `builtin cd <a> <b>` (zsh は置換として読んで失敗する)
 - どちらの shell でも走らない形: `builtin git` / `builtin env git` など (組み込みが無い)
 - `builtin popd`: スタックが空だと失敗して移動しない形を、読むと止められなくなる
+- `builtin pushd`: 対の `builtin popd` を読まないので、読むと戻り先を取り違える。`builtin pushd <main>; git reset --hard` は見逃す
+- 移動しない形と行き先の分からない形: `builtin cd +1` / `-1` / `-` / `-x <dir>` / `-e <dir>`、`$` / `` ` `` / glob / `{` を含む語
+- 変数の扱いが違う形: `builtin unset -f GIT_DIR` (関数を消すだけ)、`builtin export -x` / `-n`、`builtin export GIT_DIR=$x`
 
 `cd <main>; builtin cd <worktree>; git reset --hard` のように `builtin` で自分の worktree へ戻る形は、実際には自分の worktree で
 走るので、誤って止めなくなる (実測で確認)。
+
+次の形は読みが実際と違うが、受け入れている:
+
+- `\time builtin cd` / `'time' builtin cd`: 外部の `time` で動くが、shlex が引用を外すので keyword の `time` と区別できず、今の shell で
+  動くものとして読む
+- bash 3.2 の `! time builtin cd` / `if time builtin cd`: 外部の `time` になるが、Bash tool の zsh に合わせて今の shell で動くものとして読む
+- `builtin cd <dir>/missing` や開けない redirect の付いた `builtin cd` など失敗する形、`builtin cd -` の行き先、`HOME=` を書き換えた
+  後の `builtin cd`: `builtin` の無い `cd` と同じ読み (`cd` は成功するものとして扱う)
 
 ### テストの追加
 
 - `tests/test_builtin_prefix.py`: 上の読みごとの判定
 
-テスト件数: 93 → 101 (追加 8・削除 0・統合 0)。
+テスト件数: 93 → 104 (追加 11・削除 0・統合 0)。
 
 ## 0.4.0
 
