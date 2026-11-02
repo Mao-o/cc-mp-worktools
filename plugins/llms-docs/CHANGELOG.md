@@ -7,21 +7,22 @@ All notable changes to this plugin will be documented here.
 ### 追加: Zed / Amp を読む (`llms-full.txt` が無く、ページごとに取得するサイト)
 
 - `zed` / `amp` の preset を足した (`body: fetch`)。`llms.txt` の項目がページで、本文は必要なページだけを 1 ページずつ取得する
-- `respect_robots` (`body: fetch` 専用): `robots.txt` が拒否する `llms.txt`・ページ・転送先を要求しない。Amp は未知のパスを拒否対象の `/auth/` へ転送するので、転送の前に止める。読み方は RFC 9309 の最長一致で、`urllib.robotparser` (先勝ち) は `Allow: /` で始まる両サイトで使えない
+- `respect_robots` (`body: fetch` 専用): `robots.txt` が拒否する `llms.txt`・ページ・転送先を要求しない。Amp は未知のパスを拒否対象の `/auth/` へ転送するので、転送の前に止める。読み方は RFC 9309 の最長一致で、`urllib.robotparser` (先勝ち) は `Allow: /` で始まる両サイトで使えない。先頭の BOM は読み飛ばし、`%7E` と `~` のようなエンコードの違いでは拒否が抜けない。自分宛てのグループは空でも `*` より優先する。読めないときも取得しないが、文面は拒否と分ける
 - `search_content_needs_page_ref` (`body: fetch` 専用): `--page-ref` の無い `search-content` を、ページを取得せずに終了コード 2 で止める。0 件のときの案内も全ページの走査を勧めない
 - `body: fetch` で `drop_lines` と `heading_line_pattern` を使えるようにした (Zed の定型の 1 行、Amp の `<h2 id="…">` の行)
 - `robots.txt` が拒否する Kiro と、全件の取得が前提の Cursor は対応しない。`sitemap.xml` はどのサイトにもタイトルが無く、索引に採用しない (実測は `docs/generic-llms-txt-source.md`)
 
 ### 追加: Gemini CLI / Kilo Code / OpenAI Agents SDK (TypeScript) / Continue の preset
 
-- `page_url: "h1-link"`: H1 全体が `[タイトル](<url>)` のとき、リンクの文字をタイトル、リンク先を URL にする (Gemini CLI、97 ページ)
+- `page_url: "h1-link"`: H1 全体が 1 つの `[タイトル](<url>)` のとき、リンクの文字をタイトル、リンク先を URL にする (Gemini CLI、97 ページ)
 - `url_prefix`: 相対のページ URL の前にそのままつなぐ (Kilo Code の `/docs`、212 ページ)。`split: line` で、タイトルが Markdoc などの式のままの見出しは、ページ冒頭の frontmatter の `title:` から読む
 - A2A は新しい区切り方と URL の規則が要り、この形は 1 サイトだけなので見送った
-- `researching-library-docs` の description は上限に近いので変えていない。新しいサイトは Step 0 の表と `sources` で選ぶ
+- `researching-library-docs` の description は上限に近いので変えていない。新しいサイトは Step 0 の表と `sources` で選び、SessionStart の案内に名前を足した (Gemini CLI / Kilo Code / OpenAI Agents SDK (TS) / Continue / Zed / Amp)
 
 ### 変更: `ai-sdk` の索引が H3 も読む
 
 - `### maxOutputTokens` のように API 名を H3 にだけ書くページが、その名前の `search` で上位 5 件に入らなかった。手元のキャッシュで、該当する 71 語のうち届くページが 44 語から 63 語に増え、消えたものは 0 語。`search-index --show-sections` の一覧にも H3 が出る
+- `search` の H3 の規則で、本文のヒットが 0 の候補を基準にしない。全キーワードが description に当たるだけのページの下に、本文のヒットがあるページを下げていた。`index_heading_level` が 3 の他の preset も順位が変わるが、ヒット 0 のページが下に移るだけ (実測は `docs/generic-llms-txt-source.md`)
 
 ### 修正: 200 で返った HTML を本文として読まない
 

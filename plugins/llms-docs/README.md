@@ -321,7 +321,7 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `frontmatter_key` | | `split: frontmatter` のとき、ページの frontmatter に必ずあるキー (既定 `title`)。これが無い `---` の組は区切りとみなさない (本文の水平線を誤認しないため) |
 | `frontmatter_delimiter` | | `split: frontmatter` のとき、frontmatter を囲む行 (既定 `---`。`-` か `+` を 3 個以上)。Vercel は `-` 80 個 |
 | `line_prefix` | `split: line` で必須 | 区切り行の接頭辞。接頭辞のあとに URL が 1 つだけ続く行を区切りにする |
-| `page_url` | | ページ URL の取り方。`none` (既定) / `h1-link` (`split: h1` 専用。H1 全体が `[タイトル](<url>)` のとき、リンクの文字をタイトル、リンク先を URL にする) / `frontmatter:<key>` / `line:<接頭辞>` (本文の先頭 10 行から探す) / `link:<リンク文字列>` (本文の先頭 20 行にある Markdown リンク `[<リンク文字列>](<url>)` の URL)。`split: line` では区切り行の URL を使う |
+| `page_url` | | ページ URL の取り方。`none` (既定) / `h1-link` (`split: h1` 専用。H1 全体が 1 つの `[タイトル](<url>)` のとき、リンクの文字をタイトル、リンク先を URL にする。リンクが 2 つある H1 やリンクの後ろに語がある H1 は読まない) / `frontmatter:<key>` / `line:<接頭辞>` (本文の先頭 10 行から探す) / `link:<リンク文字列>` (本文の先頭 20 行にある Markdown リンク `[<リンク文字列>](<url>)` の URL)。`split: line` では区切り行の URL を使う |
 | `url_base` | | ページ URL が相対 (`/guide.md`) のときに前に付ける基点 (URL として解決するので、基点のパスは `/…` で置き換わる) |
 | `url_prefix` | | ページ URL が相対のときに、そのまま前につなぐ文字列 (`https://kilo.ai/docs` + `/automate`)。`url_base` とは一緒に書けない |
 | `drop_lines` | | 本文から除く行の正規表現のリスト (行頭から照合したいときは `^` を付ける)。全ページに付く定型行 (「Skip to content」など) が検索に当たらないようにする。コードブロック内の行は除かない。ページ URL は除く前に読む |
@@ -354,7 +354,7 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `page_fetch_workers` | | `body: fetch` の `search` が同時に取得するページ数 (1〜32。既定 8) |
 | `page_fetch_timeout` | | `body: fetch` の `search` / `search-content` が 1 ページの取得を待つ秒数 (1〜600。既定 30。`sections` / `content` は 120) |
 | `search_content_warn_pages` | | `body: fetch` で `--page-ref` の無い `search-content` が、ページ数がこれを超えると stderr に WARNING を出す (既定 30) |
-| `respect_robots` | | `body: fetch` で `true` のとき、取得する前に対象のホストの `robots.txt` を読み (キャッシュは `--max-age` に従う)、拒否された `llms.txt`・ページと転送先を要求しない。読み方は RFC 9309 (最も長く一致した規則で決め、同じ長さなら `Allow`)。`robots.txt` が 4xx か HTML なら制限なし、それ以外で読めないときは取得しない。既定 `false` |
+| `respect_robots` | | `body: fetch` で `true` のとき、取得する前に対象のホストの `robots.txt` を読み (キャッシュは `--max-age` に従う)、拒否された `llms.txt`・ページと転送先を要求しない。読み方は RFC 9309 (最も長く一致した規則で決め、同じ長さなら `Allow`。`%7E` と `~` のようなエンコードの違いは同じものとして比べる。自分宛てのグループがあれば、規則が無くてもそちらで決める)。`robots.txt` が 4xx か HTML なら制限なし、それ以外で読めないときは取得せず、拒否とは別の文面 (`could not read …/robots.txt`) で知らせる。古いキャッシュがあれば、拒否のときも読めないときも WARNING を出してそれを返す。既定 `false` |
 | `search_content_needs_page_ref` | | `body: fetch` で `true` のとき、`--page-ref` の無い `search-content` を終了コード 2 で止める (ページを 1 つも取得しない)。既定 `false` |
 | `index_page_size` | | `fetch-index` が既定で出す項目数 (0 以上の整数。無いか 0 なら全件)。`fetch-index --offset N --limit M` で範囲を選べ (`--limit 0` は全件)、範囲が全件でないときは末尾に `(M of N documents shown, offset=K)` と、次の範囲を出す `  Next page: --offset … --limit …` (同じコマンドに足して使う) を出す。全件を出すときの出力は変わらない |
 | `cache_name` | | 同梱 presets 専用 (`sources.json` に書くとエラー)。キャッシュのファイル名を `<cache_name>-llms-full.txt` / `<cache_name>-llms.txt` にする |
@@ -489,8 +489,9 @@ description と、`researching-library-docs` の対応表・この README の pr
 `search` の候補 (`--top-n`) は、タイトル・description・tags・見出し (`index_heading_level` の段まで) の
 ランキングで選び、本文のヒットの良い順に並べる。`index_heading_level` が `3` の source では、H3 だけで候補に
 入ったページ (タイトル・description・tags・H1 / H2 のどれにも当たらないページ) を、タイトル・description・
-tags・H1 / H2 で全キーワードが当たった候補より上には置かない (その最後の候補の直後に移す。全文検索で補った
-`[body-only]` の行は動かさない)。CLI のページが設定の選択肢を H3 で並べ、本文のヒットも多いとき、その選択肢の
+tags・H1 / H2 で全キーワードが当たり、本文にもヒットがある候補より上には置かない (その最後の候補の直後に移す。
+全文検索で補った `[body-only]` の行は動かさない)。本文のヒットが 0 の候補はこの基準にしない (ヒットのあるページはもともと
+その上に並び、下げると 0 件のページが 1 位になるため)。CLI のページが設定の選択肢を H3 で並べ、本文のヒットも多いとき、その選択肢の
 ページ (タイトルがその語そのもの) を 2 位に下げないため。一部のキーワードだけが当たった候補の上には残る
 (H3 がクエリをそのまま名指すことがあるため)。Changelog / Release notes のページは、全キーワードが当たっても
 この基準にしない (末尾に置く並びを保つため。`--include-changelog-priority` を付けたときは基準にする)。

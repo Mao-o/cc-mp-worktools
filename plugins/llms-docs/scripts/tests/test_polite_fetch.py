@@ -20,7 +20,7 @@ from pathlib import Path
 from unittest import mock
 
 import _loader
-from test_page_fetch import _Net, _Resp  # noqa: F401  (the mocked network of the page tests)
+from test_page_fetch import _Net, _Resp  # (the mocked network of the page tests)
 
 import _common
 
@@ -147,6 +147,54 @@ class ParseRobotsTest(unittest.TestCase):
         self.assertFalse(self.allows("# c\nUser-Agent: * # c\nDISALLOW: /x # c\njunk line\n", "/x"))
         self.assertTrue(self.allows("", "/x"))
 
+    def test_a_byte_order_mark_does_not_hide_the_first_group(self):
+        for text in ("User-agent: *\nDisallow: /auth/\n",
+                     "User-agent: GPTBot\nDisallow: /a\nUser-agent: *\nDisallow: /auth/\n"):
+            with self.subTest(text=text):
+                self.assertEqual(_common.parse_robots("\ufeff" + text, self.AGENT),
+                                 _common.parse_robots(text, self.AGENT))
+                self.assertFalse(self.allows("\ufeff" + text, "/auth/sign-in"))
+
+    def test_a_named_group_decides_even_with_no_rule(self):
+        me = "User-agent: Claude-Code-LLMS-Docs-Generic"
+        for text in (f"User-agent: *\nDisallow: /\n\n{me}\nDisallow:\n",
+                     f"{me}\nDisallow:\n\nUser-agent: *\nDisallow: /\n",
+                     f"User-agent: *\nDisallow: /\n\n{me}\n"):
+            with self.subTest(text=text):
+                self.assertTrue(self.allows(text, "/x"))
+        # another name's empty group leaves the "*" rules in force
+        self.assertFalse(self.allows("User-agent: GPTBot\nDisallow:\n\nUser-agent: *\nDisallow: /\n", "/x"))
+        # no rule between the two names: one group, and its rules are mine
+        self.assertFalse(self.allows(f"{me}\n\nUser-agent: *\nDisallow: /x\n", "/x"))
+
+    def test_encoding_does_not_decide(self):
+        # (pattern, path, the pattern matches)
+        cases = [
+            ("/%7Euser", "/~user", True), ("/~user", "/%7Euser", True), ("/%7euser", "/%7Euser", True),
+            ("/a%20b", "/a b", True), ("/a b", "/a%20b", True),
+            ("/foo/%62%61%7A", "/foo/baz", True), ("/foo/baz", "/foo/%62%61%7A", True),
+            ("/?u=https://x", "/?u=https%3A%2F%2Fx", True), ("/?u=https%3A%2F%2Fx", "/?u=https://x", True),
+            ("/ツ", "/%E3%83%84", True), ("/%E3%83%84", "/ツ", True), ("/%e3%83%84", "/ツ", True),
+            # one level of escape only: %25 is a percent sign, not the start of another escape
+            ("/%2541", "/A", False), ("/%2541", "/%2541", True), ("/%41", "/%2541", False), ("/%25", "/%25", True),
+            # a lone percent sign is a literal one
+            ("/100%", "/100%25", True), ("/100%25", "/100%", True), ("/%zz", "/%25zz", True),
+            # an escaped * or $ is the character, not the wildcard or the end
+            ("/a%2Ab", "/axb", False), ("/a%2Ab", "/a*b", True), ("/a*b", "/a%2Ab", True), ("/a*b", "/axb", True),
+            ("/a%24", "/a", False), ("/a%24", "/a$", True), ("/a$", "/a$", False), ("/a$", "/a", True),
+            ("/a$b", "/a$b", True), ("/a$b", "/a", False),
+            # the wildcard between encoded pieces still works
+            ("/%7Eu*%20x$", "/~u/any x", True), ("/%7Eu*%20x$", "/~u/any xy", False),
+        ]
+        for pattern, path, matches in cases:
+            with self.subTest(pattern=pattern, path=path):
+                self.assertEqual(self.allows(f"User-agent: *\nDisallow: {pattern}\n", path), not matches)
+
+    def test_the_longest_match_is_counted_on_one_spelling(self):
+        # the same path written twice ties, and a tie goes to Allow, whichever is the longer text
+        self.assertTrue(self.allows("User-agent: *\nDisallow: /%7Euser\nAllow: /~user\n", "/~user"))
+        self.assertTrue(self.allows("User-agent: *\nDisallow: /~user\nAllow: /%7Euser\n", "/~user"))
+
     def test_many_stars_stay_fast(self):
         rules = _common.parse_robots("User-agent: *\nDisallow: /" + "*a" * 2000 + "b\n", self.AGENT)
         self.assertTrue(_common.robots_allows(rules, "/" + "a" * 4000))
@@ -269,20 +317,81 @@ class RespectRobotsTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn(HIDDEN, self.net.calls)
 
-    def test_an_unreachable_robots_file_stops_the_fetch(self):
+    def test_an_unreachable_robots_file_stops_the_fetch_and_says_so(self):
         del self.net.served[ROBOTS]
         code, _out, err = self.run_g("search-index", "widgets")
         self.assertEqual(code, 1)
         self.assertNotIn(INDEX, self.net.calls)
-        self.assertIn("robots.txt disallows", err)
+        self.assertIn(f"could not read {ROBOTS}", err)
+        self.assertIn("mock network", err)  # why it could not be read
+        self.assertNotIn("disallows", err)  # the site forbade nothing
 
-    def test_a_server_error_on_robots_stops_the_fetch(self):
+    def test_a_server_error_on_robots_stops_the_fetch_and_says_so(self):
         import urllib.error
         del self.net.served[ROBOTS]
         self.net.raises[ROBOTS] = urllib.error.HTTPError(ROBOTS, 503, "Unavailable", {}, None)
-        code, _out, _err = self.run_g("search-index", "widgets")
+        code, _out, err = self.run_g("search-index", "widgets")
         self.assertEqual(code, 1)
         self.assertNotIn(INDEX, self.net.calls)
+        self.assertIn(f"could not read {ROBOTS}", err)
+        self.assertIn("503", err)
+        self.assertNotIn("disallows", err)
+
+    def test_a_byte_order_mark_on_the_served_file_keeps_the_refusal(self):
+        self.net.served[ROBOTS] = "\ufeffUser-agent: *\nDisallow: /secret/\n"
+        code, _out, err = self.run_g("content", "1")
+        self.assertEqual(code, 1, err)
+        self.assertNotIn(HIDDEN, self.net.calls)
+
+    def test_an_encoded_rule_stops_the_page(self):
+        self.net.served[ROBOTS] = "User-agent: *\nDisallow: /%73ecret/\n"
+        code, _out, err = self.run_g("content", "1")
+        self.assertEqual(code, 1, err)
+        self.assertNotIn(HIDDEN, self.net.calls)
+        self.assertIn("robots.txt disallows", err)
+
+    def _page_cache(self, url):
+        return g._page_cache_path(self.tmp, g._validate_profile(self.sources, "polite", self.profile), url)
+
+    def _age(self, path):
+        os.utime(path, (1, 1))
+
+    def test_a_refused_page_with_a_stale_copy_answers_with_the_copy_and_no_request(self):
+        self.net.served[ROBOTS] = "User-agent: *\nAllow: /\n"
+        code, out, err = self.run_g("content", "1")
+        self.assertEqual(code, 0, err)
+        self.assertIn("widgets", out)
+        self.net.served[ROBOTS] = "User-agent: *\nDisallow: /secret/\n"
+        self.net.served[HIDDEN] = "# Hidden\n\nnew body\n"
+        for url in (ROBOTS, HIDDEN):
+            self._age(self._page_cache(url))
+        self.net.calls.clear()
+        code, out, err = self.run_g("content", "1", "--max-age", "60")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(HIDDEN, self.net.calls)
+        self.assertIn(ROBOTS, self.net.calls)
+        self.assertIn("WARNING", err)
+        self.assertIn("using cached copy", err)
+        self.assertIn("robots.txt disallows", err)
+        self.assertIn("widgets", out)
+        self.assertNotIn("new body", out)
+
+    def test_a_refused_page_does_not_answer_with_a_cache_of_another_url(self):
+        self.net.served[ROBOTS] = "User-agent: *\nAllow: /\n"
+        code, _out, err = self.run_g("content", "1")
+        self.assertEqual(code, 0, err)
+        path = self._page_cache(HIDDEN)
+        Path(path).write_text("# Another\n\nanother corpus\n", encoding="utf-8")
+        Path(path + ".meta.json").write_text(json.dumps({"url": ORIGIN + "/elsewhere"}), encoding="utf-8")
+        self.net.served[ROBOTS] = "User-agent: *\nDisallow: /secret/\n"
+        self._age(self._page_cache(ROBOTS))
+        self.net.calls.clear()
+        code, out, err = self.run_g("content", "1", "--max-age", "60")
+        self.assertEqual(code, 1, out)
+        self.assertNotIn(HIDDEN, self.net.calls)
+        self.assertNotIn("another corpus", out)
+        self.assertNotIn("using cached copy", err)
+        self.assertIn("robots.txt disallows", err)
 
     def test_without_the_key_robots_is_never_read(self):
         profile = {k: v for k, v in PROFILE.items() if k != "respect_robots"}
@@ -291,6 +400,41 @@ class RespectRobotsTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertNotIn(ROBOTS, self.net.calls)
         self.assertIn(HIDDEN, self.net.calls)
+
+
+class RobotsOnceWithWorkersTest(unittest.TestCase):
+    """``search``'s workers meet the file together only when the pages live on
+    another host than the index (the index read the index host's file first)."""
+
+    OTHER = "https://pages.example.com"
+
+    def test_eight_workers_read_robots_once(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        sources = os.path.join(tmp, "sources.json")
+        Path(sources).write_text(json.dumps({"sources": {"polite": {**PROFILE, "page_fetch_workers": 8}}}), encoding="utf-8")
+        pages = [f"{self.OTHER}/p{i}" for i in range(8)]
+        robots = self.OTHER + "/robots.txt"
+        # Holds the first reader until a second one arrives. Under the lock no
+        # second one can, so this waits out the timeout and the count is 1; with
+        # no lock the other workers are at the same line, and the count is more.
+        meet = threading.Barrier(2)
+
+        def on_fetch(url):
+            if url == robots:
+                with contextlib.suppress(threading.BrokenBarrierError):
+                    meet.wait(timeout=0.5)
+
+        served = {INDEX: "".join(f"- [Page {i}]({u}): widgets\n" for i, u in enumerate(pages)),
+                  ROBOTS: "User-agent: *\nAllow: /\n", robots: "User-agent: *\nAllow: /\n",
+                  **{u: "# Page\n\nwidgets\n" for u in pages}}
+        net = _Net(served, on_fetch=on_fetch)
+        with mock.patch("urllib.request.urlopen", side_effect=net):
+            code, _out, err = _loader.run_cli(g, [SCRIPT, "search", "widgets", "--top-n", "8", "--source", "polite",
+                                                  "--sources-file", sources, "--cache-dir", tmp])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sum(u in net.calls for u in pages), 8)
+        self.assertEqual(net.calls.count(robots), 1)
 
 
 class _Server(http.server.BaseHTTPRequestHandler):
@@ -305,11 +449,14 @@ class _Server(http.server.BaseHTTPRequestHandler):
             self._send(200, AMP_ROBOTS)
         elif self.path == "/llms.txt":
             base = f"http://{self.headers['Host']}"
-            self._send(200, f"- [Good]({base}/docs/good): a\n- [Gone]({base}/docs/gone): b\n- [Moved]({base}/docs/moved): c\n")
+            self._send(200, f"- [Good]({base}/docs/good): a\n- [Gone]({base}/docs/gone): b\n- [Moved]({base}/docs/moved): c\n"
+                            f"- [Away]({base}/docs/away): d\n")
         elif self.path == "/docs/good":
             self._send(200, "# Good\n\nbody\n")
         elif self.path == "/docs/moved":
             self._redirect("/docs/good")
+        elif self.path == "/docs/away":
+            self._redirect(type(self).elsewhere)
         elif self.path == "/docs/gone":
             self._redirect("/hop")
         elif self.path == "/hop":
@@ -328,6 +475,21 @@ class _Server(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+
+class _BrokenRobots(http.server.BaseHTTPRequestHandler):
+    """Another host, whose robots.txt answers 503."""
+
+    seen: list = []
+
+    def do_GET(self):
+        type(self).seen.append(self.path)
+        self.send_response(503)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def log_message(self, *args):
         pass
@@ -360,6 +522,19 @@ class RedirectTest(unittest.TestCase):
         self.assertIn("refused", err)
         self.assertIn("/hop", _Server.seen)  # the first hop is allowed
         self.assertNotIn("/auth/sign-in", _Server.seen)
+
+    def test_a_redirect_to_a_host_whose_robots_cannot_be_read_says_so(self):
+        broken = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _BrokenRobots)
+        threading.Thread(target=broken.serve_forever, daemon=True).start()
+        self.addCleanup(broken.server_close)
+        self.addCleanup(broken.shutdown)
+        _BrokenRobots.seen = []
+        _Server.elsewhere = f"http://127.0.0.1:{broken.server_address[1]}/page"
+        code, _out, err = self.run_g({}, "content", "3")
+        self.assertEqual(code, 1, err)
+        self.assertEqual(_BrokenRobots.seen, ["/robots.txt"])
+        self.assertIn("refused: could not read", err)
+        self.assertNotIn("disallows", err)
 
     def test_an_allowed_redirect_is_followed(self):
         code, out, err = self.run_g({}, "content", "2")

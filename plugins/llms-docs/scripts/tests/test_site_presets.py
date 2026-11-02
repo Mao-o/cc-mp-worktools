@@ -143,6 +143,36 @@ class GeminiShapeTest(unittest.TestCase):
             g._validate_profile("f", "x", {"url": "https://a.example/llms.txt", "split": "line",
                                            "line_prefix": "Source: ", "page_url": "h1-link"})
 
+    def test_only_an_h1_that_is_one_whole_link_is_read(self):
+        cases = {
+            "[A](http://x)": ("A", "http://x"),
+            "[A](/docs/a.md)": ("A", "/docs/a.md"),
+            "[A [b]](http://x)": ("A [b]", "http://x"),
+            "[A [b] [c [d]]](http://x)": ("A [b] [c [d]]", "http://x"),
+            "[A (b)](http://x/a_(c))": ("A (b)", "http://x/a_(c)"),
+            r"[A \] b](http://x)": (r"A \] b", "http://x"),
+            "[ A ](http://x)": ("A", "http://x"),
+            # not one link
+            "[A](http://x) and [B](http://y)": ("[A](http://x) and [B](http://y)", ""),
+            "[A](http://x)[B](http://y)": ("[A](http://x)[B](http://y)", ""),
+            "[A](http://x) tail": ("[A](http://x) tail", ""),
+            "lead [A](http://x)": ("lead [A](http://x)", ""),
+            "[A] b](http://x)": ("[A] b](http://x)", ""),
+            "[A] /b(c)": ("[A] /b(c)", ""),
+            "[A [b](http://x)": ("[A [b](http://x)", ""),
+            "[A](http://x": ("[A](http://x", ""),
+            "[A](http://x y)": ("[A](http://x y)", ""),
+            "[A](#anchor)": ("[A](#anchor)", ""),
+            "[A]()": ("[A]()", ""),
+            "[](http://x)": ("[](http://x)", ""),
+            "[A]": ("[A]", ""),
+            "[": ("[", ""),
+            "Plain": ("Plain", ""),
+        }
+        for title, want in cases.items():
+            with self.subTest(title=title):
+                self.assertEqual(g._h1_link(title), want)
+
     def test_without_the_rule_a_link_h1_is_the_title_as_written(self):
         p = g._validate_profile("f", "x", {"url": "https://a.example/llms.txt", "split": "h1"})
         docs = g.split_documents(_lines("# [A](http://a.example/a.md)\n\nx\n"), p)
@@ -406,6 +436,11 @@ class PerPagePresetsTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertNotIn("lastModified", out)
         self.assertNotIn("~icons/lucide/mic", out)
+        # the fixture's only "---" lines are the frontmatter's, so one in the output is left of it
+        raw = AMP_PAGES["https://ampcode.com/docs/markdown/prompting"][2].splitlines()
+        self.assertEqual(raw.count("---"), 2)
+        self.assertLess(raw.index("lastModified: 2026-11-02"), raw.index("# Prompting"))
+        self.assertEqual(out.splitlines().count("---"), 1, "the one under the page's header")
         # the same lines inside a code block are the page's own text
         self.assertIn("import X from 'y'", out)
 
@@ -430,6 +465,45 @@ class PerPagePresetsTest(unittest.TestCase):
         self.assertIn("agent installer", out)
         code, _out, _err = self.run_g(net, "zed", "content", "Overview")
         self.assertEqual(code, 1)
+
+
+class SessionStartNoticeTest(unittest.TestCase):
+    """A bundled source the skill description does not list is reached through
+    this notice, so a preset is named here or is left out on purpose."""
+
+    # preset -> the words the notice uses for it (cloudflare-*: "Cloudflare 製品")
+    NAMED = {
+        "claude-code": "Claude Code", "ai-sdk": "AI SDK", "firebase": "Firebase",
+        "nextjs": "Next.js", "vite": "Vite", "vitest": "Vitest", "drizzle": "Drizzle", "zod": "Zod", "hono": "Hono",
+        "bun": "Bun", "vercel": "Vercel", "render": "Render", "mcp": "MCP", "codex": "Codex", "ollama": "Ollama",
+        "agentskills": "Agent Skills", "agent-plugins": "Agent Plugins", "openai-plugins": "OpenAI Plugins",
+        "openai-api-docs": "OpenAI Plugins/API", "acp": "ACP", "cline": "Cline", "factory": "Factory",
+        "devin": "Devin", "gemini-cli": "Gemini CLI", "kilo-code": "Kilo Code",
+        "openai-agents-js": "OpenAI Agents SDK (TS)", "continue": "Continue", "zed": "Zed", "amp": "Amp",
+    }
+    # left out on purpose: the Claude docs skill the notice names reads them too
+    LEFT_OUT = {"claude-platform", "claude"}
+
+    def notice(self) -> str:
+        hooks = json.loads((Path(g.PRESETS_FILE).parent.parent / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+        return hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+
+    def test_every_preset_is_named_or_left_out_on_purpose(self):
+        notice = self.notice()
+        names = json.loads(Path(g.PRESETS_FILE).read_text(encoding="utf-8"))["sources"]
+        for name in names:
+            with self.subTest(name):
+                if name.startswith("cloudflare-"):
+                    self.assertIn("Cloudflare 製品", notice)
+                elif name in self.LEFT_OUT:
+                    self.assertIn("researching-claude-docs", notice)
+                else:
+                    self.assertIn(name, self.NAMED, "a new preset: add it to the notice and to NAMED, or to LEFT_OUT")
+                    self.assertIn(self.NAMED[name], notice)
+
+    def test_the_lists_hold_no_preset_that_is_gone(self):
+        names = set(json.loads(Path(g.PRESETS_FILE).read_text(encoding="utf-8"))["sources"])
+        self.assertEqual((set(self.NAMED) | self.LEFT_OUT) - names, set())
 
 
 class FetchKeysValidationTest(unittest.TestCase):

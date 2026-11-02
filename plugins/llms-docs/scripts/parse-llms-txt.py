@@ -64,6 +64,8 @@ from _common import (  # noqa: E402
     MAX_SNIPPET_HITS,
     NotTextError,
     _handle_fetch_failure,
+    _load_fetch_meta,
+    _meta_names_other_url,
     _norm,
     add_cache_dir_arg,
     add_heading_path_arg,
@@ -978,15 +980,36 @@ def split_h1(lines: list[str], profile: dict) -> list[dict]:
     return docs
 
 
-_H1_LINK_RE = re.compile(r"^\[(.+)\]\((\S+)\)$")
+def _closing(text: str, start: int, opener: str, closer: str) -> int:
+    """Index of the *closer* that balances the *opener* at *text[start]*, or
+    -1. A backslash escapes the next character."""
+    depth = 0
+    i = start
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == opener:
+            depth += 1
+        elif text[i] == closer:
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
 
 
 def _h1_link(title: str) -> tuple[str, str]:
     """``page_url: "h1-link"``: ``[Title](<url>)`` as a whole H1 is the page's
-    title and URL (Gemini CLI). Anything else is the title as written, no URL."""
-    m = _H1_LINK_RE.match(title)
-    if m and _URLISH_RE.match(m.group(2)):
-        return m.group(1).strip(), m.group(2)
+    title and URL (Gemini CLI), the title may hold brackets of its own. Anything
+    else is the title as written, no URL: two links in one H1, or a link with
+    words after it, name no one page."""
+    if title.startswith("["):
+        close = _closing(title, 0, "[", "]")
+        if close > 0 and title[close + 1:close + 2] == "(" and _closing(title, close + 1, "(", ")") == len(title) - 1:
+            url = title[close + 2:-1]
+            if _URLISH_RE.match(url) and title[1:close].strip():
+                return title[1:close].strip(), url
     return title, ""
 
 
@@ -2062,13 +2085,13 @@ def _fetch_zero_tip(profile: dict) -> str:
 _ROBOTS_LOCK = threading.Lock()
 
 
-def _robots_rules(args, profile: dict, origin: str) -> list | None:
+def _robots_rules(args, profile: dict, origin: str) -> list | str:
     """The rules of *origin*'s ``robots.txt`` for this loader, read once per
-    run (and kept in the page cache for ``--max-age``); ``None`` when it could
-    not be read. RFC 9309: a 4xx means no restrictions, an unreachable file
-    means nothing may be fetched. An HTML answer is a site's page for a missing
-    file, so it counts as the 404 it stands for. The lock keeps ``search``'s
-    workers from fetching it twice."""
+    run (and kept in the page cache for ``--max-age``); the reason as a string
+    when it could not be read. RFC 9309: a 4xx means no restrictions, an
+    unreachable file means nothing may be fetched. An HTML answer is a site's
+    page for a missing file, so it counts as the 404 it stands for. The lock
+    keeps ``search``'s workers from fetching it twice."""
     with _ROBOTS_LOCK:
         known = args.__dict__.setdefault("robots_rules", {})
         if origin not in known:
@@ -2080,17 +2103,23 @@ def _robots_rules(args, profile: dict, origin: str) -> list | None:
             except FetchError as e:
                 missing = (isinstance(e.cause, urllib.error.HTTPError) and 400 <= e.cause.code < 500
                            or isinstance(e.cause, NotTextError))
-                known[origin] = [] if missing else None
+                known[origin] = [] if missing else str(e.cause)
         return known[origin]
 
 
-def _robots_permit(args, profile: dict, url: str) -> bool:
-    """True when the ``robots.txt`` of *url*'s host lets this loader fetch it."""
+def _robots_refusal(args, profile: dict, url: str) -> str | None:
+    """Why *url* must not be fetched, or ``None`` when the ``robots.txt`` of its
+    host lets this loader fetch it. A site that forbids the URL and a file that
+    could not be read stop the fetch alike, and read differently: the second
+    says nothing about what the site allows, and may pass on a later run."""
     parts = urlsplit(url)
-    rules = _robots_rules(args, profile, f"{parts.scheme}://{parts.netloc}")
-    if rules is None:
-        return False
-    return robots_allows(rules, (parts.path or "/") + (f"?{parts.query}" if parts.query else ""))
+    origin = f"{parts.scheme}://{parts.netloc}"
+    rules = _robots_rules(args, profile, origin)
+    if isinstance(rules, str):
+        return f"could not read {origin}/robots.txt ({rules}), so nothing is fetched from that host for now"
+    if robots_allows(rules, (parts.path or "/") + (f"?{parts.query}" if parts.query else "")):
+        return None
+    return f"robots.txt disallows {url}"
 
 
 def _polite_fetch(args, profile: dict, url: str, cache_path: str, *, timeout: int,
@@ -2098,13 +2127,18 @@ def _polite_fetch(args, profile: dict, url: str, cache_path: str, *, timeout: in
     """``fetch_url``, and with ``respect_robots`` nothing ``robots.txt``
     disallows is requested, a redirect's target included (Amp sends an unknown
     path to /auth/, which its robots.txt disallows). A file the cache serves
-    costs no request, so ``robots.txt`` is not read for it."""
+    costs no request, so ``robots.txt`` is not read for it. A refusal is a
+    failed fetch: it may answer with the stale copy of this URL, never with a
+    cache whose sidecar names another URL (``fetch_url``)."""
     check = None
     if profile.get("respect_robots"):
         def check(target):
-            return _robots_permit(args, profile, target)
-        if cached_if_fresh(cache_path, args.max_age, url) is None and not check(url):
-            return _handle_fetch_failure(url, cache_path, OSError(f"robots.txt disallows {url}"), raise_on_error)
+            return _robots_refusal(args, profile, target)
+        if cached_if_fresh(cache_path, args.max_age, url) is None:
+            refusal = check(url)
+            if refusal:
+                return _handle_fetch_failure(url, cache_path, OSError(refusal), raise_on_error,
+                                             cache_usable=not _meta_names_other_url(_load_fetch_meta(cache_path), url))
     return fetch_url(url, cache_path, user_agent=USER_AGENT, timeout=timeout, max_age=args.max_age,
                      raise_on_error=raise_on_error, redirect_check=check)
 
@@ -2885,9 +2919,13 @@ def _demote_h3_only(results: list[dict], h3_only: set, full_match: set, *,
 
     A Changelog / Release notes page (``is_low_priority``) is not an anchor
     unless *include_changelog_priority*: search_rank_key puts it last, and
-    moving an ordinary page below it would undo that order."""
+    moving an ordinary page below it would undo that order. Nor is a page with
+    no body hits: search_rank_key puts it below every page with hits, and the
+    H3 page with hits (``citations``: Generating Text, against MCP pages whose
+    description says the word) is the answer there."""
     def matched(r):
         return (not r["body_only"] and r["doc_idx"] in full_match and r["doc_idx"] not in h3_only
+                and r["body_hits"]["total_matches"] > 0
                 and (include_changelog_priority or not is_low_priority(r.get("title", ""))))
     last = max((i for i, r in enumerate(results) if matched(r)), default=-1)
     moved = [i for i in range(last) if not results[i]["body_only"] and results[i]["doc_idx"] in h3_only]

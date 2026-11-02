@@ -504,8 +504,8 @@ class H3OnlyCandidateStaysBelowTest(_Cli):
                          [("0", "testTimeout", "11"), ("1", "Command Line Interface", "1")])
 
 
-def _row(idx, *, body_only=False, title=""):
-    return {"doc_idx": idx, "body_only": body_only, "title": title}
+def _row(idx, *, body_only=False, title="", hits=1):
+    return {"doc_idx": idx, "body_only": body_only, "title": title, "body_hits": {"total_matches": hits}}
 
 
 class DemoteH3OnlyTest(unittest.TestCase):
@@ -537,6 +537,11 @@ class DemoteH3OnlyTest(unittest.TestCase):
             "H P M -> P M H": ([_row(1), _row(5), _row(3)], [5, 3, 1]),
             "H M P -> M H P (just below the last M, above P)": ([_row(1), _row(3), _row(5)], [3, 1, 5]),
             "P H P2: nothing moves": ([_row(5), _row(1), _row(6)], [5, 1, 6]),
+            # a full match with no body hits is not an anchor: H (with hits) stays above it
+            "H M0: nothing moves": ([_row(1, hits=10), _row(3, hits=0)], [1, 3]),
+            "H M0 M0: nothing moves": ([_row(1, hits=10), _row(3, hits=0), _row(4, hits=0)], [1, 3, 4]),
+            "H M M0 -> M H M0 (below the last M with hits)": (
+                [_row(1, hits=10), _row(3, hits=2), _row(4, hits=0)], [3, 1, 4]),
         }
         for label, (rows, want) in cases.items():
             with self.subTest(label):
@@ -555,6 +560,24 @@ class DemoteH3OnlyTest(unittest.TestCase):
         # an ordinary full match after the changelog one is still the anchor
         rows = [_row(1, title="CLI"), _row(4, title="Upgrade"), _row(3, title="Changelog")]
         self.assertEqual([r["doc_idx"] for r in generic._demote_h3_only(rows, {1}, {3, 4})], [4, 1, 3])
+
+    def test_citations_on_a_full_search(self):
+        """The shape that broke it: two pages whose description says the word
+        and whose bodies do not, and a page that names it in an H3 and in its
+        body. The sort puts the hits first; the demotion must leave that."""
+        corpus = (
+            "---\ntitle: MCP Elicitation\ndescription: citations in forms\nurl: https://x.example/a\n---\n\nNothing here.\n\n"
+            "---\ntitle: MCP\ndescription: citations of servers\nurl: https://x.example/b\n---\n\nNothing here.\n\n"
+            "---\ntitle: Generating Text\ndescription: text\nurl: https://x.example/c\n---\n\n"
+            "## Sources\n\n### citations\n\nThe citations of a call. More citations here.\n"
+        )
+        path = Path(tempfile.mkdtemp(), "ai.txt")
+        self.addCleanup(shutil.rmtree, path.parent, ignore_errors=True)
+        path.write_text(corpus, encoding="utf-8")
+        code, out, err = _loader.run_cli(generic, [SCRIPT, "search", "citations", "--source", "ai-sdk", "--file", str(path)])
+        self.assertEqual(code, 0, err)
+        titles = re.findall(r"(?m)^\[\d+\] (.+?) (?:\(index_score: \d+\)|\[body-only\])$", out)
+        self.assertEqual(titles[0], "Generating Text", out)
 
     def test_ranked_marks_h3_only_and_full_match_pages(self):
         p = generic._validate_profile("sources.json", "x", {"url": URL, "split": "h1"})

@@ -798,8 +798,9 @@ class _NoValidatorRedirectHandler(urllib.request.HTTPRedirectHandler):
         check = getattr(req, "redirect_check", None)
         # ``fetch_url(..., redirect_check=)``: refused before the target is
         # requested. A URLError is handled as any failed fetch.
-        if check is not None and not check(newurl):
-            raise urllib.error.URLError(f"redirect to {newurl} refused: robots.txt disallows it")
+        refusal = check(newurl) if check is not None else None
+        if refusal:
+            raise urllib.error.URLError(f"redirect to {newurl} refused: {refusal}")
         new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new_req is not None:
             new_req.redirect_check = check  # the next hop is checked too
@@ -877,8 +878,8 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
     Markdown or text, and a 200 with HTML is the site's page for a missing one.
 
     *redirect_check* (a function of the target URL) is asked before each
-    redirect is followed; when it returns false the fetch fails without
-    requesting the target.
+    redirect is followed; when it returns a reason (a string) the fetch fails
+    with that reason without requesting the target. ``None`` lets it through.
 
     When *max_age* is given (seconds), re-fetches if the existing cache is
     older than that. ``max_age=None`` (default) keeps the original behaviour
@@ -1105,19 +1106,54 @@ def fetch_url(url: str, cache_path: str, *, user_agent: str,
 # robots.txt (RFC 9309)
 # ---------------------------------------------------------------------------
 
+_ROBOTS_ESCAPE_RE = re.compile(r"%[0-9A-Fa-f]{2}|[^\x00-\x7f]+|[%*$]")
+
+
+def _robots_canonical(text: str) -> str:
+    """*text* (a path, or a piece of a pattern between its ``*``) in the one
+    spelling two encodings of it share, so that ``/%7Euser`` and ``/~user``,
+    ``/a%20b`` and ``/a b``, or ``%2f`` and ``/`` compare equal (RFC 9309 2.2.2).
+    An escape of an ASCII character is decoded, except ``%``, ``*`` and ``$``,
+    which stay escaped so that they are never read as an escape's start or
+    as a pattern's wildcard and end; the same characters written literally
+    get the same escape. A non-ASCII character becomes its UTF-8 escapes.
+    Hex digits are upper case. One pass, so ``%2541`` stays ``%2541``."""
+    def spell(m):
+        found = m.group(0)
+        if found in ("%", "*", "$"):
+            return f"%{ord(found):02X}"
+        if found[0] != "%":
+            return "".join(f"%{b:02X}" for b in found.encode("utf-8", "surrogatepass"))
+        code = int(found[1:], 16)
+        return f"%{code:02X}" if code >= 0x80 or chr(code) in "%*$" else chr(code)
+    return _ROBOTS_ESCAPE_RE.sub(spell, text)
+
+
+def _robots_canonical_pattern(pattern: str) -> str:
+    """``_robots_canonical`` of a pattern: its ``*`` and a final ``$`` stay."""
+    anchored = pattern.endswith("$")
+    pieces = (pattern[:-1] if anchored else pattern).split("*")
+    return "*".join(_robots_canonical(p) for p in pieces) + ("$" if anchored else "")
+
+
 def parse_robots(text: str, agent: str) -> list[tuple[bool, str]]:
     """``(allow, pattern)`` rules of *text* that apply to *agent*: the groups
     naming its product token (case-insensitive, the token before ``/``), else
-    the ``*`` groups. A ``Disallow:`` with an empty path allows everything and
-    is no rule. Not ``urllib.robotparser``: it takes the first rule that
-    matches, so ``Allow: /`` on the first line (ampcode.com, zed.dev) would
-    allow every ``Disallow:`` below it; RFC 9309 takes the longest match."""
+    the ``*`` groups. A group naming the token decides even with no rule in it
+    (``Disallow:`` alone means nothing is disallowed). A ``Disallow:`` with an
+    empty path allows everything and is no rule. A byte order mark before the
+    first line is not part of it. The patterns come back in
+    ``_robots_canonical`` spelling. Not ``urllib.robotparser``: it takes the
+    first rule that matches, so ``Allow: /`` on the first line (ampcode.com,
+    zed.dev) would allow every ``Disallow:`` below it; RFC 9309 takes the
+    longest match."""
     token = agent.split("/", 1)[0].strip().lower()
     named: list = []
     star: list = []
     agents: list = []
     in_rules = False
-    for raw in text.splitlines():
+    saw_named = False
+    for raw in text.removeprefix("\ufeff").splitlines():
         line = raw.split("#", 1)[0].strip()
         key, sep, value = line.partition(":")
         key, value = key.strip().lower(), value.strip()
@@ -1127,16 +1163,17 @@ def parse_robots(text: str, agent: str) -> list[tuple[bool, str]]:
             if in_rules:
                 agents, in_rules = [], False
             agents.append(value.lower())
+            saw_named = saw_named or value.lower() == token
         elif key in ("allow", "disallow"):
             in_rules = True
             if not value:
                 continue
-            rule = (key == "allow", value)
+            rule = (key == "allow", _robots_canonical_pattern(value))
             if token in agents:
                 named.append(rule)
             if "*" in agents:
                 star.append(rule)
-    return named or star
+    return named if saw_named else star
 
 
 def _robots_pattern_matches(pattern: str, path: str) -> bool:
@@ -1164,7 +1201,9 @@ def _robots_pattern_matches(pattern: str, path: str) -> bool:
 def robots_allows(rules: list[tuple[bool, str]], path: str) -> bool:
     """True when *rules* (``parse_robots``) let *path* (path and query) be
     fetched: the longest matching pattern decides, ``Allow`` wins a tie, and no
-    matching rule allows."""
+    matching rule allows. *path* is compared in ``_robots_canonical`` spelling,
+    as the rules are."""
+    path = _robots_canonical(path)
     best_len, allowed = -1, True
     for allow, pattern in rules:
         if _robots_pattern_matches(pattern, path):
