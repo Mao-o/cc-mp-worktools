@@ -2,7 +2,7 @@
 name: researching-library-docs
 description: |
   AI SDK (Vercel AI SDK) / Firebase / Next.js / Vite / Vitest / Drizzle / Zod / Hono / Bun /
-  Vercel / Render / MCP / OpenAI Codex・Plugins・API・Agents SDK / Ollama / Agent Skills /
+  Vercel / Render / MCP (Model Context Protocol) / OpenAI Codex・Plugins・API・Agents SDK / Ollama / Agent Skills /
   Agent Plugins / ACP / AI コーディングツール (Cline / Factory / Devin / Gemini CLI /
   Kilo Code / Continue / Zed / Amp) の公式ドキュメント調査スキル。llms.txt を段階的に読み、
   API 仕様・設定・コード例を verbatim で取得する。Skill ツールで起動し、会話コンテキストを
@@ -18,7 +18,7 @@ when_to_use: |
   "Firebase", "Firestore", "Firebase Auth", "Cloud Functions", "FCM", "Firebase Hosting",
   "App Hosting", "Realtime Database", "Cloud Storage", "App Check", "Remote Config",
   "Crashlytics", "Data Connect", "Genkit", "AI Logic", "security rules", "firestore.rules",
-  "storage.rules", "App Router", "MCP", "Codex CLI", "OpenAI API", "OpenAI Agents SDK",
+  "storage.rules", "App Router", "Codex CLI", "OpenAI API", "OpenAI Agents SDK",
   "agentskills.io", "SKILL.md spec", "Factory Droid", "researching-ai-sdk",
   "researching-firebase"
 argument-hint: "[source] <question>"
@@ -171,7 +171,7 @@ llms-full.txt にページ URL が無く、`llms.txt` とタイトルが一致�
 `agent-plugins` と `openai-agents-js` は URL が全く無い。URL の無いページの引用元はタイトル + heading_path で表す。
 `openai-agents-js` は同じタイトルのページがあるので、整数 index で開く。
 
-`zed` / `amp` は整数 index・完全 URL・URL の末尾 (slug) を受け付ける (タイトルの部分一致は無い)。`ai-sdk` / `firebase` も形が違うので、下の「source ごとの注意」を読む。
+`zed` / `amp` は整数 index・完全 URL・URL の末尾 (slug) を受け付ける (タイトルの部分一致は無い)。`search` に全文検索の補い (`[body-only]`) は無く、上位 N 件の外のページは取得しない。`ai-sdk` / `firebase` も形が違うので、下の「source ごとの注意」を読む。
 
 ## source ごとの注意
 
@@ -209,7 +209,7 @@ llms-full.txt にページ URL が無く、`llms.txt` とタイトルが一致�
 | キャッシュ | `<cache-dir>/firebase-llms.txt` (index) + `<cache-dir>/firebase-docs/` (per-page) |
 
 - `search` は上位候補 N 件 (既定 5、`--top-n`) だけを取得して本文を検索する。初回は N 件分の HTTP 取得で数秒〜十数秒かかり、
-  2 回目以降はキャッシュで速い。`sections` / `content` は該当ページを自動で取得する
+  2 回目以降はキャッシュで速い。`sections` / `content` は該当ページを自動で取得する。全文検索の補い (`[body-only]`) は無く、上位 N 件の外のページは取得しない
 - **`search-content` は `--page-ref` を付ける**。省略すると 7000 ページ近くを取得する (初回は非常に重い)。7000 ページを
   盲目的に一覧せず、`search` を入口にする
 - `fetch-index` は既定で先頭 100 件。続きは `--offset 100 --limit 100`。`--limit 0` は全件 (7000 行近い) なので通常は避ける
@@ -241,7 +241,7 @@ llms-full.txt にページ URL が無く、`llms.txt` とタイトルが一致�
 |---|---|---|
 | `search` | `<query> [--top-n N] [--max-hits N] [--context N] [--max-snippet-chars N] [--include-changelog-priority]` | 推奨入口。候補 top N + 本文 hits。changelog / release notes は既定で末尾 (`--include-changelog-priority` で解除) |
 | `search-index` | `<query> [--limit N] [--show-sections]` | タイトル・見出しで候補だけ取得 |
-| `search-content` | `<query> [--page-ref REF] [--limit N] [--max-hits N] [--include-changelog-priority]` | 本文を横断検索 |
+| `search-content` | `<query> [--page-ref REF] [--limit N] [--context N] [--max-hits N] [--max-snippet-chars N] [--include-changelog-priority]` | 本文を横断検索 |
 | `sections` | `<page_ref>` | ページの見出し一覧 |
 | `content` | `<page_ref> [heading_path] [--max-chars N] [--no-subsection-hints]` | 本文を表示。前後にサブセクション一覧、既定 24000 文字で切り詰め |
 | `fetch-index` | `[--compact] [--offset N] [--limit N]` | 全ページ一覧 (フォールバック) |

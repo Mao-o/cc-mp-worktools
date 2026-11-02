@@ -68,10 +68,16 @@ schema を埋めるのは呼び出し元の仕事で、呼び出し元は最終�
 | Browser Run (旧 Browser Rendering。source 名は旧名のまま) | `cloudflare-browser-rendering` |
 | Containers | `cloudflare-containers` |
 
-- 引数の先頭語が上の source 名ならそれを使う
+- 引数の先頭語が上の source 名、または `sources` の一覧にある名前ならそれを使う
 - 質問が複数製品にまたがる (例: Workers から D1 を使う) ときは、主題の製品から始め、足りなければ
   別の source で `search` し直す。wrangler の設定は `cloudflare-workers`
-- 表に無い製品は「末尾: 表に無い製品」に従う
+- 表に無い製品は、まず一覧を確かめる (利用者が `sources.json` に足した profile も出る):
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" sources
+```
+
+一覧にも無ければ「末尾: 表に無い製品」に従う。
 
 ## Quick Start
 
@@ -162,7 +168,7 @@ schema 付きで起動された agent (`StructuredOutput` を持つ呼び出し�
 |---|---|---|
 | `search` | `<query> [--top-n N] [--max-hits N] [--context N] [--max-snippet-chars N] [--include-changelog-priority]` | 推奨入口。候補 top N + 本文 hits。changelog / release notes は既定で末尾 (`--include-changelog-priority` で解除) |
 | `search-index` | `<query> [--limit N] [--show-sections]` | タイトル・見出しで候補だけ取得 |
-| `search-content` | `<query> [--page-ref REF] [--limit N] [--max-hits N] [--include-changelog-priority]` | 本文を横断検索 |
+| `search-content` | `<query> [--page-ref REF] [--limit N] [--context N] [--max-hits N] [--max-snippet-chars N] [--include-changelog-priority]` | 本文を横断検索 |
 | `sections` | `<page_ref>` | ページの見出し一覧 |
 | `content` | `<page_ref> [heading_path] [--max-chars N] [--no-subsection-hints]` | 本文を表示。前後にサブセクション一覧、既定 24000 文字で切り詰め |
 | `fetch-index` | `[--compact] [--offset N] [--limit N]` | 全ページ一覧 (フォールバック) |

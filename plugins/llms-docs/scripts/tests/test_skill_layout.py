@@ -26,6 +26,8 @@ REMOVED = ("researching-ai-sdk", "researching-firebase")
 LISTING_CAP = 1536
 # leave room for one more preset
 LISTING_MARGIN = 50
+# what the listing puts between the two fields, and counts against the cap
+LISTING_SEPARATOR = " - "
 
 # skill -> the heading of the table that lists its sources
 SOURCE_TABLE = {CLAUDE: "## ソース", CLOUDFLARE: "## Step 0", LIBRARY: "## Step 0"}
@@ -61,12 +63,12 @@ LISTING_WORD = {
     "bun": (LIBRARY, "Bun"),
     "vercel": (LIBRARY, "Vercel"),
     "render": (LIBRARY, "Render"),
-    "mcp": (LIBRARY, "MCP"),
+    "mcp": (LIBRARY, "MCP (Model Context Protocol)"),
     "codex": (LIBRARY, "Codex"),
     "ollama": (LIBRARY, "Ollama"),
     "agentskills": (LIBRARY, "Agent Skills"),
     "agent-plugins": (LIBRARY, "Agent Plugins"),
-    "openai-plugins": (LIBRARY, "Plugins"),
+    "openai-plugins": (LIBRARY, "Codex・Plugins"),
     "openai-api-docs": (LIBRARY, "OpenAI API"),
     "acp": (LIBRARY, "ACP"),
     "cline": (LIBRARY, "Cline"),
@@ -104,20 +106,19 @@ def frontmatter(name: str) -> str:
 
 def block(front: str, key: str) -> str:
     """A ``key: |`` block of the frontmatter, flattened the way the listing reads it."""
-    m = re.search(rf"^{key}: \|\n((?:  .*\n)+)", front, re.M)
+    # A blank line does not end a block scalar: the text after it is still listed.
+    m = re.search(rf"^{key}: \|\n((?:(?:  .*)?\n)+)", front, re.M)
     if m is None:
         raise AssertionError(f"{key} is not a block in the frontmatter")
     return " ".join(line.strip() for line in m.group(1).splitlines())
 
 
+def listing_of(front: str) -> str:
+    return block(front, "description") + LISTING_SEPARATOR + block(front, "when_to_use")
+
+
 def listing(name: str) -> str:
-    front = frontmatter(name)
-    return block(front, "description") + " " + block(front, "when_to_use")
-
-
-def listing_len(name: str) -> int:
-    front = frontmatter(name)
-    return len(block(front, "description")) + len(block(front, "when_to_use"))
+    return listing_of(frontmatter(name))
 
 
 def table_sources(name: str) -> set[str]:
@@ -145,7 +146,11 @@ class SkillSetTest(unittest.TestCase):
     def test_each_listing_stays_under_the_cap_and_is_read_whole(self):
         for name in (CLAUDE, CLOUDFLARE, LIBRARY):
             with self.subTest(name):
-                self.assertLess(listing_len(name), LISTING_CAP - LISTING_MARGIN)
+                self.assertLess(len(listing(name)), LISTING_CAP - LISTING_MARGIN)
+
+    def test_listing_counts_past_a_blank_line_and_the_separator(self):
+        front = "---\ndescription: |\n  ab\n\n  cd\nwhen_to_use: |\n  ef\nmodel: sonnet\n"
+        self.assertEqual(listing_of(front), "ab  cd - ef")
 
     def test_bodies_stay_short_enough_to_load(self):
         for name in (CLAUDE, CLOUDFLARE, LIBRARY):
@@ -177,6 +182,25 @@ class SharedTablesTest(unittest.TestCase):
             with self.subTest(heading):
                 self.assertEqual(self.shared(LIBRARY, heading), self.shared(CLOUDFLARE, heading))
 
+    def test_search_content_row_lists_the_options_that_narrow_its_output(self):
+        table = self.shared(LIBRARY, "## コマンドリファレンス")
+        row = re.search(r"(?m)^\| `search-content` \|.*$", table).group(0)
+        for option in ("--context N", "--max-snippet-chars N"):
+            with self.subTest(option):
+                self.assertIn(option, row)
+
+
+class SourceStepTest(unittest.TestCase):
+    """A name the table does not have may still be a profile the user added."""
+
+    def test_each_table_skill_looks_at_the_sources_list_before_giving_up(self):
+        for name in (CLOUDFLARE, LIBRARY):
+            step = skill_text(name).split("## Step 0", 1)[1].split("\n## ", 1)[0]
+            for needle in ("または `sources` の一覧にある名前", 'parse-llms-txt.py" sources',
+                           "`sources.json` に足した profile も出る", "一覧にも無ければ"):
+                with self.subTest(skill=name, needle=needle):
+                    self.assertIn(needle, step)
+
 
 class EveryPresetIsRoutedTest(unittest.TestCase):
     def test_every_preset_is_in_exactly_one_skills_table(self):
@@ -204,7 +228,8 @@ class EveryPresetIsRoutedTest(unittest.TestCase):
     def test_owner_listing_names_each_preset(self):
         for preset, (owner, word) in LISTING_WORD.items():
             with self.subTest(preset):
-                self.assertIn(word, listing(owner))
+                # as a word: "Vite" inside "Vitest" does not name Vite
+                self.assertRegex(listing(owner), rf"(?<!\w){re.escape(word)}(?!\w)")
 
     def test_cloudflare_sources_all_belong_to_the_cloudflare_skill(self):
         cloudflare = {p for p in presets() if p.startswith("cloudflare-")}
@@ -259,6 +284,12 @@ class FoldedBodiesTest(unittest.TestCase):
                        "`--page-ref` で絞っていると", "firebase.google.com/docs/<product>"):
             with self.subTest(needle):
                 self.assertIn(needle, body)
+
+    def test_page_by_page_sources_say_search_has_no_full_text_fallback(self):
+        # the general note on [body-only] does not hold for these (_fetch_search_results)
+        needle = "全文検索の補い (`[body-only]`) は無く、上位 N 件の外のページは取得しない"
+        self.assertIn(needle, self.section("### Firebase (`--source firebase`)"))
+        self.assertIn(needle, self.section("## page_ref の指定方法"))
 
     def test_error_strings_the_notes_quote_are_still_printed(self):
         printed = "".join(
