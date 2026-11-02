@@ -355,6 +355,59 @@ frontmatter 区切りはコードブロックの中の `---` を境界にしな�
 同梱 preset の手元のキャッシュ (18 source) では、どれも発火しない。捕まえられないのは、`index_url` の無い source で、閉じ損ねの
 後でファイルの末尾までに閉じ直している場合 (Next.js のキャッシュの閉じ記号を 1/4 だけ連結した実験で、473 ページが 363 ページになる例)。
 
+### 2026-11-03 実測 (0.51.0): ページごとのサイトと、形の小さな違い
+
+**ページごとに取得するサイト** (`body: fetch`)。ユーザーの決定により Zed と Amp だけに対応する。
+
+| サイト | `robots.txt` | `llms.txt` の項目 | ページの形 |
+|---|---|---|---|
+| Zed (`zed.dev/docs/llms.txt`) | `Allow: /`。拒否は `/_next/` の一部だけ | 190 (すべて `.md`) | 各ページの先頭に同じ blockquote が 1 行 (`drop_lines` で除く) |
+| Amp (`ampcode.com/llms.txt`) | `Allow: /`。`/auth/`・`/api/`・`/admin` などを拒否 | 64 (すべて `/docs/markdown/…`) | 先頭に `lastModified` の frontmatter と `<script>`。H2 の一部が `<h2 id="…">` の行 (`heading_line_pattern` で節にする) |
+
+- 対応しないもの: Kiro (`robots.txt` が `/llms.txt` と `/docs/*.md` を拒否)、Cursor (全件の取得が前提で、上限が決まるまで見送り)
+- Amp は未知のパスを `/auth/sign-in` へ転送して 200 の HTML を返す。転送先は `robots.txt` が拒否する場所なので
+  `respect_robots` が転送の前に止める。HTML の本文は全 source で取得の失敗として扱う
+- `urllib.robotparser` は使えない。最初に一致した規則で決めるため、1 行目が `Allow: /` の両サイトではすべて許可になる
+- 通信は逐次 (`page_fetch_workers: 1`)。全ページを走査する `search-content` は `search_content_needs_page_ref` で止める
+
+**`sitemap.xml` は索引として採用しない。** どのサイトの sitemap にもタイトルが無く (`<title>` の類は 0 件)、タイトルを
+得るには全ページの取得が要る。`llms.txt` があるサイトでは増えるものも無い。
+
+| サイト | sitemap の URL | `llms.txt` / ページとの対応 | タイトル |
+|---|---|---|---|
+| Zed (`/docs/sitemap.xml`) | 190 (`.html`) | 190 / 190 が一致 (`.html` ↔ `.md`)。増えるページ 0 | 0 |
+| Amp (`/sitemap.xml` の `/docs`) | 90 | 64 / 64 を含む (`/docs/…` ↔ `/docs/markdown/…`)。残り 26 は `/docs/using-amp/…` で、`.md` の所在が不明 | 0 |
+| Gemini CLI (`sitemap-0.xml`) | 104 | ページ 97 / 97 を含む。残り 7 は docs の外 (`/brand-kit`、`/terms` など) | 0 |
+| Kilo Code (`/docs/sitemap.xml`) | 210 | ページ 212 のうち 209 と一致 | 0 |
+| A2A (`/latest/sitemap.xml`) | 38 | `<file>` 158 件のうち SDK の 124 件などは対応なし | 0 |
+| OpenAI Agents SDK JS (`sitemap-0.xml`) | 5024 (4 言語 × 1256) | 英語の 1256 はページ数と同じ。タイトルが無いので、ページに URL を付けられない | 0 |
+| Continue (`sitemap.xml`) | 92 | ページ 92 と同数 | 0 |
+
+**形の小さな違い** (`--file` で全ページを分割して確かめた)。
+
+| サイト | 区切り | ページ URL | ページ | 独立に数えた値 |
+|---|---|---|---|---|
+| Gemini CLI | H1 全体がリンク (`page_url: h1-link`)。リンクでない H1 は前のページの見出し | リンク先 97 | 97 | リンクの H1 97 |
+| Kilo Code | `## Source: /<path>` (`url_prefix`)。21 ページのタイトルは Markdoc の式のままなので frontmatter の `title:` から読む (1 ページは先頭に BOM) | 212 | 212 | `## Source:` 行 212 |
+| OpenAI Agents SDK JS | H1 | なし | 1256 (タイトルの重複 517 種) | sitemap の英語の URL 1256 |
+| Continue | H1 の直後に `Source:` 行 | 92 | 92 | H1 の次の行が `Source:` の数 92 |
+
+**`ai-sdk` の索引に H3 を読む** (手元の `ai-sdk` のキャッシュ 541 ページ。`index_heading_level` 2 と 3 の `search` の上位 5 件を比べた):
+
+| クエリ | 件数 | 持ち主のページが上位 5 件にある (2 → 3) | 順位が良くなった / 悪くなった |
+|---|---|---|---|
+| H3 にだけ書かれた API 名 | 71 | 44 → 63 | 悪化で消えたもの 0 (`maxOutputTokens` の `Settings` など 19 件が新たに届く) |
+| H3 の見出し (無作為) | 250 | 194 → 206 | 18 / 1 |
+| H2 の見出し (無作為) | 250 | 235 → 235 | 0 / 0 |
+| ページのタイトル | 491 | 486 → 486 | 5 / 3 (悪化はどれも 1 つ下がるだけ) |
+
+- 旧版の上位 3 件にあり新版の上位 5 件から消えたページは、1,067 クエリで 167 件。156 件はクエリの語を見出しに持たないページで、本文のヒットで入っていたもの。
+  残り 11 件は `Returns` / `Methods` / `Warnings` のような多くのページが持つ見出しで、H3 の持ち主に入れ替わる
+- 悪化の型: タイトルが 1 語に一致し、もう 1 語が本文にだけある `useChat transport` は、`useChat` が 4 位から 5 位に下がる (消えない)
+
+見送ったもの: A2A。`<file path="…">` で囲んだファイルの連結で、158 件のうち 127 件に H1 が無く、新しい区切り方と、
+ファイルのパスからページ URL を作る規則が要る。この形は 1 サイトだけなので、コストに見合わない。
+
 ## 3. 需要の根拠
 
 `llms.txt` を公開していて、かつこの plugin が使われる環境で実際に依存しているもの:

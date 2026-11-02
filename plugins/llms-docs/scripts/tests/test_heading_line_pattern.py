@@ -139,7 +139,8 @@ class SplitTest(unittest.TestCase):
         self.assertEqual(_h2(new), ["## Older releases\n"])
         presets = generic._read_sources_file(generic.PRESETS_FILE)
         with_key = sorted(n for n, p in presets.items() if p.get("heading_line_pattern") is not None)
-        self.assertEqual(with_key, ["claude-code"])
+        # amp writes its H2 as HTML lines (``<h2 id="x">X</h2>``)
+        self.assertEqual(with_key, ["amp", "claude-code"])
         self.assertEqual(presets["claude-code"]["heading_line_pattern"].pattern, PRESET_PATTERN)
 
 
@@ -157,11 +158,10 @@ class ValidationTest(unittest.TestCase):
                     self.fail(f"{value!r}: {e!r}")
                 self.assertIn(f"heading_line_pattern {msg}", err.getvalue())
 
-    def test_body_fetch_refuses_it(self):
-        with self.assertRaises(SystemExit), _loader_stderr() as err:
-            _profile({"body": "fetch", "index_url": "https://example.com/llms.txt",
-                      "heading_line_pattern": PRESET_PATTERN})
-        self.assertIn("heading_line_pattern", err.getvalue())
+    def test_body_fetch_takes_it(self):
+        p = _profile({"body": "fetch", "rank_from": "index", "index_url": "https://example.com/llms.txt",
+                      "page_ref_forms": ["int", "url", "slug"], "heading_line_pattern": PRESET_PATTERN})
+        self.assertEqual(p["heading_line_pattern"].pattern, PRESET_PATTERN)
 
 
 def _loader_stderr():

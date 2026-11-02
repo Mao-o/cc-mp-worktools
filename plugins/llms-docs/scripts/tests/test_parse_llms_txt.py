@@ -747,10 +747,9 @@ class PresetsTest(unittest.TestCase):
             raw = json.load(f)["sources"]
         presets = generic._read_sources_file(generic.PRESETS_FILE)
         self.assertEqual(set(presets), set(raw))
-        # agent-plugins.org has no llms-full.txt (404): its llms.txt is the
-        # whole text (frontmatter per page, no links), so it is the one preset
-        # that points at an llms.txt
-        whole_text_llms_txt = {"agent-plugins"}
+        # these sites have no llms-full.txt (404): their llms.txt is the whole
+        # text, so these presets point at an llms.txt
+        whole_text_llms_txt = {"agent-plugins", "gemini-cli", "kilo-code"}
         for name, p in presets.items():
             with self.subTest(name):
                 if p.get("members"):

@@ -6,8 +6,9 @@ headings. By default (3) it reads H1 to H3, so a reference page that names
 its API in H3 (Vitest's ``Vi``: ``## Mock Modules`` / ``### vi.mock``) is
 found by the function name. An H3 adds +1 per keyword but never completes
 the all-keyword bonus, so a page titled exactly one of the words stays ahead
-of pages whose H3 option groups name every word. The Claude docs / AI SDK /
-Firebase presets set 2 (the dedicated scripts read H1 / H2 only).
+of pages whose H3 option groups name every word. The Claude docs and Firebase
+presets set 2 (the dedicated scripts read H1 / H2 only); the AI SDK preset moved
+to 3 once the real corpus showed its pages dropping out of search.
 
 No network: the CLI tests read ``--file`` or a fresh cache, with
 ``urlopen`` patched to fail.
@@ -32,7 +33,7 @@ SCRIPT = "parse-llms-txt.py"
 URL = "https://example.com/llms-full.txt"
 # the presets that keep the dedicated scripts' H1 / H2 index (``claude`` is an
 # alias of the two Claude sources and reads no file of its own)
-H2_PRESETS = ("claude-code", "claude-platform", "ai-sdk", "firebase")
+H2_PRESETS = ("claude-code", "claude-platform", "firebase")
 H2_ALIASES = ("claude",)
 
 # Vitest llms-full.txt (2026-10-15), abridged: the migration guide names
@@ -636,8 +637,8 @@ class ChangelogStaysLastTest(_Cli):
 
 
 class PresetLevelsTest(unittest.TestCase):
-    """The Claude docs / AI SDK / Firebase presets keep the dedicated scripts'
-    H1 / H2 index; every other bundled preset reads H3 (the default)."""
+    """The Claude docs / Firebase presets keep the dedicated scripts' H1 / H2
+    index; every other bundled preset reads H3 (the default)."""
 
     def test_levels(self):
         presets = generic._read_sources_file(generic.PRESETS_FILE)
@@ -669,17 +670,23 @@ Repairs a tool call that failed to parse.
 """
 
 
-class AiSdkPresetReadsNoH3Test(_Cli):
+class AiSdkPresetReadsH3Test(_Cli):
+    """A name the AI SDK writes only in an H3 (``### maxOutputTokens`` on its
+    Settings page) finds its page; measured on the real corpus, see
+    docs/generic-llms-txt-source.md."""
+
     SOURCE = "ai-sdk"
     CORPUS = AI_SDK_H3
 
-    def test_h3_name_is_not_in_the_index(self):
+    def test_h3_name_is_in_the_index(self):
         code, out, err = self.run_cmd("search-index", "experimental_repairToolCall")
         self.assertEqual(code, 0, err)
-        self.assertIn("No matching documents found.", out)
+        self.assertIn("generateText", out)
+        self.assertNotIn("No matching documents found.", out)
         code, out, err = self.run_cmd("search-index", "generateText", "--show-sections")
         self.assertEqual(code, 0, err)
-        self.assertEqual(re.findall(r"(?m)^      - (.+)$", out), ["`generateText()`", "Parameters"])
+        self.assertEqual(re.findall(r"(?m)^      - (.+)$", out),
+                         ["`generateText()`", "Parameters", "experimental_repairToolCall"])
 
 
 class ClaudePresetsShowNoH3Test(unittest.TestCase):

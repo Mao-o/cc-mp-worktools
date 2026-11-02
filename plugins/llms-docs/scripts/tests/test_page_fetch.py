@@ -403,7 +403,7 @@ class FetchProfileValidationTest(unittest.TestCase):
     def test_keys_that_read_an_llms_full_txt_are_refused(self):
         for key, value in (("url", "https://x/llms-full.txt"), ("split", "h1"),
                            ("page_url", "line:Source: "), ("index_join", "url"),
-                           ("link_annotations", True), ("drop_lines", ["^x"]),
+                           ("link_annotations", True),
                            ("join_rate_guard", True), ("split_candidates", [])):
             with self.subTest(key):
                 self._bad({**PROFILE, key: value}, f"so these keys do not apply: {key}")
