@@ -531,20 +531,24 @@ def _help_options(*argv: str) -> set:
 
 
 class SkillCommandTableTest(unittest.TestCase):
-    """The command table of the generic loader's SKILL.md names options the
+    """The command table of the SKILL.md files that share it names options the
     commands have; ``fetch-index``'s row names all of its own (the paging
     options included)."""
 
     def test_documented_options_exist_and_fetch_index_lists_its_own(self):
-        text = (PLUGIN_DIR / "skills" / "researching-library-docs" / "SKILL.md").read_text(encoding="utf-8")
-        rows = dict(re.findall(r"^\| `([a-z-]+)` \| ([^|]*) \|", text, re.M))
         common = _help_options("sections")
-        for cmd in ("search", "search-index", "search-content", "sections", "content", "fetch-index"):
-            with self.subTest(cmd=cmd):
-                documented = set(re.findall(r"--[a-z][a-z-]*", rows[cmd]))
-                self.assertLessEqual(documented, _help_options(cmd))
-        self.assertEqual(set(re.findall(r"--[a-z][a-z-]*", rows["fetch-index"])),
-                         _help_options("fetch-index") - common)
+        helps = {cmd: _help_options(cmd) for cmd in ("search", "search-index", "search-content",
+                                                     "sections", "content", "fetch-index")}
+        for skill in ("researching-library-docs", "researching-cloudflare-docs"):
+            text = (PLUGIN_DIR / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
+            rows = dict(re.findall(r"^\| `([a-z-]+)` \| ([^|]*) \|", text, re.M))
+            for cmd, options in helps.items():
+                with self.subTest(skill=skill, cmd=cmd):
+                    documented = set(re.findall(r"--[a-z][a-z-]*", rows[cmd]))
+                    self.assertLessEqual(documented, options)
+            with self.subTest(skill=skill, cmd="fetch-index lists its own"):
+                self.assertEqual(set(re.findall(r"--[a-z][a-z-]*", rows["fetch-index"])),
+                                 helps["fetch-index"] - common)
 
 
 class PageCacheNameTest(unittest.TestCase):

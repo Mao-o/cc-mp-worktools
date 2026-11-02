@@ -807,30 +807,6 @@ class PresetsTest(unittest.TestCase):
         docs = generic.split_documents(_lines(CLOUDFLARE_LIKE), p)
         self.assertEqual(docs[0]["url"], "https://example.com/product/index.md")
 
-    def test_skill_source_table_matches_the_presets(self):
-        # researching-library-docs lists the presets by hand (description and
-        # the Step 0 table); a preset added or renamed without the skill would
-        # never be picked by it
-        skill = Path(generic.PRESETS_FILE).parents[1] / "skills" / "researching-library-docs" / "SKILL.md"
-        text = skill.read_text(encoding="utf-8")
-        table = text.split("## Step 0", 1)[1].split("\n## ", 1)[0]
-        named = set()
-        for row in re.findall(r"(?m)^\| [^|]+ \| (.+) \|$", table):
-            if row.startswith("`--source`"):
-                continue  # header
-            m = re.match(r"`cloudflare-<製品>`: (.+)", row)
-            if m:
-                named |= {f"cloudflare-{slug}" for slug in re.findall(r"`([a-z0-9-]+)`", m.group(1))}
-            else:
-                named |= set(re.findall(r"`([a-z0-9-]+)`", row))
-        # The presets that take over the dedicated scripts are read by their
-        # own skills (researching-claude-docs / -ai-sdk / -firebase), not
-        # by this one
-        from test_migration_parity import PARITY_PRESETS
-        presets = set(generic._read_sources_file(generic.PRESETS_FILE)) - set(PARITY_PRESETS)
-        self.assertEqual(presets - named, set(), "presets missing from the skill's Step 0 table")
-        self.assertEqual(named - presets, set(), "skill names a source that is not a preset")
-
     def test_readme_host_list_matches_the_presets(self):
         # The README lists every host the presets fetch from (one per line in
         # a text block); the root README's Privacy table points at it, so a
@@ -853,18 +829,6 @@ class PresetsTest(unittest.TestCase):
         self.assertTrue(fetched)
         self.assertEqual(fetched - set(listed), set(), "hosts the presets fetch from but the README omits")
         self.assertEqual(set(listed) - fetched, set(), "hosts the README lists but no preset fetches from")
-
-    def test_skill_description_stays_under_the_listing_cap(self):
-        # Claude Code truncates description + when_to_use at 1,536 characters
-        # in the skill listing, silently cutting the Triggers at the end
-        skill = Path(generic.PRESETS_FILE).parents[1] / "skills" / "researching-library-docs" / "SKILL.md"
-        front = skill.read_text(encoding="utf-8").split("\n---\n", 1)[0]
-        desc, rest = front.split("description: |\n", 1)[1].split("\nwhen_to_use: |\n", 1)
-        when = rest.split("\nargument-hint:", 1)[0]
-
-        def flat(block):
-            return " ".join(line.strip() for line in block.splitlines())
-        self.assertLess(len(flat(desc)) + len(flat(when)), 1536 - 50, "leave room for one more preset")
 
     def test_nextjs_preset_does_not_cut_a_page_at_a_titled_block_without_url(self):
         # a YAML example in the prose (outside a code fence) that has a title

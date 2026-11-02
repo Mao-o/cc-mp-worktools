@@ -580,12 +580,11 @@ class ClaudeDocsSlugTest(unittest.TestCase):
 
 
 SKILLS_DIR = Path(_loader.SCRIPTS_DIR).parent / "skills"
-SKILL_NAMES = ["researching-claude-docs", "researching-ai-sdk", "researching-firebase",
-               "researching-library-docs"]
+SKILL_NAMES = ["researching-claude-docs", "researching-cloudflare-docs", "researching-library-docs"]
 
 
 class SkillGuidanceTest(unittest.TestCase):
-    """The four SKILL.md say the same thing about how many calls to spend and
+    """The SKILL.md files say the same thing about how many calls to spend and
     how to read the new error output; only the per-source details differ."""
 
     def text(self, name):
@@ -631,7 +630,7 @@ class SkillGuidanceTest(unittest.TestCase):
                 for needle in ("**最終メッセージ**", "`StructuredOutput`", "呼ばない",
                                "`Skill execution completed`"):
                     self.assertIn(needle, sections[name])
-        self.assertEqual(len(set(sections.values())), 1, "the four skills drifted apart")
+        self.assertEqual(len(set(sections.values())), 1, "the skills drifted apart")
 
     def test_skill_names_the_way_out_when_the_body_does_not_come_back(self):
         heading = "## Skill を呼べない文脈 (subagent など)"
@@ -655,7 +654,7 @@ class SkillGuidanceTest(unittest.TestCase):
 
     def test_failure_table_names_what_the_scripts_print(self):
         # The strings the table quotes must be strings the scripts still print
-        # (all four skills run parse-llms-txt.py).
+        # (every skill runs parse-llms-txt.py).
         printed = "".join(
             (Path(_loader.SCRIPTS_DIR) / f).read_text(encoding="utf-8")
             for f in ("_common.py", "_commands.py", "parse-llms-txt.py"))

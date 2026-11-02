@@ -2,6 +2,9 @@
 
 計測: **Claude Code 2.1.276** / plugin 0.24.0 を `--plugin-dir` でセッション限定ロード / 2026-09-19
 
+(計測当時の 3 SKILL のうち `researching-ai-sdk` / `researching-firebase` は 0.52.0 で `researching-library-docs` に畳んだ。
+`paths` を持つのは現在 `researching-claude-docs` だけ)
+
 ## 背景
 
 3 SKILL はいずれも `context: fork` で、本文は 200 行超ある。`researching-claude-docs` の

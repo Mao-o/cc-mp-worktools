@@ -1,6 +1,6 @@
 # llms-docs
 
-Claude 公式ドキュメント、AI SDK 公式ドキュメント、Firebase 公式ドキュメントを `llms.txt` 経由で段階的に調査するスキル集。
+Claude・Cloudflare・AI SDK・Firebase と同梱 presets の各サイトの公式ドキュメントを `llms.txt` 経由で段階的に調査するスキル集。
 全文読み込みを避け、**キーワード検索 → セクション特定 → コンテンツ取得**の順で必要な部分だけを取得する。
 
 ## Skills
@@ -8,12 +8,24 @@ Claude 公式ドキュメント、AI SDK 公式ドキュメント、Firebase 公
 | スキル | 対象 | 推奨エントリポイント |
 |--------|------|---------------------|
 | `researching-claude-docs` | Claude Code / Claude Developer Platform | `search --source claude-code` (URL-join 統合検索) → `content <page_ref> "<heading_path>" --source claude-code` (`claude-platform` / 両方の `search` は `claude`) |
-| `researching-ai-sdk` | Vercel AI SDK (ai-sdk.dev) | `search --source ai-sdk` (top N 候補 + 本文 hits) → `content <page_ref> "<heading_path>" --source ai-sdk` |
-| `researching-firebase` | Firebase (firebase.google.com) | `search --source firebase` (top N on-demand fetch + 本文 hits) → `content <page_ref> "<heading_path>" --source firebase` |
-| `researching-library-docs` | 同梱 presets のサイト (Next.js / Vite / Vitest / Drizzle / Zod / Hono / Bun / Vercel / Render / MCP / Codex / Ollama / Agent Skills / Agent Plugins / OpenAI Plugins・API docs / ACP / Cline / Factory / Devin / Cloudflare 製品別) と利用者の `sources.json` のサイト | `search --source <name>` → `content <page_ref> "<heading_path>" --source <name>` |
+| `researching-cloudflare-docs` | Cloudflare 製品別 (Workers / D1 / R2 / KV / Durable Objects ほか) | `search --source cloudflare-<製品>` → `content <page_ref> "<heading_path>" --source cloudflare-<製品>` |
+| `researching-library-docs` | 上の 2 つ以外の同梱 presets のサイト (AI SDK / Firebase / Next.js / Vite / Vitest / Drizzle / Zod / Hono / Bun / Vercel / Render / MCP / Codex / Ollama / Agent Skills / Agent Plugins / OpenAI Plugins・API docs・Agents SDK / ACP / Cline / Factory / Devin / Gemini CLI / Kilo Code / Continue / Zed / Amp) と利用者の `sources.json` のサイト | `search --source <name>` → `content <page_ref> "<heading_path>" --source <name>` |
 
-4 skill とも同じ script (`scripts/parse-llms-txt.py`) を、source 名 (`--source`) を変えて使う (0.46.0)。
+3 skill とも同じ script (`scripts/parse-llms-txt.py`) を、source 名 (`--source`) を変えて使う (0.46.0)。
 サブコマンドは `search` / `search-index` / `search-content` / `sections` / `content` / `fetch-index` (と `sources`)。
+
+### Renamed / removed skills
+
+| 旧 skill | 移行先 (0.52.0 から) | 打ち直し |
+|---|---|---|
+| `researching-ai-sdk` | `researching-library-docs` | `/llms-docs:researching-library-docs ai-sdk <質問>`。スクリプトの `--source ai-sdk` は同じ |
+| `researching-firebase` | `researching-library-docs` | `/llms-docs:researching-library-docs firebase <質問>`。スクリプトの `--source firebase` は同じ |
+
+旧 2 skill の stub は残していない (skill の一覧の枠を使うため)。自分の rule や CLAUDE.md が旧名を指していたら、上の移行先に
+書き換える。Cloudflare の製品は `researching-library-docs` から `researching-cloudflare-docs` に分けた (source 名は同じ)。
+
+skill の一覧の枠 (description + when_to_use の上限) に入らない語は、起動の語から外している。外した語のサイトの機能
+(Firebase の `A/B Testing` など) も読めるので、自動で起動しないときは skill を明示して呼ぶ。
 
 ### 命名メモ: `researching-claude-docs` が `claude` を含むのは意図的
 
@@ -51,6 +63,7 @@ field が抜ける)。
 | Claude Developer Platform | `claude-platform` | 両方をまとめた `search` は `claude` (`search` だけ) |
 | AI SDK | `ai-sdk` | |
 | Firebase | `firebase` | |
+| Cloudflare の各製品 | `cloudflare-<製品>` | `researching-cloudflare-docs` の表 |
 | 同梱 presets・利用者の `sources.json` のサイト | `<name>` | `sources` で一覧 |
 
 調査の手数の目安 (1 論点は `search` 1 回 → `content` 1〜2 回、3 回外したら言い換えずに構造から当たる、
@@ -59,7 +72,7 @@ field が抜ける)。
 ### 既知の制約: `StructuredOutput` を持つ呼び出し元
 
 schema 付きで起動された agent (Workflow の `agent(prompt, {schema})` など、`StructuredOutput` ツールを持つもの) が
-4 skill のどれかを Skill ツールで呼ぶと、調べた本文が返らないことがある。
+どの skill を Skill ツールで呼んでも、調べた本文が返らないことがある。
 
 - **再現** (2026-11-03、Claude Code 2.1.316、Workflow 1 体で 1 回): Workflow で
   `agent("<Claude Code の仕様の質問>。必ず Skill ツールで llms-docs:researching-claude-docs を使う", {schema: {...}})`
@@ -68,7 +81,7 @@ schema 付きで起動された agent (Workflow の `agent(prompt, {schema})` �
   だけだった。fork 側の transcript では、fork の agent が Bash で調査したあと、本文を `StructuredOutput` の引数 `raw_result`
   に入れて呼んでいた。`raw_result` は呼び出し元の schema のフィールド名なので、fork は呼び出し元のツールと schema を引き継いでいる。
   原因の本体は harness 側で、公式 docs の `StructuredOutput` の記述に fork の skill の話は無い (2026-11-03 確認)
-- **plugin 側の対策**: 4 つの SKILL.md の冒頭で、`StructuredOutput` を呼ばず本文を最終メッセージとして返すよう fork に指示している
+- **plugin 側の対策**: すべての SKILL.md の冒頭で、`StructuredOutput` を呼ばず本文を最終メッセージとして返すよう fork に指示している
   (0.51.1)。指示なので確実ではなく、この指示で返るようになるかは未確認
 - **回避**: schema 付きの呼び出し元は、Skill を使わずに上の手順でスクリプトを Bash で直接実行する。Skill の結果に本文が無く
   `Skill execution completed` だけだったときも、同じ Skill を呼び直さずにスクリプトへ切り替える
@@ -105,10 +118,9 @@ schema 付きで起動された agent (Workflow の `agent(prompt, {schema})` �
 | 種類 | パス |
 |------|------|
 | Skill | `skills/researching-claude-docs/SKILL.md` |
-| Skill | `skills/researching-ai-sdk/SKILL.md` |
-| Skill | `skills/researching-firebase/SKILL.md` |
+| Skill | `skills/researching-cloudflare-docs/SKILL.md` |
 | Skill | `skills/researching-library-docs/SKILL.md` |
-| Script | `scripts/parse-llms-txt.py` (4 skill 共通の loader。同梱 presets と利用者の `sources.json` のサイトを `--source` で選ぶ) |
+| Script | `scripts/parse-llms-txt.py` (3 skill 共通の loader。同梱 presets と利用者の `sources.json` のサイトを `--source` で選ぶ) |
 | Data | `scripts/presets.json` (`parse-llms-txt.py` の同梱 profile) |
 | Dev tool | `scripts/check-preset-urls.py` (presets の `url` / `index_url` を HEAD で点検する。ネットワークに出るので suite には入れない) |
 | Shared | `scripts/_common.py` (FenceTracker / extract_sections / fetch_url ほか共通ヘルパー) |
@@ -197,8 +209,8 @@ pytest scripts/tests/test_common.py::ParseLlmsIndexTest::test_colon_description_
 
 `scripts/parse-llms-txt.py` は、profile に従って任意のサイトの `llms-full.txt` を読む
 (0.25.0)。サブコマンド (`search` / `search-index` / `search-content` / `sections` / `content` /
-`fetch-index`) に加えて、使える profile を一覧する `sources` がある。0.46.0 から 4 skill すべてがこの
-script を使う。skill `researching-library-docs` (0.27.0) は
+`fetch-index`) に加えて、使える profile を一覧する `sources` がある。0.46.0 からすべての skill がこの
+script を使う。skill `researching-library-docs` (0.27.0) と `researching-cloudflare-docs` (0.52.0) は
 description に同梱 presets のサイト名を並べて auto-invoke の対象にしている。presets に無い
 サイトを `sources.json` に足した場合は、skill を `/llms-docs:researching-library-docs <source> <質問>`
 で明示的に起動するか、CLI を直接呼ぶ。
@@ -245,7 +257,7 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading
 | `ai-sdk` | AI SDK (Vercel AI SDK) | あり (`search` / `sections` / `content` に出す。`fetch-index` / `search-index` の一覧には出さない) |
 | `firebase` | Firebase (`llms-full.txt` が無いので、`llms.txt` の各ページを必要なときに取得する。`body: fetch`) | あり (`.md.txt`) |
 
-`claude-code` / `claude-platform` / `claude` / `ai-sdk` / `firebase` は 0.45.0 までの専用 script と同じ出力になるよう設定した preset で、キャッシュも専用 script と同じファイル (下の「キャッシュ」の表) を読み書きする。それぞれの skill (`researching-claude-docs` / `researching-ai-sdk` / `researching-firebase`) が使う (0.46.0 から)。`ai-sdk` は 0.51.0 から H3 も索引に読む (`index_heading_level` の既定。`### maxOutputTokens` のように H3 にだけ API 名を書くページが見つかるため)。H3 だけで候補に入ったページが全文検索の補いを止めないよう、`h3_only_keeps_full_search` も有効にしている。
+`claude-code` / `claude-platform` / `claude` / `ai-sdk` / `firebase` は 0.45.0 までの専用 script と同じ出力になるよう設定した preset で、キャッシュも専用 script と同じファイル (下の「キャッシュ」の表) を読み書きする。Claude の 3 つは `researching-claude-docs`、`ai-sdk` / `firebase` は `researching-library-docs` が使う (0.46.0 から 0.51.x までは `ai-sdk` / `firebase` に専用の skill があった)。`ai-sdk` は 0.51.0 から H3 も索引に読む (`index_heading_level` の既定。`### maxOutputTokens` のように H3 にだけ API 名を書くページが見つかるため)。H3 だけで候補に入ったページが全文検索の補いを止めないよう、`h3_only_keeps_full_search` も有効にしている。
 
 **取得先のホスト** (`scripts/presets.json` の `url` / `index_url` から出した一覧。ネットワークの出口を決める根拠にする。
 1 行に 1 ホスト、次のコードブロックはテストが読む):
@@ -285,8 +297,8 @@ zod.dev
 
 preset の追加・移転のたびにこの一覧を presets.json に合わせる (`presets.json` との集合の一致は suite が確かめる。
 ルートの README の Privacy 表はこの一覧を指しており、ホストを列挙していない)。
-`researching-claude-docs` / `researching-ai-sdk` / `researching-firebase` の取得先 (`code.claude.com` /
-`platform.claude.com` / `ai-sdk.dev` / `firebase.google.com`) も、それぞれの preset の取得先として含む。
+Claude docs・AI SDK・Firebase の取得先 (`code.claude.com` / `platform.claude.com` / `ai-sdk.dev` /
+`firebase.google.com`) も、それぞれの preset の取得先として含む。
 
 他の製品や他のサイトは、下の `sources.json` に profile を書けば読める。
 
@@ -419,7 +431,7 @@ source 名は `^[a-z0-9][a-z0-9-]*$` (キャッシュのファイル名になる
 
 ## 設計判断: subagent fork + Sonnet は維持する
 
-3 SKILL とも `context: fork` + `model: sonnet` で起動する。これは spawn
+すべての SKILL が `context: fork` + `model: sonnet` で起動する。これは spawn
 オーバーヘッドと引き換えに以下を保証する設計判断:
 
 - **context rot 防止**: llms.txt / llms-full.txt は数 MB あり、親 context に流すと
@@ -435,7 +447,8 @@ spawn オーバーヘッドは受け入れ、低品質回答や context rot を�
 
 `paths` による自動ロードも親 context を太らせない。`paths` がマッチしても SKILL.md 本文は
 親に注入されず (実測値と手順は [docs/paths-and-fork-context.md](docs/paths-and-fork-context.md))、
-`paths` を絞る最適化は不要と判定済み。
+`paths` を絞る最適化は不要と判定済み。`researching-library-docs` は対象が広いので `paths` を持たない (0.52.0 で畳んだ
+`researching-firebase` の `paths` は引き継がず、`firebase.json` などの語を when_to_use に移した)。
 
 「軽い質問でも WebFetch に流れる」課題への対応策は次の 3 系統で、いずれも
 fork + Sonnet 構成を崩さない:
@@ -453,7 +466,7 @@ WebFetch との比較メモ: WebFetch は要約モデル経由のため field �
 ## 保守メモ
 
 Claude Code / Claude Developer Platform・AI SDK・Firebase は、0.45.0 まで別々の専用 script で読んでいた。
-0.46.0 から 4 skill とも `parse-llms-txt.py` を使い、違いは `presets.json` の profile のキーで表す
+0.46.0 からどの skill も `parse-llms-txt.py` を使い、違いは `presets.json` の profile のキーで表す
 (`rank_from: index` で `llms.txt` の項目をランキングする Claude docs、`body: fetch` でページごとに取得する
 Firebase など)。Firebase の `search` は top N 件 (default 5) だけを取得し、`search-content` の
 `--page-ref` 省略時は全ページを順に取得する (重いので明示指定推奨)。`<page_ref>` の形式は profile の
@@ -484,7 +497,7 @@ HTTP fetch / エラーヘルパー / metadata header / Next hint / argparse skel
 (`python3 plugins/llms-docs/scripts/check-preset-urls.py`。200 以外があれば exit 1)。一覧に出た preset は、
 転送先と内容を比べてから直す: 同じ内容なら URL を移す。内容が違うとき (旧い版が残っているだけ、など) は
 ページ数・ページ内の URL・`index_url` の突き合わせを測って、新しい側へ移すかを決める。直したら
-description と、`researching-library-docs` の対応表・この README の presets 表を合わせる。
+description と、その preset を読む skill (`researching-library-docs` / `researching-cloudflare-docs`) の対応表・この README の presets 表を合わせる。
 ネットワークに出る点検なので CI の suite には入れず、サーベイのときに流す。
 
 `search-content` はセクション単位の AND 検索が既定 — 指定した全キーワードが同じセクション内に

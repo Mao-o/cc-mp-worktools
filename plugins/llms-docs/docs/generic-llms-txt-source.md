@@ -16,10 +16,13 @@
 > Zod のページ数が 16 から 17 になった (下の「2026-10-03 追記 (0.26.1)」)。
 >
 > **2026-10-16 追記 (0.46.0)**: 専用 parser 3 本 (Claude docs / AI SDK / Firebase) を汎用 loader に統合した。
-> 4 skill とも `parse-llms-txt.py … --source <name>` (`claude-code` / `claude-platform` / `claude` / `ai-sdk` /
+> 当時の 4 skill とも `parse-llms-txt.py … --source <name>` (`claude-code` / `claude-platform` / `claude` / `ai-sdk` /
 > `firebase`) を使う。専用 script の名前は 0.46.0〜0.47.x の間だけ shim として残り、0.48.0 で旧実装とともに
 > 削除した。以下の表や本文で専用 script を名指ししている箇所は、計測した時点の状態の記録として残している
 > (旧実装は 0.47.3 以前の `scripts/tests/legacy/` で読める)。
+>
+> **2026-11-03 追記 (0.52.0)**: skill を 3 本に再編した (`researching-claude-docs` / `researching-cloudflare-docs` /
+> `researching-library-docs`)。`ai-sdk` / `firebase` は `researching-library-docs` が読む。
 
 ## 1. 現状の共通化率 (実測)
 
