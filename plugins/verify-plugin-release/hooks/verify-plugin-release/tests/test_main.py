@@ -322,6 +322,94 @@ class MainTest(unittest.TestCase):
                 self.assertEqual(self.decision(out), "deny")
                 self.assertIn("解析できない", out["hookSpecificOutput"]["permissionDecisionReason"])
 
+    def test_cd_that_does_not_move_the_shell_keeps_the_gate_on_the_cwd(self):
+        # gh は元の cwd (不備のある repo) で走る。cd の先を検査先と読むと、repo の外を見て素通しになる
+        write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
+        commit_all(self.root, "change without bump")
+        out_dir = self._tmp.name
+        for cmd in (
+            f"(cd {out_dir} && true) && gh pr create -t x",
+            f"(cd {out_dir}) && gh pr create -t x",
+            f"(cd {out_dir}) && X=1 gh pr create -t x",
+            f"(cd {out_dir} && git push) && gh pr create -t x",
+            f"ROOT=$(cd {out_dir} && pwd); gh pr create -t x",
+            f"ROOT=$(cd {out_dir} && pwd)\ngh pr create -t x",
+            f"X=$(cd {out_dir}); gh pr create -t x",
+            f"cd {out_dir} | cat; gh pr create -t x",
+            f"cd {out_dir} & gh pr create -t x",
+            f"env cd {out_dir}; gh pr create -t x",
+            f"nohup -- cd {out_dir}; gh pr create -t x",
+        ):
+            with self.subTest(cmd=cmd):
+                out = run_hook(bash(cmd, self.root))
+                self.assertEqual(self.decision(out), "deny")
+                self.assertIn("version[alpha]", out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_cd_that_may_not_run_stops_before_the_gate(self):
+        write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
+        commit_all(self.root, "change without bump")
+        out_dir = self._tmp.name
+        for cmd in (
+            f"false && cd {out_dir}; gh pr create -t x",
+            f"false && \ncd {out_dir}; gh pr create -t x",
+            f"false && # c\ncd {out_dir}; gh pr create -t x",
+            f"true || \ncd {out_dir}; gh pr create -t x",
+            f"true | cd {out_dir}; gh pr create -t x",
+            f"if false; then cd {out_dir}; fi; gh pr create -t x",
+            f"X=$(a b) cd {out_dir}; gh pr create -t x",
+            f"$x cd {out_dir}; gh pr create -t x",
+        ):
+            with self.subTest(cmd=cmd):
+                out = run_hook(bash(cmd, self.root))
+                self.assertEqual(self.decision(out), "deny")
+                self.assertIn("cd の移動先", out["hookSpecificOutput"]["permissionDecisionReason"])
+                self.assertIn("静的に解決できない", out["hookSpecificOutput"]["permissionDecisionReason"])
+                self.assertIn("cd <絶対パス> && gh", out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_outside_the_repo_forms_that_may_enter_it_stop(self):
+        # hook の cwd が repo の外でも、移動の読み落としで素通しにしない
+        write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
+        commit_all(self.root, "change without bump")
+        out_dir = self.root.parent
+        cases = {
+            f"builtin cd {self.root}; gh pr create -t x": "version[alpha]",
+            f"cd {self.root} || cd /; gh pr create -t x": "静的に解決できない",
+            f"if pushd {self.root}; then gh pr create -t x; fi": "pushd / popd",
+            f"command pushd {self.root}; gh pr create -t x": "pushd / popd",
+            f"Y=1 pushd {self.root}; gh pr create -t x": "pushd / popd",
+            f"'pushd' {self.root}; gh pr create -t x": "pushd / popd",
+            f"! pushd {self.root}; gh pr create -t x": "pushd / popd",
+            f"time pushd {self.root}; gh pr create -t x": "pushd / popd",
+            "true && ${x} gh pr create -t x": "解析できない",
+            "$x gh pr create -t x": "解析できない",
+            "env -i gh pr create -t x": "解析できない",
+            "case a in a) gh pr create -t x;; esac": "解析できない",
+        }
+        for cmd, why in cases.items():
+            with self.subTest(cmd=cmd):
+                out = run_hook(bash(cmd, out_dir))
+                self.assertEqual(self.decision(out), "deny")
+                self.assertIn(why, out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_everyday_forms_are_not_stopped_when_the_release_is_complete(self):
+        write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
+        write(self.root, "plugins/alpha/CHANGELOG.md", "# Changelog\n\n## 0.2.0\n")
+        bump(self.root, "alpha", "0.2.0")
+        commit_all(self.root, "release")
+        self.assertIsNone(self.decision(run_hook(bash("gh pr create --base main -t x", self.root))))
+        for cmd in (
+            "cd plugins/alpha && cd ../.. && gh pr create --base main -t x",
+            "cd plugins; cd ..; gh pr create --base main -t x",
+            "ROOT=$(cd .. && pwd); gh pr create --base main -t x",
+            "(cd plugins && git status) && gh pr create --base main -t x",
+            "(cd plugins); gh pr create --base main -t x",
+            "git status && gh pr create --base main -t x",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.decision(run_hook(bash(cmd, self.root))))
+        # 同じ形で repo の外へ移る cd は移動として読む
+        self.assertIsNone(run_hook(bash(f"cd {self._tmp.name}; gh pr create --base main -t x", self.root)))
+
     def test_japanese_payload_as_utf8_bytes(self):
         # Windows では stdin の既定 codec が UTF-8 でないため、日本語タイトルで
         # decode に失敗して素通りする経路があった。bytes で渡して確かめる

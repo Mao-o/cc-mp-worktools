@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.3.5
+
+cd が後ろの PR 操作の cwd を変えるかを 3 つに分け、「変えるか確かでない cd」の後ろは止め、「変えない cd」の後ろは元の cwd を
+検査するようにした (patch bump)。これまで cd が 1 回の形は、シェルの cwd を変えない cd でも移動先を検査先と読み、不備のある
+repo でゲートを見ずに素通しになっていた。
+
+読みを足す案は入れなかった。`&&` の左が成功するか・分岐を通るかは語の並びから決まらないので、走るか確かでない cd は読まずに止める。
+
+### Fixed
+
+- シェルの cwd を変えない cd の後ろの PR 操作は、元の cwd を検査する (これまでは cd の移動先を検査していた):
+  `(cd X && make) && gh pr create` / `(cd X); gh pr create` / `(cd X) && Y=1 gh pr create` / `ROOT=$(cd .. && pwd); gh pr create` /
+  `X=$(cd Y);(gh pr create)` / `cd X | cat; gh pr create` / `cd X | gh pr create` / `cd X & gh pr create` / `env cd X; gh pr create` /
+  `nohup -- cd X; gh pr create`。この cd に相対の cd が続く形は、これまでどおり止める
+- cwd を変えるか確かでない cd の後ろの PR 操作は止める (`gh` が走る dir がシェルや実行時の値で変わる):
+  - `cd A || cd B`、`cd A || true`、`true || cd A` (cd が 1 回の形も。`cd A || exit` の A は決まる)
+  - パイプの右の cd (`true | cd A; gh pr create`。zsh だけ移る)
+  - `&&` の前に別のコマンドがあり後ろが `;` か改行で続く形 (`[ -d A ] && cd A; gh pr create` / `make && cd ..; gh pr create`)。
+    `make && cd A && gh pr create` は止めない
+  - `&&` と改行の間に空白やコメントがある形 (`false && ` + 改行 + `cd A; gh pr create`)。改行で区切りの種類を上書きしていた
+  - `if` の分岐を閉じた後や `else` の後 (`if [ -d A ]; then cd A; fi; gh pr create`)、ループの中、`case` の分岐、関数の中の cd
+    (関数があると読みをやめる)
+  - `&` の前のリストの cd (`cd A && true & gh pr create`、`cd A; true & gh pr create`)、`{ cd A; } | cat`
+  - 語の並びでは読まないが移る cd (`X=$(a b) cd A`、`$x cd A`、`command -p cd A`、`builtin -- cd A`)
+  - コマンド語が展開の形 (`$c d; gh pr create`、`$(echo cd a); gh pr create`。何が走るか読めない)
+  - シェルで読みが割れる形: `command cd A` (zsh は外部コマンドを探し、`/usr/bin/cd` があると移らない)、`time cd A`
+    (bash 3.2 の `if time cd A; then` は移らない)、`exec cd A`、`chdir A`、`cd A B` (zsh は `$PWD` の A を B に置き換える)
+  - `CDPATH=` / `cdpath=` / `HOME=` の代入があるコマンドの cd (行き先が変わる)
+  - 引数なしの cd (shell は `$HOME` に移るが、hook の cwd を検査していた)
+- `builtin cd A` を cd として読む。これまでは読まず、hook の cwd を検査していた
+- 空になりうる展開がコマンド語の位置にある形の後ろの PR 操作を止める。`true && ${x} gh pr create` / `$x gh pr create` /
+  `"$x" gh pr create` / `$(true) gh pr create` / `` `true` gh pr create `` を見失い、ゲートを走らせずに通していた
+- wrapper にオプションが付いた形 (`env -i gh pr create` / `nohup -- gh pr create` / `command -- gh pr create` / `time -p gh pr create`) と、
+  `case` の分岐と同じ行の `gh pr create` も同じく止める
+- `pushd` / `popd` は語としてどこかにあれば止める (`if pushd A; then ...` / `command pushd A` / `Y=1 pushd A` / `'pushd' A` / `! pushd A` /
+  `time pushd A`)。区切りの直後の素の `pushd` だけを見ていて、hook の cwd が repo の外だと素通しになっていた。
+  語が引数でも止める (`echo pushd; gh pr create`)
+
+### Known gaps
+
+- `eval "cd A"`、`. ./env.sh` の中の cd は読まない
+- `sudo gh pr create` / `xargs gh pr create` のように、前置きとして読まない語の後ろの PR 操作は数えない
+- `$(a)#b` の後ろの cd は、cwd を変えうる語があるときの従来の読み (`#` からコメント) で読み落とすことがある
+
 ## 0.3.4
 
 代入語の値に置換がある形の後ろの PR 操作を素通しにせず止めるようにし、PR 本文の定型

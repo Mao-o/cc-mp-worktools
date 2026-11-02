@@ -153,13 +153,12 @@ class AssignmentValueTest(_Base):
                 with self.subTest(prefix=pre, value=value):
                     self.assert_stops(pre + value)
 
-    def test_old_reading_around_a_value(self):
-        # 語の数が合う形は、値を読み直さず従来どおりの語の並びで読む。`cd` の読みは旧版と同じ (実際の $PWD と違う形がある。
-        # README の「検査しないもの」)
+    def test_reading_around_a_value(self):
+        # 語の数が合う形は、値を読み直さず語の並びで読む。代入の後ろに続く cd は移るが読まないので、検査先を決めずに止める
         for cmd, steps, unresolved in (
-            ("X=$(a b) cd sub && gh pr create", (), False),
-            ("cd a || X=$(b c) cd d; gh pr create", ("a",), False),
-            ("X=$(cd a) cd b; gh pr create", ("a",), False),
+            ("X=$(a b) cd sub && gh pr create", (), True),
+            ("cd a || X=$(b c) cd d; gh pr create", ("a",), True),
+            ("X=$(cd a) cd b; gh pr create", (), True),
             ("X=$(cd a; gh pr create) true", ("a",), False),
             ("cd b; X=$(cd a; gh pr create) true", ("b", "a"), True),
         ):
@@ -501,10 +500,8 @@ class WordsThatMayMoveTest(_Base):
             "git fetch && cd a && ": ("a",),
             "cd a || exit 1; ": ("a",),
             "cd a 2>/dev/null && ": ("a",),
-            "[ -d a ] && cd a; ": ("a",),
-            "if [ -d a ]; then cd a; fi; ": ("a",),
             'cd "$PWD" && ': ("$PWD",),
-            "for d in a; do (cd $d && make); done; ": ("$d",),
+            "for d in a; do (cd $d && make); done; ": (),
             "echo cd; ": (),
             "grep -rn chdir . ; ": (),
         }
@@ -517,15 +514,18 @@ class WordsThatMayMoveTest(_Base):
         self.assert_clean(cmd, ["m1"])
         self.assertEqual(_first(cmd).cd_steps, ())
 
-    def test_old_reading_of_an_uncertain_cd_is_kept(self):
-        for cmd, steps in (
-            ("cd a && if cd b; then gh pr create --base m1; fi", ("a", "b")),
-            ("(cd a) && gh pr create --base m1", ("a",)),
-            ("false && cd a; gh pr create --base m1", ("a",)),
+    def test_reading_of_a_cd_with_a_plain_body(self):
+        for cmd, steps, unresolved in (
+            ("cd a && if cd b; then gh pr create --base m1; fi", ("a", "b"), False),
+            ("(cd a) && gh pr create --base m1", (), False),
+            ("false && cd a; gh pr create --base m1", ("a",), True),
+            ("[ -d a ] && cd a; gh pr create --base m1", ("a",), True),
+            ("if [ -d a ]; then cd a; fi; gh pr create --base m1", ("a",), True),
         ):
             with self.subTest(cmd=cmd):
                 found = find_invocations(cmd)
                 self.assertEqual([i.cd_steps for i in found], [steps])
+                self.assertEqual(found[0].cd_unresolved is not None, unresolved)
                 self.assertIsNone(unresolved_reason(cmd, found))
 
     def test_word_middle_hash_with_those_words_is_the_old_reading(self):
