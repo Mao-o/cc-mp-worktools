@@ -22,9 +22,10 @@
 - `scripts/check_skill_allowed_tools.py` の ALLOWLIST で、llms-docs の Bash 単独の許可を
   skill 4 件の SKILL.md パスから `plugins/llms-docs/skills/` 配下の指定に変えた
   (llms-docs の skill は引数が質問ごとに変わるスクリプトを打つので、完全一致に絞れない)。
-  skill を足す・消すときに ALLOWLIST の変更が要らず、plugin と root を別レーンで
-  変更しても検査が通る。`Bash(... *)` と他の plugin の skill は従来どおり FAIL、
+  skill を足す・消すときに ALLOWLIST の変更が要らず、plugin と root を別々の変更で
+  直しても検査が通る。`Bash(... *)` と他の plugin の skill は従来どおり FAIL、
   配下に Bash 単独を持つ skill が 1 つも無ければ「実体の無い許可リスト」として FAIL。
+  symlink で実体が範囲の外にある SKILL.md には許可を効かせない。
   codex-pr-review の許可は skill 単位のまま
 
 ## 2026-11-01

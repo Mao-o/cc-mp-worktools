@@ -15,7 +15,7 @@ import unittest
 SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "check_skill_allowed_tools.py"
 REPO_ROOT = SCRIPT.parent.parent
 
-# スクリプトの ALLOWLIST に載っている skill の相対パス (例外が効く範囲の確認用)
+# スクリプトの ALLOWLIST の範囲に入る skill の相対パス (例外が効く範囲の確認用)
 ALLOWED_REL = "plugins/llms-docs/skills/researching-ai-sdk/SKILL.md"
 ALLOWED_SCOPE = "plugins/llms-docs/skills/"
 CODEX_REL = "plugins/codex-pr-review/skills/iterating-pr-codex-reviews/SKILL.md"
@@ -252,6 +252,22 @@ class AllowlistScope(FixtureCase):
         r = _run(self.root)
         self.assertEqual(r.returncode, 1)
         self.assertIn("plugins/llms-docs/skills/new/SKILL.md: `Bash(ls *)`", r.stderr)
+
+    def test_symlink_out_of_scope_is_not_covered(self) -> None:
+        self.skill(ALLOWED_REL, "allowed-tools:\n  - Bash\n")
+        self.skill("external/x/SKILL.md", "allowed-tools:\n  - Bash\n")
+        link = self.root / "plugins/llms-docs/skills/link"
+        link.symlink_to("../../../external/x", target_is_directory=True)
+        r = _run(self.root)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("plugins/llms-docs/skills/link/SKILL.md: `Bash`", r.stderr)
+
+    def test_symlink_within_scope_stays_covered(self) -> None:
+        self.skill(ALLOWED_REL, "allowed-tools:\n  - Bash\n")
+        link = self.root / "plugins/llms-docs/skills/alias"
+        link.symlink_to("researching-ai-sdk", target_is_directory=True)
+        r = _run(self.root)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_scope_does_not_cover_other_plugins(self) -> None:
         self.skill(ALLOWED_REL, "allowed-tools:\n  - Bash\n")

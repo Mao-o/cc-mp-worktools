@@ -270,6 +270,10 @@ def main() -> int:
     used_allow: set[tuple[str, str]] = set()
     for path in skills:
         rel = path.relative_to(root).as_posix()
+        # symlink で範囲の外の実体を指す SKILL.md には、範囲の許可を効かせない
+        real = path.resolve()
+        real_root = root.resolve()
+        real_rel = real.relative_to(real_root).as_posix() if real.is_relative_to(real_root) else ""
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
@@ -284,16 +288,21 @@ def main() -> int:
             reason = violation(entry)
             if reason is None:
                 continue
-            covering = {a for a in ALLOWLIST if a[1] == entry and _allow_covers(a[0], rel)}
+            covering = {
+                a
+                for a in ALLOWLIST
+                if a[1] == entry and _allow_covers(a[0], rel) and _allow_covers(a[0], real_rel)
+            }
             if covering:
                 used_allow.update(covering)
                 continue
             failures.append(f"{rel}: `{entry}` — {reason}")
 
     # 実体の無い許可リストは残さない (ワイルドカードを直したのに例外だけ残ると、
-    # 後で同じ付与が戻っても黙って通ってしまう)。既定の root では、許可リストにある
-    # skill の rename・削除も FAIL にする。--root で別のツリーを指したときだけ、
-    # 検査した SKILL.md に限る (fixture のツリーでの誤検出を避ける)
+    # 後で同じ付与が戻っても黙って通ってしまう)。既定の root では、範囲に該当する付与が
+    # 1 件も無ければ FAIL にする (1 件指定の許可は、その skill の rename・削除でも FAIL)。
+    # --root で別のツリーを指したときだけ、範囲に該当する SKILL.md を検査した許可に
+    # 限る (fixture のツリーでの誤検出を避ける)
     scanned = {p.relative_to(root).as_posix() for p in skills}
     for scope, entry in sorted(ALLOWLIST - used_allow):
         if explicit_root and not any(_allow_covers(scope, r) for r in scanned):
