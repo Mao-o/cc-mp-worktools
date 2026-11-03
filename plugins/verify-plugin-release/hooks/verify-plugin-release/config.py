@@ -14,7 +14,8 @@ CONFIG_RELPATH = Path(".claude") / "verify-plugin-release.json"
 
 # hooks.json の timeout (120 秒) より短くしておく。hook 自体が時間切れになると
 # Claude Code はコマンドをそのまま実行する (公式仕様) ため、ゲート内部で先に
-# 打ち切って「止める」判断を返す必要がある。
+# 打ち切って「止める」判断を返す必要がある。実際の時間は hook 全体の予算
+# (runner.HOOK_BUDGET) の残りが上限なので、MAX_TIMEOUT より先に予算が効くことがある。
 DEFAULT_TIMEOUT = 90
 MAX_TIMEOUT = 110
 

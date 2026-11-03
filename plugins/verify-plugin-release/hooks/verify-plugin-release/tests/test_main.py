@@ -534,6 +534,16 @@ class UnresolvedCommandTest(unittest.TestCase):
         # 文中の言及は PR 操作ではない
         self.assertIsNone(self.mod.evaluate('git commit -m "run gh pr create later"', self._tmp.name))
 
+    def test_too_large_command_is_denied_with_body_file_guidance(self):
+        from command import _READ_LIMIT
+
+        large = "x" * (_READ_LIMIT + 1)
+        out = self.mod.evaluate(f"gh pr create --body '{large}'", self._tmp.name)
+        decision = (out or {}).get("hookSpecificOutput", {})
+        self.assertEqual(decision.get("permissionDecision"), "deny")
+        self.assertIn("--body-file", decision.get("permissionDecisionReason", ""))
+        self.assertIsNone(self.mod.evaluate(f"echo '{large}'", self._tmp.name))
+
 
 class FailClosedTest(unittest.TestCase):
     """hook が例外で終わるとコマンドがそのまま走るので、想定外の例外は止める側に倒す (in-process)。"""

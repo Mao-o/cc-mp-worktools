@@ -7,7 +7,7 @@ PreToolUse:Bash に登録する。対象コマンドでなければ何も出力�
 - FAIL がある → PR 作成を止める (deny)。理由には FAIL / WARN の行だけを載せる
 - ゲートを完了できない (時間切れ・内部エラー・設定の破損) → 同じく止める。
   hook 自体が時間切れになると Claude Code はコマンドをそのまま実行するため、
-  ゲート内部で先に打ち切って止める判断を返す
+  hook 全体で 1 つの予算 (HOOK_BUDGET) を持ち、先に打ち切って止める判断を返す
 - draft PR の作成 / VERIFY_PLUGIN_RELEASE_MODE=warn → 止めずに結果を伝える
 - VERIFY_PLUGIN_RELEASE_MODE=off → 何もしない
 
@@ -26,12 +26,14 @@ from pathlib import Path
 import config
 import gate
 import layout
-from command import Invocation, find_invocations, unresolved_reason
-from runner import Deadline, GateTimeout, git, run
+from command import Invocation
+from reading import read_command
+from runner import HOOK_BUDGET, Deadline, GateTimeout, git, run
 
 MODE_ENV = "VERIFY_PLUGIN_RELEASE_MODE"
 _REASON_LIMIT = 1800
 _TAG = "[verify-plugin-release]"
+_SPLIT_ADVICE = "PR 操作が複数あれば別のコマンドに分け、それでも収まらなければ test_command で実行範囲を絞る"
 
 
 def _mode() -> str:
@@ -102,15 +104,15 @@ def evaluate(command: str, cwd: str) -> dict | None:
     mode = _mode()
     if mode == "off":
         return None
+    budget = Deadline(HOOK_BUDGET)
     # 1 つのコマンドに複数の PR 操作があれば全部を検査し、止めるものがあれば止める
-    invocations = find_invocations(command)
-    reason = unresolved_reason(command, invocations)
+    invocations, reason = read_command(command, budget)
     if reason:
         soft = mode == "warn"
         return _error(RuntimeError(f"{reason}。gh pr create / ready は単独のコマンドとして実行する"), soft)
     context = None
     for inv in invocations:
-        result = _evaluate_one(inv, cwd, mode)
+        result = _evaluate_one(inv, cwd, mode, budget)
         if result is None:
             continue
         if result["hookSpecificOutput"].get("permissionDecision") == "deny":
@@ -186,8 +188,10 @@ def _load_config(root: Path, dl: Deadline) -> tuple[config.Config, str | None]:
     return cfg, note
 
 
-def _evaluate_one(inv: Invocation, cwd: str, mode: str) -> dict | None:
+def _evaluate_one(inv: Invocation, cwd: str, mode: str, budget: Deadline) -> dict | None:
     soft = mode == "warn" or inv.draft
+    if budget.remaining() <= 0:
+        return _error(GateTimeout(f"hook 全体の制限時間 ({HOOK_BUDGET} 秒) を使い切った。{_SPLIT_ADVICE}"), soft)
     workdir = Path(cwd or os.getcwd())
     if inv.cd_unresolved is not None or inv.cd:
         # `cd "$WT" && gh pr create` のように移動先が静的に決まらない / 存在しない場合、
@@ -214,7 +218,7 @@ def _evaluate_one(inv: Invocation, cwd: str, mode: str) -> dict | None:
         except (OSError, RuntimeError) as e:
             return _error(RuntimeError(f"cd の移動先 ({workdir}) を確かめられない: {e}"), soft)
 
-    probe = Deadline(10)
+    probe = budget.sub(10)
     try:
         root = _repo_root(workdir, probe)
     except RepoLookupError as e:
@@ -224,9 +228,16 @@ def _evaluate_one(inv: Invocation, cwd: str, mode: str) -> dict | None:
     if not layout.is_plugin_repo(root):
         return None
 
+    shrunk = ""
     try:
-        cfg, cfg_note = _load_config(root, Deadline(10))
-        dl = Deadline(cfg.timeout_seconds)
+        cfg, cfg_note = _load_config(root, budget.sub(10))
+        left = budget.remaining()
+        if cfg.timeout_seconds > left:
+            shrunk = (
+                f"。制限時間 ({cfg.timeout_seconds} 秒) を hook 全体の制限時間 ({HOOK_BUDGET} 秒) の残り {left:.0f} 秒に"
+                f"縮めて検査した。{_SPLIT_ADVICE}"
+            )
+        dl = budget.sub(cfg.timeout_seconds)
         base_hint = inv.base
         # gh が PR を作る repo は --repo → GH_REPO → `gh repo set-default` → origin の順で決まる。
         # origin 以外を指していると、手元で検査した base と PR の base が一致しない
@@ -297,7 +308,9 @@ def _evaluate_one(inv: Invocation, cwd: str, mode: str) -> dict | None:
         rep = gate.run_gate(root, cfg, dl, base_hint=base_hint)
         if cfg_note:
             rep.notes.append(cfg_note)
-    except (config.ConfigError, GateTimeout, OSError, RuntimeError) as e:
+    except GateTimeout as e:
+        return _error(GateTimeout(f"{e}{shrunk}"), soft)
+    except (config.ConfigError, OSError, RuntimeError) as e:
         return _error(e, soft)
     except Exception as e:  # noqa: BLE001 - 想定外の例外も「止める」側に倒す
         return _error(e, soft)
