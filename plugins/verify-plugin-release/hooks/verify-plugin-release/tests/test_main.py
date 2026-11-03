@@ -41,6 +41,11 @@ def bash(command: str, cwd: Path) -> dict:
     return {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(cwd)}
 
 
+def shell_path(path: str | Path) -> str:
+    """コマンドに引用なしで埋めるパス。シェルは `\\` を外すので、Windows のパスは `/` で書く (`C:\\a` は `C:a` と読まれる)。"""
+    return Path(path).as_posix()
+
+
 class MainTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -301,10 +306,11 @@ class MainTest(unittest.TestCase):
         # 値の中の cd はサブシェルで走り、gh は元の cwd で走る (repo の外への移動と読むと素通しになる)
         write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
         commit_all(self.root, "change without bump")
+        out_dir = shell_path(self._tmp.name)
         for cmd in (
             'ROOT="$(cd .. && pwd)" gh pr create --base main -t x',
-            f'ROOT="$(cd {self._tmp.name} && pwd)" gh pr create --base main -t x',
-            f'X="$(cd {self._tmp.name})" gh pr create --base main -t x',
+            f'ROOT="$(cd {out_dir} && pwd)" gh pr create --base main -t x',
+            f'X="$(cd {out_dir})" gh pr create --base main -t x',
         ):
             with self.subTest(cmd=cmd):
                 out = run_hook(bash(cmd, self.root))
@@ -312,10 +318,10 @@ class MainTest(unittest.TestCase):
                 self.assertIn("version[alpha]", out["hookSpecificOutput"]["permissionDecisionReason"])
         # 値を読めない形は、検査先を決めずに止める
         for cmd in (
-            f"X=$(cd {self._tmp.name} && pwd) gh pr create --base main -t x",
-            f"X=`cd {self._tmp.name}` gh pr create --base main -t x",
-            f"(cd {self._tmp.name}) && X=$(a b) gh pr create --base main -t x",
-            f"cd {self._tmp.name} && X=$(a b) gh pr create --base main -t x",
+            f"X=$(cd {out_dir} && pwd) gh pr create --base main -t x",
+            f"X=`cd {out_dir}` gh pr create --base main -t x",
+            f"(cd {out_dir}) && X=$(a b) gh pr create --base main -t x",
+            f"cd {out_dir} && X=$(a b) gh pr create --base main -t x",
         ):
             with self.subTest(cmd=cmd):
                 out = run_hook(bash(cmd, self.root))
@@ -326,7 +332,7 @@ class MainTest(unittest.TestCase):
         # gh は元の cwd (不備のある repo) で走る。cd の先を検査先と読むと、repo の外を見て素通しになる
         write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
         commit_all(self.root, "change without bump")
-        out_dir = self._tmp.name
+        out_dir = shell_path(self._tmp.name)
         for cmd in (
             f"(cd {out_dir} && true) && gh pr create -t x",
             f"(cd {out_dir}) && gh pr create -t x",
@@ -348,7 +354,7 @@ class MainTest(unittest.TestCase):
     def test_cd_that_may_not_run_stops_before_the_gate(self):
         write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
         commit_all(self.root, "change without bump")
-        out_dir = self._tmp.name
+        out_dir = shell_path(self._tmp.name)
         for cmd in (
             f"false && cd {out_dir}; gh pr create -t x",
             f"false && \ncd {out_dir}; gh pr create -t x",
@@ -371,15 +377,16 @@ class MainTest(unittest.TestCase):
         write(self.root, "plugins/alpha/hooks/alpha/__main__.py", "print('x')\n")
         commit_all(self.root, "change without bump")
         out_dir = self.root.parent
+        root = shell_path(self.root)
         cases = {
-            f"builtin cd {self.root}; gh pr create -t x": "version[alpha]",
-            f"cd {self.root} || cd /; gh pr create -t x": "静的に解決できない",
-            f"if pushd {self.root}; then gh pr create -t x; fi": "pushd / popd",
-            f"command pushd {self.root}; gh pr create -t x": "pushd / popd",
-            f"Y=1 pushd {self.root}; gh pr create -t x": "pushd / popd",
-            f"'pushd' {self.root}; gh pr create -t x": "pushd / popd",
-            f"! pushd {self.root}; gh pr create -t x": "pushd / popd",
-            f"time pushd {self.root}; gh pr create -t x": "pushd / popd",
+            f"builtin cd {root}; gh pr create -t x": "version[alpha]",
+            f"cd {root} || cd /; gh pr create -t x": "静的に解決できない",
+            f"if pushd {root}; then gh pr create -t x; fi": "pushd / popd",
+            f"command pushd {root}; gh pr create -t x": "pushd / popd",
+            f"Y=1 pushd {root}; gh pr create -t x": "pushd / popd",
+            f"'pushd' {root}; gh pr create -t x": "pushd / popd",
+            f"! pushd {root}; gh pr create -t x": "pushd / popd",
+            f"time pushd {root}; gh pr create -t x": "pushd / popd",
             "true && ${x} gh pr create -t x": "解析できない",
             "$x gh pr create -t x": "解析できない",
             "env -i gh pr create -t x": "解析できない",
@@ -408,7 +415,7 @@ class MainTest(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.decision(run_hook(bash(cmd, self.root))))
         # 同じ形で repo の外へ移る cd は移動として読む
-        self.assertIsNone(run_hook(bash(f"cd {self._tmp.name}; gh pr create --base main -t x", self.root)))
+        self.assertIsNone(run_hook(bash(f"cd {shell_path(self._tmp.name)}; gh pr create --base main -t x", self.root)))
 
     def test_japanese_payload_as_utf8_bytes(self):
         # Windows では stdin の既定 codec が UTF-8 でないため、日本語タイトルで

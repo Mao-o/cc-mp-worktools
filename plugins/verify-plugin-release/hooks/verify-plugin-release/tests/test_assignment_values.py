@@ -6,12 +6,9 @@
 from __future__ import annotations
 
 import itertools
-import subprocess
-import sys
 import unittest
-from pathlib import Path
 
-import _testutil  # noqa: F401
+import _testutil
 
 import command
 
@@ -399,51 +396,27 @@ class AssignmentValueTest(_Base):
         self.assert_stops("true $'x'; V=$(a $(b)) gh pr create --base m1")
 
     def test_time_is_linear(self):
-        # 走査を 1 回で終わらせる。500 個と 2000 個の時間の比で見る
-        script = (
-            "import time\n"
-            "from command import find_invocations, unresolved_reason\n"
-            "units = {\n"
-            "  'open': ('X=$( ', ''),\n"
-            "  'open dq': ('X=\"$( ', ''),\n"
-            "  'word': ('X=$(a) ', 'gh pr create'),\n"
-            "  'word 2': ('X=$(a $(b)) ', 'gh pr create'),\n"
-            "  'dq': ('\"$(a) ', ''),\n"
-            "  'dq heredoc': ('\"$(cat <<E\\nb\\nE\\n)\" ', 'gh pr create'),\n"
-            "  'quote': (\"X=$(a ' \", ''),\n"
-            "  'brace': ('${', ''),\n"
-            "  'escape': ('X=a\\\\\\\\ ', 'gh pr create'),\n"
-            "  'ansi': (\"X=$'a\\\\\\\\'b' \", 'gh pr create'),\n"
-            "  'backtick': ('`V=$(a $(b)) c` ', 'gh pr create'),\n"
-            "  'nested backtick': ('`a \\\\\\\\`V=$(b) c\\\\\\\\`` ', 'gh pr create'),\n"
-            "}\n"
-            "def run(k):\n"
-            "    best = {}\n"
-            "    for name, (unit, tail) in units.items():\n"
-            "        cmd = 'gh pr create <<x; ' + unit * k + tail\n"
-            "        for _ in range(3):\n"
-            "            t = time.perf_counter()\n"
-            "            unresolved_reason(cmd, find_invocations(cmd))\n"
-            "            d = time.perf_counter() - t\n"
-            "            best[name] = min(best.get(name, d), d)\n"
-            "    return best\n"
-            "small, large = run(500), run(2000)\n"
-            "for name in small:\n"
-            "    print(name, small[name], large[name])\n"
+        # 走査を 1 回で終わらせる。`${` は安全網の正規表現の、gh の前のパスの読みも通る
+        units = {
+            "open": ("X=$( ", ""),
+            "open dq": ('X="$( ', ""),
+            "word": ("X=$(a) ", "gh pr create"),
+            "word 2": ("X=$(a $(b)) ", "gh pr create"),
+            "dq": ('"$(a) ', ""),
+            "dq heredoc": ('"$(cat <<E\nb\nE\n)" ', "gh pr create"),
+            "quote": ("X=$(a ' ", ""),
+            "brace": ("${", ""),
+            "escape": ("X=a\\\\ ", "gh pr create"),
+            "ansi": ("X=$'a\\\\'b' ", "gh pr create"),
+            "backtick": ("`V=$(a $(b)) c` ", "gh pr create"),
+            "nested backtick": ("`a \\\\`V=$(b) c\\\\`` ", "gh pr create"),
+        }
+        _testutil.assert_linear(
+            self,
+            "from command import find_invocations, unresolved_reason",
+            "unresolved_reason(s, find_invocations(s))",
+            {name: ("gh pr create <<x; ", unit, tail) for name, (unit, tail) in units.items()},
         )
-        pkg = Path(__file__).resolve().parent.parent
-        try:
-            r = subprocess.run([sys.executable, "-c", script], cwd=pkg, capture_output=True, text=True, timeout=60)
-        except subprocess.TimeoutExpired:
-            self.fail("60 秒を超えた")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        for line in r.stdout.splitlines():
-            name, small, large = line.rsplit(" ", 2)
-            with self.subTest(name):
-                self.assertLess(float(large), 2.0, line)
-                # 線形なら約 4 倍、2 乗なら約 16 倍。ごく短い時間の揺れは見ない
-                if float(large) > 0.05:
-                    self.assertLess(float(large) / float(small), 9.0, line)
 
 
 _PLAIN_BODY = "--body \"$(cat <<'EOF'\nbody text\nEOF\n)\""
