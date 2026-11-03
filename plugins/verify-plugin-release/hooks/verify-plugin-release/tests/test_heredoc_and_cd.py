@@ -13,7 +13,7 @@ import time
 import unittest
 from pathlib import Path
 
-import _testutil  # noqa: F401
+import _testutil
 
 import command
 from command import find_invocations, unresolved_reason
@@ -352,32 +352,72 @@ class HeredocBodyTest(unittest.TestCase):
         # `&>f&>f ...` は前置きの中に実行位置の始まり (`&`) が並ぶ。前置きの繰り返しに上限が無いと、始まりごとに
         # 残り全部を読み直して個数の 2 乗の時間になる (8000 個で 10 秒)。リダイレクトの対象・代入の値・gh の
         # パスが区切りをまたいで読んでも同じになる。1000 個と 4000 個の時間の比で見る
-        script = (
-            "import time\n"
-            "from command import find_invocations, unresolved_reason\n"
-            "def run(k):\n"
-            "    best = None\n"
-            "    for _ in range(3):\n"
-            "        t = time.perf_counter()\n"
-            "        for tok in ('&>f', '&>f ', '2>&1 ', '>f;', '>f|', 'a=1&', '>f>', 'a=1 '):\n"
-            "            cmd = 'true; ' + tok * k + ' make gh pr'\n"
-            "            unresolved_reason(cmd, find_invocations(cmd))\n"
-            "        d = time.perf_counter() - t\n"
-            "        best = d if best is None else min(best, d)\n"
-            "    return best\n"
-            "small, large = run(1000), run(4000)\n"
-            "print(small, large)\n"
+        tokens = ("&>f", "&>f ", "2>&1 ", ">f;", ">f|", "a=1&", ">f>", "a=1 ")
+        _testutil.assert_linear(
+            self,
+            "from command import find_invocations, unresolved_reason",
+            "unresolved_reason(s, find_invocations(s))",
+            {tok: ("true; ", tok, " make gh pr") for tok in tokens},
         )
-        pkg = Path(__file__).resolve().parent.parent
-        try:
-            r = subprocess.run([sys.executable, "-c", script], cwd=pkg, capture_output=True, text=True, timeout=30)
-        except subprocess.TimeoutExpired:
-            self.fail("前置きの繰り返しで 30 秒を超えた")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        small, large = map(float, r.stdout.split())
-        self.assertLess(large, 1.0)
-        # 線形なら約 4 倍、2 乗なら約 16 倍
-        self.assertLess(large / max(small, 1e-4), 8.0, (small, large))
+
+    def test_opener_runs_take_linear_time(self):
+        # 実行位置の始まり (`(` `{` backtick) が語の中に並ぶと、gh の前のパスと代入の値の読みが始まりごとに語の残りを読み直す
+        tokens = (
+            "(", "{", "`", "$(", "${", "a/(", "a/{", "a/`", "a/$(", "a/${", "$x(", "$x{", '"$(', "\\(", "\\{", "\\`",
+            "a=(", "a={", "a=`", "a=$(", "a=${",
+        )
+        _testutil.assert_linear(
+            self,
+            "from command import find_invocations, unresolved_reason",
+            "unresolved_reason(s, find_invocations(s))",
+            {tok: ("gh pr create; ", tok, " gh pr create") for tok in tokens},
+        )
+
+    def test_words_just_under_the_opener_limit_take_linear_time(self):
+        # 上限の手前の語は読む。語の数に対して線形
+        _testutil.assert_linear(
+            self,
+            "from command import find_invocations, unresolved_reason",
+            "unresolved_reason(s, find_invocations(s))",
+            {"assign": ("gh pr create; ", "a=(" * 255 + " ", "gh pr create")},
+            sizes=(20, 80),
+        )
+
+    def test_opener_runs_in_a_nested_shell_take_linear_time(self):
+        _testutil.assert_linear(
+            self,
+            "from command import unresolved_reason",
+            "unresolved_reason(s, [])",
+            {tok: ("bash -c ' gh pr; ", tok, "'") for tok in ("${", "$(", "(", "{", "`", "a=(")},
+        )
+
+    def test_too_many_openers_in_a_word_stop_only_with_a_pr_operation(self):
+        reason = "括弧などが多すぎて"
+        for opener in ("(", "{", "`", "$(", "${", "a=$("):
+            with self.subTest(opener=opener):
+                self.assertIn(reason, unresolved_reason(f"echo {opener * 256}; gh pr create", []) or "")
+                self.assertIn(reason, unresolved_reason(f"gh pr create; echo {opener * 256}", []) or "")
+                self.assertNotIn(reason, unresolved_reason(f"echo {opener * 255}; gh pr create", []) or "")
+                # 語が分かれていれば数は合算しない
+                self.assertNotIn(reason, unresolved_reason(f"echo {opener * 128} {opener * 128}; gh pr create", []) or "")
+                self.assertIsNone(unresolved_reason(f"echo {opener * 256}; gh pr view", []))
+
+    def test_too_many_openers_inside_a_quoted_body_still_count_the_operation(self):
+        # 引用のある本文は実行されないので数えない (これまでどおり)。別の shell の中身は本文でも見るので、位置を見ずに数える
+        words = "(" * 256
+        self.assertEqual(command._count_pr_ops(f"{words} gh pr create; x gh pr ready"), 2)
+        self.assertIsNone(unresolved_reason(f"cat <<'E'\n{words} gh pr create\nE", []))
+        nested = f"cat <<'E'\nbash -c 'x {words} gh pr create'\nE"
+        self.assertIn("別の shell", unresolved_reason(nested, []) or "")
+        nested_undo = f"cat <<'E'\nbash -c 'x {words} gh pr ready --undo'\nE"
+        self.assertIn("別の shell", unresolved_reason(nested_undo, []) or "")
+        self.assertIsNone(unresolved_reason(f"cat <<'E'\nbash -c 'x {words} gh pr view'\nE", []))
+
+    def test_many_openers_split_by_separators_do_not_stop(self):
+        # 区切りで語が分かれる長い本文は止めない
+        body = "{a} " * 300
+        cmd = f"gh pr create --title x --body '{body}'"
+        self.assertIsNone(unresolved_reason(cmd, find_invocations(cmd)))
 
     def test_too_long_prefix_before_a_pr_operation_stops(self):
         # 上限を超える前置きの後ろの PR 操作は安全網が数えないので、別に見つけて止める

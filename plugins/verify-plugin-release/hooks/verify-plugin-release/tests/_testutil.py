@@ -47,6 +47,59 @@ NO_BACKGROUND_GIT_SETTINGS = (
 )
 
 
+# 別プロセスで走らせる時間の測定。hook が時間切れになるとコマンドは素通しになるので、固まっても suite を止めない
+_SCALING_SCRIPT = """\
+import json, sys, time
+{setup}
+cases, sizes, rounds = json.load(sys.stdin)
+best = {{}}
+for name, (head, unit, tail) in cases.items():
+    texts = [head + unit * k + tail for k in sizes]
+    times = [float("inf")] * len(texts)
+    for _ in range(rounds):
+        for i, s in enumerate(texts):
+            t = time.perf_counter()
+            {call}
+            times[i] = min(times[i], time.perf_counter() - t)
+    best[name] = times
+print(json.dumps(best))
+"""
+# 4 倍の入力で、線形なら約 4 倍、2 乗なら約 16 倍。形ごとに見る (まとめて測ると、重い形に軽い形の 2 乗が隠れる)
+_LINEAR_RATIO_LIMIT = 8.0
+# 機械の速さに依らない、固まっていないことの確認。Windows の runner は手元の 4 倍ほど遅い
+_LINEAR_LARGE_LIMIT = 10.0
+
+
+def _measure_scaling(test, setup, call, cases, sizes, rounds=3) -> dict[str, list[float]]:
+    script = _SCALING_SCRIPT.format(setup=setup, call=call)
+    try:
+        r = subprocess.run(
+            [sys.executable, "-c", script], cwd=_PKG_DIR, input=json.dumps([cases, sizes, rounds]),
+            capture_output=True, text=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        test.fail(f"120 秒を超えた: {sorted(cases)}")
+    test.assertEqual(r.returncode, 0, r.stderr)
+    return json.loads(r.stdout)
+
+
+def assert_linear(test, setup: str, call: str, cases: Mapping[str, tuple[str, str, str]], sizes=(2000, 8000)) -> None:
+    """(head, unit, tail) の unit の繰り返しで `call` (文字列 s を読む文) の時間が線形に伸びることを確かめる。
+
+    小さい入力が数 ms だと比がタイマーの揺れに負けるので、入力を大きくし、大小を交互に測った最小値で比べる。
+    揺れは時間を増やす側にしか働かないので、上限を超えた形だけ測り直して最小値を取る (2 乗の形は何度測っても超える)。
+    """
+    best = _measure_scaling(test, setup, call, dict(cases), list(sizes))
+    over = {k: cases[k] for k, (small, large) in best.items() if large / small >= _LINEAR_RATIO_LIMIT}
+    if over:
+        for name, times in _measure_scaling(test, setup, call, over, list(sizes)).items():
+            best[name] = [min(a, b) for a, b in zip(best[name], times)]
+    for name, (small, large) in best.items():
+        with test.subTest(name=name):
+            test.assertLess(large, _LINEAR_LARGE_LIMIT, (small, large))
+            test.assertLess(large / small, _LINEAR_RATIO_LIMIT, (small, large))
+
+
 def git_config_env(settings: tuple[tuple[str, str], ...]) -> dict[str, str]:
     """`(key, value)` の並びを `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` にする。
 

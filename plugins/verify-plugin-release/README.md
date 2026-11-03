@@ -111,6 +111,8 @@ heredoc (`<<'EOF'` など) の本文に `gh pr create` の使い方を書いて�
 `X=$(echo a b) gh pr create` や `GH_REPO=$(basename $(pwd)) gh pr create` のように、代入の値に空白や置換がある形の
 後ろの PR 操作は「解析できない」で止めます。先に別の行で変数に入れてください (`X=$(echo a b); gh pr create`)。
 引用符の中に閉じた値 (`ROOT="$(git rev-parse --show-toplevel)" gh pr create`) は検査します。
+空白も区切りも無い 1 つの語に `(` `{` backtick が合わせて 256 個以上あるコマンドの PR 操作は、読むと時間がかかりすぎるので止めます
+(詰めた JSON を `--body` に直接書いたときなど。本文はファイルに置いて `--body-file` で渡してください)。
 
 同様に、PR 操作がコマンド置換 (`url="$(gh pr create ...)"`)・関数・`pushd` の後などにあって
 検査対象を特定できない場合も止めます。**`gh pr create` / `gh pr ready` は単独のコマンド

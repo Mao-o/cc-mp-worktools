@@ -78,6 +78,11 @@ _LONG_PREFIX = re.compile(_EXEC_START + _PREFIX_ITEM + "{%d}" % (_PREFIX_LIMIT +
 _WORD_PART_NO_PAIR = r"""(?:'[^']*'|"[^"]*"|\$\([^()]*\)|`[^`]*`|[^\s'";&|<>])"""
 _EXEC_POS_NO_PAIR = re.compile(_EXEC_POS.pattern.replace(_WORD_PART, _WORD_PART_NO_PAIR))
 _LONG_PREFIX_NO_PAIR = re.compile(_LONG_PREFIX.pattern.replace(_WORD_PART, _WORD_PART_NO_PAIR))
+# 1 つの語の中に実行位置の始まり (`(` `{` backtick) が並ぶ形 (`${${...` / `a=$(a=$(...`)。gh の前のパスと代入の値の読みは語の残りを
+# 最後まで見るので、始まりごとに読み直して語の長さの 2 乗の時間になる (hook が時間切れになるとコマンドが素通しになる)。
+# 空白も区切りも無い語にこの数が並ぶ形は読まずに止める。語の先頭からだけ数えるので、この検査自体は線形
+_OPENER_LIMIT = 256
+_TOO_MANY_OPENERS = re.compile(r"(?<![^\s;&|<>])(?:[^\s;&|<>({`]*[({`]){%d}" % _OPENER_LIMIT)
 _PR_OP_ANYWHERE = re.compile(_PR_OP)
 # shell の名前 (sh / bash / zsh / ksh / dash / ash / ssh / csh / tcsh / mksh / yash / fish)
 _SHELLS = r"(?:ba|z|k|da|a|c|tc|mk|ya|fi)?sh"
@@ -1501,8 +1506,18 @@ def _blank_quoted_bodies(command: str) -> str:
     return command if _SHELL_READER.search(blanked) else blanked
 
 
+def _has_exec_pr_op(text: str) -> bool:
+    """実行位置に PR 操作がありそうか (`gh pr ready --undo` も含む。位置を読むと 2 乗になる語があれば位置を見ない)。"""
+    if _TOO_MANY_OPENERS.search(text):
+        return bool(_PR_OP_ANYWHERE.search(text))
+    return bool(_EXEC_POS.search(text) or _EXEC_POS_NO_PAIR.search(text))
+
+
 def _count_pr_ops(text: str) -> int:
     """実行位置にある PR 操作を数える (draft に戻す `gh pr ready --undo` は除く)。"""
+    if _TOO_MANY_OPENERS.search(text):
+        # 位置を読むと 2 乗の時間になるので、位置を見ずに全部数える (数えすぎは止める側)
+        return len(_PR_OP_ANYWHERE.findall(text))
     # `\` が無ければ 2 つの読みは同じ (同じ走査を 2 回しない)
     patterns = (_EXEC_POS, _EXEC_POS_NO_PAIR) if "\\" in text else (_EXEC_POS,)
     return max(
@@ -1523,10 +1538,13 @@ def unresolved_reason(command: str, found: list[Invocation]) -> str | None:
         return None  # 安全網の正規表現はどれも gh と pr を含む (継続行をつないだ後で見る)
     # 数え上げは、区切り語に引用がある heredoc の本文を空行にした文字列で行う (構文解析と同じく本文を数えない)
     counted = _join_continuations(_blank_quoted_bodies(command))
-    for pattern in (_LONG_PREFIX, _LONG_PREFIX_NO_PAIR):
-        long_prefix = pattern.search(counted)
-        if long_prefix and _PR_OP_ANYWHERE.search(counted, long_prefix.start()):
-            return "PR 操作の前の前置き (リダイレクト・代入など) が長すぎて位置を確かめられない"
+    if _PR_OP_ANYWHERE.search(counted):
+        if _TOO_MANY_OPENERS.search(counted):
+            return "1 つの語に括弧などが多すぎて PR 操作の位置を確かめられない"
+        for pattern in (_LONG_PREFIX, _LONG_PREFIX_NO_PAIR):
+            long_prefix = pattern.search(counted)
+            if long_prefix and _PR_OP_ANYWHERE.search(counted, long_prefix.start()):
+                return "PR 操作の前の前置き (リダイレクト・代入など) が長すぎて位置を確かめられない"
     expected = _count_pr_ops(counted)
     # 代入の値の入れ子は正規表現で読めないので、語の読みで分けた文字列でも数える。構文解析は値を読まないので、
     # 値に空白や置換がある形の後ろの gh は、見つからずに数だけ合わなくなって止まる。cwd を変えうる語があっても新しい読みの
@@ -1534,7 +1552,7 @@ def unresolved_reason(command: str, found: list[Invocation]) -> str | None:
     expected = max(expected, _count_pr_ops(_split_assignments(_strip_comments(command))))
     # bash -c の中身と pushd / popd は、引用のある本文の中のものも加工前の文字列で見る (止める側)
     for m in _NESTED_SHELL.finditer(raw):
-        if _EXEC_POS.search(m.group(2)) or _EXEC_POS_NO_PAIR.search(m.group(2)):
+        if _has_exec_pr_op(m.group(2)):
             return "PR 操作が別の shell (bash -c / eval 等) の中にある"
     if expected > len(found) or any(not inv.parsed for inv in found):
         return "PR 操作の位置を解析できない (コマンド置換・サブシェル等の中にある)"
