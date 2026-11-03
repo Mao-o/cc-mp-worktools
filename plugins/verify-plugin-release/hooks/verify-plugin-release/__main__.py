@@ -21,9 +21,11 @@ import json
 import os
 import re
 import sys
+import threading
 from pathlib import Path
 
 import config
+import runner
 import gate
 import layout
 from command import Invocation
@@ -376,6 +378,24 @@ def _manual(argv: list[str]) -> int:
     return 1 if rep.failed else 0
 
 
+def _arm_last_resort() -> threading.Timer:
+    """どの子プロセスの待ちで固まっても、hook の時間切れの前に止める判断を返す。
+
+    Windows の subprocess.run は時間切れの後に孫が pipe を閉じるまで待つ。このスレッドはその待ちと無関係に動く。
+    """
+
+    def fire() -> None:
+        msg = f"hook 全体の制限時間 ({HOOK_BUDGET} 秒) を超えても子プロセスの終わりを待っている。{_SPLIT_ADVICE}"
+        json.dump(_error(GateTimeout(msg), _mode() == "warn"), sys.stdout)
+        sys.stdout.flush()
+        os._exit(0)
+
+    timer = threading.Timer(runner.LAST_RESORT, fire)
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
 def main() -> None:
     # Windows の既定 (cp1252 等) では日本語の入出力で例外になり、hook が JSON を
     # 返せないまま終わる = Claude Code はコマンドをそのまま実行する。入出力は
@@ -395,10 +415,12 @@ def main() -> None:
     command = (data.get("tool_input") or {}).get("command") or ""
     if not isinstance(command, str) or not command:
         return
+    timer = _arm_last_resort()
     try:
         result = evaluate(command, data.get("cwd") or "")
     except Exception as e:  # noqa: BLE001 - ゲートを完了できない → 止める (例外で終わるとコマンドが走る)
         result = _error(e, _mode() == "warn")
+    timer.cancel()
     if result is not None:
         json.dump(result, sys.stdout)
 

@@ -12,6 +12,10 @@ import faulthandler
 import json
 import subprocess
 import sys
+from pathlib import Path
+
+# 子はスクリプトとして起動する。PYTHONSAFEPATH=1 だと script の dir が sys.path に入らず、全部の子が異常終了する
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from command import _READ_LIMIT, Invocation, _join_continuations, find_invocations, unresolved_reason
 from runner import Deadline
@@ -23,7 +27,7 @@ CHILD_FROM = 4096
 READ_SECONDS = 15
 # 親が先に落ちても子が残らないように、子は期限 + この秒数で自分で終わる
 _CHILD_GRACE = 1.0
-_ADVICE = "PR 操作の位置を確かめられない (本文はファイルに置いて --body-file で渡す)"
+_ADVICE = "PR 操作の位置を確かめられない (本文はファイルに置いて --body-file で渡すか、コマンドを分けて 4096 文字未満にする)"
 
 
 def _reads_in_child(command: str) -> bool:
@@ -52,8 +56,10 @@ def read_command(command: str, budget: Deadline) -> tuple[list[Invocation], str 
         if r.returncode != 0:
             return [], f"コマンドの読み取りが異常終了した (exit {r.returncode}) ので{_ADVICE}"
         data = json.loads(r.stdout)
-        found = [Invocation(**{**d, "cd_steps": tuple(d["cd_steps"])}) for d in data["found"]]
-        return found, data["reason"]
+        reason = data["reason"]
+        if not isinstance(data["found"], list) or not (reason is None or (isinstance(reason, str) and reason)):
+            raise TypeError("found / reason の型が違う")
+        return [Invocation(**{**d, "cd_steps": tuple(d["cd_steps"])}) for d in data["found"]], reason
     except subprocess.TimeoutExpired:
         return [], f"コマンドの読み取りが制限時間 ({seconds:.0f} 秒) で終わらないので{_ADVICE}"
     except Exception as e:  # noqa: BLE001 - 読めないものは止める (例外の種類で通す側に倒さない)

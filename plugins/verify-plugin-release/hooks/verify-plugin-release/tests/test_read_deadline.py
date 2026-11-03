@@ -226,6 +226,49 @@ class RealHookTest(unittest.TestCase):
         self.assertLess(elapsed, 0.2 + _MARGIN)
 
 
+class LastResortTest(unittest.TestCase):
+    def _hook(self, env_extra=None):
+        script = (
+            "import runpy, sys, time\n"
+            f"sys.path.insert(0, {str(_PKG)!r})\n"
+            "import reading, runner\n"
+            "runner.LAST_RESORT = 1\n"
+            "reading.read_command = lambda c, b: time.sleep(60)\n"  # 子プロセスの待ちで固まった状態
+            f"runpy.run_path({str(_PKG / '__main__.py')!r}, run_name='__main__')\n"
+        )
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "gh pr create"}, "cwd": str(_PKG)})
+        try:
+            return subprocess.run([sys.executable, "-c", script], input=payload.encode(), capture_output=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            self.fail("最後の手段が効かず、hook が固まった")
+
+    def test_hung_wait_is_denied_before_the_hook_timeout(self):
+        r = self._hook()
+        self.assertEqual(json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_last_resort_is_after_the_cleanup_and_before_the_hook_timeout(self):
+        import runner
+        self.assertGreaterEqual(runner.LAST_RESORT, HOOK_BUDGET + 10.5)
+        self.assertLess(runner.LAST_RESORT, 120)
+
+
+class ChildOutputTypeTest(unittest.TestCase):
+    def test_wrong_types_stop(self):
+        cmd = _padded("gh pr create")
+        for out in (b'{"found": {}, "reason": null}', b'{"found": "", "reason": null}',
+                    b'{"found": [], "reason": ""}', b'{"found": [], "reason": 0}', b'{"found": [], "reason": false}'):
+            with self.subTest(out=out), mock.patch.object(
+                reading.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, out, b"")
+            ):
+                self.assertIn("--body-file", read_command(cmd, Deadline(60))[1] or "")
+
+    def test_child_starts_under_safe_path(self):
+        env = {**os.environ, "PYTHONSAFEPATH": "1"}
+        r = subprocess.run([sys.executable, str(_PKG / "reading.py"), "30"], input=json.dumps("git status").encode(),
+                           capture_output=True, env=env, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
 class HookBudgetTest(unittest.TestCase):
     """読み取り・repo の確認・設定の読み・ゲートは 1 つの予算を分け合う。"""
 
@@ -235,7 +278,7 @@ class HookBudgetTest(unittest.TestCase):
         write_json(
             self.root,
             ".claude/verify-plugin-release.json",
-            {"fetch": False, "timeout_seconds": 110, "test_command": [sys.executable, "-c", "import time; time.sleep(10)"]},
+            {"fetch": False, "timeout_seconds": 110, "test_command": [sys.executable, "-c", "import time; time.sleep(60)"]},
         )
         commit_all(self.root, "config")
         sh(self.root, "switch", "-q", "-c", "feat")
@@ -262,7 +305,7 @@ class HookBudgetTest(unittest.TestCase):
         reason = decision.get("permissionDecisionReason", "")
         self.assertIn("110 秒", reason)
         self.assertIn("縮めて", reason)
-        self.assertLess(elapsed, 9)  # テストの 10 秒を待っていない
+        self.assertLess(elapsed, 30)  # テストの 60 秒を待っていない
 
     def test_operations_in_one_command_share_the_budget(self):
         # draft の検査が予算を使い切ると、次の PR 操作は検査できないので止まる
@@ -270,7 +313,7 @@ class HookBudgetTest(unittest.TestCase):
         decision = (out or {}).get("hookSpecificOutput", {})
         self.assertEqual(decision.get("permissionDecision"), "deny")
         self.assertIn("使い切った", decision.get("permissionDecisionReason", ""))
-        self.assertLess(elapsed, 9)  # テストの 10 秒を待っていない
+        self.assertLess(elapsed, 30)  # テストの 60 秒を待っていない
 
     def test_repo_lookup_and_config_read_are_cut_by_the_budget(self):
         seen = []

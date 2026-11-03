@@ -18,6 +18,8 @@ from pathlib import Path
 # 読み取り 15 秒 (reading.READ_SECONDS) + ゲートの既定 90 秒。hooks.json の 120 秒との差 15 秒は、時間切れの後の後始末
 # (Windows の taskkill は 1 回 10 秒まで) と、Python の起動と出力のための余裕
 HOOK_BUDGET = 105
+# 予算と後始末 (105 + taskkill 10 + poll 0.5) でも返せなかったときの最後の手段。hooks.json の 120 秒の手前
+LAST_RESORT = 117
 
 
 class GateTimeout(Exception):
