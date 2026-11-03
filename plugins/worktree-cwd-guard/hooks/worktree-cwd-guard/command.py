@@ -1014,11 +1014,12 @@ class _Analyzer:
                 return
             sub = rest[0]
             if sub == "worktree":
-                base = targets[0] if targets else None
-                for path in _worktree_targets(rest, base):
-                    o = owner(path, fam)
-                    if o is not None and o != fam.home and path == o:
-                        self._add(Finding(True, f"`git worktree {rest[1]}` が別の worktree ({o}) を対象にしている", o))
+                # 相対パスの基点は作業ツリーの指定や git dir で変わる。どの基点でも別の worktree なら止める
+                for base in targets or [None]:
+                    for path in _worktree_targets(rest, base):
+                        o = owner(path, fam)
+                        if o is not None and o != fam.home and path == o:
+                            self._add(Finding(True, f"`git worktree {rest[1]}` が別の worktree ({o}) を対象にしている", o))
                 continue
             if not _is_mutating(sub, rest[1:]):
                 return
@@ -1028,6 +1029,6 @@ class _Analyzer:
             for target in targets:
                 o = owner(target, fam)
                 if o is not None and o != fam.home:
-                    self._add(Finding(True, f"`git {sub}` が別の checkout ({o}) を書き換える", o))
+                    self._add(Finding(True, f"`git {sub}` が別の checkout ({o}) を対象にしている", o))
         if note is not None:
             self._add(note)

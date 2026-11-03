@@ -6,7 +6,7 @@
 `export GIT_DIR=<自分の worktree>/.git; git -C <main> reset --hard` は main の作業ツリーを上書きし、`git --git-dir=<別の worktree>/.git add .` は別の worktree の index に書くのに、止まらなかった (0.7.0 まで)。
 どちらも対象を足す変更で、0.7.0 が止めていた形は止まったまま (比較の全入力で 0 件)。
 
-### 修正: git dir だけが効くとき、作業ツリーは今の場所
+### 修正: git dir だけが効くとき、作業ツリーは今の場所 (config の `core.worktree` が無ければ)
 
 `--work-tree` / `GIT_WORK_TREE` が無ければ、git は今の場所を作業ツリーにする。0.7.0 までは git dir の checkout だけを見ていた。今の場所 (`cd` / `git -C` の後) も対象に足す。
 今の場所が決まらない形 (`cd "$Y"; GIT_DIR=<自分の worktree>/.git git reset --hard`) は注意を出す。git dir の checkout が別の checkout なら、これまでどおり止める。
@@ -14,6 +14,12 @@
 ### 修正: `<checkout>/.git` を、その checkout の git dir として読む
 
 linked worktree の `.git` はファイルで、git は中身をたどる。0.7.0 までは `.git/worktrees/<name>` の形だけを対応付けていて、`<worktree>/.git` の形は別の checkout だと分からなかった。
+
+### 修正: `git worktree remove|move` の相対パスは、どの基点でも別の worktree なら止める
+
+`git worktree remove|move` の相対パスは、git dir・作業ツリー・今の場所のどの基点でも別の worktree なら止める。git dir と作業ツリーの指定で基点が変わるので、先頭の対象だけで読まない。`GIT_DIR=<main>/.git git worktree remove --force ../<別>` と `cd <main>; GIT_DIR=<自分>/.git git worktree remove --force <別への相対パス>` は別の worktree を消すのに、止まらなかった (0.7.0 まで)。
+
+止める理由の文面は「`git <sub>` が別の checkout (...) を対象にしている」に変えた。`cd <main>; GIT_DIR=<自分>/.git git add .` のように書かない形でも出るため。
 
 ### 実 git の実測
 
@@ -34,12 +40,14 @@ bash 3.2 と `zsh -f` で本物の git を走らせた結果 (○ = 別 checkout
 - 今の場所が別の checkout なら、作業ツリーを書かない操作も止まる: `cd <main>; GIT_DIR=<自分>/.git git add .` / `git commit -m x` / `git reset --soft` (git dir の側にだけ書く)。操作ごとの読みは足していない
 - git が失敗して何も書かない git dir も同じに読む: `GIT_DIR= git -C <main> reset --hard` / `GIT_DIR=<自分> git -C <main> reset --hard`
 - 綴りが違う git dir は対応付けない (見逃し。0.7.0 と同じ): `GIT_DIR=<別>/.GIT git add .` (大文字小文字を区別しない FS) / `.git` ファイルの hard link
+- `git worktree remove|move` の相対パスは、実際の基点が 1 つでも全部の基点で読むので、git が失敗する形も止まる: `GIT_DIR=<main>/.git git worktree remove <main からの相対パス>` / `cd sub; git --work-tree=<自分> worktree remove ../<別>`
+- `git worktree remove|move` の、パスの末尾だけの指定は読まない (見逃し。0.7.0 と同じ): `git worktree remove --force <別の名前>` (git は末尾の一致で別の worktree を選ぶ)
 
 ### テストの追加
 
-- `tests/test_git_dir_targets.py`: `GitDirOnlyWorkTreeTest` / `GitFileMappingTest` / `RealGitTest` (本物の git と本物の shell で、書く / 書かないの前提を固定する)
+- `tests/test_git_dir_targets.py`: `GitDirOnlyWorkTreeTest` / `GitFileMappingTest` / `WorktreeBaseTest` / `RealGitTest` (本物の git と本物の shell で、書く / 書かないの前提を固定する)
 
-テスト件数: 158 → 176 (追加 18・削除 0・統合 0)。
+テスト件数: 158 → 180 (追加 22・削除 0・統合 0)。
 
 ## 0.7.0
 

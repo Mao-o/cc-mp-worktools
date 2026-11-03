@@ -54,7 +54,7 @@ class GitDirOnlyWorkTreeTest(test_guard.GuardBase):
         out = evaluate(bash(f'cd "{self.main}"; GIT_DIR="{self.a}/.git" git {RESET}', self.a))
         self.assertEqual(decision(out), "deny")
         reason = out["hookSpecificOutput"]["permissionDecisionReason"]
-        self.assertIn(f"`git reset` が別の checkout ({family.norm(self.main)})", reason)
+        self.assertIn(f"`git reset` が別の checkout ({family.norm(self.main)}) を対象にしている", reason)
 
     def test_git_dir_outside_the_repo_writes_the_checkout_of_the_place(self):
         other = Path(self._tmp.name) / "other"
@@ -171,6 +171,46 @@ class GitFileMappingTest(test_guard.GuardBase):
         self.assertEqual(decision(evaluate(bash(f'GIT_DIR="{self.b}/.git" git add .', self.a))), "deny")
 
 
+class WorktreeBaseTest(test_guard.GuardBase):
+    """`git worktree remove|move` の相対パスは、git dir・作業ツリー・今の場所のどの基点でも別の worktree なら止める。"""
+
+    def test_relative_path_from_any_base_is_denied(self):
+        rel = os.path.relpath(self.b, self.main)
+        own = self.a / ".git"
+        for cmd in (
+            f'cd "{self.main}"; git --git-dir="{own}" --work-tree="{self.main}" worktree remove --force {rel}',
+            f'cd "{self.main}"; GIT_DIR="{own}" GIT_WORK_TREE="{self.main}" git worktree remove --force {rel}',
+            f'git -C "{self.main}" --git-dir="{own}" --work-tree=. worktree remove --force {rel}',
+            f'git --git-dir="{own}" --work-tree="{self.main}" worktree remove --force {rel}',
+            f'git --git-dir=.git --work-tree="{self.main}" worktree remove --force {rel}',
+            f'cd "{self.main}"; git --git-dir="{own}" --work-tree="{self.main}" worktree move {rel} /tmp/x',
+            f'cd "{self.b}"; git --git-dir="{own}" --work-tree=. worktree remove --force .',
+            f'cd "{self.main}"; git --git-dir="{self.b}/.git" --work-tree="{self.main}" worktree remove --force {rel}',
+            f'cd "{self.main}"; GIT_DIR="{own}" git worktree remove --force {rel}',
+            f'GIT_DIR="{self.main}/.git" git worktree remove --force {os.path.relpath(self.b, self.a)}',
+            # git dir の checkout から読むと別の worktree になる形 (今の場所から読むと git は失敗する)。0.7.0 と同じに止める
+            f'GIT_DIR="{self.main}/.git" git worktree remove --force {rel}',
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+
+    def test_absolute_path_is_denied_when_no_base_is_known(self):
+        for cmd in (f'cd "$Y"; git worktree remove --force "{self.b}"', f'git -C "$Y" worktree remove --force "{self.b}"'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
+
+    def test_own_worktree_and_other_subcommands_stay_allowed(self):
+        own = self.a / ".git"
+        for cmd in (
+            f'git worktree remove --force "{self.a}"',
+            f'git --git-dir=.git --work-tree=. worktree remove --force "{self.a}"',
+            "git --git-dir=.git worktree add ../c -b c",
+            f'GIT_DIR="{own}" git worktree prune',
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(evaluate(bash(cmd, self.a)))
+
+
 class RealGitTest(unittest.TestCase):
     """本物の git と本物の shell で走らせ、判定の前提の「書く / 書かない」を固定する。"""
 
@@ -225,6 +265,13 @@ class RealGitTest(unittest.TestCase):
                 self.assertEqual((self.main / "README.md").read_text(encoding="utf-8"), "dirty main\n")
                 self.assertEqual((self.a / "README.md").read_text(encoding="utf-8"), "# demo\n")
                 (self.a / "README.md").write_text("dirty a\n", encoding="utf-8")
+
+    def test_worktree_remove_takes_the_relative_path_from_the_place(self):
+        # `.git` ファイルを git dir にしても、相対パスは今の場所から読まれて別の worktree が消える
+        self.assertTrue(self.b.exists())
+        rel = os.path.relpath(self.b, self.main)
+        self._run(["/bin/bash", "-c"], f'cd "{self.main}"; git --git-dir="{self.a}/.git" --work-tree="{self.main}" worktree remove --force {rel}')
+        self.assertFalse(self.b.exists())
 
 
 if __name__ == "__main__":
