@@ -1563,7 +1563,7 @@ def unresolved_reason(command: str, found: list[Invocation]) -> str | None:
     counted = _BLANK_RUN.sub("\n", _join_continuations(_blank_quoted_bodies(command)))
     if _PR_OP_ANYWHERE.search(counted):
         if _too_many_openers(counted):
-            return "1 つの語に括弧などが多すぎて PR 操作の位置を確かめられない (本文はファイルに置いて --body-file で渡す)"
+            return "括弧などが多すぎて PR 操作の位置を確かめられない (本文はファイルに置いて --body-file で渡す)"
         for pattern in (_LONG_PREFIX, _LONG_PREFIX_NO_PAIR):
             long_prefix = pattern.search(counted)
             if long_prefix and _PR_OP_ANYWHERE.search(counted, long_prefix.start()):
