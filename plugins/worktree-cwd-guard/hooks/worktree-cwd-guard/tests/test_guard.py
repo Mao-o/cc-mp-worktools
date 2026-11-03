@@ -392,7 +392,8 @@ class NtpathEmulationTest(unittest.TestCase):
                     self.assertTrue(self._blocked(cmd))
 
     def test_tilde_word_with_a_home_is_expanded(self):
-        # 実在する home なら、その下の checkout を止める (`~other` は USERPROFILE の親の下の `other`)
+        # 実在する home なら、その下の checkout を止める (`~other` は USERPROFILE の親の下の `other`)。
+        # 引用した `~` は実際の shell では展開されないが、引用の有無を区別しない既存の読みで止める側に倒す
         for cmd in ("git -C ~other/repo reset --hard", "git -C ~other/wt-b reset --hard", 'git -C "~other\\repo" reset --hard'):
             with self.subTest(cmd=cmd):
                 self.assertTrue(self._blocked(cmd, homes=(self.TMP,)))
