@@ -357,7 +357,7 @@ class HeredocBodyTest(unittest.TestCase):
             self,
             "from command import find_invocations, unresolved_reason",
             "unresolved_reason(s, find_invocations(s))",
-            {tok: ("true; ", tok, " make gh pr") for tok in tokens},
+            {tok: ("gh pr create; ", tok, " make gh pr") for tok in tokens},
         )
 
     def test_opener_runs_take_linear_time(self):
@@ -373,15 +373,45 @@ class HeredocBodyTest(unittest.TestCase):
             {tok: ("gh pr create; ", tok, " gh pr create") for tok in tokens},
         )
 
-    def test_words_just_under_the_opener_limit_take_linear_time(self):
-        # 上限の手前の語は読む。語の数に対して線形
+    def test_openers_split_inside_quotes_take_linear_time(self):
+        # 代入の値は引用符・`\ `・`$(b c)`・backtick の中をまたいで読むので、空白や `;` で語を割っても読み直しの長さは縮まない
+        tokens = ('$(a=" "', "(a=' '", "(a=\\ ", '(a=";"', "(a=$(b c)", "(a=`b c`", "{a=$'\\ '", '(>" "', '(2>" "', '(&>" "')
+        cases = {t: ("gh pr create; ", t, " gh pr create") for t in tokens}
+        # 空行の並びは改行ごとに残りを読み直す。`\s` が読む文字はどれも同じ
+        cases["heredoc body"] = ("cat > f <<'E'\n", "x\n", "E\ngh pr create --body-file f")
+        cases["blank lines"] = ("gh pr create\n", "\n", "x")
+        for name, unit in (("form feed", "\n\f"), ("vertical tab", "\n\v"), ("ideographic space", "\n\u3000"), ("cr", "\r\n")):
+            cases[name] = ("gh pr create\n", unit, "x")
+        cases["blank lines in eval"] = ('eval " gh pr ; ', "\n \n", '"')
+        # --repo の値は語の全部を読むので、次の `(gh -R` も値として読み直す
+        for start in ("(", ";", "\n"):
+            cases[f"repo after {start!r}"] = ("gh pr create; ", start + "gh -R ", "")
+        cases["repo run"] = ("gh pr; ", "gh -R ", "")
         _testutil.assert_linear(
-            self,
-            "from command import find_invocations, unresolved_reason",
-            "unresolved_reason(s, find_invocations(s))",
-            {"assign": ("gh pr create; ", "a=(" * 255 + " ", "gh pr create")},
-            sizes=(20, 80),
+            self, "from command import find_invocations, unresolved_reason", "unresolved_reason(s, find_invocations(s))", cases,
         )
+
+    def test_value_starts_stop_at_the_limit_across_words(self):
+        # `(a=` は値の読みが語をまたぐので、語が分かれていてもコマンド全体で数える。語の中の括弧だけの数え方は語ごとのまま
+        reason = "括弧などが多すぎて"
+        for unit in ("(a=1 ", "{a=1;", "`a=1 ", "(>f ", "( a=1 ", "(2>f "):
+            with self.subTest(unit=unit):
+                self.assertIn(reason, unresolved_reason("gh pr create; " + unit * 256, []) or "")
+                self.assertNotIn(reason, unresolved_reason("gh pr create; " + unit * 255, []) or "")
+                self.assertIsNone(unresolved_reason("gh pr view; " + unit * 256, []))
+
+    def test_too_many_repo_options_stop(self):
+        # --repo の長い並びは読まずに止める。pr の前後のそれぞれで数える
+        for cmd in (
+            "f() { gh" + " -R a/b" * 9 + " pr create; }",
+            "f() { gh pr" + " --repo=a/b" * 9 + " create; }",
+            "f() { gh" + " -R a/b" * 8 + " pr" + " -R a/b" * 9 + " create; }",
+        ):
+            with self.subTest(cmd=cmd[:30]):
+                self.assertIn("--repo", unresolved_reason(cmd, find_invocations(cmd)) or "")
+        cmd = "f() { gh" + " -R a/b" * 8 + " pr" + " -R a/b" * 8 + " create; }"
+        self.assertEqual(find_invocations(cmd), [])
+        self.assertIn("解析できない", unresolved_reason(cmd, []) or "")
 
     def test_opener_runs_in_a_nested_shell_take_linear_time(self):
         _testutil.assert_linear(
@@ -401,9 +431,15 @@ class HeredocBodyTest(unittest.TestCase):
                 # 語が分かれていれば数は合算しない
                 self.assertNotIn(reason, unresolved_reason(f"echo {opener * 128} {opener * 128}; gh pr create", []) or "")
                 self.assertIsNone(unresolved_reason(f"echo {opener * 256}; gh pr view", []))
+                for sep in ";&|<>":
+                    # 語は空白と ;&|<> で切れる。切れた語の数は合算せず、区切りの直後からも語の先頭として数える
+                    separated = f"echo {opener * 128}{sep}{opener * 128}; gh pr create"
+                    self.assertNotIn(reason, unresolved_reason(separated, []) or "", sep)
+                    self.assertIn(reason, unresolved_reason(f"echo x{sep}{opener * 256}; gh pr create", []) or "", sep)
 
     def test_too_many_openers_inside_a_quoted_body_still_count_the_operation(self):
         # 引用のある本文は実行されないので数えない (これまでどおり)。別の shell の中身は本文でも見るので、位置を見ずに数える
+        # (`--body "$(cat <<'EOF' ...)"` は `$(` の中で本文を読み飛ばさないので、詰めた JSON は heredoc で渡しても同じ)
         words = "(" * 256
         self.assertEqual(command._count_pr_ops(f"{words} gh pr create; x gh pr ready"), 2)
         self.assertIsNone(unresolved_reason(f"cat <<'E'\n{words} gh pr create\nE", []))

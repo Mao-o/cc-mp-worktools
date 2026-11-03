@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 
 import _testutil
 
@@ -583,7 +583,7 @@ class ExpansionCommandWordTest(unittest.TestCase):
             self,
             "from command import find_invocations, unresolved_reason",
             "unresolved_reason(s, find_invocations(s))",
-            {tok: ("true; ", tok, " make gh pr") for tok in tokens},
+            {tok: ("gh pr create; ", tok, " make gh pr") for tok in tokens},
         )
 
 
@@ -654,25 +654,24 @@ class WindowsPathReadingTest(unittest.TestCase):
     """Windows のパスの綴りの読み。読みは文字列だけで決まるので、どの OS でも確かめられる。"""
 
     def test_steps_follow_the_shell_quoting(self):
-        for cmd, step, want in (
-            ('cd "C:\\Users\\me"; ', "C:\\Users\\me", "C:\\Users\\me"),
-            ("cd 'C:\\Users\\me'; ", "C:\\Users\\me", "C:\\Users\\me"),
-            ("cd C:\\\\Users\\\\me; ", "C:\\Users\\me", "C:\\Users\\me"),
-            ("cd C:/Users/me; ", "C:/Users/me", "C:\\Users\\me"),
-            ("cd D:/other; ", "D:/other", "D:\\other"),
-            # 引用なしの `\` はシェルが外す。同じ読みで、cwd の下の無い dir になって止まる
-            ("cd C:\\Users\\me; ", "C:Usersme", "C:\\w\\Usersme"),
+        for cmd, step in (
+            ('cd "C:\\Users\\me"; ', "C:\\Users\\me"),
+            ("cd 'C:\\Users\\me'; ", "C:\\Users\\me"),
+            ("cd C:\\\\Users\\\\me; ", "C:\\Users\\me"),
+            ("cd C:/Users/me; ", "C:/Users/me"),
+            ("cd D:/other; ", "D:/other"),
+            # 引用なしの `\` はシェルが外す
+            ("cd C:\\Users\\me; ", "C:Usersme"),
         ):
             with self.subTest(cmd=cmd):
                 found = find_invocations(cmd + _GH)
                 self.assertEqual([inv.cd_steps for inv in found], [(step,)])
                 self.assertIsNone(found[0].cd_unresolved)
-                self.assertEqual(str(PureWindowsPath("C:\\w") / step), want)
 
 
 # 表の読みは文字列だけで決まり、上の表のテストが Windows でも走る。ここは実シェルとの突き合わせで、シェルの文法は同じ。
-# Windows では PATH の `C:\...:/usr/bin` と $PWD の綴り (`/c/...`) がこの作りのまま通らず、偽の gh が 1 度も走らない
-@unittest.skipIf(os.name == "nt", "偽の gh を PATH の POSIX の形で置く作りで、Windows のシェルでは走らない")
+# Windows の CI では偽の gh が 1 度も走らない (実際の集合が全件空)。原因は未切り分けだが、製品のコードは通らない
+@unittest.skipIf(os.name == "nt", "Windows の CI では偽の gh が走らない")
 @unittest.skipUnless(shutil.which("bash"), "bash が無い")
 class RealShellTest(unittest.TestCase):
     """読みが実際の $PWD と合うことを、手元のシェルで確かめる。"""

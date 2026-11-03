@@ -66,6 +66,8 @@ print(json.dumps(best))
 """
 # 4 倍の入力で、線形なら約 4 倍、2 乗なら約 16 倍。形ごとに見る (まとめて測ると、重い形に軽い形の 2 乗が隠れる)
 _LINEAR_RATIO_LIMIT = 8.0
+# 大きい入力が伸びないのは線形の確認になっていない (早期終了で読んでいない、前半で止まる入力を測っている)
+_LINEAR_RATIO_FLOOR = 1.5
 # 機械の速さに依らない、固まっていないことの確認。Windows の runner は手元の 4 倍ほど遅い
 _LINEAR_LARGE_LIMIT = 10.0
 
@@ -87,17 +89,22 @@ def assert_linear(test, setup: str, call: str, cases: Mapping[str, tuple[str, st
     """(head, unit, tail) の unit の繰り返しで `call` (文字列 s を読む文) の時間が線形に伸びることを確かめる。
 
     小さい入力が数 ms だと比がタイマーの揺れに負けるので、入力を大きくし、大小を交互に測った最小値で比べる。
-    揺れは時間を増やす側にしか働かないので、上限を超えた形だけ測り直して最小値を取る (2 乗の形は何度測っても超える)。
+    揺れは時間を増やす側にしか働かないので、比が範囲の外の形だけ測り直して最小値を取る (2 乗の形は何度測っても上限を
+    超え、読まずに終わる形は何度測っても下限を割る)。
     """
     best = _measure_scaling(test, setup, call, dict(cases), list(sizes))
-    over = {k: cases[k] for k, (small, large) in best.items() if large / small >= _LINEAR_RATIO_LIMIT}
-    if over:
-        for name, times in _measure_scaling(test, setup, call, over, list(sizes)).items():
+    outside = {
+        k: cases[k] for k, (small, large) in best.items()
+        if not _LINEAR_RATIO_FLOOR < large / small < _LINEAR_RATIO_LIMIT
+    }
+    if outside:
+        for name, times in _measure_scaling(test, setup, call, outside, list(sizes), rounds=5).items():
             best[name] = [min(a, b) for a, b in zip(best[name], times)]
     for name, (small, large) in best.items():
         with test.subTest(name=name):
             test.assertLess(large, _LINEAR_LARGE_LIMIT, (small, large))
             test.assertLess(large / small, _LINEAR_RATIO_LIMIT, (small, large))
+            test.assertGreater(large / small, _LINEAR_RATIO_FLOOR, (small, large))
 
 
 def git_config_env(settings: tuple[tuple[str, str], ...]) -> dict[str, str]:
