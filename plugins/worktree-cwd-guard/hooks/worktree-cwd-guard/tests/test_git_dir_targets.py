@@ -166,7 +166,9 @@ class GitFileMappingTest(test_guard.GuardBase):
         self.assertEqual(decision(evaluate(bash(f'GIT_DIR="{git_link}" git add .', self.a))), "deny")
 
     def test_unreadable_git_file_is_still_mapped(self):
-        # 中身の読めない `.git` ファイルでも、パスとの対応は残す
+        # 中身の読めない `.git` ファイルでも、パスとの対応は残す。
+        # Windows では `.git` ファイルを `w` で開くと PermissionError になる (隠しファイルのためと読んでいる) ので作り直す
+        (self.b / ".git").unlink()
         (self.b / ".git").write_text("", encoding="utf-8")
         self.assertEqual(decision(evaluate(bash(f'GIT_DIR="{self.b}/.git" git add .', self.a))), "deny")
 
@@ -175,7 +177,8 @@ class WorktreeBaseTest(test_guard.GuardBase):
     """`git worktree remove|move` の相対パスは、git dir・作業ツリー・今の場所のどの基点でも別の worktree なら止める。"""
 
     def test_relative_path_from_any_base_is_denied(self):
-        rel = os.path.relpath(self.b, self.main)
+        # 引用なしの語に書くので `/` 区切りにする (引用なしの `\` は shell が消し、`..\wt-b` は `..wt-b` になる。test_guard の NtpathEmulationTest)
+        rel = Path(os.path.relpath(self.b, self.main)).as_posix()
         own = self.a / ".git"
         for cmd in (
             f'cd "{self.main}"; git --git-dir="{own}" --work-tree="{self.main}" worktree remove --force {rel}',
@@ -187,9 +190,11 @@ class WorktreeBaseTest(test_guard.GuardBase):
             f'cd "{self.b}"; git --git-dir="{own}" --work-tree=. worktree remove --force .',
             f'cd "{self.main}"; git --git-dir="{self.b}/.git" --work-tree="{self.main}" worktree remove --force {rel}',
             f'cd "{self.main}"; GIT_DIR="{own}" git worktree remove --force {rel}',
-            f'GIT_DIR="{self.main}/.git" git worktree remove --force {os.path.relpath(self.b, self.a)}',
+            f'GIT_DIR="{self.main}/.git" git worktree remove --force {Path(os.path.relpath(self.b, self.a)).as_posix()}',
             # git dir の checkout から読むと別の worktree になる形 (今の場所から読むと git は失敗する)。0.7.0 と同じに止める
             f'GIT_DIR="{self.main}/.git" git worktree remove --force {rel}',
+            # 引用すれば OS の区切りのまま届く (Windows では `\` 区切り)
+            f'cd "{self.main}"; GIT_DIR="{own}" git worktree remove --force "{os.path.relpath(self.b, self.main)}"',
         ):
             with self.subTest(cmd=cmd):
                 self.assertEqual(decision(evaluate(bash(cmd, self.a))), "deny")
@@ -211,6 +216,7 @@ class WorktreeBaseTest(test_guard.GuardBase):
                 self.assertIsNone(evaluate(bash(cmd, self.a)))
 
 
+@unittest.skipUnless(os.path.exists("/bin/bash"), "POSIX の shell が前提 (hook を呼ばず、git と shell の前提だけを確かめるテスト)")
 class RealGitTest(unittest.TestCase):
     """本物の git と本物の shell で走らせ、判定の前提の「書く / 書かない」を固定する。"""
 
