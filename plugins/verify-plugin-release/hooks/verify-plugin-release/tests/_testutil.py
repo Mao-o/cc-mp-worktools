@@ -50,6 +50,8 @@ NO_BACKGROUND_GIT_SETTINGS = (
 # 別プロセスで走らせる時間の測定。hook が時間切れになるとコマンドは素通しになるので、固まっても suite を止めない
 _SCALING_SCRIPT = """\
 import json, sys, time
+import command
+command._READ_LIMIT = 10 ** 9  # 大きさの上限の手前の読みを測る (上限を超えると読まずに終わる)
 {setup}
 cases, sizes, rounds = json.load(sys.stdin)
 best = {{}}

@@ -2,6 +2,10 @@
 
 ゲート全体で 1 つの Deadline を共有し、各コマンドは残り時間 (と個別の上限の
 小さい方) で打ち切る。時間切れは GateTimeout として呼び出し側まで上げる。
+
+hook 1 回の全体にも 1 つの Deadline (HOOK_BUDGET) を持ち、読み取り・repo の確認・設定の読み・
+ゲートはその残り時間を上限に動く。hook が時間切れになるとコマンドはそのまま走るので、
+hooks.json の timeout (120 秒) より十分手前で「止める」判断を返す。
 """
 from __future__ import annotations
 
@@ -9,6 +13,13 @@ import os
 import subprocess
 import time
 from pathlib import Path
+
+
+# 読み取り 15 秒 (reading.READ_SECONDS) + ゲートの既定 90 秒。hooks.json の 120 秒との差 15 秒は、時間切れの後の後始末
+# (Windows の taskkill は 1 回 10 秒まで) と、Python の起動と出力のための余裕
+HOOK_BUDGET = 105
+# 予算と後始末 (105 + taskkill 10 + poll 0.5) でも返せなかったときの最後の手段。hooks.json の 120 秒の手前
+LAST_RESORT = 117
 
 
 class GateTimeout(Exception):
@@ -21,6 +32,10 @@ class Deadline:
 
     def remaining(self) -> float:
         return self._end - time.monotonic()
+
+    def sub(self, seconds: float) -> Deadline:
+        """seconds と自分の残り時間の短い方を期限とする Deadline。"""
+        return Deadline(min(seconds, self.remaining()))
 
 
 def run(

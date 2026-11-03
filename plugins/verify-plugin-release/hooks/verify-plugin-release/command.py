@@ -93,6 +93,37 @@ _VALUE_STARTS = re.compile(r"[({`]\s*(?:[A-Za-z_][A-Za-z0-9_]*=|\d*(?:&>|[<>]))"
 # 読む側の `\s` と同じ文字 (`\f` `\v` や全角の空白も) を畳む。畳むのは読む側がどれも空白と読む文字だけなので、読みは変わらない
 _BLANK_RUN = re.compile(r"\n\s*\n")
 
+# 読む大きさの上限 (文字数)。上限以下のコマンドは読む。読みが長引く形は reading.py の期限で止まる。読まずに判定する処理はどれも線形
+_READ_LIMIT = 32 * 1024
+# `$'pr'` / `$"pr"` の `$` も引用の一部 (外さないと `$pr` で単独の語にならない)
+_SHELL_QUOTING = re.compile(r"""\$(?=['"])|['"\\]""")
+# パス付き (`/usr/bin/gh`) と引用を外した形 (`g''h`) は語として読み、語の一部 (`through` / `x-gh`) は読まない
+_GH_WORD = re.compile(r"(?i)(?<![\w.-])gh(?:\.exe)?\s")
+_PR_WORD = re.compile(r"(?:^|\s)pr\s")
+_OP_WORD = re.compile(r"\b(?:create|new|ready)\b")
+# --repo の長い並びは語の途中の展開 (`gh -R a/b` 9 個 + `pr cre$()ate`) を語で見られないので、語とは別に止める。_LONG_REPO_OPTS と同じ並びを
+# 語の頭からだけ見る (語の途中からも始めると `--repo=--repo=...` が 2 乗になる)
+_REPO_RUN_AT_WORD = re.compile(r"(?<!\S)" + _LONG_REPO_OPTS.pattern)
+_TOO_LARGE_REASON = (
+    f"コマンドが長すぎて ({_READ_LIMIT} 文字を超える) PR 操作の位置を確かめられない (本文はファイルに置いて --body-file で渡す)"
+)
+
+
+def _oversized(command: str) -> str | None:
+    """上限を超えるコマンドを読まずに分ける。"stop" = 語が揃うか --repo の並びがあるので止める / "pass" = それ以外は通す / None = 上限以下。
+
+    引用符と `\\` を外して語を見るので、`gh "pr" create` のようにシェルが PR 操作と読むものは止まる。外すと語がつながる形
+    (`gh pr create'x'`) があるので、外す前の文字列でも見る。単一引用符の中の `\\`+改行は継続行ではないので、つないだ読みと
+    つながない読みの両方を見る。
+    """
+    if len(command) <= _READ_LIMIT:
+        return None
+    joined = _join_continuations(command)
+    if "gh" in joined and "pr" in joined and _REPO_RUN_AT_WORD.search(joined):
+        return "stop"
+    text = _SHELL_QUOTING.sub("", joined + "\0" + command)
+    return "stop" if all(p.search(text) or p.search(joined) for p in (_GH_WORD, _PR_WORD, _OP_WORD)) else "pass"
+
 
 def _too_many_openers(text: str) -> bool:
     """位置を読むと 2 乗の時間になるだけの始まりがあるか (数は上限で打ち切る)。"""
@@ -104,8 +135,9 @@ def _too_many_openers(text: str) -> bool:
 # shell の名前 (sh / bash / zsh / ksh / dash / ash / ssh / csh / tcsh / mksh / yash / fish)
 _SHELLS = r"(?:ba|z|k|da|a|c|tc|mk|ya|fi)?sh"
 # `bash -c '...'` / `sh -lc "..."` / `eval "..."` の中身。中の PR 操作は構文解析の対象外になる
+# `-\w*c\w*` と書くと、語の中の `c` ごとに後戻りして語の長さの 2 乗になる (`sh -c` の並びの始まりの数を掛けて 3 乗)。先読みなら 1 回で決まる
 _NESTED_SHELL = re.compile(
-    r"(?:\b" + _SHELLS + r"(?:\.exe)?\s+(?:-\w+\s+)*-\w*c\w*|\beval)\s+(['\"])(.*?)\1",
+    r"(?:\b" + _SHELLS + r"(?:\.exe)?\s+(?:-\w+\s+)*-(?=\w*c)\w+|\beval)\s+(['\"])(.*?)\1",
     re.S,
 )
 _DIR_CHANGERS = re.compile(r"(?:^|[;&|(\n`{]|\$\()\s*(?:pushd|popd)\b")
@@ -1337,6 +1369,9 @@ def find_invocations(command: str) -> list[Invocation]:
     `gh pr create --draft && gh pr ready` のように 1 つのコマンドで draft 作成と
     ready 化を続ける形があるため、最初の 1 つだけを見て判定してはいけない。
     """
+    oversized = _oversized(command)
+    if oversized:
+        return [Invocation(kind="create", parsed=False)] if oversized == "stop" else []
     if "gh" not in command or "pr" not in command:
         return []
     joined = _join_continuations(command)
@@ -1554,6 +1589,9 @@ def unresolved_reason(command: str, found: list[Invocation]) -> str | None:
     実行位置に現れる PR 操作の数と、構文解析で認識できた数が合わない場合は
     「検査対象を特定できない」として扱い、呼び出し側で止める。
     """
+    oversized = _oversized(command)
+    if oversized:
+        return _TOO_LARGE_REASON if oversized == "stop" else None
     raw = _join_continuations(command)
     if "gh" not in raw or "pr" not in raw:
         return None  # 安全網の正規表現はどれも gh と pr を含む (継続行をつないだ後で見る)
