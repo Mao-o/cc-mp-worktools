@@ -132,12 +132,6 @@ SURE = (
     (f"(cd a; foo >')'; {_GH})", ("a",)),
     (f"(cd a; foo ')'>/dev/null; {_GH})", ("a",)),
     (f"cd a; foo \")\" ''; {_GH}", ("a",)),
-    # shlex は二重引用符の中の置換のさらに内側の二重引用符を、引用の外と読む
-    (f'(cd a; X="$(foo ")")"; {_GH})', ("a",)),
-    (f'(cd a; foo "$(foo ")" bar)"; {_GH})', ("a",)),
-    (f'(cd a; foo "$(foo "a)b")"; {_GH})', ("a",)),
-    (f'(cd a; foo "`foo ")"`"; {_GH})', ("a",)),
-    (f'foo "$(foo "(")"; cd a; foo "$(foo ")")"; {_GH}', ("a",)),
     # 引数の function / case は関数定義や case 文ではない
     (f"grep function foo.py; cd a && {_GH}", ("a",)),
     (f"grep case foo.py; (make); cd a && {_GH}", ("a",)),
@@ -195,6 +189,25 @@ MAYBE = (
     f"cd a <(foo & foo); {_GH}",
     f"cd a$(foo | cat); {_GH}",
     f"env cd $(foo | cat); {_GH}",
+    # backtick と `${` は shlex が開きと閉じを分けないので、中の区切りで語が切れる
+    f"cd `echo a | cat`; {_GH}",
+    f"cd `echo a & wait`; {_GH}",
+    f"cd a `foo | cat`; {_GH}",
+    f"builtin cd `echo a | cat`; {_GH}",
+    f"cd ${{X:-`echo a | cat`}}; {_GH}",
+    f"cd ${{X:-a|b}}; {_GH}",
+    # 二重引用符の中の置換の内側に記号があると、走査が読み違えて本物の記号を隠しうるので、cwd を変えうる語があれば止める
+    # (止めすぎを含む。先頭の 5 件は実際には a で走るが、後ろの形と走査では区別できない)
+    f'(cd a; X="$(foo ")")"; {_GH})',
+    f'(cd a; foo "$(foo ")" bar)"; {_GH})',
+    f'(cd a; foo "$(foo "a)b")"; {_GH})',
+    f'(cd a; foo "`foo ")"`"; {_GH})',
+    f'foo "$(foo "(")"; cd a; foo "$(foo ")")"; {_GH}',
+    f'foo "$(foo ${{x%(*}})" && cd a && foo ")" && {_GH}',
+    f'foo "$(foo # (\nfoo)" && cd a && foo ")" && {_GH}',
+    f'foo "$(foo ${{x%(*}})" | cd a ; foo ")" ; {_GH}',
+    f'foo "$(foo ${{x%(*}})" & cd a ; foo ")" ; {_GH}',
+    f'X="$(foo ${{x%(*}})"\ncd a\nfoo ")"\n{_GH}',
     # 値の中のコマンドが失敗すると `&&` の後ろの cd は走らず、`;` の後ろの gh は走る
     f"X=$(make) && cd a; {_GH}",
     f'X="$(make)" && cd a; {_GH}',
@@ -395,6 +408,35 @@ class QuotedPunctuationTest(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(command._tokens(text), want)
 
+    def _mask(self, text: str) -> str:
+        try:
+            return command._mask_quoted_punct(text)
+        except ValueError as e:
+            self.fail(f"cwd を変えうる語が無いのに止めた: {e}")
+
+    def test_inner_punctuation_is_replaced_only_without_a_word_that_may_move(self):
+        # cwd を変えうる語が無ければ検査先を取り違えないので、これまでどおり置き換える
+        self.assertEqual(self._mask('"$(a ")")"'), '"$(a "_")"')
+        for text in ('"$(a ")")"; cd b', 'cd b; "$(a ")")"', '"$(a ")")"; chdir b', '"$(c\\d ")")"'):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                command._mask_quoted_punct(text)
+        # 例外は hook の外に漏れず、「解析できない」で止まる
+        cmd = f'(cd a; X="$(foo ")")"; {_GH})'
+        found = find_invocations(cmd)
+        self.assertEqual([inv.parsed for inv in found], [False])
+        self.assertIsNotNone(unresolved_reason(cmd, found))
+        self.assertFalse(command._names_dir_changer(cmd))
+        # 同じ形に cwd を変えうる語が無ければ止めない
+        for cmd in (f'X="$(git log --format="%h (%s)" -1)"; {_GH}', f'foo "$(foo ")")"; {_GH}'):
+            with self.subTest(cmd=cmd):
+                found = find_invocations(cmd)
+                self.assertIsNone(unresolved_reason(cmd, found))
+                self.assertEqual([inv.cd_steps for inv in found], [()])
+
+    def test_character_after_an_escape_does_not_start_a_word(self):
+        self.assertEqual(command._tokens("foo a\\;')' b"), ["foo", "a;)", "b"])
+        self.assertEqual(command._mask_quoted_punct("a\\(')' b"), "a\\(')' b")
+
     def test_others_are_left_as_they_are(self):
         for text in (
             "foo '' \"\" a",
@@ -444,7 +486,7 @@ class QuotedPunctuationTest(unittest.TestCase):
             ('"$(a ((b)) c ")")"', '"$(a ((b)) c "_")"'),
         ):
             with self.subTest(text=text):
-                self.assertEqual(command._mask_quoted_punct(text), want)
+                self.assertEqual(self._mask(text), want)
 
     def test_many_words_take_linear_time(self):
         script = (
@@ -454,8 +496,8 @@ class QuotedPunctuationTest(unittest.TestCase):
             "    best = None\n"
             "    for _ in range(3):\n"
             "        t = time.perf_counter()\n"
-            "        for tok in (\"')' \", \"')'\", \"''\", '\\\\( ', '\"$(', '$(\"', '${x#(} ', '${', \"$'\", '`\"', '\"(', \"')'x \"):\n"
-            "            mask(tok * k)\n"
+            "        for tok in (\"')' \", \"')'\", \"''\", '\\\\( ', '\\\\(', '\"$(', '$(\"', '${x#(} ', '${', \"$'\", '`\"', '\"(', \"')'x \", '\"$(a \";\" b)\" '):\n"
+            "            mask(tok * k + 'x')\n"
             "        d = time.perf_counter() - t\n"
             "        best = d if best is None else min(best, d)\n"
             "    return best\n"

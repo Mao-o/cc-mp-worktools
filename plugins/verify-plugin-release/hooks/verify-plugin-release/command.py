@@ -668,7 +668,7 @@ def _next_cd(state: _CdState, arg: str | None, uncertain_here: bool) -> _CdState
 def _maybe_cd(state: _CdState, arg: str | None) -> _CdState:
     """シェルの cwd を変えるか確かでない cd。後ろの PR 操作の検査先が決まらないので止める (確かな絶対パスの cd までは解けない)。"""
     steps = state.steps if arg is None else (*state.steps, arg)
-    return _CdState(steps, " → ".join(steps) or "引数なしの cd や読めない形のコマンド", True)
+    return _CdState(steps, " → ".join(steps) or "引数なしの cd、コマンド語の展開、読めない形のコマンド", True)
 
 
 def _unsettled(state: _CdState) -> _CdState:
@@ -809,8 +809,10 @@ class _CdTracker:
         segment = self.segments[index]
         args = _cd_arguments(words)
         arg = args[0] if args else None
-        if segment.depths[-1] > depth:
+        text = " ".join(words)
+        if segment.depths[-1] > depth or text.count("`") % 2 or text.count("${") > text.count("}"):
             # `cd $(a | b); gh pr create`: 直後の区切りは引数の置換の中のもので、cd のものではない
+            # (backtick と `${` は shlex が開きと閉じを分けないので、語の中で閉じているかを数える)
             self.state = _maybe_cd(self.state, arg)
         elif segment.after in ("pipe", "bg") or any(w in _DETACHING_WRAPPERS for w in wrappers):
             self.moved_nowhere()
@@ -1004,7 +1006,9 @@ def _mask_quoted_punct(s: str, nested: bool = True) -> str:
     置き換えるのは次の 3 つで、シェルと同じ規則で引用を読んで見つける (引用の中の文字列を語と読み違えないため):
     - 語全体が引用かエスケープされた記号だけのもの
     - 括弧の対応が取れていない `${...}` (`${x#(}`)
-    - 二重引用符の中の置換の、さらに内側の二重引用符の中身 (`"$(foo ")")"`。shlex はここを引用の外と読む)
+    - 二重引用符の中の置換の、さらに内側の二重引用符の中身 (`"$(foo ")")"`。shlex はここを引用の外と読む)。
+      この走査は `${x%(*}` やコメントの中の括弧を数え違えて本物の記号を隠すことがあるので、cwd を変えうる語がコマンドに
+      あるときは隠さず ValueError にする (「解析できない」として止まる)。cwd が変わらなければ、検査先を取り違えない
 
     二重引用符の中の置換に heredoc があると、本文の括弧や引用符で置換の範囲を読み違えるので、3 つ目だけをやめて
     shlex と同じ読み (二重引用符は次の `"` で閉じる) に戻す (nested=False)。
@@ -1012,10 +1016,12 @@ def _mask_quoted_punct(s: str, nested: bool = True) -> str:
     out: list[str] = []
     stack: list[str] = []  # 開いている `"`、その中の `$(` と `(`、backtick
     dq = 0  # stack の中の `"` の数。偶数のときの二重引用符の中身を、shlex は引用の外と読む
+    moves = _may_move(s)
+    escaped = False  # 直前がエスケープ。その文字は語を区切らない (読み直すと `\(\(...x` の長さの 2 乗の時間になる)
     i, n = 0, len(s)
     while i < n:
         ch = s[i]
-        if not stack and (not out or out[-1][-1] in _WORD_START_PREV):
+        if not stack and not escaped and (not out or out[-1][-1] in _WORD_START_PREV):
             m = _QUOTED_PUNCT_WORD.match(s, i)
             if m and not set(m.group()).isdisjoint(_PUNCT):
                 out.append(_MASKED_WORD)
@@ -1035,6 +1041,8 @@ def _mask_quoted_punct(s: str, nested: bool = True) -> str:
             elif nested and ch == "`":
                 stack.append(ch)
             elif dq % 2 == 0 and ch in _PUNCT:
+                if moves:
+                    raise ValueError("二重引用符の中の置換の内側に記号がある")
                 out.append("_")
                 i += 1
                 continue
@@ -1070,6 +1078,7 @@ def _mask_quoted_punct(s: str, nested: bool = True) -> str:
                 continue
         out.append(s[i : i + step])
         i += step
+        escaped = ch == "\\"
     return "".join(out)
 
 

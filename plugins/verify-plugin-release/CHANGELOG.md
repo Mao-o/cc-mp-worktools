@@ -35,11 +35,13 @@ repo でゲートを見ずに素通しになっていた。
   - 引数なしの cd (shell は `$HOME` に移るが、hook の cwd を検査していた)
 - `builtin cd A` を cd として読む。これまでは読まず、hook の cwd を検査していた
 - 引用かエスケープで記号だけになった語 (`git log --grep ')'` / `foo \(` / `find ... -exec x {} \;`)、括弧の対応が取れていない
-  `${x#(}`、二重引用符の中の置換のさらに内側の二重引用符の中身を、括弧や区切りと読まない。これまでは `foo ';' cd A; gh pr create`
-  の引数を cd と読み、括弧の深さの読みもずれていた。`$'a\'b'` の形は shlex が引用符の対応を読み違えるので、コマンド全体を
+  `${x#(}`を、括弧や区切りと読まない。これまでは `foo ';' cd A; gh pr create` の引数を cd と読み、括弧の深さの読みもずれていた。
+  二重引用符の中の置換のさらに内側の二重引用符の中身に記号があるときは、cwd を変えうる語がコマンドに無ければ括弧や区切りと読まず、
+  あれば「解析できない」として止める (`foo "$(foo ${x%(*})" && cd A && foo ")" && gh pr create`。引用の走査が内側の括弧を数え違え、
+  本物の記号を隠して cd を読み違えるため)。`$'a\'b'` の形は shlex が引用符の対応を読み違えるので、コマンド全体を
   「解析できない」として止める。括弧が閉じないまま括弧の中で読んだ PR 操作も止める
 - 引数の置換の中の区切りを cd の区切りと読まない。`cd $(a | b); gh pr create` をパイプの左の cd と読むと、元の cwd を検査してしまう。
-  この形の cd の後ろは止める
+  この形の cd の後ろは止める。backtick と `${` の中も同じ (`` cd `a | b`; gh pr create `` / `cd ${X:-a|b}; gh pr create`)
 - 空になりうる展開がコマンド語の位置にある形の後ろの PR 操作を止める。`true && ${x} gh pr create` / `$x gh pr create` /
   `"$x" gh pr create` / `$(true) gh pr create` / `` `true` gh pr create `` / `${x:-${y}} gh pr create` / `"$@" gh pr create` /
   `$* gh pr create` を見失い、ゲートを走らせずに通していた
@@ -69,6 +71,10 @@ repo でゲートを見ずに素通しになっていた。
 - `[ -d A ] && { cd A; gh pr create; }`
 - `cd A; make & wait; gh pr create`
 - `$(cd .. && pwd)/x.sh && gh pr create` (コマンド語の展開が cd を書いている形と区別しない)
+- `$PY x.py cd; gh pr create`、`$PY -m pytest -k cd -q; gh pr create`、`$G --msg 'cd a'; gh pr create` (コマンド語の展開の後ろの引数の cd を、
+  移動しうる cd と区別しない)
+- `cd A; X="$(foo ")")"; gh pr create` (二重引用符の中の置換の内側の記号と cwd を変えうる語が同じコマンドにある形)。
+  `gh pr create` の本文の heredoc の中の記号は、この形に当たらない
 
 ## 0.3.4
 
