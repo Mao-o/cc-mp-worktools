@@ -261,11 +261,28 @@ def _dynamic(path: str) -> bool:
     return "$" in path or "`" in path
 
 
+# `~name` の形の語の先頭 (`~` と `~/x` は含まない)
+_TILDE_NAME = re.compile(r"~[^/\\]+")
+
+
+def _expand_home(path: str) -> str:
+    """`~` を home に展開する。`~name` は、その home が実在するときだけ展開する。
+
+    POSIX の expanduser は知らない名前をそのまま返すが、Windows の expanduser は名前を調べずに `<home の親>\\<名前>` と推測する
+    (`~+` が `C:\\Users\\+` になり、手前の `cd <main>` が消えて、main で動く git を見逃していた)。
+    `~+` / `~-` / `~1` や知らない名前は、どの OS でも今の場所の下の語として読む。
+    """
+    named = _TILDE_NAME.match(path)
+    if named and not os.path.isdir(os.path.expanduser(named.group())):
+        return path
+    return os.path.expanduser(path)
+
+
 def _resolve(base: str | None, path: str) -> str | None:
     """base から見た path の正規化済み絶対パス。解決できなければ None。"""
     if _dynamic(path):
         return None
-    path = os.path.expanduser(path)
+    path = _expand_home(path)
     if os.path.isabs(path):
         return norm(path)
     if base is None:

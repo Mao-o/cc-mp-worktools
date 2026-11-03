@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.8.1
+
+**Windows で `cd <main>; cd ~+; git reset --hard` が止まらなかった不具合を直し、Windows の CI を直した (patch bump)。**
+
+### 修正: Windows で、home の無い `~name` を home と読まない
+
+Python の Windows 用 `expanduser` は名前を調べずに `~name` を `<home の親>\name` と推測する。`~+` が `C:\Users\+` になり、手前の `cd <main>` が消えて、main で動く git を見逃していた。POSIX は知らない名前をそのまま返すので、この形を止めていた。
+`~name` は、その home が実在するときだけ展開する。`~+` / `~-` / `~1` / 知らない名前は、どの OS でも今の場所の下の語として読む。
+
+比較は同じ 2013 件の入力を POSIX の読みと Windows の読み (`os.path` を `ntpath` に差し替え) で 0.8.0 と 0.8.1 に流した。止める側を緩めた形は両方で 0 件。
+
+| 読み | 通過 → 停止 | 停止 → 通過 | 形 |
+|---|---|---|---|
+| POSIX | 16 | 0 | home が実在しない利用者の `~name` の後ろ (実際の shell は移動に失敗して main に残る) |
+| Windows | 220 | 0 | `~+` / `~-` / `~1` / 知らない名前の後ろ |
+
+次の形は Windows で止まらないまま: `cd <main>; cd ~.` と `cd ~:` (名前がパスの部品として読める。普通には書かない形)。
+
+### テスト: Windows の前提の違いを直した
+
+0.8.0 の Windows の CI の 20 件のうち、製品の不具合は上の 1 件。残りはテストの前提で、どれも Windows で判定を緩めていない。
+
+- `git worktree remove` の相対パスを引用なしで `..\wt-b` と書いていた。引用なしの `\` は shell が消し、git が受け取るのは `..wt-b` で、止めないのが正しい。`/` 区切りにし、引用した `\` の形を足した
+- 行の継続のテストが `C:\` の直後で分けていて、`\\` が escape になり継続ではなくなっていた。分ける位置を変えた
+- `.git` ファイルの上書きが Windows で `PermissionError` になる。消してから作り直す (Windows の実機が手元に無く、隠しファイルが理由という読みは未検証)
+- `RealGitTest` は `/bin/bash` が無ければ skip する。hook を呼ばず、git と shell の前提だけを確かめるテストで、判定は `WorktreeBaseTest` などが確かめる
+
+`NtpathEmulationTest` を足した。`os.path` を `ntpath` に差し替えて、Windows のパスの読みをどの OS でも確かめる。
+
+テスト件数: 180 → 184 (追加 4・削除 0・統合 0)。
+
 ## 0.8.0
 
 **`GIT_DIR` / `--git-dir` だけが効いているときの作業ツリー (今の場所) と、`<checkout>/.git` の形の git dir を読み、別 checkout への git の書き込みを止めるようにした (minor bump)。**

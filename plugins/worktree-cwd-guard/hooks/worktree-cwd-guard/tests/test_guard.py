@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import ntpath
 import os
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from _testutil import HermeticGitTestCase, make_repo
 
 import importlib.util
 
+import command
 import family
 
 _PKG = Path(__file__).resolve().parent.parent
@@ -350,6 +352,63 @@ class GuardTest(GuardBase):
         os.environ["WORKTREE_CWD_GUARD_ALLOW"] = str(self.main)
         self.assertIsNone(evaluate(bash(cmd, self.a)))
         self.assertEqual(decision(evaluate(bash(f'git -C "{self.b}" checkout -b oops', self.a))), "deny")
+
+
+class NtpathEmulationTest(unittest.TestCase):
+    """`os.path` を ntpath に差し替え、Windows のパスの読みをどの OS でも確かめる (git は起動しない)。"""
+
+    TMP = "C:\\Users\\other"
+    MAIN = TMP + "\\repo"
+    A = MAIN + "\\.claude\\worktrees\\a"
+    B = TMP + "\\wt-b"
+
+    def setUp(self):
+        for patcher in (
+            mock.patch.object(os, "path", ntpath),
+            mock.patch.object(os, "sep", "\\"),
+            mock.patch.dict(os.environ, {"USERPROFILE": "C:\\Users\\me", "USERNAME": "me"}),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        n = family.norm
+        self.fam = family.Family(
+            home=n(self.A),
+            roots=(n(self.MAIN), n(self.A), n(self.B)),
+            common_dir=n(self.MAIN + "\\.git"),
+        )
+
+    def _blocked(self, cmd: str, homes: tuple[str, ...] = ()) -> bool:
+        # 実在するディレクトリを固定する (実機の `C:\Users` の中身に左右されないように)
+        real = {family.norm(h) for h in homes}
+        with mock.patch.object(ntpath, "isdir", lambda p: family.norm(p) in real):
+            return any(f.blocked for f in command.analyze(cmd, self.A, self.fam))
+
+    def test_tilde_word_without_a_home_stays_under_the_place(self):
+        # expanduser は `~+` を `C:\Users\+` と推測する。実際の shell は `~+` / `~+/x` で main に残り、
+        # `~1` / `~-1` / 知らない名前は bash が失敗して main に残る (`~-` は OLDPWD だが、`cd ~-` を読まないのは POSIX も同じ)
+        for word in ("~+", "~-", "~+/x", "~-/x", "~1", "~+1", "~-1", "~nosuch", "~nosuch/x"):
+            for cmd in (f'cd "{self.MAIN}"; cd {word}; git reset --hard', f'cd "{self.MAIN}"; builtin cd {word}; git reset --hard'):
+                with self.subTest(cmd=cmd):
+                    self.assertTrue(self._blocked(cmd))
+
+    def test_tilde_word_with_a_home_is_expanded(self):
+        # 実在する home なら、その下の checkout を止める (`~other` は USERPROFILE の親の下の `other`)
+        for cmd in ("git -C ~other/repo reset --hard", "git -C ~other/wt-b reset --hard", 'git -C "~other\\repo" reset --hard'):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(self._blocked(cmd, homes=(self.TMP,)))
+                self.assertFalse(self._blocked(cmd))
+
+    def test_plain_home_is_expanded(self):
+        with mock.patch.dict(os.environ, {"USERPROFILE": self.TMP}):
+            self.assertTrue(self._blocked("git -C ~/repo reset --hard"))
+            self.assertFalse(self._blocked(f'cd "{self.MAIN}"; cd ~; git reset --hard'))
+
+    def test_separator_of_a_relative_worktree_path(self):
+        rel = "..\\wt-b"
+        self.assertTrue(self._blocked(f'cd "{self.MAIN}"; git worktree remove --force "{rel}"'))
+        self.assertTrue(self._blocked(f'cd "{self.MAIN}"; git worktree remove --force ../wt-b'))
+        # 引用なしの `\` は shell が消す (git が受け取るのは `..wt-b` で、別の worktree を指さない)
+        self.assertFalse(self._blocked(f'cd "{self.MAIN}"; git worktree remove --force {rel}'))
 
 
 class EntryTest(HermeticGitTestCase):

@@ -53,8 +53,9 @@ class CommentAndContinuationTest(test_guard.GuardBase):
             # 継続の後ろの `#` は前の単語の続きなら comment ではない
             f'git -C "{m}" reset\\\n#x --hard; git -C "{m}" stash',
         ))
-        # 二重引用符の中の継続もつながる (`-C` の値が main を指す)
-        self.assertDenied((f'git -C "{str(m)[:3]}\\\n{str(m)[3:]}" reset --hard',))
+        # 二重引用符の中の継続もつながる (`-C` の値が main を指す)。分ける位置はパスの区切りの直後を避ける
+        # (Windows の `C:\` の直後で分けると `\\` が escape になり、継続ではなくなる)
+        self.assertDenied((f'git -C "{str(m)[:-2]}\\\n{str(m)[-2:]}" reset --hard',))
 
     def test_hash_inside_a_word_or_quotes_is_not_a_comment(self):
         m = self.main
