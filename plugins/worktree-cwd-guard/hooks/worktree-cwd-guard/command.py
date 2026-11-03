@@ -279,7 +279,8 @@ def _git_targets(
     """git の global option を読み、(書き換わる場所のパス一覧, 解決できない理由, 残りの引数) を返す。
 
     書き換わる場所は 2 つある: HEAD / index を持つ repo 側 (`-C` / `--git-dir` で決まる) と、
-    作業ツリー側 (`--work-tree`、無ければ repo 側と同じ)。どちらかが別 checkout なら止める。
+    作業ツリー側 (`--work-tree`。無ければ、`--git-dir` だけが効いているときは今の場所、それ以外は repo 側と同じ)。
+    どちらかが別 checkout なら止める。一覧と理由の両方を返すことがある (`GIT_DIR` が決まっていて、今の場所が決まらないとき)。
     """
     here = cwd
     env = env or {}
@@ -310,6 +311,7 @@ def _git_targets(
     rest = args[i:]
 
     targets: list[str] = []
+    unresolved = None
     if git_dir is not None:
         resolved = _resolve(here, git_dir)
         if resolved is None:
@@ -321,6 +323,13 @@ def _git_targets(
             targets.append(norm(os.path.dirname(fam.common_dir)))
         elif resolved.startswith(fam.common_dir.rstrip(os.sep) + os.sep):
             return [], f"--git-dir {git_dir}", rest  # 同じ repo の、対応の分からない git dir
+        if work_tree is None:
+            # git dir だけが効くとき、作業ツリーは今の場所になる (`GIT_DIR=<worktree>/.git git -C <main> reset --hard` は
+            # main の作業ツリーを上書きする)。`git add` / `git commit` のように作業ツリーを書かない操作も同じに読む
+            if here is not None:
+                targets.append(here)
+            else:
+                unresolved = "cd の移動先"
     elif here is not None:
         targets.append(here)
     else:
@@ -330,7 +339,7 @@ def _git_targets(
         if resolved is None:
             return [], f"--work-tree {work_tree}", rest
         targets.append(resolved)
-    return targets, None, rest
+    return targets, unresolved, rest
 
 
 def _worktree_targets(rest: list[str], here: str | None) -> list[str]:
@@ -1015,7 +1024,6 @@ class _Analyzer:
                 return
             if unresolved:
                 note = note or Finding(False, f"`git {sub}` の対象 ({unresolved}) を静的に解決できない")
-                continue
             # 対象ごとに記録する (許可リストで 1 つ外れても、残りの対象で止められるように)
             for target in targets:
                 o = owner(target, fam)

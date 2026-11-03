@@ -19,7 +19,7 @@ class Family:
     home: str  # この session の worktree root (正規化済み)
     roots: tuple[str, ...]  # 同じ repo の全 checkout の root (home を含む)
     common_dir: str  # 共有 git dir (main checkout の .git)
-    gitdirs: tuple[tuple[str, str], ...] = ()  # (各 checkout の git dir, その root)
+    gitdirs: tuple[tuple[str, str], ...] = ()  # (各 checkout の git dir か `.git` ファイル, その root)
 
 
 def norm(path: str | os.PathLike[str]) -> str:
@@ -92,13 +92,17 @@ def detect(cwd: str) -> Family | None:
 
 
 def _gitdirs(roots: list[str]) -> list[tuple[str, str]]:
-    """各 checkout の git dir (main は `.git`、linked は `.git` ファイルが指す先) と root の対応。"""
+    """各 checkout の git dir (main は `.git`、linked は `.git` ファイルが指す先) と root の対応。
+
+    linked の `.git` ファイル自身も入れる (`GIT_DIR=<worktree>/.git` は git がファイルの中身をたどって、その checkout の git dir になる)。
+    """
     out = []
     for root in roots:
         marker = Path(root) / ".git"
         if marker.is_dir():
             out.append((norm(marker), root))
         elif marker.is_file():
+            out.append((norm(marker), root))
             try:
                 line = marker.read_text(encoding="utf-8", errors="replace").strip().splitlines()[0]
             except (OSError, IndexError):
