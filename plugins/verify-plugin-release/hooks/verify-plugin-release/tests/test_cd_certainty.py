@@ -60,6 +60,27 @@ NO_EFFECT = (
     f"(true);(cd a); {_GH}",
     f"(true)\n(cd a)\n{_GH}",
     f"X=$(true)\n(cd a; true)\n{_GH}",
+    # 引用された記号は括弧でも区切りでもない
+    f"X=$(foo ')'; cd a); {_GH}",
+    f"foo ';' cd a; {_GH}",
+    f"foo '&&' cd a && {_GH}",
+    f"foo ')';(cd a); {_GH}",
+    f"(foo ')'; cd a); {_GH}",
+    # 語の途中に見える引用: `'a '` と `)` と `;` と `' b'` で、括弧はここで閉じている
+    f"(cd a; foo 'a ');' b'; {_GH}",
+    f'(cd a; foo "a ");" b"; {_GH}',
+    # コマンド語が展開でも、cd を書いていなければ読まない
+    f"$c d; {_GH}",
+    f"${{c}} d; {_GH}",
+    f"$x; {_GH}",
+    f"$G --summary; {_GH}",
+    f"$PY cd.py; {_GH}",
+    f"$V/foo --dir cd; {_GH}",
+    f"X=`date +%s`; {_GH}",
+    f"V=`cat VERSION`; {_GH}",
+    f"NAME=`basename $PWD`; {_GH}",
+    f"ROOT=`cd .. && pwd`; {_GH}",
+    f"X=`cd a`; {_GH}",
 )
 
 # gh は確かな cd の先で走る (cd_steps)
@@ -99,6 +120,33 @@ SURE = (
     (f"echo $x; cd a; {_GH}", ("a",)),
     (f"cd a; \"$V\"/make; {_GH}", ("a",)),
     (f"cd a; $V/make; {_GH}", ("a",)),
+    # 引用された記号は括弧でも区切りでもない
+    (f"(cd a; foo ')'; {_GH})", ("a",)),
+    (f"(cd a && git log --grep ')' && {_GH})", ("a",)),
+    (f"foo '(' ; cd a; foo ')' ; {_GH}", ("a",)),
+    (f"foo \\( ; cd a; foo \\) ; {_GH}", ("a",)),
+    (f"find . \\( -name a \\) -exec foo {{}} \\; ; cd a && {_GH}", ("a",)),
+    (f"find . -name a -exec foo {{}} \\; && cd a && {_GH}", ("a",)),
+    (f"(cd a; foo ')'')'; {_GH})", ("a",)),
+    (f"(cd a; foo \\)\\); {_GH})", ("a",)),
+    (f"(cd a; foo >')'; {_GH})", ("a",)),
+    (f"(cd a; foo ')'>/dev/null; {_GH})", ("a",)),
+    (f"cd a; foo \")\" ''; {_GH}", ("a",)),
+    # shlex は二重引用符の中の置換のさらに内側の二重引用符を、引用の外と読む
+    (f'(cd a; X="$(foo ")")"; {_GH})', ("a",)),
+    (f'(cd a; foo "$(foo ")" bar)"; {_GH})', ("a",)),
+    (f'(cd a; foo "$(foo "a)b")"; {_GH})', ("a",)),
+    (f'(cd a; foo "`foo ")"`"; {_GH})', ("a",)),
+    (f'foo "$(foo "(")"; cd a; foo "$(foo ")")"; {_GH}', ("a",)),
+    # 引数の function / case は関数定義や case 文ではない
+    (f"grep function foo.py; cd a && {_GH}", ("a",)),
+    (f"grep case foo.py; (make); cd a && {_GH}", ("a",)),
+    # 値の中のコマンドが無くても `&&` の後ろは同じリストで走る
+    (f"X=$(make) && cd a && {_GH}", ("a",)),
+    (f'X="$(make)" && cd a && {_GH}', ("a",)),
+    (f'X="$(make)"; cd a; {_GH}', ("a",)),
+    (f'X="$((1))" && cd a; {_GH}', ("a",)),
+    (f"X=1 && cd a; {_GH}", ("a",)),
 )
 
 # シェルや実行時の値で cwd が変わる。止める
@@ -128,19 +176,43 @@ MAYBE = (
     f"cd \"$WT\"; cd a | cat; {_GH}",
     f"cd b; chdir a; {_GH}",
     f"cd b; $x cd a; {_GH}",
-    # コマンド語が展開: c=cd なら移る。出力がコマンドになる形も読めない
-    f"$c d; {_GH}",
-    f"${{c}} d && {_GH}",
+    # コマンド語が展開で、cd を書いた形。出力がコマンドになる形も読めない
     f"$(echo cd a); {_GH}",
+    f'$(echo "cd a"); {_GH}',
     f"`echo cd a`; {_GH}",
     f"`echo cd` d; {_GH}",
+    f"`cd a`; {_GH}",
+    f"$(echo chdir a); {_GH}",
     f"X=$(a) $y cd a; {_GH}",
     f"X=$(a) `y` cd a; {_GH}",
     # 括弧を挟んでもループの中はループの中
     f"for i in 1; do (true); cd a && {_GH}; done",
     f"(while true; do cd a && {_GH}; exit; done)",
-    f"$x; {_GH}",
     f"! cd b && cd a; {_GH}",
+    # 引数の置換の中の区切りは cd の区切りではない (パイプの左や `&` の前と読まない)
+    f"cd $(foo | cat); {_GH}",
+    f"cd $(foo & foo); {_GH}",
+    f"cd a <(foo & foo); {_GH}",
+    f"cd a$(foo | cat); {_GH}",
+    f"env cd $(foo | cat); {_GH}",
+    # 値の中のコマンドが失敗すると `&&` の後ろの cd は走らず、`;` の後ろの gh は走る
+    f"X=$(make) && cd a; {_GH}",
+    f'X="$(make)" && cd a; {_GH}',
+    f"X=`make` && cd a; {_GH}",
+    # zsh だけ移る
+    f"builtin chdir a; {_GH}",
+    f"$x chdir a; {_GH}",
+    f"command -p chdir a; {_GH}",
+    # 括弧が閉じないまま、括弧の中で gh を読む (zsh は `#\` で読みが割れて、元の cwd で走らせる)
+    f"$(\"\"&cd a;(a) #\\\n(\ncd'');{_GH}",
+    # 区切りとまとめて 1 token になった () (zsh の無名関数)
+    f"true;() {{ cd a; }}; {_GH}",
+    # 語の位置に置いた function / case
+    f"true && function f {{ cd a; }}; f; {_GH}",
+    f"time function f {{ cd a; }}; f; {_GH}",
+    f"foo $(function f {{ cd a; }}; f; {_GH})",
+    f"`function f {{ cd a; }}; f; {_GH}`",
+    f"true; (case a in a) true;; esac; cd a); {_GH}",
     # `&` の前のリスト
     f"cd a && true & {_GH}",
     f"{{ cd a; }} & {_GH}",
@@ -157,6 +229,7 @@ MAYBE = (
     f"case a in b) cd a;; esac; {_GH}",
     f"case a in a) cd a; {_GH};; esac",
     f"case a in a) chdir a;; esac; {_GH}",
+    f"case a in a)\ncd a;; esac; {_GH}",
     f"(case a in a) true;; esac; cd a); {_GH}",
     f"{{ cd a; }} | cat; {_GH}",
     f"false && {{ cd a; }}; {_GH}",
@@ -267,6 +340,134 @@ class ClassificationTest(unittest.TestCase):
         inv = find_invocations(f"case a in a) true;; esac; cd a; {_GH}")[0]
         self.assertEqual((inv.cd_steps, inv.cd_unresolved), (("a",), None))
 
+    def test_expansion_command_word_without_cd_is_left_alone(self):
+        # コマンド語の展開が空だと後ろの語がコマンドになり `&&` の後ろが走らないので、実シェルの表には載せない
+        for cmd in (
+            f"$PY -m pytest && {_GH}",
+            f'"$SCRIPT" --check && {_GH}',
+            f"$(which python3) -m pytest && {_GH}",
+            f"$(git rev-parse --show-toplevel)/x.sh && {_GH}",
+        ):
+            with self.subTest(cmd=cmd):
+                found, reason = _reading(cmd)
+                self.assertIsNone(reason)
+                self.assertEqual((found[0].cd_steps, found[0].cd_unresolved), ((), None))
+
+
+class QuotedPunctuationTest(unittest.TestCase):
+    def test_unbalanced_brace_expansion_is_not_a_paren(self):
+        # zsh は `${x#(}` で止まるので、実シェルの表には載せない (bash は a で走る)
+        for cmd in (f"foo ${{x#(}}; cd a; foo ${{x%)}}; {_GH}", f"(cd a; foo ${{x%)}}; {_GH})"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(find_invocations(cmd)[0].cd_steps, ("a",))
+
+    def test_heredoc_in_a_substitution_does_not_shift_the_reading(self):
+        # 本文の括弧と引用符で置換の範囲を読み違えると、後ろの cd の読みがずれる (本文の終わりはシェルで割れるので実シェルの表には載せない)
+        cmd = f"foo \"$(cat <<'E'\nsay \")\" (\nE\n)\"; cd a; foo \"$(foo \"(\")\" && {_GH}"
+        try:
+            found = find_invocations(cmd)
+            command._tokens(command._strip_for_parsing(cmd))
+        except ValueError as e:
+            self.fail(f"読み違えて引用符が閉じない: {e}")
+        self.assertEqual([inv.cd_steps for inv in found], [("a",)])
+        # 本文の括弧で括弧の読みが閉じなくても、その手前で読んだ gh は止めない
+        inv = find_invocations(f"cd a && {_GH} --body \"$(cat <<'E'\nsay \"(hi\"\nE\n)\"")[0]
+        self.assertEqual((inv.cd_steps, inv.cd_unresolved), (("a",), None))
+
+    def test_words_are_replaced(self):
+        for text, want in (
+            ("foo ')' bar", ["foo", "_q_", "bar"]),
+            ('foo ")" bar', ["foo", "_q_", "bar"]),
+            ("foo \\) bar", ["foo", "_q_", "bar"]),
+            ("foo ')'')' \\;\\;", ["foo", "_q_", "_q_"]),
+            ("foo '' ')'", ["foo", "", "_q_"]),
+            ("foo >')'", ["foo", ">", "_q_"]),
+            ("foo ')'>f", ["foo", "_q_", ">", "f"]),
+            ("(foo ')')", ["(", "foo", "_q_", ")"]),
+            ("foo $(')')", ["foo", "$", "(", "_q_", ")"]),
+            ("foo ';' a", ["foo", "_q_", "a"]),
+            ("foo '\n' a", ["foo", "_q_", "a"]),
+            ("foo ${x#(} a", ["foo", "_q_", "a"]),
+            # `'...'` の `\` は文字。引用の外の `\"` は引用を開かない
+            ("foo 'a\\' ')'", ["foo", "a\\", "_q_"]),
+            ('foo \\" \')\' \\"', ["foo", '"', "_q_", '"']),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(command._tokens(text), want)
+
+    def test_others_are_left_as_they_are(self):
+        for text in (
+            "foo '' \"\" a",
+            "foo ')'a",
+            "foo a')'",
+            "foo '; '",
+            "foo 'a ')",
+            "foo \"a ')' b\"",
+            "foo \"$(foo ')')\"",
+            "foo \"$(foo)\"",
+            "foo ${x:-$(a)} ${x:-(a)}",
+            "foo $'a)' $'\\\\'",
+            "foo $'a",
+            "foo 'a",
+            'foo "a',
+            "foo \\",
+            "foo \"$(cat <<'E'\nsay \")\" (\nE\n)\"",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(command._mask_quoted_punct(text), text)
+
+    def test_escaped_quote_in_ansi_string_is_not_read(self):
+        # shlex は `\'` で引用を閉じるので、後ろの引用符の対応がずれる
+        for text in ("foo $'a\\'b'", "$'\\''", "\"$(foo $'\\'')\""):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                command._mask_quoted_punct(text)
+        for cmd in (f"foo $'a\\'b' $'c\\'d'; cd a; {_GH}", f"foo $'\\'' $'\\''; (cd a; {_GH})"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(unresolved_reason(cmd, find_invocations(cmd)))
+        # 二重引用符の中の `$'` は文字なので止めない
+        cmd = f"foo \"$'a\\'b\"; cd a; {_GH}"
+        self.assertEqual(find_invocations(cmd)[0].cd_steps, ("a",))
+
+    def test_only_the_inner_double_quotes_are_replaced(self):
+        for text, want in (
+            ('"$(a `b ")"` c ")")"', '"$(a `b "_"` c "_")"'),
+            # 置換の中の backtick の `)` は置換を閉じない
+            ('"$(a `b )` ")")"', '"$(a `b )` "_")"'),
+            ('"$(a `b )`) ")"', '"$(a `b )`) ")"'),
+            ('"$(a ")" b)"', '"$(a "_" b)"'),
+            ('"$(a "x;y" b)"', '"$(a "x_y" b)"'),
+            ('"`a ")"`"', '"`a "_"`"'),
+            # さらに内側は shlex も二重引用符の中と読む
+            ('"$(a "$(b ")")")"', '"$(a "$(b ")")")"'),
+            # 閉じた置換の後ろは外側の二重引用符
+            ('"$(a) ) ;"', '"$(a) ) ;"'),
+            ('"$(a ((b)) c ")")"', '"$(a ((b)) c "_")"'),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(command._mask_quoted_punct(text), want)
+
+    def test_many_words_take_linear_time(self):
+        script = (
+            "import time\n"
+            "from command import _mask_quoted_punct as mask\n"
+            "def run(k):\n"
+            "    best = None\n"
+            "    for _ in range(3):\n"
+            "        t = time.perf_counter()\n"
+            "        for tok in (\"')' \", \"')'\", \"''\", '\\\\( ', '\"$(', '$(\"', '${x#(} ', '${', \"$'\", '`\"', '\"(', \"')'x \"):\n"
+            "            mask(tok * k)\n"
+            "        d = time.perf_counter() - t\n"
+            "        best = d if best is None else min(best, d)\n"
+            "    return best\n"
+            "print(run(1000), run(4000))\n"
+        )
+        pkg = Path(__file__).resolve().parent.parent
+        r = subprocess.run(["python3", "-c", script], cwd=pkg, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        small, large = map(float, r.stdout.split())
+        self.assertLess(large, 2.0)
+        self.assertLess(large / max(small, 1e-4), 8.0, (small, large))
+
 
 class SeparatorTest(unittest.TestCase):
     def test_newline_after_an_operator_keeps_the_operator(self):
@@ -310,6 +511,11 @@ class ExpansionCommandWordTest(unittest.TestCase):
             "`true` ",
             "`p q` ",
             "${x:-a b} ",
+            "${x:-${y}} ",
+            "$(true $(true)) ",
+            '"$@" ',
+            "$@ ",
+            "$* ",
             "$x $y ",
             "A=1 $x ",
             "time ${x} ",
@@ -319,6 +525,13 @@ class ExpansionCommandWordTest(unittest.TestCase):
                 cmd = f"{start}{prefix}gh pr create --fill"
                 with self.subTest(cmd=cmd):
                     self.assertIsNotNone(unresolved_reason(cmd, find_invocations(cmd)))
+
+    def test_pr_operation_after_an_expansion_in_a_double_quoted_substitution_stops(self):
+        # 二重引用符の中は構文解析が読まないので、前置きの展開を安全網が数える
+        for prefix in ("$x", "${x}", "$(a b)", "a$x", "$x-y", "$x$y", '"$x"'):
+            cmd = f'echo "$({prefix} gh pr create)"'
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(unresolved_reason(cmd, find_invocations(cmd)))
 
     def test_expansion_in_an_argument_is_left_alone(self):
         for cmd in (
@@ -334,7 +547,9 @@ class ExpansionCommandWordTest(unittest.TestCase):
                 self.assertIsNone(unresolved_reason(cmd, find_invocations(cmd)))
 
     def test_undo_after_an_expansion_is_not_counted(self):
-        self.assertIsNone(unresolved_reason("$x gh pr ready --undo", find_invocations("$x gh pr ready --undo")))
+        for cmd in ("$x gh pr ready --undo", '"$@" gh pr ready --undo', "${x:-${y}} gh pr ready --undo"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(unresolved_reason(cmd, find_invocations(cmd)))
 
     def test_many_expansions_take_linear_time(self):
         script = (
@@ -432,7 +647,7 @@ class RealShellTest(unittest.TestCase):
         self.top = Path(os.path.realpath(self._tmp.name))
         self.fake = self.top / "fake"
         self.fake.mkdir()
-        for name, body in {"gh": 'echo "$PWD" >> "$GHLOG"', "git": ":", "make": ":"}.items():
+        for name, body in {"gh": 'echo "$PWD" >> "$GHLOG"', "git": ":", "make": ":", "foo": ":"}.items():
             path = self.fake / name
             path.write_text(f"#!/bin/sh\n{body}\nexit 0\n")
             path.chmod(0o755)

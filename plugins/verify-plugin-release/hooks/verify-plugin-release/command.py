@@ -809,7 +809,10 @@ class _CdTracker:
         segment = self.segments[index]
         args = _cd_arguments(words)
         arg = args[0] if args else None
-        if segment.after in ("pipe", "bg") or any(w in _DETACHING_WRAPPERS for w in wrappers):
+        if segment.depths[-1] > depth:
+            # `cd $(a | b); gh pr create`: 直後の区切りは引数の置換の中のもので、cd のものではない
+            self.state = _maybe_cd(self.state, arg)
+        elif segment.after in ("pipe", "bg") or any(w in _DETACHING_WRAPPERS for w in wrappers):
             self.moved_nowhere()
         elif (
             "exec" in wrappers
@@ -842,7 +845,7 @@ class _CdTracker:
         # `command -p cd d` / `builtin -- cd d`: 語の並びでは読まない
         hidden = (
             bool(rest)
-            and "cd" in rest
+            and not _CD_WORDS.isdisjoint(rest)
             and ((rest[0] == "builtin" and rest[1] != "cd") or (bool(wrappers) and rest[0].startswith("-")))
         )
         if hidden and any(w in _DETACHING_WRAPPERS for w in wrappers):
@@ -850,7 +853,7 @@ class _CdTracker:
             return
         for i in range(1, len(rest)):
             prev = rest[i - 1]
-            if rest[i] == "cd" and (hidden or prev == ")" or "$" in prev or "`" in prev):
+            if rest[i] in _CD_WORDS and (hidden or prev == ")" or "$" in prev or "`" in prev):
                 self.sync(segment.depths[offset + i])
                 self.unsure_cd()
                 return
@@ -988,9 +991,91 @@ def _brace_group_exits(segments: list[_Segment], index: int) -> bool:
     return False
 
 
+# 引用かエスケープで記号だけになった語 (`foo ')'` / `foo \\(` / `-exec x {} \\;`)
+_QUOTED_PUNCT_WORD = re.compile(r"""(?:'[()|&<>;\n]*'|"[()|&<>;\n]*"|\\[()|&<>;])+(?=[\s;&|()<>]|$)""")
+_BRACE_EXPANSION = re.compile(r"\$\{[^{}]*\}")
+_MASKED_WORD = "_q_"
+
+
+def _mask_quoted_punct(s: str, nested: bool = True) -> str:
+    """shlex が本物の括弧や区切りと読んでしまう、シェルの文字列の中の記号を普通の文字に置き換える。
+
+    shlex は引用を外すので、`foo ')'` の `)` は本物の `)` と同じ token になり、括弧の深さや区切りの読みがずれる。
+    置き換えるのは次の 3 つで、シェルと同じ規則で引用を読んで見つける (引用の中の文字列を語と読み違えないため):
+    - 語全体が引用かエスケープされた記号だけのもの
+    - 括弧の対応が取れていない `${...}` (`${x#(}`)
+    - 二重引用符の中の置換の、さらに内側の二重引用符の中身 (`"$(foo ")")"`。shlex はここを引用の外と読む)
+
+    二重引用符の中の置換に heredoc があると、本文の括弧や引用符で置換の範囲を読み違えるので、3 つ目だけをやめて
+    shlex と同じ読み (二重引用符は次の `"` で閉じる) に戻す (nested=False)。
+    """
+    out: list[str] = []
+    stack: list[str] = []  # 開いている `"`、その中の `$(` と `(`、backtick
+    dq = 0  # stack の中の `"` の数。偶数のときの二重引用符の中身を、shlex は引用の外と読む
+    i, n = 0, len(s)
+    while i < n:
+        ch = s[i]
+        if not stack and (not out or out[-1][-1] in _WORD_START_PREV):
+            m = _QUOTED_PUNCT_WORD.match(s, i)
+            if m and not set(m.group()).isdisjoint(_PUNCT):
+                out.append(_MASKED_WORD)
+                i = m.end()
+                continue
+        top = stack[-1] if stack else ""
+        step = 1
+        if ch == "\\":
+            step = 2
+        elif top == '"':
+            if ch == '"':
+                stack.pop()
+                dq -= 1
+            elif nested and s.startswith("$(", i):
+                stack.append("(")
+                step = 2
+            elif nested and ch == "`":
+                stack.append(ch)
+            elif dq % 2 == 0 and ch in _PUNCT:
+                out.append("_")
+                i += 1
+                continue
+        elif stack and s.startswith("<<", i):
+            return _mask_quoted_punct(s, nested=False)
+        elif ch == "'" or s.startswith("$'", i):
+            # `'...'` はそのまま。`$'...'` だけ `\\X` を組で読む
+            j = i + (ch != "'") + 1
+            while j < n and s[j] != "'":
+                j += 2 if s[j] == "\\" and ch != "'" else 1
+            step = j + 1 - i
+            # shlex は `$'a\\'b'` の `\\'` で引用を閉じ、後ろの引用符の対応がずれる。ずれた読みで cd を確かめない
+            if ch != "'" and "\\'" in s[i:j]:
+                raise ValueError("$'...' の中の \\' は読めない")
+        elif ch == '"':
+            stack.append(ch)
+            dq += 1
+        elif stack and ch == "`":
+            if top == "`":
+                stack.pop()
+            else:
+                stack.append(ch)
+        elif top == "(" and ch in "()":
+            if ch == "(":
+                stack.append(ch)
+            else:
+                stack.pop()
+        elif not stack and s.startswith("${", i):
+            m = _BRACE_EXPANSION.match(s, i)
+            if m and m.group().count("(") != m.group().count(")"):
+                out.append(_MASKED_WORD)
+                i = m.end()
+                continue
+        out.append(s[i : i + step])
+        i += step
+    return "".join(out)
+
+
 def _tokens(stripped: str) -> list[str]:
     """_strip_comments を通した文字列を shell の語と記号に分ける (閉じていない引用符は ValueError)。"""
-    lex = shlex.shlex(stripped, posix=True, punctuation_chars=_PUNCT)
+    lex = shlex.shlex(_mask_quoted_punct(stripped), posix=True, punctuation_chars=_PUNCT)
     lex.commenters = ""  # コメントは _strip_comments で落とす (shlex は改行まで食う)
     lex.whitespace = " \t\r"
     lex.whitespace_split = True
@@ -1209,6 +1294,12 @@ def _has_pr_op(args: list[str]) -> bool:
     )
 
 
+# 値にコマンド置換がある (`$((1))` は算術で、失敗しない)
+_VALUE_MAY_FAIL = re.compile(r"\$\((?!\()|`")
+# 語として cd / chdir が現れる。backtick は語の一部として残っているので区切りに数える (`` `echo cd` d ``)
+_NAMES_CD = re.compile(r"(?:^|[\s`])(?:cd|chdir)(?:$|[\s`])")
+
+
 def find_invocations(command: str) -> list[Invocation]:
     """コマンド中の `gh pr create` / `gh pr ready` をすべて順に返す。
 
@@ -1234,11 +1325,14 @@ def find_invocations(command: str) -> list[Invocation]:
     segments = _segments(tokens)
     tracker = _CdTracker(segments)
     # 読めない形の cd: 関数の中の cd は呼ばれたときに走り、CDPATH / HOME は cd の行き先を変える
-    unreadable = not _CD_WORDS.isdisjoint(tokens) and _defines_function_or_cd_context(tokens)
+    unreadable = not _CD_WORDS.isdisjoint(tokens) and _defines_function_or_cd_context(tokens, segments)
     for index, segment in enumerate(segments):
         seg, assigns, wrappers = _strip_prefix(segment.tokens)
         tracker.begin(segment, seg, segments[index - 1] if index else None)
         if not seg:
+            # `X="$(make)" && cd a; gh pr create`: 値の中のコマンドが失敗すると `&&` の後ろは走らない
+            if any(_VALUE_MAY_FAIL.search(v) for v in assigns.values()):
+                tracker.guard = True
             continue
         depth = segment.depths[len(segment.tokens) - len(seg)]
         if seg[0] == "cd" or seg[:2] == ["builtin", "cd"]:
@@ -1249,16 +1343,23 @@ def find_invocations(command: str) -> list[Invocation]:
             tracker.unsure_cd()
             continue
         tracker.scan_hidden(segment, seg, wrappers)
-        # コマンド語が展開なら、走るものが読めない (`$c d` は c=cd なら移る)。`/` を含む語 (`"$VENV"/bin/python`) は外部コマンド
-        if not _is_gh(seg[0]) and ("$" in seg[0] or "`" in seg[0]) and "/" not in seg[0]:
+        word_expands = "$" in seg[0] or "`" in seg[0]
+        # コマンド語が展開で cd を書いた形 (`$(echo cd a)` / `$x cd a`)。`/` を含む語 (`"$VENV"/bin/python`) は外部コマンド。
+        # cd を書いていない形 (`$PY -m pytest` / `$c d`) は読まない。cwd を変えない形の方がずっと多い
+        if not _is_gh(seg[0]) and word_expands and "/" not in seg[0] and _NAMES_CD.search(" ".join(seg)):
             tracker.unsure_cd()
-        # `env -i gh pr create` / `nohup -- gh pr create` / case の分岐の gh は語の並びからは読まないが、走る
-        if not _is_gh(seg[0]) and (tracker.in_case or (wrappers and seg[0].startswith("-"))) and _has_pr_op(seg):
+        # `env -i gh pr create` / `nohup -- gh pr create` / case の分岐の gh / 空になりうる展開の後ろの gh
+        # (`"$@" gh pr create`) は語の並びからは読まないが、走る
+        may_run_pr_op = tracker.in_case or (wrappers and seg[0].startswith("-")) or (word_expands and "--undo" not in seg)
+        if not _is_gh(seg[0]) and may_run_pr_op and _has_pr_op(seg):
             found.append(Invocation(kind="create", parsed=False))
         tracker.guard = True
         if not _is_gh(seg[0]):
             continue
         cd = tracker.state
+        # 括弧が閉じないまま終わるのに括弧の中で gh を読んだ: 括弧の読みがシェルとずれていて、どの cd が効くか決まらない
+        if depth > 0 and segments[-1].end_depth > 0:
+            cd = _unsettled(cd)
         global_repo, rest = _split_global_flags(seg[1:])
         if not rest or rest[0] != "pr":
             continue
@@ -1295,12 +1396,31 @@ def find_invocations(command: str) -> list[Invocation]:
     return found
 
 
-def _defines_function_or_cd_context(tokens: list[str]) -> bool:
-    """関数定義 (`f() {` / `function f`) か、cd の行き先を変える代入 (CDPATH= / cdpath= / HOME=) があるか。"""
-    if "()" in tokens or "function" in tokens or any(a == "(" and b == ")" for a, b in zip(tokens, tokens[1:])):
+def _command_words(segments: list[_Segment]) -> set[str]:
+    """コマンド語の位置にある語 (前置きを外した先頭の語と、括弧を開いた直後の語)。"""
+    words: set[str] = set()
+    for segment in segments:
+        rest = _strip_prefix(segment.tokens)[0]
+        words.update(rest[:1])
+        words.update(b for a, b in zip(segment.tokens, segment.tokens[1:]) if a == "(")
+    return words
+
+
+def _defines_function_or_cd_context(tokens: list[str], segments: list[_Segment]) -> bool:
+    """関数定義 (`f() {` / `function f`) か、cd の行き先を変える代入 (CDPATH= / cdpath= / HOME=) があるか。
+
+    `grep function x` / `rg case x` の語は引数なので数えない。
+    """
+    # shlex は隣り合う記号を 1 token にまとめる (`;()`)
+    if any("()" in tok and set(tok) <= set(_PUNCT) for tok in tokens):
+        return True
+    if any(a == "(" and b == ")" for a, b in zip(tokens, tokens[1:])):
+        return True
+    words = _command_words(segments)
+    if "function" in words:
         return True
     # `(case a in a) ...` の分岐の `)` は括弧の深さの読みをずらす
-    if "case" in tokens and any("(" in tok for tok in tokens):
+    if "case" in words and any("(" in tok for tok in tokens):
         return True
     return any(tok.split("=", 1)[0] in ("CDPATH", "cdpath", "HOME") and "=" in tok for tok in tokens)
 
