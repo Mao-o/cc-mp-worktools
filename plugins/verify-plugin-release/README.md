@@ -92,9 +92,14 @@ Claude Code は PreToolUse hook が時間切れになるとコマンドをその
 `cd "$DIR" && gh pr create` のように移動先が変数で、どの repo を検査すればよいか
 静的に分からない場合も、「ゲートを完了できない」扱いで止めます (絶対パスで書けば通ります)。
 cd が何度もあるときは順に合成します (`cd plugins/x && make test && cd ../.. && gh pr create` は
-repo root を検査します)。サブシェルやパイプの中など shell の cwd を変えないことがある cd の後に
-相対パスの cd が続く場合と、`cd -` を合成する場合も、移動先が決まらないので止めます
-(`cd A || cd B` の両側の cd も同じ扱いです。`cd A || exit` の A は決まります)。
+repo root を検査します)。shell の cwd を変えない cd (`(cd X && make) && gh pr create` のサブシェルの中、
+`ROOT=$(cd .. && pwd); gh pr create` の値の中、パイプの左、`&` の前、`env` / `nohup` の後) の後ろは、元の cwd を検査します。
+その後に相対パスの cd が続く場合と、`cd -` を合成する場合は、移動先が決まらないので止めます。
+cwd を変えるか確かでない cd の後ろも止めます: `cd A || cd B` の両側 (`cd A || exit` の A は決まります)、パイプの右、
+`[ -d A ] && cd A; gh pr create` (`&&` の前に別のコマンドがあり後ろが `;` か改行で続く形。`make && cd A && gh pr create` は検査します)、
+`if` の分岐を閉じた後、ループ・`case`・関数の中、`command cd` / `time cd` (シェルで読みが割れます)、引数なしの `cd`、
+`CDPATH=` / `HOME=` の代入がある形。止まったら `cd <絶対パス> && gh pr create` の形にしてください。
+`eval "cd A"` や `. ./env.sh` の中の cd は読みません。
 heredoc の本文はコマンドとして読まないので、本文に `'` があっても止めません。区切り語に引用がある
 heredoc (`<<'EOF'` など) の本文に `gh pr create` の使い方を書いても止めません (引用の無い区切り語の
 本文の `$(...)` は shell が実行するので、従来どおり止めます)。

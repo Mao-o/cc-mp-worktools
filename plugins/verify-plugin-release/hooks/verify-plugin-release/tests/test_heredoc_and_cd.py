@@ -515,8 +515,6 @@ class CdCompositionTest(unittest.TestCase):
             "relative": ("cd plugins/x && gh pr create", "plugins/x"),
             "absolute": ("cd /abs/repo && gh pr create", "/abs/repo"),
             "home": ("cd ~/repo && gh pr create", "~/repo"),
-            "subshell": ("(cd x)&& gh pr create", "x"),
-            "env wrapper": ("env cd x; gh pr create", "x"),
         }
         for label, (cmd, want) in cases.items():
             with self.subTest(label):
@@ -538,8 +536,8 @@ class CdCompositionTest(unittest.TestCase):
         self.assertEqual(self.first("cd / && cd tmp && gh pr create").cd, "/tmp")
 
     def test_effective_forms_compose(self):
-        # どれも shell の cwd を変える (bash / zsh 実測。`command cd` は bash のみ。zsh では gh が走らない)
-        for prefix in ("", "time ", "command ", "A=1 ", "! "):
+        # どれも shell の cwd を変える (bash 3.2 / zsh / bash 5.2 実測)
+        for prefix in ("", "builtin ", "A=1 ", "! ", "2>/dev/null "):
             cmd = f"cd a && {prefix}cd b && gh pr create"
             with self.subTest(prefix=prefix):
                 inv = self.first(cmd)
@@ -656,9 +654,11 @@ class CdCompositionTest(unittest.TestCase):
         inv = self.first("cd a; cd /abs || exit; gh pr create")
         self.assertEqual((inv.cd_steps, inv.cd_unresolved), (("/abs",), None))
 
-    def test_bare_cd_resets_to_the_hook_cwd(self):
-        inv = self.first("cd plugins && cd && gh pr create")
-        self.assertEqual((inv.cd, inv.cd_steps, inv.cd_unresolved), (None, (), None))
+    def test_bare_cd_stops(self):
+        # shell は $HOME に移る。hook の HOME と同じとは限らないので検査先にしない
+        for cmd in ("cd plugins && cd && gh pr create", "cd; gh pr create", "cd 2>/dev/null; gh pr create"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.first(cmd).cd_unresolved)
 
     def test_each_invocation_gets_the_cd_at_its_position(self):
         found = find_invocations("cd plugins/x && gh pr create --draft && cd ../.. && gh pr ready")

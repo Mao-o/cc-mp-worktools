@@ -194,7 +194,13 @@ def _evaluate_one(inv: Invocation, cwd: str, mode: str) -> dict | None:
         # 検査する repo が分からない。素通しにせず「完了できなかった」として扱う。
         unresolved = inv.cd_unresolved or (inv.cd if any(c in inv.cd for c in "$`") else None)
         if unresolved is not None:
-            return _error(RuntimeError(f"cd の移動先 ({unresolved}) を静的に解決できない。絶対パスで指定する"), soft)
+            return _error(
+                RuntimeError(
+                    f"cd の移動先 ({unresolved}) を静的に解決できない (cd が走らないことがある形を含む)。"
+                    "`cd <絶対パス> && gh ...` の形で実行する"
+                ),
+                soft,
+            )
         # cd を 1 つずつ辿る。shell の cd と同じく論理パス (`..` は symlink を辿る前の親) で進め、
         # 途中の移動先が無ければ止める (`cd 無い && cd ..` を `.` と読まないため)
         # 権限の無い dir・長すぎる名前・symlink の循環は is_dir / resolve が例外を投げる (Python 3.11〜3.13)。

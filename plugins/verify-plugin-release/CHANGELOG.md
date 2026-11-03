@@ -1,5 +1,81 @@
 # Changelog
 
+## 0.3.5
+
+cd が後ろの PR 操作の cwd を変えるかを 3 つに分け、「変えるか確かでない cd」の後ろは止め、「変えない cd」の後ろは元の cwd を
+検査するようにした (patch bump)。これまで cd が 1 回の形は、シェルの cwd を変えない cd でも移動先を検査先と読み、不備のある
+repo でゲートを見ずに素通しになっていた。
+
+読みを足す案は入れなかった。`&&` の左が成功するか・分岐を通るかは語の並びから決まらないので、走るか確かでない cd は読まずに止める。
+
+### Fixed
+
+- シェルの cwd を変えない cd の後ろの PR 操作は、元の cwd を検査する (これまでは cd の移動先を検査していた):
+  `(cd X && make) && gh pr create` / `(cd X); gh pr create` / `(cd X) && Y=1 gh pr create` / `ROOT=$(cd .. && pwd); gh pr create` /
+  `X=$(cd Y);(gh pr create)` / `cd X | cat; gh pr create` / `cd X | gh pr create` / `cd X & gh pr create` / `env cd X; gh pr create` /
+  `nohup -- cd X; gh pr create`。この cd に相対の cd が続く形は、これまでどおり止める
+- cwd を変えるか確かでない cd の後ろの PR 操作は止める (`gh` が走る dir がシェルや実行時の値で変わる):
+  - `cd A || cd B`、`cd A || true`、`true || cd A` (cd が 1 回の形も。`cd A || exit` の A は決まる)
+  - パイプの右の cd (`true | cd A; gh pr create`。zsh だけ移る)
+  - `&&` の前に別のコマンドがあり後ろが `;` か改行で続く形 (`[ -d A ] && cd A; gh pr create` / `make && cd ..; gh pr create`)。
+    `make && cd A && gh pr create` は止めない
+  - `&&` と改行の間に空白やコメントがある形 (`false && ` + 改行 + `cd A; gh pr create`)。改行で区切りの種類を上書きしていた
+  - `if` の分岐を閉じた後や `else` の後 (`if [ -d A ]; then cd A; fi; gh pr create`)、ループの中、`case` の分岐、関数の中の cd
+    (関数があると読みをやめる)
+  - `&` の前のリストの cd (`cd A && true & gh pr create`)、`{ cd A; } | cat`。`cd A; true & gh pr create` の gh は実際には
+    常に A で走るが、`&` の前を切り分ける読みを足していないので、これも止める
+  - 語の並びでは読まないが移る cd (`X=$(a b) cd A`、`$x cd A`、`command -p cd A`、`builtin -- cd A`)
+  - コマンド語が展開で cd を書いた形 (`$(echo cd a); gh pr create`、`` `true` cd a; gh pr create ``)。cd を書いていない形
+    (`$PY -m pytest && gh pr create`、`$c d; gh pr create`) は読まない
+  - シェルで読みが割れる形: `command cd A` (zsh は外部コマンドを探し、`/usr/bin/cd` があると移らない)、`time cd A`
+    (bash 3.2 の `if time cd A; then` は移らない)、`exec cd A`、`chdir A`、`builtin chdir A`、`cd A B` (zsh は `$PWD` の A を B に
+    置き換える)
+  - 値にコマンド置換がある代入の後ろの `&&` の cd (`X="$(make)" && cd A; gh pr create`。`make` が失敗すると gh は元の cwd で走る)
+  - `CDPATH=` / `cdpath=` / `HOME=` の代入があるコマンドの cd (行き先が変わる)
+  - 引数なしの cd (shell は `$HOME` に移るが、hook の cwd を検査していた)
+- `builtin cd A` を cd として読む。これまでは読まず、hook の cwd を検査していた
+- 引用かエスケープで記号だけになった語 (`git log --grep ')'` / `foo \(` / `find ... -exec x {} \;`)、括弧の対応が取れていない
+  `${x#(}`を、括弧や区切りと読まない。これまでは `foo ';' cd A; gh pr create` の引数を cd と読み、括弧の深さの読みもずれていた。
+  二重引用符の中の置換のさらに内側の二重引用符の中身に記号があるときは、cwd を変えうる語がコマンドに無ければ括弧や区切りと読まず、
+  あれば「解析できない」として止める (`foo "$(foo ${x%(*})" && cd A && foo ")" && gh pr create`。引用の走査が内側の括弧を数え違え、
+  本物の記号を隠して cd を読み違えるため)。`$'a\'b'` の形は shlex が引用符の対応を読み違えるので、コマンド全体を
+  「解析できない」として止める。括弧が閉じないまま括弧の中で読んだ PR 操作も止める
+- 引数の置換の中の区切りを cd の区切りと読まない。`cd $(a | b); gh pr create` をパイプの左の cd と読むと、元の cwd を検査してしまう。
+  この形の cd の後ろは止める。backtick と `${` の中も同じ (`` cd `a | b`; gh pr create `` / `cd ${X:-a|b}; gh pr create`)
+- 空になりうる展開がコマンド語の位置にある形の後ろの PR 操作を止める。`true && ${x} gh pr create` / `$x gh pr create` /
+  `"$x" gh pr create` / `$(true) gh pr create` / `` `true` gh pr create `` / `${x:-${y}} gh pr create` / `"$@" gh pr create` /
+  `$* gh pr create` を見失い、ゲートを走らせずに通していた
+- wrapper にオプションが付いた形 (`env -i gh pr create` / `nohup -- gh pr create` / `command -- gh pr create` / `time -p gh pr create`) と、
+  `case` の分岐と同じ行の `gh pr create` も同じく止める
+- `pushd` / `popd` は語としてどこかにあれば止める (`if pushd A; then ...` / `command pushd A` / `Y=1 pushd A` / `'pushd' A` / `! pushd A` /
+  `time pushd A`)。区切りの直後の素の `pushd` だけを見ていて、hook の cwd が repo の外だと素通しになっていた。
+  語が引数でも止める (`echo pushd; gh pr create`)
+
+### Known gaps
+
+- `eval "cd A"`、`. ./env.sh` の中の cd は読まない
+- `sudo gh pr create` / `xargs gh pr create` のように、前置きとして読まない語の後ろの PR 操作は数えない
+- `$(a)#b` の後ろの cd は、cwd を変えうる語があるときの従来の読み (`#` からコメント) で読み落とすことがある
+- コマンド語が展開で cd を書いていない形 (`$c d`、`${c} d`、`$x; gh pr create`、`g=cd; $g A`、`c${x}d A`) は、値で cd になっても
+  読まない。うっかりの予防の範囲の外で、`$PY -m pytest` のような普段の形を止める害の方が大きい
+- 語の並びで cd と読まない前置き: `noglob cd A`、`nocorrect cd A`、`repeat 1 cd A` (zsh だけ移る)、`eval cd A`。
+  閉じ括弧の直後に `fi` を続けた `if false; then { cd A; } fi` の分岐の cd は、走ったものとして読む
+
+### 止めすぎとして残す形
+
+走る cwd は 1 つに決まる、または確かめられるが、読みを足さずに止める。この「止める」は plugin repo でない repo と repo の外でも効く
+(検査先が決まらないので、検査先が plugin repo かどうかを確かめられない)。`cd <絶対パス> && gh pr create` の形にすれば通る。
+
+- `if ! cd A; then exit 1; fi; gh pr create` (`cd A || exit 1` の形なら通る)
+- `cat x | (cd A && gh pr create)`
+- `[ -d A ] && { cd A; gh pr create; }`
+- `cd A; make & wait; gh pr create`
+- `$(cd .. && pwd)/x.sh && gh pr create` (コマンド語の展開が cd を書いている形と区別しない)
+- `$PY x.py cd; gh pr create`、`$PY -m pytest -k cd -q; gh pr create`、`$G --msg 'cd a'; gh pr create` (コマンド語の展開の後ろの引数の cd を、
+  移動しうる cd と区別しない)
+- `cd A; X="$(foo ")")"; gh pr create` (二重引用符の中の置換の内側の記号と cwd を変えうる語が同じコマンドにある形)。
+  `gh pr create` の本文の heredoc の中の記号は、この形に当たらない
+
 ## 0.3.4
 
 代入語の値に置換がある形の後ろの PR 操作を素通しにせず止めるようにし、PR 本文の定型

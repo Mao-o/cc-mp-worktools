@@ -51,9 +51,15 @@ _REDIRECT_PREFIX = (
     + r"(?:\s+|(?=\d*(?:&>|[<>])))"
 )
 _EXEC_START = r"(?:^|[;&|(\n`{]|\$\()\s*"
+# コマンド語の位置の展開 (`$x` / `${x}` / `$(a b)`。前後に文字が続く形や二重引用符で囲んだ形も)。空に展開されると
+# 後ろの語がコマンド語になるので、後ろの PR 操作を数える (構文解析は読まないので、数が合わずに止まる)。
+# backtick は実行位置の始まりでもあり、ここで読むと個数の 2 乗の時間になるので、構文解析の側で止める
+_EXPANSION = r"\$(?:\w+|\{[^{}]*\}|\([^()]*\))"
+_EXPANSION_PREFIX = _atomic(r'"?[\w./-]*' + _EXPANSION + r'(?:[\w./-]|' + _EXPANSION + r')*"?', "expansion") + r"\s+"
 _PREFIX_ITEM = (
     r"(?:(?:if|then|else|elif|do|while|until|!|env|command|exec|time|nohup)\s+"
-    r"|" + _atomic(r"[A-Za-z_][A-Za-z0-9_]*=" + _WORD_PART + r"*", "assign") + r"\s+|" + _REDIRECT_PREFIX + r")"
+    r"|" + _atomic(r"[A-Za-z_][A-Za-z0-9_]*=" + _WORD_PART + r"*", "assign") + r"\s+|" + _REDIRECT_PREFIX
+    + r"|" + _EXPANSION_PREFIX + r")"
 )
 # 前置きの繰り返しには上限を置く。`&>f&>f ...` のように前置きの中に実行位置の始まり (`&` など) が並ぶと、
 # 始まりごとに残り全部を読み直して個数の 2 乗の時間になるため。上限を超える前置きの後ろの PR 操作は
@@ -540,6 +546,7 @@ class _Segment:
     depths: list[int]  # 各 token の時点の括弧 (サブシェル・コマンド置換) の深さ
     before: str = ""  # 直前の区切りの種類 ("" = コマンドの先頭)
     after: str = ""  # 直後の区切りの種類 ("" = コマンドの末尾)
+    end_depth: int = 0  # 直後の区切りを読み終えるまでの、括弧の一番浅い深さ (`);(` は深さが戻らないまま閉じている)
 
 
 def _segments(tokens: list[str]) -> list[_Segment]:
@@ -548,16 +555,23 @@ def _segments(tokens: list[str]) -> list[_Segment]:
     depth = 0
     for tok in tokens:
         punct = bool(tok) and set(tok) <= set(_PUNCT)
+        lowest = depth
         if punct:
-            depth = max(0, depth + tok.count("(") - tok.count(")"))
+            for ch in tok:
+                depth = depth + 1 if ch == "(" else max(0, depth - 1) if ch == ")" else depth
+                lowest = min(lowest, depth)
         if tok and _is_separator(tok):
             # shlex は隣り合う記号を 1 token にまとめるので、区切りの直後のリダイレクト (`;>f` / 改行 + `<<EOF`)
             # が区切りに飲まれる。リダイレクトの部分は次のセグメントの先頭に回す
             sep, redirect = _split_trailing_redirect(tok)
             kind = _separator_kind(sep)
             cur.after = kind
+            cur.end_depth = lowest
             if cur.tokens:
                 segments.append(cur)
+            # `&&` + 空白 + 改行 の改行は別の token になる。コマンドの続きなので、前の区切りの種類を保つ
+            if not cur.tokens and kind == "seq" and cur.before:
+                kind = cur.before
             cur = _Segment([], [], before=kind)
             if redirect:
                 cur.tokens.append(redirect)
@@ -566,6 +580,7 @@ def _segments(tokens: list[str]) -> list[_Segment]:
             cur.tokens.append(tok)
             cur.depths.append(depth)
     if cur.tokens:
+        cur.end_depth = depth
         segments.append(cur)
     return segments
 
@@ -601,16 +616,15 @@ def _strip_prefix(seg: list[str]) -> tuple[list[str], dict[str, str], list[str]]
 # リダイレクト演算子だけでできた token (`<` `<<` `<<<` `>` `>>` `>&` `&>` `<&` `<>`)。区切り (`;` `|` 改行) は含まない
 _REDIRECT_CHARS = frozenset("<>&")
 
-# 後ろの cd を外部プロセスとして走らせる wrapper (シェルの cwd は変わらない。exec は shell ごと置き換える)
-_DETACHING_WRAPPERS = {"env", "nohup", "exec"}
+# 後ろの cd を外部プロセスとして走らせる wrapper (シェルの cwd は変わらない)
+_DETACHING_WRAPPERS = {"env", "nohup"}
 
 
 @dataclass(frozen=True)
 class _CdState:
     steps: tuple[str, ...] = ()
     unresolved: str | None = None
-    # いずれかの step が、シェルの cwd を変えないかもしれない位置 (サブシェル・パイプ・`&`・
-    # env / nohup / exec の後) にある
+    # シェルの cwd を変えない、または変えるか確かでない cd を読んだ。後ろの相対の cd の起点が決まらない
     uncertain: bool = False
 
     @property
@@ -629,24 +643,222 @@ def _unstatic(arg: str) -> bool:
 
 
 def _next_cd(state: _CdState, arg: str | None, uncertain_here: bool) -> _CdState:
-    """cd を 1 つ進める。相対パスは前の移動先に join し、絶対パス (`/` `~`) は置き換える。
+    """確かな cd を 1 つ進める。相対パスは前の移動先に join し、絶対パス (`/` `~`) は置き換える。
 
-    引数なしの cd は従来どおり起点 (hook の cwd) に戻す。シェルの cwd を変えないかもしれない
-    cd に相対の cd が続くと、どちらを起点にするか決まらないので「静的に解決できない」にする。
+    引数なしの cd は `$HOME` に移るが、hook の HOME と shell の HOME が同じとは限らないので止める。uncertain_here は
+    サブシェルの中の cd。`(cd a && gh pr create)` の gh は a で走るが、それ以上は読まない (相対の cd が続くと止める)。
+    シェルの cwd を変えないかもしれない cd に相対の cd が続くと、起点が決まらないので「静的に解決できない」にする。
     """
     if arg is None:
-        return _CdState()
-    if state.steps and uncertain_here and arg.startswith(("/", "~")):
-        # `cd A || cd /abs`: 絶対パスでも、走らないかもしれない cd は前の移動先を置き換えるとは限らない
-        steps = (*state.steps, arg)
-        return _CdState(steps, " → ".join(steps), True)
-    if arg.startswith(("/", "~")) or not state.steps:
+        return _maybe_cd(state, None)
+    absolute = arg.startswith(("/", "~"))
+    if state.steps and uncertain_here and absolute:
+        # 走らないかもしれない cd は、絶対パスでも前の移動先を置き換えるとは限らない
+        return _maybe_cd(state, arg)
+    if not absolute and not state.steps and state.uncertain:
+        return _CdState((arg,), f"(シェルの cwd を変えない cd) → {arg}", True)
+    if absolute or not state.steps:
         return _CdState((arg,), arg if _unstatic(arg) else None, uncertain_here)
     steps = (*state.steps, arg)
-    unresolved = state.unresolved or (arg if _unstatic(arg) else None)
-    if unresolved is None and (state.uncertain or uncertain_here):
-        unresolved = " → ".join(steps)
-    return _CdState(steps, unresolved, state.uncertain or uncertain_here)
+    if state.uncertain or uncertain_here:
+        return _CdState(steps, " → ".join(steps), True)
+    return _CdState(steps, state.unresolved or (arg if _unstatic(arg) else None), False)
+
+
+def _maybe_cd(state: _CdState, arg: str | None) -> _CdState:
+    """シェルの cwd を変えるか確かでない cd。後ろの PR 操作の検査先が決まらないので止める (確かな絶対パスの cd までは解けない)。"""
+    steps = state.steps if arg is None else (*state.steps, arg)
+    return _CdState(steps, " → ".join(steps) or "引数なしの cd、コマンド語の展開、読めない形のコマンド", True)
+
+
+def _unsettled(state: _CdState) -> _CdState:
+    """ここまでの cd が走ったか確かでなくなった (`false && cd a; ...` の `;` / `if` の閉じなど)。"""
+    return _CdState(state.steps, state.unresolved or " → ".join(state.steps) or "cd", True)
+
+
+_CD_WORDS = frozenset({"cd", "chdir"})
+
+
+def _cd_arguments(words: list[str]) -> list[str]:
+    """cd の後ろの語からリダイレクトを除いた引数。"""
+    args: list[str] = []
+    i = 0
+    while i < len(words):
+        if words[i] and set(words[i]) <= _REDIRECT_CHARS:
+            i += 2
+        elif words[i].isdigit() and i + 1 < len(words) and words[i + 1] and set(words[i + 1]) <= _REDIRECT_CHARS:
+            i += 3
+        else:
+            args.append(words[i])
+            i += 1
+    return args
+
+
+@dataclass
+class _Scope:
+    """括弧 (サブシェル・コマンド置換) の 1 段に入る前の読みの状態。閉じたら元に戻す。"""
+
+    state: _CdState
+    guard: bool
+    pending: bool
+    block_base: int
+
+
+@dataclass
+class _Block:
+    kind: str  # "if" | "loop" | "brace" | "guarded-brace"
+    opened: _CdState
+
+
+class _CdTracker:
+    """セグメントを順に読み、PR 操作の時点の cwd の読みを持つ。
+
+    読むのは「確かに移る cd」だけで、次の 3 つに分ける (bash 3.2 / zsh / bash 5.2 で実測):
+    - 後ろのコマンドの cwd を変えない cd (閉じた括弧の中・パイプの左・`&` の前・env / nohup の後)。元の cwd を検査する
+    - 変えるか確かでない cd (`||` の右と左・パイプの右 (zsh だけ移る)・ループの中・`&&` の前に別のコマンドがあって後ろが
+      `;` で続く・`if` の分岐が閉じた後など)。止める
+    - 確かに移る cd。合成する
+    語の並びから確かめられない形は、上の 2 つに倒す (「確かに移る」の方を限定する)。
+    """
+
+    def __init__(self, segments: list[_Segment]) -> None:
+        self.segments = segments
+        self.state = _CdState()
+        self.frames: list[_Scope] = []
+        self.blocks: list[_Block] = []
+        self.block_base = 0
+        self.guard = False  # 同じ and-or のリストの前のほうに、cd ではないコマンドがある
+        self.pending = False  # guard の後ろの cd を読んだ。リストが終わると走ったか確かでなくなる
+        self.in_case = False
+
+    def sync(self, depth: int) -> None:
+        while len(self.frames) > depth:
+            frame = self.frames.pop()
+            # 括弧の中の cd は後ろのコマンドの cwd を変えない。後ろの相対の cd の読みだけ従来どおり止める
+            moved = self.state != frame.state
+            self.state = _CdState(
+                frame.state.steps, frame.state.unresolved, frame.state.uncertain or moved
+            )
+            # 括弧の中のコマンドが失敗すると `&&` の後ろは走らない
+            self.guard, self.pending = True, frame.pending
+            self.block_base = frame.block_base
+        while len(self.frames) < depth:
+            self.frames.append(_Scope(self.state, self.guard, self.pending, self.block_base))
+            self.guard = self.pending = False
+            self.block_base = len(self.blocks)
+
+    def _settle(self) -> None:
+        if self.pending:
+            self.state = _unsettled(self.state)
+        self.pending = False
+
+    def begin(self, segment: _Segment, rest: list[str], previous: _Segment | None) -> None:
+        # 区切りはその時点の深さに属する (`{ cd a; } & (true)` の `&` は `(` に入る前に読む)
+        if previous is not None:
+            self.sync(previous.end_depth)
+        if segment.before in ("", "seq", "bg"):
+            self._settle()
+            self.guard = False
+        elif segment.before == "or":
+            self._settle()
+        if segment.before == "bg" and self.state.steps:
+            # `cd a && true & gh pr create` / `{ cd a; } && true & gh pr create`: `&` の前のリストごと別のプロセスで走る
+            self.state = _unsettled(self.state)
+        tokens = segment.tokens
+        offset = len(tokens) - len(rest)
+        for tok, depth in zip(tokens[:offset], segment.depths):
+            self.sync(depth)
+            self._keyword(tok, segment.before)
+        if rest:
+            # `(a)\n(cd b)` の `(` は区切りの token に飲まれ、前置きに現れない
+            self.sync(segment.depths[offset])
+            self._keyword(rest[0], segment.before, segment.after)
+        if self.in_case and not _CD_WORDS.isdisjoint(tokens):
+            self.unsure_cd()
+
+    def _keyword(self, tok: str, before: str, after: str = "") -> None:
+        if tok == "if":
+            self.blocks.append(_Block("if", self.state))
+        elif tok in ("while", "until", "for", "select"):
+            self.blocks.append(_Block("loop", self.state))
+        elif tok == "{":
+            guarded = before in ("or", "pipe") or (before == "and" and self.guard)
+            kind = "guarded-brace" if guarded else "brace"
+            self.blocks.append(_Block(kind, self.state))
+        elif tok in ("else", "elif"):
+            if self.blocks:
+                self._close_branch(self.blocks[-1])
+        elif tok in ("fi", "done", "}") and self.blocks:
+            block = self.blocks.pop()
+            if block.kind != "brace" or after == "pipe":
+                self._close_branch(block)
+        elif tok == "case":
+            self.in_case = True
+        elif tok == "esac":
+            self.in_case = False
+
+    def _close_branch(self, block: _Block) -> None:
+        if (self.state.steps, self.state.unresolved) != (block.opened.steps, block.opened.unresolved):
+            self.state = _unsettled(self.state)
+
+    def _in_loop(self) -> bool:
+        return any(b.kind == "loop" for b in self.blocks[self.block_base :])
+
+    def cd(self, index: int, words: list[str], wrappers: list[str], depth: int) -> None:
+        """words はコマンド語 cd の後ろの語。"""
+        segment = self.segments[index]
+        args = _cd_arguments(words)
+        arg = args[0] if args else None
+        text = " ".join(words)
+        if segment.depths[-1] > depth or text.count("`") % 2 or text.count("${") > text.count("}"):
+            # `cd $(a | b); gh pr create`: 直後の区切りは引数の置換の中のもので、cd のものではない
+            # (backtick と `${` は shlex が開きと閉じを分けないので、語の中で閉じているかを数える)
+            self.state = _maybe_cd(self.state, arg)
+        elif segment.after in ("pipe", "bg") or any(w in _DETACHING_WRAPPERS for w in wrappers):
+            self.moved_nowhere()
+        elif (
+            "exec" in wrappers
+            or "command" in wrappers  # zsh の command は外部コマンドを探す (/usr/bin/cd があると移らない)
+            or "time" in wrappers  # bash 3.2 の `if time cd a; then` は移らない
+            or segment.before in ("pipe", "or")
+            # `cd A || exit` の左は、失敗すると後ろが走らないので A に決まる
+            or (segment.after == "or" and not _terminates(self.segments, index + 1))
+            or self._in_loop()
+            # zsh の `cd a b` は $PWD の a を b に置き換える
+            or len(args) > 1
+        ):
+            self.state = _maybe_cd(self.state, arg)
+        else:
+            self.state = _next_cd(self.state, arg, depth > 0)
+            if segment.before == "and" and self.guard:
+                self.pending = True
+            if "!" in segment.tokens:
+                self.guard = True  # `! cd a && cd b`: a に移れると b は走らない
+
+    def moved_nowhere(self) -> None:
+        self.state = _CdState(self.state.steps, self.state.unresolved, True)
+
+    def unsure_cd(self) -> None:
+        self.state = _maybe_cd(self.state, None) if not self.state.steps else _unsettled(self.state)
+
+    def scan_hidden(self, segment: _Segment, rest: list[str], wrappers: list[str]) -> None:
+        """コマンド語として読まなかったが、移動しうる cd (`X=$(a b) cd d` / `$x cd d` / `command -p cd d`)。"""
+        offset = len(segment.tokens) - len(rest)
+        # `command -p cd d` / `builtin -- cd d`: 語の並びでは読まない
+        hidden = (
+            bool(rest)
+            and not _CD_WORDS.isdisjoint(rest)
+            and ((rest[0] == "builtin" and rest[1] != "cd") or (bool(wrappers) and rest[0].startswith("-")))
+        )
+        if hidden and any(w in _DETACHING_WRAPPERS for w in wrappers):
+            self.moved_nowhere()
+            return
+        for i in range(1, len(rest)):
+            prev = rest[i - 1]
+            if rest[i] in _CD_WORDS and (hidden or prev == ")" or "$" in prev or "`" in prev):
+                self.sync(segment.depths[offset + i])
+                self.unsure_cd()
+                return
 
 
 def _is_gh(tok: str) -> bool:
@@ -781,9 +993,98 @@ def _brace_group_exits(segments: list[_Segment], index: int) -> bool:
     return False
 
 
+# 引用かエスケープで記号だけになった語 (`foo ')'` / `foo \\(` / `-exec x {} \\;`)
+_QUOTED_PUNCT_WORD = re.compile(r"""(?:'[()|&<>;\n]*'|"[()|&<>;\n]*"|\\[()|&<>;])+(?=[\s;&|()<>]|$)""")
+_BRACE_EXPANSION = re.compile(r"\$\{[^{}]*\}")
+_MASKED_WORD = "_q_"
+
+
+def _mask_quoted_punct(s: str, nested: bool = True) -> str:
+    """shlex が本物の括弧や区切りと読んでしまう、シェルの文字列の中の記号を普通の文字に置き換える。
+
+    shlex は引用を外すので、`foo ')'` の `)` は本物の `)` と同じ token になり、括弧の深さや区切りの読みがずれる。
+    置き換えるのは次の 3 つで、シェルと同じ規則で引用を読んで見つける (引用の中の文字列を語と読み違えないため):
+    - 語全体が引用かエスケープされた記号だけのもの
+    - 括弧の対応が取れていない `${...}` (`${x#(}`)
+    - 二重引用符の中の置換の、さらに内側の二重引用符の中身 (`"$(foo ")")"`。shlex はここを引用の外と読む)。
+      この走査は `${x%(*}` やコメントの中の括弧を数え違えて本物の記号を隠すことがあるので、cwd を変えうる語がコマンドに
+      あるときは隠さず ValueError にする (「解析できない」として止まる)。cwd が変わらなければ、検査先を取り違えない
+
+    二重引用符の中の置換に heredoc があると、本文の括弧や引用符で置換の範囲を読み違えるので、3 つ目だけをやめて
+    shlex と同じ読み (二重引用符は次の `"` で閉じる) に戻す (nested=False)。
+    """
+    out: list[str] = []
+    stack: list[str] = []  # 開いている `"`、その中の `$(` と `(`、backtick
+    dq = 0  # stack の中の `"` の数。偶数のときの二重引用符の中身を、shlex は引用の外と読む
+    moves = _may_move(s)
+    escaped = False  # 直前がエスケープ。その文字は語を区切らない (読み直すと `\(\(...x` の長さの 2 乗の時間になる)
+    i, n = 0, len(s)
+    while i < n:
+        ch = s[i]
+        if not stack and not escaped and (not out or out[-1][-1] in _WORD_START_PREV):
+            m = _QUOTED_PUNCT_WORD.match(s, i)
+            if m and not set(m.group()).isdisjoint(_PUNCT):
+                out.append(_MASKED_WORD)
+                i = m.end()
+                continue
+        top = stack[-1] if stack else ""
+        step = 1
+        if ch == "\\":
+            step = 2
+        elif top == '"':
+            if ch == '"':
+                stack.pop()
+                dq -= 1
+            elif nested and s.startswith("$(", i):
+                stack.append("(")
+                step = 2
+            elif nested and ch == "`":
+                stack.append(ch)
+            elif dq % 2 == 0 and ch in _PUNCT:
+                if moves:
+                    raise ValueError("二重引用符の中の置換の内側に記号がある")
+                out.append("_")
+                i += 1
+                continue
+        elif stack and s.startswith("<<", i):
+            return _mask_quoted_punct(s, nested=False)
+        elif ch == "'" or s.startswith("$'", i):
+            # `'...'` はそのまま。`$'...'` だけ `\\X` を組で読む
+            j = i + (ch != "'") + 1
+            while j < n and s[j] != "'":
+                j += 2 if s[j] == "\\" and ch != "'" else 1
+            step = j + 1 - i
+            # shlex は `$'a\\'b'` の `\\'` で引用を閉じ、後ろの引用符の対応がずれる。ずれた読みで cd を確かめない
+            if ch != "'" and "\\'" in s[i:j]:
+                raise ValueError("$'...' の中の \\' は読めない")
+        elif ch == '"':
+            stack.append(ch)
+            dq += 1
+        elif stack and ch == "`":
+            if top == "`":
+                stack.pop()
+            else:
+                stack.append(ch)
+        elif top == "(" and ch in "()":
+            if ch == "(":
+                stack.append(ch)
+            else:
+                stack.pop()
+        elif not stack and s.startswith("${", i):
+            m = _BRACE_EXPANSION.match(s, i)
+            if m and m.group().count("(") != m.group().count(")"):
+                out.append(_MASKED_WORD)
+                i = m.end()
+                continue
+        out.append(s[i : i + step])
+        i += step
+        escaped = ch == "\\"
+    return "".join(out)
+
+
 def _tokens(stripped: str) -> list[str]:
     """_strip_comments を通した文字列を shell の語と記号に分ける (閉じていない引用符は ValueError)。"""
-    lex = shlex.shlex(stripped, posix=True, punctuation_chars=_PUNCT)
+    lex = shlex.shlex(_mask_quoted_punct(stripped), posix=True, punctuation_chars=_PUNCT)
     lex.commenters = ""  # コメントは _strip_comments で落とす (shlex は改行まで食う)
     lex.whitespace = " \t\r"
     lex.whitespace_split = True
@@ -1002,6 +1303,12 @@ def _has_pr_op(args: list[str]) -> bool:
     )
 
 
+# 値にコマンド置換がある (`$((1))` は算術で、失敗しない)
+_VALUE_MAY_FAIL = re.compile(r"\$\((?!\()|`")
+# 語として cd / chdir が現れる。backtick は語の一部として残っているので区切りに数える (`` `echo cd` d ``)
+_NAMES_CD = re.compile(r"(?:^|[\s`])(?:cd|chdir)(?:$|[\s`])")
+
+
 def find_invocations(command: str) -> list[Invocation]:
     """コマンド中の `gh pr create` / `gh pr ready` をすべて順に返す。
 
@@ -1024,27 +1331,44 @@ def find_invocations(command: str) -> list[Invocation]:
         ]
 
     found: list[Invocation] = []
-    cd = _CdState()
     segments = _segments(tokens)
+    tracker = _CdTracker(segments)
+    # 読めない形の cd: 関数の中の cd は呼ばれたときに走り、CDPATH / HOME は cd の行き先を変える
+    unreadable = not _CD_WORDS.isdisjoint(tokens) and _defines_function_or_cd_context(tokens, segments)
     for index, segment in enumerate(segments):
         seg, assigns, wrappers = _strip_prefix(segment.tokens)
+        tracker.begin(segment, seg, segments[index - 1] if index else None)
         if not seg:
+            # `X="$(make)" && cd a; gh pr create`: 値の中のコマンドが失敗すると `&&` の後ろは走らない
+            if any(_VALUE_MAY_FAIL.search(v) for v in assigns.values()):
+                tracker.guard = True
             continue
-        if seg[0] == "cd":
-            uncertain_here = (
-                segment.depths[len(segment.tokens) - len(seg)] > 0
-                or segment.before == "pipe"
-                or segment.after in ("pipe", "bg")
-                or any(w in _DETACHING_WRAPPERS for w in wrappers)
-                # `cd A || cd B`: 右は A に移れたときだけ走らず、左は失敗しても後ろが続く。
-                # `cd A || exit` の左は、失敗すると後ろが走らないので cwd は A に決まる
-                or segment.before == "or"
-                or (segment.after == "or" and not _terminates(segments, index + 1))
-            )
-            cd = _next_cd(cd, seg[1] if len(seg) > 1 else None, uncertain_here)
+        depth = segment.depths[len(segment.tokens) - len(seg)]
+        if seg[0] == "cd" or seg[:2] == ["builtin", "cd"]:
+            tracker.cd(index, seg[seg.index("cd") + 1 :], wrappers, depth)
+            tracker.scan_hidden(segment, seg, wrappers)
             continue
+        if seg[0] == "chdir":  # zsh だけが移る
+            tracker.unsure_cd()
+            continue
+        tracker.scan_hidden(segment, seg, wrappers)
+        word_expands = "$" in seg[0] or "`" in seg[0]
+        # コマンド語が展開で cd を書いた形 (`$(echo cd a)` / `$x cd a`)。`/` を含む語 (`"$VENV"/bin/python`) は外部コマンド。
+        # cd を書いていない形 (`$PY -m pytest` / `$c d`) は読まない。cwd を変えない形の方がずっと多い
+        if not _is_gh(seg[0]) and word_expands and "/" not in seg[0] and _NAMES_CD.search(" ".join(seg)):
+            tracker.unsure_cd()
+        # `env -i gh pr create` / `nohup -- gh pr create` / case の分岐の gh / 空になりうる展開の後ろの gh
+        # (`"$@" gh pr create`) は語の並びからは読まないが、走る
+        may_run_pr_op = tracker.in_case or (wrappers and seg[0].startswith("-")) or (word_expands and "--undo" not in seg)
+        if not _is_gh(seg[0]) and may_run_pr_op and _has_pr_op(seg):
+            found.append(Invocation(kind="create", parsed=False))
+        tracker.guard = True
         if not _is_gh(seg[0]):
             continue
+        cd = tracker.state
+        # 括弧が閉じないまま終わるのに括弧の中で gh を読んだ: 括弧の読みがシェルとずれていて、どの cd が効くか決まらない
+        if depth > 0 and segments[-1].end_depth > 0:
+            cd = _unsettled(cd)
         global_repo, rest = _split_global_flags(seg[1:])
         if not rest or rest[0] != "pr":
             continue
@@ -1075,10 +1399,50 @@ def find_invocations(command: str) -> list[Invocation]:
                 # 分けられない (後ろの --base が前の値を上書きしている)
                 parsed=not _has_pr_op(rest[2:]),
                 cd_steps=cd.steps,
-                cd_unresolved=cd.unresolved,
+                cd_unresolved=cd.unresolved or ("関数定義や CDPATH / HOME の後ろの cd" if unreadable else None),
             )
         )
     return found
+
+
+def _command_words(segments: list[_Segment]) -> set[str]:
+    """コマンド語の位置にある語 (前置きを外した先頭の語と、括弧を開いた直後の語)。"""
+    words: set[str] = set()
+    for segment in segments:
+        rest = _strip_prefix(segment.tokens)[0]
+        words.update(rest[:1])
+        words.update(b for a, b in zip(segment.tokens, segment.tokens[1:]) if a == "(")
+    return words
+
+
+def _defines_function_or_cd_context(tokens: list[str], segments: list[_Segment]) -> bool:
+    """関数定義 (`f() {` / `function f`) か、cd の行き先を変える代入 (CDPATH= / cdpath= / HOME=) があるか。
+
+    `grep function x` / `rg case x` の語は引数なので数えない。
+    """
+    # shlex は隣り合う記号を 1 token にまとめる (`;()`)
+    if any("()" in tok and set(tok) <= set(_PUNCT) for tok in tokens):
+        return True
+    if any(a == "(" and b == ")" for a, b in zip(tokens, tokens[1:])):
+        return True
+    words = _command_words(segments)
+    if "function" in words:
+        return True
+    # `(case a in a) ...` の分岐の `)` は括弧の深さの読みをずらす
+    if "case" in words and any("(" in tok for tok in tokens):
+        return True
+    return any(tok.split("=", 1)[0] in ("CDPATH", "cdpath", "HOME") and "=" in tok for tok in tokens)
+
+
+# 語として現れた pushd / popd (`if pushd` / `command pushd` / `Y=1 pushd` / `'pushd'` / `! pushd`。backtick の直後は _DIR_CHANGERS が見る)
+_DIR_CHANGER_WORDS = frozenset({"pushd", "popd"})
+
+
+def _names_dir_changer(command: str) -> bool:
+    try:
+        return not _DIR_CHANGER_WORDS.isdisjoint(_tokens(_strip_for_parsing(command)))
+    except ValueError:
+        return False  # 分けられないコマンドは呼び出し側が別に止める
 
 
 # 標準入力をシェルのコードとして読みうるコマンド語 (`bash <<'EOF'` の本文は実行される)
@@ -1174,7 +1538,7 @@ def unresolved_reason(command: str, found: list[Invocation]) -> str | None:
             return "PR 操作が別の shell (bash -c / eval 等) の中にある"
     if expected > len(found) or any(not inv.parsed for inv in found):
         return "PR 操作の位置を解析できない (コマンド置換・サブシェル等の中にある)"
-    if found and _DIR_CHANGERS.search(raw):
+    if found and (_DIR_CHANGERS.search(raw) or _names_dir_changer(command)):
         return "pushd / popd による移動先を追跡できない"
     return None
 
