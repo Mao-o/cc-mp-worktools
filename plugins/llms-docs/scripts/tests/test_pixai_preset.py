@@ -33,7 +33,7 @@ g = _loader.load_script("parse-llms-txt.py")
 SCRIPT = "parse-llms-txt.py"
 FULL_URL = "https://platform.pixai.art/llms-full.txt"
 INDEX_URL = "https://platform.pixai.art/llms.txt"
-PATTERN = r"^\s*(.+? \[#[^\]\s]+\])\s*$"
+PATTERN = r"^\s*(\S.*? \[#[^\]\s]+\])\s*$"
 SKILL = Path(_loader.SCRIPTS_DIR).parent / "skills" / "researching-library-docs" / "SKILL.md"
 
 
@@ -414,6 +414,8 @@ class SplitTest(unittest.TestCase):
             "Steps [#a b]": None,
             "[#steps]": None,
             " [#steps]": None,
+            "  [#steps]": None,
+            "    [#poll-step]": None,
             "Steps[#steps]": None,
             "Steps [#]": None,
             "Steps [steps]": None,
