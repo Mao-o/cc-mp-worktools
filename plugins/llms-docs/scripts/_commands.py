@@ -177,12 +177,18 @@ def print_hit_sections(hits: dict, *, anchor_for=None) -> None:
     appended to its ``Section:`` line (a `` [https://...#anchor]`` link).
     Callers pass the leaf title, not ``heading_path`` — a heading whose own
     title contains "/" (e.g. "## CI/CD") would otherwise be misread as a
-    nested breadcrumb (マージ前レビューの指摘).
+    nested breadcrumb (マージ前レビューの指摘). A section whose heading
+    gives its own id (``"anchor_id"``) passes it too, as ``anchor_id=``.
     """
     partial = hits.get("match_mode") == "partial"
     for r in hits["results"]:
         kw_info = f"  keywords: {', '.join(r['matched_keywords'])}" if partial else ""
-        anchor = anchor_for(r["title"]) if anchor_for is not None else ""
+        if anchor_for is None:
+            anchor = ""
+        elif r.get("anchor_id") is not None:
+            anchor = anchor_for(r["title"], anchor_id=r["anchor_id"])
+        else:
+            anchor = anchor_for(r["title"])
         print(f"    Section: {format_heading_path_for_display(r['heading_path'])}  (x{r['hit_count']}){kw_info}{anchor}")
         for snippet_line in r["snippet"].splitlines():
             print(f"      {snippet_line}")

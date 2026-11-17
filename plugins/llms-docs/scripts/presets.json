@@ -214,7 +214,7 @@
       "url": "https://platform.pixai.art/llms-full.txt",
       "split": "h1",
       "index_url": "https://platform.pixai.art/llms.txt",
-      "heading_line_pattern": "^\\s*(.+?) \\[#[^\\]\\s]+\\]\\s*$",
+      "heading_line_pattern": "^\\s*(.+? \\[#[^\\]\\s]+\\])\\s*$",
       "description": "PixAI API (アニメ調の画像・動画生成 API。英・日・韓のページを含む)"
     },
     "cloudflare-workers": {

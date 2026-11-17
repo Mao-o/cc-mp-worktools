@@ -108,7 +108,9 @@ schema 付きで起動された agent (Workflow の `agent(prompt, {schema})` �
   先読みの上限 (400 行) までに閉じない、または手元に `llms.txt` があってページ数がその異なる URL 数の半分を下回るときは、
   stderr に WARNING を出す。分割の規則は変わらず、出力もそのまま続く
 - **同じ heading_path が 1 ページに 2 回以上ある見出し**: コマンドは 1 つ目を読む (2 つ目以降を指す手段は
-  無い)。そうした見出しのコマンドには `# heading appears N times; this reads the first` (shell のコメントなので、行ごと打てる) が付く
+  無い。ただし見出しが id を書いているとき (`## Setup {#a}` / `## Setup {#b}`) は、2 つ目以降もその id (`#b`) か
+  id 付きの書き方 (`Setup {#b}`) で開ける。下の「見出しに書かれた id」)。そうした見出しのコマンドには
+  `# heading appears N times; this reads the first` (shell のコメントなので、行ごと打てる) が付く
 - **0 件**: `Why nothing matched:` に語ごとのページ数を出し、「語が corpus に無い」「語は有るが同じ
   セクションに揃わない」「`--page-ref` で外した」を区別して、語を減らす / `search-index` / 別 source の
   コマンドを示す
@@ -220,6 +222,30 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py sources
 python3 plugins/llms-docs/scripts/parse-llms-txt.py search "<query>" --source <name>
 python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading_path>" --source <name>
 ```
+
+### 見出しに書かれた id
+
+見出しの末尾に書かれた id はページに表示されない文字なので、節の名前から外す (0.54.0)。対象は mdBook /
+VitePress / Docusaurus / Pandoc などの属性ブロック (Zed の `## Overview {#overview}`、`{#id .class key=value}`・
+`{.class}`・`{: #id}`) と、fumadocs の `[#id]` / `\[#id]` (Agent Plugins の `## Why Agent Plugins? [#why-agent-plugins]`、
+Zod の `## Stringbools \[#stringbool]`)。
+
+- **外した名前が出るところ**: `sections` の一覧・`heading_path`・`Section:` 行・`Next:` 行・見つからないときの候補、
+  `search-index --show-sections` の見出し、見出しから取ったページのタイトル (`# Migrating to Vitest 5.0 {#vitest-5}`
+  のページは `Migrating to Vitest 5.0`)。frontmatter の `title:` は見出しではないのでそのまま
+- **前の書き方でも開ける**: `content` は id 付きの書き方 (`Overview {#overview}/Checkpoints {#checkpoints}` /
+  `Checkpoints {#checkpoints}`) と id そのもの (`checkpoints`、ページ内リンクの形の `#checkpoints`) でも同じ節を開き、
+  `# heading_path:` には外した名前 (`Overview/Checkpoints`) を出す。照合は書かれたままの見出し → 外した名前 → id →
+  部分一致の順で、書かれたままの見出しを先にするのは、前の版の `Default Width` が開いた id の無い `### Default Width` を、
+  先にある `### Default Width {#agent-panel-default-width}` に取られないため。部分一致は外した名前で探し、何にも
+  当たらないときだけ書かれたままの見出しで探す。title の `<page_ref>` も id 付きのタイトルで当たる
+- **anchor**: `anchor_style` のある profile では、id を書いた見出しの節はその id を anchor にする
+  (`## Token Usage and Compaction {#token-usage}` は ` [https://zed.dev/docs/ai/agent-panel#token-usage]`)
+- **変えないもの**: 本文 (`content` の出力と、`search` / `search-content` が探す文字) は書かれたまま
+  (`### Checkpoints {#checkpoints}`)
+- **外さないもの**: 括弧の中に `#id` / `.class` / `key=value` の形でない語があるもの、見出しの途中にあるものや前に
+  空白の無いもの (`Foo{#id}`)、id だけの見出し。テンプレートや MDX の括弧 (`{mediaId}` / `{#each items}` /
+  `{props.name}` / `{{#each}}`) はそのまま
 
 ### 同梱 presets
 
@@ -361,7 +387,7 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `join_rate_guard` | | `true` で、`index_url` の `llms.txt` の項目のうち、ページ自身の URL (`page_url` で読んだもの。タイトルの突き合わせで付けた URL は数えない) と一致するものの割合を見る (`.md`・クエリ・`#…`・末尾の `/` は無視)。50% 未満なら終了コード 2 で止め、80% 未満なら stderr に WARNING を出す。区切り方が合っていない profile (frontmatter 形式のファイルを `split: h1` で読むなど) ではページに URL が無く、ここで止まる。`index_url` と `page_url` が要る。`llms.txt` を読めない (取得に失敗した) とき、または絶対 URL のページ項目が 0 件 (相対リンクだけなど) のときは見ない (stderr に WARNING を出し、止めない)。`--file` で `--index-file` を渡さないときは `llms.txt` を読まないので見ない |
 | `h1_needs_url` | | `split: h1` で `true` のとき、`page_url` (`h1-link` / `line:` / `link:`) の URL が見つからない H1 をページの区切りにせず、前のページの見出しとして残す (ページ本文の中で H1 を使うサイト向け) |
 | `strip_trailing_headings` | | `true` で、ページ末尾に本文の無いまま並ぶ見出し行 (ページ間に置かれたナビの見出し `## Messages` など) を除く。`drop_lines` の後に適用する。コードブロックの状態は見ない |
-| `heading_line_pattern` | | 正規表現 (グループをちょうど 1 つ持つ)。コードブロックの外で、行全体 (改行を除く) がこれに一致する本文の行を、グループを題にした H2 (`## <グループ>`) として読む。見出しを使わず太字の行で節を区切るページ (Claude Code の changelog の `**2.1.310**`) で、検索の hit・`sections`・`content` が節を持つ。`content` の本文ではその行が `## <グループ>` と出る。`Section:` 行には、ほかの見出しと同じ規則で anchor が付く (公開中の changelog は版ごとに `id="2-1-310"` の形の anchor を持つ)。グループが空になる行はそのまま。`strip_trailing_headings` の後に適用する。`claude-code` preset は `^\*\*(\d+\.\d+\.\d+)\*\*\s*$`、`pixai` preset は `^\s*(.+?) \[#[^\]\s]+\]\s*$` (見出しを `#` を付けずに `見出し [#id]` と書いた行。インデントされた行も読み、`[#id]` は本文に残らない) |
+| `heading_line_pattern` | | 正規表現 (グループをちょうど 1 つ持つ)。コードブロックの外で、行全体 (改行を除く) がこれに一致する本文の行を、グループを題にした H2 (`## <グループ>`) として読む。見出しを使わず太字の行で節を区切るページ (Claude Code の changelog の `**2.1.310**`) で、検索の hit・`sections`・`content` が節を持つ。`content` の本文ではその行が `## <グループ>` と出る。`Section:` 行には、ほかの見出しと同じ規則で anchor が付く (公開中の changelog は版ごとに `id="2-1-310"` の形の anchor を持つ)。グループが空になる行はそのまま。`strip_trailing_headings` の後に適用する。`claude-code` preset は `^\*\*(\d+\.\d+\.\d+)\*\*\s*$`、`pixai` preset は `^\s*(.+? \[#[^\]\s]+\])\s*$` (見出しを `#` を付けずに `見出し [#id]` と書いた行。インデントされた行も読む。`[#id]` ごとグループにするので本文には `## 見出し [#id]` と出て、節の名前からは「見出しに書かれた id」の規則で外れる) |
 | `min_heading_level` | | `sections` / `content` / 本文検索で節として数える最も浅い見出し (`1` か `2`)。既定は `split: h1` で `2`、ほかは `1`。本文にコードブロック外の `# …` 行があるサイトでは `2` にする |
 | `index_heading_level` | | `search-index` / `search` のランキングと `--show-sections` の一覧に使う見出しの最も深い段 (`2` か `3`。既定 `3`)。コードブロック外の見出しだけを読む。H3 はキーワード 1 語ごとに +1 するが、全キーワード一致の加点 (+10) には数えない (API を H3 で並べるページが関数名で見つかり、選択肢の H3 を並べるだけのページが、タイトルがその語そのもののページを押し出さないため)。`2` で H1 / H2 だけを読む (Claude docs / Firebase の preset。`rank_from: index` ではランキングに見出しを使わないので `--show-sections` の一覧にだけ効く。`body: fetch` ではどちらにも効かない (`--show-sections` を無視するため)) |
 | `h3_only_keeps_full_search` | | `true` で、`search` の全文検索の補いの要否を判定するときに、H3 だけで候補に入ったページ (タイトル・description・tags・H1 / H2 のどれにも当たらないページ) を数えない。そのページに本文のヒットがあっても補いが止まらず、補いで増えた行はヒットのある候補の下、ヒット 0 の行の上に置く (1 位は変わらない)。`rank_from: pages` (既定) かつ `index_heading_level: 3` でだけ書ける。`body: fetch` では書けない。既定 `false`。同梱 presets では `ai-sdk` だけが使う (実測は `docs/generic-llms-txt-source.md`) |
@@ -372,7 +398,7 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `tags_key` | | `split: frontmatter` のとき、タグとして読む frontmatter のキー (例 `tags`)。`- a` の行のリスト、`[a, b]`、`a, b` を読む (`a, b` を次の行に書いたときは `frontmatter_yaml_values` が `true` のときだけ読む)。タグはランキングに加わり、一覧と検索結果に `tags: a, b` の行、`content` のヘッダに `# doc_tags:` の行として出る |
 | `page_ref_forms` | | `sections` / `content` / `search-content --page-ref` の `<page_ref>` を解く形と、試す順 (リスト)。`int` = ページ番号 / `url` = 完全な URL (`.md`・クエリ・`#…`・末尾の `/` を無視して完全一致。同じ URL のページが複数あれば、クエリまで同じページ、無ければクエリの無いページ (`api?id=strings` のような 1 ページ内の位置を指すクエリ)、それも無ければ参照にクエリが無いときだけ先頭。クエリまで同じページ (またはクエリの無いページ) が複数あるときは、本文が同じ写しなら先頭を開き、本文が違えば候補を列挙して終了する (同じ URL に別々のページが載るサイトがあり、先頭を黙って開くと別のページを見せるため)。どのページにも当たらないとき、および参照のクエリがどのページとも合わないとき (`?surface=web` で、ページは `cli` と `api` だけ) は `No page found for URL` で終了し、後ろの形には進まない) / `slug` = URL の末尾 (`hooks`、`agent-sdk/hooks`。複数に当たるときは `/<lang>/<slug>` ちょうどの 1 ページを選んで他を知らせ、選べなければ候補を列挙して終了。`page_url_strip_suffix` の付いた URL のページは `/<lang>/<slug>` ちょうどとはみなさない) / `title` = タイトルの部分一致 / `url_substring` = URL の部分一致 (複数に当たれば候補を列挙して終了)。先頭は `int` にする (一覧と `Next:` が出すのはページ番号)。`url` と `slug` は `page_url` か `index_url` が要る。既定は `["int", "title", "url_substring"]` (このキーが無かった頃の順) |
 | `page_url_strip_suffix` | | `.md.txt` のような接尾辞。`url` と `slug` の照合で、ページの URL と `<page_ref>` の両方から外す (一覧に出る `….md.txt` の URL も、人が読むページの URL も同じページに届く)。`anchor_style` の anchor を付ける URL からも外す。`page_ref_forms` の `url` か `slug`、または `anchor_style` が要る。`url_substring` には効かない (URL の生の文字列を見る) |
-| `anchor_style` | | `search` / `search-content` の各 `Section:` 行の末尾に、その節へのリンク ` [<ページ URL>#<anchor>]` を付ける。`github` = 見出しの単語を `-` でつなぐ (Mintlify / GitHub 形式。Claude Code・Claude Platform) / `devsite` = `_` でつなぐ (Google DevSite 形式。Firebase)。ページ URL は `URL:` 行の URL から `.md`・`page_url_strip_suffix`・`#…`・末尾の `/` を外したもの (取得用の URL に `#…` を付けても節には届かないため)。クエリは残す (`?surface=cli` と `?surface=ide` のようにクエリだけ違うページを区別し、anchor の URL を `<page_ref>` に渡したときにヒットしたページへ戻るため)。URL が `http(s)://` で始まらないページと、最初の見出しより前の本文 (`(top)`) には付けない。anchor は見出しの文字列から作る推定で、同名見出しの連番 (`-1` など) やページ側で指定した id は再現しない。`page_url` か `index_url` が要る。既定は付けない |
+| `anchor_style` | | `search` / `search-content` の各 `Section:` 行の末尾に、その節へのリンク ` [<ページ URL>#<anchor>]` を付ける。`github` = 見出しの単語を `-` でつなぐ (Mintlify / GitHub 形式。Claude Code・Claude Platform) / `devsite` = `_` でつなぐ (Google DevSite 形式。Firebase)。ページ URL は `URL:` 行の URL から `.md`・`page_url_strip_suffix`・`#…`・末尾の `/` を外したもの (取得用の URL に `#…` を付けても節には届かないため)。クエリは残す (`?surface=cli` と `?surface=ide` のようにクエリだけ違うページを区別し、anchor の URL を `<page_ref>` に渡したときにヒットしたページへ戻るため)。URL が `http(s)://` で始まらないページと、最初の見出しより前の本文 (`(top)`) には付けない。見出しが自分の id を書いている節 (`## Token Usage and Compaction {#token-usage}`・`[#id]`。「見出しに書かれた id」) はその id を anchor にする。それ以外の anchor は見出しの文字列から作る推定で、同名見出しの連番 (`-1` など) は再現しない。`page_url` か `index_url` が要る。既定は付けない |
 | `show_overflow` | | `true` で、`search` / `search-content` の各ページの末尾に、`--max-hits` を超えて表示しなかったヒットのある節を `Other sections with hits (not shown):` として並べる |
 | `rank_from` | | `index` で、`fetch-index` / `search-index` / `search` が `index_url` の `llms.txt` の項目を一覧・ランキングする (表示するタイトル・説明・`URL:` も項目のもの。見出しはランキングに使わない)。本文は `llms-full.txt` から、`index_join` で項目に対応づけたページを読む。`fetch-index` / `search-index` は `llms-full.txt` を取得しない: `--file`、またはキャッシュが `--max-age` 内で、取得元が profile の `url` のときだけページ番号を `[ref]` に出し、それ以外は索引全体で一意になる URL の末尾 (`hooks`、`agent-sdk/hooks`) を出す (`llms.txt` での並び順の番号は出さない。`llms-full.txt` と順序が違い、別のページを開くため)。`search` はページの無い項目を stderr に `(skip: no full-text …)` と出して飛ばす。`llms.txt` に 2 回載るページ (同じページを指す項目) は、上位の 1 行だけを出す (`search` はページ番号、`search-index` は `[ref]` で同じページかを見る)。`index_url` と、`page_ref_forms` の `slug` と `url` が要る (クエリを持つ項目と、`llms.txt` に 2 回出る URL は完全な URL (クエリ込み) で出すため)。`--file` のときは `--index-file` も要り、取得の案内は出さない (対応づけが 0 件なら、その旨だけを出す)。既定は `pages` (ページのタイトル・説明・見出しでランキングする) |
 | `index_join` | | `rank_from: index` のとき、項目とページの対応づけ方。`title` (既定) = タイトルが項目側でもページ側でも 1 つだけのときに一致させる (比べ方は `index_url` と同じ。`page_url` の無い profile 用で、`page_url` があるときは `url` にする。一覧に出す URL の末尾がページ自身の URL と合わないため) / `url` = ページ自身の URL と項目の URL を `.md`・クエリ・`#…`・末尾の `/` を無視して比べる。同じ URL のページが複数あるときは、クエリまで一致するページを優先し、なければクエリの無いページ (`api?id=strings` のような 1 ページ内の位置を指すクエリ)、それも無ければ項目にクエリが無いときだけ先頭のページ (`page_ref_forms` の `url` と同じ。`llms-full.txt` のキャッシュの有無で開くページが変わらないため)。クエリまで一致するページ (またはクエリの無いページ) が複数あり本文が違うときは対応づけない (別のページの本文を項目のタイトルの下に出さないため)。どのページともクエリが合わない項目 (`?surface=web` で、ページは `cli` と `api` だけ) は対応づけない (`?surface=cli` と `?surface=api` は別のページ)。`url` では `search` が対応づけの割合を見て、50% 未満なら終了コード 2 で止め、80% 未満なら stderr に WARNING を出す (`join_rate_guard` と同じ基準。`join_rate_guard` と一緒には書けない)。`url` は `page_url` が要り、`sections` などで `index_url` によるタイトルの突き合わせをしない |

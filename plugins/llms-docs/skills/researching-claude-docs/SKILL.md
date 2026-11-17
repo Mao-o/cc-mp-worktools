@@ -135,7 +135,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" search "<キーワー�
 
 各 `Section:` 行には `[<URL>#<anchor>]` が付く (末尾見出しタイトルから生成したベストエフォートの Mintlify 互換 slug)。引用元を答えるときはこの URL#anchor をそのまま使ってよい — 同名見出しがページ内に複数ある場合の `-1`/`-2` 連番までは再現しない best-effort である点に注意。見出しタイトル自体に `/` を含む場合 (例: `## CI/CD`) は `ci-cd` にする (ページによっては `/` を残す id があり、一致しない)。
 
-**anchor の正規化範囲 (これ以外は best-effort)**: slug は見出しのレンダリング後テキストから作る。英数字と `_` 以外の記号の連続は 1 つの `-` にする (`loop.md` は `loop-md`、`/security-review` は `security-review`)。アポストロフィは削る (`Can't` は `cant`)。正規化するのは インライン / 参照形式リンク (`[text](url)` / `[text][ref]`)・画像 (alt を採用)・脚注マーカー・HTML タグ・HTML 実体参照・コードスパン (中身は逐語)・`*` `~` と単語境界の `_` 強調記号。同名見出しの連番、ページ側の独自 ID 指定、上記以外の記法は再現しない。anchor が解決しない場合は URL 本体 (`#` の前) でページを開き、見出しを目視で探す。
+**anchor の正規化範囲 (これ以外は best-effort)**: slug は見出しのレンダリング後テキストから作る。英数字と `_` 以外の記号の連続は 1 つの `-` にする (`loop.md` は `loop-md`、`/security-review` は `security-review`)。アポストロフィは削る (`Can't` は `cant`)。正規化するのは インライン / 参照形式リンク (`[text](url)` / `[text][ref]`)・画像 (alt を採用)・脚注マーカー・HTML タグ・HTML 実体参照・コードスパン (中身は逐語)・`*` `~` と単語境界の `_` 強調記号。見出しの末尾に id を書いた見出し (`## Foo {#custom-id}` / `## Foo [#custom-id]`) は slug を作らず、その id を anchor にする (この id は heading_path にも `Section:` 行の見出しにも出ない)。同名見出しの連番、上記以外の記法は再現しない。anchor が解決しない場合は URL 本体 (`#` の前) でページを開き、見出しを目視で探す。
 
 `--source claude` を受けるのは `search` だけ (`search-content` / `search-index` / `content` / `sections` / `fetch-index` は 1 source ずつ)。`--source claude` のときは結果に `[claude-code]` / `[claude-platform]` プレフィックスが付き、`doc_idx` は **source 内でユニーク**なので、follow-up の `content` / `sections` 呼び出しには `--source <claude-code|claude-platform>` を明示する (`Next:` 行にはページごとの `--source` が入っている)。
 

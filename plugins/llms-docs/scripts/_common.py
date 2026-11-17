@@ -184,6 +184,52 @@ class FenceTracker:
 
 
 # ---------------------------------------------------------------------------
+# Core: explicit heading ids
+# ---------------------------------------------------------------------------
+
+# One token of an attribute block: ``#id``, ``.class`` or ``key=value``.
+_ATTR_TOKEN = r"""(?:#[^\s{}]+|\.[^\s{}#.=]+|[A-Za-z_][\w:.-]*=(?:"[^"]*"|'[^']*'|[^\s{}"']+))"""
+_ATTR_TOKEN_RE = re.compile(_ATTR_TOKEN)
+# ``Foo {#foo}`` / ``Foo {#foo .c k=v}`` / ``Foo {.c}`` / ``Foo {: #foo}``
+_ATTR_BLOCK_RE = re.compile(r"^(?P<text>.*?\S)\s+\{:?\s*(?P<attrs>%s(?:\s+%s)*)\s*\}\s*$"
+                            % (_ATTR_TOKEN, _ATTR_TOKEN))
+# ``Foo [#foo]`` / ``Foo \[#foo]`` (a ``\]`` closing it is read as ``]``)
+_BRACKET_ID_RE = re.compile(r"^(?P<text>.*?\S)\s+\\?\[#(?P<id>[^\s\]]+?)\\?\]\s*$")
+
+
+def split_heading_id(title: str) -> tuple[str, str | None]:
+    """``(text, anchor_id)``: *title* with a trailing explicit id taken off.
+
+    Some Markdown dialects write a heading's id after its text, and the page
+    renders the text alone with that id on the element:
+
+    - an attribute block ``{#id}`` / ``{#id .class key=value}`` / ``{.class}``
+      / ``{: #id}`` (Pandoc, kramdown, mdBook, VitePress, Docusaurus: Zed's
+      ``## Overview {#overview}``, Vitest's H1 ``{#vitest-5}``). Taken off
+      only when every token in it is ``#id``, ``.class`` or ``key=value``, so
+      a template or MDX brace stays: ``{mediaId}`` / ``{#each items}`` /
+      ``{props.name}`` / ``{{#each}}`` / ``{# c #}`` / ``{=html}`` / ``{}``.
+      Of several ``#id`` tokens the first is the id; a block of classes only
+      gives ``None``
+    - fumadocs' ``[#id]`` / ``\\[#id]`` (Agent Plugins, Zod, PixAI)
+
+    The block must end *title*, follow a space, and leave text in front of
+    it: ``Foo{#id}``, a ``{#x}`` in the middle and a title that is only
+    ``{#id}`` are kept as written. An id holds any character but a space and
+    the closing bracket (``[#エディターに接続する]``). A *title* without such
+    a block comes back unchanged, with ``None``.
+    """
+    m = _ATTR_BLOCK_RE.match(title)
+    if m:
+        ids = [t[1:] for t in _ATTR_TOKEN_RE.findall(m.group("attrs")) if t.startswith("#")]
+        return m.group("text"), (ids[0] if ids else None)
+    m = _BRACKET_ID_RE.match(title)
+    if m:
+        return m.group("text"), m.group("id")
+    return title, None
+
+
+# ---------------------------------------------------------------------------
 # Core: section (heading) extraction
 # ---------------------------------------------------------------------------
 
@@ -204,6 +250,16 @@ def extract_sections(body_lines, min_level: int = 2):
             "line_end": int,
             "has_code_blocks": bool,
         }
+
+    A heading's explicit id (``## Overview {#overview}``, ``## Why? [#why]``:
+    ``split_heading_id``) is not part of its ``title``, and ``heading_path``
+    is built from those titles, so both read as the page shows the heading.
+    Only a section whose own title lost an id block also carries
+    ``"raw_title"`` (the heading as written) and ``"anchor_id"`` (the id, or
+    ``None`` for ``{.class}``), and only one whose path changed (its own
+    heading or an ancestor's) ``"raw_heading_path"``: ``extract_content``
+    still opens a section by them. A page with no such heading gets the same
+    dicts as before.
     """
     fence = FenceTracker()
     pattern = re.compile(r"^(#{%d,6})\s+(.+)" % min_level)
@@ -218,14 +274,19 @@ def extract_sections(body_lines, min_level: int = 2):
         m = pattern.match(line)
         if m:
             level = len(m.group(1))
-            title = m.group(2).strip()
-            headings.append({
+            raw_title = m.group(2).strip()
+            title, anchor_id = split_heading_id(raw_title)
+            heading = {
                 "level": level,
                 "title": title,
                 "line_start": idx,
                 "line_end": -1,
                 "has_code_blocks": False,
-            })
+            }
+            if title != raw_title:
+                heading["raw_title"] = raw_title
+                heading["anchor_id"] = anchor_id
+            headings.append(heading)
 
     for i, h in enumerate(headings):
         next_start = headings[i + 1]["line_start"] if i + 1 < len(headings) else len(body_lines)
@@ -237,8 +298,11 @@ def extract_sections(body_lines, min_level: int = 2):
     for h in headings:
         while path_stack and path_stack[-1][0] >= h["level"]:
             path_stack.pop()
-        path_stack.append((h["level"], h["title"]))
-        h["heading_path"] = "/".join(t for _, t in path_stack)
+        path_stack.append((h["level"], h["title"], h.get("raw_title", h["title"])))
+        h["heading_path"] = "/".join(t for _, t, _raw in path_stack)
+        raw_path = "/".join(raw for _, _t, raw in path_stack)
+        if raw_path != h["heading_path"]:
+            h["raw_heading_path"] = raw_path
 
     return headings
 
@@ -340,6 +404,19 @@ def extract_content(body_lines, heading_path=None, *,
     *retry*, when given, maps a heading path to the full command that reads
     it; the not-found and ambiguous errors use it to print candidates as
     commands that can be run as they are.
+
+    A heading with an explicit id (``extract_sections``) is found by its
+    text and also as written before the id came off, so a path printed
+    before that change opens the section it opened then. The exact tiers
+    run on the headings as written first (``raw_heading_path`` /
+    ``raw_title``; the same values for a heading without an id), then on
+    their text: with the text first, a bare ``Default Width`` would open an
+    earlier ``### Default Width {#a}`` instead of the ``### Default Width``
+    it named. Then the id itself (``checkpoints`` or ``#checkpoints``,
+    the ``#…`` of a link to the section), then the substring tier on the
+    text, and on the headings as written only when the text matches none
+    (a part of an old path that runs into an id). A section found by any
+    exact tier or the id is the one read.
     """
     if heading_path is None:
         return "".join(body_lines), None
@@ -353,34 +430,53 @@ def extract_content(body_lines, heading_path=None, *,
         )
         return "".join(content_lines), "(top)"
 
-    # A full heading_path match is looked for in the whole page before a
-    # bare title match: in one pass, an earlier nested ``### Error handling``
-    # (title) would win over a later top-level ``## Error handling`` whose
-    # heading_path is exactly the argument, and the commands this module
-    # prints (always a full heading_path) would read another section.
-    target = next((s for s in sections if s["heading_path"] == heading_path), None)
-    if target is None:
-        target = next((s for s in sections if s["title"] == heading_path), None)
-
     heading_lower = heading_path.lower()
-
-    if target is None:
-        # Case-folded exact match, still a second "exact" tier — not a
-        # substring/partial one — so it also wins outright with no
-        # ambiguity check. Skipping this and falling straight to the
-        # substring tier below would wrongly treat a case-differing exact
-        # match as merely "ambiguous" whenever it happens to also be a
-        # substring of one of its own descendants' heading_path. Same
-        # order as above: heading_path first, then title.
-        target = next((s for s in sections if s["heading_path"].lower() == heading_lower), None)
+    target = None
+    for path_of, title_of in ((lambda s: s.get("raw_heading_path", s["heading_path"]),
+                               lambda s: s.get("raw_title", s["title"])),
+                              (lambda s: s["heading_path"], lambda s: s["title"])):
+        # A full heading_path match is looked for in the whole page before
+        # a bare title match: in one pass, an earlier nested ``### Error
+        # handling`` (title) would win over a later top-level ``## Error
+        # handling`` whose heading_path is exactly the argument, and the
+        # commands this module prints (always a full heading_path) would
+        # read another section.
+        target = next((s for s in sections if path_of(s) == heading_path), None)
         if target is None:
-            target = next((s for s in sections if s["title"].lower() == heading_lower), None)
+            target = next((s for s in sections if title_of(s) == heading_path), None)
+        if target is None:
+            # Case-folded exact match, still a second "exact" tier — not a
+            # substring/partial one — so it also wins outright with no
+            # ambiguity check. Skipping this and falling straight to the
+            # substring tier below would wrongly treat a case-differing
+            # exact match as merely "ambiguous" whenever it happens to also
+            # be a substring of one of its own descendants' heading_path.
+            # Same order as above: heading_path first, then title.
+            target = next((s for s in sections if path_of(s).lower() == heading_lower), None)
+        if target is None:
+            target = next((s for s in sections if title_of(s).lower() == heading_lower), None)
+        if target is not None:
+            break
 
     if target is None:
+        wanted = heading_path[1:] if heading_path.startswith("#") else heading_path
+        target = next((s for s in sections
+                       if s.get("anchor_id") is not None and s["anchor_id"] == wanted), None)
+
+    if target is None:
+        # the substring tier reads the text of the headings (no explicit id);
+        # only when that finds nothing, the headings as written, so a part of
+        # a path printed with the ids (``Overview {#overview}/Check``) still
+        # finds what it found before
         matches = [
             s for s in sections
             if heading_lower in s["heading_path"].lower() or heading_lower in s["title"].lower()
         ]
+        if not matches:
+            # a title is the last part of its path, so the path as written
+            # holds every part of the heading as written too
+            matches = [s for s in sections
+                       if heading_lower in s.get("raw_heading_path", s["heading_path"]).lower()]
         if len(matches) > 1:
             die_ambiguous_heading(heading_path, matches, retry=retry)
         if matches:
@@ -1657,10 +1753,11 @@ def heading_anchor_slug(title: str, style: str = "github") -> str:
     neither reproduces the numeric ``-1``/``-2`` (or DevSite's own)
     duplicate-heading suffix a page gets when two headings share a title,
     since that requires knowing every other heading on the page rather
-    than just this one title, nor a page's custom-id override (Mintlify's
-    ``{#custom-id}`` syntax has a DevSite equivalent too). Callers display
-    the result as a best-effort anchor, not a guarantee that it matches
-    the live page exactly.
+    than just this one title. A custom id the heading writes itself
+    (``## Foo {#custom-id}`` / ``## Foo [#custom-id]``) is not slugged:
+    ``extract_sections`` splits it off, and ``section_url_anchor`` uses it
+    as it is. Callers display the result as a best-effort anchor, not a
+    guarantee that it matches the live page exactly.
 
     Returns ``""`` if *title* normalizes to nothing (e.g. an all-symbol
     heading) — callers should treat that as "no anchor available".
@@ -1679,7 +1776,8 @@ def heading_anchor_slug(title: str, style: str = "github") -> str:
     return s.strip("-")
 
 
-def section_url_anchor(url: str, title: str, style: str = "github") -> str:
+def section_url_anchor(url: str, title: str, style: str = "github",
+                       anchor_id: str | None = None) -> str:
     """``  [<url>#<anchor>]`` suffix for a ``Section:`` search result line.
 
     Bracketed to match this tool's existing annotation convention on these
@@ -1713,9 +1811,16 @@ def section_url_anchor(url: str, title: str, style: str = "github") -> str:
     resolves to nothing. Canonicalizing that is the caller's job (each
     ``parse-*.py`` already has its own notion of "the real page URL" for
     its source).
+
+    *anchor_id* is the id the heading gave itself (a section's
+    ``"anchor_id"``, ``## Token Usage and Compaction {#token-usage}``): the
+    anchor is that id as written, not a slug of *title*, so it is the id
+    the page's own links point at (``agent-panel.md#token-usage``).
     """
     if not url or title == "(top)":
         return ""
+    if anchor_id:
+        return f"  [{url}#{anchor_id}]"
     slug = heading_anchor_slug(title, style=style)
     if not slug:
         return ""
@@ -1963,7 +2068,7 @@ def _build_section_results(section_hits, sections, body_lines, keywords,
         names_text, inherited_text = (heading_texts[si] if si is not None
                                       else (top_text, top_text))
         heading_match = names_every_keyword(names_text, keywords)
-        results.append({
+        result = {
             "heading_path": heading_path,
             "title": title,
             "line_offset": hit_line_numbers[0],
@@ -1974,7 +2079,11 @@ def _build_section_results(section_hits, sections, body_lines, keywords,
             "heading_match": heading_match,
             "heading_own": heading_match and not names_every_keyword(inherited_text, keywords),
             "long_section": long_section,
-        })
+        }
+        # the id the heading gave itself is its anchor (section_url_anchor)
+        if si is not None and sections[si].get("anchor_id") is not None:
+            result["anchor_id"] = sections[si]["anchor_id"]
+        results.append(result)
     return results, total
 
 

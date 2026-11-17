@@ -254,10 +254,11 @@ class HeadingRowsTest(unittest.TestCase):
             "### not a heading\n", "```\n", "### vi.hoisted {#vi-hoisted}\n", "####### seven\n"]
 
     def test_depth_3_reads_h1_to_h3_outside_code_blocks(self):
+        # the explicit id of ``vi.hoisted {#vi-hoisted}`` is not part of the text
         self.assertEqual(generic._heading_rows(self.BODY, 3),
-                         [(1, "Vi"), (2, "Mock Modules"), (3, "vi.mock"), (3, "vi.hoisted {#vi-hoisted}")])
+                         [(1, "Vi"), (2, "Mock Modules"), (3, "vi.mock"), (3, "vi.hoisted")])
         self.assertEqual(generic._headings(self.BODY, 3),
-                         ["Vi", "Mock Modules", "vi.mock", "vi.hoisted {#vi-hoisted}"])
+                         ["Vi", "Mock Modules", "vi.mock", "vi.hoisted"])
 
     def test_depth_2_reads_h1_and_h2_only(self):
         self.assertEqual(generic._headings(self.BODY, 2), ["Vi", "Mock Modules"])
@@ -362,7 +363,7 @@ class SearchFindsApiReferenceH3Test(_Cli):
         block = out[out.index("[1] Vi (score: 1)"):]
         self.assertEqual(re.findall(r"(?m)^      - (.+)$", block),
                          ["Vi", "Mock Modules", "vi.mock", "vi.doMock", "Miscellaneous",
-                          "vi.hoisted {#vi-hoisted}"])
+                          "vi.hoisted"])
 
     def test_level_2_keeps_the_h1_h2_index(self):
         """The same page, with ``index_heading_level: 2`` in a user profile:
@@ -379,7 +380,7 @@ class SearchFindsApiReferenceH3Test(_Cli):
         code, out, err = self.run_argv([*base[:2], "hoisted", "--show-sections", *base[2:]])
         self.assertEqual(code, 0, err)
         self.assertEqual(re.findall(r"(?m)^      - (.+)$", out),
-                         ["Migrating to Vitest 5.0 {#vitest-5}", "Hoisted Mocking Calls Must Be at the Top Level"])
+                         ["Migrating to Vitest 5.0", "Hoisted Mocking Calls Must Be at the Top Level"])
 
 
 class H3DoesNotCompleteAllKeywordBonusTest(_Cli):
@@ -490,7 +491,7 @@ class H3OnlyCandidateStaysBelowTest(_Cli):
                 code, out, err = self.run_argv([SCRIPT, *argv, "--source", "vitest",
                                                 "--file", str(self._vi_file())])
                 self.assertEqual(code, 0, err)
-                self.assertEqual(self.pages(out), [("1", "Vi"), ("0", "Migrating to Vitest 5.0 {#vitest-5}")], out)
+                self.assertEqual(self.pages(out), [("1", "Vi"), ("0", "Migrating to Vitest 5.0")], out)
 
     def _vi_file(self):
         f = Path(self.tmp, "vi.txt")

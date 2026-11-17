@@ -2,6 +2,19 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.54.0] - 2026-11-17
+
+### 修正: 見出しの末尾に書かれた id が節の名前に入り、表示と食い違う
+
+- **症状**: 見出しの id を本文に書くサイト (Zed の `## Overview {#overview}`、Agent Plugins の `## Why Agent Plugins? [#why-agent-plugins]`、Zod の `## Stringbools \[#stringbool]`、Vitest の H1 の `{#vitest-5}`) で、`sections`・`Section:`・`Next:` が `Overview {#overview}/Checkpoints {#checkpoints}` のように id ごと節を名づけていた。ページに表示されない文字で、id を外した `Overview/Checkpoints` は `content` で見つからず、`Overview` は子の節と曖昧になって止まっていた。切り詰めの案内が勧める検索語・索引の見出し (`search-index --show-sections`)・見出しから取ったページのタイトルにも id が入っていた
+- **変更**: 見出しの末尾の id (`{#id}` / `{#id .class key=value}` / `{.class}` / `{: #id}` と fumadocs の `[#id]` / `\[#id]`) を、節の名前・heading_path・索引の見出し・見出しから取ったページのタイトルから外す。外すのは、括弧の中が `#id` / `.class` / `key=value` だけで、見出しの最後にあり、前に空白と文字があるときだけ。テンプレートや MDX の括弧 (`{mediaId}` / `{#each items}` / `{props.name}` / `{{#each}}`) と frontmatter の `title:` はそのまま
+- **前の書き方でも開ける**: `content` は id 付きの書き方 (`Overview {#overview}/Checkpoints {#checkpoints}` / `Checkpoints {#checkpoints}`) と id そのもの (`checkpoints` / `#checkpoints`) でも同じ節を開き、`# heading_path:` には外した名前を出す。照合は書かれたままの見出しを先にするので、前の版で開いた節がそのまま開く (Zed の設定のページの `Default Width` は、先にある `### Default Width {#agent-panel-default-width}` ではなく前と同じ id の無い `### Default Width` を開く)。部分一致は外した名前で探し、何にも当たらないときだけ書かれたままの見出しで探す (外した名前で 2 つの節に当たる部分文字列は、前の版で開いたものでも候補の一覧を出して止まる。Zed の設定のページの `Panel/Default Width` など)。title の `<page_ref>` も id 付きのタイトルで当たる。外すと同じ名前になる見出し (`## Setup {#a}` / `## Setup {#b}`) は重複の注記が付き、2 つ目も id か id 付きの書き方で開ける
+- **anchor**: `anchor_style` のある profile では、id を書いた見出しの節の anchor をその id にした (` [https://zed.dev/docs/ai/agent-panel#token-usage]`。見出しの文字から作ると `#token-usage-and-compaction` になり、ページの id と合わない)。id の無い見出しは今までどおり
+- **変えないもの**: 本文 (`content` の出力と、`search` / `search-content` が探す文字) は書かれたまま (`### Checkpoints {#checkpoints}`)。キャッシュのある 23 source のうち id の無い 19 source は、ページ・節・索引の見出しの差が 0
+- **PixAI**: `heading_line_pattern` を `^\s*(.+? \[#[^\]\s]+\])\s*$` にして `[#id]` ごと H2 にした。節の名前は前と同じで (id は上の規則で外れる)、本文の見出し行が `## 見出し [#id]` になり、節を id でも開ける。英語のページで、明示の id は 66 中 66 がページの id と合うが、id の無い API リファレンスの見出しから作る anchor は 76 中 0 なので、`anchor_style` は付けないまま
+- **検索の順位**: 索引と見出しの一致から id の語が消える。id の語だけのクエリが見出しで上がらなくなった例が Zed に 1 件 (`editor ai` と `Edit Predictions {#editor-ai}`。`content` に id を渡せば開く)。PixAI では本文の見出し行に残る `[#id]` で語が揃い、期待のページが先頭に来るクエリが 145 件増えた
+- 実測 (データの差、前の版で開けた引数が同じ節を開くこと、部分一致の段の比較、順位、PixAI の anchor) は `docs/generic-llms-txt-source.md` の「2026-11-17 実測 (0.54.0)」。README に「見出しに書かれた id」の節を足し、`anchor_style` の説明 (ページ側で指定した id は再現しない) を直した
+
 ## [0.53.0] - 2026-11-17
 
 ### 追加: PixAI API のドキュメントを読む (preset `pixai`)

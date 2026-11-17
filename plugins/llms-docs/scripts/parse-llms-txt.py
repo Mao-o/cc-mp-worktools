@@ -102,6 +102,7 @@ from _common import (  # noqa: E402
     search_index_entries,
     search_rank_key,
     section_url_anchor,
+    split_heading_id,
 )
 from _commands import (  # noqa: E402
     PageView,
@@ -897,9 +898,22 @@ _H1_RE = re.compile(r"^#\s+(.+?)\s*#*\s*$")
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 
 
+def _split_title_id(doc: dict) -> dict:
+    """*doc* whose title is a heading's text: a trailing explicit id
+    (``# Migrating to Vitest 5.0 {#vitest-5}``, ``split_heading_id``) comes
+    off the title, and the heading as written stays as ``raw_title`` (only
+    then), which a ``title`` page_ref still matches."""
+    title, _anchor_id = split_heading_id(doc["title"])
+    if title != doc["title"]:
+        doc["raw_title"] = doc["title"]
+        doc["title"] = title
+    return doc
+
+
 def _first_heading(body_lines: list[str], fence=None) -> str:
-    """First heading outside a code fence. *fence* is a ``_Fence`` for the
-    ``line`` shape; otherwise the shared ``FenceTracker`` is used."""
+    """First heading outside a code fence, as written (``_split_title_id``
+    takes its id off). *fence* is a ``_Fence`` for the ``line`` shape;
+    otherwise the shared ``FenceTracker`` is used."""
     if fence is not None:
         for line in body_lines:
             text = line.rstrip("\n\r")
@@ -984,7 +998,8 @@ def split_h1(lines: list[str], profile: dict) -> list[dict]:
             d["title"], d["url"] = _h1_link(d["title"])
     if profile["h1_needs_url"]:
         docs = _merge_urlless_h1(docs)
-    return docs
+    # after the merge, which puts a folded H1 back into the body as written
+    return [_split_title_id(d) for d in docs]
 
 
 def _closing(text: str, start: int, opener: str, closer: str) -> int:
@@ -1254,7 +1269,7 @@ def split_frontmatter(lines: list[str], profile: dict) -> list[dict]:
             url = fields.get(rule[1], "")
         else:
             url = _body_url(body, rule)
-        docs.append({
+        doc = {
             "title": fields.get("title") or _first_heading(body),
             "fm_titled": bool(fields.get("title")),
             "description": fields.get("description", ""),
@@ -1263,7 +1278,9 @@ def split_frontmatter(lines: list[str], profile: dict) -> list[dict]:
             "min_level": 1,
             "tags": _fm_tags(fields, lists, tags_key) if tags_key else [],
             **({"split_notes": notes} if notes else {}),
-        })
+        }
+        # a frontmatter ``title:`` is not a heading and keeps what it says
+        docs.append(doc if doc["fm_titled"] else _split_title_id(doc))
     return docs
 
 
@@ -1382,9 +1399,15 @@ def split_line(lines: list[str], profile: dict) -> list[dict]:
             url = delimiter_url
         else:
             url = _body_url(body, rule)
-        title = _untemplated_title(_first_heading(body, fence=_Fence()), body)
-        title = title or delimiter_url.rstrip("/").rsplit("/", 1)[-1] or "(untitled)"
-        docs.append({"title": title, "url": url, "body_lines": body, "min_level": 1})
+        heading = _first_heading(body, fence=_Fence())
+        title = _untemplated_title(heading, body)
+        # only a title read from the heading loses an id (not the
+        # frontmatter's, nor the URL's last segment below)
+        doc = {"title": title, "url": url, "body_lines": body, "min_level": 1}
+        if heading and title == heading:
+            _split_title_id(doc)
+        doc["title"] = doc["title"] or delimiter_url.rstrip("/").rsplit("/", 1)[-1] or "(untitled)"
+        docs.append(doc)
     return docs
 
 
@@ -2536,7 +2559,11 @@ def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
         else:
             field_name = "title" if form == "title" else "url"
             needle = page_ref.lower()
-            found = [(i, d) for i, d in enumerate(docs) if d[field_name] and needle in d[field_name].lower()]
+            # a title whose heading carried an id (``_split_title_id``) is
+            # matched as written, which also holds the title without it: a
+            # page_ref taken from either finds the page it did before
+            found = [(i, d) for i, d in enumerate(docs) if d[field_name] and needle in (
+                d.get("raw_title", d["title"]) if form == "title" else d["url"]).lower()]
             if len(found) == 1:
                 if form == "title":
                     _note_slug_page_shadowed(docs, page_ref, found[0][0], forms, strip_suffix, retry)
@@ -2612,7 +2639,9 @@ def _resolve_ref(profile: dict, docs: list[dict], args) -> int:
 
 
 def _heading_rows(body_lines: list[str], depth: int) -> list[tuple[int, str]]:
-    """``(level, text)`` of the headings from H1 to H<depth> outside code blocks."""
+    """``(level, text)`` of the headings from H1 to H<depth> outside code
+    blocks. The text is the heading's without its explicit id
+    (``split_heading_id``), as ``extract_sections`` titles it."""
     fence = FenceTracker()
     out = []
     for line in body_lines:
@@ -2622,7 +2651,7 @@ def _heading_rows(body_lines: list[str], depth: int) -> list[tuple[int, str]]:
             continue
         m = re.match(r"^(#{1,%d})\s+(.+)" % depth, line)
         if m:
-            out.append((len(m.group(1)), m.group(2).strip()))
+            out.append((len(m.group(1)), split_heading_id(m.group(2).strip())[0]))
     return out
 
 
@@ -2646,7 +2675,8 @@ def _anchor_for(profile: dict, doc: dict):
     if style is None or not re.match(r"https?://", doc["url"] or ""):
         return None
     url = _ref_url_key_with_query(doc["url"], profile["page_url_strip_suffix"])
-    return lambda title: section_url_anchor(url, title, style=style)
+    # a heading's own id (``{#token-usage}``) is its anchor, else a slug of the title
+    return lambda title, anchor_id=None: section_url_anchor(url, title, style=style, anchor_id=anchor_id)
 
 
 # A Markdown link target in parentheses: an absolute URL or a root-relative

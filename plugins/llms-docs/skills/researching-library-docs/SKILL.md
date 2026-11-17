@@ -237,8 +237,8 @@ llms-full.txt にページ URL が無く、`llms.txt` とタイトルが一致�
   `llms.txt` に無い旧 v1 の `Create a generation task` には付かない。引用元は英語のページの URL + heading_path で表す
 - **日本語の語でも引ける** (`search "接続"` は日本語のページの `エディターやエージェントに接続する` に当たる)。英語のページを
   引用元にするなら、英語の語で引き直す
-- **見出し**: 文章のページの見出しは `見出し [#id]` の 1 行で、すべて H2 として読む (`content` では `## 見出し`、`[#id]` は
-  残らない)。元のページの階層は残らないので、子の見出しを持つ見出しの節は本文が空のことがある (`Connect your editor or agent`
+- **見出し**: 文章のページの見出しは `見出し [#id]` の 1 行で、すべて H2 として読む (`content` の本文では `## 見出し [#id]`、
+  heading_path では `[#id]` が外れる)。元のページの階層は残らないので、子の見出しを持つ見出しの節は本文が空のことがある (`Connect your editor or agent`
   と、その下の `Claude Code` / `Cursor` は並んだ別の節)。API リファレンスのページは `## POST https://api.pixai.art/…` /
   `### Request body (…)` の見出しを持つ。`Section:` 行に `URL#anchor` は付かない
 - **WebFetch フォールバックの先**: 英語のページの URL。各ページには `<URL>.md` の Markdown 版もある
@@ -250,6 +250,9 @@ llms-full.txt にページ URL が無く、`llms.txt` とタイトルが一致�
 長すぎて `content` 1 回に収まらない節 (24000 文字超) で、見出しが検索語を含まないときは、`Next:` は `content` ではなく `search-content --page-ref N` を出す (一致する行を一覧する。スニペットも語が多く揃う行の前後だけを示す)。
 部分一致も受け付けるが、候補が 2 件以上なら `ambiguous heading` で候補一覧を出して止まる。
 `Section: (top)` は最初の見出しより前の本文を指す。
+見出しの末尾に id を書くページ (Zed の `## Overview {#overview}`、Agent Plugins・Zod・PixAI の `[#id]`) では、
+パスは id を外した見出し (`Overview/Checkpoints`) で出る。本文の見出し行は書かれたままで、id 付きの書き方や id
+そのもの (`#checkpoints`) を渡しても同じ節を開く。
 
 ## コマンドリファレンス
 
