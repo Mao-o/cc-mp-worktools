@@ -139,8 +139,9 @@ class SplitTest(unittest.TestCase):
         self.assertEqual(_h2(new), ["## Older releases\n"])
         presets = generic._read_sources_file(generic.PRESETS_FILE)
         with_key = sorted(n for n, p in presets.items() if p.get("heading_line_pattern") is not None)
-        # amp writes its H2 as HTML lines (``<h2 id="x">X</h2>``)
-        self.assertEqual(with_key, ["amp", "claude-code"])
+        # amp writes its H2 as HTML lines (``<h2 id="x">X</h2>``), pixai as
+        # ``Title [#id]`` lines (test_pixai_preset)
+        self.assertEqual(with_key, ["amp", "claude-code", "pixai"])
         self.assertEqual(presets["claude-code"]["heading_line_pattern"].pattern, PRESET_PATTERN)
 
 

@@ -2,8 +2,8 @@
 name: researching-library-docs
 description: |
   AI SDK (Vercel AI SDK) / Firebase / Next.js / Vite / Vitest / Drizzle / Zod / Hono / Bun /
-  Vercel / Render / MCP (Model Context Protocol) / OpenAI Codex・Plugins・API・Agents SDK / Ollama / Agent Skills /
-  Agent Plugins / ACP / AI コーディングツール (Cline / Factory / Devin / Gemini CLI /
+  Vercel / Render / MCP (Model Context Protocol) / OpenAI Codex・Plugins・API・Agents SDK / Ollama / PixAI /
+  Agent Skills / Agent Plugins / ACP / AI コーディングツール (Cline / Factory / Devin / Gemini CLI /
   Kilo Code / Continue / Zed / Amp) の公式ドキュメント調査スキル。llms.txt を段階的に読み、
   API 仕様・設定・コード例を verbatim で取得する。Skill ツールで起動し、会話コンテキストを
   消費しない。WebFetch (要約で field が抜ける) の代わりに使う。sources.json のサイトも読める。
@@ -13,7 +13,7 @@ when_to_use: |
   `ai` / `@ai-sdk/*` / `firebase` / `firebase-admin` / `firebase-functions` / `next` /
   `drizzle-orm` / `zod` / `hono` / `@modelcontextprotocol/sdk`, or firebase.json / *.rules /
   next.config.* / vite.config.* / vitest.config.* / drizzle.config.* / vercel.json.
-  Triggers: "AI SDK", "ai-sdk", "@ai-sdk", "streamText", "generateText", "useChat",
+  Triggers: "ai-sdk", "@ai-sdk", "streamText", "generateText", "useChat",
   "streamObject", "generateObject", "useObject", "embedMany", "convertToModelMessages",
   "Firebase", "Firestore", "Firebase Auth", "Cloud Functions", "FCM", "Firebase Hosting",
   "App Hosting", "Realtime Database", "Cloud Storage", "App Check", "Remote Config",
@@ -70,6 +70,7 @@ schema を埋めるのは呼び出し元の仕事で、呼び出し元は最終�
 | MCP (Model Context Protocol) の仕様・SDK | `mcp` |
 | OpenAI Codex (CLI / IDE / cloud / SDK) と ChatGPT の docs (desktop app / Work / 管理) | `codex` |
 | Ollama | `ollama` |
+| PixAI API (アニメ調の画像・動画生成。英・日・韓のページを含む。下の「source ごとの注意」) | `pixai` |
 | Agent Skills (`SKILL.md` の仕様、agentskills.io) | `agentskills` |
 | Agent Plugins (Skills と MCP server を束ねる plugin の共通形式、agent-plugins.org) | `agent-plugins` |
 | OpenAI Plugins (ChatGPT / Codex の plugin: MCP server・UI・skills・提出) | `openai-plugins` |
@@ -165,9 +166,9 @@ schema 付きで起動された agent (`StructuredOutput` を持つ呼び出し�
 - **タイトルの部分一致**: 一意に決まる場合のみ (曖昧ならエラーで候補を出す)
 - **URL の部分一致**: ページ URL を持つ source のみ (例: `get-started`)
 
-`zod` / `hono` / `render` / `codex` / `openai-plugins` / `openai-api-docs` / `factory` は
+`zod` / `hono` / `render` / `codex` / `openai-plugins` / `openai-api-docs` / `factory` / `pixai` は
 llms-full.txt にページ URL が無く、`llms.txt` とタイトルが一致したページにだけ URL が付く
-(付く割合は source で違う。Hono は 4 分の 1 程度、`factory` は全ページ。README の presets 表)。
+(付く割合は source で違う。Hono は 4 分の 1 程度、`factory` は全ページ、`pixai` は英語のページだけ。README の presets 表)。
 `agent-plugins` と `openai-agents-js` は URL が全く無い。URL の無いページの引用元はタイトル + heading_path で表す。
 `openai-agents-js` は同じタイトルのページがあるので、整数 index で開く。
 
@@ -223,6 +224,24 @@ llms-full.txt にページ URL が無く、`llms.txt` とタイトルが一致�
 - **一部のページの取得失敗** (`search` / `search-content`): 失敗したページだけ `(skip: fetch failed <url>: ...)` を stderr に出して読み飛ばし、残りで続ける (exit 0)。末尾に `(N documents skipped — fetch failed, see stderr)` が出る。全ページ失敗したときだけ結果が 0 件になる
 - **結果ゼロ**: `Why nothing matched:` の語ごとのページ数は、`search` ならタイトル / 説明の index、`search-content` なら取得済みのページが対象。`--page-ref` で絞っていると数えるのはそのページだけなので、外して再実行する
 - **WebFetch フォールバックの先**: `https://firebase.google.com/docs/<product>`
+
+### PixAI (`--source pixai`)
+
+`llms-full.txt` は英・日・韓の 3 言語の同じ 39 ページを、英語・日本語・韓国語の順に 1 ファイルに並べている
+(ページ番号もこの順に続く)。
+
+- **同じページの写しが並ぶ**: 識別子 (`modelVersionId` / `contextImages` など) で `search` すると、上位 N 件に同じページの
+  日・韓の写しが入り、別のページの枠を取る。写しは本文のヒットが英語のページと同じになりやすく、同じなら英語のページが先に
+  並ぶ。別のページも見るときは `--top-n` を広げる
+- **`URL:` 行を持つのは英語のページだけ** (`llms.txt` とタイトルで突き合わせる)。日・韓のページ、題が 3 言語で同じ `Webhook`、
+  `llms.txt` に無い旧 v1 の `Create a generation task` には付かない。引用元は英語のページの URL + heading_path で表す
+- **日本語の語でも引ける** (`search "接続"` は日本語のページの `エディターやエージェントに接続する` に当たる)。英語のページを
+  引用元にするなら、英語の語で引き直す
+- **見出し**: 文章のページの見出しは `見出し [#id]` の 1 行で、すべて H2 として読む (`content` では `## 見出し`、`[#id]` は
+  残らない)。元のページの階層は残らないので、子の見出しを持つ見出しの節は本文が空のことがある (`Connect your editor or agent`
+  と、その下の `Claude Code` / `Cursor` は並んだ別の節)。API リファレンスのページは `## POST https://api.pixai.art/…` /
+  `### Request body (…)` の見出しを持つ。`Section:` 行に `URL#anchor` は付かない
+- **WebFetch フォールバックの先**: 英語のページの URL。各ページには `<URL>.md` の Markdown 版もある
 
 ## heading_path の指定方法
 

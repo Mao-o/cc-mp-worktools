@@ -830,6 +830,25 @@ class PresetsTest(unittest.TestCase):
         self.assertEqual(fetched - set(listed), set(), "hosts the presets fetch from but the README omits")
         self.assertEqual(set(listed) - fetched, set(), "hosts the README lists but no preset fetches from")
 
+    def test_readme_presets_table_has_a_row_for_every_preset(self):
+        # the table of the bundled presets names each in its first column;
+        # the Cloudflare products share one row that lists them in the second
+        readme = Path(generic.PRESETS_FILE).parents[1] / "README.md"
+        table = readme.read_text(encoding="utf-8").split("### 同梱 presets", 1)[1].split("\n\n|", 1)[1]
+        table = "|" + table.split("\n\n", 1)[0]
+        named = set()
+        for row in table.splitlines()[2:]:
+            first, second = row.split(" | ")[:2]
+            names = set(re.findall(r"`([a-z0-9<>-]+)`", first))
+            if "cloudflare-<製品>" in first:
+                names |= {f"cloudflare-{p}" for p in re.findall(r"`([a-z0-9-]+)`", second)}
+            named |= names
+        with open(generic.PRESETS_FILE, encoding="utf-8") as f:
+            raw = json.load(f)["sources"]
+        # ``claude`` (the alias of the two Claude presets) is told in their row
+        self.assertEqual(set(raw) - named - {"claude"}, set(), "a preset with no row in the README")
+        self.assertEqual({n for n in named if "<" not in n} - set(raw), set(), "a row for a preset that is gone")
+
     def test_nextjs_preset_does_not_cut_a_page_at_a_titled_block_without_url(self):
         # a YAML example in the prose (outside a code fence) that has a title
         # but no url is not a page; the preset's pages all carry a url

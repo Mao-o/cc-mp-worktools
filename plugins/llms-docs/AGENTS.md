@@ -15,7 +15,7 @@ preset を置き換える。
 - 対応する形状のサイトで、ページの分割・タイトル・URL が誤る (実測した Next.js / Vite /
   Vitest / Drizzle / Zod / Hono / Bun / Vercel / Render / MCP / Codex / Ollama / Agent Skills /
   Agent Plugins / OpenAI Plugins・API docs / ACP / Cline / Factory / Devin / Gemini CLI / Kilo Code /
-  OpenAI Agents SDK (TypeScript) / Continue / Cloudflare 製品別ファイルと同じ形のもの)。
+  OpenAI Agents SDK (TypeScript) / Continue / PixAI / Cloudflare 製品別ファイルと同じ形のもの)。
   本文の水平線やコードブロック内の見本を区切りと誤認する、`drop_lines` がコードブロック内の
   行を消す、ページ URL を読む前に行を消す、など
 - `index_url` の突き合わせで、別のページの URL が付く (完全一致・一意以外で付けている、別の

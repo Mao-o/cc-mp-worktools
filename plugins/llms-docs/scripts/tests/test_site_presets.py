@@ -476,7 +476,7 @@ class SessionStartNoticeTest(unittest.TestCase):
         "claude-code": "Claude Code", "ai-sdk": "AI SDK", "firebase": "Firebase",
         "nextjs": "Next.js", "vite": "Vite", "vitest": "Vitest", "drizzle": "Drizzle", "zod": "Zod", "hono": "Hono",
         "bun": "Bun", "vercel": "Vercel", "render": "Render", "mcp": "MCP", "codex": "Codex", "ollama": "Ollama",
-        "agentskills": "Agent Skills", "agent-plugins": "Agent Plugins", "openai-plugins": "OpenAI Plugins",
+        "pixai": "PixAI", "agentskills": "Agent Skills", "agent-plugins": "Agent Plugins", "openai-plugins": "OpenAI Plugins",
         "openai-api-docs": "OpenAI Plugins/API", "acp": "ACP", "cline": "Cline", "factory": "Factory",
         "devin": "Devin", "gemini-cli": "Gemini CLI", "kilo-code": "Kilo Code",
         "openai-agents-js": "OpenAI Agents SDK (TS)", "continue": "Continue", "zed": "Zed", "amp": "Amp",

@@ -9,7 +9,7 @@ Claude・Cloudflare・AI SDK・Firebase と同梱 presets の各サイトの公�
 |--------|------|---------------------|
 | `researching-claude-docs` | Claude Code / Claude Developer Platform | `search --source claude-code` (URL-join 統合検索) → `content <page_ref> "<heading_path>" --source claude-code` (`claude-platform` / 両方の `search` は `claude`) |
 | `researching-cloudflare-docs` | Cloudflare 製品別 (Workers / D1 / R2 / KV / Durable Objects ほか) | `search --source cloudflare-<製品>` → `content <page_ref> "<heading_path>" --source cloudflare-<製品>` |
-| `researching-library-docs` | 上の 2 つ以外の同梱 presets のサイト (AI SDK / Firebase / Next.js / Vite / Vitest / Drizzle / Zod / Hono / Bun / Vercel / Render / MCP / Codex / Ollama / Agent Skills / Agent Plugins / OpenAI Plugins・API docs・Agents SDK / ACP / Cline / Factory / Devin / Gemini CLI / Kilo Code / Continue / Zed / Amp) と利用者の `sources.json` のサイト | `search --source <name>` → `content <page_ref> "<heading_path>" --source <name>` |
+| `researching-library-docs` | 上の 2 つ以外の同梱 presets のサイト (AI SDK / Firebase / Next.js / Vite / Vitest / Drizzle / Zod / Hono / Bun / Vercel / Render / MCP / Codex / Ollama / PixAI / Agent Skills / Agent Plugins / OpenAI Plugins・API docs・Agents SDK / ACP / Cline / Factory / Devin / Gemini CLI / Kilo Code / Continue / Zed / Amp) と利用者の `sources.json` のサイト | `search --source <name>` → `content <page_ref> "<heading_path>" --source <name>` |
 
 3 skill とも同じ script (`scripts/parse-llms-txt.py`) を、source 名 (`--source`) を変えて使う (0.46.0)。
 サブコマンドは `search` / `search-index` / `search-content` / `sections` / `content` / `fetch-index` (と `sources`)。
@@ -224,7 +224,7 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading
 ### 同梱 presets
 
 次のサイトは `scripts/presets.json` に profile が同梱されており、設定なしで `--source <name>` で読める。
-各サイトのページ数と確かめ方は `docs/generic-llms-txt-source.md` の「2026-10-03 実測」にある。
+各サイトのページ数と確かめ方は `docs/generic-llms-txt-source.md` の「実測」の節 (preset を足した日ごと) にある。
 
 | source 名 | サイト | ページ URL |
 |---|---|---|
@@ -252,6 +252,7 @@ python3 plugins/llms-docs/scripts/parse-llms-txt.py content <page_ref> "<heading
 | `openai-agents-js` | OpenAI Agents SDK (TypeScript) | なし (1256 ページ。同じタイトルのページがあるので番号で開く) |
 | `continue` | Continue (公式の `docs.continue.dev` に llms ファイルが無く、Mintlify の既定ホスト `continue-docs.mintlify.app` から読む。公式からのリンクは無いので、消えたら `check-preset-urls.py` の点検で分かる) | あり (既定ホストの URL) |
 | `zed` / `amp` | Zed / Amp (`llms-full.txt` が無いので、`llms.txt` の各ページを必要なときに 1 ページずつ取得する。`body: fetch`。`robots.txt` が拒否する場所は取得せず、全ページを走査する `search-content` は `--page-ref` が無いと止める) | あり (`.md` / `/docs/markdown/…`) |
+| `pixai` | PixAI API (`platform.pixai.art`。アニメ調の画像・動画生成 API。`llms-full.txt` は英・日・韓の同じ 39 ページを 1 ファイルに並べ、3 言語のまま読む。文章のページの見出しは `#` の無い `見出し [#id]` の行で、`heading_line_pattern` で H2 として読む) | 一部 (`llms.txt` とタイトルで突き合わせ。117 中 37 で、英語の 39 ページのうち 37。日・韓のページには付かない) |
 | `cloudflare-<製品>` | Cloudflare の製品別 `/<製品>/llms-full.txt`。製品は `workers` / `d1` / `r2` / `kv` / `durable-objects` / `pages` / `queues` / `workers-ai` / `vectorize` / `hyperdrive` / `agents` / `workflows` / `ai-gateway` / `browser-rendering` / `containers` | あり (`index.md`)。`browser-rendering` は製品名が Browser Run に変わり、取得先は `/browser-run/llms-full.txt` (52 ページ中 51 でページ内に URL。URL の無い 1 件は他の製品と同じ API リファレンスのページ)。source 名は変えていない |
 | `claude-code` / `claude-platform` | Claude Code (`code.claude.com/docs`) / Claude Developer Platform (`platform.claude.com`)。`llms.txt` の項目でランキングし、本文は `llms-full.txt` から読む (`rank_from: index`)。`claude` は両方をまとめて `search` する別名 (`members`) | あり |
 | `ai-sdk` | AI SDK (Vercel AI SDK) | あり (`search` / `sections` / `content` に出す。`fetch-index` / `search-index` の一覧には出さない) |
@@ -287,6 +288,7 @@ nextjs.org
 openai.github.io
 orm.drizzle.team
 platform.claude.com
+platform.pixai.art
 render.com
 vercel.com
 vite.dev
@@ -359,7 +361,7 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `join_rate_guard` | | `true` で、`index_url` の `llms.txt` の項目のうち、ページ自身の URL (`page_url` で読んだもの。タイトルの突き合わせで付けた URL は数えない) と一致するものの割合を見る (`.md`・クエリ・`#…`・末尾の `/` は無視)。50% 未満なら終了コード 2 で止め、80% 未満なら stderr に WARNING を出す。区切り方が合っていない profile (frontmatter 形式のファイルを `split: h1` で読むなど) ではページに URL が無く、ここで止まる。`index_url` と `page_url` が要る。`llms.txt` を読めない (取得に失敗した) とき、または絶対 URL のページ項目が 0 件 (相対リンクだけなど) のときは見ない (stderr に WARNING を出し、止めない)。`--file` で `--index-file` を渡さないときは `llms.txt` を読まないので見ない |
 | `h1_needs_url` | | `split: h1` で `true` のとき、`page_url` (`h1-link` / `line:` / `link:`) の URL が見つからない H1 をページの区切りにせず、前のページの見出しとして残す (ページ本文の中で H1 を使うサイト向け) |
 | `strip_trailing_headings` | | `true` で、ページ末尾に本文の無いまま並ぶ見出し行 (ページ間に置かれたナビの見出し `## Messages` など) を除く。`drop_lines` の後に適用する。コードブロックの状態は見ない |
-| `heading_line_pattern` | | 正規表現 (グループをちょうど 1 つ持つ)。コードブロックの外で、行全体 (改行を除く) がこれに一致する本文の行を、グループを題にした H2 (`## <グループ>`) として読む。見出しを使わず太字の行で節を区切るページ (Claude Code の changelog の `**2.1.310**`) で、検索の hit・`sections`・`content` が節を持つ。`content` の本文ではその行が `## <グループ>` と出る。`Section:` 行には、ほかの見出しと同じ規則で anchor が付く (公開中の changelog は版ごとに `id="2-1-310"` の形の anchor を持つ)。グループが空になる行はそのまま。`strip_trailing_headings` の後に適用する。`claude-code` preset は `^\*\*(\d+\.\d+\.\d+)\*\*\s*$` |
+| `heading_line_pattern` | | 正規表現 (グループをちょうど 1 つ持つ)。コードブロックの外で、行全体 (改行を除く) がこれに一致する本文の行を、グループを題にした H2 (`## <グループ>`) として読む。見出しを使わず太字の行で節を区切るページ (Claude Code の changelog の `**2.1.310**`) で、検索の hit・`sections`・`content` が節を持つ。`content` の本文ではその行が `## <グループ>` と出る。`Section:` 行には、ほかの見出しと同じ規則で anchor が付く (公開中の changelog は版ごとに `id="2-1-310"` の形の anchor を持つ)。グループが空になる行はそのまま。`strip_trailing_headings` の後に適用する。`claude-code` preset は `^\*\*(\d+\.\d+\.\d+)\*\*\s*$`、`pixai` preset は `^\s*(.+?) \[#[^\]\s]+\]\s*$` (見出しを `#` を付けずに `見出し [#id]` と書いた行。インデントされた行も読み、`[#id]` は本文に残らない) |
 | `min_heading_level` | | `sections` / `content` / 本文検索で節として数える最も浅い見出し (`1` か `2`)。既定は `split: h1` で `2`、ほかは `1`。本文にコードブロック外の `# …` 行があるサイトでは `2` にする |
 | `index_heading_level` | | `search-index` / `search` のランキングと `--show-sections` の一覧に使う見出しの最も深い段 (`2` か `3`。既定 `3`)。コードブロック外の見出しだけを読む。H3 はキーワード 1 語ごとに +1 するが、全キーワード一致の加点 (+10) には数えない (API を H3 で並べるページが関数名で見つかり、選択肢の H3 を並べるだけのページが、タイトルがその語そのもののページを押し出さないため)。`2` で H1 / H2 だけを読む (Claude docs / Firebase の preset。`rank_from: index` ではランキングに見出しを使わないので `--show-sections` の一覧にだけ効く。`body: fetch` ではどちらにも効かない (`--show-sections` を無視するため)) |
 | `h3_only_keeps_full_search` | | `true` で、`search` の全文検索の補いの要否を判定するときに、H3 だけで候補に入ったページ (タイトル・description・tags・H1 / H2 のどれにも当たらないページ) を数えない。そのページに本文のヒットがあっても補いが止まらず、補いで増えた行はヒットのある候補の下、ヒット 0 の行の上に置く (1 位は変わらない)。`rank_from: pages` (既定) かつ `index_heading_level: 3` でだけ書ける。`body: fetch` では書けない。既定 `false`。同梱 presets では `ai-sdk` だけが使う (実測は `docs/generic-llms-txt-source.md`) |
@@ -410,6 +412,7 @@ source 名は `^[a-z0-9][a-z0-9-]*$` (キャッシュのファイル名になる
 | H1 全体が `[タイトル](<url>)` | `split: h1` + `page_url: h1-link` + `h1_needs_url` | Gemini CLI |
 | `## Source: /<path>` 行で区切り、パスがサイトの下の階層 | `split: line` + `line_prefix` + `url_prefix` | Kilo Code |
 | `llms-full.txt` が無く、`llms.txt` が全ページを並べ、サイトへの負荷を抑えたい | 上の `body: fetch` に `page_fetch_workers: 1` + `respect_robots` + `search_content_needs_page_ref` | Zed / Amp |
+| H1 で区切り URL なし、本文の見出しが `#` の無い `見出し [#id]` の行 | `split: h1` + `index_url` + `heading_line_pattern` | PixAI |
 
 対象外: `llms.txt` が別の `llms.txt` へのリンク集になっている 2 段 index (Cloudflare のルート
 `/llms.txt`。製品別の `llms-full.txt` は上のとおり読める)、ページごとに別ファイルで公開し、
@@ -454,8 +457,9 @@ spawn オーバーヘッドは受け入れ、低品質回答や context rot を�
 fork + Sonnet 構成を崩さない:
 
 1. **description の充実** (`Use proactively` / `Triggers:` を 3 SKILL で揃える、0.6.0)
-2. **`~/.claude/rules/` の `*-doc-first.md` rule** で「自身の知識より先に
-   `researching-*` を呼ぶ」を明示 (ai-sdk / claude-docs / firebase)
+2. **利用者の指示ファイル**: 利用者が自分の指示ファイル (`CLAUDE.md` や `.claude/rules/`) に、対象のライブラリ・
+   サービスの仕様確認では自身の知識より先に該当の skill (`researching-claude-docs` / `researching-cloudflare-docs` /
+   `researching-library-docs`) を呼ぶ、と書く。plugin はこの指示を同梱しない
 3. **`search` 統合サブコマンドの提供** (0.7.0) で 1 コマンド完結の調査体験
 
 WebFetch との比較メモ: WebFetch は要約モデル経由のため field 抜け落ち・幻覚の

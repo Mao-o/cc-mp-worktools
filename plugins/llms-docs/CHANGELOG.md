@@ -2,6 +2,23 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.53.0] - 2026-11-17
+
+### 追加: PixAI API のドキュメントを読む (preset `pixai`)
+
+- `pixai` の preset を足した (`platform.pixai.art/llms-full.txt`、`split: h1` + `index_url`)。`researching-library-docs` が読む
+- ファイルは英・日・韓の 3 言語の同じ 39 ページを 1 ファイルに並べている (117 ページ)。言語で絞る仕組みは足さず、3 言語のまま読む (日本語・韓国語の語でも引ける)。コードブロックの中の H1 の形のコメント (`# 1. Get an upload URL` など、言語ごとに 3 行) はページにしない
+- ページの URL はファイルに無く、`llms.txt` とタイトルで突き合わせる。付くのは英語の 39 ページのうち 37 (題が 3 言語で同じ `Webhook` と、`llms.txt` に無い旧 v1 の `Create a generation task` には付かない)。日・韓のページには付かない
+- 文章のページの見出しは `#` の無い 1 行 `見出し [#id]` (Steps の中ではインデントされる) で、`heading_line_pattern` で H2 として読む。実ファイルの 198 行がすべて見出しで、コードブロックの中の行を拾わないことを確かめた。`[#id]` は本文に残らない。`anchor_style` は付けない (見出しの文字から作る anchor が明示の id と一致するのは 198 行中 122)。`rank_from: index` も採らない (本文にだけある語のページが候補に入らず、`Webhook` は本文との対応づけを失う)
+- skill の Step 0 の表・description と、SessionStart の案内に PixAI を足した。description の枠に入れるため、Triggers から description と重なる `"AI SDK"` を外した。「source ごとの注意」に、同じページの日・韓の写しが上位に並ぶこと (英語のページが先に並ぶ。別のページは `--top-n` で広げる)、`URL:` 行を持つのは英語のページだけであること、見出しがすべて H2 になることを書いた
+- 実測 (分割数・URL の付き方・見出しの 2 つの形・3 言語の並び) は `docs/generic-llms-txt-source.md` の「2026-11-17 実測」
+
+### 変更: README の設計判断が作者の手元の rule を前提にしていた記述を直す
+
+- 「軽い質問でも WebFetch に流れる」への対応策の 2 つ目が、plugin に同梱されない作者の手元の rule (ホームの下の rule ファイル) を指していた。利用者が自分の指示ファイル (`CLAUDE.md` や `.claude/rules/`) に「仕様確認では自身の知識より先に該当の skill を呼ぶ」と書く設定として書き直し、plugin はこの指示を同梱しないと明記した。挙げていた skill の名前も 0.52.0 の 3 skill (`researching-claude-docs` / `researching-cloudflare-docs` / `researching-library-docs`) に合わせた。設計判断 (fork + Sonnet を維持する) は変えていない
+- README・SKILL.md・docs が書くホームの下のパスを、どの環境にもあるもの (plugin の展開先・キャッシュ・`sources.json`) に限ることをテストで固定した (`scripts/tests/test_skill_layout.py`)
+- 0.52.0 の削除の案内をテストが「最新の節」で探していたので、0.52.0 の節で探すようにした
+
 ## [0.52.0] - 2026-11-03
 
 ### 変更: skill を 4 本から 3 本に再編

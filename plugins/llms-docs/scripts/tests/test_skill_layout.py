@@ -66,6 +66,7 @@ LISTING_WORD = {
     "mcp": (LIBRARY, "MCP (Model Context Protocol)"),
     "codex": (LIBRARY, "Codex"),
     "ollama": (LIBRARY, "Ollama"),
+    "pixai": (LIBRARY, "PixAI"),
     "agentskills": (LIBRARY, "Agent Skills"),
     "agent-plugins": (LIBRARY, "Agent Plugins"),
     "openai-plugins": (LIBRARY, "Codex・Plugins"),
@@ -321,12 +322,14 @@ class MigrationNoticeTest(unittest.TestCase):
                 self.assertIn(f"--source {source}", row.group(0))
 
     def test_changelog_names_each_removed_skill_with_where_it_went(self):
+        # the release that removed them (later releases add their sections above it)
         text = (PLUGIN_DIR / "CHANGELOG.md").read_text(encoding="utf-8")
-        latest = re.split(r"(?m)^## \[", text)[1]
+        releases = {s.split("]", 1)[0]: s for s in re.split(r"(?m)^## \[", text)[1:]}
+        removal = releases["0.52.0"]
         for old in REMOVED:
             with self.subTest(old):
-                self.assertIn(old, latest)
-        self.assertIn(LIBRARY, latest)
+                self.assertIn(old, removal)
+        self.assertIn(LIBRARY, removal)
 
     def test_session_start_points_at_the_three_skills_only(self):
         hooks = json.loads((PLUGIN_DIR / "hooks" / "hooks.json").read_text(encoding="utf-8"))
@@ -365,6 +368,43 @@ class MigrationNoticeTest(unittest.TestCase):
             for old in REMOVED:
                 with self.subTest(place=place, old=old):
                     self.assertNotIn(old, text)
+
+
+class ReaderSetupTest(unittest.TestCase):
+    """The shipped docs lean on nothing the plugin does not ship: whoever
+    installs it has no rule file of the author's under their home."""
+
+    # the paths under the home that every install has: where plugins are
+    # installed, the default cache, the default sources.json
+    HOME_PATHS = ("~/.claude/plugins/", "~/.cache/llms-docs", "~/.config/llms-docs/")
+
+    @staticmethod
+    def shipped_docs():
+        yield PLUGIN_DIR / "README.md"
+        yield PLUGIN_DIR / "AGENTS.md"
+        yield from sorted(SKILLS_DIR.glob("*/SKILL.md"))
+        yield from sorted(SKILLS_DIR.glob("*/references/*.md"))
+        yield from sorted((PLUGIN_DIR / "docs").glob("*.md"))
+
+    def test_home_paths_are_only_those_of_every_install(self):
+        seen = 0
+        for path in self.shipped_docs():
+            for found in re.findall(r"~/[^\s`)'\"]*", path.read_text(encoding="utf-8")):
+                seen += 1
+                with self.subTest(file=path.name, path=found):
+                    self.assertTrue(found.startswith(self.HOME_PATHS), found)
+        self.assertGreater(seen, 0)
+
+    def test_the_design_note_leaves_the_instruction_file_to_the_reader(self):
+        readme = (PLUGIN_DIR / "README.md").read_text(encoding="utf-8")
+        note = readme.split("## 設計判断: subagent fork + Sonnet は維持する", 1)[1].split("\n## ", 1)[0]
+        # the second of the ways to keep light questions off WebFetch
+        item = re.search(r"(?ms)^2\. (.*?)(?=^\d+\. |\n\n)", note)
+        self.assertIsNotNone(item, note)
+        self.assertIn("plugin はこの指示を同梱しない", item.group(1))
+        # it names the skills the plugin has, by their names
+        self.assertEqual(sorted(set(re.findall(r"`(researching-[a-z-]+)`", item.group(1)))),
+                         sorted((CLAUDE, CLOUDFLARE, LIBRARY)))
 
 
 if __name__ == "__main__":
