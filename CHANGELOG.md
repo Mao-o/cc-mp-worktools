@@ -15,6 +15,15 @@
 (更新判定のキーは各 plugin の `plugin.json` の `version`)、semver を振ると
 「plugin のバージョン」と混同されるため採っていません。
 
+## 2026-11-17
+
+### Changed
+
+- README の Privacy 表の `llms-docs` の行を、skill の区別ではなく取得の種類で書き直した
+  (skill の再編で「専用の 3 skill」という区別が無くなっていた)。同梱 presets の取得先、
+  `body: fetch` の preset が `llms.txt` に並べる各ページ、`respect_robots` の preset の
+  `robots.txt`、利用者が `sources.json` に書いた URL。送るヘッダと無効化の列は実装と照合して変更なし
+
 ## 2026-11-03
 
 ### Changed
