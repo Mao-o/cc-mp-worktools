@@ -252,7 +252,10 @@ llms-full.txt にページ URL が無く、`llms.txt` とタイトルが一致�
 `Section: (top)` は最初の見出しより前の本文を指す。
 見出しの末尾に id を書くページ (Zed の `## Overview {#overview}`、Agent Plugins・Zod・PixAI の `[#id]`) では、
 パスは id を外した見出し (`Overview/Checkpoints`) で出る。本文の見出し行は書かれたままで、id 付きの書き方や id
-そのもの (`#checkpoints`) を渡しても同じ節を開く。
+そのもの (`#checkpoints`) を渡しても同じ節を開く。外した名前では別の節が開いてしまう見出しだけは、書かれたままの
+名前 (`Default Width {#panel-default-width}`) で出る。外すと同じパスになる節 (`## Setup {#a}` / `## Setup {#b}`) の
+2 つ目以降は、`Next:` 行が `content 0 '#b'` / `content 0 'Setup {#b}/Child'`、subsection hints が `#b` /
+`Setup {#b}/Child` で指す (`Next:` 行はそのまま打てば、hints の名前はプレースホルダに入れれば開く)。
 
 ## コマンドリファレンス
 

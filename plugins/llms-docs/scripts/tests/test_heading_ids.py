@@ -19,12 +19,14 @@ the cache that leaves and on ``--file``, the others on ``--file``. Every
 
 import contextlib
 import io
+import itertools
 import json
 import re
 import shlex
 import shutil
 import tempfile
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -219,8 +221,11 @@ class _Corpora(unittest.TestCase):
         return out
 
     def run_cli(self, net, argv):
-        with mock.patch("urllib.request.urlopen", side_effect=net):
-            return _loader.run_cli(g, argv)
+        try:
+            with mock.patch("urllib.request.urlopen", side_effect=net):
+                return _loader.run_cli(g, argv)
+        except Exception as e:  # noqa: BLE001  (a broken step fails the test, not errors it)
+            self.fail(f"{argv}: {type(e).__name__}: {e}")
 
     def run_line(self, net, line, replace=None):
         """Run a ``Next:`` line as the shell splits it; *replace* maps a word
@@ -378,6 +383,214 @@ class ZedFormAnchorTest(_Corpora):
                                                     "token usage"])
                 self.assertEqual(code, 0, err)
                 self.assertNotIn("#token-usage]", out)
+
+
+def _zed_form(body: str) -> str:
+    return f"> Docs index.\n\n# Agent Panel\n\nIntro.\n\n{body}"
+
+
+# a heading whose text is the path of a later heading as written
+SHADOWED_TOP = _zed_form("## Default Width {#panel-default-width}\n\nalpha width text.\n\n## Other\n\nother body.\n\n"
+                         "### Default Width\n\nbravo width text.\n")
+# a heading whose text is an id-less heading of the same level
+SHADOWED_BARE = _zed_form("## Setup {#a}\n\nalpha install text.\n\n### Alpha child\n\nalpha child body.\n\n"
+                          "## Setup\n\nbravo install text.\n\n## Other\n\nother body.\n")
+# two headings whose texts are the same, with subsections of their own
+SAME_TEXT = _zed_form("## Setup {#a}\n\nalpha install text.\n\n### Alpha child\n\nalpha child body.\n\n"
+                      "## Setup {#b}\n\nbravo install text.\n\n### Bravo child\n\nbravo child body.\n\n"
+                      "## Other\n\nother body.\n")
+# the same, the second with no subsection
+SAME_TEXT_CHILDLESS = _zed_form("## Setup {#a}\n\nalpha install text.\n\n### Alpha child\n\nalpha child body.\n\n"
+                                "## Setup {#b}\n\nbravo install text.\n\n## Other\n\nother body.\n")
+# the same, with subsections whose texts are the same too
+SAME_TEXT_CHILDREN = _zed_form("## Setup {#a}\n\nalpha install text.\n\n### Child\n\nalpha child body.\n\n"
+                               "## Setup {#b}\n\nbravo install text.\n\n### Child\n\nbravo child body.\n\n"
+                               "## Other\n\nother body.\n")
+
+
+class SharedTextTest(_Corpora):
+    """Pages where a heading's text (its id taken off) is also another
+    heading's name (マージ前レビューの指摘): every name printed opens its section,
+    or the first with it; ``content`` hints at the subsections of the section
+    it printed; a ``Next:`` line and a hint reach the section by its name,
+    ``#<id>`` or its path as written."""
+
+    def corpora_of(self, text: str):
+        """``corpora`` for a page of *text* (in the form of the Zed page), in
+        a directory of its own."""
+        root = Path(tempfile.mkdtemp(dir=self.tmp))
+        cache = root / "cache"
+        cache.mkdir()
+        file = root / "local-llms-full.txt"
+        file.write_text(f"# Agent Panel\nSource: {ZED_URL}\n{text.split(chr(10) + '# Agent Panel' + chr(10), 1)[1]}",
+                        encoding="utf-8")
+        common = ["--sources-file", str(self.sources), "--cache-dir", str(cache)]
+        return {"fetch": (["--source", "zed", *common], _Net({**self.served, ZED_URL: text})),
+                "cache": (["--source", "zed", *common], _Net({})),
+                "file": (["--source", "zedfile", *common, "--file", str(file)], _Net({}))}
+
+    def rows(self, net, opts):
+        code, out, err = self.run_cli(net, [SCRIPT, "sections", *opts, "--", "0"])
+        self.assertEqual(code, 0, err)
+        rows = [ln for ln in out.splitlines() if re.match(r"^\s*\[L\d\] ", ln)]
+        return rows, self.next_lines(out)[0]
+
+    def opens(self, net, line, body, replace=None):
+        """Run the ``Next:`` *line* (a word of it replaced as *replace* says):
+        it prints *body*, and the output without its subsection hints."""
+        code, got, err = self.run_line(net, line, replace)
+        self.assertEqual(code, 0, f"{line}\n{err}")
+        self.assertIn(body, got.split("\n---\n", 1)[1], line)
+        return got
+
+    def search_next(self, net, opts, query):
+        code, out, err = self.run_cli(net, [SCRIPT, "search-content", *opts, "--page-ref", "0", "--", query])
+        self.assertEqual(code, 0, err)
+        return re.findall(r"(?m)^    Section: (.*?)  \(x\d+\)", out), self.next_lines(out)[0]
+
+    def hints(self, out):
+        """The subsection hint blocks of a ``content`` output: ``(label, rows)``."""
+        return [(label, re.findall(r"(?m)^  - (.*)$", rows))
+                for label, rows in re.findall(r"(?m)^--- (.*) ---\n((?:  - .*\n)*)", out)]
+
+    def test_a_heading_whose_text_is_another_heading_is_named_as_written(self):
+        """``## Default Width {#panel-default-width}`` and ``### Default
+        Width`` under ``## Other``: ``Default Width`` opens the second (as
+        before), so the first is named as written."""
+        for label, (opts, net) in self.corpora_of(SHADOWED_TOP).items():
+            with self.subTest(corpus=label):
+                rows, nxt = self.rows(net, opts)
+                self.assertEqual(rows, ["[L2] Default Width {#panel-default-width}", "[L2] Other",
+                                        "  [L3] Other/Default Width"])
+                for path, body in (("Default Width {#panel-default-width}", "alpha width text."),
+                                   ("Other/Default Width", "bravo width text."), ("Default Width", "bravo width")):
+                    self.opens(net, nxt, body, {"<heading_path>": [path]})
+                for query, section, body in (("alpha", "Default Width {#panel-default-width}", "alpha width text."),
+                                             ("bravo", "Other/Default Width", "bravo width text.")):
+                    sections, line = self.search_next(net, opts, query)
+                    self.assertEqual(sections, [section])
+                    self.assertEqual(shlex.split(line, comments=True)[2:5], ["content", "0", section], line)
+                    self.opens(net, line, body)
+
+    def test_a_heading_whose_text_is_an_id_less_heading_is_named_as_written(self):
+        """``## Setup {#a}`` (with a subsection) and ``## Setup``: ``Setup``
+        opens the second, so the first is named ``Setup {#a}``, and each
+        lists its own subsections."""
+        for label, (opts, net) in self.corpora_of(SHADOWED_BARE).items():
+            with self.subTest(corpus=label):
+                rows, nxt = self.rows(net, opts)
+                self.assertEqual(rows, ["[L2] Setup {#a}", "  [L3] Setup/Alpha child", "[L2] Setup", "[L2] Other"])
+                for query, section, body in (("alpha install", "Setup {#a}", "alpha install text."),
+                                             ("bravo", "Setup", "bravo install text.")):
+                    sections, line = self.search_next(net, opts, query)
+                    self.assertEqual(sections, [section])
+                    self.assertEqual(shlex.split(line, comments=True)[2:5], ["content", "0", section], line)
+                    # one section each: no note of a repeated heading
+                    self.assertNotIn("heading appears", line)
+                    self.opens(net, line, body)
+                got = self.opens(net, nxt, "bravo install text.", {"<heading_path>": ["Setup"]})
+                self.assertEqual(self.hints(got), [])
+                for name in ("Setup {#a}", "#a", "a"):
+                    got = self.opens(net, nxt, "alpha install text.", {"<heading_path>": [name]})
+                    self.assertIn("# heading_path: Setup {#a}\n", got)
+                    self.assertEqual(self.hints(got), [("Subsections of 'Setup {#a}' (1)", ["Setup/Alpha child"])] * 2)
+
+    def test_the_second_of_two_same_texts_lists_its_own_subsections(self):
+        """``## Setup {#a}`` / ``## Setup {#b}``: both are ``Setup``, and the
+        second opened by ``#b`` or ``Setup {#b}`` hints at its own subsection
+        and decides by it whether it can be narrowed."""
+        for label, (opts, net) in self.corpora_of(SAME_TEXT).items():
+            with self.subTest(corpus=label):
+                rows, nxt = self.rows(net, opts)
+                self.assertEqual(rows, ["[L2] Setup", "  [L3] Setup/Alpha child", "[L2] Setup",
+                                        "  [L3] Setup/Bravo child", "[L2] Other"])
+                for name in ("#b", "Setup {#b}"):
+                    got = self.opens(net, nxt, "bravo install text.", {"<heading_path>": [name]})
+                    hints = self.hints(got)
+                    self.assertEqual(hints, [("Subsections of 'Setup' (1)", ["Setup/Bravo child"])] * 2)
+                    hint_next = [ln for ln in self.next_lines(got) if "<heading_path from above>" in ln][0]
+                    self.opens(net, hint_next, "bravo child body.", {"<heading_path from above>": hints[0][1]})
+        for label, (opts, net) in self.corpora_of(SAME_TEXT_CHILDLESS).items():
+            with self.subTest(corpus=label, childless=True):
+                for name, heading, has_subsections in (("Setup", "## Setup {#a}\n", True),
+                                                       ("#a", "## Setup {#a}\n", True),
+                                                       ("#b", "## Setup {#b}\n", False),
+                                                       ("Setup {#b}", "## Setup {#b}\n", False)):
+                    code, got, err = self.run_cli(net, [SCRIPT, "content", *opts, "--max-chars", "30", "--", "0",
+                                                        name])
+                    self.assertEqual(code, 0, err)
+                    # the body (cut after its heading) is the section's
+                    body = got.split("\n---\n", 1)[1]
+                    self.assertIn(heading, body, name)
+                    self.assertNotIn(heading.replace("{#a}", "{#x}").replace("{#b}", "{#a}").replace("{#x}", "{#b}"),
+                                     body, name)
+                    self.assertEqual(bool(self.hints(got)), has_subsections, name)
+                    self.assertEqual("this section has no subsections to narrow to" in got, not has_subsections, name)
+                    self.assertEqual("chars truncated; narrow with " in got, has_subsections, name)
+                    if not has_subsections:
+                        cut = [ln for ln in self.next_lines(got) if " search-content " in ln][0]
+                        self.assertTrue(cut.endswith(" -- setup"), cut)
+                        self.assertEqual(self.run_line(net, cut)[0], 0, cut)
+
+    def test_a_hit_in_the_second_of_two_same_texts_reads_it_by_its_id(self):
+        """The ``Next:`` line of a hit in the second ``Setup`` is ``content 0
+        '#b'`` (0.53.0 printed ``'Setup {#b}'``; both open it), and of the
+        first ``Setup`` with the note, as before."""
+        for label, (opts, net) in self.corpora_of(SAME_TEXT).items():
+            with self.subTest(corpus=label):
+                for query, words, note, body in (
+                        ("bravo install", ["content", "0", "#b"], False, "bravo install text."),
+                        ("alpha install", ["content", "0", "Setup"], True, "alpha install text.")):
+                    sections, line = self.search_next(net, opts, query)
+                    self.assertEqual(sections, ["Setup"])
+                    self.assertEqual(shlex.split(line, comments=True)[2:5], words, line)
+                    self.assertEqual(line.endswith("# heading appears 2 times; this reads the first"), note, line)
+                    self.opens(net, line, body)
+
+    def test_a_subsection_of_the_second_same_text_is_reached_by_its_path_as_written(self):
+        """Both ``Setup`` have a ``### Child``: the second child's ``Next:``
+        line and hint are ``Setup {#b}/Child`` (``Setup/Child`` opens the
+        first child), the first child's stay ``Setup/Child``."""
+        for label, (opts, net) in self.corpora_of(SAME_TEXT_CHILDREN).items():
+            with self.subTest(corpus=label):
+                rows, nxt = self.rows(net, opts)
+                self.assertEqual(rows, ["[L2] Setup", "  [L3] Setup/Child", "[L2] Setup", "  [L3] Setup/Child",
+                                        "[L2] Other"])
+                sections, line = self.search_next(net, opts, "bravo child")
+                self.assertEqual(sections, ["Setup/Child"])
+                self.assertEqual(shlex.split(line, comments=True)[2:5], ["content", "0", "Setup {#b}/Child"], line)
+                self.assertNotIn("heading appears", line)
+                self.opens(net, line, "bravo child body.")
+                for name, child, body in (("#b", "Setup {#b}/Child", "bravo child body."),
+                                          ("Setup {#b}", "Setup {#b}/Child", "bravo child body."),
+                                          ("Setup", "Setup/Child", "alpha child body."),
+                                          ("#a", "Setup/Child", "alpha child body.")):
+                    got = self.opens(net, nxt, body.split()[0] + " install text.", {"<heading_path>": [name]})
+                    self.assertEqual(self.hints(got), [("Subsections of 'Setup' (1)", [child])] * 2, name)
+                    hint_next = [ln for ln in self.next_lines(got) if "<heading_path from above>" in ln][0]
+                    self.opens(net, hint_next, body, {"<heading_path from above>": [child]})
+
+    def test_the_whole_page_and_its_top(self):
+        """``content <page>`` lists the top-level sections, the second
+        ``Setup`` as ``#b``; ``(top)`` reads the text above the headings."""
+        for label, (opts, net) in self.corpora_of(SAME_TEXT).items():
+            with self.subTest(corpus=label):
+                code, out, err = self.run_cli(net, [SCRIPT, "content", *opts, "--", "0"])
+                self.assertEqual(code, 0, err)
+                self.assertIn("bravo child body.", out)
+                self.assertEqual(self.hints(out), [("Top-level sections (3)", ["Setup", "#b", "Other"])] * 2)
+                hint_next = [ln for ln in self.next_lines(out) if "<heading_path from above>" in ln][0]
+                self.opens(net, hint_next, "bravo install text.", {"<heading_path from above>": ["#b"]})
+                code, out, err = self.run_cli(net, [SCRIPT, "content", *opts, "--", "0", "(top)"])
+                self.assertEqual(code, 0, err)
+                self.assertIn("Intro.", out)
+                self.assertNotIn("install text.", out)
+                self.assertEqual(self.hints(out), [])
+                # a hit above the first heading
+                sections, line = self.search_next(net, opts, "intro")
+                self.assertEqual(sections, ["(top)  [before first heading]"])
+                self.assertEqual(shlex.split(line, comments=True)[2:5], ["content", "0", "(top)"], line)
+                self.opens(net, line, "Intro.")
 
 
 AGENT_PLUGINS = """\
@@ -545,6 +758,8 @@ class ResolveOrderTest(unittest.TestCase):
                 content, path = _common.extract_content(body.splitlines(keepends=True), arg)
         except SystemExit:
             self.fail(f"{arg!r} opened no section:\n{err.getvalue()}")
+        except Exception as e:  # noqa: BLE001  (a broken step fails the test, not errors it)
+            self.fail(f"{arg!r}: {type(e).__name__}: {e}")
         return path, content.splitlines()[0]
 
     def test_an_exact_title_comes_before_a_case_folded_path(self):
@@ -578,11 +793,14 @@ class ResolveOrderTest(unittest.TestCase):
                                  ("Agent Panel/Default Width", "### Default Width {#agent-panel-default-width}"))
 
     def test_the_heading_as_written_comes_before_the_text(self):
-        # "Setup" names the second heading as written, the first by its text
+        # "Setup" names the second heading as written, the first by its text.
+        # The first is named as written ("Setup {#a}"): named by its text it
+        # would print "Setup", which opens the second (this test expected that
+        # name before; マージ前レビューの指摘)
         body = "## Setup {#a}\none\n## Setup\ntwo\n"
         self.assertEqual(self.opened(body, "Setup"), ("Setup", "## Setup"))
-        self.assertEqual(self.opened(body, "Setup {#a}"), ("Setup", "## Setup {#a}"))
-        self.assertEqual(self.opened(body, "a"), ("Setup", "## Setup {#a}"))
+        self.assertEqual(self.opened(body, "Setup {#a}"), ("Setup {#a}", "## Setup {#a}"))
+        self.assertEqual(self.opened(body, "a"), ("Setup {#a}", "## Setup {#a}"))
 
     def test_an_id_comes_before_a_substring(self):
         # "usage" is a part of both headings' text (ambiguous as a substring)
@@ -615,20 +833,37 @@ class ResolveOrderTest(unittest.TestCase):
         with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
             _common.extract_content(body.splitlines(keepends=True), "erview")
 
+    def test_the_substring_tier_reads_the_text_of_a_section_named_as_written(self):
+        # the first heading is named as written (its text opens the third),
+        # and the substring tier still reads its text: "panel" is a part of
+        # "Panel settings" only, as it was before it was named so
+        body = ("## Default Width {#panel-default-width}\na\n## Other\nb\n### Default Width\nc\n"
+                "## Panel settings\nd\n")
+        self.assertEqual([s["heading_path"] for s in _common.extract_sections(body.splitlines(keepends=True))],
+                         ["Default Width {#panel-default-width}", "Other", "Other/Default Width", "Panel settings"])
+        self.assertEqual(self.opened(body, "panel"), ("Panel settings", "## Panel settings"))
+        self.assertEqual(self.opened(body, "default width {#panel"),
+                         ("Default Width {#panel-default-width}", "## Default Width {#panel-default-width}"))
+
     def test_two_headings_whose_text_is_the_same(self):
         """``## Setup {#a}`` / ``## Setup {#b}``: one path, listed with the
-        note of a repeated heading; the second opens by its old text and id."""
+        note of a repeated heading; the second opens by its old text and id,
+        and the ``Next:`` line of a hit in it reads it by its id."""
         body = "## Setup {#a}\nalpha install\n## Setup {#b}\nbravo install\n"
         lines = body.splitlines(keepends=True)
         self.assertEqual(self.opened(body, "Setup"), ("Setup", "## Setup {#a}"))
         for arg in ("Setup {#b}", "b", "#b"):
             with self.subTest(arg=arg):
                 self.assertEqual(self.opened(body, arg), ("Setup", "## Setup {#b}"))
-        hits = _common.search_content_in_body(lines, "bravo")
-        self.assertEqual([(r["heading_path"], r["heading_count"]) for r in hits["results"]], [("Setup", 2)])
-        out = _run_printing(_commands.render_next_content, _commands.hit_candidates([(0, hits, ())]),
-                            hint_args=())
-        self.assertIn(" content 0 Setup # heading appears 2 times; this reads the first\n", out)
+        for word, line in (("alpha", " content 0 Setup # heading appears 2 times; this reads the first\n"),
+                           ("bravo", " content 0 '#b'\n")):
+            with self.subTest(word=word):
+                hits = _common.search_content_in_body(lines, word)
+                self.assertEqual([(r["heading_path"], r["heading_count"]) for r in hits["results"]],
+                                 [("Setup", 2)])
+                out = _run_printing(_commands.render_next_content, _commands.hit_candidates([(0, hits, ())]),
+                                    hint_args=())
+                self.assertTrue(out.endswith(line), out)
 
 
 def _run_printing(fn, *args, **kw) -> str:
@@ -636,6 +871,198 @@ def _run_printing(fn, *args, **kw) -> str:
     with contextlib.redirect_stdout(buf):
         fn(*args, **kw)
     return buf.getvalue()
+
+
+# The heading parts of the synthetic pages: names that differ only by an id,
+# by an attribute without an id, by case, and by level.
+_PARTS = ("## Setup", "## setup", "## Setup {#a}", "## Setup {#b}", "## Setup {.c}", "## Other",
+          "### Setup", "### Setup {#c}", "### Child")
+_WORDS = ("alpha", "bravo", "charlie", "delta")
+# a long line in every section: --max-chars _CUT keeps a section's heading and
+# its word line and cuts the rest (the subsections come after it)
+_PAD = "padding " * 25 + "\n"
+_CUT = 60
+
+
+class _Page:
+    """One synthetic page: every heading is followed by a line with its own
+    word (``wordalpha text.``) that tells which section a text starts with."""
+
+    def __init__(self, parts):
+        self.lines = []
+        for i, part in enumerate(parts):
+            self.lines += [f"{part}\n", f"word{_WORDS[i]} text.\n", _PAD]
+        # the same headings without the long lines, for what only the headings decide
+        self.short = [ln for ln in self.lines if ln is not _PAD]
+        self.secs = _common.extract_sections(self.lines)
+        self._opened = {}
+
+    @staticmethod
+    def section_of(text):
+        m = re.search(r"(?m)^word(\w+) text\.$", text)
+        return _WORDS.index(m.group(1)) if m else None
+
+    def open(self, arg):
+        """The section ``content`` opens for *arg*; ``None`` when it exits."""
+        if arg not in self._opened:
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    content, _path = _common.extract_content(self.short, arg)
+                self._opened[arg] = self.section_of(content)
+            except SystemExit:
+                self._opened[arg] = None
+        return self._opened[arg]
+
+    def first(self, key, i):
+        """The first section whose *key* is the one of section *i*."""
+        return next(k for k, s in enumerate(self.secs) if key(s) == key(self.secs[i]))
+
+    def children(self, i):
+        """The direct subsections of section *i*: the shallowest of those in its block."""
+        block = []
+        for s in self.secs[i + 1:]:
+            if s["level"] <= self.secs[i]["level"]:
+                break
+            block.append(s)
+        level = min((s["level"] for s in block), default=None)
+        return [self.secs.index(s) for s in block if s["level"] == level]
+
+    def ref(self, i):
+        """The name a line that leads to section *i* uses: the first of its
+        name, ``#<its id>`` and its path as written that opens it, else its
+        name (no name reaches it)."""
+        s = self.secs[i]
+        names = [s["heading_path"]]
+        if s.get("anchor_id") is not None:
+            names.append("#" + s["anchor_id"])
+        if "raw_heading_path" in s:
+            names.append(s["raw_heading_path"])
+        return next((n for n in names if self.open(n) == i), s["heading_path"])
+
+
+def _name(s):
+    return s["heading_path"]
+
+
+def _raw_path(s):
+    return s.get("raw_heading_path", s["heading_path"])
+
+
+def _old_open(secs, arg):
+    """What 0.53.0 opened for *arg* by an exact match: the sections as written,
+    path then title, then the same case-folded. ``None`` when no exact match."""
+    for key, fold in ((_raw_path, False), (lambda s: s.get("raw_title", s["title"]), False),
+                      (_raw_path, True), (lambda s: s.get("raw_title", s["title"]), True)):
+        want = arg.lower() if fold else arg
+        for k, s in enumerate(secs):
+            if (key(s).lower() if fold else key(s)) == want:
+                return k
+    return None
+
+
+class SyntheticPagesTest(unittest.TestCase):
+    """Every page of 3 or 4 of ``_PARTS`` (every order, with repeats), every
+    section, through the functions the commands print with:
+
+    1. its name (``sections`` / ``Section:``) opens it, or the first section
+       of that name when several share it
+    2. what opened a section in 0.53.0 (the path and title as written, also
+       case-folded) opens it still, and ``#<id>`` the first section with the id
+    3. ``content`` lists the subsections, and decides whether there are any
+       to narrow to, of the section whose text it printed, by any name of it
+    4. a ``Next:`` line and a subsection hint name the section by what opens
+       it (``_Page.ref``); a name that opens it keeps the line as it was
+       (with the note of a repeated heading), and a line that reached it in
+       0.53.0 reaches it still
+    """
+
+    def check(self, parts, bad):
+        page = _Page(parts)
+        secs, counts = page.secs, _common.heading_path_counts(page.secs)
+        label = " / ".join(parts)
+        forms = []
+        for i, s in enumerate(secs):
+            # 1. the name
+            if page.open(s["heading_path"]) != page.first(_name, i):
+                bad[1].append(f"{label}: {s['heading_path']!r} opens {page.open(s['heading_path'])}, "
+                              f"not {page.first(_name, i)}")
+            # 2. the names of 0.53.0
+            raw_title = s.get("raw_title", s["title"])
+            for arg in dict.fromkeys((_raw_path(s), raw_title, _raw_path(s).lower(), raw_title.lower())):
+                want = _old_open(secs, arg)
+                if want is not None and page.open(arg) != want:
+                    bad[2].append(f"{label}: {arg!r} opens {page.open(arg)}, 0.53.0 {want}")
+            if s.get("anchor_id") is not None:
+                want = page.first(lambda x: x.get("anchor_id"), i)
+                if page.open("#" + s["anchor_id"]) != want:
+                    bad[2].append(f"{label}: '#{s['anchor_id']}' opens {page.open('#' + s['anchor_id'])}, not {want}")
+            forms += [s["heading_path"], _raw_path(s)] + (["#" + s["anchor_id"]] if s.get("anchor_id") else [])
+        # 4. the Next: line of a hit in each section (every word line is a hit
+        # of "word": one search, one result per section)
+        hits = _common.search_content_in_body(page.lines, "word", max_matches_per_doc=0)
+        results = {r["line_offset"] // 3: r for r in hits["results"]}
+        self.assertEqual(sorted(results), list(range(len(secs))), label)
+        for i, s in enumerate(secs):
+            self.assertEqual(results[i]["heading_path"], s["heading_path"], label)
+            out = _run_printing(_commands.render_next_content,
+                                _commands.hit_candidates([(0, {**hits, "results": [results[i]]}, ())]),
+                                hint_args=())
+            line = out.strip().removeprefix(f"Next: {SCRIPT} ")
+            ref = page.ref(i)
+            note = _common.duplicate_heading_note(counts[ref]).strip() if ref == s["heading_path"] else ""
+            if line != " ".join(["content", "0", shlex.quote(ref)] + ([note] if note else [])):
+                bad[4].append(f"{label}: Next: for {i} is {line!r}, not {ref!r}")
+            elif page.first(_raw_path, i) == i and page.open(ref) != i:
+                bad[4].append(f"{label}: Next: for {i} ({ref!r}) reached it in 0.53.0, not now")
+        # 3. (and 4. for the hints) content by every name. A page of 4 parts
+        # renders only a section that a name of another opens first or that
+        # has a subsection named otherwise; the pages of 3 parts render all
+        for arg in dict.fromkeys(forms):
+            t = page.open(arg)
+            if (len(parts) > 3 and t is not None and page.first(_name, t) == t
+                    and all(page.ref(k) == secs[k]["heading_path"] for k in page.children(t))):
+                continue
+            args = types.SimpleNamespace(heading_path=arg, max_chars=_CUT, no_subsection_hints=False)
+            page_view = _commands.PageView(idx=0, title="Page", body_lines=page.lines)
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    out = _run_printing(_commands.render_content, page_view, args, script=SCRIPT, hint_args=())
+            except SystemExit:
+                bad[3].append(f"{label}: content {arg!r} exits")
+                continue
+            t = page.section_of(out.split("\n---\n", 1)[1])
+            kids = page.children(t)
+            blocks = re.findall(r"(?m)^--- Subsections of '.*' \((\d+)\) ---\n((?:  - .*\n)*)", out)
+            rows = [re.findall(r"(?m)^  - (.*?)(?: \[code\])?$", b) for _n, b in blocks]
+            want_blocks = 2 if kids else 0
+            if len(blocks) != want_blocks or any(int(n) != len(kids) or len(r) != len(kids)
+                                                 for (n, _b), r in zip(blocks, rows)):
+                bad[3].append(f"{label}: content {arg!r} opens {t} and lists {rows}, its subsections are {kids}")
+            else:
+                for r in rows:
+                    for k, row in zip(kids, r):
+                        if row not in (secs[k]["heading_path"], page.ref(k)):
+                            bad[3].append(f"{label}: content {arg!r} opens {t} and lists {row!r}, not {k}")
+                        elif row != page.ref(k):
+                            bad[4].append(f"{label}: content {arg!r} hints {row!r} for {k}, not {page.ref(k)!r}")
+            childless = "this section has no subsections to narrow to" in out
+            keyword = _common.quoted_keyword(_common.search_in_page_keyword(secs[t]["title"]))
+            if childless != (not kids) or (childless and f"with {keyword} (the section heading" not in out):
+                bad[3].append(f"{label}: content {arg!r} opens {t}, cut as {'childless' if childless else 'with'}"
+                              f" subsections; it has {kids}")
+
+    def test_every_section_of_every_page(self):
+        bad = {1: [], 2: [], 3: [], 4: []}
+        with mock.patch("sys.argv", [SCRIPT]):
+            for n in (3, 4):
+                for parts in itertools.product(_PARTS, repeat=n):
+                    try:
+                        self.check(parts, bad)
+                    except Exception as e:  # noqa: BLE001  (a broken step fails the test, not errors it)
+                        self.fail(f"{' / '.join(parts)}: {type(e).__name__}: {e}")
+        # the number of pages that break each property
+        failing = {p: len({x.split(": ", 1)[0] for x in v}) for p, v in bad.items() if v}
+        self.assertEqual(failing, {}, "\n".join(x for v in bad.values() for x in v[:5]))
 
 
 class SectionDictTest(unittest.TestCase):

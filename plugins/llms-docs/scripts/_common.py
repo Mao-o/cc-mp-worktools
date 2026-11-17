@@ -260,6 +260,13 @@ def extract_sections(body_lines, min_level: int = 2):
     heading or an ancestor's) ``"raw_heading_path"``: ``extract_content``
     still opens a section by them. A page with no such heading gets the same
     dicts as before.
+
+    The one exception: a section whose text path opens another section
+    (``extract_content`` reads the headings as written first, so ``Default
+    Width`` opens a later ``### Default Width`` before the ``## Default
+    Width {#panel-default-width}`` it would name) keeps the path as written
+    in ``heading_path`` too (``_keep_written_paths``), so that every
+    ``heading_path`` opens its section, or the first section with it.
     """
     fence = FenceTracker()
     pattern = re.compile(r"^(#{%d,6})\s+(.+)" % min_level)
@@ -304,7 +311,102 @@ def extract_sections(body_lines, min_level: int = 2):
         if raw_path != h["heading_path"]:
             h["raw_heading_path"] = raw_path
 
+    if any("raw_heading_path" in h for h in headings):
+        _keep_written_paths(headings)
     return headings
+
+
+def _keep_written_paths(headings) -> None:
+    """Give back its path as written (``raw_heading_path``) to each section
+    whose text path ``extract_content`` resolves to a section other than the
+    first one with that path (``## Default Width {#panel-default-width}``
+    when a later ``Other/Default Width`` is ``### Default Width`` as written,
+    ``## Setup {#a}`` before an id-less ``## Setup``): that path is the one
+    that opens it. The texts of sections that only share a path (``## Setup
+    {#a}`` / ``## Setup {#b}``) stay, as a repeated heading.
+
+    Such a section keeps its text path as ``"text_heading_path"``, which
+    ``extract_content`` reads in place of ``heading_path`` (``_text_path``),
+    so what an argument opens does not change, and one pass is enough."""
+    find = _exact_lookup(headings)
+    first: dict = {}
+    for h in headings:
+        first.setdefault(h["heading_path"], h)
+    missed = [h for h in headings
+              if "raw_heading_path" in h and find(h["heading_path"]) is not first[h["heading_path"]]]
+    for h in missed:
+        h["text_heading_path"] = h["heading_path"]
+        h["heading_path"] = h["raw_heading_path"]
+
+
+def _text_path(section) -> str:
+    """The path of *section* made of its headings' text (``Default Width``),
+    also for a section that ``_keep_written_paths`` names as written."""
+    return section.get("text_heading_path", section["heading_path"])
+
+
+def _exact_lookup(sections):
+    """``find(heading_path)``: the section the exact tiers of
+    ``extract_content`` open for *heading_path*, then the section whose
+    heading gave itself that id; ``None`` when none does.
+
+    The tiers run on the headings as written (``raw_heading_path`` /
+    ``raw_title``, the same values for a heading without an id), then on
+    their text. Each holds the full path before the bare title, and the
+    case-sensitive match before the case-folded one, each the first section
+    in page order with the value: one dict per tier, built once, so looking
+    up every heading of a page (``_keep_written_paths``) stays linear.
+
+    A full heading_path match is looked for in the whole page before a bare
+    title match: in one pass, an earlier nested ``### Error handling``
+    (title) would win over a later top-level ``## Error handling`` whose
+    heading_path is exactly the argument, and the commands this module
+    prints (always a full heading_path) would read another section. The
+    case-folded match is still an "exact" tier — not a substring/partial
+    one — so it also wins outright with no ambiguity check. Skipping it and
+    falling straight to the substring tier would wrongly treat a
+    case-differing exact match as merely "ambiguous" whenever it happens to
+    also be a substring of one of its own descendants' heading_path."""
+    tiers = []
+    for path_of, title_of in ((lambda s: s.get("raw_heading_path", s["heading_path"]),
+                               lambda s: s.get("raw_title", s["title"])),
+                              (_text_path, lambda s: s["title"])):
+        for value_of, folded in ((path_of, False), (title_of, False), (path_of, True), (title_of, True)):
+            first: dict = {}
+            for s in sections:
+                value = value_of(s)
+                first.setdefault(value.lower() if folded else value, s)
+            tiers.append((first, folded))
+    by_id: dict = {}
+    for s in sections:
+        if s.get("anchor_id") is not None:
+            by_id.setdefault(s["anchor_id"], s)
+
+    def find(heading_path):
+        heading_lower = heading_path.lower()
+        for first, folded in tiers:
+            target = first.get(heading_lower if folded else heading_path)
+            if target is not None:
+                return target
+        return by_id.get(heading_path[1:] if heading_path.startswith("#") else heading_path)
+
+    return find
+
+
+def heading_arg(section, find) -> str:
+    """The heading argument of ``content`` that opens *section*: its
+    ``heading_path``, else ``#<its id>``, else its path as written — the
+    first that *find* (``_exact_lookup`` of the same sections) resolves to
+    it. ``## Setup {#a}`` / ``## Setup {#b}`` share ``Setup``, and the
+    second opens as ``#b``; its id-less ``### Child`` as ``Setup
+    {#b}/Child``. ``heading_path`` when none of them does (a heading
+    repeated with no id: every command reads the first)."""
+    names = [section["heading_path"]]
+    if section.get("anchor_id") is not None:
+        names.append("#" + section["anchor_id"])
+    if "raw_heading_path" in section:
+        names.append(section["raw_heading_path"])
+    return next((name for name in names if find(name) is section), section["heading_path"])
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +450,7 @@ def _extend_for_fence_and_table(content_lines, end_line, body_lines, protect_tab
 
 def extract_content(body_lines, heading_path=None, *,
                     protect_tables: bool = True, min_level: int = 2,
-                    retry=None):
+                    retry=None, with_section: bool = False):
     """Extract content from *body_lines*.
 
     If *heading_path* is None, return the entire body. Otherwise, find the
@@ -417,9 +519,16 @@ def extract_content(body_lines, heading_path=None, *,
     text, and on the headings as written only when the text matches none
     (a part of an old path that runs into an id). A section found by any
     exact tier or the id is the one read.
+
+    With *with_section*, a third value is the section read (a dict of
+    ``extract_sections``; ``None`` for the whole document and the
+    preamble): two sections can share the resolved ``heading_path``
+    (``## Setup {#a}`` / ``## Setup {#b}`` opened as ``#b``), and a caller
+    that prints more about the section (``render_content``'s subsection
+    hints) names it by its ``line_start``.
     """
     if heading_path is None:
-        return "".join(body_lines), None
+        return ("".join(body_lines), None) + ((None,) if with_section else ())
 
     sections = extract_sections(body_lines, min_level=min_level)
 
@@ -428,40 +537,11 @@ def extract_content(body_lines, heading_path=None, *,
         content_lines = _extend_for_fence_and_table(
             list(body_lines[:end_line]), end_line, body_lines, protect_tables
         )
-        return "".join(content_lines), "(top)"
+        return ("".join(content_lines), "(top)") + ((None,) if with_section else ())
 
     heading_lower = heading_path.lower()
-    target = None
-    for path_of, title_of in ((lambda s: s.get("raw_heading_path", s["heading_path"]),
-                               lambda s: s.get("raw_title", s["title"])),
-                              (lambda s: s["heading_path"], lambda s: s["title"])):
-        # A full heading_path match is looked for in the whole page before
-        # a bare title match: in one pass, an earlier nested ``### Error
-        # handling`` (title) would win over a later top-level ``## Error
-        # handling`` whose heading_path is exactly the argument, and the
-        # commands this module prints (always a full heading_path) would
-        # read another section.
-        target = next((s for s in sections if path_of(s) == heading_path), None)
-        if target is None:
-            target = next((s for s in sections if title_of(s) == heading_path), None)
-        if target is None:
-            # Case-folded exact match, still a second "exact" tier — not a
-            # substring/partial one — so it also wins outright with no
-            # ambiguity check. Skipping this and falling straight to the
-            # substring tier below would wrongly treat a case-differing
-            # exact match as merely "ambiguous" whenever it happens to also
-            # be a substring of one of its own descendants' heading_path.
-            # Same order as above: heading_path first, then title.
-            target = next((s for s in sections if path_of(s).lower() == heading_lower), None)
-        if target is None:
-            target = next((s for s in sections if title_of(s).lower() == heading_lower), None)
-        if target is not None:
-            break
-
-    if target is None:
-        wanted = heading_path[1:] if heading_path.startswith("#") else heading_path
-        target = next((s for s in sections
-                       if s.get("anchor_id") is not None and s["anchor_id"] == wanted), None)
+    # the exact tiers, then the id (``_exact_lookup``)
+    target = _exact_lookup(sections)(heading_path)
 
     if target is None:
         # the substring tier reads the text of the headings (no explicit id);
@@ -470,7 +550,7 @@ def extract_content(body_lines, heading_path=None, *,
         # finds what it found before
         matches = [
             s for s in sections
-            if heading_lower in s["heading_path"].lower() or heading_lower in s["title"].lower()
+            if heading_lower in _text_path(s).lower() or heading_lower in s["title"].lower()
         ]
         if not matches:
             # a title is the last part of its path, so the path as written
@@ -500,6 +580,8 @@ def extract_content(body_lines, heading_path=None, *,
         list(body_lines[target["line_start"]:end_line]), end_line, body_lines, protect_tables
     )
 
+    if with_section:
+        return "".join(content_lines), target["heading_path"], target
     return "".join(content_lines), target["heading_path"]
 
 
@@ -2010,6 +2092,8 @@ def _build_section_results(section_hits, sections, body_lines, keywords,
 
     ``heading_count`` is how many sections of the page share the result's
     heading_path (a command that names it reads the first of them).
+    ``heading_arg``, only on a section that its heading_path does not open
+    (``heading_arg``: a later ``## Setup {#b}``), is the argument that does.
     ``heading_match`` is whether the page title and the section's headings
     (its own and its ancestors') name every keyword (``names_every_keyword``).
     ``heading_own`` is whether that match needs the section's own heading:
@@ -2021,6 +2105,10 @@ def _build_section_results(section_hits, sections, body_lines, keywords,
     path_counts = heading_path_counts(sections)
     heading_texts = _section_heading_texts(sections, page_title)
     top_text = _heading_text(page_title) if page_title else ""
+    # every heading_path opens its section, or the first with it, on a page
+    # whose headings give no id: no argument to look for there
+    find = None
+    has_ids = any("raw_heading_path" in s for s in sections)
     for si, hits in section_hits.items():
         all_matched = set()
         for _, m in hits:
@@ -2083,6 +2171,11 @@ def _build_section_results(section_hits, sections, body_lines, keywords,
         # the id the heading gave itself is its anchor (section_url_anchor)
         if si is not None and sections[si].get("anchor_id") is not None:
             result["anchor_id"] = sections[si]["anchor_id"]
+        if si is not None and has_ids:
+            find = find or _exact_lookup(sections)
+            arg = heading_arg(sections[si], find)
+            if arg != heading_path:
+                result["heading_arg"] = arg
         results.append(result)
     return results, total
 
@@ -3043,11 +3136,13 @@ def _shallowest(candidates):
     return [s for s in candidates if s["level"] == level]
 
 
-def subsection_children(sections, body_lines, heading_path):
+def subsection_children(sections, body_lines, heading_path, line_start=None):
     """``(label, children, target)`` for the direct child sections of
     *heading_path* (the top-level sections when it is ``None``), or ``None``
     when *heading_path* is not one of *sections*. *target* is the section
-    itself (``None`` for the page top).
+    itself (``None`` for the page top): the one at *line_start* when given
+    (the section ``extract_content`` read, which a later section with the
+    same heading_path can be), else the first with *heading_path*.
 
     A direct child is a section at the shallowest level below its parent,
     not at exactly one level deeper: the top of a page whose first heading
@@ -3057,11 +3152,10 @@ def subsection_children(sections, body_lines, heading_path):
     heading at all."""
     if heading_path is None:
         return "Top-level sections", _shallowest(sections), None
-    target = None
-    for s in sections:
-        if s["heading_path"] == heading_path:
-            target = s
-            break
+    if line_start is not None:
+        target = next((s for s in sections if s["line_start"] == line_start), None)
+    else:
+        target = next((s for s in sections if s["heading_path"] == heading_path), None)
     if target is None:
         return None
     target_idx = sections.index(target)
@@ -3082,11 +3176,15 @@ def subsection_children(sections, body_lines, heading_path):
 
 
 def print_subsection_hints(body_lines, page_ref, heading_path, *,
-                            min_level: int = 2, extra_hint_args: tuple = ()) -> None:
+                            min_level: int = 2, extra_hint_args: tuple = (),
+                            line_start=None) -> None:
     """Print direct child sections of *heading_path* (or top-level if
     ``None``) as a hint block, followed by a ``Next: <script> content
     <page_ref> "..."`` line. Lets the caller drill down further without
-    re-running ``sections``.
+    re-running ``sections``. *line_start* is that of the section read
+    (``subsection_children``). Each child is listed by the argument that
+    opens it (``heading_arg``): its heading_path, unless that opens
+    another section.
 
     Shared by all three ``parse-*.py`` scripts' ``cmd_content`` (moved out
     of claude-docs-only ``_print_subsection_hints`` so ai-sdk/firebase get
@@ -3111,18 +3209,21 @@ def print_subsection_hints(body_lines, page_ref, heading_path, *,
     sections = extract_sections(body_lines, min_level=min_level)
     if not sections:
         return
-    found = subsection_children(sections, body_lines, heading_path)
+    found = subsection_children(sections, body_lines, heading_path, line_start)
     if found is None:
         return
     label, children, _target = found
     if not children:
         return
 
+    # on a page whose headings give no id, every heading_path opens its section
+    find = _exact_lookup(sections) if any("raw_heading_path" in s for s in sections) else None
     print()
     print(f"--- {label} ({len(children)}) ---")
     for s in children:
         code_marker = " [code]" if s["has_code_blocks"] else ""
-        print(f"  - {s['heading_path']}{code_marker}")
+        name = heading_arg(s, find) if find is not None else s["heading_path"]
+        print(f"  - {name}{code_marker}")
     print()
     # the reader puts a heading listed above in place of the placeholder,
     # and one may start with "-" (``--bg``): the options go first and every

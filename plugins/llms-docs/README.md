@@ -99,7 +99,8 @@ schema 付きで起動された agent (Workflow の `agent(prompt, {schema})` �
 - **heading が見つからない**: 全見出しの前に `Closest sections:` として近い見出し (最大 5 件) を、
   実行できるコマンド付きで出す
 - **`search` / `search-content` の `Next:`**: 上位ヒットの `doc_idx` と heading_path を埋めたコマンドを
-  最大 3 行出す (`--source` などは引き継ぐ)。ヒットが無いときはプレースホルダを出さない
+  最大 3 行出す (`--source` などは引き継ぐ。heading_path で別の節が開く節は、その節を開く `#<id>` か書かれたままの
+  パスを埋める。下の「見出しに書かれた id」)。ヒットが無いときはプレースホルダを出さない
 - **長すぎる節のヒット**: 節自身の本文が `content` の既定の上限 (24000 文字) を超える節 (CLI の環境変数の表など) では、
   スニペットは語が多く揃う行の前後だけを示し、節の見出しが検索語を含まないときは `Next:` が `content` ではなく
   `search-content --page-ref N --context 3 --max-snippet-chars 2000 -- '<同じ語>'` になる (`# long section: ...` は shell のコメントなので、行ごと打てる)。
@@ -108,9 +109,10 @@ schema 付きで起動された agent (Workflow の `agent(prompt, {schema})` �
   先読みの上限 (400 行) までに閉じない、または手元に `llms.txt` があってページ数がその異なる URL 数の半分を下回るときは、
   stderr に WARNING を出す。分割の規則は変わらず、出力もそのまま続く
 - **同じ heading_path が 1 ページに 2 回以上ある見出し**: コマンドは 1 つ目を読む (2 つ目以降を指す手段は
-  無い。ただし見出しが id を書いているとき (`## Setup {#a}` / `## Setup {#b}`) は、2 つ目以降もその id (`#b`) か
-  id 付きの書き方 (`Setup {#b}`) で開ける。下の「見出しに書かれた id」)。そうした見出しのコマンドには
-  `# heading appears N times; this reads the first` (shell のコメントなので、行ごと打てる) が付く
+  無い)。そうした見出しのコマンドには `# heading appears N times; this reads the first` (shell のコメントなので、
+  行ごと打てる) が付く。ただし見出しが id を書いているとき (`## Setup {#a}` / `## Setup {#b}`) は、2 つ目以降も
+  その id (`#b`) か id 付きの書き方 (`Setup {#b}`) で開け、`Next:` 行と subsection hints もそれで 2 つ目以降を指す
+  (下の「見出しに書かれた id」)
 - **0 件**: `Why nothing matched:` に語ごとのページ数を出し、「語が corpus に無い」「語は有るが同じ
   セクションに揃わない」「`--page-ref` で外した」を区別して、語を減らす / `search-index` / 別 source の
   コマンドを示す
@@ -233,6 +235,21 @@ Zod の `## Stringbools \[#stringbool]`)。
 - **外した名前が出るところ**: `sections` の一覧・`heading_path`・`Section:` 行・`Next:` 行・見つからないときの候補、
   `search-index --show-sections` の見出し、見出しから取ったページのタイトル (`# Migrating to Vitest 5.0 {#vitest-5}`
   のページは `Migrating to Vitest 5.0`)。frontmatter の `title:` は見出しではないのでそのまま
+- **書かれたままの名前で出す見出し**: 外した名前で `content` が別の節を開いてしまう見出しは、`sections` の一覧・
+  `heading_path`・`Section:` 行・`Next:` 行・候補でも書かれたままの名前で出す (下の照合の順で書かれたままの見出しが
+  先に当たるため)。`## Default Width {#panel-default-width}` の後に `## Other` の下の id の無い `### Default Width`
+  があるページでは、1 つ目は `Default Width {#panel-default-width}` (`Default Width` は 2 つ目を開く)。
+  `## Setup {#a}` の後に id の無い `## Setup` があるページでは、1 つ目は `Setup {#a}`。id を書く同梱 presets の実測
+  (`docs/generic-llms-txt-source.md`) では該当 0 件。`search-index --show-sections` の見出しは節の名前 (パス) ではなく
+  見出しの文字なので、いつも外した名前で出す (id の無いページと同じく、同じ文字の見出しが並ぶことがある)
+- **外すと同じ名前になる見出し**: `## Setup {#a}` / `## Setup {#b}` は、`sections` の一覧などで両方 `Setup` と出る
+  (`Setup` は 1 つ目を開く)。2 つ目以降の節を指す `Next:` 行と subsection hints は、その節を開く名前を使う: パス →
+  `#<id>` (`content 0 '#b'`) → 書かれたままのパス (id の無い子の `### Child` は `Setup {#b}/Child`) の順で、その節を
+  開く最初のもの。1 つ目の節と、どれでも開けない節 (id の無い本物の重複) の行は今までどおりパスと重複の注記
+  (`# heading appears N times; this reads the first`)。見つからないときの候補も今までどおり名前ごとに 1 行で、注記が
+  付く。`#` を含む名前は shell の引用符で囲んで出す (囲まないと shell のコメントになる)。`content` で 2 つ目を開いた
+  とき (`#b` / `Setup {#b}`) の前後の subsection hints と、`--max-chars` で切ったときに子の節があるかの判断は、開いた
+  節のもの
 - **前の書き方でも開ける**: `content` は id 付きの書き方 (`Overview {#overview}/Checkpoints {#checkpoints}` /
   `Checkpoints {#checkpoints}`) と id そのもの (`checkpoints`、ページ内リンクの形の `#checkpoints`) でも同じ節を開き、
   `# heading_path:` には外した名前 (`Overview/Checkpoints`) を出す。照合は書かれたままの見出し → 外した名前 → id →
