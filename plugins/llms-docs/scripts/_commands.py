@@ -109,12 +109,16 @@ def render_content(page: PageView, args, *, script: str, hint_args: tuple,
     content_kwargs = page._level_kwargs()
     if page.protect_tables is not None:
         content_kwargs = {"protect_tables": page.protect_tables, **content_kwargs}
-    content, resolved_heading_path = extract_content(
+    # the section read decides the subsection hints and the truncation notice
+    # too: a later section can share its heading_path (``## Setup {#b}``
+    # opened as ``#b`` after ``## Setup {#a}``)
+    content, resolved_heading_path, opened = extract_content(
         page.body_lines, args.heading_path,
         retry=lambda heading: content_command(
             script, page.idx, heading, retry_option_args(args, "content") + tuple(hint_args)),
-        **content_kwargs,
+        with_section=True, **content_kwargs,
     )
+    line_start = opened["line_start"] if opened is not None else None
 
     if transform is not None:
         content = transform(content)
@@ -126,7 +130,7 @@ def render_content(page: PageView, args, *, script: str, hint_args: tuple,
     # start below H1 is not (``subsection_children`` takes the shallowest).
     truncate_kwargs = {}
     sections = extract_sections(page.body_lines, **page._level_kwargs())
-    found = subsection_children(sections, page.body_lines, resolved_heading_path)
+    found = subsection_children(sections, page.body_lines, resolved_heading_path, line_start)
     if found is None or not found[1]:
         target = found[2] if found else None
         title = target["title"] if target else page.title
@@ -156,13 +160,13 @@ def render_content(page: PageView, args, *, script: str, hint_args: tuple,
     # where the cut lands.
     if not args.no_subsection_hints:
         print_subsection_hints(page.body_lines, page.idx, resolved_heading_path,
-                               extra_hint_args=hint_args, **page._level_kwargs())
+                               extra_hint_args=hint_args, line_start=line_start, **page._level_kwargs())
 
     print(content, end="")
 
     if not args.no_subsection_hints:
         print_subsection_hints(page.body_lines, page.idx, resolved_heading_path,
-                               extra_hint_args=hint_args, **page._level_kwargs())
+                               extra_hint_args=hint_args, line_start=line_start, **page._level_kwargs())
 
 
 def partial_note(hits: dict) -> str:
@@ -177,12 +181,18 @@ def print_hit_sections(hits: dict, *, anchor_for=None) -> None:
     appended to its ``Section:`` line (a `` [https://...#anchor]`` link).
     Callers pass the leaf title, not ``heading_path`` — a heading whose own
     title contains "/" (e.g. "## CI/CD") would otherwise be misread as a
-    nested breadcrumb (マージ前レビューの指摘).
+    nested breadcrumb (マージ前レビューの指摘). A section whose heading
+    gives its own id (``"anchor_id"``) passes it too, as ``anchor_id=``.
     """
     partial = hits.get("match_mode") == "partial"
     for r in hits["results"]:
         kw_info = f"  keywords: {', '.join(r['matched_keywords'])}" if partial else ""
-        anchor = anchor_for(r["title"]) if anchor_for is not None else ""
+        if anchor_for is None:
+            anchor = ""
+        elif r.get("anchor_id") is not None:
+            anchor = anchor_for(r["title"], anchor_id=r["anchor_id"])
+        else:
+            anchor = anchor_for(r["title"])
         print(f"    Section: {format_heading_path_for_display(r['heading_path'])}  (x{r['hit_count']}){kw_info}{anchor}")
         for snippet_line in r["snippet"].splitlines():
             print(f"      {snippet_line}")
@@ -280,13 +290,21 @@ def hit_candidates(ranked, *, limit: int = NEXT_CONTENT_LIMIT, keep=None) -> lis
     offered, without a heading, only when no page has a body hit.
     *heading_count* is how many sections of the page share that heading_path
     (1 when unique or unknown). *search_inside* (``_search_inside``) says the
-    line should search the page rather than read the section.
+    line should search the page rather than read the section. A section that
+    its heading_path does not open (a later ``## Setup {#b}``) is offered by
+    the argument that does (its ``heading_arg``, ``#b``), with a count of 1:
+    that argument reads it, not the first ``Setup``.
 
     *keep* is ``(ref, extra_args)`` of a page whose best section must stay
     among the picks when it has one (``search`` passes its top index
     candidate, so pages appended from the full-corpus search above it cannot
     take every line). It replaces the last pick when there is no room.
     """
+    def pick(ref, r, extra):
+        if "heading_arg" in r:
+            return (ref, r["heading_arg"], extra, 1, _search_inside(r))
+        return (ref, r["heading_path"], extra, r.get("heading_count", 1), _search_inside(r))
+
     firsts = []
     spare = []
     index_only = []
@@ -295,10 +313,8 @@ def hit_candidates(ranked, *, limit: int = NEXT_CONTENT_LIMIT, keep=None) -> lis
         if not sections:
             index_only.append((ref, None, extra, 1, False))
             continue
-        firsts += [(ref, sections[0]["heading_path"], extra,
-                    sections[0].get("heading_count", 1), _search_inside(sections[0]))]
-        spare += [(ref, r["heading_path"], extra, r.get("heading_count", 1), _search_inside(r))
-                  for r in sections[1:]]
+        firsts += [pick(ref, sections[0], extra)]
+        spare += [pick(ref, r, extra) for r in sections[1:]]
     # A page that only ranked on the index is worth suggesting only when no
     # page has a body hit to point at.
     picked = (firsts or index_only)[:limit]

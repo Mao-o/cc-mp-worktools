@@ -4,8 +4,10 @@ One ``llms-full.txt`` holds the same 39 pages in English, Japanese and Korean,
 one language after another. It is split on H1; the file has no page URL, so
 the English pages get theirs from ``llms.txt`` by title. A prose page writes
 its headings as a line ``Title [#id]`` with no ``#`` (indented inside a Steps
-block), which ``heading_line_pattern`` reads as ``## Title``; an API reference
-page uses real ``##`` / ``###`` headings.
+block), which ``heading_line_pattern`` reads as ``## Title [#id]``: the
+sections are titled ``Title`` and carry ``id`` as their anchor
+(``split_heading_id``); an API reference page uses real ``##`` / ``###``
+headings.
 
 The fixtures are cut from the real files (2026-11-17): English and Japanese
 pages, H1-shaped comments inside a code block, the ``[#id]`` lines, and
@@ -25,11 +27,13 @@ from unittest import mock
 import _loader
 from test_page_fetch import _Net
 
+import _common
+
 g = _loader.load_script("parse-llms-txt.py")
 SCRIPT = "parse-llms-txt.py"
 FULL_URL = "https://platform.pixai.art/llms-full.txt"
 INDEX_URL = "https://platform.pixai.art/llms.txt"
-PATTERN = r"^\s*(.+?) \[#[^\]\s]+\]\s*$"
+PATTERN = r"^\s*(\S.*? \[#[^\]\s]+\])\s*$"
 SKILL = Path(_loader.SCRIPTS_DIR).parent / "skills" / "researching-library-docs" / "SKILL.md"
 
 
@@ -255,15 +259,18 @@ TITLES = ["Docs MCP server", "Your First API Call", "Webhook", "Create a generat
           "画像のアップロード URL の取得"]
 URLS = ["https://platform.pixai.art/en/docs/docs-mcp", "https://platform.pixai.art/en/docs/quick-start/first-api-call",
         "", "", "https://platform.pixai.art/en/docs/api-v2/media/getImageUploadUrl", "", "", "", ""]
-# page -> its ``## `` lines: the [#id] lines read as H2, and the real ones
+# page -> its ``## `` lines: the [#id] lines read as H2 (the id stays on the
+# line, as written), and the real ones
 H2 = {
-    0: ["Connect your editor or agent", "Claude Code", "Cursor"],
-    1: ["Steps", "Submit a Task", "Poll for Status", "All steps in one script"],
+    0: ["Connect your editor or agent [#connect-your-editor-or-agent]", "Claude Code [#claude-code]",
+        "Cursor [#cursor]"],
+    1: ["Steps [#steps]", "Submit a Task [#submit-a-task-step]", "Poll for Status [#poll-for-status-step]",
+        "All steps in one script [#all-steps-in-one-script]"],
     2: [],
     3: ["POST https://api.pixai.art/v1/task"],
     4: ["POST https://api.pixai.art/v2/media/image/upload-url"],
-    5: ["エディターやエージェントに接続する", "Claude Code"],
-    6: ["手順", "タスクを送信する"],
+    5: ["エディターやエージェントに接続する [#エディターやエージェントに接続する]", "Claude Code [#claude-code]"],
+    6: ["手順 [#手順]", "タスクを送信する [#タスクを送信する-step]"],
     7: [],
     8: ["POST https://api.pixai.art/v2/media/image/upload-url"],
 }
@@ -306,9 +313,10 @@ class PresetTest(unittest.TestCase):
     def test_left_out_on_purpose(self):
         # ``rank_from: index`` ranks the llms.txt entries (the English pages, by
         # their descriptions), and the Webhook entry joins no page (three pages
-        # share its title). ``anchor_style`` would make anchors from the titles,
-        # and 76 of the 198 ``[#id]`` lines of the real file carry another id
-        # (``#submit-a-task-step``).
+        # share its title). ``anchor_style``: the ``[#id]`` sections would link
+        # their own id, which the live English pages carry (66 of 66, measured
+        # 2026-11-17), but the API reference pages' headings have no id and
+        # their slugs name no element of the rendered page (0 of 76)
         p = preset()
         self.assertEqual(p["rank_from"], "pages")
         self.assertIsNone(p["anchor_style"])
@@ -342,6 +350,20 @@ class SplitTest(unittest.TestCase):
                 self.assertEqual(_h2(self.page(page)), want)
         self.assertIn("### Example (cURL)\n", self.page(4)["body_lines"])
 
+    def test_the_sections_are_titled_by_the_text_and_carry_the_id(self):
+        # the shared layer takes the [#id] off the made heading (split_heading_id)
+        got = [(s["title"], s.get("anchor_id"))
+               for s in _common.extract_sections(self.page(1)["body_lines"])]
+        self.assertEqual(got, [("Steps", "steps"), ("Submit a Task", "submit-a-task-step"),
+                               ("Poll for Status", "poll-for-status-step"),
+                               ("All steps in one script", "all-steps-in-one-script")])
+        got = [(s["title"], s.get("anchor_id"))
+               for s in _common.extract_sections(self.page(6)["body_lines"])]
+        self.assertEqual(got, [("手順", "手順"), ("タスクを送信する", "タスクを送信する-step")])
+        # an API reference page's headings carry no id
+        self.assertEqual([s.get("anchor_id") for s in _common.extract_sections(self.page(4)["body_lines"])],
+                         [None, None, None])
+
     def test_only_the_anchor_lines_change(self):
         plain = _split(heading_line_pattern=None)
         self.assertEqual(len(plain), len(self.docs))
@@ -350,19 +372,23 @@ class SplitTest(unittest.TestCase):
             self.assertEqual(len(old["body_lines"]), len(new["body_lines"]))
             changed += [(a, b) for a, b in zip(old["body_lines"], new["body_lines"]) if a != b]
         self.assertEqual(changed, [
-            ("Connect your editor or agent [#connect-your-editor-or-agent]\n", "## Connect your editor or agent\n"),
-            ("Claude Code [#claude-code]\n", "## Claude Code\n"),
-            ("Cursor [#cursor]\n", "## Cursor\n"),
-            ("Steps [#steps]\n", "## Steps\n"),
-            ("    Submit a Task [#submit-a-task-step]\n", "## Submit a Task\n"),
-            ("    Poll for Status [#poll-for-status-step]\n", "## Poll for Status\n"),
-            ("All steps in one script [#all-steps-in-one-script]\n", "## All steps in one script\n"),
-            ("エディターやエージェントに接続する [#エディターやエージェントに接続する]\n", "## エディターやエージェントに接続する\n"),
-            ("Claude Code [#claude-code]\n", "## Claude Code\n"),
-            ("手順 [#手順]\n", "## 手順\n"),
-            ("    タスクを送信する [#タスクを送信する-step]\n", "## タスクを送信する\n"),
+            ("Connect your editor or agent [#connect-your-editor-or-agent]\n",
+             "## Connect your editor or agent [#connect-your-editor-or-agent]\n"),
+            ("Claude Code [#claude-code]\n", "## Claude Code [#claude-code]\n"),
+            ("Cursor [#cursor]\n", "## Cursor [#cursor]\n"),
+            ("Steps [#steps]\n", "## Steps [#steps]\n"),
+            ("    Submit a Task [#submit-a-task-step]\n", "## Submit a Task [#submit-a-task-step]\n"),
+            ("    Poll for Status [#poll-for-status-step]\n", "## Poll for Status [#poll-for-status-step]\n"),
+            ("All steps in one script [#all-steps-in-one-script]\n",
+             "## All steps in one script [#all-steps-in-one-script]\n"),
+            ("エディターやエージェントに接続する [#エディターやエージェントに接続する]\n",
+             "## エディターやエージェントに接続する [#エディターやエージェントに接続する]\n"),
+            ("Claude Code [#claude-code]\n", "## Claude Code [#claude-code]\n"),
+            ("手順 [#手順]\n", "## 手順 [#手順]\n"),
+            ("    タスクを送信する [#タスクを送信する-step]\n", "## タスクを送信する [#タスクを送信する-step]\n"),
         ])
-        self.assertFalse([ln for d in self.docs for ln in d["body_lines"] if "[#" in ln])
+        # the id stays only on the heading lines made from those lines
+        self.assertFalse([ln for d in self.docs for ln in d["body_lines"] if "[#" in ln and not ln.startswith("## ")])
 
     def test_a_line_of_that_shape_in_a_code_block_is_text(self):
         docs = _split("# P\n\nbody\n\n```text\nTitle [#title]\n    Step [#step-step]\n```\n\nTitle [#title]\n")
@@ -370,22 +396,26 @@ class SplitTest(unittest.TestCase):
         body = docs[0]["body_lines"]
         self.assertIn("Title [#title]\n", body)
         self.assertIn("    Step [#step-step]\n", body)
-        self.assertEqual(_h2(docs[0]), ["Title"])
+        self.assertEqual(_h2(docs[0]), ["Title [#title]"])
+        self.assertEqual([s["title"] for s in _common.extract_sections(body)], ["Title"])
 
     def test_which_lines_the_pattern_reads(self):
         rx = preset()["heading_line_pattern"]
         self.assertIsNotNone(rx)
+        # line -> (the section title, its id) the made heading gives
         cases = {
-            "Steps [#steps]": "Steps",
-            "    Submit a Task [#submit-a-task-step]": "Submit a Task",
-            "Steps [#steps]  ": "Steps",
-            "Q：APIを通じて生成した画像は？ [#qapiを通じて生成した画像は]": "Q：APIを通じて生成した画像は？",
+            "Steps [#steps]": ("Steps", "steps"),
+            "    Submit a Task [#submit-a-task-step]": ("Submit a Task", "submit-a-task-step"),
+            "Steps [#steps]  ": ("Steps", "steps"),
+            "Q：APIを通じて生成した画像は？ [#qapiを通じて生成した画像は]": ("Q：APIを通じて生成した画像は？", "qapiを通じて生成した画像は"),
             # not a heading line: the anchor is not the end of the line, has a
             # space, has no title or no space before it
             "See [#steps] for the list": None,
             "Steps [#a b]": None,
             "[#steps]": None,
             " [#steps]": None,
+            "  [#steps]": None,
+            "    [#poll-step]": None,
             "Steps[#steps]": None,
             "Steps [#]": None,
             "Steps [steps]": None,
@@ -393,7 +423,7 @@ class SplitTest(unittest.TestCase):
         for line, want in cases.items():
             with self.subTest(line=line):
                 m = rx.fullmatch(line)
-                self.assertEqual(m.group(1).strip() if m else None, want)
+                self.assertEqual(_common.split_heading_id(m.group(1).strip()) if m else None, want)
 
 
 class IndexUrlTest(unittest.TestCase):
@@ -547,8 +577,9 @@ class RoundTripTest(unittest.TestCase):
                 code, out, err = self.run_cli(net, [SCRIPT, "content", *args, "--", "0", "Cursor"])
                 self.assertEqual(code, 0, err)
                 self.assertEqual("# source: https://platform.pixai.art/en/docs/docs-mcp\n" in out, with_url)
-                self.assertIn("## Cursor\n", out)
-                self.assertNotIn("[#cursor]", out)
+                # the heading is named without its id; the body keeps the line as made
+                self.assertIn("# heading_path: Cursor\n", out)
+                self.assertIn("## Cursor [#cursor]\n", out)
                 code, out, err = self.run_cli(net, [SCRIPT, "content", *args, "--", "5", "Claude Code"])
                 self.assertEqual(code, 0, err)
                 self.assertNotIn("# source:", out)
