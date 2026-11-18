@@ -1787,8 +1787,14 @@ def _in_directory(url: str, directory: str) -> bool:
     """True when *url* (as ``normalize_doc_url`` leaves it: no query, fragment,
     ``.md`` or trailing ``/``) is *directory* itself or below it. The host is
     compared ignoring case, the path as written: ``/docs/`` does not hold
-    ``/docsearch``."""
-    a, d = urlsplit(url), urlsplit(directory)
+    ``/docsearch``. A URL that ``urlsplit`` rejects (a bracketed host that is
+    not an IPv6 address, such as ``https://[name].example.com/``, or an
+    unbalanced ``[``) is not under it: the count is a diagnostic, and must not
+    stop the command."""
+    try:
+        a, d = urlsplit(url), urlsplit(directory)
+    except ValueError:
+        return False
     return ((a.scheme, a.netloc.lower()) == (d.scheme, d.netloc.lower())
             and (a.path + "/").startswith(d.path))
 
@@ -1801,10 +1807,14 @@ def _compared_index_urls(profile: dict, index_lines: list[str]) -> tuple[set, st
     articles, a blog and a changelog next to the docs; its llms-full.txt is
     the docs). An index with no page under that directory (a full text kept
     elsewhere on the site, or on a mirror) is counted whole, so that the
-    check still runs for it."""
+    check still runs for it. So is the index of a profile whose own ``url``
+    ``urlsplit`` rejects."""
     listed = {normalize_doc_url(e["url"]) for e in parse_llms_index(index_lines)
               if not _is_index_file_url(e["url"])}
-    directory = _url_directory(profile["url"])
+    try:
+        directory = _url_directory(profile["url"])
+    except ValueError:  # a url whose host urlsplit rejects: count them all
+        return listed, None
     under = {u for u in listed if _in_directory(u, directory)}
     return (under, directory) if under else (listed, None)
 

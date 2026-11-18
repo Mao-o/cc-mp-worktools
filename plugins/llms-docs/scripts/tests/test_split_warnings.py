@@ -80,6 +80,9 @@ SOURCES = {
     # a full text on a mirror: no entry of its index is under its directory
     "mirror": {"url": "https://mirror.example/llms-full.txt", "split": "frontmatter",
                "page_url": "frontmatter:url", "index_url": "https://mirror.example/llms.txt"},
+    # a url whose host urlsplit rejects (it passes the profile check, and --file reads no network)
+    "bad-host": {"url": "https://[docs/llms-full.txt", "split": "frontmatter",
+                 "page_url": "frontmatter:url", "index_url": "https://example.com/llms.txt"},
 }
 
 
@@ -597,6 +600,25 @@ class FewPagesThanTheIndexTest(_Case):
                       self.warning(err, "split into"))
         code, _out, err = self.run_g("mirror", "sections", "0", corpus=self.files(full, index_for(4)))
         self.assertEqual((code, err), (0, ""))
+
+    def test_an_entry_whose_host_urlsplit_rejects_is_not_under_it(self):
+        """urlsplit raises on a bracketed host that is not an IPv6 address (a
+        placeholder such as ``[service-name]``) and on an unbalanced bracket:
+        such an entry is not under the directory, and no command stops on it."""
+        bad = ("- [Your service](https://[service-name].onrender.com/healthz): where it answers\n"
+               "- [Broken](https://[render.com/docs/broken): a typo\n")
+        listed, directory = self.compared("render-like", RENDER_INDEX + bad)
+        self.assertEqual((directory, len(listed)), ("https://render.com/docs/", 11))
+        for argv in (["fetch-index", "--compact"], ["sections", "0"], ["search", "zzq"]):
+            with self.subTest(argv=argv):
+                code, _out, err = self.run_g("render-like", *argv, corpus=self.files(RENDER_FULL, RENDER_INDEX + bad))
+                self.assertEqual((code, err), (0, ""))
+        # the profile's own url: every entry counts, as with nothing under the directory
+        self.assertEqual(self.compared("bad-host", index_for(10)), (self.compared("mirror", index_for(10))[0], None))
+        full = "".join(page(k) for k in range(2))
+        code, _out, err = self.run_g("bad-host", "sections", "0", corpus=self.files(full, index_for(10)))
+        self.assertEqual(code, 0, err)
+        self.assertIn("split into 2 pages, but its llms.txt lists 10. The file may", self.warning(err, "split into"))
 
 
 class FrontmatterCutOffTest(_Case):
