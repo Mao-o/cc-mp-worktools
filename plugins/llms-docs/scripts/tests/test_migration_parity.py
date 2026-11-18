@@ -188,9 +188,20 @@ def _scrub(text: str, cache_dir: str) -> str:
     return text.replace(cache_dir, CACHE_TOKEN)
 
 
+# The old Firebase script never read robots.txt. The preset does
+# (``respect_robots``) before it fetches a file the cache does not serve; with
+# the network off, that request would fail and the preset would fetch nothing
+# from the host for the run, so the cases would no longer make the requests the
+# old script made. The site's rules (nothing under /docs/ refused, 2026-11) are
+# staged in the page cache with the corpus. Not a fixture file: the page cache
+# fixtures hold index pages only (test_page_fetch).
+FIREBASE_ROBOTS = ("https://firebase.google.com/robots.txt", "User-agent: *\nDisallow: /byptwd/\n")
+
+
 def stage_corpus(corpus: str, dest: str, *, source_dir: Path | None = None) -> None:
     """Copy the corpus's cache files into *dest* with a fresh mtime (so the
-    scripts' ``--max-age`` sees a cache hit and never tries to refetch)."""
+    scripts' ``--max-age`` sees a cache hit and never tries to refetch), and
+    for firebase its robots.txt (``FIREBASE_ROBOTS``)."""
     src = source_dir or (FIXTURES / corpus)
     for name in CORPORA[corpus]:
         s = src / name
@@ -198,6 +209,11 @@ def stage_corpus(corpus: str, dest: str, *, source_dir: Path | None = None) -> N
             shutil.copytree(s, Path(dest) / name, copy_function=shutil.copyfile)
         elif s.exists():
             shutil.copyfile(s, Path(dest) / name)
+    if corpus == "firebase":
+        url, text = FIREBASE_ROBOTS
+        robots = Path(_loader.load_script("parse-llms-txt.py")._page_cache_path(dest, preset_profile("firebase"), url))
+        robots.parent.mkdir(parents=True, exist_ok=True)
+        robots.write_text(text, encoding="utf-8")
 
 
 def run_script(script: str, argv: list, cache_dir: str) -> _Run:
@@ -1223,12 +1239,13 @@ class SplitAutoParityTest(unittest.TestCase):
                 self.assertEqual(auto_split_mismatches(full, name, want), [])
 
 
-def corpus_cache_dir() -> Path:
+def corpus_cache_dir(env: dict | None = None) -> Path:
     """The local cache the full-corpus gates read: the loaders' own default
     (``$LLMS_DOCS_CACHE_DIR`` / ``$XDG_CACHE_HOME/llms-docs`` /
-    ``~/.cache/llms-docs``), so a gate reads the cache the scripts fill."""
-    import _common
-    return Path(_common.default_cache_dir())
+    ``~/.cache/llms-docs``) as the environment the suite started in has it
+    (*env* in its place), so a gate reads the cache the scripts fill. The suite
+    itself runs with its own (``_loader.SANDBOX``)."""
+    return Path(_loader.local_cache_dir(env))
 
 
 class CorpusCacheDirTest(unittest.TestCase):
@@ -1240,10 +1257,13 @@ class CorpusCacheDirTest(unittest.TestCase):
                           ({"XDG_CACHE_HOME": tmp}, os.path.join(tmp, "llms-docs")),
                           ({"HOME": tmp}, os.path.join(tmp, ".cache", "llms-docs"))):
             with self.subTest(env=env):
-                clean = {k: v for k, v in os.environ.items()
-                         if k not in ("LLMS_DOCS_CACHE_DIR", "XDG_CACHE_HOME")}
-                with mock.patch.dict(os.environ, {**clean, **env}, clear=True):
-                    self.assertEqual(corpus_cache_dir(), Path(want))
+                self.assertEqual(corpus_cache_dir(env), Path(want))
+
+    def test_the_gates_read_the_cache_outside_the_suite(self):
+        import _common
+        sandbox = Path(_loader.SANDBOX)
+        self.assertTrue(Path(_common.default_cache_dir()).is_relative_to(sandbox))
+        self.assertFalse(corpus_cache_dir().is_relative_to(sandbox), corpus_cache_dir())
 
 
 if __name__ == "__main__":

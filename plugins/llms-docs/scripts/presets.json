@@ -546,6 +546,7 @@
       "index_page_size": 100,
       "cache_name": "firebase",
       "page_cache_dir": "firebase-docs",
+      "respect_robots": true,
       "description": "Firebase (llms.txt + per-page fetch)"
     }
   }

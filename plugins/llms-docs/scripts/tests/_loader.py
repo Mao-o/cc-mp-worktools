@@ -13,18 +13,24 @@ import ...`` resolves. Tests that need ``_common`` directly can rely on
 this import happening first (e.g. ``import _loader`` then ``import
 _common``).
 
+It also moves the scripts' default cache into a temp dir of the test
+process (``SANDBOX``, see ``_sandbox``), so nothing a test runs can write
+into the developer's own cache.
+
 Uses bare PEP 604 / PEP 585 type hints (``list[str]``, ``str | None``)
 without ``from __future__ import annotations`` — this plugin's floor is
 Python 3.11+ (see README.md "前提条件"), matching the ``parse-*.py`` scripts
 under test, so no 3.9-compat shim is added here either.
 """
 
+import atexit
 import contextlib
 import importlib.util
 import io
 import json
 import os
 import shutil
+import site
 import sys
 import tempfile
 import unittest
@@ -36,6 +42,62 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
+
+# What ``_common.default_cache_dir()`` reads, in its order of precedence
+CACHE_ENV = ("LLMS_DOCS_CACHE_DIR", "XDG_CACHE_HOME", "HOME")
+_SANDBOX_ENV = "LLMS_DOCS_TEST_SANDBOX"
+
+
+def _sandbox() -> tuple[str, dict]:
+    """Point the scripts' default cache into a temp dir of this process, before
+    any test runs: ``(that dir, the values CACHE_ENV had before)``.
+
+    A command run without ``--cache-dir`` puts its files in
+    ``default_cache_dir()``, the developer's real cache unless the environment
+    says otherwise. The tests run commands as they print them, so a printed
+    command that lost its ``--cache-dir`` (a broken hint, or work in progress)
+    wrote the fixtures over the real cache, which ``--max-age`` then served for
+    a week. Here ``$HOME`` and ``$XDG_CACHE_HOME`` point into the temp dir and
+    ``$LLMS_DOCS_CACHE_DIR`` is unset, so a test that removes some of them (to
+    test the order of precedence, or to keep the printed ``--cache-dir``
+    stable) still lands there. ``$PYTHONUSERBASE`` keeps the user
+    site-packages of a ``python`` the suite starts where they were.
+
+    Once per process: this file is imported as ``_loader`` and, by one test, as
+    ``tests._loader``; the second import must not take the first temp dir for
+    the developer's. A process the suite starts makes its own. The dir is
+    removed at exit."""
+    state = json.loads(os.environ.get(_SANDBOX_ENV) or "null")
+    if state and state["pid"] == os.getpid():
+        return state["root"], state["outer"]
+    outer = {k: os.environ.get(k) for k in CACHE_ENV}
+    root = os.path.realpath(tempfile.mkdtemp(prefix="llms-docs-tests-"))
+    atexit.register(shutil.rmtree, root, ignore_errors=True)
+    home = os.path.join(root, "home")
+    os.mkdir(home)
+    os.environ.setdefault("PYTHONUSERBASE", site.getuserbase())
+    os.environ["HOME"] = home
+    os.environ["XDG_CACHE_HOME"] = os.path.join(home, ".cache")
+    os.environ.pop("LLMS_DOCS_CACHE_DIR", None)
+    os.environ[_SANDBOX_ENV] = json.dumps({"pid": os.getpid(), "root": root, "outer": outer})
+    return root, outer
+
+
+SANDBOX, OUTER_CACHE_ENV = _sandbox()
+
+
+def local_cache_dir(env: dict | None = None) -> str:
+    """The scripts' default cache outside the suite: ``default_cache_dir()``
+    with *env* (default: the values this process started with) as CACHE_ENV.
+    For the opt-in full-corpus gates, which read the developer's cache; they
+    pass a copy of it to the commands, never the cache itself."""
+    import _common
+    values = {k: v for k, v in (OUTER_CACHE_ENV if env is None else env).items() if v is not None}
+    with mock.patch.dict(os.environ, values):
+        for key in CACHE_ENV:
+            if key not in values:
+                os.environ.pop(key, None)
+        return _common.default_cache_dir()
 
 
 def load_script(filename: str) -> ModuleType:

@@ -11,6 +11,7 @@ rebuilt here from the pages' real frontmatter and the same joined fences.
 """
 
 import json
+import re
 import shutil
 import tempfile
 import unittest
@@ -57,6 +58,15 @@ SOURCES = {
         {"split": "frontmatter", "page_url": "frontmatter:url"},
         {"split": "h1", "page_url": "line:Source: "}]},
     "h1": {"url": FULL_URL, "split": "h1", "page_url": "line:Source: ", "index_url": INDEX_URL},
+    "fm-skip-empty": {**FM, "skip_empty": True},
+    "fm-no-url": {"url": FULL_URL, "split": "frontmatter", "page_url": "none"},
+    # Cloudflare's shape: the page URL is a link in the body
+    "fm-link": {"url": FULL_URL, "split": "frontmatter", "page_url": "link:View as Markdown"},
+    "h1-source": {"url": FULL_URL, "split": "h1", "page_url": "line:Source: "},
+    "h1-source-skip-empty": {"url": FULL_URL, "split": "h1", "page_url": "line:Source: ", "skip_empty": True},
+    "h1-link": {"url": FULL_URL, "split": "h1", "page_url": "h1-link"},
+    "h1-no-url": {"url": FULL_URL, "split": "h1"},
+    "line": {"url": FULL_URL, "split": "line", "line_prefix": "Source: "},
 }
 
 
@@ -335,6 +345,375 @@ class FrontmatterCutOffTest(_Case):
                  *[f"  - m{n}" for n in range(self.L + 20)]]
         full = page(0, "```yaml", *block, "```") + page(1)
         code, _out, err = self.run_g("no-index", "sections", "0", corpus=self.files(full))
+        self.assertEqual((code, err), (0, ""))
+
+
+# A Markdown example of a code block, written with fences of one length: the
+# inner closer closes the outer block, and the last line opens a new one,
+# which the next block of the file closes
+NESTED_SAMPLE = ("A Markdown sample that shows a code block:", "", "```md", "```js", "console.log('hello')",
+                 "```", "```")
+SAMPLE = "\n".join(NESTED_SAMPLE)
+
+# The three files of the report, as written there (frontmatter / H1 + Source: / Source: lines)
+REPRO = {
+    "nextjs": (f"""\
+---
+title: Page 0
+url: "https://example.com/docs/p0"
+---
+
+## Heading 0
+
+body 0.
+
+---
+title: Page 1
+url: "https://example.com/docs/p1"
+---
+
+## Heading 1
+
+{SAMPLE}
+
+---
+title: Page 2
+url: "https://example.com/docs/p2"
+---
+
+## Heading 2
+
+body 2.
+
+---
+title: Page 3
+url: "https://example.com/docs/p3"
+---
+
+## Heading 3
+
+```ts
+const a = 1
+```
+""", ["Page 0", "Page 1"], 2, 25, 23),
+    "bun": (f"""\
+# Page 0
+Source: https://example.com/docs/p0
+
+body 0.
+
+# Page 1
+Source: https://example.com/docs/p1
+
+{SAMPLE}
+
+# Page 2
+Source: https://example.com/docs/p2
+
+body 2.
+
+# Page 3
+Source: https://example.com/docs/p3
+
+```ts
+const a = 1
+```
+""", ["Page 0", "Page 1"], 2, 17, 15),
+    "drizzle": ("""\
+Source: https://example.com/docs/p0
+
+# Page 0
+
+body 0.
+
+Source: https://example.com/docs/p1
+
+# Page 1
+
+```md
+```js
+console.log('hello')
+```
+```
+
+Source: https://example.com/docs/p2
+
+# Page 2
+
+```ts
+const b = 2
+```
+
+Source: https://example.com/docs/p3
+
+# Page 3
+
+body 3.
+""", ["Page 0", "Page 1", "Page 3"], 1, 17, 15),
+}
+
+
+def link_page(k, *body) -> str:
+    """A page of Cloudflare's shape: the URL is the target of a link under the frontmatter."""
+    return "\n".join(["---", f"title: Page {k}", "---", "", f"[View as Markdown](https://example.com/docs/p{k}/index.md)",
+                      "", f"zzq body {k}.", "", *body, ""])
+
+
+class InsideCodePagesTest(_Case):
+    """A page that begins inside a code block (one a nested fence example or a
+    fence with no closer left open, until a later block of the file closes
+    it) is part of the page before it; the split stands, stderr says how many
+    (``_warn_if_split_suspect``). Counted only with the page URL the profile's
+    ``page_url`` finds for it, looked for inside the same block."""
+
+    def inside(self, err: str) -> list:
+        return self.warnings(err, "begin inside a code block")
+
+    def assert_said(self, err: str, count: int, first: int, opened: int) -> None:
+        found = self.inside(err)
+        self.assertEqual(len(found), 1, err)
+        self.assertIn(f": {count} page(s) of ", found[0])
+        self.assertIn(f"(first near line {first}, in a block opened near line {opened}), so each is part of the "
+                      "page before it. The file may be broken upstream", found[0])
+
+    def split(self, profile: dict, full: str) -> list:
+        try:
+            return generic.split_documents(full.splitlines(keepends=True), profile)
+        except Exception as e:  # a crash fails the assertions, not the run
+            self.fail(f"the split crashed: {e!r}")
+
+    def titles(self, source: str, full: str) -> list:
+        return [d["title"] for d in self.split(self.profile(source), full)]
+
+    def counted(self, docs: list) -> list:
+        """The page heads the split counted inside code blocks."""
+        self.assertTrue(docs)
+        self.assertIn("inside_code_pages", docs[0].get("split_notes", {}), docs[0].get("split_notes"))
+        return docs[0]["split_notes"]["inside_code_pages"]
+
+    def test_the_three_files_of_the_report(self):
+        for source, (full, titles, count, first, opened) in REPRO.items():
+            with self.subTest(source=source):
+                code, out, err = self.run_g(source, "fetch-index", "--compact", corpus=self.files(full))
+                self.assertEqual(code, 0, err)
+                self.assertEqual(re.findall(r"^\[\d+\] (.+)$", out, re.M), titles, out)
+                self.assertIn(f"({len(titles)} documents total)", out)
+                self.assertEqual(len(err.splitlines()), 1, err)
+                self.assert_said(err, count, first, opened)
+                self.assertIn(str(Path(self.tmp, "full.txt")), self.inside(err)[0])
+
+    def test_a_nested_sample_at_the_end_of_a_page_is_said_by_every_command(self):
+        full = page(0) + page(1, *NESTED_SAMPLE) + page(2) + page(3, "```ts", "const a = 1", "```")
+        lines = full.splitlines()
+        first = lines.index("title: Page 2")  # the line of its "---", counted from 1
+        opened = lines.index("console.log('hello')") + 3  # the sample's last fence
+        self.assertEqual(self.titles("no-index", full), ["Page 0", "Page 1"])
+        self.stage("no-index", full)
+        for argv in (["sections", "0"], ["content", "0"], ["search", "zzq"], ["search-content", "zzq"],
+                     ["search-index", "zzq"], ["fetch-index"]):
+            with self.subTest(argv=argv):
+                code, _out, err = self.run_g("no-index", *argv)
+                self.assertEqual(code, 0, err)
+                self.assert_said(err, 2, first, opened)
+                self.assertIn(generic._cache_path(self.tmp, self.profile("no-index")), self.inside(err)[0])
+                self.assertEqual(self.warnings(err, "never closes"), [], err)
+
+    def test_a_fence_with_no_closer_hides_the_pages_up_to_the_next_block(self):
+        full = page(0) + page(1, "```") + page(2) + page(3, "```ts", "x", "```")
+        lines = full.splitlines()
+        self.assertEqual(self.titles("no-index", full), ["Page 0", "Page 1"])
+        code, _out, err = self.run_g("no-index", "sections", "0", corpus=self.files(full))
+        self.assertEqual(code, 0, err)
+        self.assert_said(err, 2, lines.index("title: Page 2"), lines.index("```") + 1)
+
+    def test_a_sample_with_the_key_but_no_page_url_says_nothing(self):
+        full = page(0, "```yaml", "---", "title: An example", "description: no url in it", "---", "```") + page(1)
+        self.assertEqual(self.titles("no-index", full), ["Page 0", "Page 1"])
+        code, _out, err = self.run_g("no-index", "sections", "0", corpus=self.files(full))
+        self.assertEqual((code, err), (0, ""))
+
+    def test_a_whole_page_head_in_a_closed_block_is_counted(self):
+        """The cost of the rule: a code block showing a page head with its URL
+        (a page about the file format) is said too. None in the bundled
+        sources' files."""
+        full = page(0, "```yaml", "---", "title: An example", "url: https://example.com/docs/x", "---", "```") + page(1)
+        self.assertEqual(self.titles("no-index", full), ["Page 0", "Page 1"])
+        code, _out, err = self.run_g("no-index", "sections", "0", corpus=self.files(full))
+        self.assertEqual(code, 0, err)
+        lines = full.splitlines()
+        self.assert_said(err, 1, lines.index("```yaml") + 2, lines.index("```yaml") + 1)
+
+    def test_a_block_is_counted_once_and_its_closer_opens_nothing(self):
+        """As outside a block, the line that closes a frontmatter block does
+        not open the next one: a second block written right after it is not
+        a page head (counting it would say more pages than went missing)."""
+        sample = ["```yaml", "---", "title: A", "---", "title: B", "url: https://example.com/docs/b", "---", "```"]
+        self.assertEqual(self.titles("no-index", page(0) + "\n".join(sample[1:-1]) + "\n" + page(1)),
+                         ["Page 0", "A", "Page 1"])
+        full = page(0, *sample) + page(1)
+        code, _out, err = self.run_g("no-index", "sections", "0", corpus=self.files(full))
+        self.assertEqual((code, err), (0, ""))
+
+    def test_no_page_url_rule_counts_nothing(self):
+        full = page(0) + page(1, *NESTED_SAMPLE) + page(2) + page(3, "```ts", "x", "```")
+        self.assertEqual(self.titles("fm-no-url", full), ["Page 0", "Page 1"])
+        code, _out, err = self.run_g("fm-no-url", "sections", "0", corpus=self.files(full))
+        self.assertEqual((code, err), (0, ""))
+
+    def test_a_link_rule_looks_for_the_link_in_the_same_block(self):
+        # the sample's block closes right after it: the link 7 lines on is the next page's
+        outside = link_page(0) + link_page(1, "```md", "---", "title: Example", "---", "```") + link_page(2)
+        self.assertEqual(self.titles("fm-link", outside), ["Page 0", "Page 1", "Page 2"])
+        code, _out, err = self.run_g("fm-link", "sections", "0", corpus=self.files(outside))
+        self.assertEqual((code, err), (0, ""))
+        inside = link_page(0) + link_page(1, *NESTED_SAMPLE) + link_page(2) + link_page(3, "```ts", "x", "```")
+        lines = inside.splitlines()
+        self.assertEqual(self.titles("fm-link", inside), ["Page 0", "Page 1"])
+        code, _out, err = self.run_g("fm-link", "sections", "0", corpus=self.files(inside))
+        self.assertEqual(code, 0, err)
+        self.assert_said(err, 2, lines.index("title: Page 2"), lines.index("console.log('hello')") + 3)
+
+    def test_a_block_that_closes_the_code_block_has_its_link_outside_it(self):
+        """An indented fence line in the frontmatter (a continuation line to
+        YAML) closes the code block, as the splitter reads it: the link after
+        the frontmatter is no longer in the block."""
+        link = "[View as Markdown](https://example.com/docs/example/index.md)"
+        full = link_page(0, "```md", "---", "title: Example", "note: |", "  ```", "---", "", link) + link_page(1)
+        self.assertEqual(self.titles("fm-link", full), ["Page 0", "Page 1"])
+        code, _out, err = self.run_g("fm-link", "sections", "0", corpus=self.files(full))
+        self.assertEqual((code, err), (0, ""))
+        # the block closed by a fence of its own after the link: counted
+        full = link_page(0, "```md", "---", "title: Example", "note: |", "---", "", link, "```") + link_page(1)
+        self.assertEqual(self.titles("fm-link", full), ["Page 0", "Page 1"])
+        code, _out, err = self.run_g("fm-link", "sections", "0", corpus=self.files(full))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.inside(err)), 1, err)
+        self.assertEqual(self.warnings(err, "never closes"), [], err)
+
+    def test_the_link_is_looked_for_in_the_lines_a_link_rule_reads(self):
+        """``_link_url`` reads 20 lines under the frontmatter: so does the look
+        inside the block (the block closes after the last line read)."""
+        for gap, counted in ((18, True), (19, True), (20, False)):
+            with self.subTest(gap=gap):
+                body = ["```md", "---", "title: Example", "---", *["text"] * gap,
+                        "[View as Markdown](https://example.com/docs/example/index.md)", "```"]
+                full = link_page(0, *body) + link_page(1)
+                self.assertEqual(self.titles("fm-link", full), ["Page 0", "Page 1"])
+                code, _out, err = self.run_g("fm-link", "sections", "0", corpus=self.files(full))
+                self.assertEqual(code, 0, err)
+                self.assertEqual(len(self.inside(err)), int(counted), err)
+
+    def test_a_file_that_ends_in_a_code_block_says_only_that(self):
+        full = JoinedFencesFileTest.FULL
+        # the pages after the open block are counted, and left to the warning that says it
+        self.assertEqual(len(self.counted(self.split(self.profile("no-index"), full))), 474 - 9)
+        code, _out, err = self.run_g("no-index", "sections", "0", corpus=self.files(full))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.warnings(err, "never closes")), 1, err)
+        self.assertEqual(self.inside(err), [], err)
+
+    def test_with_an_index_one_missing_page_is_said_and_the_ratio_is_not(self):
+        full = page(0) + page(1, *NESTED_SAMPLE) + page(2, "```ts", "x", "```") + page(3)
+        lines = full.splitlines()
+        first, opened = lines.index("title: Page 2"), lines.index("console.log('hello')") + 3
+        index = index_for(4)
+        self.stage("title-join", full, index)
+        self.stage("url-join", full, index)
+        ways = {
+            "title join, cached": ("title-join", None, ["sections", "0"]),
+            "title join, files": ("title-join", self.files(full, index), ["sections", "0"]),
+            "url join, cached": ("url-join", None, ["sections", "0"]),
+            "listing, cached": ("url-join", None, ["fetch-index"]),
+            "listing, files": ("url-join", self.files(full, index), ["fetch-index"]),
+            "search index, cached": ("url-join", None, ["search-index", "page"]),
+        }
+        for what, (source, corpus, argv) in ways.items():
+            with self.subTest(what):
+                code, _out, err = self.run_g(source, *argv, corpus=corpus)
+                self.assertEqual(code, 0, err)
+                self.assert_said(err, 1, first, opened)
+                self.assertEqual(self.warnings(err, "split into"), [], err)
+
+    def test_it_survives_dropping_empty_pages(self):
+        hidden = page(1, *NESTED_SAMPLE) + page(2) + page(3, "```ts", "x", "```")
+        full = "---\ntitle: Empty\nurl: https://example.com/e\n---\n\n" + hidden
+        self.assertEqual(self.titles("fm-skip-empty", full), ["Page 1"])
+        lines = full.splitlines()
+        code, _out, err = self.run_g("fm-skip-empty", "sections", "0", corpus=self.files(full))
+        self.assertEqual(code, 0, err)
+        self.assert_said(err, 2, lines.index("title: Page 2"), lines.index("console.log('hello')") + 3)
+        # an H1 page with no body goes too
+        full = ("# Banner\n\n# Page 1\nSource: https://example.com/docs/p1\n\n" + SAMPLE + "\n\n"
+                "# Page 2\nSource: https://example.com/docs/p2\n\nbody 2.\n\n```ts\nx\n```\n")
+        self.assertEqual(self.titles("h1-source-skip-empty", full), ["Page 1"])
+        lines = full.splitlines()
+        code, _out, err = self.run_g("h1-source-skip-empty", "sections", "0", corpus=self.files(full))
+        self.assertEqual(code, 0, err)
+        self.assert_said(err, 1, lines.index("# Page 2") + 1, lines.index("console.log('hello')") + 3)
+
+    def test_split_auto_reports_only_the_candidate_that_won(self):
+        won_fm = page(0) + page(1, *NESTED_SAMPLE) + page(2) + page(3, "```ts", "x", "```")
+        lines = won_fm.splitlines()
+        code, _out, err = self.run_g("auto", "sections", "0", corpus=self.files(won_fm))
+        self.assertEqual(code, 0, err)
+        self.assert_said(err, 2, lines.index("title: Page 2"), lines.index("console.log('hello')") + 3)
+        # the H1 candidate wins (two Source: lines to one url:); the frontmatter
+        # candidate saw a page head with a URL in the yaml block
+        won_h1 = ("---\ntitle: Top\nurl: https://example.com/top\n---\n\n"
+                  "# One\nSource: https://example.com/a\n\nbody\n\n"
+                  "```yaml\n---\ntitle: Example\nurl: https://example.com/x\n---\n```\n\n"
+                  "# Two\nSource: https://example.com/b\n\nbody\n")
+        candidate = generic._validate_profile(self.sources, "c", {"url": FULL_URL, **SOURCES["auto"]["split_candidates"][0]})
+        self.assertEqual(len(self.counted(self.split(candidate, won_h1))), 1)
+        try:
+            chosen = generic.resolve_split(won_h1.splitlines(keepends=True), self.profile("auto"))[0]
+        except Exception as e:  # a crash fails the assertions, not the run
+            self.fail(f"the split crashed: {e!r}")
+        self.assertEqual(chosen, 1)
+        code, _out, err = self.run_g("auto", "sections", "0", corpus=self.files(won_h1))
+        self.assertEqual((code, err), (0, ""))
+
+    def test_h1_with_a_source_line(self):
+        # the next page's H1 and Source: line inside the block the sample left open
+        full = REPRO["bun"][0]
+        lines = full.splitlines()
+        self.assertEqual(self.titles("h1-source", full), ["Page 0", "Page 1"])
+        code, _out, err = self.run_g("h1-source", "sections", "0", corpus=self.files(full))
+        self.assertEqual(code, 0, err)
+        self.assert_said(err, 2, lines.index("# Page 2") + 1, lines.index("console.log('hello')") + 3)
+        # a "# comment" in a code block, and the next page's Source: line after the block closed
+        full = ("# Page 0\nSource: https://example.com/docs/p0\n\n```powershell\n"
+                "# Remove project-specific settings\nRemove-Item x\n```\n\n"
+                "# Page 1\nSource: https://example.com/docs/p1\n\nbody\n")
+        self.assertEqual(self.titles("h1-source", full), ["Page 0", "Page 1"])
+        code, _out, err = self.run_g("h1-source", "sections", "0", corpus=self.files(full))
+        self.assertEqual((code, err), (0, ""))
+
+    def test_h1_that_is_a_link_and_h1_with_no_page_url(self):
+        full = ("# [Page 0](https://example.com/docs/p0)\n\nbody 0.\n\n" + SAMPLE + "\n\n"
+                "# [Page 1](https://example.com/docs/p1)\n\nbody 1.\n\n```ts\nx\n```\n")
+        lines = full.splitlines()
+        self.assertEqual(self.titles("h1-link", full), ["Page 0"])
+        code, _out, err = self.run_g("h1-link", "sections", "0", corpus=self.files(full))
+        self.assertEqual(code, 0, err)
+        self.assert_said(err, 1, lines.index("# [Page 1](https://example.com/docs/p1)") + 1,
+                         lines.index("console.log('hello')") + 3)
+        # an H1 in a code block that is no link: a shell comment, as far as the rule can tell
+        self.assertEqual(self.titles("h1-no-url", full), ["[Page 0](https://example.com/docs/p0)"])
+        code, _out, err = self.run_g("h1-no-url", "sections", "0", corpus=self.files(full))
+        self.assertEqual((code, err), (0, ""))
+
+    def test_split_line(self):
+        full = REPRO["drizzle"][0]
+        lines = full.splitlines()
+        self.assertEqual(self.titles("line", full), ["Page 0", "Page 1", "Page 3"])
+        code, _out, err = self.run_g("line", "sections", "0", corpus=self.files(full))
+        self.assertEqual(code, 0, err)
+        self.assert_said(err, 1, lines.index("Source: https://example.com/docs/p2") + 1,
+                         lines.index("console.log('hello')") + 3)
+        clean = full.replace("```md\n```js\nconsole.log('hello')\n```\n```\n", "```js\nconsole.log('hello')\n```\n")
+        self.assertEqual(self.titles("line", clean), ["Page 0", "Page 1", "Page 2", "Page 3"])
+        code, _out, err = self.run_g("line", "sections", "0", corpus=self.files(clean))
         self.assertEqual((code, err), (0, ""))
 
 
