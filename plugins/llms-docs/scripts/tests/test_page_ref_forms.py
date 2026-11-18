@@ -470,6 +470,153 @@ class FormOrderTest(unittest.TestCase):
                                  (None, "Error: No document found for: nothing\n"))
 
 
+def candidates(err: str) -> list:
+    """The ``[N]`` of the candidates an ambiguity error lists, in order."""
+    return [int(n) for n in re.findall(r"(?m)^  \[(\d+)\] ", err)]
+
+
+def count_lines(err: str) -> list:
+    return re.findall(r"(?m)^  \(showing .*\)$", err)
+
+
+# 22 pages whose title holds "tool", and last the page titled exactly that
+TOOL_PAGES = ([(f"Tool kit {i}", f"https://example.com/docs/kit-{i}") for i in range(22)]
+              + [("tool", "https://example.com/docs/reference/tool")])
+
+
+class AmbiguousListTest(unittest.TestCase):
+    """The ambiguity error of a title / URL substring lists first the pages
+    the reference most likely names (a title that is it, then a URL that ends
+    in it), then the rest in page order, and cuts the list at 20 with a line
+    that says so: the AI SDK's ``tool`` is part of 42 titles, and the page
+    titled ``tool`` was the 42nd, cut off without a word. The URL error lists
+    the pages that share it the same way (page order)."""
+
+    D = ("int", "title", "url_substring")
+
+    def test_the_title_that_is_the_reference_comes_first_and_the_cut_is_said(self):
+        idx, err = resolve("tool", self.D, pages=TOOL_PAGES)
+        self.assertIsNone(idx)
+        self.assertTrue(err.startswith("Error: Ambiguous title substring 'tool'. Matches:\n  [22] tool "
+                                       "(https://example.com/docs/reference/tool)\n"), err)
+        self.assertEqual(candidates(err), [22] + list(range(19)))
+        self.assertEqual(count_lines(err), ["  (showing 20 of 23 matches; pass more of the title, "
+                                            "a longer URL tail, or the full URL)"])
+        self.assertTrue(err.rstrip("\n").endswith(count_lines(err)[0]), err)
+
+    def test_twenty_or_fewer_are_all_listed_with_no_count_line(self):
+        for n in (2, 19, 20):
+            with self.subTest(n=n):
+                idx, err = resolve("tool", self.D, pages=TOOL_PAGES[:n - 1] + TOOL_PAGES[-1:])
+                self.assertIsNone(idx)
+                self.assertEqual(candidates(err), [n - 1] + list(range(n - 1)))
+                self.assertEqual(count_lines(err), [])
+        idx, err = resolve("tool", self.D, pages=TOOL_PAGES[:21])
+        self.assertEqual((len(candidates(err)), len(count_lines(err))), (20, 1))
+        self.assertIn("(showing 20 of 21 matches;", err)
+
+    def test_then_a_url_that_ends_in_it_then_page_order(self):
+        pages = [("Tool kit", "https://example.com/a"), ("Tooling", "https://example.com/docs/tool"),
+                 ("TOOL", "https://example.com/b"), ("Big tool", "https://example.com/c"),
+                 ("Tool box", "https://example.com/docs/tool/")]
+        for forms in (self.D, ("int", "title"), ("int", "title", "slug")):
+            with self.subTest(forms=forms):
+                # with "slug" after "title", two URLs end in "tool": the titles are listed
+                self.assertEqual(candidates(resolve("tool", forms, pages=pages)[1]), [2, 1, 4, 0, 3])
+        # the URL's end as the slug form reads it (page_url_strip_suffix off)
+        pages = [("Guide two", "https://example.com/two"), ("Guide one", "https://example.com/docs/guide.md.txt")]
+        self.assertEqual(candidates(resolve("guide", self.D, ".md.txt", pages=pages)[1]), [1, 0])
+        self.assertEqual(candidates(resolve("guide", self.D, None, pages=pages)[1]), [0, 1])
+        # a title as written (with its heading id) is the reference too: the
+        # page titled "Setup {#start}" goes ahead of the one before it whose
+        # title as written only holds it
+        docs = docs_of([("Setup guide", "https://example.com/a"), ("Setup", "https://example.com/b")])
+        docs[1]["raw_title"] = "Setup {#start}"
+        listed = [docs[0], {**docs[1], "raw_title": "Setup {#start} again"}, docs[1]]
+        for ref, want in (("setup {#start}", [2, 1]), ("SETUP", [1, 2, 0])):
+            err = io.StringIO()
+            with self.subTest(ref=ref), contextlib.redirect_stderr(err):
+                with self.assertRaises(SystemExit):
+                    generic._resolve_page_ref(listed, ref, None, self.D)
+                self.assertEqual(candidates(err.getvalue()), want, err.getvalue())
+
+    def test_the_count_line_names_the_forms_the_profile_has(self):
+        for forms, ways in ((self.D, "more of the title, a longer URL tail, or the full URL"),
+                            (("int", "title"), "more of the title"),
+                            (("int", "title", "url"), "more of the title, or the full URL"),
+                            (("int", "title", "slug"), "more of the title, or a longer URL tail")):
+            with self.subTest(forms=forms):
+                pages = [(f"Tool kit {i}", f"https://example.com/k{i}") for i in range(21)]
+                self.assertEqual(count_lines(resolve("tool", forms, pages=pages)[1]),
+                                 [f"  (showing 20 of 21 matches; pass {ways})"])
+        # pages with no URL: only the title
+        no_urls = [(f"Tool kit {i}", "") for i in range(21)]
+        self.assertEqual(count_lines(resolve("tool", self.D, pages=no_urls)[1]),
+                         ["  (showing 20 of 21 matches; pass more of the title)"])
+        # a URL substring (no title has it)
+        urls = [(f"Page {i}", f"https://example.com/docs/x{i}") for i in range(21)]
+        idx, err = resolve("docs/x", self.D, pages=urls)
+        self.assertTrue(err.startswith("Error: Ambiguous url substring 'docs/x'."), err)
+        self.assertEqual(count_lines(err), ["  (showing 20 of 21 matches; pass more of the URL, or the full URL)"])
+
+    def test_the_pages_of_one_url(self):
+        pages = [(f"Page {i}", "https://example.com/docs/same") for i in range(21)]
+        docs = docs_of(pages)
+        for i, d in enumerate(docs):
+            d["body_lines"] = [f"body {i}\n"]  # different pages, not copies
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            generic._resolve_page_ref(docs, "https://example.com/docs/same", None, ("int", "url"))
+        self.assertTrue(err.getvalue().startswith("Error: Ambiguous URL 'https://example.com/docs/same'."), err)
+        self.assertEqual(candidates(err.getvalue()), list(range(20)))
+        self.assertEqual(count_lines(err.getvalue()),
+                         ["  (showing 20 of 21 matches; the pages share this URL, so pass a page number)"])
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            generic._resolve_page_ref(docs[:20], "https://example.com/docs/same", None, ("int", "url"))
+        self.assertEqual((len(candidates(err.getvalue())), count_lines(err.getvalue())), (20, []))
+
+    def test_the_candidates_run_as_printed_and_the_count_line_is_no_command(self):
+        """Through the commands, each listed candidate's command, split by the
+        shell rules and run as printed, opens the page it names; the count
+        line is not taken for a command (it starts with no script name)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            full = Path(tmp, "full.txt")
+            full.write_text(corpus_text(TOOL_PAGES), encoding="utf-8")
+            sources = Path(tmp, "sources.json")
+            sources.write_text(json.dumps({"sources": {"plain": H1}}), encoding="utf-8")
+            env = {"LLMS_DOCS_CACHE_DIR": str(Path(tmp, "default-cache"))}
+            with mock.patch.dict(os.environ, env), \
+                    mock.patch("urllib.request.urlopen", side_effect=OSError("test: network disabled")):
+                for cmd, tail, reached in (("sections", ("tool",), "Sections in [{n}] "),
+                                           ("content", ("tool", "Part of x"), "# doc_title: "),
+                                           ("search-content", ("Body",), "Body of ")):
+                    args = (cmd, "--page-ref", "tool") if cmd == "search-content" else (cmd,)
+                    with self.subTest(cmd=cmd):
+                        code, out, err = _loader.run_cli(generic, [
+                            SCRIPT, *args, "--source", "plain", "--sources-file", str(sources),
+                            "--file", str(full), "--", *tail])
+                        self.assertEqual(code, 1, err)
+                        self.assertEqual(len(count_lines(err)), 1, err)
+                        lines = [ln.strip() for ln in err.splitlines() if ln.strip().startswith(SCRIPT + " ")]
+                        self.assertEqual(len(lines), 20, err)
+                        for n, line in zip(candidates(err), lines):
+                            argv = shlex.split(line, comments=True)
+                            self.assertEqual(argv[argv.index("--source"):argv.index("--source") + 6],
+                                             ["--source", "plain", "--sources-file", str(sources),
+                                              "--file", str(full)], line)
+                            code, opened, err2 = _loader.run_cli(generic, argv)
+                            title = TOOL_PAGES[n][0]
+                            if cmd == "content":
+                                # the page has no "Part of x": the heading error names the page
+                                self.assertEqual(code, 1, line)
+                                self.assertIn(f"Part of {title}", err2)
+                                continue
+                            self.assertEqual(code, 0, (line, err2))
+                            self.assertIn(reached.format(n=n) + (f'"{title}"' if cmd == "sections" else title),
+                                          opened)
+
+
 class CliTest(unittest.TestCase):
     """Through the commands: ``sections`` / ``content`` / ``search-content
     --page-ref`` honour the profile, and the retry commands they print run."""

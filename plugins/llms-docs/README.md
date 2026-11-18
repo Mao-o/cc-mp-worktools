@@ -89,13 +89,22 @@ schema 付きで起動された agent (Workflow の `agent(prompt, {schema})` �
 ### エラー・0 件のあとの出力
 
 失敗や 0 件のあとに「次に打つコマンド」をそのまま出す (エラーと 0 件の exit code は
-変わらない。slug を受け付ける source で下の規則により 1 ページに解決した slug は、曖昧エラーではなく本文を返す):
+変わらない。slug を受け付ける source で下の規則により 1 ページに解決した slug と、`ai-sdk` で slug として 1 ページに
+決まったタイトルの部分一致は、曖昧エラーではなく本文を返す):
 
 - **曖昧な page_ref**: 候補ごとに実行できるコマンドを付ける。slug を受け付ける source (`claude-code` /
   `claude-platform` / `ai-sdk` / `firebase`) は slug が `<lang>/<slug>`
   に完全一致するページが 1 件だけならそれに解決し、他の候補を stderr の `Note:` で、それを読むコマンド
   付きで知らせる (`hooks` は `en/hooks`。`en/agent-sdk/hooks` は別のページ)。候補のコマンドは
-  `--max-chars` / `--limit` などの既定以外の値も引き継ぐ
+  `--max-chars` / `--limit` などの既定以外の値も引き継ぐ。タイトル・URL の部分一致の候補は、タイトルが参照と
+  (大文字小文字を無視して) ちょうど同じページ、URL が `/<参照>` で終わるページ、残りの順に並べ (それぞれページ順)、
+  先頭の 20 件を出す。20 件を超えるときは候補の後に `(showing 20 of 42 matches; pass more of the title, a longer URL
+  tail, or the full URL)` の行を出す (コマンドは付かない。挙げる方法は、その source の `page_ref_forms` が受け付ける
+  ものだけ)。同じ URL の別々のページの候補を 20 件で切ったときも、件数の行を出す
+- **`ai-sdk` で複数のタイトルの一部に当たる参照**: 曖昧エラーにする前に slug として解き直し、URL がその段で終わる
+  ページが 1 つ (複数なら `<lang>/<slug>` ちょうどの 1 つ) ならそれを開く (`openai` は 8 件のタイトルの一部で、URL が
+  `/openai` で終わるのは `OpenAI` のページだけ)。stderr の `Note:` に、何件のタイトルの一部か、他のタイトルのページ
+  (最大 5 件の `[N] URL`) と、その先頭を開くコマンドを出す。決まらなければ上の候補を出して終了する
 - **heading が見つからない**: 全見出しの前に `Closest sections:` として近い見出し (最大 5 件) を、
   実行できるコマンド付きで出す
 - **`search` / `search-content` の `Next:`**: 上位ヒットの `doc_idx` と heading_path を埋めたコマンドを
@@ -301,7 +310,7 @@ Zod の `## Stringbools \[#stringbool]`)。
 | `ai-sdk` | AI SDK (Vercel AI SDK) | あり (`search` / `sections` / `content` に出す。`fetch-index` / `search-index` の一覧には出さない) |
 | `firebase` | Firebase (`llms-full.txt` が無いので、`llms.txt` の各ページを必要なときに取得する。`body: fetch`) | あり (`.md.txt`) |
 
-`claude-code` / `claude-platform` / `claude` / `ai-sdk` / `firebase` は 0.45.0 までの専用 script と同じ出力になるよう設定した preset で、キャッシュも専用 script と同じファイル (下の「キャッシュ」の表) を読み書きする。Claude の 3 つは `researching-claude-docs`、`ai-sdk` / `firebase` は `researching-library-docs` が使う (0.46.0 から 0.51.x までは `ai-sdk` / `firebase` に専用の skill があった)。`ai-sdk` は 0.51.0 から H3 も索引に読む (`index_heading_level` の既定。`### maxOutputTokens` のように H3 にだけ API 名を書くページが見つかるため)。H3 だけで候補に入ったページが全文検索の補いを止めないよう、`h3_only_keeps_full_search` も有効にしている。
+`claude-code` / `claude-platform` / `claude` / `ai-sdk` / `firebase` は 0.45.0 までの専用 script と同じ出力になるよう設定した preset で、キャッシュも専用 script と同じファイル (下の「キャッシュ」の表) を読み書きする。Claude の 3 つは `researching-claude-docs`、`ai-sdk` / `firebase` は `researching-library-docs` が使う (0.46.0 から 0.51.x までは `ai-sdk` / `firebase` に専用の skill があった)。`ai-sdk` は 0.51.0 から H3 も索引に読む (`index_heading_level` の既定。`### maxOutputTokens` のように H3 にだけ API 名を書くページが見つかるため)。H3 だけで候補に入ったページが全文検索の補いを止めないよう、`h3_only_keeps_full_search` も有効にしている。H3 の加点で一覧から消える本文ヒットのあるページ (候補の枠を取られたページと、止まった補いの行) は、`h3_keeps_h2_results` で H1 / H2 だけの索引の行として下に戻す (0.56.0)。
 
 **取得先のホスト** (`scripts/presets.json` の `url` / `index_url` から出した一覧。ネットワークの出口を決める根拠にする。
 1 行に 1 ホスト、次のコードブロックはテストが読む):
@@ -408,12 +417,13 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `min_heading_level` | | `sections` / `content` / 本文検索で節として数える最も浅い見出し (`1` か `2`)。既定は `split: h1` で `2`、ほかは `1`。本文にコードブロック外の `# …` 行があるサイトでは `2` にする |
 | `index_heading_level` | | `search-index` / `search` のランキングと `--show-sections` の一覧に使う見出しの最も深い段 (`2` か `3`。既定 `3`)。コードブロック外の見出しだけを読む。H3 はキーワード 1 語ごとに +1 するが、全キーワード一致の加点 (+10) には数えない (API を H3 で並べるページが関数名で見つかり、選択肢の H3 を並べるだけのページが、タイトルがその語そのもののページを押し出さないため)。`2` で H1 / H2 だけを読む (Claude docs / Firebase の preset。`rank_from: index` ではランキングに見出しを使わないので `--show-sections` の一覧にだけ効く。`body: fetch` ではどちらにも効かない (`--show-sections` を無視するため)) |
 | `h3_only_keeps_full_search` | | `true` で、`search` の全文検索の補いの要否を判定するときに、H3 だけで候補に入ったページ (タイトル・description・tags・H1 / H2 のどれにも当たらないページ) を数えない。そのページに本文のヒットがあっても補いが止まらず、補いで増えた行はヒットのある候補の下、ヒット 0 の行の上に置く (1 位は変わらない)。`rank_from: pages` (既定) かつ `index_heading_level: 3` でだけ書ける。`body: fetch` では書けない。既定 `false`。同梱 presets では `ai-sdk` だけが使う (実測は `docs/generic-llms-txt-source.md`) |
+| `h3_keeps_h2_results` | | `true` で、`search` が H1 / H2 だけの索引 (`index_heading_level: 2`) なら出す本文ヒットのある行のうち一覧に無いものを、ヒットのある行の下、ヒット 0 の行の上に足す (その索引での並びと表示のまま: その索引の `index_score`、`[body-only]`)。H3 の +1 で候補の枠を取られたページと、H3 で候補に入ったページのヒットで止まった全文検索の補いの行が戻る。今の行・順・1 行目は変えない。H1 / H2 の索引の候補が今の候補と同じページなら、その索引の行は求めない。戻した行があるときは、見出し行 (members の alias では member ごとの件数の行) に `; N more from the H1/H2 index after the rows with hits` を添える。`rank_from: pages` (既定) かつ `index_heading_level: 3` でだけ書ける。`body: fetch` では書けない。既定 `false`。同梱 presets では `ai-sdk` だけが使う (実測は `docs/generic-llms-txt-source.md`) |
 | `protect_tables` | | `false` で、`content` の節の切り出しを表の途中で止めることを許す (既定 `true`) |
 | `compact_pack` | | `true` で、`fetch-index --compact` を 1 行 80 桁以内に数件ずつ詰めて出す |
 | `untitled_warn_ratio` | | `split: frontmatter` のとき、frontmatter に `title:` の無いページがこの割合 (0〜1) を超えたら、`fetch-index` / `search-index` / `search` で stderr に WARNING を出す (本文の見出しで補ったタイトルも「無い」に数える) |
 | `frontmatter_yaml_values` | | `split: frontmatter` で `true` のとき、frontmatter の値を YAML どおりに読む。引用符を 1 組だけ外し、二重引用符の中の `\"` / `\\`、一重引用符の中の `''` を戻す。インデントされた次の行は値の続きとして読み、`\|` / `>` のブロックスカラーも読む (どれも空白でつないで 1 行にする)。既定 (`false`) はインデントされた続きの行を読まず、引用符は両端の文字を取るだけにする |
 | `tags_key` | | `split: frontmatter` のとき、タグとして読む frontmatter のキー (例 `tags`)。`- a` の行のリスト、`[a, b]`、`a, b` を読む (`a, b` を次の行に書いたときは `frontmatter_yaml_values` が `true` のときだけ読む)。タグはランキングに加わり、一覧と検索結果に `tags: a, b` の行、`content` のヘッダに `# doc_tags:` の行として出る |
-| `page_ref_forms` | | `sections` / `content` / `search-content --page-ref` の `<page_ref>` を解く形と、試す順 (リスト)。`int` = ページ番号 / `url` = 完全な URL (`.md`・クエリ・`#…`・末尾の `/` を無視して完全一致。同じ URL のページが複数あれば、クエリまで同じページ、無ければクエリの無いページ (`api?id=strings` のような 1 ページ内の位置を指すクエリ)、それも無ければ参照にクエリが無いときだけ先頭。クエリまで同じページ (またはクエリの無いページ) が複数あるときは、本文が同じ写しなら先頭を開き、本文が違えば候補を列挙して終了する (同じ URL に別々のページが載るサイトがあり、先頭を黙って開くと別のページを見せるため)。どのページにも当たらないとき、および参照のクエリがどのページとも合わないとき (`?surface=web` で、ページは `cli` と `api` だけ) は `No page found for URL` で終了し、後ろの形には進まない) / `slug` = URL の末尾 (`hooks`、`agent-sdk/hooks`。複数に当たるときは `/<lang>/<slug>` ちょうどの 1 ページを選んで他を知らせ、選べなければ候補を列挙して終了。`page_url_strip_suffix` の付いた URL のページは `/<lang>/<slug>` ちょうどとはみなさない) / `title` = タイトルの部分一致 / `url_substring` = URL の部分一致 (複数に当たれば候補を列挙して終了)。先頭は `int` にする (一覧と `Next:` が出すのはページ番号)。`url` と `slug` は `page_url` か `index_url` が要る。既定は `["int", "title", "url_substring"]` (このキーが無かった頃の順) |
+| `page_ref_forms` | | `sections` / `content` / `search-content --page-ref` の `<page_ref>` を解く形と、試す順 (リスト)。`int` = ページ番号 / `url` = 完全な URL (`.md`・クエリ・`#…`・末尾の `/` を無視して完全一致。同じ URL のページが複数あれば、クエリまで同じページ、無ければクエリの無いページ (`api?id=strings` のような 1 ページ内の位置を指すクエリ)、それも無ければ参照にクエリが無いときだけ先頭。クエリまで同じページ (またはクエリの無いページ) が複数あるときは、本文が同じ写しなら先頭を開き、本文が違えば候補を列挙して終了する (同じ URL に別々のページが載るサイトがあり、先頭を黙って開くと別のページを見せるため)。どのページにも当たらないとき、および参照のクエリがどのページとも合わないとき (`?surface=web` で、ページは `cli` と `api` だけ) は `No page found for URL` で終了し、後ろの形には進まない) / `slug` = URL の末尾 (`hooks`、`agent-sdk/hooks`。複数に当たるときは `/<lang>/<slug>` ちょうどの 1 ページを選んで他を知らせ、選べなければ候補を列挙して終了。`page_url_strip_suffix` の付いた URL のページは `/<lang>/<slug>` ちょうどとはみなさない) / `title` = タイトルの部分一致 (複数に当たるとき、後ろに `slug` があれば同じ参照を `slug` として解き、1 ページに決まればそれを開いて stderr の `Note:` で知らせる。前の形が複数に当たると後ろの形に進まない規則の、`title` → `slug` だけの例外。決まらなければ候補を列挙して終了) / `url_substring` = URL の部分一致 (複数に当たれば候補を列挙して終了。候補の並びと、20 件を超えたときの件数の行は「エラー・0 件のあとの出力」)。先頭は `int` にする (一覧と `Next:` が出すのはページ番号)。`url` と `slug` は `page_url` か `index_url` が要る。既定は `["int", "title", "url_substring"]` (このキーが無かった頃の順) |
 | `page_url_strip_suffix` | | `.md.txt` のような接尾辞。`url` と `slug` の照合で、ページの URL と `<page_ref>` の両方から外す (一覧に出る `….md.txt` の URL も、人が読むページの URL も同じページに届く)。`anchor_style` の anchor を付ける URL からも外す。`page_ref_forms` の `url` か `slug`、または `anchor_style` が要る。`url_substring` には効かない (URL の生の文字列を見る) |
 | `anchor_style` | | `search` / `search-content` の各 `Section:` 行の末尾に、その節へのリンク ` [<ページ URL>#<anchor>]` を付ける。`github` = 見出しの単語を `-` でつなぐ (Mintlify / GitHub 形式。Claude Code・Claude Platform) / `devsite` = `_` でつなぐ (Google DevSite 形式。Firebase)。ページ URL は `URL:` 行の URL から `.md`・`page_url_strip_suffix`・`#…`・末尾の `/` を外したもの (取得用の URL に `#…` を付けても節には届かないため)。クエリは残す (`?surface=cli` と `?surface=ide` のようにクエリだけ違うページを区別し、anchor の URL を `<page_ref>` に渡したときにヒットしたページへ戻るため)。URL が `http(s)://` で始まらないページと、最初の見出しより前の本文 (`(top)`) には付けない。見出しが自分の id を書いている節 (`## Token Usage and Compaction {#token-usage}`・`[#id]`。「見出しに書かれた id」) はその id を anchor にする。それ以外の anchor は見出しの文字列から作る推定で、同名見出しの連番 (`-1` など) は再現しない。`page_url` か `index_url` が要る。既定は付けない |
 | `show_overflow` | | `true` で、`search` / `search-content` の各ページの末尾に、`--max-hits` を超えて表示しなかったヒットのある節を `Other sections with hits (not shown):` として並べる |
@@ -574,7 +584,10 @@ tags・H1 / H2 で全キーワードが当たり、本文にもヒットがあ�
 (H3 がクエリをそのまま名指すことがあるため)。Changelog / Release notes のページは、全キーワードが当たっても
 この基準にしない (末尾に置く並びを保つため。`--include-changelog-priority` を付けたときは基準にする)。
 `h3_only_keeps_full_search` の source では、H3 だけの候補を除いて全文検索の補いの要否を判定し、それで増えた行を
-ヒットのある候補の下、ヒット 0 の行の上に置く。
+ヒットのある候補の下、ヒット 0 の行の上に置く。`h3_keeps_h2_results` の source では、H1 / H2 だけの索引なら出る
+本文ヒットのある行のうち一覧に無いものを、その索引での並びと表示のまま、ヒットのある行の下、ヒット 0 の行の上に足し、
+見出し行に件数を添える (今の行・順・1 行目は変えない)。`Next:` 行は本文ヒットのある上位 3 行から選ぶので、戻した行に
+付くのは、今の行で本文ヒットのある行が 3 未満のときだけ。
 
 `--show-sections` の一覧は `index_heading_level` の段までの見出しを並べる。既定の `3` では、同梱 presets
 (汎用ローダーの source。2026-10 時点の各サイトの `llms-full.txt` で計測) の見出しの行数は全体で H1 / H2 だけのときの約 1.7 倍

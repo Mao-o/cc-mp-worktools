@@ -2761,17 +2761,23 @@ def prefer_lang_exact(candidates, page_ref: str):
     return exact if len(exact) == 1 else list(candidates)
 
 
-def die_ambiguous_page(kind: str, page_ref: str, rows, retry=None) -> None:
+def die_ambiguous_page(kind: str, page_ref: str, rows, retry=None, *,
+                       total: int | None = None, narrow: str = "") -> None:
     """Print an ambiguous page reference error and exit 1.
 
     *rows* is ``[(idx, label), ...]``. With *retry* (``idx -> command``) each
-    candidate is followed by the full command that reads that page.
+    candidate is followed by the full command that reads that page. *total*
+    is how many pages matched when *rows* is only the first of them: a line
+    after the candidates says how many were shown, and *narrow* how to name
+    one of the others (the line carries no command).
     """
     lines = []
     for idx, label in rows:
         lines.append(f"[{idx}] {label}")
         if retry is not None:
             lines.append(f"    {retry(idx)}")
+    if total is not None and total > len(rows):
+        lines.append(f"(showing {len(rows)} of {total} matches" + (f"; {narrow})" if narrow else ")"))
     detail = "\n  ".join(lines)
     die(f"Ambiguous {kind} '{page_ref}'. Matches:\n  {detail}")
 
