@@ -1031,8 +1031,14 @@ def cached_if_fresh(path: str, max_age: int | None, url: str | None = None) -> s
 
 # An HTML document, not the Markdown / text this module fetches: a "soft 404"
 # (Cursor's llms-full.txt answers 200 with its site page, Amp sends an unknown
-# path to its sign-in page).
-_HTML_START_RE = re.compile(rb"(?:\xef\xbb\xbf)?\s*<(?:!doctype\s+html|html)[\s>]", re.IGNORECASE)
+# path to its sign-in page). ``looks_like_html`` reads this much of the start.
+_HTML_SCAN_BYTES = 64 * 1024
+_HTML_SPACE_RE = re.compile(rb"[ \t\n\r\f\v]*")
+# The start of a document: a doctype naming html (any case, with or without the
+# space), or the html / head / body tag written all lower case or all upper
+# case. ``<Html>`` / ``<Head>`` / ``<Body>`` are MDX / React components a page
+# may open with (react-email writes ``<Html lang="en">``), not the tags.
+_HTML_DOC_START_RE = re.compile(rb"<(?:(?i:!doctype\s*html)|html|HTML|head|HEAD|body|BODY)[\s>]")
 
 
 class NotTextError(ValueError):
@@ -1040,9 +1046,37 @@ class NotTextError(ValueError):
 
 
 def looks_like_html(data: bytes) -> bool:
-    """True when *data* opens as an HTML document. A Markdown page that only
-    holds HTML (``<h2 id="x">``, ``<script>``) does not."""
-    return _HTML_START_RE.match(data[:1024]) is not None
+    """True when *data* opens as an HTML document.
+
+    A UTF-8 byte order mark, ASCII white space, HTML comments (``<!-- … -->``,
+    a build stamp above the doctype) and ``<?xml … ?>`` declarations (XHTML)
+    are skipped first. What follows must be the doctype or an ``<html>`` /
+    ``<head>`` / ``<body>`` tag (a page may leave ``<html>`` out). Anything
+    else is the text file it was fetched as: Markdown that holds HTML
+    (``<h2 id="x">``, ``<script>``, ``<div>``), Hono's ``<SYSTEM>…</SYSTEM>``
+    header, an MDX component (``<Note>``, ``<Head>``), a page that opens with
+    ``<meta>`` or ``<title>``. Taking a real file for HTML is the worse error
+    (with no cache the source cannot be read at all), so no more tags count.
+
+    Only the first ``_HTML_SCAN_BYTES`` are read: a comment or declaration not
+    closed by then reads as text. A loop over ``bytes.find``, not one regular
+    expression: a repeated group of comments before the tag takes time
+    exponential in their number."""
+    head = data[:_HTML_SCAN_BYTES]
+    pos = 3 if head.startswith(b"\xef\xbb\xbf") else 0
+    while True:
+        pos = _HTML_SPACE_RE.match(head, pos).end()
+        if head.startswith(b"<!--", pos):
+            close = b"-->"
+            end = head.find(close, pos + 4)
+        elif head[pos:pos + 5].lower() == b"<?xml":
+            close = b"?>"
+            end = head.find(close, pos + 5)
+        else:
+            return _HTML_DOC_START_RE.match(head, pos) is not None
+        if end < 0:
+            return False
+        pos = end + len(close)
 
 
 def fetch_url(url: str, cache_path: str, *, user_agent: str,

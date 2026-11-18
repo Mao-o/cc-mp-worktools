@@ -544,12 +544,78 @@ class FetchKeysValidationTest(unittest.TestCase):
         p = g._validate_profile("f", "x", self.FETCH)
         self.assertFalse(p["respect_robots"])
         self.assertFalse(p["search_content_needs_page_ref"])
-        self.assertFalse(presets()["firebase"]["respect_robots"])
         self.assertFalse(presets()["firebase"]["search_content_needs_page_ref"])
 
     def test_drop_lines_and_heading_pattern_are_checked_on_a_fetch_profile(self):
         self.refused({**self.FETCH, "drop_lines": ["("]}, "invalid regular expression")
         self.refused({**self.FETCH, "heading_line_pattern": "no-group"}, "exactly one group")
+
+    def test_every_bundled_source_that_fetches_page_by_page_reads_robots_txt(self):
+        """The policy: a bundled ``body: "fetch"`` preset walks its llms.txt
+        page by page, so it obeys robots.txt. A ``body: "full"`` one fetches
+        the one or two files its profile names, and has no such key."""
+        with _loader_quiet():
+            fetching = {name: p for name, p in presets().items() if p.get("body") == "fetch"}
+        self.assertGreater(len(fetching), 0)
+        for name, p in fetching.items():
+            with self.subTest(name):
+                self.assertTrue(p["respect_robots"])
+
+
+FIREBASE_ROBOTS = "https://firebase.google.com/robots.txt"
+FIREBASE_INDEX = "https://firebase.google.com/docs/llms.txt"
+FIREBASE_PAGES = {
+    "https://firebase.google.com/docs/cli/targets.md.txt": ("Deploy targets", "Short names for resources.",
+                                                            "## Set up deploy targets\n\nApply a target name.\n"),
+    "https://firebase.google.com/docs/auth/users.md.txt": ("Users in Firebase Projects", "Users.",
+                                                           "## User properties\n\nA user has properties.\n"),
+}
+
+
+class FirebaseRobotsTest(unittest.TestCase):
+    """The bundled ``firebase`` preset reads robots.txt before the first file
+    the cache does not serve, once, and keeps it in the page cache."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.sources = os.path.join(self.tmp, "sources.json")
+        Path(self.sources).write_text(json.dumps({"sources": {}}), encoding="utf-8")
+
+    def run_g(self, net, *argv):
+        with mock.patch("urllib.request.urlopen", side_effect=net):
+            try:
+                return _loader.run_cli(g, [SCRIPT, *argv, "--source", "firebase", "--sources-file", self.sources,
+                                           "--cache-dir", self.tmp])
+            except Exception as e:  # a crash fails the assertions, not the run
+                self.fail(f"{argv} crashed: {e!r}")
+
+    def test_robots_txt_is_read_once_and_then_from_the_cache(self):
+        net = _Net({FIREBASE_ROBOTS: "User-agent: *\nDisallow: /*?*authuser=\nDisallow: /byptwd/\n",
+                    FIREBASE_INDEX: _index_text(FIREBASE_PAGES), **{u: b for u, (_t, _d, b) in FIREBASE_PAGES.items()}})
+        first, second = FIREBASE_PAGES
+        code, out, err = self.run_g(net, "content", "0")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Apply a target name.", out)
+        self.assertEqual(net.calls, [FIREBASE_ROBOTS, FIREBASE_INDEX, first])
+        net.calls.clear()
+        code, out, err = self.run_g(net, "content", "1")
+        self.assertEqual(code, 0, err)
+        self.assertIn("A user has properties.", out)
+        self.assertEqual(net.calls, [second])
+        net.calls.clear()
+        code, _out, err = self.run_g(net, "content", "0")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(net.calls, [])
+
+    def test_a_robots_txt_that_cannot_be_read_stops_the_first_fetch(self):
+        net = _Net({FIREBASE_INDEX: _index_text(FIREBASE_PAGES)})  # robots.txt fails
+        code, out, err = self.run_g(net, "fetch-index")
+        self.assertEqual(code, 1, err)
+        self.assertEqual(out, "")
+        self.assertEqual(net.calls, [FIREBASE_ROBOTS])
+        self.assertIn(f"could not read {FIREBASE_ROBOTS} (mock network: no {FIREBASE_ROBOTS})", err)
+        self.assertNotIn("disallows", err)
 
 
 if __name__ == "__main__":

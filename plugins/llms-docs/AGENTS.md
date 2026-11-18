@@ -27,7 +27,7 @@ preset を置き換える。
 - `body: "fetch"` の source で、取得するページが増える (`fetch-index` / `search-index` がページを
   取る、`search` が候補の外のページを取る・全文 fallback をする、`search-content` を並行にして
   最初の結果が全件の取得を待つ)。ページの cache で、別の URL のページの本文を返す
-- `respect_robots` の source (Zed / Amp) で、`robots.txt` が拒否する場所 (転送先を含む) を要求する。
+- `respect_robots` の source (Firebase / Zed / Amp) で、`robots.txt` が拒否する場所 (転送先を含む) を要求する。
   `search_content_needs_page_ref` の source の出力が、`--page-ref` の無い `search-content` を勧める
 - 200 で返った HTML の文書を本文としてキャッシュする
 - `Next:` ヒントが `--source` / `--sources-file` / `--file` / `--cache-dir` / `--max-age` を

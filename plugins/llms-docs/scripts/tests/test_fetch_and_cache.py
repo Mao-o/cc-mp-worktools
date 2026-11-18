@@ -19,12 +19,17 @@ import http.client
 import io
 import json
 import os
+import shlex
 import shutil
+import site
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
 import urllib.error
 import urllib.request
+from pathlib import Path
 from unittest import mock
 
 import _loader  # noqa: F401  (side effect: adds scripts/ to sys.path)
@@ -109,6 +114,113 @@ class DefaultCacheDirTest(unittest.TestCase):
         os.environ["LLMS_DOCS_CACHE_DIR"] = target
         _common.default_cache_dir()
         self.assertFalse(os.path.isdir(target))
+
+
+# Set by SuiteSandboxTest for the process it starts: where SandboxProbe writes
+# what it saw
+PROBE_ENV = "LLMS_DOCS_TEST_SANDBOX_PROBE"
+# the environment names that come before $HOME, which some tests take out
+BEFORE_HOME = ("LLMS_DOCS_CACHE_DIR", "XDG_CACHE_HOME")
+
+
+class SuiteSandboxTest(unittest.TestCase):
+    """The suite's default cache is a temp dir of its own (``_loader.SANDBOX``):
+    a command a test runs without ``--cache-dir`` writes nothing into the cache
+    the environment names (the developer's), whatever it names."""
+
+    def test_the_default_cache_is_in_the_suite_temp_dir(self):
+        sandbox = Path(_loader.SANDBOX)
+        # as the suite has it, and as the tests that take names out have it
+        for drop in ((), BEFORE_HOME[:1], BEFORE_HOME[1:], BEFORE_HOME):
+            with self.subTest(drop=drop):
+                env = {k: v for k, v in os.environ.items() if k not in drop}
+                with mock.patch.dict(os.environ, env, clear=True):
+                    got = Path(_common.default_cache_dir())
+                self.assertTrue(got.is_relative_to(sandbox), (got, sandbox))
+
+    def test_a_python_the_suite_starts_has_the_same_user_site(self):
+        """``$HOME`` moved, ``pytest`` installed with ``pip --user`` is still found."""
+        run = subprocess.run([sys.executable, "-c", "import site; print(site.getusersitepackages())"],
+                             capture_output=True, text=True, timeout=60)
+        self.assertEqual((run.returncode, run.stdout.strip()), (0, site.getusersitepackages()), run.stderr)
+
+    def test_a_command_without_its_cache_dir_writes_nothing_where_the_environment_points(self):
+        """In a process started with the cache names pointing at a stand-in for
+        the developer's dirs, both ways of running tests (directory discovery,
+        and one test named), ``SandboxProbe`` runs a printed command that lost
+        its ``--cache-dir``: it caches in the process's temp dir, never in the
+        stand-in."""
+        if os.environ.get(PROBE_ENV):
+            self.skipTest("inside the process this test starts")
+        plugin = _loader.SCRIPTS_DIR.parent
+        probe = "test_fetch_and_cache.SandboxProbe.test_run_a_command_that_lost_its_cache_dir"
+        styles = {
+            "discover": ([sys.executable, "-m", "unittest", "discover", "-s", "tests",
+                          "-p", "test_fetch_and_cache.py", "-k", "SandboxProbe"], _loader.SCRIPTS_DIR),
+            "one test": ([sys.executable, "-m", "unittest", f"scripts.tests.{probe}"], plugin),
+        }
+        for style, (argv, cwd) in styles.items():
+            with self.subTest(style=style):
+                local = tempfile.mkdtemp(prefix="llms local ")
+                self.addCleanup(shutil.rmtree, local, ignore_errors=True)
+                os.mkdir(os.path.join(local, "home"))
+                report = Path(tempfile.mkdtemp(), "report.json")
+                self.addCleanup(shutil.rmtree, report.parent, ignore_errors=True)
+                env = {**os.environ, PROBE_ENV: str(report),
+                       "LLMS_DOCS_CACHE_DIR": os.path.join(local, "own"),
+                       "XDG_CACHE_HOME": os.path.join(local, "xdg"),
+                       "HOME": os.path.join(local, "home")}
+                run = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True, timeout=120)
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertTrue(report.exists(), f"the probe did not run: {run.stderr}")
+                seen = json.loads(report.read_text(encoding="utf-8"))
+                self.assertEqual(sorted(seen["shapes"]), ["as set", "names before HOME taken out"], seen)
+                for shape, got in seen["shapes"].items():
+                    self.assertEqual(got["code"], 0, (shape, got))
+                    self.assertTrue(got["cached"], (shape, got))
+                    self.assertTrue(Path(got["default"]).is_relative_to(seen["sandbox"]), (shape, got, seen))
+                written = [os.path.join(d, f) for d, _dirs, files in os.walk(local) for f in files]
+                self.assertEqual(written, [], seen)
+
+
+@unittest.skipUnless(os.environ.get(PROBE_ENV), "run by SuiteSandboxTest in a process of its own")
+class SandboxProbe(unittest.TestCase):
+    def test_run_a_command_that_lost_its_cache_dir(self):
+        generic = _loader.load_script("parse-llms-txt.py")
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        corpus = "# Alpha\nSource: https://example.com/a\n\nalpha body\n\n# Beta\nSource: https://example.com/b\n\nbeta\n"
+        profile = {"split": "h1", "page_url": "line:Source: "}
+        sources = os.path.join(tmp, "sources.json")
+        names = {"as set": "probe-a", "names before HOME taken out": "probe-b"}
+        with open(sources, "w", encoding="utf-8") as f:
+            json.dump({"sources": {n: {"url": f"https://example.com/{n}/llms-full.txt", **profile}
+                                   for n in names.values()}}, f)
+        shapes = {}
+        for shape, name in names.items():
+            served = mock.patch("urllib.request.urlopen",
+                                side_effect=lambda req, *a, **kw: _FakeResponse(corpus.encode(), url=req.full_url))
+            with served:
+                code, out, err = _loader.run_cli(generic, ["parse-llms-txt.py", "fetch-index", "--source", name,
+                                                           "--sources-file", sources, "--cache-dir", tmp])
+            nexts = [ln[len("Next: "):] for ln in out.splitlines() if ln.startswith("Next: ")]
+            self.assertEqual((code, len(nexts) > 0), (0, True), out + err)
+            # the page's number in place of the placeholder, as the reader runs it
+            argv = ["0" if word == "<page_ref>" else word for word in shlex.split(nexts[0], comments=True)]
+            self.assertIn("--cache-dir", argv, nexts[0])
+            at = argv.index("--cache-dir")
+            del argv[at:at + 2]  # as a hint that lost it prints it
+            drop = BEFORE_HOME if shape != "as set" else ()
+            env = {k: v for k, v in os.environ.items() if k not in drop}
+            with mock.patch.dict(os.environ, env, clear=True), served:
+                default = _common.default_cache_dir()
+                code, out, err = _loader.run_cli(generic, argv)
+                cached = os.path.exists(generic._cache_path(
+                    default, generic._validate_profile(sources, name, {"url": f"https://example.com/{name}/llms-full.txt",
+                                                                       **profile})))
+            shapes[shape] = {"default": default, "code": code, "cached": cached, "stderr": err}
+        Path(os.environ[PROBE_ENV]).write_text(json.dumps({"sandbox": _loader.SANDBOX, "shapes": shapes}),
+                                               encoding="utf-8")
 
 
 class FormatAgeTest(unittest.TestCase):

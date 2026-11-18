@@ -2,6 +2,34 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.57.0] - 2026-11-18
+
+### 追加: ページの頭がコードブロックの中にあるとき stderr へ警告する
+
+- **症状**: 入れ子の同じ長さの fence の見本 (内側の閉じで外側が閉じ、最後の記号の行が新しいブロックを開く) や閉じの無い開きがあると、後ろのブロックで閉じ直すまでの間にあるページの頭がコードブロックの中に入り、前のページの一部になる。ファイルの末尾までに閉じ直すと、0.49.0 の警告はどれも出なかった (`llms.txt` と比べる警告も、欠落がページの半分に届かなければ出ない)
+- **変更**: 分割の規則は変えず、検出だけ足した。`split: frontmatter` / `split: h1` では `page_url` の規則でページの URL まで揃う frontmatter か H1、`split: line` では見本として読み飛ばした区切りの行がコードブロックの中にあるとき、件数・最初の 1 件の行・それを含むブロックが開いた行を WARNING の 1 行で出す。URL は同じコードブロックの中だけで探す (外に出ると次のページの本物の `Source:` 行を拾う)。ファイルがコードブロックの中で終わるとき (0.49.0 の警告) はそちらだけを出す。stdout・終了コード・ページの並びは変わらない
+- `page_url` の無い `split: frontmatter` / `split: h1` では出さない。コードブロックの中に URL まで揃ったページの頭の見本がある source (`llms-full.txt` の書式を説明するページなど) では、壊れていなくても出る (取り直した同梱 preset の 43 ファイルでは 0 件)。壊れた版 49 件では 23 件で出て、21 件は件数が欠落ページ数と一致した。分割の時間の増え方は 1 ファイルあたり 5% 以内 (実測は `docs/generic-llms-txt-source.md`)
+- テスト: 3 つの splitter それぞれで出る形と出ない形 (frontmatter の `page_url` のキー (`url` と、長い横線で囲む Vercel の形の `source`)・`link:`、h1 の `line:`・`h1-link`・`page_url` なし、シェルの `# コメント`、閉じの無い開き、frontmatter の中でブロックを閉じる行の後ろのリンク (直後に開く別のブロックの中のリンクを含む)、`link:` の 20 行の先読みの境目)、6 つのコマンドで 1 行ずつ出ること、`index_url` があるときは 1 ページの欠落でもこの行だけが出ること、`skip_empty` と `split: auto` での出方を固定した
+
+### 修正: 先頭にコメントや XML 宣言がある HTML と、`<head>` / `<body>` で始まる HTML を本文としてキャッシュする
+
+- **症状**: 0.51.0 の soft 404 の判定は、先頭 1 KiB の BOM と空白の後が `<!doctype html` か `<html` のときだけ HTML とみなした。doctype の前にコメントがある HTML、XML 宣言で始まる XHTML、`<html>` を省いて `<head>` / `<body>` から始まる HTML、1 KiB を超える前置きの後の doctype、空白の無い `<!DOCTYPEhtml>` は本文としてキャッシュされ、良いキャッシュを上書きした (`llms-full.txt` / `llms.txt` は `--max-age` の間 `format may have changed` の終了コード 2 になり、`body: fetch` のページは HTML がそのまま本文として出る)。逆に、`<Html lang="en">` (MDX / React のコンポーネント) で始まる本文を HTML とみなした
+- **変更**: 先頭の BOM・空白・HTML のコメント (`<!-- … -->`)・`<?xml … ?>` を読み飛ばし (先頭の 64 KiB まで)、次が doctype (大文字小文字と空白の有無を問わない) か、すべて小文字かすべて大文字の `<html>` / `<head>` / `<body>` のときだけ HTML とみなす。`<div>`・`<SYSTEM>`・MDX のコンポーネント (`<Note>`・`<Html>`・`<Head>`)・`<meta>`・`<title>` で始まる文書は本文として読む (本物の文書を HTML とみなす誤りの方が重いため)。読み飛ばしは正規表現 1 本ではなくループで書いた (コメントのくり返しを 1 本の正規表現で書くと、コメントの数に対して指数時間になる)
+- 実例の soft 404 は観測していない。手元の本文 125 本 (`llms-full.txt`・`llms.txt`・ページ・`robots.txt`) の判定は変わらない
+- テスト: 読み飛ばすもの・数えるタグ・数えないタグ (大文字小文字の混ざった `<Head>` など)・空白 (フォームフィードと垂直タブ、doctype の中の改行、タグ名の後ろの改行)・64 KiB の境目の判定、コメント 30 個と 64 KiB を埋めるコメントが時間をかけないこと、コメント始まりと `<head>` 始まりの HTML がキャッシュされず良いキャッシュが残ること、先頭がコメントの Markdown がキャッシュされることを固定した
+
+### 変更: firebase の preset も robots.txt を読む
+
+- 同梱 presets のうち `body: fetch` の preset (Firebase / Zed / Amp) は、すべて `respect_robots: true` にした (ページをたどる取得は `robots.txt` に従う)。`body: full` の preset は profile の `url` / `index_url` の 1〜2 ファイルを `--max-age` ごとに取得するだけでページをたどらないので対象外。今の Firebase の `robots.txt` は、`llms.txt` に並ぶ 7,475 URL のどれも拒否しない
+- 費用: キャッシュに無い firebase のファイルを取得する実行で、`robots.txt` の要求が 1 回増える (ページの cache に置き、`--max-age` の間は読み直さない)。`robots.txt` だけが読めない (接続の失敗・5xx・応答なし) とき、そのキャッシュが無ければ、その実行ではキャッシュに無い firebase のファイルを 1 つも取得しない (Zed / Amp と同じ。一度でも読めていれば、古い `robots.txt` を WARNING 付きで使う)
+- テスト: `body: fetch` の同梱 preset がすべて `respect_robots` を持つこと、firebase の要求が `robots.txt`・`llms.txt`・ページの順で `robots.txt` は 1 回だけになること、`robots.txt` が読めないときの終了コードと要求を固定した。移行の比較は、firebase の corpus を置く一時のキャッシュに合成の `robots.txt` を置く (専用 script の出力の記録は変えていない)
+
+### テスト: テストが利用者の既定のキャッシュ (`~/.cache/llms-docs`) に書かない
+
+- **症状**: テストが既定のキャッシュの置き場を解決すると、利用者の実際のキャッシュ (`LLMS_DOCS_CACHE_DIR` / `$XDG_CACHE_HOME/llms-docs` / `~/.cache/llms-docs`) を指した。案内のコマンドを書かれたまま実行する往復テストは、コマンドから `--cache-dir` が落ちる誤りがあると、fixture の本文でそのキャッシュを上書きし、skill は `--max-age` (既定 7 日) の間その内容を読む
+- **変更**: すべてのテストが読み込む `scripts/tests/_loader.py` が、読み込まれた時点で `HOME` と `XDG_CACHE_HOME` を suite の一時ディレクトリに向け、`LLMS_DOCS_CACHE_DIR` を外す (プロセスごとに 1 回。終了時に消す)。`unittest discover` でも単体のテスト指定でも効き、テストが起こす子プロセスも同じ env を受け継ぐ。`PYTHONUSERBASE` は元の値を渡す (子の Python が同じ user site の package を見るため)。既定の置き場の解決規則のテストは今までどおり動き、手元の全件のキャッシュで確かめる任意のテスト (`LLMS_DOCS_PARITY_CORPUS=1`) は、置き換える前の env から置き場を解決して読むだけ
+- テスト: suite の中で既定の置き場が一時ディレクトリの中にあること、外側の env を別の一時ディレクトリに向けた子プロセスで `--cache-dir` を落とした案内のコマンドを実行しても、そこに何も書かれないこと (`unittest discover` と単体のテスト指定の 2 つの起動形) を固定した
+
 ## [0.56.0] - 2026-11-18
 
 ### 修正: ai-sdk の search で、H3 の加点が本文ヒットのあるページを一覧から消す

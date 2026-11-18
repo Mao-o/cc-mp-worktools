@@ -44,6 +44,7 @@ for a page of another docs set still gets that entry's URL.
 import argparse
 import concurrent.futures
 import contextlib
+import copy
 import hashlib
 import io
 import json
@@ -980,15 +981,59 @@ def _body_url(body_lines: list[str], rule) -> str:
     return ""
 
 
+# What a ``line:`` / ``link:`` rule reads at most (``_line_url`` / ``_link_url``)
+_BODY_URL_LINES = 20
+
+
+def _lines_in_block(lines: list[str], start: int, fence: FenceTracker) -> list[str]:
+    """The lines from *start* that are still inside the code block *fence* is
+    in, ``_BODY_URL_LINES`` at most. *fence* is advanced (pass a copy). The URL
+    of a page head inside a code block is looked for there only: past the
+    block's end, the next page's own ``Source:`` line would be taken for it.
+    None when the block closed before *start* (a frontmatter example's YAML
+    may close it with an indented fence line): a block that opens after that
+    is another one."""
+    out = []
+    if not fence.in_fence:  # the block closed before *start*: no line is in it
+        return out
+    for line in lines[start:start + _BODY_URL_LINES]:
+        fence.update(line)
+        if not fence.in_fence:
+            break
+        out.append(line)
+    return out
+
+
+def _split_notes(docs: list[dict], notes: dict) -> None:
+    """Put what a splitter found about the file on every page, for
+    ``_warn_if_split_suspect``: ``skip_empty`` may drop the first one."""
+    if notes:
+        for d in docs:
+            d["split_notes"] = notes
+
+
 def split_h1(lines: list[str], profile: dict) -> list[dict]:
     docs: list[dict] = []
     fence = FenceTracker()
     title = None
     start = 0
+    rule = profile["page_url"]
+    # an H1 inside a code block, with the page URL the rule finds for it: a
+    # page head the block hid (a shell "# comment" has no such URL)
+    look = bool(rule) and rule[0] in ("line", "link", "h1-link")
+    opened = 0
+    inside: list[tuple[int, int]] = []
     for i, line in enumerate(lines):
         was = fence.in_fence
         fence.update(line)
         if was or fence.in_fence:
+            if not was:
+                opened = i
+            elif look and line.startswith("#"):
+                m = _H1_RE.match(line.rstrip("\n\r"))
+                if m and (_h1_link(m.group(1).strip())[1] if rule[0] == "h1-link"
+                          else _body_url(_lines_in_block(lines, i + 1, copy.copy(fence)), rule)):
+                    inside.append((i + 1, opened + 1))
             continue
         m = _H1_RE.match(line.rstrip("\n\r"))
         if not m:
@@ -999,7 +1044,6 @@ def split_h1(lines: list[str], profile: dict) -> list[dict]:
         start = i + 1
     if title is not None:
         docs.append({"title": title, "body_lines": lines[start:]})
-    rule = profile["page_url"]
     for d in docs:
         d["url"] = _body_url(d["body_lines"], rule)
         d["min_level"] = None  # the H1 is the delimiter, so sections start at H2
@@ -1007,6 +1051,7 @@ def split_h1(lines: list[str], profile: dict) -> list[dict]:
             d["title"], d["url"] = _h1_link(d["title"])
     if profile["h1_needs_url"]:
         docs = _merge_urlless_h1(docs)
+    _split_notes(docs, {"inside_code_pages": inside} if inside else {})
     # after the merge, which puts a folded H1 back into the body as written
     return [_split_title_id(d) for d in docs]
 
@@ -1242,23 +1287,47 @@ def _closes_double_quote(text: str) -> bool:
     return backslashes % 2 == 0
 
 
+def _hidden_frontmatter_url(lines: list[str], pos: int, hit: tuple, rule, fence: FenceTracker) -> str:
+    """The page URL *rule* finds for the frontmatter block *hit* that opens at
+    *pos* inside a code block (*fence*, before line *pos*): its key, or a
+    ``line:`` / ``link:`` line after it in the same block."""
+    if rule[0] == "frontmatter":
+        return hit[0].get(rule[1], "")
+    probe = copy.copy(fence)
+    for line in lines[pos:hit[1]]:
+        probe.update(line)
+    return _body_url(_lines_in_block(lines, hit[1], probe), rule)
+
+
 def split_frontmatter(lines: list[str], profile: dict) -> list[dict]:
     key = profile["frontmatter_key"]
+    delimiter = profile["frontmatter_delimiter"]
+    yaml_values = profile.get("frontmatter_yaml_values", False)
+    rule = profile["page_url"]
     blocks: list[tuple[dict, int, int, dict]] = []  # (fields, block_start, body_start, lists)
     fence = FenceTracker()
     fence_line = 0
     cut_off: list[int] = []
+    # a frontmatter block with the page URL inside a code block: a page head
+    # the block hid. (its line, the line the block opened), counted once
+    inside: list[tuple[int, int]] = []
+    seen_to = 0
     i = 0
     while i < len(lines):
         if not fence.in_fence:
-            hit = _frontmatter_at(lines, i, key, profile["frontmatter_delimiter"],
-                                  yaml_values=profile.get("frontmatter_yaml_values", False),
-                                  cut_off=cut_off)
+            hit = _frontmatter_at(lines, i, key, delimiter, yaml_values=yaml_values, cut_off=cut_off)
             if hit is not None:
                 blocks.append((hit[0], i, hit[1], hit[2]))
                 i = hit[1]
                 continue
             fence_line = i
+        elif rule and i >= seen_to and lines[i].rstrip("\n\r") == delimiter:
+            # no cut_off: a long example in the code is not a page cut off by the bound
+            hit = _frontmatter_at(lines, i, key, delimiter, yaml_values=yaml_values)
+            if hit is not None:
+                seen_to = hit[1]
+                if _hidden_frontmatter_url(lines, i, hit, rule, fence):
+                    inside.append((i + 1, fence_line + 1))
         fence.update(lines[i])
         i += 1
     # What _warn_if_split_suspect reports; only a page that needs it says so
@@ -1268,7 +1337,8 @@ def split_frontmatter(lines: list[str], profile: dict) -> list[dict]:
         notes["unclosed_fence_line"] = fence_line + 1
     if cut_off:
         notes["cut_off_lines"] = [pos + 1 for pos in cut_off]
-    rule = profile["page_url"]
+    if inside:
+        notes["inside_code_pages"] = inside
     tags_key = profile.get("tags_key")
     docs = []
     for k, (fields, _start, body_start, lists) in enumerate(blocks):
@@ -1387,13 +1457,22 @@ def split_line(lines: list[str], profile: dict) -> list[dict]:
         return False
 
     starts: list[int] = []
+    # a delimiter read as an example: a page head the block hid, if the block
+    # was not an example of one. (its line, the line the block opened)
+    inside: list[tuple[int, int]] = []
+    opened = 0
     fence = _Fence()
     for i, text in enumerate(texts):
-        if is_delimiter(text) and (fence.open is None or not fence_closes_before_next_delimiter(fence, i)):
-            starts.append(i)
-            fence = _Fence()
-            continue
+        if is_delimiter(text):
+            if fence.open is None or not fence_closes_before_next_delimiter(fence, i):
+                starts.append(i)
+                fence = _Fence()
+                continue
+            inside.append((i + 1, opened + 1))
+        was_open = fence.open is not None
         fence.update(text)
+        if not was_open and fence.open is not None:
+            opened = i
     docs = []
     for k, s in enumerate(starts):
         end = starts[k + 1] if k + 1 < len(starts) else len(lines)
@@ -1417,6 +1496,7 @@ def split_line(lines: list[str], profile: dict) -> list[dict]:
             _split_title_id(doc)
         doc["title"] = doc["title"] or delimiter_url.rstrip("/").rsplit("/", 1)[-1] or "(untitled)"
         docs.append(doc)
+    _split_notes(docs, {"inside_code_pages": inside} if inside else {})
     return docs
 
 
@@ -1660,6 +1740,11 @@ def _warn_if_split_suspect(profile: dict, docs: list[dict], path: str, index_lin
       inside a fence, which keeps a frontmatter example in a code block from
       being a page)
     * a frontmatter block cut off by ``_FM_LOOKAHEAD``: not read as a page
+    * a page that begins inside a code block (a block left open by a nested
+      fence example, or an opener with no closer, until a later block closes
+      it): a page head with its URL by ``page_url`` there (a frontmatter
+      block, an H1, a ``split: line`` delimiter read as an example) went into
+      the page before. Not said with the first case, which covers it
     * far fewer pages than the index has distinct page URLs (*index_lines*,
       ``None`` when it is not at hand)"""
     label = _label(profile)
@@ -1671,6 +1756,12 @@ def _warn_if_split_suspect(profile: dict, docs: list[dict], path: str, index_lin
         lines = notes["cut_off_lines"]
         print(f"WARNING: {label}: {len(lines)} frontmatter block(s) of {path} did not close within "
               f"{_FM_LOOKAHEAD} lines (first near line {lines[0]}) and were not read as pages. "
+              f"{_SPLIT_ADVICE}", file=sys.stderr)
+    if "inside_code_pages" in notes and "unclosed_fence_line" not in notes:
+        pages = notes["inside_code_pages"]
+        first, opened = pages[0]
+        print(f"WARNING: {label}: {len(pages)} page(s) of {path} begin inside a code block (first near "
+              f"line {first}, in a block opened near line {opened}), so each is part of the page before it. "
               f"{_SPLIT_ADVICE}", file=sys.stderr)
     if index_lines is None:
         return

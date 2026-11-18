@@ -358,8 +358,11 @@ frontmatter 区切りはコードブロックの中の `---` を境界にしな�
   ページ数がその異なる URL 数の半分を下回る。同梱 preset の手元のキャッシュでの比は 0.97〜1.06 で、Next.js の例は 0.02
 - 必須のキーを持つ frontmatter が `_FM_LOOKAHEAD` (400 行) までに閉じない (上限で打ち切られたブロックはページにならない)
 
-同梱 preset の手元のキャッシュ (18 source) では、どれも発火しない。捕まえられないのは、`index_url` の無い source で、閉じ損ねの
+同梱 preset の手元のキャッシュ (18 source) では、どれも発火しない。この 3 つで捕まえられないのは、`index_url` の無い source で、閉じ損ねの
 後でファイルの末尾までに閉じ直している場合 (Next.js のキャッシュの閉じ記号を 1/4 だけ連結した実験で、473 ページが 363 ページになる例)。
+0.57.0 からは、隠れたページの頭が `page_url` の URL まで揃っていれば 4 つ目の警告が捕まえる (下の「2026-11-18 実測 (0.57.0)」の節。
+同じ形の実験で 473 ページが 360 ページになる版では、件数 113 が欠落の数と一致する)。`page_url` の無い `split: frontmatter` /
+`split: h1` の source は今も捕まえられない。
 
 ### 2026-11-03 実測 (0.51.0): ページごとのサイトと、形の小さな違い
 
@@ -373,6 +376,22 @@ frontmatter 区切りはコードブロックの中の `---` を境界にしな�
 - 対応しないもの: Kiro (`robots.txt` が `/llms.txt` と `/docs/*.md` を拒否)、Cursor (全件の取得が前提で、上限が決まるまで見送り)
 - Amp は未知のパスを `/auth/sign-in` へ転送して 200 の HTML を返す。転送先は `robots.txt` が拒否する場所なので
   `respect_robots` が転送の前に止める。HTML の本文は全 source で取得の失敗として扱う
+- HTML の文書の判定 (0.57.0 で改めた): 先頭の BOM・空白・HTML のコメント・`<?xml … ?>` を読み飛ばし、次が doctype
+  (`<!doctype html`。大文字小文字と空白の有無を問わない) か、すべて小文字かすべて大文字の `<html>` / `<head>` / `<body>` の
+  タグなら HTML とみなす。見るのは先頭の 64 KiB まで。0.56.0 までは先頭 1 KiB の BOM と空白の後が `<!doctype html` か `<html`
+  (大文字小文字を問わない) のときだけで、ビルドの印などのコメントを doctype の前に置く HTML、XML 宣言で始まる XHTML、`<html>`
+  を省いて `<head>` / `<body>` から始まる HTML を本文としてキャッシュし、良いキャッシュを上書きしていた。逆に `<Html lang="en">`
+  (react-email などの MDX / React のコンポーネント) で始まる本文を HTML とみなしていた
+  - 実例の soft 404 は観測していない。存在しないパスを要求した 3 件 (Zed / Cline / Gemini CLI、2026-11-17) はどれも 404 で、
+    HTML の 2 件は doctype が先頭、Cline は Markdown の `Page Not Found`
+  - 手元の本文 (2026-11-18。既定のキャッシュの 67 本、作業用に取り直した同梱 preset の 53 本、PixAI の 5 本の計 125 本。
+    `llms-full.txt`・`llms.txt`・ページ・`robots.txt`) は、新旧どちらの規則でもすべて本文 (HTML とみなすもの 0)
+  - 数えるタグを増やさない (`<meta>` / `<title>` / `<link>` で始まる HTML は本文として読む)。`<Meta>` / `<Title>` / `<Link>` は MDX
+    の定番のコンポーネントで、本物の文書を HTML とみなす誤り (キャッシュが無ければその source が読めなくなる) の方が重いため。
+    残る誤りは、frontmatter もタイトルも無く小文字の `<head>` のブロックから始まる MDX の文書 (Docusaurus の書き方。実例は未観測)
+  - 読み飛ばしは `bytes.find` のループで書く。コメントのくり返しを 1 本の正規表現 (`(?:\s|<!--.*?-->)*<…`) で書くと、
+    コメントの数に対して指数時間になる。`<!--a-->` 30 個の後に `<p>` が続く入力で、その正規表現は約 60 秒、ループは 0.01 ms
+    未満。64 KiB を 8,192 個のコメントで埋めても、ループは約 1 ms
 - `urllib.robotparser` は使えない。最初に一致した規則で決めるため、1 行目が `Allow: /` の両サイトではすべて許可になる
 - エンコードは比べる前に揃える。ASCII の文字の escape は復号する。`%25` / `%2A` / `%24` は記号として読まないよう escape のまま残す
 - 予約文字の escape (`%2F` / `%3F` など) は規則の種類で分ける。`Disallow` では復号して比べ (RFC 9309 の表の `https%3A%2F%2F` と同じ扱い)、拒否は広めに当たる。`Allow` では規則とパスのどちらも復号せず、綴りが同じときだけ当たる。`Allow: /a%2Fb` は `/a/b` の拒否を打ち消さない。逆に `Disallow: /` + `Allow: /?u=https://x` は `/?u=https%3A%2F%2Fx` を拒否する (取りこぼしの側に倒す)。一致の長さはどちらも復号した綴りで数える
@@ -431,6 +450,44 @@ frontmatter 区切りはコードブロックの中の `---` を境界にしな�
 
 見送ったもの: A2A。`<file path="…">` で囲んだファイルの連結で、158 件のうち 127 件に H1 が無く、新しい区切り方と、
 ファイルのパスからページ URL を作る規則が要る。この形は 1 サイトだけなので、コストに見合わない。
+
+### 2026-11-18 追記 (0.57.0): Firebase の preset も `robots.txt` を読む
+
+方針: 同梱 presets のうち `body: fetch` の preset (ページをたどって取得するもの) は、すべて `respect_robots: true` にする。
+0.56.0 までは Zed / Amp だけで、Firebase は `robots.txt` を読んでいなかった。`body: full` の preset は profile の `url` /
+`index_url` の 1〜2 ファイルを `--max-age` ごとに取得するだけでページをたどらないので対象外。`body: fetch` の preset を足すとき
+`respect_robots` を書き忘れると、テストが落とす。
+
+Firebase の `robots.txt` (2026-11-18 取得、106 バイト):
+
+```
+User-agent: *
+Disallow: /*?*authuser=
+Disallow: /byptwd/
+Sitemap: https://firebase.google.com/sitemap.xml
+```
+
+- `llms.txt` の 7,474 項目と `llms.txt` 自身の計 7,475 URL を、この loader の読み方 (RFC 9309) で照らすと拒否は 0。
+  今のところ取得するものは変わらない
+- 費用: キャッシュに無い firebase のファイルを取得する実行で、`robots.txt` の要求が 1 回増える。`robots.txt` はページの cache
+  (`<cache-dir>/firebase-docs/robots.txt-<URL の hash>.md.txt`) に置き、`--max-age` (既定 7 日) の間は読み直さない。空の
+  キャッシュで `content 0` を実行すると要求は `robots.txt`・`llms.txt`・そのページの 3 回、続く `content 1` はそのページの
+  1 回、取得済みのページだけを読む実行は 0 回。`--max-age 0` では毎回 `robots.txt` も取り直す。取得先のホストは増えない
+  (`firebase.google.com` のまま)
+- 読めないとき (接続の失敗・5xx・応答なし。応答を待つのは最大 30 秒): `robots.txt` のキャッシュが無ければ、その実行では
+  キャッシュに無い firebase のファイルを 1 つも取得しない (要求は `robots.txt` の 1 回だけ)。拒否とは別の文面
+  (`could not read https://firebase.google.com/robots.txt (…)`) で知らせる。`llms.txt` もキャッシュに無ければ、どの
+  コマンドも終了コード 1。`llms.txt` があれば、`content` / `sections` はキャッシュに無いページで終了コード 1、`search` /
+  `search-content` はキャッシュに無いページを `(skip: fetch failed …)` で飛ばして残りを出す。期限切れのキャッシュがある
+  ファイルは、WARNING を出してそれを使う。一度でも読めていれば、以後の失敗では古い `robots.txt` を WARNING 付きで使い、
+  取得を続ける。ホスト全体が落ちているときは前から失敗するので、増えるのは `robots.txt` だけが読めない場合だけ
+  (Zed / Amp は同じ経路を前から使っている)
+- `robots.txt` が 4xx か HTML なら制限なしで取得を続ける。その答えはキャッシュしないので、実行ごとに 1 回聞き直す
+  (Firebase は 200 を返すので、今は当たらない)
+- 移行の比較 (`scripts/tests/test_migration_parity.py`) は通信を止めて流すので、`robots.txt` がキャッシュに無いと preset が
+  firebase から何も取得せず、0.45.0 までの専用 script と同じ要求にならない。firebase の corpus を置く一時のキャッシュに、合成の
+  `robots.txt` (`User-agent: *` / `Disallow: /byptwd/`) をコードで置く。専用 script の出力の記録
+  (`scripts/tests/fixtures/parity/golden/`) は変えていない
 
 ### 2026-11-17 実測 (0.53.0): PixAI (3 言語を 1 ファイルに連結)
 
@@ -737,6 +794,51 @@ URLs、`ds` ⊂ IDs、`ks` ⊂ SDKs、`fs` ⊂ PDFs など)。どれも旧は語
 断片のまま `--` を入れる案 (`sections -- <slug>`・`search-content --page-ref=<page_ref> -- "<query>"`) は、差し込めば上と同じ
 結果だが、後ろに足すと 150 回すべてが終了コード 2 になる (0.54.0 の `sections <slug>` は後ろに足しても通っていた) ので
 採らなかった。完全なコマンドの後ろにさらにオプションを足すと `unrecognized arguments` で終了コード 2 になる (足す必要は無い)。
+
+### 2026-11-18 実測 (0.57.0): ページの頭がコードブロックの中にあるときの警告
+
+入れ子の同じ長さの fence の見本 (上の「入れ子の同じ長さの fence の見本」。対応していない) では、内側の閉じで外側が閉じ、
+最後の記号の行が新しいブロックを開く。閉じの無い開きも同じで、後ろのブロックで閉じ直すまでの間にあるページの頭はコード
+ブロックの中なので区切りにならず、前のページの一部になる。ファイルの末尾までに閉じ直すと、0.49.0 の 3 つの警告はどれも
+出ない (`index_url` があっても、欠落がページの半分に届かなければ出ない)。
+
+分割の規則 (`FenceTracker` と 3 つの splitter の区切り方) は変えず、検出だけ足した。各 splitter のループの中で、コード
+ブロックの中で始まる「ページの頭」を数え、1 つ以上なら stderr に WARNING を 1 行出す (件数、最初の 1 件の行、それを含む
+ブロックが開いた行)。stdout・終了コード・ページの並びは変わらない。
+
+| splitter | 数えるもの |
+|---|---|
+| `split: frontmatter` | 必須のキーを持ち、`page_url` でページの URL が付く frontmatter (`frontmatter:<key>` はそのキー、`line:` / `link:` は閉じの後ろの同じコードブロックの中で、その規則が読む行数 (`line:` 10 行・`link:` 20 行) まで)。先読みの上限で打ち切らない (コード中の長い見本を cut-off と報告しないため)。1 つのブロックは 1 回だけ数える |
+| `split: h1` | `page_url` が `line:` / `link:` / `h1-link` のとき、ページの URL が付く H1 (`h1-link` はその H1 自身のリンク、`line:` / `link:` は後ろの同じコードブロックの中で、その規則が読む行数まで)。シェルの `# コメント` には URL が付かないので数えない |
+| `split: line` | 見本として読み飛ばした区切りの行 (`page_url` によらない) |
+
+- URL の先読みは同じコードブロックの中で止める。外に出ると、次のページの本物の `Source:` 行を拾う
+- ファイルがコードブロックの中で終わるとき (0.49.0 の never closes) は、そちらだけを出す。件数には閉じないブロックの後ろの
+  ページがすべて入り、同じことを言うため
+- `split: auto` では勝った候補のものだけを出す。`skip_empty` で先頭のページが消えても出る
+- `page_url` の無い `split: frontmatter` / `split: h1` は対象外 (コードの中の見本とページの頭を区別できない)
+- 残る誤検出: コードブロックの中に、URL まで揃ったページの頭の見本がある source (`llms-full.txt` の書式を説明するページなど)
+  では、壊れていなくても毎回出る。下の 44 ファイルでは 0
+
+計測 (0.56.0 との比較):
+
+| 対象 | 結果 |
+|---|---|
+| 報告の 3 ファイル (入れ子の見本を持つ frontmatter / h1 / line の合成ファイル) | 新しい WARNING がちょうど 1 行。件数と行は 2・25 行目・23 行目、2・17・15、1・17・15。ページの並び・stdout・終了コードは同じ |
+| きれいなファイル 44 件: 同梱 preset のうち `body: fetch` と `members` を除く 43 件 (2026-11-18 に作業用のディレクトリへ取り直したもの。`split: frontmatter` 22・`split: h1` 19・`split: line` 2) と、Claude Code の `llms-full.txt` を `Source:` 行で区切る `split: line` の代用 1 件 | ページ (タイトル・URL・本文の hash) は全件同じ。新しい WARNING は 0 件 |
+| 壊れた版 49 件: 2026-11-03 のキャッシュの 10 source (と上の代用) から作った。閉じ記号を次の行と連結 (全部 / 4 つに 1 つ)、2 ページ目の頭の直後に閉じの無い開き、ページの末尾 (次のページの頭の直前) に入れ子の見本 (1 ページ / 10 ページ) | ページは全件 0.56.0 と同じ。新しい行は 23 件で出て、21 件は件数が欠落ページ数と一致 (残りの 2 件は claude-code の 4 つに 1 つの連結で 168 / 167、gemini-cli で 83 / 86)。ファイルがコードブロックの中で終わる 7 件は never closes だけ。欠落の無い 9 件では出ない。出なかった欠落ありの 10 件は、すべて `page_url` の無い h1 (codex / hono / zod) |
+
+分割の関数 (`resolve_split`) の時間。作業用のキャッシュで best of 11 を、0.56.0 と交互に 3 回 (ms):
+
+| source | 0.56.0 | 0.57.0 | 差 |
+|---|---|---|---|
+| nextjs (frontmatter) | 31.2〜31.5 | 32.1〜32.5 | +2〜4% |
+| ai-sdk (frontmatter) | 38.8〜40.5 | 39.6〜39.9 | −1〜+3% |
+| claude-code (h1 + `line:`) | 89.2〜89.9 | 91.2〜91.6 | +2〜3% |
+| drizzle (line) | 22.7〜23.8 | 23.7〜24.1 | +1〜5% |
+| gemini-cli (h1 + `h1-link`) | 17.1〜17.2 | 17.5〜17.6 | +2〜3% |
+| vercel (frontmatter) | 77.6〜78.0 | 77.8〜78.6 | 0〜+1% |
+| claude-platform (frontmatter) | 502.1〜507.2 | 493.7〜501.2 | −1〜−2% (ループの中で引いていた profile のキーを外に出した分) |
 
 ## 3. 需要の根拠
 

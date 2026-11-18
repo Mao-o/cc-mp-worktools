@@ -1302,9 +1302,7 @@ class CorpusRefsResolveTest(unittest.TestCase):
 
     def test_every_index_ref_opens_its_page(self):
         from test_migration_parity import GENERIC_PROFILES
-        cache = Path(os.environ.get("LLMS_DOCS_CACHE_DIR")
-                     or os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
-                                     "llms-docs"))
+        cache = Path(_loader.local_cache_dir())
         checked = 0
         for name in ("claude-code", "claude-platform"):
             full, index = cache / f"{name}-llms-full.txt", cache / f"{name}-llms.txt"

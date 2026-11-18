@@ -415,10 +415,13 @@ ZED_SERVED = {
         "# Tool Permissions\n\nConfigure which [Agent Panel](./agent-panel.md) tools run automatically and "
         "which require your approval.\nFor a list of available tools, [see the Tools page](./tools.md).\n"),
 }
-# Cut from firebase.google.com's llms.txt and three of its pages (2026-11):
-# the bundled ``firebase`` preset fetches each page, and its search-content
-# scans every page (no ``search_content_needs_page_ref``).
+# Cut from firebase.google.com's llms.txt, robots.txt and three of its pages
+# (2026-11): the bundled ``firebase`` preset fetches each page, reads robots.txt
+# first, and its search-content scans every page (no
+# ``search_content_needs_page_ref``).
 FIREBASE_SERVED = {
+    "https://firebase.google.com/robots.txt": ("User-agent: *\nDisallow: /*?*authuser=\nDisallow: /byptwd/\n"
+                                               "Sitemap: https://firebase.google.com/sitemap.xml\n"),
     "https://firebase.google.com/docs/llms.txt": (
         "# Documentation\n\nDeveloper documentation for Firebase\n\n## Docs\n\n"
         "- [Create Custom Tokens](https://firebase.google.com/docs/auth/admin/create-custom-tokens.md.txt): "

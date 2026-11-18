@@ -675,9 +675,7 @@ class MembersCorpusRoundTripTest(MembersRoundTripTest):
     cache_states = ("all",)
 
     def setUp(self):
-        cache = Path(os.environ.get("LLMS_DOCS_CACHE_DIR")
-                     or os.path.join(os.environ.get("XDG_CACHE_HOME")
-                                     or os.path.expanduser("~/.cache"), "llms-docs"))
+        cache = parity.corpus_cache_dir()
         if not all((cache / f).exists() for f in parity.CORPORA["claude-docs"]):
             self.skipTest(f"no Claude docs cache in {cache}")
         # the full cache keeps both corpora's files side by side

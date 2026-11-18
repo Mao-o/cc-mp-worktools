@@ -15,6 +15,7 @@ import os
 import shutil
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -44,6 +45,13 @@ KIRO_LIKE_ROBOTS = "User-agent: *\nDisallow: /llms.txt\nDisallow: /docs/*.md\n"
 HTML = "<!doctype html>\n<!-- Appearance placeholders -->\n<html><body>Sign in</body></html>\n"
 
 
+SCAN = 64 * 1024  # _common._HTML_SCAN_BYTES, written out: the bound is part of the rule
+# the real start of Hono's llms-full.txt (2026-11-03)
+HONO_START = (b"<SYSTEM>This is the full developer documentation for Hono.</SYSTEM>\n\n"
+              b"# Start of Hono documentation\n\n# Hono\n\n")
+XHTML_DOCTYPE = b'<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">'
+
+
 class LooksLikeHtmlTest(unittest.TestCase):
     def test_table(self):
         cases = {
@@ -58,10 +66,77 @@ class LooksLikeHtmlTest(unittest.TestCase):
             b"# Title\n\n<!doctype html> in prose\n": False,
             b"<htmlish>": False,
             b"": False,
+            # what comes before the document is skipped: comments, an XML declaration, blank lines
+            b"<!-- build 1234 -->\n<!doctype html><html>": True,
+            b"<!-- a -->\n<!-- b -->\n<html lang=\"en\">": True,
+            b"\xef\xbb\xbf<!-- build -->\n<!doctype html>": True,
+            b"<!-- build -->\n<head><title>404</title></head>": True,
+            b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" + XHTML_DOCTYPE + b"\n<html>": True,
+            b"<?XML version=\"1.0\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\">": True,
+            b"\n" * 2048 + b"<!doctype html>": True,
+            b"\r\n" * 600 + b"<!doctype html>": True,
+            b"<!-- " + b"x" * 3600 + b" -->\n<!doctype html>": True,
+            b"<!DOCTYPEhtml>": True,
+            # white space is ASCII's (form feed and vertical tab too): before the document, in the
+            # doctype, after the tag's name
+            b"\f\v<!doctype html>": True,
+            b"<!DOCTYPE\n  html>": True,
+            b"<html\n  lang=\"en\">": True,
+            # a page that leaves <html> out, in either case
+            b"<head>\n<title>404</title></head><body>x</body>": True,
+            b"<HEAD><TITLE>404</TITLE></HEAD>": True,
+            b"<body>Page not found</body>": True,
+            b"<BODY>Page not found</BODY>": True,
+            # text the file is: comments and tags a Markdown file starts with
+            b"<!-- markdownlint-disable -->\n# Title\n": False,
+            b"<!-- badge -->\n<p align=\"center\">\n  <img src=\"logo.png\">\n</p>\n": False,
+            b"<!-- never closed\n# Title\n\n<!doctype html>\n": False,
+            HONO_START: False,
+            b"<Note>\nA note.\n</Note>\n": False,
+            b"<script>\n</script>\n# Title\n": False,
+            b"<style>\n.x {}\n</style>\n# Title\n": False,
+            b"<header>Site</header>\n# Title\n": False,
+            b"<bodytext>x</bodytext>": False,
+            b"<div class=\"x\">\n# Title\n": False,
+            # MDX / React components named like the tags (react-email's <Html lang="en">)
+            b"<Head>\n  <title>Docs</title>\n</Head>\n\n# Title\n": False,
+            b"<Html lang=\"en\">\n<Body>x</Body>\n</Html>\n": False,
+            b"<Body>x</Body>": False,
+            b"<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>\n": False,
+            # tags that do not start a document on their own
+            b"<meta charset=\"utf-8\">\n<title>404</title>": False,
+            b"<title>404</title>\n": False,
+            # only the first SCAN bytes are read: a comment that runs past them reads as text
+            b"<!--" + b"x" * SCAN + b"-->\n<!doctype html>": False,
         }
         for data, want in cases.items():
-            with self.subTest(data=data):
+            with self.subTest(data=data[:80]):
                 self.assertEqual(_common.looks_like_html(data), want)
+
+    def test_the_scan_bound(self):
+        """Both sides of the bound: the doctype just within the first SCAN
+        bytes, and a byte past them."""
+        for blank, want in ((SCAN - len(b"<!doctype html>"), True), (SCAN - len(b"<!doctype html>") + 1, False)):
+            with self.subTest(blank=blank):
+                data = b"\n" * blank + b"<!doctype html>"
+                self.assertEqual(_common.looks_like_html(data), want)
+        for pad, want in ((SCAN - len(b"<!---->") - len(b"<html>"), True), (SCAN - len(b"<!---->") - len(b"<html>") + 1, False)):
+            with self.subTest(comment_pad=pad):
+                data = b"<!--" + b"x" * pad + b"-->" + b"<html>"
+                self.assertEqual(_common.looks_like_html(data), want)
+
+    def assert_quick_and_not_html(self, data: bytes) -> None:
+        started = time.monotonic()
+        self.assertFalse(_common.looks_like_html(data))
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_thirty_comments_take_no_time(self):
+        """One regular expression with a repeated group of comments takes
+        about 80 s here (four times as long for every two more)."""
+        self.assert_quick_and_not_html(b"<!--a-->" * 30 + b"<p>")
+
+    def test_a_scan_full_of_comments_takes_no_time(self):
+        self.assert_quick_and_not_html(b"<!--a-->" * (SCAN // 8))
 
 
 class SoftNotFoundTest(unittest.TestCase):
@@ -99,6 +174,38 @@ class SoftNotFoundTest(unittest.TestCase):
     def test_markdown_that_holds_html_is_kept(self):
         path, _err = self.fetch('<script>\n</script>\n\n<h2 id="a">A</h2>\n')
         self.assertTrue(os.path.exists(path))
+
+    # HTML that does not open with the doctype: a build comment above it, or
+    # no <html> before the <head>
+    PAGES = {
+        "a comment first": "<!-- build 1234 -->\n<!doctype html>\n<html><head><title>Sign in</title></head>"
+                           "<body>Sign in</body></html>\n",
+        "<head> first": "<head><title>404</title></head>\n<body>Page not found</body>\n",
+    }
+
+    def test_html_after_a_comment_or_from_its_head_is_not_cached(self):
+        for what, body in self.PAGES.items():
+            with self.subTest(what):
+                with self.assertRaises(_common.FetchError) as cm:
+                    self.fetch(body, raise_on_error=True)
+                self.assertIsInstance(cm.exception.cause, _common.NotTextError)
+                self.assertFalse(os.path.exists(self.path))
+
+    def test_html_after_a_comment_or_from_its_head_keeps_the_good_copy(self):
+        for what, body in self.PAGES.items():
+            with self.subTest(what):
+                Path(self.path).write_text("# Good\n", encoding="utf-8")
+                path, err = self.fetch(body)
+                self.assertEqual(path, self.path)
+                self.assertEqual(Path(path).read_text(encoding="utf-8"), "# Good\n")
+                self.assertIn("WARNING: fetch failed (the server answered with an HTML page", err)
+                self.assertIn("using cached copy", err)
+
+    def test_markdown_after_a_comment_is_cached(self):
+        body = "<!-- markdownlint-disable MD033 -->\n# Title\n\nText.\n"
+        path, err = self.fetch(body)
+        self.assertEqual((path, err), (self.path, ""))
+        self.assertEqual(Path(path).read_text(encoding="utf-8"), body)
 
 
 class ParseRobotsTest(unittest.TestCase):

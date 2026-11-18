@@ -119,8 +119,13 @@ schema 付きで起動された agent (Workflow の `agent(prompt, {schema})` �
   `search-content --page-ref N --context 3 --max-snippet-chars 2000 -- '<同じ語>'` になる (`# long section: ...` は shell のコメントなので、行ごと打てる)。
   その検索はこの節の一致する行を最大 15 行出す。語を差し替えて絞れる。ページと節の順位は変わらない
 - **ページの分割が怪しいとき**: `split: frontmatter` のファイルでコードブロックが閉じないまま終わる、frontmatter が
-  先読みの上限 (400 行) までに閉じない、または手元に `llms.txt` があってページ数がその異なる URL 数の半分を下回るときは、
-  stderr に WARNING を出す。分割の規則は変わらず、出力もそのまま続く
+  先読みの上限 (400 行) までに閉じない、ページの頭がコードブロックの中にある、または手元に `llms.txt` があってページ数が
+  その異なる URL 数の半分を下回るときは、stderr に WARNING を出す。分割の規則は変わらず、出力もそのまま続く。
+  ページの頭は、`split: frontmatter` / `split: h1` では `page_url` の規則でページの URL まで揃う frontmatter か H1、
+  `split: line` では区切りの行。コードブロックの中にあると前のページの一部になる (入れ子のフェンスの見本でブロックが
+  閉じ損ねたときなど)。その件数と、最初の 1 件の行、それを含むブロックが開いた行を出す。`page_url` の無い
+  `split: frontmatter` / `split: h1` では出さない。コードブロックの中に URL まで揃ったページの頭の見本があるファイル
+  (`llms-full.txt` の書式を説明するページなど) では、壊れていなくても出る
 - **同じ heading_path が 1 ページに 2 回以上ある見出し**: コマンドは 1 つ目を読む (2 つ目以降を指す手段は
   無い)。そうした見出しのコマンドには `# heading appears N times; this reads the first` (shell のコメントなので、
   行ごと打てる) が付く。ただし見出しが id を書いているとき (`## Setup {#a}` / `## Setup {#b}`) は、2 つ目以降も
@@ -312,7 +317,7 @@ Zod の `## Stringbools \[#stringbool]`)。
 | `cloudflare-<製品>` | Cloudflare の製品別 `/<製品>/llms-full.txt`。製品は `workers` / `d1` / `r2` / `kv` / `durable-objects` / `pages` / `queues` / `workers-ai` / `vectorize` / `hyperdrive` / `agents` / `workflows` / `ai-gateway` / `browser-rendering` / `containers` | あり (`index.md`)。`browser-rendering` は製品名が Browser Run に変わり、取得先は `/browser-run/llms-full.txt` (52 ページ中 51 でページ内に URL。URL の無い 1 件は他の製品と同じ API リファレンスのページ)。source 名は変えていない |
 | `claude-code` / `claude-platform` | Claude Code (`code.claude.com/docs`) / Claude Developer Platform (`platform.claude.com`)。`llms.txt` の項目でランキングし、本文は `llms-full.txt` から読む (`rank_from: index`)。`claude` は両方をまとめて `search` する別名 (`members`) | あり |
 | `ai-sdk` | AI SDK (Vercel AI SDK) | あり (`search` / `sections` / `content` に出す。`fetch-index` / `search-index` の一覧には出さない) |
-| `firebase` | Firebase (`llms-full.txt` が無いので、`llms.txt` の各ページを必要なときに取得する。`body: fetch`) | あり (`.md.txt`) |
+| `firebase` | Firebase (`llms-full.txt` が無いので、`llms.txt` の各ページを必要なときに取得する。`body: fetch`。`robots.txt` が拒否する場所は取得しない) | あり (`.md.txt`) |
 
 `claude-code` / `claude-platform` / `claude` / `ai-sdk` / `firebase` は 0.45.0 までの専用 script と同じ出力になるよう設定した preset で、キャッシュも専用 script と同じファイル (下の「キャッシュ」の表) を読み書きする。Claude の 3 つは `researching-claude-docs`、`ai-sdk` / `firebase` は `researching-library-docs` が使う (0.46.0 から 0.51.x までは `ai-sdk` / `firebase` に専用の skill があった)。`ai-sdk` は 0.51.0 から H3 も索引に読む (`index_heading_level` の既定。`### maxOutputTokens` のように H3 にだけ API 名を書くページが見つかるため)。H3 だけで候補に入ったページが全文検索の補いを止めないよう、`h3_only_keeps_full_search` も有効にしている。H3 の加点で一覧から消える本文ヒットのあるページ (候補の枠を取られたページと、止まった補いの行) は、`h3_keeps_h2_results` で H1 / H2 だけの索引の行として下に戻す (0.56.0)。
 
@@ -443,7 +448,7 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `page_fetch_workers` | | `body: fetch` の `search` が同時に取得するページ数 (1〜32。既定 8) |
 | `page_fetch_timeout` | | `body: fetch` の `search` / `search-content` が 1 ページの取得を待つ秒数 (1〜600。既定 30。`sections` / `content` は 120) |
 | `search_content_warn_pages` | | `body: fetch` で `--page-ref` の無い `search-content` が、ページ数がこれを超えると stderr に WARNING を出す (既定 30) |
-| `respect_robots` | | `body: fetch` で `true` のとき、取得する前に対象のホストの `robots.txt` を読み (キャッシュは `--max-age` に従う)、拒否された `llms.txt`・ページと転送先を要求しない。読み方は RFC 9309 (最も長く一致した規則で決め、同じ長さなら `Allow`。`%7E` と `~` のようなエンコードの違いは同じものとして比べる。ただし `%2F` のような予約文字の escape は、`Disallow` では復号して比べ、`Allow` では復号しない (符号化の違いで拒否が抜けず、`Allow: /a%2Fb` が `/a/b` の拒否を打ち消さない)。自分宛てのグループがあれば、規則が無くてもそちらで決める)。`robots.txt` が 4xx か HTML なら制限なし、それ以外で読めないときは取得せず、拒否とは別の文面 (`could not read …/robots.txt`) で知らせる。古いキャッシュがあれば、拒否のときも読めないときも WARNING を出してそれを返す。既定 `false` |
+| `respect_robots` | | `body: fetch` で `true` のとき、取得する前に対象のホストの `robots.txt` を読み (キャッシュは `--max-age` に従う)、拒否された `llms.txt`・ページと転送先を要求しない。読み方は RFC 9309 (最も長く一致した規則で決め、同じ長さなら `Allow`。`%7E` と `~` のようなエンコードの違いは同じものとして比べる。ただし `%2F` のような予約文字の escape は、`Disallow` では復号して比べ、`Allow` では復号しない (符号化の違いで拒否が抜けず、`Allow: /a%2Fb` が `/a/b` の拒否を打ち消さない)。自分宛てのグループがあれば、規則が無くてもそちらで決める)。`robots.txt` が 4xx か HTML なら制限なし、それ以外で読めないときは取得せず、拒否とは別の文面 (`could not read …/robots.txt`) で知らせる。古いキャッシュがあれば、拒否のときも読めないときも WARNING を出してそれを返す。既定 `false`。同梱 presets では `body: fetch` の preset (Firebase / Zed / Amp) はすべて `true`。`body: full` の preset は profile の `url` / `index_url` の 1〜2 ファイルを `--max-age` ごとに取得するだけでページをたどらないので対象外 |
 | `search_content_needs_page_ref` | | `body: fetch` で `true` のとき、`--page-ref` の無い `search-content` を終了コード 2 で止める (ページを 1 つも取得しない)。既定 `false` |
 | `index_page_size` | | `fetch-index` が既定で出す項目数 (0 以上の整数。無いか 0 なら全件)。`fetch-index --offset N --limit M` で範囲を選べ (`--limit 0` は全件)、範囲が全件でないときは末尾に `(M of N documents shown, offset=K)` と、次の範囲を出す `  Next page: --offset … --limit …` (同じコマンドに足して使う) を出す。全件を出すときの出力は変わらない |
 | `cache_name` | | 同梱 presets 専用 (`sources.json` に書くとエラー)。キャッシュのファイル名を `<cache_name>-llms-full.txt` / `<cache_name>-llms.txt` にする |
@@ -464,7 +469,7 @@ source 名は `^[a-z0-9][a-z0-9-]*$` (キャッシュのファイル名になる
 | H1 で区切り、直後に `Source: <url>` 行 | `split: h1` + `page_url: "line:Source: "` (本文にも H1 があれば `h1_needs_url`) | Agent Skills / Bun / MCP / Ollama / ACP / Cline / Devin |
 | frontmatter を長い横線で囲む | `split: frontmatter` + `frontmatter_delimiter` | Vercel |
 | H1 で区切り URL なし | `split: h1` (見出しだけのページがあれば `skip_empty`) | Zod / Hono / Render / Codex / OpenAI Plugins・API docs / Factory |
-| `llms-full.txt` が無く、`llms.txt` が全ページ (ページごとの `.md.txt`) を並べる | `body: fetch` + `rank_from: index` + `index_url` + `page_ref_forms: ["int", "url", "slug"]` (+ `page_url_strip_suffix: ".md.txt"` / `anchor_style: devsite` / `min_heading_level: 2`) | Firebase |
+| `llms-full.txt` が無く、`llms.txt` が全ページ (ページごとの `.md.txt`) を並べる | `body: fetch` + `rank_from: index` + `index_url` + `page_ref_forms: ["int", "url", "slug"]` (+ `respect_robots: true` / `page_url_strip_suffix: ".md.txt"` / `anchor_style: devsite` / `min_heading_level: 2`) | Firebase |
 | frontmatter (`title:` / `description:`) で区切り URL なし | `split: frontmatter` (既定の `frontmatter_key: title`) | Agent Plugins |
 | H1 全体が `[タイトル](<url>)` | `split: h1` + `page_url: h1-link` + `h1_needs_url` | Gemini CLI |
 | `## Source: /<path>` 行で区切り、パスがサイトの下の階層 | `split: line` + `line_prefix` + `url_prefix` | Kilo Code |
@@ -484,7 +489,7 @@ source 名は `^[a-z0-9][a-z0-9-]*$` (キャッシュのファイル名になる
 
 ## 既知の制約
 
-- 取得した本文が HTML の文書 (`<!doctype html` か `<html` で始まる) のときは、取得の失敗として扱いキャッシュしない (200 で HTML を返す soft 404 を本文として読まないため)。古いキャッシュがあれば WARNING を出してそれを使う
+- 取得した本文が HTML の文書のときは、取得の失敗として扱いキャッシュしない (200 で HTML を返す soft 404 を本文として読まないため)。古いキャッシュがあれば WARNING を出してそれを使う。HTML の文書とみなすのは、先頭の BOM・空白・HTML のコメント (`<!-- … -->`)・`<?xml … ?>` を読み飛ばした後が、doctype (`<!doctype html`。大文字小文字と空白の有無を問わない) か、すべて小文字かすべて大文字の `<html>` / `<head>` / `<body>` のタグのときだけ。読むのは先頭の 64 KiB までで、そこまでに閉じないコメントの後は本文として読む。`<div>`・`<SYSTEM>` (Hono)・MDX のコンポーネント (`<Note>`・`<Html>`・`<Head>` など) で始まる文書と、`<meta>`・`<title>` で始まる文書も本文として読む (本物の文書を HTML とみなす誤りの方が重いため、数えるタグを増やさない)。frontmatter もタイトルも無く、小文字の `<head>` のブロックから始まる MDX の文書は HTML とみなす (実例は観測していない)
 - 全文読み込み禁止: 必ず段階的に絞り込むこと
 - コードフェンス保護: コードブロックの途中分割を自動防止
 - テーブル保護 (claude-docs / firebase): Markdown テーブルの途中分割を自動防止
