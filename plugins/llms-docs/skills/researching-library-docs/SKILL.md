@@ -184,7 +184,7 @@ llms-full.txt にページ URL が無く、`llms.txt` とタイトルが一致�
 `page_ref` は 4 形式を受け付け、上から順に試す:
 
 - **整数 index** (推奨): `42`
-- **タイトルの部分一致**: `"Event Callbacks"`。一意に決まる場合のみ。曖昧ならエラーになる (候補ごとのコマンド付き)
+- **タイトルの部分一致**: `"Event Callbacks"`。一意に決まる場合のみ。複数のタイトルに当たるときは下の slug への引き継ぎを試し、それでも決まらなければエラーになる (候補ごとのコマンド付き)
 - **完全 URL**: `https://ai-sdk.dev/docs/ai-sdk-core/generating-text`。各ページの frontmatter の `url:` (`sections` /
   `content` / `search` / `search-content` が `URL:` 行に表示する) と正規化して一致するページ。末尾の `/` や `.md` は
   無視する。一致するページが無ければ `No page found for URL` で exit 1
@@ -194,6 +194,8 @@ llms-full.txt にページ URL が無く、`llms.txt` とタイトルが一致�
 タイトルの部分一致が先に効くので、slug がどれかのタイトルの一部にも当たると、そのタイトルのページが開く
 (同じ slug で終わる別ページがあっても開かない。例 `acp`)。ただし、その別ページがあるときは stderr に `Note: '<ref>' matched the title of [N], and the URL of [M] … also ends in it` と、
 そのページを開くコマンドが出る (終了コードは 0 のまま)。Note が出たら、開いたページの `URL:` 行が目的のページかを確かめ、違えば出力のコマンドを使う。
+参照が複数のタイトルの一部に当たったときは、曖昧エラーの前に slug として解き直す。URL がその段で終わるページが 1 つ (複数なら `/<lang>/<slug>` ちょうどの 1 つ) ならそれが開き (例 `openai`: 8 件のタイトルの一部で、`/openai` で終わる `OpenAI` のページが開く)、stderr に `Note: '<ref>' is part of N titles, and the URL of [M] ends in it; opened [M]. The other titles: [N] <URL>, …` と、他のタイトルの先頭のページを開くコマンドが出る (終了コード 0)。目的が他のタイトルのページなら、`The other titles:` の `[N]` を整数 index で開く。
+決まらなければ `Ambiguous title substring` で exit 1。候補は、タイトルが参照とちょうど同じページ、URL が参照で終わるページが先に並び、20 件を超えると `(showing 20 of N matches; …)` の行に絞り方が出る。URL の照合は大文字小文字を区別する (`OpenAI` は曖昧エラーのまま。候補の先頭が `OpenAI` のページ)。
 どの形式にも当たらなければ `No document found for: <ref>` で exit 1 (整数 index を `search` / `search-index` で調べ直す)。
 
 - **引用元**: `search` / `search-content` の結果に、ページの URL が `URL:` 行で付く。`Section:` 行の `URL#anchor` は付かない

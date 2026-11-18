@@ -141,6 +141,7 @@ _PROFILE_KEYS = {
     "page_fetch_workers", "page_fetch_timeout", "search_content_warn_pages", "index_page_size",
     "list_page_urls", "index_heading_level", "heading_line_pattern", "url_prefix",
     "respect_robots", "search_content_needs_page_ref", "h3_only_keeps_full_search",
+    "h3_keeps_h2_results",
 }
 # A profile with ``members`` is an alias of several sources for ``search``;
 # it reads no file of its own, so it takes no other key but these.
@@ -606,6 +607,13 @@ def _validate_index_keys(path: str, name: str, raw: dict, profile: dict) -> None
         _bad(path, f"sources.{name}.h3_only_keeps_full_search needs index_heading_level 3 "
                    f"(with 2 no candidate comes from an H3)")
     profile["h3_only_keeps_full_search"] = keeps_full_search
+    keeps_h2 = _bool_key(path, name, raw, "h3_keeps_h2_results", False)
+    if keeps_h2 and rank_from != "pages":
+        _bad(path, f'sources.{name}.h3_keeps_h2_results is only valid with rank_from "pages" (the default)')
+    if keeps_h2 and profile["index_heading_level"] != 3:
+        _bad(path, f"sources.{name}.h3_keeps_h2_results needs index_heading_level 3 "
+                   f"(with 2 the index reads H1 / H2 only already)")
+    profile["h3_keeps_h2_results"] = keeps_h2
     profile["rank_from"] = rank_from
     profile["list_page_urls"] = list_urls
     profile["index_join"] = index_join
@@ -2527,7 +2535,12 @@ def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
       others are named); else the candidates are listed. The suffix comes
       off the reference too (``overview.md.txt`` is ``overview``)
     * ``title`` / ``url_substring``: a unique case-insensitive substring of the
-      title / URL; several matches are listed
+      title / URL; several matches are listed (``_die_ambiguous_substring``)
+
+    A form that matches several pages stops the search, with one exception:
+    a ``title`` that is part of several titles goes on to a ``slug`` listed
+    after it, and opens the one page that form opens (``_title_to_slug``;
+    ai-sdk's ``openai`` is part of eight titles, and one URL ends in it).
     """
     if not page_ref:
         words = [_PAGE_REF_FORM_WORDS[f] for f in forms]
@@ -2569,28 +2582,14 @@ def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
                     return found[0][0]
             die(f"No page found for URL: {page_ref}")
         elif form == "slug":
-            slug = page_ref.strip("/")
-            if strip_suffix and slug.endswith(strip_suffix):
-                slug = slug[:-len(strip_suffix)]
-            if is_url or not slug:
-                continue
-            pattern = re.compile(rf"/{re.escape(slug)}/?$")
-            found = [(i, d["url"]) for i, d in enumerate(docs)
-                     if d["url"] and pattern.search(_ref_url_key(d["url"], strip_suffix))]
-            if len(found) > 1:
-                # prefer_lang_exact reads the raw page URL, suffix and all, so
-                # a page whose URL carries page_url_strip_suffix is never
-                # "exactly /<lang>/<slug>" and such candidates are listed.
-                # Kept so on purpose: stripping the suffix there would read
-                # firebase's /docs/ml/… as a language and send refs its old
-                # parser stopped as ambiguous to the ml/ page.
-                preferred = prefer_lang_exact(found, slug)
-                if len(preferred) == 1:
-                    note_other_candidates(slug, preferred[0][0], found, retry)
-                    return preferred[0][0]
-                die_ambiguous_page("slug", page_ref, found, retry)
+            slug, found = _slug_pages(docs, page_ref, strip_suffix)
+            chosen = _slug_choice(found, slug)
+            if chosen is not None:
+                if len(found) > 1:
+                    note_other_candidates(slug, chosen, found, retry)
+                return chosen
             if found:
-                return found[0][0]
+                die_ambiguous_page("slug", page_ref, found, retry)
         else:
             field_name = "title" if form == "title" else "url"
             needle = page_ref.lower()
@@ -2604,14 +2603,145 @@ def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
                     _note_slug_page_shadowed(docs, page_ref, found[0][0], forms, strip_suffix, retry)
                 return found[0][0]
             if len(found) > 1:
-                rows = [(i, d["title"] + (f" ({d['url']})" if d["url"] else "")) for i, d in found[:20]]
-                die_ambiguous_page(f"{field_name} substring", page_ref, rows, retry)
+                found = _likely_first(docs, found, page_ref, strip_suffix)
+                if form == "title" and "slug" in forms[forms.index("title") + 1:]:
+                    chosen = _title_to_slug(docs, found, page_ref, strip_suffix, retry)
+                    if chosen is not None:
+                        return chosen
+                _die_ambiguous_substring(field_name, page_ref, found, forms, strip_suffix, retry)
     # a profile that also takes a title (ai-sdk) cannot tell a slug from a
     # title that matched nothing: "for slug" would misname the latter
     if "slug" in forms and not is_url and not {"title", "url_substring"} & set(forms):
         die(f"No page found for slug: {page_ref}")
     die(f"No document found for: {page_ref}")
     return -1
+
+
+def _slug_pages(docs: list[dict], page_ref: str, strip_suffix: str | None) -> tuple[str, list]:
+    """*page_ref* as the ``slug`` form reads it (the slashes around it and
+    *strip_suffix* off) and the pages whose URL ends in it at a segment
+    boundary: ``(slug, [(idx, url), ...])`` in page order. No pages for a full
+    URL or an empty slug (the form does not apply)."""
+    slug = page_ref.strip("/")
+    if strip_suffix and slug.endswith(strip_suffix):
+        slug = slug[:-len(strip_suffix)]
+    if not slug or re.match(r"https?://", page_ref):
+        return slug, []
+    pattern = re.compile(rf"/{re.escape(slug)}/?$")
+    return slug, [(i, d["url"]) for i, d in enumerate(docs)
+                  if d["url"] and pattern.search(_ref_url_key(d["url"], strip_suffix))]
+
+
+def _slug_choice(found: list, slug: str) -> int | None:
+    """The page the ``slug`` form opens of the pages *found* by
+    ``_slug_pages``: the only one, else the one at exactly ``/<lang>/<slug>``;
+    ``None`` when there is none, or several and none of them is that page."""
+    if len(found) == 1:
+        return found[0][0]
+    if len(found) > 1:
+        # prefer_lang_exact reads the raw page URL, suffix and all, so
+        # a page whose URL carries page_url_strip_suffix is never
+        # "exactly /<lang>/<slug>" and such candidates are listed.
+        # Kept so on purpose: stripping the suffix there would read
+        # firebase's /docs/ml/… as a language and send refs its old
+        # parser stopped as ambiguous to the ml/ page.
+        preferred = prefer_lang_exact(found, slug)
+        if len(preferred) == 1:
+            return preferred[0][0]
+    return None
+
+
+def _url_is_ref(url: str | None, page_ref: str, strip_suffix: str | None) -> bool:
+    """True when *page_ref* is a full ``http(s)://`` URL (as the ``url`` form
+    takes one) and *url* is that URL: compared as the ``url`` form compares
+    them (``_ref_url_key``), and case-insensitively, as the substring forms
+    read a reference. Other URLs can hold the whole of it
+    (``https://nextjs.org/docs/app/guides`` is part of 80 longer URLs), and
+    then the ``url_substring`` form matches them all."""
+    return (bool(url) and re.match(r"https?://", page_ref) is not None
+            and _ref_url_key(url, strip_suffix).lower() == _ref_url_key(page_ref, strip_suffix).lower())
+
+
+def _likely_first(docs: list[dict], found: list, page_ref: str, strip_suffix: str | None) -> list:
+    """*found* (``[(idx, doc), ...]`` of a title or URL substring, in page
+    order) with the pages the reference most likely names first: a title
+    that is the reference (case-insensitively, as written or without its
+    heading id), then a URL that ends in it (as the ``slug`` form reads it)
+    or, for a full URL, a URL that is it (``_url_is_ref``), then the rest;
+    each group in page order. The ambiguity error cuts the list, and in page
+    order the page titled ``tool`` was the 42nd, and the page at
+    ``https://nextjs.org/docs/app/guides`` the 23rd of the 81 pages whose URL
+    holds it."""
+    needle = page_ref.lower()
+    tails = {i for i, _url in _slug_pages(docs, page_ref, strip_suffix)[1]}
+
+    def group(item) -> int:
+        i, d = item
+        if needle in {(d["title"] or "").lower(), (d.get("raw_title") or "").lower()}:
+            return 0
+        return 1 if i in tails or _url_is_ref(d["url"], page_ref, strip_suffix) else 2
+
+    return sorted(found, key=group)
+
+
+# How many candidates an ambiguous title / URL error lists.
+AMBIGUOUS_LIMIT = 20
+
+
+def _die_ambiguous_substring(field_name: str, page_ref: str, found: list, forms: tuple,
+                             strip_suffix: str | None = None, retry=None) -> None:
+    """The ambiguity error of the ``title`` / ``url_substring`` forms: the
+    first ``AMBIGUOUS_LIMIT`` of *found* (in ``_likely_first`` order), each
+    with its command, and when that is not all of them, a line with how many
+    matched and how to name one of the others. A full URL that is the URL of
+    one of them (``_url_is_ref``) is already the whole of it, and the other
+    URLs hold it: the line says so and asks for a page number rather than for
+    more of the URL or the full URL."""
+    rows = [(i, d["title"] + (f" ({d['url']})" if d["url"] else "")) for i, d in found[:AMBIGUOUS_LIMIT]]
+    if field_name == "title":
+        ways = ["more of the title"]
+        if any(d["url"] for _i, d in found):
+            if {"slug", "url_substring"} & set(forms):
+                ways.append("a longer URL tail")
+            if {"url", "url_substring"} & set(forms):
+                ways.append("the full URL")
+    elif any(_url_is_ref(d["url"], page_ref, strip_suffix) for _i, d in found):
+        ways = []
+    else:
+        ways = ["more of the URL", "the full URL"]
+    if ways:
+        narrow = "pass " + (", ".join(ways[:-1]) + ", or " + ways[-1] if len(ways) > 1 else ways[0])
+    else:
+        narrow = "other URLs contain this whole URL, so pass a page number"
+    die_ambiguous_page(f"{field_name} substring", page_ref, rows, retry, total=len(found), narrow=narrow)
+
+
+def _title_to_slug(docs: list[dict], found: list, page_ref: str, strip_suffix: str | None, retry=None) -> int | None:
+    """``page_ref_forms`` with ``slug`` after ``title`` (ai-sdk): *page_ref*
+    is part of several titles (*found*, in ``_likely_first`` order), so the
+    ``slug`` form reads it instead, and the one page that form opens (the one
+    whose URL ends in the reference, or of several the one at exactly
+    ``/<lang>/<slug>``) is opened. ``openai`` is part of eight titles of the
+    AI SDK (OpenAI Compatible, Azure OpenAI, ...), and the URL of one page
+    ends in ``/openai``. A stderr Note says how many titles matched and names
+    the others (up to five), with the command for the first; when several
+    URLs end in it, the slug form's Note follows. ``None`` when
+    the slug form opens no page (no URL ends in the reference, or several
+    do): the titles are listed then, as before. The exception to "a form that
+    matches several pages stops the search" is this step only."""
+    slug, pages = _slug_pages(docs, page_ref, strip_suffix)
+    chosen = _slug_choice(pages, slug)
+    if chosen is None:
+        return None
+    others = [(i, d) for i, d in found if i != chosen]
+    listed = ", ".join(f"[{i}] {d['url'] or d['title']}" for i, d in others[:5])
+    more = f" (and {len(others) - 5} more)" if len(others) > 5 else ""
+    tail = f" For [{others[0][0]}]: {retry(others[0][0])}" if retry is not None else ""
+    print(f"Note: '{page_ref}' is part of {len(found)} titles, and the URL of [{chosen}] ends in it; "
+          f"opened [{chosen}]. The other titles: {listed}{more}.{tail}", file=sys.stderr)
+    if len(pages) > 1:  # the slug form's Note on the other URLs that end in it
+        note_other_candidates(slug, chosen, pages, retry)
+    return chosen
 
 
 def _note_slug_page_shadowed(docs: list[dict], page_ref: str, chosen: int, forms: tuple,
@@ -2624,19 +2754,9 @@ def _note_slug_page_shadowed(docs: list[dict], page_ref: str, chosen: int, forms
     listed both). When another page's URL ends in the reference, name that
     page and its command on stderr. The result and the exit code stay as
     they were."""
-    if "slug" not in forms or re.match(r"https?://", page_ref):
+    if "slug" not in forms:
         return
-    slug = page_ref.strip("/")
-    if strip_suffix and slug.endswith(strip_suffix):
-        slug = slug[:-len(strip_suffix)]
-    if not slug:
-        return
-    pattern = re.compile(rf"/{re.escape(slug)}/?$")
-
-    def ends_with_slug(doc: dict) -> bool:
-        return bool(doc["url"]) and pattern.search(_ref_url_key(doc["url"], strip_suffix)) is not None
-
-    others = [(i, d["url"]) for i, d in enumerate(docs) if i != chosen and ends_with_slug(d)]
+    others = [(i, u) for i, u in _slug_pages(docs, page_ref, strip_suffix)[1] if i != chosen]
     if not others:
         return
     listed = ", ".join(f"[{i}] {u}" for i, u in others)
@@ -2662,8 +2782,9 @@ def _url_page(docs: list[dict], pages: list[int], page_ref: str, retry=None) -> 
     them would show another page than the one the URL was taken from."""
     if _copies(docs, pages):
         return pages[0]
-    rows = [(i, f"{docs[i]['title'] or '(untitled)'} ({docs[i]['url']})") for i in pages[:20]]
-    die_ambiguous_page("URL", page_ref, rows, retry)
+    rows = [(i, f"{docs[i]['title'] or '(untitled)'} ({docs[i]['url']})") for i in pages[:AMBIGUOUS_LIMIT]]
+    die_ambiguous_page("URL", page_ref, rows, retry, total=len(pages),
+                       narrow="the pages share this URL, so pass a page number")
     return -1
 
 
@@ -2941,20 +3062,25 @@ def cmd_content(args):
                    transform=transform)
 
 
-def _ranked(args, profile: dict, docs: list[dict], limit: int):
+def _ranked(args, profile: dict, docs: list[dict], limit: int, *, heading_rows=None):
     """Rank *docs* on title / description / tags / headings, and return each
     page's headings for ``--show-sections``. H1 / H2 are ``headings``; H3
     (``index_heading_level`` 3) are ``headings_extra``, which add the
     per-keyword +1 but never complete the all-keyword bonus (``score_entry``):
     a reference page names dozens of entries in H3, and letting them complete
     the bonus pushed out the page whose title is one of the words exactly.
+    *heading_rows* are the pages' ``_heading_rows`` when the caller read them
+    already, at least as deep as the profile's ``index_heading_level`` (the
+    deeper ones are left out).
 
     Returns ``(scored, headings, h3_only, full_match)`` for
     ``_demote_h3_only``: *h3_only* = the ranked pages that only an H3 made
     candidates (without the H3 they score 0); *full_match* = the ranked
     pages whose title / description / tags / H1-H2 match every keyword."""
     entries = [{"title": d["title"] or "", "description": d["description"] or ""} for d in docs]
-    rows = [_heading_rows(d["body_lines"], profile["index_heading_level"]) for d in docs]
+    depth = profile["index_heading_level"]
+    rows = ([_heading_rows(d["body_lines"], depth) for d in docs] if heading_rows is None
+            else [[(level, text) for level, text in r if level <= depth] for r in heading_rows])
     major = [[text for level, text in r if level <= 2] for r in rows]
     minor = [[text for level, text in r if level == 3] for r in rows]
     scored = search_index_entries(
@@ -3011,10 +3137,11 @@ def _demote_h3_only(results: list[dict], h3_only: set, full_match: set, *,
 
 def _place_below_hits(results: list[dict], extras: list[dict], *,
                       include_changelog_priority: bool = False) -> list[dict]:
-    """*results* with *extras* (``h3_only_keeps_full_search``) under the rows
-    with body hits and above the rows with none, so that the order of *results*
-    and its first row do not change. A Changelog / Release notes page stays
-    last unless *include_changelog_priority*, as ``search_rank_key`` has it."""
+    """*results* with *extras* (``h3_only_keeps_full_search`` /
+    ``h3_keeps_h2_results``) under the rows with body hits and above the rows
+    with none, so that the order of *results* and its first row do not change.
+    A Changelog / Release notes page stays last unless
+    *include_changelog_priority*, as ``search_rank_key`` has it."""
     def low(r):
         return not include_changelog_priority and is_low_priority(r.get("title", ""))
     at = next((i for i, r in enumerate(results) if low(r) or r["body_hits"]["total_matches"] == 0), len(results))
@@ -3134,13 +3261,26 @@ def _search_results(args, profile: dict) -> tuple:
     _warn_if_untitled_ratio_high(profile, docs, path)
     if not args.query.strip():
         die("query must not be empty")
-    from_index = profile["rank_from"] == "index"
+    if not profile["h3_keeps_h2_results"]:
+        return profile, path, docs, _search_rows(args, profile, docs), profile["rank_from"] == "index", 0
+    # Both indexes rank on the same headings, read once (reading every page's
+    # headings is most of a ranking's time): the H1 / H2 index takes the
+    # H1 / H2 of them. The key needs rank_from "pages", so from_index is false.
+    rows = [_heading_rows(d["body_lines"], profile["index_heading_level"]) for d in docs]
+    results = _search_rows(args, profile, docs, _ranked(args, profile, docs, args.top_n, heading_rows=rows))
+    return profile, path, docs, _with_h2_rows(args, profile, docs, results, rows), False, 0
+
+
+def _search_rows(args, profile: dict, docs: list[dict], ranked=None) -> list[dict]:
+    """The ``search`` rows of *docs* in display order: the candidates drilled
+    into their bodies, the rows of the full-corpus search, ordered.
+    *ranked* is ``_ranked``'s result when the caller has it already."""
     h3_only, full_match = set(), set()
-    if from_index:
+    if profile["rank_from"] == "index":
         # ranked on the llms.txt entries (their titles and URLs are shown)
         results = _index_candidates(args, profile, docs)
     else:
-        scored, _headings_unused, h3_only, full_match = _ranked(args, profile, docs, args.top_n)
+        scored, _headings_unused, h3_only, full_match = ranked or _ranked(args, profile, docs, args.top_n)
         results = [
             {"doc_idx": idx, "index_score": score, "body_hits": _body_hits(args, docs[idx]), "body_only": False,
              "title": docs[idx]["title"] or "(untitled)", "url": None}
@@ -3175,8 +3315,36 @@ def _search_results(args, profile: dict) -> tuple:
     # empty unless the profile's index reads H3: the order is then search_rank_key's
     results = _demote_h3_only(results, h3_only, full_match,
                               include_changelog_priority=args.include_changelog_priority)
-    results = _place_below_hits(results, below, include_changelog_priority=args.include_changelog_priority)
-    return profile, path, docs, results, from_index, 0
+    return _place_below_hits(results, below, include_changelog_priority=args.include_changelog_priority)
+
+
+def _with_h2_rows(args, profile: dict, docs: list[dict], results: list[dict], heading_rows: list) -> list[dict]:
+    """``h3_keeps_h2_results``: *results* (the rows of the index that reads
+    H3) and, under its rows with body hits, the rows with body hits that the
+    H1 / H2 index (``index_heading_level`` 2) shows and *results* does not, in
+    that index's order, as that index shows them (its ``index_score``, its
+    ``[body-only]``). An H3's +1 can take a candidate slot from a page that
+    the H1 / H2 index ranks (same score or one point above, then document
+    order), and a candidate it brings in can stop the full-corpus search with
+    its body hits: either way a page with body hits left the list. The rows,
+    order and first row of *results* stay. When the H1 / H2 candidates are the
+    pages of *results*' candidates, that index shows nothing more and is not
+    searched. A row put back carries ``h2_row``. *heading_rows* are the
+    pages' headings as the index that reads H3 ranked on them."""
+    h2 = dict(profile, index_heading_level=2, h3_only_keeps_full_search=False, h3_keeps_h2_results=False)
+    ranked = _ranked(args, h2, docs, args.top_n, heading_rows=heading_rows)
+    if {idx for _score, idx, _entry in ranked[0]} == {r["doc_idx"] for r in results if not r["body_only"]}:
+        return results
+    listed = {r["doc_idx"] for r in results}
+    back = [dict(r, h2_row=True) for r in _search_rows(args, h2, docs, ranked)
+            if r["body_hits"]["total_matches"] > 0 and r["doc_idx"] not in listed]
+    return _place_below_hits(results, back, include_changelog_priority=args.include_changelog_priority)
+
+
+def _h2_rows_note(results: list[dict]) -> str:
+    """What the header adds when ``_with_h2_rows`` put rows back."""
+    back = sum(1 for r in results if r.get("h2_row"))
+    return f"; {back} more from the H1/H2 index after the rows with hits" if back else ""
 
 
 def _print_body_only_notice(profile: dict, results: list[dict]) -> None:
@@ -3213,7 +3381,7 @@ def cmd_search(args):
     if from_index:
         print(f"  (index: {args.index_file or _index_cache_path(args.cache_dir, profile)})")
     else:
-        print(f"  (top-{args.top_n} candidate docs drilled into bodies)")
+        print(f"  (top-{args.top_n} candidate docs drilled into bodies{_h2_rows_note(results)})")
     if fetch:
         print(f"  (top-{args.top_n} candidate pages fetched on demand)")
     print("=" * 60)
@@ -3243,8 +3411,8 @@ def cmd_search(args):
     _skipped_line(skipped)
     print()
     # The top index candidate keeps a Next: line even when appended pages
-    # rank above it.
-    keep = next(((r["doc_idx"], ()) for r in results if not r["body_only"]), None)
+    # rank above it (a row put back from the H1 / H2 index is not it).
+    keep = next(((r["doc_idx"], ()) for r in results if not r["body_only"] and not r.get("h2_row")), None)
     render_next_content(hit_candidates([(r["doc_idx"], r["body_hits"], ()) for r in results],
                                        keep=keep),
                         hint_args=_source_hint_args(args) + corpus_hint_args(args),
@@ -3275,13 +3443,15 @@ def _search_members(args, alias: dict) -> None:
     print()
     ranked = []
     # The top index candidate (of the first member that has one) keeps a
-    # Next: line even when appended pages rank above it.
+    # Next: line even when appended pages rank above it (a row put back from
+    # the H1 / H2 index is not it).
     keep = None
     for name, profile, _path, _docs, results, _from_index, skipped in runs:
         extra = ("--source", shlex.quote(name))
         ranked += [(r["doc_idx"], r["body_hits"], extra) for r in results]
         if keep is None:
-            keep = next(((r["doc_idx"], extra) for r in results if not r["body_only"]), None)
+            keep = next(((r["doc_idx"], extra) for r in results
+                         if not r["body_only"] and not r.get("h2_row")), None)
         print(f"--- {_label(profile)} (--source {name}) ---")
         print()
         if not results:
@@ -3291,7 +3461,7 @@ def _search_members(args, alias: dict) -> None:
             continue
         _print_body_only_notice(profile, results)
         _print_search_rows(profile, _docs, results, prefix=f"[{name}] ")
-        print(f"({len(results)} documents from {_label(profile)})")
+        print(f"({len(results)} documents from {_label(profile)}{_h2_rows_note(results)})")
         _skipped_line(skipped)
         print()
     if not ranked:

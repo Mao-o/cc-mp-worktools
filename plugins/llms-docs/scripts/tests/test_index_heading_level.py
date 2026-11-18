@@ -716,9 +716,10 @@ class H3OnlyKeepsFullSearchTest(_Cli):
         return ("--file", str(path))
 
     def user_source(self, **keys):
-        """The ai-sdk preset's shape as a user profile, with *keys* on top."""
+        """The ai-sdk preset's shape as a user profile, with *keys* on top
+        (without the preset's two H3 keys: each test turns on the one it is about)."""
         raw = {k: v for k, v in json.loads(Path(generic.PRESETS_FILE).read_text(encoding="utf-8"))["sources"]["ai-sdk"].items()
-               if k not in ("cache_name", "h3_only_keeps_full_search")}
+               if k not in ("cache_name", "h3_only_keeps_full_search", "h3_keeps_h2_results")}
         path = Path(self.tmp, "sources.json")
         path.write_text(json.dumps({"sources": {"mine": {**raw, **keys}}}), encoding="utf-8")
         return ["--source", "mine", "--sources-file", str(path), "--file", str(self.file)]
@@ -789,8 +790,10 @@ class H3OnlyKeepsFullSearchTest(_Cli):
                 self.assertEqual([t for _i, t in self.pages(out)], want, out)
 
     def test_no_second_search_without_an_h3_candidate(self):
+        # "citations": the search without the H3-only page, then the H1 / H2
+        # index's own (h3_keeps_h2_results: its candidates are other pages)
         real = generic.full_corpus_extra_hits
-        for query, calls in (("citations", 2), ("Anthropic", 1)):
+        for query, calls in (("citations", 3), ("Anthropic", 1)):
             with self.subTest(query=query), mock.patch.object(generic, "full_corpus_extra_hits", side_effect=real) as spy:
                 code, _out, err = self.run_cmd("search", query)
                 self.assertEqual(code, 0, err)
@@ -857,6 +860,607 @@ class H3OnlyKeepsFullSearchValidationTest(unittest.TestCase):
 
     def test_false_goes_with_level_2(self):
         self.assertIs(self.validate({**self.FULL, "index_heading_level": 2, self.KEY: False})[self.KEY], False)
+
+
+class H3KeepsH2ResultsValidationTest(H3OnlyKeepsFullSearchValidationTest):
+    """``h3_keeps_h2_results`` takes the same checks (the tests above run on
+    it too); the refusals name this key."""
+
+    KEY = "h3_keeps_h2_results"
+
+    def test_refused(self):
+        index = {"url": URL, "split": "frontmatter", "page_url": "frontmatter:url", "rank_from": "index",
+                 "index_join": "url", "index_url": "https://example.com/llms.txt",
+                 "page_ref_forms": ["int", "url", "slug"]}
+        for label, raw, message in (
+                ("not a bool", {**self.FULL, self.KEY: "yes"}, f"sources.x.{self.KEY} must be true or false"),
+                ("level 2", {**self.FULL, self.KEY: True, "index_heading_level": 2},
+                 f"sources.x.{self.KEY} needs index_heading_level 3"),
+                ("rank_from index", {**index, self.KEY: True},
+                 f'sources.x.{self.KEY} is only valid with rank_from "pages"'),
+                ("body fetch", {**self.FETCH, self.KEY: True}, f"these keys do not apply: {self.KEY}"),
+                ("alias", {"members": ["a", "b"], self.KEY: True}, f"{self.KEY} cannot go with it")):
+            with self.subTest(label):
+                code, err = self.load(raw)
+                self.assertEqual(code, 1, err)
+                self.assertIn(message, err)
+
+    def test_the_other_h3_key_is_not_needed(self):
+        p = self.validate({**self.FULL, self.KEY: True})
+        self.assertEqual((p[self.KEY], p["h3_only_keeps_full_search"]), (True, False))
+
+    def test_only_the_ai_sdk_preset_has_it_on(self):
+        presets = generic._read_sources_file(generic.PRESETS_FILE)
+        self.assertEqual(sorted(n for n, p in presets.items() if p.get(self.KEY)), ["ai-sdk"])
+
+
+# The two ways a page with body hits left the list (internal backlog), on four
+# synthetic pages. "alpha beta" with --top-n 2: "Alpha" has "alpha" in its
+# title and "beta" only in its H3 "Beta setup" (11 points on the H1 / H2
+# index, 12 with the H3). The H1 / H2 candidates are "Alpha Beta" (20) and
+# "Beta" (11, ahead of "Alpha" in page order); both have only partial hits,
+# so the full-corpus search adds "Alpha" and "Gamma" (every word in one
+# section). With the H3, "Alpha" takes "Beta"'s slot (pushed out), and its
+# "# Alpha" section has both words, which stops the full-corpus search
+# ("Gamma" is not added).
+ALPHA_BETA = """\
+---
+title: Alpha Beta
+description: Overview page.
+url: https://x.example/alpha-beta
+---
+
+## Overview
+
+Alpha is described here.
+
+## Details
+
+Beta is described here.
+
+---
+title: Beta
+description: The other page.
+url: https://x.example/beta
+---
+
+# Beta
+
+## Usage
+
+Beta works with other things.
+
+---
+title: Alpha
+description: Getting started.
+url: https://x.example/alpha
+---
+
+# Alpha
+
+See the [alpha beta guide](/alpha-beta) first.
+
+### Beta setup
+
+Setup steps come here.
+
+---
+title: Gamma
+description: Unrelated title.
+url: https://x.example/gamma
+---
+
+# Gamma
+
+## Notes
+
+Use alpha together with beta.
+"""
+
+# ALPHA_BETA and a fifth page whose title names both words and whose body
+# names neither (a candidate with no body hits).
+ALPHA_BETA_ZERO = ALPHA_BETA + """
+---
+title: Beta Alpha Notes
+description: Nothing to see.
+url: https://x.example/notes
+---
+
+# Notes
+
+Empty.
+"""
+
+# The top index candidate is a Changelog / Release notes page (search_rank_key
+# puts it last): "alpha beta" with --top-n 2. The H3 "Beta notes" lifts the
+# two release pages (5 -> 6) over "Alpha guide" (5, first in page order),
+# whose body has "alpha" only. Changelogs do not count for the full-corpus
+# search, so it adds the two pages with every word in one section ("Gamma",
+# "Delta"); "Alpha guide" (partial hits) comes back from the H1 / H2 index.
+RELEASE_NOTES_FIRST = """\
+---
+title: Alpha guide
+description: x
+url: https://x.example/guide
+---
+
+## Intro
+
+Alpha only here.
+
+---
+title: Alpha changelog
+description: x
+url: https://x.example/changelog
+---
+
+### Beta notes
+
+alpha and beta here.
+
+---
+title: Alpha release notes
+description: x
+url: https://x.example/release-notes
+---
+
+### Beta notes
+
+alpha and beta again.
+
+---
+title: Gamma
+description: x
+url: https://x.example/gamma
+---
+
+## One
+
+alpha beta one.
+alpha beta two.
+
+---
+title: Delta
+description: x
+url: https://x.example/delta
+---
+
+## Two
+
+alpha beta three.
+"""
+
+_ROW_RE = re.compile(r"^(?:\[[a-z0-9-]+\] )?\[(\d+)\] (.+?) (\(index_score: \d+\)|\[body-only\])$")
+_HITS_RE = re.compile(r"^    \((\d+) body hits|^    \(no body hits")
+
+
+def search_rows(out: str) -> list:
+    """``[(page, title, tag, body hits), ...]`` of a ``search`` output."""
+    rows = []
+    for line in out.splitlines():
+        m = _ROW_RE.match(line)
+        if m:
+            rows.append([m.group(1), m.group(2), m.group(3), None])
+            continue
+        m = _HITS_RE.match(line)
+        if m and rows and rows[-1][3] is None:
+            rows[-1][3] = int(m.group(1) or 0)
+    return [tuple(r) for r in rows]
+
+
+class _H3KeepsH2Cli(_Cli):
+    """The ai-sdk preset and two user profiles made from it: ``off`` (no
+    ``h3_keeps_h2_results``) and ``h2`` (``index_heading_level`` 2), on
+    ``--file`` and on a cache dir."""
+
+    SOURCE = "ai-sdk"
+    CORPUS = ALPHA_BETA
+
+    def setUp(self):
+        super().setUp()
+        raw = json.loads(Path(generic.PRESETS_FILE).read_text(encoding="utf-8"))["sources"]["ai-sdk"]
+        off = {k: v for k, v in raw.items() if k not in ("cache_name", "h3_keeps_h2_results")}
+        self.users = {"off": off,
+                      "h2": {**{k: v for k, v in off.items() if k != "h3_only_keeps_full_search"},
+                             "index_heading_level": 2}}
+        self.sources = Path(self.tmp, "sources.json")
+        self.sources.write_text(json.dumps({"sources": {**self.users, "mix": {"members": ["ai-sdk", "off"]}}}),
+                                encoding="utf-8")
+        # a printed command that dropped --cache-dir would read (and fetch
+        # into) this empty dir, not the developer's cache
+        patcher = mock.patch.dict(os.environ, {"LLMS_DOCS_CACHE_DIR": str(Path(self.tmp, "default-cache"))})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.write(self.CORPUS)
+
+    def write(self, corpus: str) -> None:
+        """*corpus* as ``--file`` and as the cache of the preset and of each user profile."""
+        self.file.write_text(corpus, encoding="utf-8")
+        Path(generic._cache_path(str(self.cache), _preset(self.SOURCE))).write_text(corpus, encoding="utf-8")
+        for name, raw in self.users.items():
+            p = generic._validate_profile(str(self.sources), name, raw)
+            Path(generic._cache_path(str(self.cache), p)).write_text(corpus, encoding="utf-8")
+
+    def search(self, source: str, corpus, query: str, *options):
+        argv = [SCRIPT, "search", "--source", source, *corpus, *options, "--", query]
+        if source != self.SOURCE:
+            argv[4:4] = ["--sources-file", str(self.sources)]
+        code, out, err = self.run_argv(argv)
+        self.assertEqual(code, 0, err)
+        return out
+
+    def assert_next_lines_open(self, out: str, titles: dict) -> list:
+        """Every ``Next:`` line of *out* runs as the shell splits it and opens
+        the page and section it names; returns the lines."""
+        nexts = [ln[len("Next: "):] for ln in out.splitlines() if ln.startswith("Next: ")]
+        for line in nexts:
+            argv = shlex.split(line, comments=True)
+            self.assertEqual(argv[:2], [SCRIPT, "content"], line)
+            page, heading = argv[argv.index("--") + 1:] if "--" in argv else argv[2:4]
+            code, opened, err = self.run_argv(argv)
+            self.assertEqual(code, 0, (line, err))
+            self.assertEqual(opened.splitlines()[0], f"# doc_title: {titles[page]}", line)
+            self.assertIn(f"# heading_path: {heading}", opened, line)
+        return nexts
+
+
+class H3KeepsH2ResultsTest(_H3KeepsH2Cli):
+    """``h3_keeps_h2_results`` (the ai-sdk preset): the rows with body hits
+    that the H1 / H2 index (``index_heading_level`` 2) shows and the H3 index
+    does not come back under the H3 index's rows with body hits, in the H1 /
+    H2 index's order and as it shows them (its score, ``[body-only]``). The
+    rows, order and first row of the H3 index stay. Measured on the real
+    corpus, see docs/generic-llms-txt-source.md."""
+
+    def test_the_rows_of_the_h1_h2_index_come_back(self):
+        want = {
+            "ai-sdk": [("2", "Alpha", "(index_score: 12)", 2), ("0", "Alpha Beta", "(index_score: 20)", 2),
+                       ("3", "Gamma", "[body-only]", 1), ("1", "Beta", "(index_score: 11)", 2)],
+            "off": [("2", "Alpha", "(index_score: 12)", 2), ("0", "Alpha Beta", "(index_score: 20)", 2)],
+            "h2": [("2", "Alpha", "[body-only]", 2), ("3", "Gamma", "[body-only]", 1),
+                   ("0", "Alpha Beta", "(index_score: 20)", 2), ("1", "Beta", "(index_score: 11)", 2)],
+        }
+        header = {"ai-sdk": "  (top-2 candidate docs drilled into bodies; 2 more from the H1/H2 index "
+                            "after the rows with hits)",
+                  "off": "  (top-2 candidate docs drilled into bodies)",
+                  "h2": "  (top-2 candidate docs drilled into bodies)"}
+        for label, corpus in self.corpora().items():
+            for source, rows in want.items():
+                with self.subTest(corpus=label, source=source):
+                    out = self.search(source, corpus, "alpha beta", "--top-n", "2")
+                    self.assertEqual(search_rows(out), rows, out)
+                    self.assertEqual(out.splitlines()[1], header[source], out)
+                    self.assertIn(f"({len(rows)} documents, ranked via index → body)", out)
+
+    def test_every_h1_h2_row_with_hits_once_and_the_h3_rows_in_their_order(self):
+        """On queries that do and do not change the candidates (one or two
+        words, a word of the H3 only, words that start with "-", an escape,
+        function words, symbols) and three --top-n: the rows are the H3
+        index's rows (same order, same first row) and every row with body hits
+        of the H1 / H2 index, each once; those come after the H3 index's rows
+        with body hits and before its rows with none."""
+        queries = ("alpha beta", "beta alpha", "alpha", "beta", "Beta setup", "alpha beta guide", "setup",
+                   "-alpha", "--beta", "\\_", "the", "---", "gamma", "beta notes")
+        put_back = set()
+        for corpus_text in (ALPHA_BETA, ALPHA_BETA_ZERO):
+            self.write(corpus_text)
+            for label, corpus in self.corpora().items():
+                for top_n in ("1", "2", "3", "5"):
+                    for query in queries:
+                        with self.subTest(pages=corpus_text.count("title:"), corpus=label, top_n=top_n, query=query):
+                            got, off, h2 = (search_rows(self.search(s, corpus, query, "--top-n", top_n))
+                                            for s in ("ai-sdk", "off", "h2"))
+                            pages = [r[0] for r in got]
+                            self.assertEqual(len(pages), len(set(pages)), got)
+                            back = [r for r in got if r[0] not in {o[0] for o in off}]
+                            self.assertEqual([r for r in got if r not in back], off)
+                            self.assertEqual(back, [r for r in h2 if r[3] and r[0] not in {o[0] for o in off}])
+                            if back:
+                                put_back.add((corpus_text.count("title:"), top_n, query))
+                                self.assertEqual(got[0], off[0])
+                                at = next((i for i, r in enumerate(off) if not r[3]), len(off))
+                                self.assertEqual(got[at:at + len(back)], back, got)
+        # the cases that put rows back (so that the checks above are not
+        # empty): elsewhere the H1 / H2 candidates are the same pages
+        self.assertEqual(sorted(put_back), [(4, "2", "alpha beta"), (4, "2", "beta alpha"),
+                                            (5, "3", "alpha beta"), (5, "3", "beta alpha")])
+
+    def test_put_back_under_the_rows_with_hits_and_above_the_rows_without(self):
+        self.write(ALPHA_BETA_ZERO)
+        for label, corpus in self.corpora().items():
+            with self.subTest(corpus=label):
+                out = self.search("ai-sdk", corpus, "alpha beta", "--top-n", "3")
+                self.assertEqual([(r[0], r[3]) for r in search_rows(out)],
+                                 [("2", 2), ("0", 2), ("3", 1), ("1", 2), ("4", 0)], out)
+
+    def test_the_put_back_rows_open_their_page_and_the_next_lines_run_as_printed(self):
+        titles = {str(i): t for i, t in enumerate(re.findall(r"(?m)^title: (.+)$", ALPHA_BETA))}
+        for label, corpus in self.corpora().items():
+            with self.subTest(corpus=label):
+                out = self.search("ai-sdk", corpus, "alpha beta", "--top-n", "2")
+                for page, title, _tag, _hits in search_rows(out)[2:]:
+                    code, opened, err = self.run_argv([SCRIPT, "content", "--source", "ai-sdk", *corpus, "--", page])
+                    self.assertEqual(code, 0, err)
+                    self.assertEqual(opened.splitlines()[0], f"# doc_title: {title}")
+                nexts = self.assert_next_lines_open(out, titles)
+                # the third is the put-back Gamma (the H3 rows have two pages with hits)
+                self.assertEqual(len(nexts), 3, out)
+                self.assertIn("content 3 Gamma/Notes", nexts[2])
+
+    def test_a_put_back_changelog_stays_last_unless_asked_for(self):
+        # the pushed-out H1 / H2 candidate is a changelog page, with the 11
+        # points of "Beta" (title 5, tag 4, description 2)
+        beta = ("---\ntitle: Beta\ndescription: The other page.\nurl: https://x.example/beta\n---\n\n"
+                "# Beta\n\n## Usage\n")
+        self.assertIn(beta, ALPHA_BETA)
+        self.write(ALPHA_BETA.replace(beta, "---\ntitle: Beta changelog\ndescription: beta notes\ntags: [beta]\n"
+                                            "url: https://x.example/beta\n---\n\n## Usage\n"))
+        for label, corpus in self.corpora().items():
+            # it is last in the H1 / H2 index's order either way
+            for extra in ((), ("--include-changelog-priority",)):
+                with self.subTest(corpus=label, extra=extra):
+                    out = self.search("ai-sdk", corpus, "alpha beta", "--top-n", "2", *extra)
+                    self.assertEqual([r[:3] for r in search_rows(out)],
+                                     [("2", "Alpha", "(index_score: 12)"), ("0", "Alpha Beta", "(index_score: 20)"),
+                                      ("3", "Gamma", "[body-only]"), ("1", "Beta changelog", "(index_score: 11)")],
+                                     out)
+        # "Gamma" (added by the H1 / H2 index's full-corpus search) is one
+        self.write(ALPHA_BETA.replace("title: Gamma\n", "title: Gamma changelog\n"))
+        for label, corpus in self.corpora().items():
+            for extra, want in (((), ["2", "0", "1", "3"]), (("--include-changelog-priority",), ["2", "0", "3", "1"])):
+                with self.subTest(corpus=label, extra=extra):
+                    out = self.search("ai-sdk", corpus, "alpha beta", "--top-n", "2", *extra)
+                    self.assertEqual([r[0] for r in search_rows(out)], want, out)
+
+    def test_the_top_index_candidate_keeps_its_next_line(self):
+        """A put-back row is not the top index candidate: the changelog that
+        is (search_rank_key puts it after the pages with hits) keeps its
+        ``Next:`` line, and the lines are the H3 index's."""
+        self.write(RELEASE_NOTES_FIRST)
+        for label, corpus in self.corpora().items():
+            with self.subTest(corpus=label):
+                out = self.search("ai-sdk", corpus, "alpha beta", "--top-n", "2")
+                self.assertEqual([r[0] for r in search_rows(out)], ["3", "4", "0", "1", "2"], out)
+                off = self.search("off", corpus, "alpha beta", "--top-n", "2")
+                self.assertEqual([r[0] for r in search_rows(off)], ["3", "4", "1", "2"], off)
+                pages = [shlex.split(ln[len("Next: "):], comments=True)[2]
+                         for text in (out, off) for ln in text.splitlines() if ln.startswith("Next: ")]
+                self.assertEqual(pages, ["3", "4", "1"] * 2, out)
+
+    def test_a_members_alias_puts_them_back_per_member(self):
+        self.write(RELEASE_NOTES_FIRST)
+        code, out, err = self.run_argv([SCRIPT, "search", "--source", "mix", "--sources-file", str(self.sources),
+                                        "--cache-dir", str(self.cache), "--top-n", "2", "--", "alpha beta"])
+        self.assertEqual(code, 0, err)
+        groups = out.split("--- AI SDK (--source off) ---")
+        self.assertEqual(len(groups), 2, out)
+        self.assertEqual([r[0] for r in search_rows(groups[0])], ["3", "4", "0", "1", "2"], out)
+        self.assertIn("(5 documents from AI SDK; 1 more from the H1/H2 index after the rows with hits)", groups[0])
+        self.assertEqual([r[0] for r in search_rows(groups[1])], ["3", "4", "1", "2"], out)
+        self.assertIn("(4 documents from AI SDK)\n", groups[1])
+        pages = [shlex.split(ln[len("Next: "):], comments=True)[2:4]
+                 for ln in out.splitlines() if ln.startswith("Next: ")]
+        self.assertEqual([p[0] for p in pages], ["3", "4", "1"], out)
+
+    def test_no_h1_h2_search_when_the_candidates_are_the_same(self):
+        """The H1 / H2 index is ranked once to compare its candidates, on the
+        headings the H3 index read (each page's once); its rows are searched
+        (on that ranking) only when they differ."""
+        rows, ranked, heads = generic._search_rows, generic._ranked, generic._heading_rows
+        pages = len(re.findall(r"(?m)^title: ", ALPHA_BETA))
+        # "beta notes" with --top-n 2: the same candidates, and the H3 index's
+        # rows also have [body-only] ones (the comparison leaves them out)
+        for query, top_n, calls in (("gamma", "5", 1), ("alpha", "1", 1), ("alpha beta", "5", 1),
+                                    ("beta notes", "2", 1), ("alpha beta", "2", 2)):
+            with self.subTest(query=query, top_n=top_n), \
+                    mock.patch.object(generic, "_search_rows", side_effect=rows) as spy, \
+                    mock.patch.object(generic, "_ranked", side_effect=ranked) as ranks, \
+                    mock.patch.object(generic, "_heading_rows", side_effect=heads) as read:
+                out = self.search("ai-sdk", ("--file", str(self.file)), query, "--top-n", top_n)
+                if query == "beta notes":
+                    self.assertIn("[body-only]", out)
+                self.assertEqual(spy.call_count, calls)
+                self.assertEqual([c.args[1]["index_heading_level"] for c in ranks.call_args_list], [3, 2])
+                self.assertEqual(read.call_count, pages)
+                # without the key, the ranking reads them as before
+                read.reset_mock()
+                self.search("off", ("--file", str(self.file)), query, "--top-n", top_n)
+                self.assertEqual(read.call_count, pages)
+
+    def test_the_h1_h2_index_ranks_on_the_h1_h2_of_those_headings(self):
+        """``_ranked`` on headings read to H3 leaves the H3 out at level 2:
+        the same result as reading the headings to H2."""
+        p = _preset("ai-sdk")
+        docs = generic.split_documents(ALPHA_BETA.splitlines(keepends=True), p)
+        h3 = [generic._heading_rows(d["body_lines"], 3) for d in docs]
+        self.assertIn((3, "Beta setup"), h3[2])
+        for level in (2, 3):
+            for query in ("alpha beta", "beta setup", "setup", "alpha"):
+                with self.subTest(level=level, query=query):
+                    args = mock.Mock(query=query)
+                    lp = {**p, "index_heading_level": level}
+                    self.assertEqual(generic._ranked(args, lp, docs, 5, heading_rows=h3),
+                                     generic._ranked(args, lp, docs, 5))
+
+
+# The AI SDK llms-full.txt (fetched 2026-11-03), cut: the six pages of the
+# rows of "After (Anthropic)" (those of the H3 index and of the H1 / H2
+# index), in their order. Each keeps its frontmatter, every heading and the
+# lines that hold "after" or "anthropic" (a code block only where it holds
+# one, with its fences); the lines that go change no score and no section's
+# hits, so the rows are those of the real corpus: the H3 "After (Anthropic)"
+# brings Reasoning into the candidates and pushes out HarnessAgent, a page
+# with 9 hits that the H1 / H2 index drills into.
+AI_SDK_AFTER_ANTHROPIC = """\
+---
+title: HarnessAgent
+description: Create and run AI SDK HarnessAgent sessions.
+url: "https://ai-sdk.dev/docs/ai-sdk-harnesses/harness-agent"
+docs_index: /llms.txt
+---
+## Installation
+## Create an Agent
+## Run a Turn
+### Image Inputs
+## Lifecycle Callbacks
+lifecycle after the runtime reports the result. The callbacks are still
+## Runtime Context
+## Generate Structured Output
+## Messages and History
+### Reading the Runtime's Own History
+## Session Lifecycle
+## Change Settings Between Turns
+`prepareCall` runs for a new prompt after its custom `options` have been
+## Resuming
+running after `detach()` or stopped with a restorable snapshot. After
+## Continue a Suspended Turn
+continues the turn. After a process resume without rebinding, the continuation
+## Stop After a Harness Step
+Use `stopWhen` to opt into semantic step boundaries. Predicates run after real
+## Prepare the Sandbox
+`sandboxConfig.onBootstrap` runs during sandbox template creation, after the
+`sandboxConfig.onSession` runs after each sandbox session is acquired and its
+## Prepare Reusable Sandboxes
+## Settings
+- `stopWhen`: condition(s) for finishing a result slice after a completed
+## Custom Sandbox Orchestration
+### Basic Sandbox Sessions Without Network Control
+## Next Steps
+---
+title: Reasoning
+description: Learn how to control reasoning across providers with the top-level reasoning parameter.
+url: "https://ai-sdk.dev/docs/ai-sdk-core/reasoning"
+docs_index: /llms.txt
+---
+## Basic Usage
+## Streaming
+## Precedence Rules
+## Provider Support
+### How values are mapped
+## Migrating from `providerOptions`
+### Before (Anthropic)
+### After (Anthropic)
+### Before (Anthropic with older model)
+### After (Anthropic with older model)
+### Before (Google with `includeThoughts`)
+### After (Google with `includeThoughts`)
+### Before (OpenAI with `reasoningSummary`)
+### After (OpenAI with `reasoningSummary`)
+---
+title: Chatbot Resume Streams
+description: Learn how to resume chatbot streams after client disconnects.
+url: "https://ai-sdk.dev/docs/ai-sdk-ui/chatbot-resume-streams"
+docs_index: /llms.txt
+---
+`useChat` supports resuming ongoing streams after page reloads. Use this feature to build applications with long-running generations.
+## How stream resumption works
+## Prerequisites
+## Implementation
+### 1. Client-side: Enable stream resumption
+The hook also reconnects when the page becomes visible again after being in the background (for example, after switching browser tabs or returning to a mobile app). This only happens when the stream was interrupted by a network disconnect. Healthy streams and other errors are left untouched.
+prevents duplicate text, reasoning, and step parts after a network disconnect.
+### 2. Create the POST handler
+```ts title="app/api/chat/route.ts"
+import { after } from 'next/server';
+      const streamContext = createResumableStreamContext({ waitUntil: after });
+```
+### 3. Implement the GET handler
+```ts title="app/api/chat/[id]/stream/route.ts"
+import { after } from 'next/server';
+    waitUntil: after,
+```
+The `after` function from Next.js allows work to continue after the response
+after the initial response is returned to the client, enabling reconnection
+## How it works
+### Request lifecycle
+3. **Client reconnection**: When the client reconnects (page reload, or returning to a backgrounded page after a network disconnect), the `resume` option triggers a GET request to `/api/chat/[id]/stream`
+## Customize the resume endpoint
+## Stop an Active Resumable Stream
+Stream resumption lets a client reconnect to an active stream after the original connection closes. To make that possible, the server keeps the stream running even when no client is actively consuming it. If the user refreshes the page, closes the tab, loses their connection, or navigates away, the client can reconnect later with `resumeStream()`.
+### Client-side: send the current assistant message
+When the client knows the active stream ID, include it in the request. This lets the server ignore stale stop requests that arrive after a newer stream has already started.
+### Server-side: stop the active work and clear the stream
+### Keep navigation separate from stop
+After a user stops a stream, avoid automatic reconnect attempts for that chat until the user sends another message or explicitly retries. Otherwise the client can reconnect before cancellation has finished.
+## Important considerations
+- **Stream expiration**: Streams in Redis expire after a set time (configurable in the `resumable-stream` package)
+---
+title: Record Final Object after Streaming Object
+description: Learn how to record the final object after streaming an object using the AI SDK and Node
+url: "https://ai-sdk.dev/cookbook/node/stream-object-record-final-object"
+docs_index: /llms.txt
+tags:
+  - node
+  - streaming
+  - structured data
+---
+## `onEnd` and `output`
+## `output` Promise
+---
+title: Record Token Usage After Streaming Object
+description: Learn how to record token usage when streaming structured data using the AI SDK and Node
+url: "https://ai-sdk.dev/cookbook/node/stream-object-record-token-usage"
+docs_index: /llms.txt
+tags:
+  - node
+  - streaming
+  - structured data
+  - observability
+---
+## `onEnd` Callback
+## `usage` Promise
+---
+title: Record Token Usage after Streaming User Interfaces
+description: Learn how to record token usage after streaming user interfaces using the AI SDK and React Server Components
+url: "https://ai-sdk.dev/cookbook/rsc/stream-ui-record-token-usage"
+docs_index: /llms.txt
+tags:
+  - rsc
+  - usage
+---
+## `onFinish` Callback
+## Server
+"""
+
+
+class H3KeepsH2ResultsRealPagesTest(_H3KeepsH2Cli):
+    """``h3_keeps_h2_results`` on pages cut from the real corpus: HarnessAgent
+    comes back as the third row, above the pages with no body hits, and gets
+    the third ``Next:`` line."""
+
+    CORPUS = AI_SDK_AFTER_ANTHROPIC
+    QUERY = "After (Anthropic)"
+    TITLES = {str(i): t for i, t in enumerate(re.findall(r"(?m)^title: (.+)$", AI_SDK_AFTER_ANTHROPIC))}
+
+    def test_harness_agent_comes_back(self):
+        reasoning, streams, harness, final, ui, usage = (
+            ("1", "Reasoning", "(index_score: 2)", 1),
+            ("2", "Chatbot Resume Streams", "(index_score: 2)", 14),
+            ("0", "HarnessAgent", "(index_score: 1)", 9),
+            ("3", "Record Final Object after Streaming Object", "(index_score: 7)", 0),
+            ("5", "Record Token Usage after Streaming User Interfaces", "(index_score: 7)", 0),
+            ("4", "Record Token Usage After Streaming Object", "(index_score: 5)", 0))
+        want = {"ai-sdk": [reasoning, streams, harness, final, ui, usage],
+                "off": [reasoning, streams, final, ui, usage],
+                # the H1 / H2 index finds Reasoning only in the full-corpus search
+                "h2": [(*reasoning[:2], "[body-only]", 1), streams, harness, final, ui, usage]}
+        for label, corpus in self.corpora().items():
+            for source, rows in want.items():
+                with self.subTest(corpus=label, source=source):
+                    out = self.search(source, corpus, self.QUERY)
+                    self.assertEqual(search_rows(out), rows, out)
+                    note = "; 1 more from the H1/H2 index after the rows with hits" if source == "ai-sdk" else ""
+                    self.assertEqual(out.splitlines()[1], f"  (top-5 candidate docs drilled into bodies{note})", out)
+
+    def test_the_next_lines_run_as_printed(self):
+        for label, corpus in self.corpora().items():
+            for source, pages in (("ai-sdk", ["1", "2", "0"]), ("off", ["1", "2"])):
+                with self.subTest(corpus=label, source=source):
+                    out = self.search(source, corpus, self.QUERY)
+                    nexts = self.assert_next_lines_open(out, self.TITLES)
+                    self.assertEqual([shlex.split(ln, comments=True)[2] for ln in nexts], pages, out)
+                    if source == "ai-sdk":
+                        self.assertIn("content 0 'Stop After a Harness Step'", nexts[2])
 
 
 class PresetLevelsTest(unittest.TestCase):
