@@ -40,13 +40,21 @@ SCRIPT = "parse-llms-txt.py"
 
 
 def sections_line(search_line: str, placeholder: str) -> str:
-    """``sections <placeholder>`` with the options of *search_line* (the
+    """``sections <options> -- <placeholder>`` (the form of fetch-index's
+    ``Next:`` line) with the options of *search_line* (the
     ``search ... -- "<query>"`` line search-index points at)."""
     _script, sep, tail = search_line.partition(" search ")
     opts, sep2, query = tail.rpartition(" -- ")
     if not (sep and sep2 and query == '"<query>"'):
         raise AssertionError(f"not a search placeholder line: {search_line}")
-    return f"{SCRIPT} sections {placeholder} {opts}"
+    return f"{SCRIPT} sections {opts} -- {placeholder}"
+
+
+def with_options(argv: list, extra) -> list:
+    """*argv* with the options *extra* added before its ``--`` (at the end
+    when it has none), as a reader adds an option to a printed line."""
+    cut = argv.index("--") if "--" in argv else len(argv)
+    return argv[:cut] + list(extra) + argv[cut:]
 FULL_URL = "https://example.com/llms-full.txt"
 INDEX_URL = "https://example.com/llms.txt"
 CODE = {"url": FULL_URL, "split": "h1", "page_url": "line:Source: ", "index_url": INDEX_URL,
@@ -203,7 +211,7 @@ class FetchIndexDocIdxJoinTest(_Case):
         self.assertEqual(code, 0, err)
         self.assertIn("[1] Skills", out)
         self.assertIn("[0] Hooks", out)
-        self.assertIn("Next: parse-llms-txt.py sections <page_ref>", out)
+        self.assertRegex(out, r"(?m)^Next: parse-llms-txt\.py sections --source code .* -- <page_ref>$")
 
     def test_grouped_variants_show_per_variant_ref_not_misleading_range(self):
         self.write("- [Batches (Python)](https://example.com/en/batches-py): Python batches\n"
@@ -356,7 +364,7 @@ class QueryVariantJoinTest(_Case):
             argv = shlex.split(next_line.replace(placeholder, ref), comments=True)
         except ValueError as e:
             self.fail(f"not a shell command: {e}")
-        code, out, err = self.run_argv(argv + list(extra))
+        code, out, err = self.run_argv(with_options(argv, extra))
         self.assertEqual(code, 0, err)
         return out
 

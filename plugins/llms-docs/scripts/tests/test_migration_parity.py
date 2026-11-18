@@ -31,7 +31,8 @@ here as the reference the bundled presets (``claude-code`` /
   first line of the normalised stderr when the expected stdout is empty
   (error paths).
 * ``GENERIC_PARITY_EXPECTED`` lists the cases the bundled presets match;
-  ``GENERIC_INTENDED_DIFF`` the ones where they differ on purpose.
+  ``GENERIC_INTENDED_DIFF`` and ``GENERIC_INTENDED_DROPPED_ROWS`` the ones
+  where they differ on purpose.
 
 ``--report-generic`` (run this file as a script) prints, per case, how far
 the generic loader with the bundled presets (``PARITY_PRESETS``) is from the
@@ -243,8 +244,11 @@ def load_golden(case_id: str) -> tuple[str, dict]:
 #     ``"<query>"`` placeholder of a ``search`` line after ``--`` with the
 #     options before it (``search --source x -- "<query>"``: the word the
 #     reader puts in its place may start with ``-``), where the old scripts
-#     print ``search "<query>" --source x``; that one line is read back in the
-#     old order before the rest of this rule. The ``content`` placeholder
+#     print ``search "<query>" --source x``; that line is read back in the
+#     old order before the rest of this rule. So is fetch-index's ``sections``
+#     line with the ``<page_ref>`` placeholder (the generic loader prints
+#     ``sections --source x -- <page_ref>`` since 0.55.0, the old scripts
+#     ``sections <page_ref> --source x``). The ``content`` placeholder
 #     lines come from the shared ``_common`` / ``_commands`` helpers, so the
 #     old scripts print them in the new order too and they are compared as is
 #  3. the trailing count line ``(N … total …)`` (firebase's paged index
@@ -272,6 +276,7 @@ _NEXT_CORPUS_OPT_RE = re.compile(
     r" --(?:source (?:code|claude-code|ai-sdk|firebase)(?!\S)|(?:cache-dir|file|index-file|sources-file) \S+)")
 _NEXT_PLATFORM_RE = re.compile(r" --source (?:claude-)?platform(?!\S)")
 _NEXT_QUERY_PLACEHOLDER_RE = re.compile(r'^(\s*Next: \S+ search)( .*)? -- ("<query>")$')
+_NEXT_PAGE_REF_PLACEHOLDER_RE = re.compile(r'^(\s*Next: \S+ sections)( .*)? -- (<page_ref>)$')
 _TIP_RE = re.compile(r"^(Tip|Note): ")
 _COUNT_RE = re.compile(r"^\(\d+ [^()]*\b(?:total|shown)\b[^()]*\)$")
 _URL_LABEL_RE = re.compile(r"^(\s*)(?:URL|url): ")
@@ -318,7 +323,8 @@ def normalize(text: str) -> list[str]:
         del body[k]
     for line in body:
         if _NEXT_RE.match(line):
-            line = _NEXT_QUERY_PLACEHOLDER_RE.sub(lambda m: f"{m[1]} {m[3]}{m[2] or ''}", line)
+            for placeholder_last in (_NEXT_QUERY_PLACEHOLDER_RE, _NEXT_PAGE_REF_PLACEHOLDER_RE):
+                line = placeholder_last.sub(lambda m: f"{m[1]} {m[3]}{m[2] or ''}", line)
             line = _NEXT_SCRIPT_RE.sub(r"\1<script> ", line)
             line = _NEXT_PLATFORM_RE.sub(" --source <platform>", line)
             line = _NEXT_CORPUS_OPT_RE.sub("", line)
@@ -416,10 +422,11 @@ GENERIC_PARITY_EXPECTED: frozenset = frozenset({
     # query that hits no page llms.txt lists twice; 0.47.2 shows one line per page)
     # cd-code-search-zero still differs: the old script adds a ``Next:`` line
     # for the other source (one source's zero-hit hint naming another source
-    # is not ported; ``members`` covers searching both at once)
+    # is not ported; ``members`` covers searching both at once).
+    # cd-code-search-index-multi is in ``GENERIC_INTENDED_DROPPED_ROWS`` since
+    # the index score stopped matching a keyword inside a word (0.55.0)
     "cd-code-fetch-index",
     "cd-code-search-index",
-    "cd-code-search-index-multi",
     "cd-code-search-index-zero",
     "cd-code-search",
     "cd-code-search-body-only",
@@ -476,8 +483,46 @@ GENERIC_PARITY_EXPECTED_BUT_URL_LINES: frozenset = frozenset()
 GENERIC_INTENDED_DIFF: dict = {
     "as-content-missing": 8,
 }
+# Cases where the generic loader leaves out result rows the old script
+# printed, on purpose: case id -> the first line of each row left out. The
+# rest of the output is the golden's (``without_rows``: those rows gone and
+# the trailing ``(N results, …)`` count lower by as many).
+#   cd-code-search-index-multi (``search-index "workers side"``): the old
+#     script matched ``side`` inside "inside", in the description of
+#     ``[6] Quillon Desktop in a sandbox VM`` (score 2). The index score
+#     matches a keyword at the start of a word or of a word part only
+#     (0.55.0), so that page scores 0 and only ``[9] Run workers side by
+#     side`` is listed
+GENERIC_INTENDED_DROPPED_ROWS: dict = {
+    "cd-code-search-index-multi": ("[6] Quillon Desktop in a sandbox VM (score: 2)",),
+}
 
 _URL_ENTRY_RE = re.compile(r"^    URL: \S+$")
+_RESULTS_COUNT_RE = re.compile(r"^\((\d+)( results?, .*\))$")
+
+
+def without_rows(stdout: str, rows) -> str:
+    """*stdout* without the result rows whose first line is one of *rows*
+    (that line, the indented lines under it and the blank line that ends the
+    row), the trailing ``(N results, …)`` count lowered by how many went.
+    Raises ``ValueError`` when a row is not there or no count line is."""
+    lines = stdout.split("\n")
+    for row in rows:
+        if not row or row[0].isspace():
+            raise ValueError(f"{row!r} is not the first line of a row")
+        start = lines.index(row)
+        end = start + 1
+        while end < len(lines) and lines[end].startswith("    "):
+            end += 1
+        if end >= len(lines) or lines[end] != "":
+            raise ValueError(f"row {row!r} does not end with a blank line")
+        del lines[start:end + 1]
+    counts = [i for i, line in enumerate(lines) if _RESULTS_COUNT_RE.match(line)]
+    if len(counts) != 1:
+        raise ValueError(f"expected one results count line, found {len(counts)}")
+    m = _RESULTS_COUNT_RE.match(lines[counts[0]])
+    lines[counts[0]] = f"({int(m.group(1)) - len(rows)}{m.group(2)}"
+    return "\n".join(lines)
 
 
 def without_url_entry_lines(stdout: str) -> tuple[str, int]:
@@ -705,6 +750,17 @@ class ComparatorTest(unittest.TestCase):
                                  "Next: parse-llms-txt.py content 3 --source claude-platform --file /b\n"), [])
         self.assertEqual(compare("Next: parse-ai-sdk.py content 3 --cache-dir /a\n",
                                  "Next: parse-llms-txt.py content 3 --source ai-sdk --file /b\n"), [])
+        # the placeholder lines whose placeholder the generic loader puts last,
+        # after "--", read back in the old order
+        self.assertEqual(compare('Next: parse-claude-docs.py search "<query>" --source platform --cache-dir /a\n',
+                                 'Next: parse-llms-txt.py search --source claude-platform --cache-dir /b '
+                                 '-- "<query>"\n'), [])
+        self.assertEqual(compare("Next: parse-claude-docs.py sections <page_ref> --source platform --cache-dir /a\n",
+                                 "Next: parse-llms-txt.py sections --source claude-platform --sources-file /s "
+                                 "--cache-dir /b -- <page_ref>\n"), [])
+        self.assertEqual(compare("Next: parse-firebase.py sections <page_ref> --cache-dir /a\n",
+                                 "Next: parse-llms-txt.py sections --source firebase --cache-dir /b -- <page_ref>\n"),
+                         [])
 
     def test_source_names_of_a_multi_source_search_are_written_alike(self):
         """Item 6: the old script's and the generic loader's name of the same
@@ -792,6 +848,20 @@ class ComparatorTest(unittest.TestCase):
             "Next --source with another value": (
                 "[1] x\n\nNext: x.py search q --source both --cache-dir <CACHE_DIR>\n",
                 "[1] x\n\nNext: x.py search q --source bothx --cache-dir <CACHE_DIR>\n"),
+            # the read-back of a placeholder put after "--" is for the two
+            # placeholder lines only
+            "Next ref placeholder of another subcommand after --": (
+                "[1] x\n\nNext: x.py content <page_ref> --cache-dir <CACHE_DIR>\n",
+                "[1] x\n\nNext: x.py content --cache-dir <CACHE_DIR> -- <page_ref>\n"),
+            "Next sections ref after -- that is not the placeholder": (
+                "[1] x\n\nNext: x.py sections 3 --cache-dir <CACHE_DIR>\n",
+                "[1] x\n\nNext: x.py sections --cache-dir <CACHE_DIR> -- 3\n"),
+            "Next sections slug placeholder after --": (
+                "[1] x\n\nNext: x.py sections <slug> --cache-dir <CACHE_DIR>\n",
+                "[1] x\n\nNext: x.py sections --cache-dir <CACHE_DIR> -- <slug>\n"),
+            "Next sections placeholder with another option": (
+                "[1] x\n\nNext: x.py sections <page_ref> --source platform --cache-dir <CACHE_DIR>\n",
+                "[1] x\n\nNext: x.py sections --cache-dir <CACHE_DIR> -- <page_ref>\n"),
             # item 6 writes the two names of a source alike, not two sources alike
             "group heading of the other source": ("--- Claude Code (--source code) ---\n",
                                                   "--- Claude Code (--source claude-platform) ---\n"),
@@ -855,6 +925,68 @@ class GenericLoaderHarnessTest(unittest.TestCase):
     def test_parity_sets_are_consistent(self):
         self.assertLessEqual(GENERIC_PARITY_EXPECTED, set(CASE_IDS))
         self.assertLessEqual(set(GENERIC_INTENDED_DIFF), set(CASE_IDS))
+        self.assertLessEqual(set(GENERIC_INTENDED_DROPPED_ROWS), set(CASE_IDS))
+        # a case is in one record at most
+        self.assertFalse(GENERIC_PARITY_EXPECTED & set(GENERIC_INTENDED_DROPPED_ROWS))
+        self.assertFalse(set(GENERIC_INTENDED_DIFF) & set(GENERIC_INTENDED_DROPPED_ROWS))
+
+    def test_intended_dropped_rows_are_the_only_difference(self):
+        """The bundled preset prints the golden less the recorded rows (and
+        the count line lowered by as many): the rows go, nothing else moves."""
+        for case_id, rows in sorted(GENERIC_INTENDED_DROPPED_ROWS.items()):
+            with self.subTest(case=case_id):
+                stdout, record = load_golden(case_id)
+                run = run_generic_case(case_id)
+                self.assertEqual(run.code, record["exit"], run.stderr)
+                self.assertLessEqual(run.fetches, record["fetches"])
+                # still a difference from the golden as recorded
+                self.assertNotEqual(compare(stdout, run.stdout, record["stderr"], run.stderr), [])
+                for row in rows:
+                    self.assertIn(row, stdout.split("\n"))
+                    self.assertNotIn(row.rsplit(" (score:", 1)[0], run.stdout)
+                self.assertEqual(compare(self.without_rows(stdout, rows), run.stdout,
+                                         record["stderr"], run.stderr), [])
+
+    def without_rows(self, stdout: str, rows) -> str:
+        """``without_rows``, where taking the rows out is expected to work:
+        a refusal is a failed check, not an error of the run."""
+        try:
+            return without_rows(stdout, rows)
+        except ValueError as e:
+            self.fail(f"without_rows refused {rows!r}: {e}")
+
+    def test_workers_side_loses_only_the_row_that_had_side_inside_a_word(self):
+        stdout, _record = load_golden("cd-code-search-index-multi")
+        run = run_generic_case("cd-code-search-index-multi")
+        self.assertIn("\n(2 results, 16 pages searched)\n", stdout)
+        self.assertIn("\n(1 results, 16 documents searched)\n", run.stdout)
+        self.assertRegex(run.stdout, r"(?m)^\[9\] Run workers side by side \(score: 22\)$")
+        self.assertNotRegex(run.stdout, r"(?m)^\[6\] ")
+
+    def test_without_rows_takes_out_whole_rows_and_lowers_the_count(self):
+        text = ("Search-index results for \"q\" (X)\n====\n\n"
+                "[1] A (score: 5)\n    desc a\n    URL: u1\n\n"
+                "[2] B (score: 2)\n    desc b\n\n"
+                "[3] C (score: 1)\n\n"
+                "(3 results, 9 documents searched)\n\nNext: x search -- \"<query>\"\n")
+        self.assertEqual(
+            self.without_rows(text, ("[2] B (score: 2)",)),
+            text.replace("[2] B (score: 2)\n    desc b\n\n", "").replace("(3 results", "(2 results"))
+        self.assertEqual(
+            self.without_rows(text, ("[1] A (score: 5)", "[3] C (score: 1)")),
+            text.replace("[1] A (score: 5)\n    desc a\n    URL: u1\n\n", "")
+                .replace("[3] C (score: 1)\n\n", "").replace("(3 results", "(1 results"))
+        for rows in (("[4] D (score: 1)",), ("    desc a",)):
+            with self.subTest(rows=rows), self.assertRaises(ValueError):
+                without_rows(text, rows)
+        with self.assertRaises(ValueError):
+            without_rows(text.replace("(3 results, 9 documents searched)\n", ""), ("[3] C (score: 1)",))
+        # a row that does not end with a blank line is not a whole row
+        with self.assertRaises(ValueError):
+            without_rows("[1] A (score: 5)\n    desc a", ("[1] A (score: 5)",))
+        with self.assertRaises(ValueError):
+            without_rows("[1] A (score: 5)\n    desc a\nNext: x\n\n(1 results, 2 documents searched)\n",
+                         ("[1] A (score: 5)",))
 
     def test_intended_differences_open_the_page_the_old_script_named(self):
         self.assertFalse(GENERIC_PARITY_EXPECTED & set(GENERIC_INTENDED_DIFF))

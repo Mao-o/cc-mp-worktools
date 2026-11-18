@@ -2011,12 +2011,14 @@ def _fetch_index_from_index(args, profile: dict) -> None:
     else:
         print(f"({len(entries)} documents total, {len(lines)} entries shown — {grouped} documents grouped)")
     print()
+    # a placeholder the reader replaces, maybe with a ref that starts with
+    # "-": the ref goes after "--", the options before it
     if joined:
-        next_hint("sections", "<page_ref>", *(_source_hint_args(args) + corpus_hint_args(args)))
+        next_hint("sections", *(_source_hint_args(args) + corpus_hint_args(args)), "--", "<page_ref>")
         if args.file is None and not fetch:
             print("  (llms-full.txt will be fetched automatically on first use)")
     else:
-        next_hint("sections", "<slug>", *(_source_hint_args(args) + corpus_hint_args(args)))
+        next_hint("sections", *(_source_hint_args(args) + corpus_hint_args(args)), "--", "<slug>")
         if args.file is not None:
             print(f"  ({_FILE_SLUG_REF_NOTE})")
         else:
@@ -2853,7 +2855,9 @@ def cmd_fetch_index(args):
     else:
         print(f"({len(docs)} documents total)")
     print()
-    next_hint("sections", "<page_ref>", *(_source_hint_args(args) + corpus_hint_args(args)))
+    # a placeholder the reader replaces, maybe with a ref that starts with
+    # "-": the ref goes after "--", the options before it
+    next_hint("sections", *(_source_hint_args(args) + corpus_hint_args(args)), "--", "<page_ref>")
 
 
 def _page_ref_retry(args):

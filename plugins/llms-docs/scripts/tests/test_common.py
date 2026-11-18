@@ -577,8 +577,11 @@ class NormalizationStemmingTest(unittest.TestCase):
     def test_mixed_case_acronym_is_not_treated_as_plural(self):
         # "iOS" is not the plural of "iO" — stripping its trailing "s" the
         # same way "Hooks" -> "Hook" is stripped turns it into "io", which
-        # then substring-matches any title/description merely containing
-        # that pair of letters (e.g. "Configuration", "Migrations").
+        # then matches any title/description merely containing that pair of
+        # letters where a word starts with it ("Ionic"; by substring until
+        # 0.55.0: "Configuration", "Migrations", which hold "io" only inside
+        # a word and so no longer need the guard to score 0).
+        self.assertEqual(_common.score_entry("Ionic", "", ["iOS"]), 0)
         self.assertEqual(_common.score_entry("Configuration", "", ["iOS"]), 0)
         self.assertEqual(_common.score_entry("Migrations", "", ["iOS"]), 0)
 
@@ -714,6 +717,138 @@ class ScoreEntryRegressionFloorTest(unittest.TestCase):
         for title, kw in [("Hooks", "hooks"), ("Skill", "skill"), ("Analysis", "analysis")]:
             with self.subTest(title=title):
                 self.assertGreaterEqual(_common.score_entry(title, "", [kw]), 10)
+
+
+# The AI SDK page that a "citations" query put first (ai-sdk llms-full.txt,
+# 2026-11-03): every field holds "citation" only inside "elicitation".
+_ELICITATION = ("Model Context Protocol (MCP) Elicitation",
+                "Learn how to handle elicitation requests from MCP servers with the AI SDK")
+_ELICITATION_EXTRAS = {"tags": ["node", "mcp", "elicitation"],
+                       "headings": ["Elicitation Response Actions"]}
+
+
+class ScoreEntryWordStartTest(unittest.TestCase):
+    """A keyword scores in a field only where it starts a word or a part of
+    one (after ``-`` / ``_``, at a camelCase step), with the rest of the
+    word free; inside a word it scores nothing (0.55.0). Before, any
+    substring scored: ``citations`` put "MCP Elicitation" (12) above the
+    pages with a "Citations" heading (1). The comments give the old score."""
+
+    def score(self, title, description, keywords, **extras):
+        try:
+            return _common.score_entry(title, description, keywords, **extras)
+        except Exception as e:  # noqa: BLE001  (a crash is a failure, not an error)
+            self.fail(f"score_entry raised {e!r}")
+
+    def assert_scores(self, cases):
+        for title, desc, kws, extras, want in cases:
+            with self.subTest(title=title, desc=desc, keywords=kws, extras=extras):
+                self.assertEqual(self.score(title, desc, kws, **extras), want)
+
+    def test_inside_a_word_scores_nothing(self):
+        self.assert_scores([
+            (*_ELICITATION, ["citations"], _ELICITATION_EXTRAS, 0),                  # 12
+            ("x", "", ["citation"], {"tags": ["elicitation"]}, 0),                   # 4
+            ("Fireworks", "", ["works"], {}, 0),                                     # 5
+            ("Webhooks", "", ["hooks"], {}, 0),                                      # 5
+            ("Overview", "", ["view"], {}, 0),                                       # 5
+            ("x", "Run sessions inside a sandbox VM", ["side"], {}, 0),              # 2
+            ("Send email", "", ["AI"], {}, 0),                                       # 5
+            ("AI_APICallError", "", ["pica"], {}, 0),                                # 5
+            ("x", "", ["lint"], {"headings_extra": ["Fill-in-the-middle Code Completion"]}, 0),  # 1
+            ("x", "", ["citations"], {"headings": ["Handling Elicitation Requests"]}, 0),  # 1
+            ("webhooksの設定", "", ["hooks"], {}, 0),                                # 5
+            # a digit is a word character: "client" is inside "oauth2client"
+            ("x", "Use oauth2client here", ["client"], {}, 0),                       # 2
+        ])
+
+    def test_two_keywords_lose_the_bonus_with_the_inside_match(self):
+        self.assert_scores([
+            (*_ELICITATION, ["MCP", "citations"], _ELICITATION_EXTRAS, 11),          # 33
+            ("Delete User Profile", "", ["delete", "file"], {}, 5),                  # 20
+        ])
+
+    def test_start_of_a_word_or_a_word_part_still_scores(self):
+        self.assert_scores([
+            # the start of a word, the rest free
+            ("Authentication", "", ["auth"], {}, 5),
+            ("Configuration", "", ["config"], {}, 5),
+            ("Snapshotting", "", ["snapshot"], {}, 5),
+            ("Model Context Protocol (MCP)", "", ["mcp"], {}, 5),
+            ("The /hooks command", "", ["/hooks"], {}, 5),
+            # camelCase steps: lower -> Upper, the last capital of a run
+            ("streamText", "", ["text"], {}, 5),
+            ("WebSockets", "", ["sockets"], {}, 5),
+            ("UIMessage", "", ["message"], {}, 5),
+            ("OAuth2Client", "", ["client"], {}, 5),
+            # a run of capitals that ends the word ("URL" has no lowercase after it)
+            ("parseURL", "", ["url"], {}, 5),
+            # after "-" / "_", also across a camelCase step after it
+            ("@ai-sdk/react", "", ["sdk"], {}, 5),
+            ("AI_APICallError", "", ["apicallerror"], {}, 5),
+            ("AI_APICallError", "", ["callerror"], {}, 5),
+            ("experimental_listBatches", "", ["listb"], {}, 5),
+            # each field reads its own word parts
+            ("x", "", ["core"], {"tags": ["ai-sdk-core"]}, 4),
+            # a tag is normalized word by word, as the title is (before, as
+            # one token: "libraries api" did not hold "library")
+            ("x", "", ["library"], {"tags": ["Libraries API"]}, 4),               # 0
+            ("x", "Call the streamText function", ["text"], {}, 2),
+            ("x", "", ["message"], {"headings": ["UIMessage types"]}, 1),
+            ("x", "", ["calls"], {"headings_extra": ["toolCalls"]}, 1),
+            ("x", "", ["citations"], {"headings_extra": ["Citations"]}, 1),
+            ("x", "", ["install"], {"headings_extra": ["Installation Control"]}, 1),
+        ])
+
+    def test_a_later_occurrence_at_a_word_start_counts(self):
+        # the first "ai" is inside "Detail"; the word "AI" ends the title
+        self.assert_scores([("Detail AI", "", ["ai"], {}, 5)])
+
+    def test_a_character_that_lowercases_to_two_keeps_the_parts_after_it(self):
+        # "İ" lowercases to "i" + U+0307: the "M" step is one further on
+        self.assert_scores([("İnputMessage", "", ["message"], {}, 5)])
+
+    def test_non_ascii_text_matches_as_before(self):
+        # the word characters are ASCII [a-z0-9] only: a keyword next to
+        # Japanese (no spaces between words) still matches, and a keyword
+        # that starts with a non-word character matches as a substring
+        self.assert_scores([
+            ("フックの設定", "", ["設定"], {}, 5),
+            ("Claude Codeのフック", "", ["フック"], {}, 5),
+            ("Claude Codeでhooksを使う", "", ["hooks"], {}, 5),
+            ("権限の設定", "パーミッションを設定する", ["設定", "権限"], {}, 22),
+            ("Claude Code設定", "", ["設定"], {}, 5),
+        ])
+
+    def test_accepted_losses(self):
+        # the back part of a closed lowercase compound and a word with a
+        # prefix cannot be told from "eli|citation" by the rule
+        self.assert_scores([
+            ("Create custom subagents", "", ["agents"], {}, 0),                      # 5
+            ("Uninstall", "", ["install"], {}, 0),                                   # 5
+        ])
+
+    def test_word_part_starts(self):
+        for text, want in [
+            ("streamText", {6}),
+            ("UIMessage", {2}),
+            ("ai-sdk-core", {2, 5}),
+            ("AI_APICallError", {2, 5, 9}),
+            ("XMLHttpRequest", {3, 7}),
+            ("parseURL", {5}),
+            ("MCP", set()),
+            ("the useChat hook", {7}),
+            ("Fireworks", set()),
+            ("-lead trail-", set()),
+            # a step past what the plural fold left of the word is not one
+            ("foo-s", set()),
+        ]:
+            with self.subTest(text=text):
+                try:
+                    got = _common._word_part_starts(text)
+                except Exception as e:  # noqa: BLE001  (a crash is a failure, not an error)
+                    self.fail(f"_word_part_starts raised {e!r}")
+                self.assertEqual(got, frozenset(want))
 
 
 class FormatHeadingPathForDisplayTest(unittest.TestCase):

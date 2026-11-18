@@ -213,8 +213,8 @@ class FirebaseTestsOnGenericLoader(_FetchSource):
         self.seed(_index(("Auth Overview", AUTH, "Overview of auth")))
         code, out, err = self.run_g("fetch-index")
         self.assertEqual(code, 0, err)
-        self.assertIn(f"Next: {SCRIPT} sections <page_ref> --source firebase "
-                      f"--sources-file {self.sources} --cache-dir {self.tmp}\n", out)
+        self.assertIn(f"Next: {SCRIPT} sections --source firebase "
+                      f"--sources-file {self.sources} --cache-dir {self.tmp} -- <page_ref>\n", out)
 
     # SectionUrlAnchorIntegrationTest
     def _one_page(self, body: str):
