@@ -70,6 +70,19 @@ SOURCES = {
     # Vercel's shape: a long rule around the frontmatter, the page URL under ``source``
     "fm-vercel": {"url": FULL_URL, "split": "frontmatter", "frontmatter_delimiter": "-" * 80,
                   "page_url": "frontmatter:source"},
+    # Render's shape: the full text under /docs/, pages with no URL of their own
+    # (the index gives them one by title)
+    "render-like": {"url": "https://render.com/docs/llms-full.txt", "split": "h1",
+                    "index_url": "https://render.com/docs/llms.txt"},
+    # the full text under /docs/, the index a site-wide llms.txt at the root
+    "docs-dir": {"url": "https://example.com/docs/llms-full.txt", "split": "frontmatter",
+                 "page_url": "frontmatter:url", "index_url": "https://example.com/llms.txt"},
+    # a full text on a mirror: no entry of its index is under its directory
+    "mirror": {"url": "https://mirror.example/llms-full.txt", "split": "frontmatter",
+               "page_url": "frontmatter:url", "index_url": "https://mirror.example/llms.txt"},
+    # a url whose host urlsplit rejects (it passes the profile check, and --file reads no network)
+    "bad-host": {"url": "https://[docs/llms-full.txt", "split": "frontmatter",
+                 "page_url": "frontmatter:url", "index_url": "https://example.com/llms.txt"},
 }
 
 
@@ -147,7 +160,9 @@ class JoinedFencesFileTest(_Case):
                                      corpus=self.files(self.FULL, index_for(474)))
         self.assertEqual(code, 0, err)
         self.assertEqual(len(self.warnings(err, "never closes")), 1, err)
-        self.assertIn("split into 9 pages, but its llms.txt lists 474", self.warning(err, "split into"))
+        # the count is of the URLs under the directory of the profile's url
+        self.assertIn("split into 9 pages, but its llms.txt lists 474 under https://example.com/. The file may",
+                      self.warning(err, "split into"))
 
     def test_the_same_pages_with_their_fences_whole_say_nothing(self):
         full = self.FULL.replace("```## Next heading", "```\n\n## Next heading")
@@ -198,6 +213,162 @@ class UnclosedFenceTest(_Case):
         code, _out, err = self.run_g("auto", "sections", "0", corpus=self.files(won_h1))
         self.assertEqual(code, 0, err)
         self.assertEqual(self.warnings(err, "never closes"), [], err)
+
+
+# Cut from render.com/docs/llms.txt (2026-11-18), lines as written: under /docs/
+# a topic bundle, some docs pages and quickstarts (which its llms-full.txt leaves
+# out); outside it the changelog, the blog and articles; and list items with a
+# bare URL, which are no entries. The whole file has 225 page URLs under /docs/
+# and 186 outside it, for 137 pages, which said the file was broken on every read.
+RENDER_INDEX = """\
+# Render
+
+Render (https://render.com) is a cloud application platform for deploying, securing, and scaling applications, from hundred-line prototypes to complex multi-service architectures.
+
+## Start here
+
+Route according to your task:
+
+- To retrieve documentation for a single topic, use the Documentation index below, search https://render.com/api/agent/docs-search?query={query}, or fetch the relevant page as Markdown from https://render.com/docs/{slug}.md.
+
+## Agent interfaces
+
+- MCP server documentation: https://render.com/docs/mcp-server.md
+- Render REST API reference material: https://api-docs.render.com/llms.txt
+
+## Documentation
+
+For the complete documentation corpus, use https://render.com/llms-full.txt only when the task requires broad access to the full Render documentation set.
+
+For complete documentation on a single topic, use a topic bundle:
+
+- [Render Sandboxes — all articles](https://render.com/docs/sandboxes/all)
+
+### Core Platform
+
+#### Start
+
+- [Your First Render Deploy](https://render.com/docs/your-first-deploy.md): Run your web app in minutes.
+- [Deploy for Free](https://render.com/docs/free.md): Preview the Render platform with free web services and datastores.
+- [Platform Features by Plan](https://render.com/docs/platform-features-by-plan.md): Enable powerful platform capabilities with a Pro, Scale, or Enterprise plan.
+- [Using Render with Coding Agents](https://render.com/docs/llm-support.md): Deploy and manage apps using LLM-powered tools.
+- [Render FAQ](https://render.com/docs/faq.md)
+
+#### Compute
+
+- [Render Compute Plans](https://render.com/docs/compute-plans.md): Specify your service's available CPU and RAM.
+
+### Quickstarts
+
+- [Deploy Ackee](https://render.com/docs/deploy-ackee.md)
+- [Deploy an Actix Web App](https://render.com/docs/deploy-actix-todo.md)
+- [Deploy Adminer on Render](https://render.com/docs/deploy-adminer.md)
+- [Deploy Astro on Render](https://render.com/docs/deploy-astro.md): Host your site for free in minutes.
+
+## Changelog
+
+https://render.com/changelog.md
+
+Most recent 10 entries:
+
+- [Render Sandboxes now available in beta](https://render.com/changelog/render-sandboxes-now-available-in-beta.md)
+- [Reuse a build across multiple services](https://render.com/changelog/reuse-a-build-across-multiple-services.md)
+
+## Blog
+
+https://render.com/blog
+
+Most recent 10 posts:
+
+- [How we built Render OIDC](https://render.com/blog/how-we-built-render-oidc.md)
+- [Introducing Render Sandboxes: A computer for every agent](https://render.com/blog/introducing-render-sandboxes.md)
+
+## Articles
+
+https://render.com/articles
+
+- [Render vs DigitalOcean App Platform: Web App Hosting Comparison](https://render.com/articles/render-vs-digitalocean-app-platform.md)
+- [Render Hobby vs Pro vs Scale: Which Plan Do You Need?](https://render.com/articles/render-hobby-vs-pro-vs-scale.md)
+- [Deploy Directus on Render: A Practical Guide](https://render.com/articles/deploy-directus-render.md)
+- [How Much Does It Cost to Host a SaaS Application?](https://render.com/articles/saas-hosting-cost.md)
+- [How Much Does It Cost to Host a FastAPI App?](https://render.com/articles/fastapi-hosting-cost.md)
+- [How to migrate a production app to a new hosting platform](https://render.com/articles/how-to-migrate-a-production-app-to-a-new-hosting-platform.md)
+- [Render Sandboxes vs Vercel Sandboxes](https://render.com/articles/render-sandboxes-vs-vercel-sandboxes.md)
+- [Set up self-hosted GitHub Actions runners on Render](https://render.com/articles/set-up-self-hosted-github-actions-runners-on-render.md)
+- [SSE vs WebSockets for Streaming Responses](https://render.com/articles/sse-vs-websockets-llm-streaming.md)
+- [Managed PostgreSQL Pricing in 2026: Compute, Storage, Backups, and Egress](https://render.com/articles/managed-postgresql-pricing-2026.md)
+- [Render Workflows vs Inngest: durable compute vs durable orchestration](https://render.com/articles/render-workflows-vs-inngest.md)
+- [Render Workflows vs Trigger.dev: durable steps vs checkpointed tasks](https://render.com/articles/render-workflows-vs-trigger.md)
+- [Render Workflows vs Temporal: managed compute vs your own workers](https://render.com/articles/render-workflows-vs-temporal.md)
+- [Best durable workflow platforms for AI agents and LLM workloads](https://render.com/articles/best-durable-workflow-platforms-for-ai-agents-and-llm-workloads.md)
+
+## Metadata
+
+### Scope of public content
+
+- https://render.com/docs
+- https://render.com/blog
+- https://render.com/changelog
+- https://render.com/articles
+"""
+
+# The pages of render.com/docs/llms-full.txt (2026-11-18) that the cut above
+# lists, opening lines as written: H1 pages with no URL, and an H1 in a code block
+RENDER_FULL = """\
+Generated on: 2026-11-18
+Obtain latest version from: https://render.com/llms-full.txt
+REST API llms reference: https://api-docs.render.com/llms.txt
+
+Render (https://render.com) is a powerful, flexible cloud application platform that helps teams deploy, secure, and scale everything from hundred-line prototypes to complex multi-service architectures.
+
+- Links use absolute URLs. Fragments refer to headings in the original source article.
+- Each h1 designates a new page.
+
+# Glossary
+
+The following terms are used throughout the Render docs:
+
+###### service type
+
+When you deploy code on Render, you select a *service type* based on the capabilities you need.
+
+# Your First Render Deploy
+
+Welcome! Let's get up and running on Render.
+
+## Consider infrastructure as code (IaC)
+
+```yaml
+# This is a basic example Blueprint for a Django web service and
+# the Render Postgres database it connects to.
+services:
+  - type: web # A Python web service named django-app running on a free instance
+    plan: free
+```
+
+# Deploy for Free
+
+zzq free.
+
+# Platform Features by Plan
+
+zzq plans.
+
+# Using Render with Coding Agents
+
+zzq agents.
+
+# Render FAQ
+
+zzq faq.
+
+# Render Compute Plans
+
+zzq compute.
+"""
+
+RENDER_TITLES = ["Glossary", "Your First Render Deploy", "Deploy for Free", "Platform Features by Plan",
+                 "Using Render with Coding Agents", "Render FAQ", "Render Compute Plans"]
 
 
 class FewPagesThanTheIndexTest(_Case):
@@ -289,6 +460,165 @@ class FewPagesThanTheIndexTest(_Case):
         code, _out, err = self.run_g("url-join", "search", "page", corpus=corpus)
         self.assertEqual(code, 1)
         self.assertIn("does not exist", err)
+
+    def compared(self, source: str, index: str) -> tuple:
+        try:
+            return generic._compared_index_urls(self.profile(source), index.splitlines(keepends=True))
+        except Exception as e:  # a crash fails the assertions, not the run
+            self.fail(f"_compared_index_urls crashed: {e!r}")
+
+    def test_an_index_that_lists_more_of_the_site_than_the_full_text(self):
+        """Render's llms.txt lists articles, a blog and a changelog next to the
+        docs, and its llms-full.txt is the docs: the pages are compared with
+        the URLs under the directory of the profile's url (/docs/) only."""
+        try:
+            docs = generic.split_documents(RENDER_FULL.splitlines(keepends=True), self.profile("render-like"))
+        except Exception as e:  # a crash fails the assertions, not the run
+            self.fail(f"the split crashed: {e!r}")
+        self.assertEqual([d["title"] for d in docs], RENDER_TITLES)
+        entries = {generic.normalize_doc_url(e["url"]) for e in generic.parse_llms_index(RENDER_INDEX.splitlines())}
+        self.assertEqual(len(entries), 29, sorted(entries))
+        listed, directory = self.compared("render-like", RENDER_INDEX)
+        self.assertEqual(directory, "https://render.com/docs/")
+        self.assertEqual(len(listed), 11, sorted(listed))
+        self.assertEqual({u for u in entries if u.startswith("https://render.com/docs/")}, listed)
+        self.assertIn("https://render.com/docs/sandboxes/all", listed)
+        # 7 pages for 11 URLs: not "far fewer" (before the rule: 29, and every read warned)
+        self.stage("render-like", RENDER_FULL, RENDER_INDEX)
+        for what, corpus in (("cached", None), ("files", self.files(RENDER_FULL, RENDER_INDEX))):
+            for argv in (["fetch-index", "--compact"], ["sections", "0"], ["search", "zzq"]):
+                with self.subTest(what=what, argv=argv):
+                    code, _out, err = self.run_g("render-like", *argv, corpus=corpus)
+                    self.assertEqual(code, 0, err)
+                    self.assertEqual(err, "")
+
+    def test_a_cut_copy_of_such_a_file_is_still_said(self):
+        cut = RENDER_FULL[:RENDER_FULL.index("# Render FAQ")]
+        self.assertEqual(len(generic.split_documents(cut.splitlines(keepends=True), self.profile("render-like"))), 5)
+        code, _out, err = self.run_g("render-like", "sections", "0", corpus=self.files(cut, RENDER_INDEX))
+        self.assertEqual(code, 0, err)
+        found = self.warning(err, "split into")
+        self.assertIn("split into 5 pages, but its llms.txt lists 11 under https://render.com/docs/. The file may be "
+                      "broken upstream", found)
+        # the count can be redone from what the line says: the entries under the
+        # directory it names (a URL that is the directory itself included)
+        m = re.search(r"lists (\d+) under (\S+)\. ", found)
+        self.assertIsNotNone(m, found)
+        count, named = int(m.group(1)), m.group(2)
+        entries = {generic.normalize_doc_url(e["url"]) for e in generic.parse_llms_index(RENDER_INDEX.splitlines())}
+        self.assertEqual(count, len({u for u in entries if u.startswith(named) or u + "/" == named}))
+
+    def test_the_bundled_render_preset_counts_only_its_docs(self):
+        """The fix stands on the bundled preset's url being under /docs/. Render
+        serves the same two files at the site root too, and the files name the
+        root as their home (2026-11-18): a url moved there would count the whole
+        site again, and every read would warn as before 0.57.1."""
+        try:
+            profile = generic._read_sources_file(generic.PRESETS_FILE)["render"]
+            listed, directory = generic._compared_index_urls(profile, RENDER_INDEX.splitlines(keepends=True))
+        except Exception as e:  # a crash fails the assertions, not the run
+            self.fail(f"comparing with the bundled render preset crashed: {e!r}")
+        self.assertEqual((directory, len(listed)), ("https://render.com/docs/", 11))
+
+    def test_the_ratio_counts_the_urls_under_the_directory_of_url(self):
+        """The boundary of test_the_ratio_boundary with 100 more entries outside
+        the directory of the profile's url (``/docs/``). The index is the
+        site-wide llms.txt at the root: its own directory is not the one."""
+        full = "".join(page(k) for k in range(5))
+        outside = "".join(f"- [Post {k}](https://example.com/blog/post-{k}): post {k}\n" for k in range(100))
+        for listed, warned in ((10, False), (11, True)):
+            with self.subTest(listed=listed):
+                code, _out, err = self.run_g("docs-dir", "sections", "0",
+                                             corpus=self.files(full, index_for(listed) + outside))
+                self.assertEqual(code, 0, err)
+                found = self.warnings(err, "split into")
+                self.assertEqual(len(found), int(warned), err)
+                if warned:
+                    self.assertIn(f"split into 5 pages, but its llms.txt lists {listed} under "
+                                  "https://example.com/docs/. The file may", found[0])
+
+    def test_what_is_under_the_directory(self):
+        """The host is compared ignoring case, the path as written; the
+        directory itself is under it, a sibling sharing its prefix is not."""
+        anchor = "https://example.com/docs/anchor"
+        cases = {
+            "https://example.com/docs/a": True,
+            "https://example.com/docs/a/b.md": True,
+            "https://example.com/docs/-beta": True,
+            "https://example.com/docs/\\_x": True,
+            "https://example.com/docs/!": True,
+            "https://example.com/docs": True,
+            "https://example.com/docs/": True,
+            "https://example.com/docs.md": True,
+            "https://example.com/docs?lang=en": True,
+            "https://example.com/docs#top": True,
+            "https://EXAMPLE.com/docs/a": True,
+            "https://example.com/docsearch/a": False,
+            "https://example.com/doc/a": False,
+            "https://example.com/Docs/a": False,
+            "https://example.com/": False,
+            "https://example.com": False,
+            "https://example.com/blog/a": False,
+            "http://example.com/docs/a": False,
+            "https://other.example/docs/a": False,
+            "https://docs.example.com/docs/a": False,
+            "https://example.com:8443/docs/a": False,
+        }
+        for url, under in cases.items():
+            with self.subTest(url=url):
+                listed, directory = self.compared("docs-dir", f"- [Anchor]({anchor})\n- [Case]({url})\n")
+                self.assertEqual(directory, "https://example.com/docs/")
+                self.assertIn(anchor, listed)
+                self.assertEqual(len(listed), 1 + under, sorted(listed))
+                self.assertEqual(generic.normalize_doc_url(url) in listed, under, sorted(listed))
+
+    def test_the_directory_of_the_url(self):
+        for url, directory in (("https://render.com/docs/llms-full.txt", "https://render.com/docs/"),
+                               ("https://zod.dev/llms-full.txt", "https://zod.dev/"),
+                               ("https://developers.openai.com/api/docs/llms-full.txt",
+                                "https://developers.openai.com/api/docs/"),
+                               ("https://example.com/docs/", "https://example.com/docs/"),
+                               ("https://example.com", "https://example.com/"),
+                               ("https://example.com/docs/llms-full.txt?v=a/b#c/d", "https://example.com/docs/")):
+            with self.subTest(url=url):
+                try:
+                    got = generic._url_directory(url)
+                except Exception as e:  # a crash fails the assertions, not the run
+                    self.fail(f"{url}: {e!r}")
+                self.assertEqual(got, directory)
+
+    def test_an_index_with_nothing_under_the_directory_is_counted_whole(self):
+        """A full text on a mirror: no entry is under its directory, so every
+        entry counts (as before the directory rule) and the line names no
+        directory. Counting none would leave the check unable to fire."""
+        listed, directory = self.compared("mirror", index_for(10))
+        self.assertEqual((len(listed), directory), (10, None))
+        full = "".join(page(k) for k in range(2))
+        code, _out, err = self.run_g("mirror", "sections", "0", corpus=self.files(full, index_for(10)))
+        self.assertEqual(code, 0, err)
+        self.assertIn("split into 2 pages, but its llms.txt lists 10. The file may be broken upstream",
+                      self.warning(err, "split into"))
+        code, _out, err = self.run_g("mirror", "sections", "0", corpus=self.files(full, index_for(4)))
+        self.assertEqual((code, err), (0, ""))
+
+    def test_an_entry_whose_host_urlsplit_rejects_is_not_under_it(self):
+        """urlsplit raises on a bracketed host that is not an IPv6 address (a
+        placeholder such as ``[service-name]``) and on an unbalanced bracket:
+        such an entry is not under the directory, and no command stops on it."""
+        bad = ("- [Your service](https://[service-name].onrender.com/healthz): where it answers\n"
+               "- [Broken](https://[render.com/docs/broken): a typo\n")
+        listed, directory = self.compared("render-like", RENDER_INDEX + bad)
+        self.assertEqual((directory, len(listed)), ("https://render.com/docs/", 11))
+        for argv in (["fetch-index", "--compact"], ["sections", "0"], ["search", "zzq"]):
+            with self.subTest(argv=argv):
+                code, _out, err = self.run_g("render-like", *argv, corpus=self.files(RENDER_FULL, RENDER_INDEX + bad))
+                self.assertEqual((code, err), (0, ""))
+        # the profile's own url: every entry counts, as with nothing under the directory
+        self.assertEqual(self.compared("bad-host", index_for(10)), (self.compared("mirror", index_for(10))[0], None))
+        full = "".join(page(k) for k in range(2))
+        code, _out, err = self.run_g("bad-host", "sections", "0", corpus=self.files(full, index_for(10)))
+        self.assertEqual(code, 0, err)
+        self.assertIn("split into 2 pages, but its llms.txt lists 10. The file may", self.warning(err, "split into"))
 
 
 class FrontmatterCutOffTest(_Case):

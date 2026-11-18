@@ -121,6 +121,9 @@ schema 付きで起動された agent (Workflow の `agent(prompt, {schema})` �
 - **ページの分割が怪しいとき**: `split: frontmatter` のファイルでコードブロックが閉じないまま終わる、frontmatter が
   先読みの上限 (400 行) までに閉じない、ページの頭がコードブロックの中にある、または手元に `llms.txt` があってページ数が
   その異なる URL 数の半分を下回るときは、stderr に WARNING を出す。分割の規則は変わらず、出力もそのまま続く。
+  `llms.txt` と比べるときに数えるのは、profile の `url` のディレクトリ (パスの最後の `/` まで。`https://render.com/docs/llms-full.txt`
+  なら `https://render.com/docs/`) の下の URL だけ (`llms.txt` が docs の外の記事やブログも並べるサイトがあるため)。1 件も無ければ
+  すべてを数える。WARNING の行は、数えたディレクトリを `lists 225 under https://render.com/docs/` のように添える。
   ページの頭は、`split: frontmatter` / `split: h1` では `page_url` の規則でページの URL まで揃う frontmatter か H1、
   `split: line` では区切りの行。コードブロックの中にあると前のページの一部になる (入れ子のフェンスの見本でブロックが
   閉じ損ねたときなど)。その件数と、最初の 1 件の行、それを含むブロックが開いた行を出す。`page_url` の無い
@@ -418,7 +421,7 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `url_prefix` | | ページ URL が相対のときに、そのまま前につなぐ文字列 (`https://kilo.ai/docs` + `/automate`)。`url_base` とは一緒に書けない |
 | `drop_lines` | | 本文から除く行の正規表現のリスト (行頭から照合したいときは `^` を付ける)。全ページに付く定型行 (「Skip to content」など) が検索に当たらないようにする。コードブロック内の行は除かない。ページ URL は除く前に読む |
 | `skip_empty` | | `true` で、本文が空 (空行と水平線だけ) のページを捨てる (Hono の `# Start of Hono documentation`、Codex のカテゴリ見出しのような見出しだけの行) |
-| `index_url` | | `url` の `llms-full.txt` と同じ範囲の `llms.txt` (他の `llms.txt` へのリンク集になっている 2 段の索引は指さない。下の「対象外」)。URL を持たないページに、タイトルが完全に一致する (大文字小文字・空白・`*_` の記号は無視) 項目の URL を付ける。同じタイトルの項目が 2 つ以上あるページ (ただし `?` か `#` を含む項目 (節への `?id=…` / `#…` など) を除いて、ページの項目がちょうど 1 つならそれを使う。Zod の `Codecs` はこの形)、同じタイトルのページが 2 つ以上あるとき (Zod はサイト冒頭と `packages/zod` のページがどちらも `Zod`)、近いだけのタイトル (`Basic Auth` と `Basic Auth Middleware`) には付けない (誤った URL は URL が無いより悪いため)。`llms.txt` は絶対 URL の項目だけを読み、`llms.txt` や `llms-<名前>.txt` (`llms-full.txt` / `llms-small.txt` など) を指す項目はページではないので除く。取得に失敗しても警告だけで本文は読める |
+| `index_url` | | `url` の `llms-full.txt` のページを並べる `llms.txt` (docs の一部の節しか並べない索引 (Next.js の `/docs/llms.txt` は Pages Router を `/docs/pages/llms.txt` に分ける) と、他の `llms.txt` へのリンク集になっている 2 段の索引は指さない。下の「対象外」。docs の外の節 (Render の記事・ブログ・変更履歴など) も並べる索引と、1 つの言語のページだけを並べる索引 (PixAI。ほかの言語のページには URL が付かない) は使える。ページ数と比べる警告 (上の「ページの分割が怪しいとき」) は `url` のディレクトリの下の URL だけを数える)。URL を持たないページに、タイトルが完全に一致する (大文字小文字・空白・`*_` の記号は無視) 項目の URL を付ける。同じタイトルの項目が 2 つ以上あるページ (ただし `?` か `#` を含む項目 (節への `?id=…` / `#…` など) を除いて、ページの項目がちょうど 1 つならそれを使う。Zod の `Codecs` はこの形)、同じタイトルのページが 2 つ以上あるとき (Zod はサイト冒頭と `packages/zod` のページがどちらも `Zod`)、近いだけのタイトル (`Basic Auth` と `Basic Auth Middleware`) には付けない (誤った URL は URL が無いより悪いため)。`llms.txt` は絶対 URL の項目だけを読み、`llms.txt` や `llms-<名前>.txt` (`llms-full.txt` / `llms-small.txt` など) を指す項目はページではないので除く。取得に失敗しても警告だけで本文は読める |
 | `join_rate_guard` | | `true` で、`index_url` の `llms.txt` の項目のうち、ページ自身の URL (`page_url` で読んだもの。タイトルの突き合わせで付けた URL は数えない) と一致するものの割合を見る (`.md`・クエリ・`#…`・末尾の `/` は無視)。50% 未満なら終了コード 2 で止め、80% 未満なら stderr に WARNING を出す。区切り方が合っていない profile (frontmatter 形式のファイルを `split: h1` で読むなど) ではページに URL が無く、ここで止まる。`index_url` と `page_url` が要る。`llms.txt` を読めない (取得に失敗した) とき、または絶対 URL のページ項目が 0 件 (相対リンクだけなど) のときは見ない (stderr に WARNING を出し、止めない)。`--file` で `--index-file` を渡さないときは `llms.txt` を読まないので見ない |
 | `h1_needs_url` | | `split: h1` で `true` のとき、`page_url` (`h1-link` / `line:` / `link:`) の URL が見つからない H1 をページの区切りにせず、前のページの見出しとして残す (ページ本文の中で H1 を使うサイト向け) |
 | `strip_trailing_headings` | | `true` で、ページ末尾に本文の無いまま並ぶ見出し行 (ページ間に置かれたナビの見出し `## Messages` など) を除く。`drop_lines` の後に適用する。コードブロックの状態は見ない |
@@ -485,7 +488,7 @@ source 名は `^[a-z0-9][a-z0-9-]*$` (キャッシュのファイル名になる
 ページに付くことはないが、`url` の `llms-full.txt` に含まれない別の docs のページ (学習トラックなど) の項目が、ページと
 タイトルを共有すると、その項目の URL が付く (OpenAI のルートの `llms.txt` を書いたとき、API ガイドの
 `Model optimization` に学習トラックのページの URL が付いた)。タイトルだけでは区別できないため防げない。`index_url` には、
-`url` の `llms-full.txt` と同じ範囲の `llms.txt` (製品別の `/<製品>/llms.txt` など) を書く。
+`url` の `llms-full.txt` のページを並べる `llms.txt` (製品別の `/<製品>/llms.txt` など) を書く。
 
 ## 既知の制約
 
