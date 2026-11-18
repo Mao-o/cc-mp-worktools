@@ -473,7 +473,7 @@ source 名は `^[a-z0-9][a-z0-9-]*$` (キャッシュのファイル名になる
 | frontmatter (`title:` / `description:`) で区切り URL なし | `split: frontmatter` (既定の `frontmatter_key: title`) | Agent Plugins |
 | H1 全体が `[タイトル](<url>)` | `split: h1` + `page_url: h1-link` + `h1_needs_url` | Gemini CLI |
 | `## Source: /<path>` 行で区切り、パスがサイトの下の階層 | `split: line` + `line_prefix` + `url_prefix` | Kilo Code |
-| `llms-full.txt` が無く、`llms.txt` が全ページを並べ、サイトへの負荷を抑えたい | 上の `body: fetch` に `page_fetch_workers: 1` + `search_content_needs_page_ref` | Zed / Amp |
+| `llms-full.txt` が無く、`llms.txt` が全ページを並べ、サイトへの負荷を抑えたい | 上の `body: fetch` に `page_fetch_workers: 1` + `respect_robots` + `search_content_needs_page_ref` | Zed / Amp |
 | H1 で区切り URL なし、本文の見出しが `#` の無い `見出し [#id]` の行 | `split: h1` + `index_url` + `heading_line_pattern` | PixAI |
 
 対象外: `llms.txt` が別の `llms.txt` へのリンク集になっている 2 段 index (Cloudflare のルート

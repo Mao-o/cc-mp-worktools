@@ -67,6 +67,9 @@ SOURCES = {
     "h1-link": {"url": FULL_URL, "split": "h1", "page_url": "h1-link"},
     "h1-no-url": {"url": FULL_URL, "split": "h1"},
     "line": {"url": FULL_URL, "split": "line", "line_prefix": "Source: "},
+    # Vercel's shape: a long rule around the frontmatter, the page URL under ``source``
+    "fm-vercel": {"url": FULL_URL, "split": "frontmatter", "frontmatter_delimiter": "-" * 80,
+                  "page_url": "frontmatter:source"},
 }
 
 
@@ -459,6 +462,15 @@ def link_page(k, *body) -> str:
                       "", f"zzq body {k}.", "", *body, ""])
 
 
+def vercel_page(k, *body) -> str:
+    """A page of Vercel's shape (the frontmatter of vercel.com/docs/llms-full.txt, 2026-10-22):
+    an 80-character rule around it, quoted values, the URL under ``source``."""
+    rule = "-" * 80
+    return "\n".join([rule, f'title: "Page {k}"', f'description: "Welcome to page {k}."',
+                      'last_updated: "2026-10-21T19:33:30.737Z"', f'source: "https://example.com/docs/p{k}"', rule,
+                      "", f"# Page {k}", "", f"zzq body {k}.", "", *body, ""])
+
+
 class InsideCodePagesTest(_Case):
     """A page that begins inside a code block (one a nested fence example or a
     fence with no closer left open, until a later block of the file closes
@@ -554,6 +566,17 @@ class InsideCodePagesTest(_Case):
         code, _out, err = self.run_g("no-index", "sections", "0", corpus=self.files(full))
         self.assertEqual((code, err), (0, ""))
 
+    def test_a_long_rule_and_another_url_key(self):
+        """Vercel's shape: inside a code block too, a frontmatter block is the
+        profile's ``frontmatter_delimiter`` (not ``---``) and its URL is under
+        the key the profile's ``page_url`` names (not ``url``)."""
+        full = vercel_page(0) + vercel_page(1, *NESTED_SAMPLE) + vercel_page(2) + vercel_page(3, "```ts", "x", "```")
+        lines = full.splitlines()
+        self.assertEqual(self.titles("fm-vercel", full), ["Page 0", "Page 1"])
+        code, _out, err = self.run_g("fm-vercel", "sections", "0", corpus=self.files(full))
+        self.assertEqual(code, 0, err)
+        self.assert_said(err, 2, lines.index('title: "Page 2"'), lines.index("console.log('hello')") + 3)
+
     def test_no_page_url_rule_counts_nothing(self):
         full = page(0) + page(1, *NESTED_SAMPLE) + page(2) + page(3, "```ts", "x", "```")
         self.assertEqual(self.titles("fm-no-url", full), ["Page 0", "Page 1"])
@@ -576,9 +599,16 @@ class InsideCodePagesTest(_Case):
     def test_a_block_that_closes_the_code_block_has_its_link_outside_it(self):
         """An indented fence line in the frontmatter (a continuation line to
         YAML) closes the code block, as the splitter reads it: the link after
-        the frontmatter is no longer in the block."""
+        the frontmatter is no longer in the block, nor is one in a block that
+        opens right after it."""
         link = "[View as Markdown](https://example.com/docs/example/index.md)"
         full = link_page(0, "```md", "---", "title: Example", "note: |", "  ```", "---", "", link) + link_page(1)
+        self.assertEqual(self.titles("fm-link", full), ["Page 0", "Page 1"])
+        code, _out, err = self.run_g("fm-link", "sections", "0", corpus=self.files(full))
+        self.assertEqual((code, err), (0, ""))
+        # a new block right after the frontmatter holds a link: not the block the example was in
+        full = link_page(0, "```md", "---", "title: Example", "note: |", "  ```", "---", "```bash", link,
+                         "```") + link_page(1)
         self.assertEqual(self.titles("fm-link", full), ["Page 0", "Page 1"])
         code, _out, err = self.run_g("fm-link", "sections", "0", corpus=self.files(full))
         self.assertEqual((code, err), (0, ""))

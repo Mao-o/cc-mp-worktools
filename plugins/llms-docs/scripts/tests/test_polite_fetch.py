@@ -77,6 +77,11 @@ class LooksLikeHtmlTest(unittest.TestCase):
             b"\r\n" * 600 + b"<!doctype html>": True,
             b"<!-- " + b"x" * 3600 + b" -->\n<!doctype html>": True,
             b"<!DOCTYPEhtml>": True,
+            # white space is ASCII's (form feed and vertical tab too): before the document, in the
+            # doctype, after the tag's name
+            b"\f\v<!doctype html>": True,
+            b"<!DOCTYPE\n  html>": True,
+            b"<html\n  lang=\"en\">": True,
             # a page that leaves <html> out, in either case
             b"<head>\n<title>404</title></head><body>x</body>": True,
             b"<HEAD><TITLE>404</TITLE></HEAD>": True,

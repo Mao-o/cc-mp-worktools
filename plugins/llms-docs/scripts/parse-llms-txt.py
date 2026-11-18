@@ -989,8 +989,13 @@ def _lines_in_block(lines: list[str], start: int, fence: FenceTracker) -> list[s
     """The lines from *start* that are still inside the code block *fence* is
     in, ``_BODY_URL_LINES`` at most. *fence* is advanced (pass a copy). The URL
     of a page head inside a code block is looked for there only: past the
-    block's end, the next page's own ``Source:`` line would be taken for it."""
+    block's end, the next page's own ``Source:`` line would be taken for it.
+    None when the block closed before *start* (a frontmatter example's YAML
+    may close it with an indented fence line): a block that opens after that
+    is another one."""
     out = []
+    if not fence.in_fence:  # the block closed before *start*: no line is in it
+        return out
     for line in lines[start:start + _BODY_URL_LINES]:
         fence.update(line)
         if not fence.in_fence:
