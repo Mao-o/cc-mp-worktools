@@ -99,6 +99,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" content <page_ref> "<h
 - 1 論点の基本は **`search` 1 回 → `content` 1〜2 回**。`search` の末尾の `Next:` 行は `doc_idx` と見出しが
   埋まったコマンドなので、見出しを手で写さずそのまま実行する (先頭の `parse-llms-txt.py` は
   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py"` に置き換える。`--source` などは `Next:` が引き継いでいる)
+- `Tip:` / `Note:` / `WARNING:` / `Error:` の行の末尾に出るコマンドも `Next:` 行と同じ形 (`--source` などを引き継ぐ)。
+  `<page_ref>` などのプレースホルダだけを埋め、先頭も同じように置き換えて実行する (オプションを後ろに足さない)
 - 同じ論点で `search` を **3 回外したら**、言い換えを続けない。`search-index` / `sections` で構造から当たるか、
   「ドキュメントに記載なし」として返す
 - **`--max-chars 0`** は、出力に `... (N chars truncated; ...)` が出て、既定の上限 (24000 字) で

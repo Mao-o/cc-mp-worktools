@@ -734,6 +734,24 @@ class HintCommandSwapTest(unittest.TestCase):
                     self.assertEqual(code, 0, err)
                     self.assertIn(f'results for "{query}"', out)
 
+    def test_a_refused_query_with_a_newline_stays_a_placeholder(self):
+        # the quoted query would split the line the command is copied from
+        # ("-- 'agent" on one line, "x'" on the next)
+        for label, corpus in self.fetch_corpora().items():
+            if not corpus["one_page"]:
+                continue
+            net = _Net(corpus["served"])
+            word = corpus["word"]
+            with self.subTest(corpus=label):
+                code, _out, err = self.run_words(net, [SCRIPT, "search-content", *corpus["options"], "--", f"{word}\nx"])
+                self.assertEqual(code, 2, err)
+                refusal = [ln for ln in err.splitlines() if ln.startswith("Error: ")]
+                self.assertEqual(len(refusal), 1, err)
+                self.assertTrue(refusal[0].endswith(' -- "<query>"'), err)
+                code, out, err = self.run_hint(net, self.command(err), {"<page_ref>": "0", '"<query>"': word})
+                self.assertEqual(code, 0, err)
+                self.assertIn(f'results for "{word}"', out)
+
     def test_the_note_with_each_listed_slug_and_a_dash_word(self):
         for label, options in self.code_corpora().items():
             # sections fetches llms-full.txt, as the note says

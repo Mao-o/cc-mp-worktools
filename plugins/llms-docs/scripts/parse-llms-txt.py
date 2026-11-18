@@ -2321,11 +2321,14 @@ def _search_content_fetch(args, profile: dict) -> None:
         targets = [_resolve_ref(profile, docs, args)]
     else:
         if profile["search_content_needs_page_ref"]:
-            # the query of this run is known: only the page is left to put in
+            # the query of this run is known: only the page is left to put in.
+            # A query with a newline (or another unprintable character) would
+            # split the line, so that one stays a placeholder
+            query = shlex.quote(args.query) if args.query.isprintable() else '"<query>"'
             die(f"--source {args.source} fetches only the pages a command needs, so 'search-content' "
                 f"does not scan all its {len(docs)} pages: use 'search' (fetches the top candidates), "
                 f"or give --page-ref (see 'search-index'): "
-                + _hint_command(args, "search-content", "--page-ref=<page_ref>", "--", shlex.quote(args.query)),
+                + _hint_command(args, "search-content", "--page-ref=<page_ref>", "--", query),
                 code=2)
         targets = range(len(docs))
         if len(docs) > profile["search_content_warn_pages"]:

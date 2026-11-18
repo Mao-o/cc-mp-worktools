@@ -842,12 +842,17 @@ class ScoreEntryWordStartTest(unittest.TestCase):
             ("SDKs", "", ["ks"], {}, 0),                                             # 5
             ("Message IDs", "", ["ds"], {}, 0),                                      # 5
             # descriptions of the cached ai-sdk / nextjs / vercel indexes
-            # (2026-11): the "s" ends the word before a space, a "." or a ","
+            # (2026-11): the "s" ends the word before any character that is
+            # no ASCII letter or digit (a space, a "." or a "," here)
             ("x", "How the AI SDK protects server-side fetches of URLs returned by model providers, "
                   "and how to harden your deployment further.", ["ls"], {}, 0),          # 2
             ("x", "Configure Next.js to allow importing modules from external URLs.", ["ls"], {}, 0),  # 2
             ("x", "Send images, PDFs, audio, and video to AI Gateway models", ["fs"], {}, 0),       # 2
             ("x", "Configure the Cursor compatibility endpoint, API key, and model IDs.", ["ds"], {}, 0),  # 2
+            # not only a "." or a ",": a ")" (nextjs, 2026-11), Japanese, a "-"
+            ("x", "Next.js fully supports building Single-Page Applications (SPAs).", ["as"], {}, 0),  # 2
+            ("URLsの設定", "", ["ls"], {}, 0),                                        # 5
+            ("URLs-based routing", "", ["ls"], {}, 0),                               # 5
         ])
 
     def test_a_run_of_capitals_still_steps_before_more_than_a_plural_s(self):
@@ -887,6 +892,9 @@ class ScoreEntryWordStartTest(unittest.TestCase):
             # before a non-word character, is not a step; more after the run is
             ("URLs", set()),
             ("URLs.", set()),
+            ("(SPAs).", set()),
+            ("URLsの設定", set()),
+            ("URLs-based", {4}),
             ("getURLs", {3}),
             ("UIMessages", {2}),
             ("URLIsValid", {3, 5}),

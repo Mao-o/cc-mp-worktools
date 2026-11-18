@@ -712,7 +712,7 @@ URLs、`ds` ⊂ IDs、`ks` ⊂ SDKs、`fs` ⊂ PDFs など)。どれも旧は語
 `sections <opts> -- <page_ref>` に、案内の中の断片 (`search-content --page-ref <page_ref> -- "<query>"`・
 `search-content -- "<query>"`・`sections <slug>`・`sections <page_ref>`・エラーの `--page-ref <page_ref>`) を、`Next:` 行と
 同じ組み立ての完全なコマンド (`<script> <subcommand> <opts> [--page-ref=<page_ref>] -- <placeholder>`。エラーは止めたクエリを
-埋める) に):
+埋める。改行など表示できない文字を含むクエリは、行が割れないように `"<query>"` のまま) に):
 22 source のキャッシュと `--file` の 44 行を出力のまま取り、一覧の ref (先頭・末尾・ランダムに 4 つずつ) に差し替えて
 `sections` を実行した。開いたページは旧新とも 497 (開けない 8 は claude-code の `llms.txt` が別言語の `llms.txt` を指す
 項目で、旧新同じ。ページごとに取得する source でキャッシュに無いページ 23 は、取得しないよう飛ばした)。`-step` / `--x` に
