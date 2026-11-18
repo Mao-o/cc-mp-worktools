@@ -196,8 +196,11 @@ class FirebaseTestsOnGenericLoader(_FetchSource):
         code, out, _ = self.run_g("search-index", "totallyabsentkeyword")
         self.assertEqual(code, 0)
         self.assertIn("No matching documents found", out)
-        # the word put in place of "<query>" may start with "-": after "--"
-        self.assertIn("'search-content -- \"<query>\"'", out)
+        # the whole command, its options those of the run; the word put in
+        # place of "<query>" may start with "-": after "--"
+        command = shlex.join([SCRIPT, "search-content", "--source", "firebase", "--sources-file", self.sources,
+                              "--cache-dir", self.tmp, "--"]) + ' "<query>"'
+        self.assertIn(f": {command}\n", out)
         self.assertIn("omit --page-ref to scan every page", out)
 
     def test_search_zero_result_tip_mentions_search_content(self):

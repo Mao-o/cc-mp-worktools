@@ -527,7 +527,10 @@ class FileHintTest(_Case):
         self.assertIn("  (llms-full.txt not cached yet, so the bracketed ref above is a\n", out)
         code, out, err = self.run_g("search-index", "hooks")
         self.assertEqual(code, 0, err)
-        self.assertIn(generic._SLUG_REF_NOTE + "\n", out)
+        # the note ends with the whole command that opens a slug
+        command = shlex.join([SCRIPT, "sections", "--source", "code", "--sources-file", self.sources,
+                              "--cache-dir", self.tmp, "--"]) + " <slug>"
+        self.assertIn(generic._SLUG_REF_NOTE + command + "\n", out)
 
 
 class SearchIndexDocIdxJoinTest(_Case):

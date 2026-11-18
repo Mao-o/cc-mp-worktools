@@ -11,10 +11,11 @@ the shell-quoted word, split by the shell rules and run; it must parse
 section it names. Both corpus options are run: the cache (``--cache-dir``)
 and ``--file`` with ``--index-file``.
 
-The command fragments the hints quote (``Tip:`` / ``Note:`` / ``WARNING:``
-and the refusal of a full scan: ``search-content --page-ref=<page_ref> --
-"<query>"``, ``sections -- <slug>``, ``sections -- <page_ref>``,
-``--page-ref=<page_ref>``) are run the same way (``HintFragmentSwapTest``).
+The whole commands the hints name at the end of their line (``Tip:`` /
+``Note:`` / ``WARNING:`` and the refusal of a full scan: ``search-content …
+--page-ref=<page_ref> -- "<query>"``, ``search-content … -- "<query>"``,
+``sections … -- <slug>``, ``sections … -- <page_ref>``) are run the same way,
+with nothing added (``HintCommandSwapTest``).
 """
 
 import contextlib
@@ -381,16 +382,17 @@ class FetchIndexLineSwapTest(unittest.TestCase):
                         self.assertTrue(err.startswith("Error: "), err)
 
 
-# A command a hint quotes with a placeholder ('sections -- <slug>'), and the
-# option the refusal of a full scan asks for (--page-ref=<page_ref>). The
-# patterns also take the forms before 0.55.0, so a regression is run, not missed.
-_QUOTED_HINT_RE = re.compile(r"'([^']*<(?:page_ref|slug)>[^']*)'")
-_PAGE_REF_OPTION_RE = re.compile(r"--page-ref[= ]<page_ref>")
+# The whole command a hint names, at the end of its line after ": " (the
+# zero-hit Tip:, the Note: while llms-full.txt is not cached, the WARNING: of
+# --show-sections and the refusal of a full scan). A hint that quotes a
+# fragment instead (the form before) has none, so a regression is caught.
+_HINT_COMMAND_RE = re.compile(rf"(?m)^(?:Tip|Note|WARNING|Error): .*?: ({re.escape(SCRIPT)} .*)$")
 # Cut from zed.dev's llms.txt, robots.txt and three of its pages (2026-11):
 # the bundled ``zed`` preset fetches each page, reads robots.txt first and
 # searches one page at a time (``search_content_needs_page_ref``).
+ZED_INDEX_URL = "https://zed.dev/docs/llms.txt"
 ZED_SERVED = {
-    "https://zed.dev/docs/llms.txt": (
+    ZED_INDEX_URL: (
         "# Zed Docs\n\n> Official Zed documentation index with links to Markdown versions of each docs page.\n\n"
         "## AI\n\n"
         "- [Agents](https://zed.dev/docs/ai/agents.md): Compare Zed Agent, External Agents, and Terminal Threads.\n"
@@ -413,32 +415,80 @@ ZED_SERVED = {
         "# Tool Permissions\n\nConfigure which [Agent Panel](./agent-panel.md) tools run automatically and "
         "which require your approval.\nFor a list of available tools, [see the Tools page](./tools.md).\n"),
 }
+# Cut from firebase.google.com's llms.txt and three of its pages (2026-11):
+# the bundled ``firebase`` preset fetches each page, and its search-content
+# scans every page (no ``search_content_needs_page_ref``).
+FIREBASE_SERVED = {
+    "https://firebase.google.com/docs/llms.txt": (
+        "# Documentation\n\nDeveloper documentation for Firebase\n\n## Docs\n\n"
+        "- [Create Custom Tokens](https://firebase.google.com/docs/auth/admin/create-custom-tokens.md.txt): "
+        "A guide on creating and using custom JSON Web Tokens (JWTs) with the Firebase Admin SDK or a "
+        "third-party JWT library to authenticate users or devices in Firebase.\n"
+        "- [Deploy targets](https://firebase.google.com/docs/cli/targets.md.txt): A guide to using deploy "
+        "targets for managing and deploying to specific Firebase resources, including Hosting sites, "
+        "Storage buckets, and Realtime Database instances.\n"
+        "- [Users in Firebase Projects](https://firebase.google.com/docs/auth/users.md.txt): A conceptual "
+        "overview of users in Firebase projects, including how they are managed and authenticated.\n"),
+    "https://firebase.google.com/docs/auth/admin/create-custom-tokens.md.txt": (
+        "Firebase gives you complete control over authentication by allowing you to\n"
+        "authenticate users or devices using secure JSON Web Tokens (JWTs). You generate\n"
+        "these tokens on your server, pass them back to a client device, and then use\n"
+        "them to authenticate via the `signInWithCustomToken()` method.\n\n"
+        "## Before you begin\n\n"
+        "Custom tokens are signed JWTs where the private key used for signing belongs to\n"
+        "a Google service account.\n"),
+    "https://firebase.google.com/docs/cli/targets.md.txt": (
+        "***Deploy targets*** are short-name identifiers (that you define yourself) for\n"
+        "Firebase resources in your Firebase project.\n\n"
+        "## Set up deploy targets for your Firebase resources\n\n"
+        "Using the Firebase CLI, apply a `TARGET_NAME` (short-name identifier that\n"
+        "you define yourself) to a Firebase resource or group of Firebase resources.\n"),
+    "https://firebase.google.com/docs/auth/users.md.txt": (
+        "The Firebase Authentication **user** object represents a user account that has signed\n"
+        "up for an app in your\n\nproject. Apps usually have many registered users, and every app in a\n\n"
+        "## User properties\n\n"
+        "Authentication users have a fixed set of basic properties---a unique\n"
+        "ID, a primary email address, a name and a photo URL.\n"),
+}
 # claude-code's llms.txt with a page whose slug starts with "-"; its
 # llms-full.txt is not cached yet, so search-index lists slugs and says so
 BETA_INDEX = INDEX + "- [Beta](https://code.claude.com/docs/en/-beta.md): the beta page\n"
 BETA_FULL = DASH_PAGE + "\n" + REAL_PAGE + "\n# Beta\nSource: https://code.claude.com/docs/en/-beta\n\n## B\nbeta body\n"
 
 
-class HintFragmentSwapTest(unittest.TestCase):
-    """The commands the hints quote with a ``<page_ref>`` / ``<slug>``
-    placeholder: the zero-hit ``Tip:`` of ``search-index`` / ``search`` on a
-    source that searches one page at a time (``search-content
-    --page-ref=<page_ref> -- "<query>"``), the ``WARNING:`` of
-    ``search-index --show-sections`` on a ``body: "fetch"`` source
-    (``sections -- <page_ref>``), the refusal of ``search-content`` without a
-    page (``--page-ref=<page_ref>``) and ``search-index``'s ``Note:`` while
-    llms-full.txt is not cached (``sections -- <slug>``).
+def options_of(argv: list) -> list:
+    """The options of a command after its script and subcommand, up to
+    ``--``. A positional before them is skipped: a ``Next:`` line writes a
+    query that does not start with "-" first (``search-index <query> --source
+    …``)."""
+    words = argv[2:argv.index("--")] if "--" in argv else argv[2:]
+    while words and not words[0].startswith("--"):
+        words = words[1:]
+    return words
 
-    Each fragment is taken from the output as printed, its placeholders
-    replaced by the shell-quoted value, split by the shell rules and run with
-    the script name before it and the options of the run that printed it
-    right after the subcommand, where the ``Next:`` lines put them (the
-    refusal's option goes into the refused command). It reaches the page
-    each listed ref names; a word that starts with ``-`` in its place is
-    looked up as a ref (its page, or exit 1), not read as an option
-    (argparse's exit 2 or its usage), as ``--page-ref <page_ref>`` and
-    ``sections <slug>`` were before 0.55.0. The bundled ``zed`` preset runs
-    on files cut from the real ones."""
+
+class HintCommandSwapTest(unittest.TestCase):
+    """The commands the hints name in their text: the zero-hit ``Tip:`` of
+    ``search-index`` / ``search`` on a ``body: "fetch"`` source
+    (``search-content … --page-ref=<page_ref> -- "<query>"`` where the source
+    searches one page at a time, else ``search-content … -- "<query>"``), the
+    ``WARNING:`` of ``search-index --show-sections`` there (``sections … --
+    <page_ref>``), the refusal of ``search-content`` without a page
+    (``search-content … --page-ref=<page_ref> -- <the query>``) and
+    ``search-index``'s ``Note:`` while llms-full.txt is not cached
+    (``sections … -- <slug>``).
+
+    Each is a whole command, put together like the ``Next:`` line of its
+    output: the script, the subcommand, the same options right after it, the
+    placeholders after ``--``. It is taken from the line as printed, only its
+    placeholders replaced by the shell-quoted value, split by the shell rules
+    and run, nothing added. It reaches the page each listed ref names; a word
+    that starts with ``-`` in its place is looked up as a ref (its page, or
+    exit 1), not read as an option (argparse's exit 2 or its usage). Before
+    0.55.0 the hints quoted fragments (``sections <slug>``), and a fragment
+    with ``--`` (``sections -- <slug>``) took no option after it: the options
+    a reader adds land after ``--`` (exit 2). The bundled ``zed`` and
+    ``firebase`` presets run on files cut from the real ones."""
 
     def setUp(self):
         _loader.without_user_sources(self)
@@ -449,18 +499,48 @@ class HintFragmentSwapTest(unittest.TestCase):
             "body": "fetch", "rank_from": "index", "index_url": FETCH_INDEX_URL,
             "page_ref_forms": ["int", "url", "slug"], "search_content_needs_page_ref": True}}}),
             encoding="utf-8")
+        self.zed_index = os.path.join(self.tmp, "zed-llms.txt")
+        Path(self.zed_index).write_text(ZED_SERVED[ZED_INDEX_URL], encoding="utf-8")
+
+    def cache(self) -> str:
+        return tempfile.mkdtemp(dir=self.tmp)
 
     def fetch_corpora(self) -> dict:
-        """label -> (options, served URLs, a word every page has, {typed ref: title})."""
+        """label -> the page-by-page sources: their options (each its own
+        cache dir; ``--sources-file``, ``--max-age`` and ``--index-file`` are
+        each given to one at least, none the default), served URLs, a word
+        every page has, {typed ref: title} and whether ``search-content``
+        needs a page."""
         fetched = {FETCH_INDEX_URL: "".join(f"- [{t}]({u}): {t} page\n" for u, (t, _b) in FETCH_PAGES.items()),
                    **{u: body for u, (_t, body) in FETCH_PAGES.items()}}
         return {
             # the slug of docs/-beta.md, typed as it is
-            "body fetch": (["--source", "fetched", "--sources-file", self.sources,
-                            "--cache-dir", tempfile.mkdtemp(dir=self.tmp)], fetched, "body", {"-beta": "Beta"}),
-            "zed, cut from the real files": (["--source", "zed", "--sources-file", self.sources,
-                                              "--cache-dir", tempfile.mkdtemp(dir=self.tmp)], ZED_SERVED, "agent", {}),
+            "body fetch": {"options": ["--source", "fetched", "--sources-file", self.sources,
+                                       "--cache-dir", self.cache()],
+                           "served": fetched, "word": "body", "typed": {"-beta": "Beta"}, "one_page": True},
+            "zed, cut from the real files": {
+                "options": ["--source", "zed", "--sources-file", self.sources, "--cache-dir", self.cache(),
+                            "--max-age", "999999999"],
+                "served": ZED_SERVED, "word": "agent", "typed": {}, "one_page": True},
+            "zed, --index-file": {
+                "options": ["--source", "zed", "--cache-dir", self.cache(), "--index-file", self.zed_index],
+                "served": {u: t for u, t in ZED_SERVED.items() if u != ZED_INDEX_URL},
+                "word": "agent", "typed": {}, "one_page": True},
+            "firebase, cut from the real files": {
+                "options": ["--source", "firebase", "--cache-dir", self.cache()],
+                "served": FIREBASE_SERVED, "word": "firebase", "typed": {}, "one_page": False},
         }
+
+    def code_corpora(self) -> dict:
+        """label -> options of claude-code with only its llms.txt: cached
+        (with ``--max-age``), and as ``--index-file`` (each its own cache dir)."""
+        code = generic._read_sources_file(generic.PRESETS_FILE)["claude-code"]
+        cached = self.cache()
+        Path(generic._index_cache_path(cached, code)).write_text(BETA_INDEX, encoding="utf-8")
+        index = os.path.join(self.tmp, "claude-code-llms.txt")
+        Path(index).write_text(BETA_INDEX, encoding="utf-8")
+        return {"llms.txt cached": ["--source", "claude-code", "--cache-dir", cached, "--max-age", "999999999"],
+                "--index-file": ["--source", "claude-code", "--cache-dir", self.cache(), "--index-file", index]}
 
     def run_words(self, net, argv: list):
         with mock.patch("urllib.request.urlopen", side_effect=net):
@@ -469,32 +549,63 @@ class HintFragmentSwapTest(unittest.TestCase):
             except Exception as e:  # a crash is a failed check, not an error of the run
                 self.fail(f"{shlex.join(argv)} crashed: {e!r}")
 
-    def fragment(self, text: str, pattern) -> str:
-        found = pattern.findall(text)
+    def command(self, text: str) -> str:
+        """The one command a hint of *text* names, as printed."""
+        found = _HINT_COMMAND_RE.findall(text)
         self.assertEqual(len(found), 1, text)
         return found[0]
 
-    def words(self, fragment: str, subs: dict) -> list:
-        for placeholder, value in subs.items():
-            self.assertIn(placeholder, fragment)
-            fragment = fragment.replace(placeholder, shlex.quote(value))
-        try:
-            return shlex.split(fragment, comments=True)
-        except ValueError as exc:
-            self.fail(f"not a shell line ({exc}): {fragment}")
+    def next_options(self, text: str) -> list:
+        """The options of the ``Next:`` lines of *text* (the same on each)."""
+        found = [options_of(shlex.split(ln[len("Next: "):], comments=True))
+                 for ln in text.splitlines() if ln.startswith("Next: ")]
+        self.assertTrue(found, text)
+        for options in found[1:]:
+            self.assertEqual(options, found[0], text)
+        return found[0]
 
-    def run_hint(self, net, fragment: str, options: list, ref: str, query: str | None):
-        """*fragment* with *ref* in place of its page (and *query* in place
-        of ``"<query>"``) run as the hint says."""
-        if fragment.startswith("--"):
-            # the option the refused command asks for, before its query
-            words = self.words(fragment, {"<page_ref>": ref})
-            return self.run_words(net, [SCRIPT, "search-content", *options, *words, "--", query])
-        subs = {"<slug>" if "<slug>" in fragment else "<page_ref>": ref}
-        if '"<query>"' in fragment:
-            subs['"<query>"'] = query
-        words = self.words(fragment, subs)
-        return self.run_words(net, [SCRIPT, words[0], *options, *words[1:]])
+    def hints(self, net, corpus: dict) -> dict:
+        """hint -> (command, the options of the ``Next:`` lines of its output):
+        the zero-hit Tip of search-index and of search, the WARNING of
+        search-index --show-sections and, where search-content needs a page,
+        the refusal without one (whose output has no ``Next:`` line: those of
+        search-index on the same options)."""
+        options, word = corpus["options"], corpus["word"]
+        out = {}
+        for cmd in ("search-index", "search"):
+            code, text, err = self.run_words(net, [SCRIPT, cmd, *options, "--", "zzznotthere"])
+            self.assertEqual(code, 0, err)
+            out[f"{cmd} tip"] = (self.command(text), self.next_options(text))
+        code, text, err = self.run_words(net, [SCRIPT, "search-index", *options, "--show-sections", "--", word])
+        self.assertEqual(code, 0, err)
+        out["--show-sections warning"] = (self.command(err), self.next_options(text))
+        if corpus["one_page"]:
+            code, _text, err = self.run_words(net, [SCRIPT, "search-content", *options, "--", word])
+            self.assertEqual(code, 2, err)
+            out["refusal"] = (self.command(err), out["search-index tip"][1])
+        return out
+
+    @staticmethod
+    def subs(command: str, ref: str, query: str | None) -> dict:
+        """The placeholders of *command* and the values that go in their place."""
+        out = {holder: ref for holder in ("<page_ref>", "<slug>") if holder in command}
+        if query is not None and '"<query>"' in command:
+            out['"<query>"'] = query
+        return out
+
+    def run_hint(self, net, command: str, subs: dict):
+        """*command* as printed, each placeholder of *subs* replaced by the
+        shell-quoted value, split by the shell rules and run: nothing added
+        (its script name is this script, as on the ``Next:`` lines)."""
+        for placeholder, value in subs.items():
+            self.assertIn(placeholder, command)
+            command = command.replace(placeholder, shlex.quote(value))
+        try:
+            argv = shlex.split(command, comments=True)
+        except ValueError as exc:
+            self.fail(f"not a shell line ({exc}): {command}")
+        self.assertEqual(argv[0], SCRIPT, command)
+        return self.run_words(net, argv)
 
     def refs(self, net, options: list) -> dict:
         """{ref: title} as fetch-index lists them."""
@@ -508,101 +619,138 @@ class HintFragmentSwapTest(unittest.TestCase):
         self.assertTrue(refs, out)
         return refs
 
-    def fetch_hints(self, net, options: list) -> dict:
-        """The fragments the four outputs of a page-by-page source print."""
-        out = {}
-        for cmd in ("search-index", "search"):
-            code, text, err = self.run_words(net, [SCRIPT, cmd, *options, "--", "zzznotthere"])
-            self.assertEqual(code, 0, err)
-            out[f"{cmd} tip"] = self.fragment(text, _QUOTED_HINT_RE)
-        code, _text, err = self.run_words(net, [SCRIPT, "search-index", *options, "--show-sections", "--", "agent"])
-        self.assertEqual(code, 0, err)
-        out["--show-sections warning"] = self.fragment(err, _QUOTED_HINT_RE)
-        code, text, err = self.run_words(net, [SCRIPT, "search-content", *options, "--", "agent"])
-        self.assertEqual(code, 2, err)
-        out["refusal"] = self.fragment(err, _PAGE_REF_OPTION_RE)
-        return out
-
-    def assert_reaches(self, net, fragment, options, query, ref, title):
-        """*fragment* with *ref* in place of its page reaches that page."""
-        code, out, err = self.run_hint(net, fragment, options, ref, query)
-        self.assertEqual(code, 0, (fragment, ref, err))
-        if fragment.startswith("sections"):
+    def assert_reaches(self, net, command: str, ref: str, query: str | None, title: str):
+        """*command* with *ref* in place of its page reaches that page."""
+        code, out, err = self.run_hint(net, command, self.subs(command, ref, query))
+        self.assertEqual(code, 0, (command, ref, err))
+        if shlex.split(command)[1] == "sections":
             self.assertRegex(out, rf'^Sections in \[\d+\] "{re.escape(title)}"\n')
         else:
             # search-content's header of the page's hits
             self.assertRegex(out, rf"(?m)^\[\d+\] {re.escape(title)}$")
 
-    def assert_is_a_ref(self, net, fragment, options, query, value):
+    def assert_is_a_ref(self, net, command: str, value: str, query: str | None):
         """*value* in place of the page is looked up as a ref."""
-        code, out, err = self.run_hint(net, fragment, options, value, query)
-        self.assertIn(code, (0, 1), (fragment, value, err))
+        code, out, err = self.run_hint(net, command, self.subs(command, value, query))
+        self.assertIn(code, (0, 1), (command, value, err))
         self.assertNotIn("usage:", out + err)
         if code == 1:
             self.assertTrue(err.startswith("Error: "), err)
 
-    def test_every_hint_puts_its_placeholder_after_double_dash_or_joins_it_to_its_option(self):
-        for label, (options, served, _word, _typed) in self.fetch_corpora().items():
-            with self.subTest(corpus=label):
-                hints = self.fetch_hints(_Net(served), options)
-                self.assertEqual(hints, {
-                    "search-index tip": 'search-content --page-ref=<page_ref> -- "<query>"',
-                    "search tip": 'search-content --page-ref=<page_ref> -- "<query>"',
-                    "--show-sections warning": "sections -- <page_ref>",
-                    "refusal": "--page-ref=<page_ref>"})
-        net = _Net({CODE_FULL_URL: BETA_FULL})
-        code, out, err = self.run_words(net, [SCRIPT, "search-index", *self.code_options(), "--", "hooks"])
+    def assert_corpus_options(self, options: list, hinted: list):
+        """Each option of the run (none the default) is on the line, with
+        its value."""
+        for flag, value in zip(options[::2], options[1::2]):
+            self.assertIn(flag, hinted)
+            self.assertEqual(hinted[hinted.index(flag) + 1], value, flag)
+
+    def test_each_hint_is_a_whole_command_with_the_options_of_its_next_line(self):
+        for label, corpus in self.fetch_corpora().items():
+            tip = (["--page-ref=<page_ref>"] if corpus["one_page"] else [], ["<query>"])
+            expected = {"search-index tip": ("search-content", *tip), "search tip": ("search-content", *tip),
+                        "--show-sections warning": ("sections", [], ["<page_ref>"])}
+            if corpus["one_page"]:
+                # the query refused, put in already
+                expected["refusal"] = ("search-content", ["--page-ref=<page_ref>"], [corpus["word"]])
+            hints = self.hints(_Net(corpus["served"]), corpus)
+            self.assertEqual(sorted(hints), sorted(expected), label)
+            for name, (command, next_options) in hints.items():
+                with self.subTest(corpus=label, hint=name):
+                    subcommand, extra, after = expected[name]
+                    self.assertEqual(shlex.split(command, comments=True),
+                                     [SCRIPT, subcommand, *next_options, *extra, "--", *after])
+                    self.assert_corpus_options(corpus["options"], next_options)
+        for label, options in self.code_corpora().items():
+            net = _Net({CODE_FULL_URL: BETA_FULL})
+            code, out, err = self.run_words(net, [SCRIPT, "search-index", *options, "--", "hooks"])
+            self.assertEqual(code, 0, err)
+            with self.subTest(corpus=label, hint="note"):
+                next_options = self.next_options(out)
+                self.assertEqual(shlex.split(self.command(out), comments=True),
+                                 [SCRIPT, "sections", *next_options, "--", "<slug>"])
+                self.assert_corpus_options(options, next_options)
+            self.assertEqual(net.calls, [])
+
+    def test_the_command_names_the_script_as_the_next_line_does(self):
+        # run by its path: both name the file the reader ran (its basename)
+        corpus = self.fetch_corpora()["zed, cut from the real files"]
+        path = os.path.join(self.tmp, "bin", SCRIPT)
+        code, out, err = self.run_words(_Net(corpus["served"]),
+                                        [path, "search-index", *corpus["options"], "--", "zzznotthere"])
         self.assertEqual(code, 0, err)
-        self.assertEqual(self.fragment(out, _QUOTED_HINT_RE), "sections -- <slug>")
-        self.assertEqual(net.calls, [])
+        nexts = [ln for ln in out.splitlines() if ln.startswith("Next: ")]
+        self.assertTrue(nexts, out)
+        for line in nexts:
+            self.assertTrue(line.startswith(f"Next: {SCRIPT} search "), line)
+        self.assertTrue(self.command(out).startswith(f"{SCRIPT} search-content "), out)
 
-    def test_each_fetch_hint_with_each_listed_ref_and_a_dash_word(self):
-        for label, (options, served, word, typed) in self.fetch_corpora().items():
-            net = _Net(served)
-            refs = self.refs(net, options)
-            for hint, fragment in self.fetch_hints(net, options).items():
-                for ref, title in {**refs, **typed}.items():
-                    with self.subTest(corpus=label, hint=hint, ref=ref):
-                        self.assert_reaches(net, fragment, options, word, ref, title)
+    def test_each_hint_with_each_listed_ref_and_a_dash_word(self):
+        for label, corpus in self.fetch_corpora().items():
+            net = _Net(corpus["served"])
+            refs = self.refs(net, corpus["options"])
+            for name, (command, _options) in self.hints(net, corpus).items():
+                if "<page_ref>" not in command:
+                    continue  # the Tip of a source that scans every page names no page
+                for ref, title in {**refs, **corpus["typed"]}.items():
+                    with self.subTest(corpus=label, hint=name, ref=ref):
+                        self.assert_reaches(net, command, ref, corpus["word"], title)
                 for value in HOSTILE_REFS:
-                    with self.subTest(corpus=label, hint=hint, value=value):
-                        self.assert_is_a_ref(net, fragment, options, word, value)
+                    with self.subTest(corpus=label, hint=name, value=value):
+                        self.assert_is_a_ref(net, command, value, corpus["word"])
 
-    def test_the_tip_takes_a_dash_query_in_place_of_its_query(self):
-        for label, (options, served, _word, _typed) in self.fetch_corpora().items():
-            net = _Net(served)
-            fragment = self.fetch_hints(net, options)["search-index tip"]
-            for query in HOSTILE_QUERIES:
+    def test_the_tips_take_a_dash_query_in_place_of_their_query(self):
+        for label, corpus in self.fetch_corpora().items():
+            net = _Net(corpus["served"])
+            titles = self.refs(net, corpus["options"]).values()
+            hints = self.hints(net, corpus)
+            for name in ("search-index tip", "search tip"):
+                command = hints[name][0]
+                if "<page_ref>" not in command:
+                    with self.subTest(corpus=label, hint=name, query=corpus["word"]):
+                        # over every page: each has the word
+                        code, out, err = self.run_hint(net, command, {'"<query>"': corpus["word"]})
+                        self.assertEqual(code, 0, err)
+                        for title in titles:
+                            self.assertRegex(out, rf"(?m)^\[\d+\] {re.escape(title)}$")
+                for query in HOSTILE_QUERIES:
+                    with self.subTest(corpus=label, hint=name, query=query):
+                        code, out, err = self.run_hint(net, command, self.subs(command, "0", query))
+                        self.assertEqual(code, 0, (command, query, err))
+                        self.assertIn(f'results for "{query}"', out)
+
+    def test_the_refusal_names_the_refused_query(self):
+        # only the page is left to put in: the query is the one refused, as
+        # the shell gave it (quoted, after "--")
+        for label, corpus in self.fetch_corpora().items():
+            if not corpus["one_page"]:
+                continue
+            net = _Net(corpus["served"])
+            word = corpus["word"]
+            for query in (word, f"it's an {word}", "--install", "-x", "\\_"):
                 with self.subTest(corpus=label, query=query):
-                    code, out, err = self.run_hint(net, fragment, options, "0", query)
-                    self.assertEqual(code, 0, (fragment, query, err))
+                    code, _out, err = self.run_words(net, [SCRIPT, "search-content", *corpus["options"], "--", query])
+                    self.assertEqual(code, 2, err)
+                    code, out, err = self.run_hint(net, self.command(err), {"<page_ref>": "0"})
+                    self.assertEqual(code, 0, err)
                     self.assertIn(f'results for "{query}"', out)
 
-    def code_options(self) -> list:
-        """claude-code with only its llms.txt cached."""
-        if not hasattr(self, "_code_cache"):
-            self._code_cache = tempfile.mkdtemp(dir=self.tmp)
-            code = generic._read_sources_file(generic.PRESETS_FILE)["claude-code"]
-            Path(generic._index_cache_path(self._code_cache, code)).write_text(BETA_INDEX, encoding="utf-8")
-        return ["--source", "claude-code", "--cache-dir", self._code_cache]
-
     def test_the_note_with_each_listed_slug_and_a_dash_word(self):
-        # sections fetches llms-full.txt, as the note says
-        net = _Net({CODE_FULL_URL: BETA_FULL})
-        options = self.code_options()
-        refs = self.refs(net, options)
-        self.assertIn("en/-beta", refs)
-        code, out, err = self.run_words(net, [SCRIPT, "search-index", *options, "--", "hooks"])
-        self.assertEqual(code, 0, err)
-        fragment = self.fragment(out, _QUOTED_HINT_RE)
-        # the slug as listed, and as typed (-beta)
-        for ref, title in {**refs, "-beta": "Beta"}.items():
-            with self.subTest(ref=ref):
-                self.assert_reaches(net, fragment, options, None, ref, title)
-        for value in HOSTILE_REFS:
-            with self.subTest(value=value):
-                self.assert_is_a_ref(net, fragment, options, None, value)
-        self.assertEqual(sorted(set(net.calls)), [CODE_FULL_URL])
+        for label, options in self.code_corpora().items():
+            # sections fetches llms-full.txt, as the note says
+            net = _Net({CODE_FULL_URL: BETA_FULL})
+            refs = self.refs(net, options)
+            self.assertIn("en/-beta", refs)
+            code, out, err = self.run_words(net, [SCRIPT, "search-index", *options, "--", "hooks"])
+            self.assertEqual(code, 0, err)
+            command = self.command(out)
+            # the slug as listed, and as typed (-beta)
+            for ref, title in {**refs, "-beta": "Beta"}.items():
+                with self.subTest(corpus=label, ref=ref):
+                    self.assert_reaches(net, command, ref, None, title)
+            for value in HOSTILE_REFS:
+                with self.subTest(corpus=label, value=value):
+                    self.assert_is_a_ref(net, command, value, None)
+            self.assertEqual(sorted(set(net.calls)), [CODE_FULL_URL])
 
 
 if __name__ == "__main__":

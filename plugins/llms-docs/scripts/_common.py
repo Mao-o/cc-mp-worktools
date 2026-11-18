@@ -3026,8 +3026,10 @@ def print_metadata_header(title: str, *, source=None, tags=None, heading_path=No
 # Next hint
 # ---------------------------------------------------------------------------
 
-def next_hint(subcommand: str, *args: str) -> None:
-    """Print ``Next: {basename(sys.argv[0])} {subcommand} {args...}``.
+def hint_command(subcommand: str, *args: str) -> str:
+    """``{basename(sys.argv[0])} {subcommand} {args...}``: the command a
+    ``Next:`` line prints (``next_hint``), and the one a hint names in its
+    text, so the two are put together the same way.
 
     ``os.path.basename`` normalises the script name so the hint always points
     to the file the user invoked, even via a symlink or absolute path.
@@ -3036,7 +3038,12 @@ def next_hint(subcommand: str, *args: str) -> None:
     """
     basename = os.path.basename(sys.argv[0])
     extra = (" " + " ".join(args)) if args else ""
-    print(f"Next: {basename} {subcommand}{extra}")
+    return f"{basename} {subcommand}{extra}"
+
+
+def next_hint(subcommand: str, *args: str) -> None:
+    """Print ``Next: {hint_command(subcommand, *args)}``."""
+    print(f"Next: {hint_command(subcommand, *args)}")
 
 
 # ---------------------------------------------------------------------------

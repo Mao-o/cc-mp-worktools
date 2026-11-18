@@ -709,19 +709,28 @@ URLs、`ds` ⊂ IDs、`ks` ⊂ SDKs、`fs` ⊂ PDFs など)。どれも旧は語
 4 つのフィールドで当たるページが本来の持ち主 (1 点) より上に残る。
 
 **同じ版の `Next:` 行と案内の中のコマンドの修正** (`fetch-index` の `sections <page_ref>` / `<slug>` を
-`sections <opts> -- <page_ref>` に、案内の中の `--page-ref <page_ref>` を `--page-ref=<page_ref>` に、`sections <slug>` /
-`sections <page_ref>` を `sections -- <slug>` / `sections -- <page_ref>` に):
+`sections <opts> -- <page_ref>` に、案内の中の断片 (`search-content --page-ref <page_ref> -- "<query>"`・
+`search-content -- "<query>"`・`sections <slug>`・`sections <page_ref>`・エラーの `--page-ref <page_ref>`) を、`Next:` 行と
+同じ組み立ての完全なコマンド (`<script> <subcommand> <opts> [--page-ref=<page_ref>] -- <placeholder>`。エラーは止めたクエリを
+埋める) に):
 22 source のキャッシュと `--file` の 44 行を出力のまま取り、一覧の ref (先頭・末尾・ランダムに 4 つずつ) に差し替えて
 `sections` を実行した。開いたページは旧新とも 497 (開けない 8 は claude-code の `llms.txt` が別言語の `llms.txt` を指す
 項目で、旧新同じ。ページごとに取得する source でキャッシュに無いページ 23 は、取得しないよう飛ばした)。`-step` / `--x` に
 差し替えた 88 行は、旧ではすべて argparse の終了コード 2 で、新では 0 行 (`-1` と出力のままの行は旧新とも 2 にならない)。
 案内の中のコマンド (0 件のときの `Tip:`、`llms-full.txt` が未取得のときの `Note:`、`--show-sections` の `WARNING:`、
-`--page-ref` の無い `search-content` を止めるエラー) も、引用の中身を出力のまま取り、一覧の ref と `-step` / `--x` /
-`-1` / `-beta` / `--help` に差し替えて実行した。Zed の 4 つと Firebase の `WARNING:` はキャッシュにあるページ (14 / 23)
-の ref、claude-code / claude-platform の `Note:` は `llms.txt` だけをキャッシュに置いたときの一覧の先頭・末尾・ランダムに
-4 つずつ。一覧の ref の 103 回は旧新で出力の 1 行目と終了コードが同じで、99 回が名前どおりのページを開いた (開けない 4 は
-上と同じ別言語の `llms.txt` を指す項目)。`-` で始まる語の 35 回は、旧では `-1` の 7 回を除く 28 回を argparse がオプションと
-読み (終了コード 2。`sections --help` は使い方を出して終わる)、新では 35 回とも ref として探され、見つからない終了コード 1。
+`--page-ref` の無い `search-content` を止めるエラー) の 9 か所 (Zed 4・Firebase 3・claude-code / claude-platform の `Note:`) も、
+行の最後のコマンドを書かれたまま取り、プレースホルダだけを一覧の ref と `-step` / `--x` / `-1` / `-beta` / `--help` (全ページを
+探す Firebase の `Tip:` はクエリ) に置き換えて実行した。Zed と Firebase はキャッシュにあるページ (14 / 23) だけを並べた
+`--index-file` で、claude-code / claude-platform の `Note:` は `llms.txt` だけをキャッシュに置いたときの一覧の先頭・末尾・
+ランダムに 4 つずつ。取得は 0 回。一覧の ref の 103 回のうち 99 回が名前どおりのページを開き (開けない 4 は上と同じ別言語の
+`llms.txt` を指す項目で、0.54.0 でも開けない)、全ページを探す `Tip:` の 2 回は 23 ページすべてを探した。`-` で始まる語の
+45 回は ref (またはクエリ) として探され、終了コード 2 は 0 回 (見つからない終了コード 1 が 35 回、クエリの 10 回は 0)。
+0.54.0 の断片は、読み手が同じオプションをサブコマンドの直後に差し込むと結果が上と同じになるが、`-` で始まる語の 28 回
+(`-1` と全ページの `Tip:` を除く) を argparse がオプションと読み (終了コード 2。`sections --help` は使い方を出して終わる)、
+オプションを後ろに足すと `-- "<query>"` で終わる断片とエラーの 44 回が終了コード 2 だった (`--` の後ろで位置引数になる)。
+断片のまま `--` を入れる案 (`sections -- <slug>`・`search-content --page-ref=<page_ref> -- "<query>"`) は、差し込めば上と同じ
+結果だが、後ろに足すと 150 回すべてが終了コード 2 になる (0.54.0 の `sections <slug>` は後ろに足しても通っていた) ので
+採らなかった。完全なコマンドの後ろにさらにオプションを足すと `unrecognized arguments` で終了コード 2 になる (足す必要は無い)。
 
 ## 3. 需要の根拠
 
