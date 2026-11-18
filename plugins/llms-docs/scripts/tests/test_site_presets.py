@@ -383,7 +383,9 @@ class PerPagePresetsTest(unittest.TestCase):
                     code, out, err = self.run_g(net, name, cmd, "zzznotthere")
                     self.assertEqual(code, 0, err)
                     self.assertNotIn("omit --page-ref", out)
-                    self.assertIn("--page-ref <page_ref>", out)
+                    # joined with "=": a ref put in its place may start with
+                    # "-" (test_placeholder_hints.HintFragmentSwapTest runs it)
+                    self.assertIn("--page-ref=<page_ref>", out)
                     for line in (ln for ln in out.splitlines() if ln.startswith("Next:")):
                         code2, _o, err2 = self.run_next(net, line)
                         self.assertEqual(code2, 0, f"{line}\n{err2}")

@@ -159,6 +159,7 @@ schema 付きで起動された agent (`StructuredOutput` を持つ呼び出し�
   語は常に `--` の後ろに置くので、`--resume` のような語に差し替えても打てる)
 - 見つからないときは、同じ論点で `search` を 3 回まで試し (言い換えより `search-index` / `sections`)、
   それでも無ければ `fetch-index --compact --source <name>` で一覧を見るか「ドキュメントに記載なし」として返す
+- 索引の点数 (`search-index` と `search` の候補) は語・語の部分 (`-` / `_` の後、camelCase の段) の頭で照合するので、語全体で打つ (`agents` ではなく `subagents`)。本文の検索は部分一致のまま
 
 ## page_ref の指定方法
 

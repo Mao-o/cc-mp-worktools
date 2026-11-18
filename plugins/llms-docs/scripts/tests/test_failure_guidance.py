@@ -597,6 +597,10 @@ class SkillGuidanceTest(unittest.TestCase):
             "同じ論点で `search` を **3 回外したら**",
             "**`--max-chars 0`** は、出力に `... (N chars truncated; ...)` が出て",
             "`| head` / `| grep` で出力を切らず",
+            # the index score matches at the start of a word or a word part
+            # (0.55.0): the back part of a closed compound needs the whole word
+            "索引の点数 (`search-index` と `search` の候補) は語・語の部分 (`-` / `_` の後、camelCase の段) の頭で"
+            "照合するので、語全体で打つ (`agents` ではなく `subagents`)。本文の検索は部分一致のまま",
             "`already executing in this forked",
             "## Skill を呼べない文脈 (subagent など)",
             "WebFetch する前に、",

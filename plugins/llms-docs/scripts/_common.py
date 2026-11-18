@@ -1564,6 +1564,13 @@ def _is_word_char(ch: str) -> bool:
     return "a" <= ch <= "z" or "0" <= ch <= "9"
 
 
+def _is_plural_s(word: str, i: int) -> bool:
+    """True when ``word[i]`` is an ``s`` that ends the word: nothing follows
+    it, or what follows is not a letter or digit (``URLs``, ``PDFs,``,
+    ``IDs.``)."""
+    return word[i] == "s" and (i + 1 == len(word) or not _is_word_char(word[i + 1].lower()))
+
+
 def _word_part_starts(text: str) -> frozenset:
     """The offsets in ``_norm_phrase(text)`` where a part of a word starts,
     other than the word's own start: right after a ``-`` / ``_`` (which
@@ -1571,7 +1578,13 @@ def _word_part_starts(text: str) -> frozenset:
     camelCase step, from a lowercase letter or digit to a capital
     (``streamText``) or at the last capital of a run followed by a lowercase
     letter (the ``M`` of ``UIMessage``). An offset past what the plural fold
-    left of the word is not one."""
+    left of the word is not one.
+
+    A run of capitals followed only by an ``s`` that ends the word has no
+    step at its last capital: the ``s`` is the plural of the acronym
+    (``URLs``, ``PDFs``, ``IDs``), so ``ls`` is not a part of ``URLs``.
+    ``UIMessages`` keeps its step (``essages`` follows the run), and so does
+    ``URLIsValid`` (the ``s`` does not end the word)."""
     starts = set()
     pos = 0
     for word in text.split():
@@ -1585,7 +1598,8 @@ def _word_part_starts(text: str) -> frozenset:
             if k and (prev in "-_"
                       or (_is_word_char(prev) and "A" <= ch <= "Z")
                       or ("A" <= prev <= "Z" and "A" <= ch <= "Z"
-                          and i + 1 < len(word) and "a" <= word[i + 1] <= "z")):
+                          and i + 1 < len(word) and "a" <= word[i + 1] <= "z"
+                          and not _is_plural_s(word, i + 1))):
                 if k < len(norm):
                     starts.add(pos + k)
             prev = ch
@@ -1601,7 +1615,8 @@ def _starts_word(kw: str, norm: str, raw: str) -> bool:
     (``_word_part_starts``); what follows is free, so ``auth`` still finds
     ``Authentication`` and ``text`` finds ``streamText``. An occurrence
     inside a word does not count: ``citation`` is not in ``Elicitation``,
-    nor ``hooks`` in ``Webhooks``.
+    nor ``hooks`` in ``Webhooks``, nor ``ls`` in ``URLs`` (the plural ``s``
+    of an acronym starts no word part).
 
     A start is an offset 0 or one after a character that is not
     ``_is_word_char`` (a space, ``.``, ``(``, ``/``, Japanese ...). A keyword

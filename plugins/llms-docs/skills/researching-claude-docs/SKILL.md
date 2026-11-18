@@ -75,6 +75,7 @@ Anthropic API は `--source claude-platform`、両 source 横断は `--source cl
   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py"` に置き換える)
 - 同じ論点で `search` を **3 回外したら**、言い換えを続けない。`search-index` / `sections` で構造から当たるか、
   「ドキュメントに記載なし」として返す
+- 索引の点数 (`search-index` と `search` の候補) は語・語の部分 (`-` / `_` の後、camelCase の段) の頭で照合するので、語全体で打つ (`agents` ではなく `subagents`)。本文の検索は部分一致のまま
 - **`--max-chars 0`** は、出力に `... (N chars truncated; ...)` が出て、既定の上限 (24000 字) で
   切れたと確かめてからだけ使う。`| head` / `| grep` で出力を切らず、`--max-chars` と `sections` で絞る
   (パイプで切ると末尾の `Next:` が見えなくなる)

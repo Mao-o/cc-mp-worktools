@@ -1949,12 +1949,16 @@ def _ranked_entries(entries: list[dict], query: str, limit: int, keys: list) -> 
     return rows[:limit]
 
 
+# The commands these hints name carry a placeholder the reader replaces, maybe
+# with a ref or a word that starts with "-" (the slug of ``docs/-beta.md``):
+# a positional goes after "--", and the value of --page-ref is joined to it
+# with "=" (argparse reads ``--page-ref -beta`` as an option without its value).
 _FETCH_ZERO_TIP = ("Tip: try broader keywords, or 'search-content -- \"<query>\"' (omit --page-ref to "
                    "scan every page — slow on first run) to search page bodies directly")
-_PAGE_REF_ZERO_TIP = ("Tip: try broader keywords, or 'search-content --page-ref <page_ref> -- \"<query>\"' "
+_PAGE_REF_ZERO_TIP = ("Tip: try broader keywords, or 'search-content --page-ref=<page_ref> -- \"<query>\"' "
                       "to search the body of one page (this source does not scan every page)")
 _SLUG_REF_NOTE = ("Note: llms-full.txt is not cached yet, so [ref] above is a URL slug, "
-                  "not an integer doc_idx. Run 'search' once (or 'sections <slug>' directly) "
+                  "not an integer doc_idx. Run 'search' once (or 'sections -- <slug>' directly) "
                   "to populate doc_idx numbering here too.")
 # With --file nothing is fetched: no entry matched one of its pages.
 _FILE_SLUG_REF_NOTE = "no entry matched a page of --file, so [ref] is a URL slug"
@@ -2039,7 +2043,7 @@ def _search_index_from_index(args, profile: dict) -> None:
         refs = [str(i) for i in doc_of]
         if args.show_sections:
             print("WARNING: --show-sections is ignored: this source fetches each page on demand "
-                  "and search-index reads only llms.txt (use 'sections <page_ref>')", file=sys.stderr)
+                  "and search-index reads only llms.txt (use 'sections -- <page_ref>')", file=sys.stderr)
     else:
         index_path, entries = _load_index(args, profile)
         if not args.query.strip():
@@ -2305,7 +2309,7 @@ def _search_content_fetch(args, profile: dict) -> None:
         if profile["search_content_needs_page_ref"]:
             die(f"--source {args.source} fetches only the pages a command needs, so 'search-content' "
                 f"does not scan all its {len(docs)} pages: use 'search' (fetches the top candidates), "
-                f"or give --page-ref <page_ref> (see 'search-index')", code=2)
+                f"or give --page-ref=<page_ref> (see 'search-index')", code=2)
         targets = range(len(docs))
         if len(docs) > profile["search_content_warn_pages"]:
             print(f"WARNING: --page-ref not given. About to fetch and search all {len(docs)} pages "

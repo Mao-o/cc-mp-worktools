@@ -794,6 +794,10 @@ class ScoreEntryWordStartTest(unittest.TestCase):
             # one token: "libraries api" did not hold "library")
             ("x", "", ["library"], {"tags": ["Libraries API"]}, 4),               # 0
             ("x", "Call the streamText function", ["text"], {}, 2),
+            # a word part after a word the plural fold shortens ("Hooks" is
+            # "hook"): its offset counts the folded word, not the written one
+            ("Hooks and streamText", "", ["text"], {}, 5),
+            ("Tools for useChat", "", ["chat"], {}, 5),
             ("x", "", ["message"], {"headings": ["UIMessage types"]}, 1),
             ("x", "", ["calls"], {"headings_extra": ["toolCalls"]}, 1),
             ("x", "", ["citations"], {"headings_extra": ["Citations"]}, 1),
@@ -828,6 +832,36 @@ class ScoreEntryWordStartTest(unittest.TestCase):
             ("Uninstall", "", ["install"], {}, 0),                                   # 5
         ])
 
+    def test_the_plural_s_of_an_acronym_starts_no_word_part(self):
+        # "URLs" is URL + the plural "s", not "UR" + "Ls": a lone "s" that
+        # ends the word after a run of capitals is no camelCase step
+        self.assert_scores([
+            ("Fetch URLs", "", ["ls"], {}, 0),                                       # 5
+            ("Read PDFs", "", ["fs"], {}, 0),                                        # 5
+            ("Use LLMs", "", ["ms"], {}, 0),                                         # 5
+            ("SDKs", "", ["ks"], {}, 0),                                             # 5
+            ("Message IDs", "", ["ds"], {}, 0),                                      # 5
+            # descriptions of the cached ai-sdk / nextjs / vercel indexes
+            # (2026-11): the "s" ends the word before a space, a "." or a ","
+            ("x", "How the AI SDK protects server-side fetches of URLs returned by model providers, "
+                  "and how to harden your deployment further.", ["ls"], {}, 0),          # 2
+            ("x", "Configure Next.js to allow importing modules from external URLs.", ["ls"], {}, 0),  # 2
+            ("x", "Send images, PDFs, audio, and video to AI Gateway models", ["fs"], {}, 0),       # 2
+            ("x", "Configure the Cursor compatibility endpoint, API key, and model IDs.", ["ds"], {}, 0),  # 2
+        ])
+
+    def test_a_run_of_capitals_still_steps_before_more_than_a_plural_s(self):
+        self.assert_scores([
+            ("UIMessages", "", ["messages"], {}, 5),
+            ("UIMessage", "", ["message"], {}, 5),
+            ("URLs", "", ["urls"], {}, 5),
+            ("getURLs", "", ["urls"], {}, 5),
+            ("OAuth", "", ["auth"], {}, 5),
+            ("URLsList", "", ["list"], {}, 5),
+            # the "s" does not end the word: "URL" + "Is" + "Valid"
+            ("URLIsValid", "", ["isvalid"], {}, 5),
+        ])
+
     def test_word_part_starts(self):
         for text, want in [
             ("streamText", {6}),
@@ -842,6 +876,20 @@ class ScoreEntryWordStartTest(unittest.TestCase):
             ("-lead trail-", set()),
             # a step past what the plural fold left of the word is not one
             ("foo-s", set()),
+            # a later word: the offsets go on after a word the fold shortens
+            # (a plural, "-", "İ" lowercasing to 2 characters) and after a run
+            # of spaces
+            ("Hooks streamText", {11}),
+            ("ai-sdk ai-sdk-core", {2, 8, 11}),
+            ("İnput streamText", {13}),
+            ("Use  streamText", {10}),
+            # the plural "s" of a run of capitals, at the end of the word or
+            # before a non-word character, is not a step; more after the run is
+            ("URLs", set()),
+            ("URLs.", set()),
+            ("getURLs", {3}),
+            ("UIMessages", {2}),
+            ("URLIsValid", {3, 5}),
         ]:
             with self.subTest(text=text):
                 try:
