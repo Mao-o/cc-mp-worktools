@@ -2,6 +2,22 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.57.1] - 2026-11-18
+
+### 修正: render を読むたびに、`llms.txt` と比べるページ数の警告が誤って出る
+
+- **症状**: 0.49.0 の比の警告 (ページ数が `llms.txt` の異なる URL 数の半分を下回ると stderr に WARNING) が、render の preset を読むたびに出ていた (`split into 137 pages, but its llms.txt lists 411`)。`render.com/docs/llms.txt` は docs のほかに記事・ブログ・変更履歴を並べ (ローダーが読む 411 項目のうち `/docs/` の下は 225)、`llms-full.txt` は docs だけを持つ。壊れていないファイルで「上流で壊れているかもしれない、続くなら報告を」と案内していた。stdout と終了コードは正しかった
+- **変更**: 比べる URL を、profile の `url` のディレクトリ (パスの最後の `/` まで。render なら `https://render.com/docs/`) の下にあるものに限る。ディレクトリそのもの (`/docs`・`/docs.md`) も数え、`/docsearch` のように接頭辞だけ同じパスは数えない。ホストは大文字小文字を区別せず、スキーム・ポート・パスは書かれたまま比べる。WARNING の行は `… lists 225 under https://render.com/docs/` のように数えたディレクトリを添える。ディレクトリの下に 1 件も無い索引 (`llms-full.txt` をサイトの別の場所やミラーに置く source) は今までどおりすべてを数える (0 件を数えると警告が出なくなるため)。preset のキーは足していない。render の `index_url` は外さない (`page_url` が無く、ページの URL を `llms.txt` との突き合わせで付けている)
+- `index_url` を持つ同梱 preset の手元の写し 16 組 (`body: fetch` の 3 つはこの警告を出さない) で、警告が変わるのは render だけ (比 0.33 → 0.61)。数える URL が減るのは render 411 → 225、codex 210 → 203 (`/docs/` の外の `/guides/` などの項目。うち 5 つは `llms-full.txt` のページで、閾値は 105 → 101.5 ページ)、hono 92 → 91 (GitHub の 1 項目)。先頭で切った写し・閉じ記号を連結した写しを含む 256 件では、出る → 出ないが 3 件 (render のきれいな写し、95% で切った render の写し (116 ページ。0.57.1 は 112.5 ページ未満で出る)、60% で切った codex の写し (97 ページ。閾値は 99 → 96.5))、出ない → 出るが 0 件、ほかの警告の行の差が 0 件。実測は `docs/generic-llms-txt-source.md` の「2026-11-18 実測 (0.57.1)」
+- README の `index_url` の定義を「`url` の `llms-full.txt` のページを並べる `llms.txt`」にし、ページの一部しか並べない索引は指さないこと、docs の外の節も並べる索引は使えること、比の警告が数える範囲を書いた
+- テスト: render の 2026-11-18 の `llms.txt` と `llms-full.txt` から切り出した fixture で、`/docs/` の下の 11 項目 (全 29 項目) だけを数え、キャッシュと `--file` の両方で 3 つのコマンドが stderr に何も出さないこと。5 ページで切った写しでは出て、行の件数がその行の名指すディレクトリの下の項目から数え直せること。比の境目が `url` のディレクトリの下の項目で決まり、`index_url` のディレクトリ (サイトのルートの `llms.txt`) では決まらないこと。ディレクトリの下かどうか (ディレクトリそのもの・`.md`・クエリ・`#…`・ホストの大文字小文字・接頭辞だけ同じパス・パスの大文字小文字・別のスキーム・別のホスト・ポート・`-` や `\_` で始まる段) と、ディレクトリの切り出し (クエリと `#…` の中の `/`、パスの無い URL)。ディレクトリの下に 1 件も無い索引はすべてを数え、行がディレクトリを名指さないことを固定した。同梱の render の preset の `url` が `/docs/` の下にあることも固定した (render はサイトのルートにも同じファイルを置き、ファイル自身はルートを案内する。`url` をルートに移すと 411 項目をすべて数えて警告が戻る)
+
+### docs・テスト: nextjs / vite / vitest / vercel に `index_url` を足さない判断を残す
+
+- 0.49.0 の比の警告を nextjs でも効かせるため `index_url` (`https://nextjs.org/docs/llms.txt`) を足す案を測り、4 preset のどれにも足さないことにした (presets.json は変えていない)。nextjs の `/docs/llms.txt` は 474 ページ中 299 しか並べず (Pages Router の 167 は `/docs/pages/llms.txt`)、比の警告は 150 ページ未満でしか出ない。既知の崩れ方 (閉じ記号の連結) は既存の警告が捕まえ、足すと全コマンドが `llms.txt` を読むようになる。vite / vitest の `llms.txt` はリンクがすべて相対で、読める項目が 0。vercel の `/docs/llms.txt` はサイト全体の `/llms.txt` への 308
+- `docs/generic-llms-txt-source.md` に「2026-11-17 実測: llms.txt を index_url にできるか (nextjs / vite / vitest / vercel)」の節 (取得結果・nextjs の範囲・壊れ方ごとの警告の表・vite / vitest / vercel・見送った案・測り方) を足した。壊れ方ごとの警告と `index_url` を足した写しの前後比較は 0.57.1 のコードで測り直した。0.49.0 の追記は 2 か所を直した (`nextjs` に `index_url` が無いことに新しい節への参照を足し、「捕まえられない例」に `index_url` があっても比 0.5 では 2〜3 割の欠落は捕まらないことを足した)
+- テスト: 4 preset が `index_url` を持たないことを、preset ごとの理由と見直すときの手順をコメントに書いて固定した (`scripts/tests/test_parse_llms_txt.py`)
+
 ## [0.57.0] - 2026-11-18
 
 ### 追加: ページの頭がコードブロックの中にあるとき stderr へ警告する

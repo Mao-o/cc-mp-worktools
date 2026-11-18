@@ -807,6 +807,23 @@ class PresetsTest(unittest.TestCase):
         docs = generic.split_documents(_lines(CLOUDFLARE_LIKE), p)
         self.assertEqual(docs[0]["url"], "https://example.com/product/index.md")
 
+    def test_nextjs_vite_vitest_and_vercel_presets_have_no_index_url(self):
+        # An index_url was weighed for these four, for the page-count warning
+        # (0.49.0), and left out. Measured 2026-11-17; before adding one, measure
+        # again as docs/generic-llms-txt-source.md ("2026-11-17 実測: llms.txt を
+        # index_url にできるか") does, since the sites may change:
+        # - nextjs: /docs/llms.txt lists 299 of the 474 pages (the Pages Router's
+        #   167 are in /docs/pages/llms.txt), so the warning fires only below 150
+        #   pages, and every command would fetch the index for it
+        # - vite, vitest: every link of their llms.txt is relative, and the index
+        #   is read for absolute URLs only (0 entries)
+        # - vercel: /docs/llms.txt is a 308 to /llms.txt, the index of the whole site
+        presets = generic._read_sources_file(generic.PRESETS_FILE)
+        for name in ("nextjs", "vite", "vitest", "vercel"):
+            with self.subTest(name):
+                self.assertIn(name, presets)
+                self.assertIsNone(presets[name]["index_url"])
+
     def test_readme_host_list_matches_the_presets(self):
         # The README lists every host the presets fetch from (one per line in
         # a text block); the root README's Privacy table points at it, so a

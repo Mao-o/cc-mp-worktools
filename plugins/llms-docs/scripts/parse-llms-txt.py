@@ -1725,8 +1725,10 @@ _GUARD_ADVICE = ("The profile may not match the file (check split / page_url: th
 
 # A page split this far below the index's count is not a matter of a few pages
 # missing from the full text. Measured on the cached corpora with an index:
-# 0.97 to 1.06. The broken file that made this check (a Next.js llms-full.txt
-# whose closing fences ran into the next line): 9 of 474, about 0.02.
+# Render 0.61 (its llms.txt also lists, under /docs/, the quickstarts its
+# llms-full.txt leaves out), the rest from 0.97 up. The broken file that made
+# this check (a Next.js llms-full.txt whose closing fences ran into the next
+# line): 9 of 474, about 0.02.
 _FEW_PAGES_RATIO = 0.5
 _SPLIT_ADVICE = ("The file may be broken upstream (--max-age 0 gets a fresh copy), or the profile "
                  "may not match it; if it persists, report an issue.")
@@ -1745,8 +1747,9 @@ def _warn_if_split_suspect(profile: dict, docs: list[dict], path: str, index_lin
       it): a page head with its URL by ``page_url`` there (a frontmatter
       block, an H1, a ``split: line`` delimiter read as an example) went into
       the page before. Not said with the first case, which covers it
-    * far fewer pages than the index has distinct page URLs (*index_lines*,
-      ``None`` when it is not at hand)"""
+    * far fewer pages than the index has distinct page URLs under the
+      directory of the profile's ``url`` (*index_lines*, ``None`` when it is
+      not at hand; ``_compared_index_urls``)"""
     label = _label(profile)
     notes = docs[0].get("split_notes", {}) if docs else {}
     if "unclosed_fence_line" in notes:
@@ -1765,11 +1768,45 @@ def _warn_if_split_suspect(profile: dict, docs: list[dict], path: str, index_lin
               f"{_SPLIT_ADVICE}", file=sys.stderr)
     if index_lines is None:
         return
+    listed, directory = _compared_index_urls(profile, index_lines)
+    if len(docs) < len(listed) * _FEW_PAGES_RATIO:
+        where = f" under {directory}" if directory else ""
+        print(f"WARNING: {label}: {path} split into {len(docs)} pages, but its llms.txt lists "
+              f"{len(listed)}{where}. {_SPLIT_ADVICE}", file=sys.stderr)
+
+
+def _url_directory(url: str) -> str:
+    """The directory of *url*: its scheme, host and path up to the last ``/``,
+    without the query or fragment (``https://render.com/docs/`` for
+    ``https://render.com/docs/llms-full.txt``)."""
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}{parts.path[:parts.path.rfind('/') + 1] or '/'}"
+
+
+def _in_directory(url: str, directory: str) -> bool:
+    """True when *url* (as ``normalize_doc_url`` leaves it: no query, fragment,
+    ``.md`` or trailing ``/``) is *directory* itself or below it. The host is
+    compared ignoring case, the path as written: ``/docs/`` does not hold
+    ``/docsearch``."""
+    a, d = urlsplit(url), urlsplit(directory)
+    return ((a.scheme, a.netloc.lower()) == (d.scheme, d.netloc.lower())
+            and (a.path + "/").startswith(d.path))
+
+
+def _compared_index_urls(profile: dict, index_lines: list[str]) -> tuple[set, str | None]:
+    """The page URLs of the ``llms.txt`` that the page count is compared with,
+    and the directory they were counted under (``None``: all of them). Only
+    those under the directory of the profile's ``url`` count: an index may
+    list more of the site than the full text holds (Render's llms.txt lists
+    articles, a blog and a changelog next to the docs; its llms-full.txt is
+    the docs). An index with no page under that directory (a full text kept
+    elsewhere on the site, or on a mirror) is counted whole, so that the
+    check still runs for it."""
     listed = {normalize_doc_url(e["url"]) for e in parse_llms_index(index_lines)
               if not _is_index_file_url(e["url"])}
-    if len(docs) < len(listed) * _FEW_PAGES_RATIO:
-        print(f"WARNING: {label}: {path} split into {len(docs)} pages, but its llms.txt lists "
-              f"{len(listed)}. {_SPLIT_ADVICE}", file=sys.stderr)
+    directory = _url_directory(profile["url"])
+    under = {u for u in listed if _in_directory(u, directory)}
+    return (under, directory) if under else (listed, None)
 
 
 def _local_index_lines(args, profile: dict) -> list[str] | None:

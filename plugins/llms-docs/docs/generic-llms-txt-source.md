@@ -353,14 +353,18 @@ frontmatter 区切りはコードブロックの中の `---` を境界にしな�
 
 分割の規則は変えず、検出だけ足した。stderr に WARNING を出すのは次の 3 つ:
 
-- ファイルがコードブロックの中で終わる (この Next.js の例はこれで捕まる。`nextjs` preset には `index_url` が無い)
+- ファイルがコードブロックの中で終わる (この Next.js の例はこれで捕まる。`nextjs` preset には `index_url` が無い。足さない理由は
+  下の「2026-11-17 実測: llms.txt を index_url にできるか (nextjs / vite / vitest / vercel)」)
 - `index_url` の `llms.txt` が手元にあり (`--index-file`、ページの対応づけで読むもの、または取得し直さず使えるキャッシュ)、
-  ページ数がその異なる URL 数の半分を下回る。同梱 preset の手元のキャッシュでの比は 0.97〜1.06 で、Next.js の例は 0.02
+  ページ数がその異なる URL 数の半分を下回る。同梱 preset の手元のキャッシュでの比は 0.97〜1.06 で、Next.js の例は 0.02。
+  0.57.1 からは `url` のディレクトリの下の URL だけを数える (Render の `llms.txt` は docs の外の記事・ブログ・変更履歴も並べ、
+  壊れていないファイルで毎回出ていた。下の「2026-11-18 実測 (0.57.1)」)
 - 必須のキーを持つ frontmatter が `_FM_LOOKAHEAD` (400 行) までに閉じない (上限で打ち切られたブロックはページにならない)
 
-同梱 preset の手元のキャッシュ (18 source) では、どれも発火しない。この 3 つで捕まえられないのは、`index_url` の無い source で、閉じ損ねの
-後でファイルの末尾までに閉じ直している場合 (Next.js のキャッシュの閉じ記号を 1/4 だけ連結した実験で、473 ページが 363 ページになる例)。
-0.57.0 からは、隠れたページの頭が `page_url` の URL まで揃っていれば 4 つ目の警告が捕まえる (下の「2026-11-18 実測 (0.57.0)」の節。
+同梱 preset の手元のキャッシュ (18 source) では、どれも発火しない。この 3 つで捕まえられないのは、閉じ損ねの後でファイルの末尾までに
+閉じ直している場合 (Next.js のキャッシュの閉じ記号を 1/4 だけ連結した実験で、473 ページが 363 ページになる例)。`index_url` があっても、
+比 0.5 では 2〜3 割の欠落は捕まらない (nextjs の `/docs/llms.txt` を索引にしても閾値は 149.5 ページ、474 項目の同じ範囲の索引でも
+237 ページ)。0.57.0 からは、隠れたページの頭が `page_url` の URL まで揃っていれば 4 つ目の警告が捕まえる (下の「2026-11-18 実測 (0.57.0)」の節。
 同じ形の実験で 473 ページが 360 ページになる版では、件数 113 が欠落の数と一致する)。`page_url` の無い `split: frontmatter` /
 `split: h1` の source は今も捕まえられない。
 
@@ -839,6 +843,178 @@ URLs、`ds` ⊂ IDs、`ks` ⊂ SDKs、`fs` ⊂ PDFs など)。どれも旧は語
 | gemini-cli (h1 + `h1-link`) | 17.1〜17.2 | 17.5〜17.6 | +2〜3% |
 | vercel (frontmatter) | 77.6〜78.0 | 77.8〜78.6 | 0〜+1% |
 | claude-platform (frontmatter) | 502.1〜507.2 | 493.7〜501.2 | −1〜−2% (ループの中で引いていた profile のキーを外に出した分) |
+
+### 2026-11-17 実測: llms.txt を index_url にできるか (nextjs / vite / vitest / vercel)
+
+0.49.0 の比の警告 (ページ数が `llms.txt` の URL 数の半分を下回ると stderr に WARNING) を `nextjs` でも効かせるため、`index_url`
+に `https://nextjs.org/docs/llms.txt` を足す案を測った。結論は、4 preset のどれにも `index_url` を足さない (presets.json は変えない。
+`scripts/tests/test_parse_llms_txt.py` の `test_nextjs_vite_vitest_and_vercel_presets_have_no_index_url` が
+理由とともに固定する)。取得は 2026-11-17。`index_url` を足した写しの前後比較と壊れ方ごとの警告の表は、0.57.1 のコードで測り直した
+(0.57.0 で 4 つ目の警告が加わったため)。
+
+**取得** (`curl -sS -L -A llms-docs-probe`、1 URL 1 回):
+
+| URL | status | content-type | 大きさ (バイト) |
+|---|---|---|---|
+| `https://nextjs.org/docs/llms.txt` | 200 | `text/plain;charset=UTF-8` | 51,443 |
+| `https://nextjs.org/docs/llms-full.txt` | 200 | `text/markdown; charset=utf-8` | 4,474,883 |
+| `https://vite.dev/llms.txt` | 200 | `text/plain; charset=UTF-8` | 3,528 |
+| `https://vitest.dev/llms.txt` | 200 | `text/plain; charset=UTF-8` | 11,919 |
+| `https://vitest.dev/llms-full.txt` | 200 | `text/plain; charset=UTF-8` | 1,428,177 |
+| `https://vercel.com/docs/llms.txt` | 308 (`location: /llms.txt`) → 200 | `text/plain; charset=utf-8` | 14,887 |
+
+**nextjs の範囲**: `llms-full.txt` は `nextjs` preset で 474 ページに分かれ、全ページが自分の URL を持つ。`/docs/llms.txt` の
+絶対リンクの項目は 300 で、うち 1 つは別の索引 (`https://nextjs.org/docs/pages/llms.txt`) なのでローダーが除く。数えるページ
+項目は 299 (URL 299 種) で、299 すべてが `llms-full.txt` のページの URL と一致する。`llms.txt` に載らないページは 175 で、
+Pages Router の `/docs/pages/…` が 167、`/docs`・`/docs/app`・節の入口 6 つが 8。各ページの frontmatter の `docs_index:` も、
+`/docs/llms.txt` が 307、`/docs/pages/llms.txt` が 167 に分かれる。README の `index_url` の定義 (`url` の `llms-full.txt` の
+ページを並べる `llms.txt`) に当たらない (474 中 299)。比の警告は 299 × 0.5 = 149.5 ページ未満でしか出ない (299 はどれも
+`url` のディレクトリ `https://nextjs.org/docs/` の下にあるので、0.57.1 の数え方でも同じ)。
+
+**`index_url` を足した写しの前後比較** (同梱の `nextjs` の写しに `index_url` を足した profile): 6 コマンド × 9 通りの読み方
+(`--file` のみ、`--file` + `--index-file`、キャッシュ、古いキャッシュ + 新しい `llms.txt`、`llms.txt` が未キャッシュでオフライン、
+壊れたファイル 4 種) で、stdout と終了コードはすべて同じで、差は stderr だけだった (0.57.1 のコードで測り直しても同じ。差が出るのは
+オフラインの取得の WARNING と、閉じ記号をすべて連結した版・先頭 10% で切った版の比の警告)。タイトルの突き合わせで付いた URL は 0
+(全ページが自分の URL を持つ)。
+
+**壊れ方ごとの警告** (2026-11-17 のファイルと 2026-10-22 のキャッシュを加工した):
+
+| 壊れ方 | ページ | 今の警告 (同梱の preset) | `index_url` を足した写し |
+|---|---|---|---|
+| 閉じ記号をすべて次の行に連結 (2026-10-15 の形) | 4 | 出る (閉じないブロック) | 出る (比の警告も) |
+| 閉じ記号の 25% を無作為に連結 | 349 (キャッシュでは 368) | 出る (閉じないブロック。キャッシュの版は 0.57.0 のページの頭の警告) | 比の警告は出ない |
+| 先頭 10% / 40% で切れたファイル | 39 / 143 | 出ない | 出る (比の警告) |
+| frontmatter の `url:` を 50% / 70% 消す | 237 / 143 | 出ない | 出ない / 出る (比の警告) |
+
+閉じ記号の連結では、連結の数を変えた 10 通り × 2 ファイルのどれでも、比の警告が出る形 (4〜108 ページ) は既存の警告でも出る。
+2026-11-17 の測定 (0.52.0 のコード) では何も出なかった 4 つ (16 個に 1 個の連結の 440 / 450 ページ、キャッシュの版の 8 個に 1 個の
+420 ページと 25% の 368 ページ) は、0.57.0 のページの頭の警告が捕まえる。比の警告で新たに捕まえられるのは、「コードブロックの外で
+4 割以下に切れた」「7 割以上のページの `url:` が消えた」という未観測の 2 つの形だけ。
+
+**vite / vitest / vercel**:
+
+- vite: `https://vite.dev/llms.txt` の項目 43 (種類 42) はすべて相対 (`/guide.md`)。`parse_llms_index` は絶対 URL の項目だけを
+  読むので項目は 0 になり、比の警告は出ない。相対を `https://vite.dev` で解決すれば、42 種すべてが `llms-full.txt` (2026-11-18 の
+  取得で 42 ページ) のページと一致する
+- vitest: 項目 217 がすべて相対で、読める項目は 0。相対を `https://vitest.dev` で解決すれば、217 種すべてが `llms-full.txt` の
+  217 ページと一致する (範囲は同じ) が、今のローダーでは読めない
+- vercel: `https://vercel.com/docs/llms.txt` は 308 で `/llms.txt` (サイト全体の索引) へ転送される。読める項目は 88 で、索引の
+  ファイル 2 つを除いたページ項目は 86 種。ページは 1,613 (2026-10-22 のキャッシュ) で、URL が一致するのは 46/86。0.57.1 の
+  数え方では `url` のディレクトリ (`https://vercel.com/docs/`) の下の 50 だけを数え、比の警告は 25 ページ未満でしか出ない
+
+見送った案:
+
+- nextjs に `index_url` を足す (起票時の案): stdout は変わらないが、効くのは 150 ページ未満への崩れだけで、既知の崩れ方は
+  既存の警告が捕まえる。`index_url` があるとタイトルの突き合わせのために全コマンドが `llms.txt` を読むので、`--max-age` ごとの
+  取得が 1 つ増え、オフラインで `llms.txt` が未キャッシュの間はコマンドごとに `WARNING: could not fetch …; page URLs from the
+  index are omitted` が出る (nextjs では全ページが自分の URL を持つので、文面と事実が違う)。0.49.0 の「`llms.txt` を普段読まない
+  コマンドが比べるために取得することはない」とも実質的に逆になる。README の定義にも合わない
+- 上に `join_rate_guard: true` も足す: 感度は高く、閉じ記号の 25% の連結でも対応づけの割合が 0.75〜0.77 に下がって WARNING が
+  出る。ただし 50% 未満で終了コード 2 になるので、索引の側がページ以外の項目を増やしただけで nextjs の全コマンドが止まりうる
+- 相対リンクを解決して vite / vitest に `index_url` を足す: `parse_llms_index` は全 source の索引の読み (claude-code /
+  claude-platform / firebase / zed / amp など) で共有されていて影響が大きく、本件の範囲を超える
+
+変えないもの: `_FEW_PAGES_RATIO` (0.5) は nextjs に合わせて上げない (`index_url` を持つ同梱 preset の手元の写しの比は Render の
+0.61 が最も低く、次が claude-code の 0.97 で (下の「2026-11-18 実測 (0.57.1)」の表)、上げると誤警告が出うる)。転送される
+`vercel.com/docs/llms.txt` を preset に書くと、`scripts/check-preset-urls.py` が moved と報告する。
+
+数字は 2026-11-17 時点のもの。上流が `/docs/llms.txt` に Pages Router を含める、vite / vitest が絶対 URL に変える、などがあれば
+判断が変わりうるので、見直すときは次の手順で測り直す。ネットワークに出るのは最初の 2 つの `curl` だけ。repo のルートで実行し、
+既定のキャッシュに書かないよう `--cache-dir` を付ける:
+
+```bash
+S=<scratch>   # 作業用ディレクトリ
+curl -sS -L -A llms-docs-probe -o "$S/docs-llms.txt" -w '%{http_code} %{content_type} %{size_download}\n' https://nextjs.org/docs/llms.txt
+curl -sS -L -A llms-docs-probe -o "$S/llms-full.txt" -w '%{http_code} %{content_type} %{size_download}\n' https://nextjs.org/docs/llms-full.txt
+grep '^docs_index:' "$S/llms-full.txt" | sort | uniq -c      # 307 /docs/llms.txt, 167 /docs/pages/llms.txt
+```
+
+`$S/sources.json` には、同梱の `nextjs` の写しに `index_url` を足したものを書く:
+
+```json
+{"sources": {"nextjs-after": {"url": "https://nextjs.org/docs/llms-full.txt", "split": "frontmatter",
+  "frontmatter_key": "url", "page_url": "frontmatter:url", "description": "Next.js",
+  "index_url": "https://nextjs.org/docs/llms.txt"}}}
+```
+
+```bash
+# 正常なファイル: stderr は空
+python3 plugins/llms-docs/scripts/parse-llms-txt.py sections 0 --source nextjs-after --sources-file "$S/sources.json" \
+    --file "$S/llms-full.txt" --index-file "$S/docs-llms.txt" --cache-dir "$S/cache"
+# 先頭 10% で切ったファイル: "split into 39 pages, but its llms.txt lists 299 under https://nextjs.org/docs/" が出る
+head -n "$(( $(wc -l < "$S/llms-full.txt") / 10 ))" "$S/llms-full.txt" > "$S/trunc.txt"
+python3 plugins/llms-docs/scripts/parse-llms-txt.py sections 0 --source nextjs-after --sources-file "$S/sources.json" \
+    --file "$S/trunc.txt" --index-file "$S/docs-llms.txt" --cache-dir "$S/cache"
+# 今の同梱 preset では、同じファイルでも stderr は空
+echo '{"sources": {}}' > "$S/empty-sources.json"
+python3 plugins/llms-docs/scripts/parse-llms-txt.py sections 0 --source nextjs --sources-file "$S/empty-sources.json" \
+    --file "$S/trunc.txt" --cache-dir "$S/cache"
+```
+
+範囲は、`parse_llms_index` で項目を読み、`_is_index_file_url` に当たる項目を除き、`normalize_doc_url` の種類を数え、
+`split_documents` (preset `nextjs`) で分けたページの URL と比べて数えた。
+
+### 2026-11-18 実測 (0.57.1): `llms.txt` と比べる警告は `url` のディレクトリの下の URL だけを数える
+
+render の preset を読むたびに、0.49.0 の比の警告 (`split into 137 pages, but its llms.txt lists 411`) が出ていた。
+`https://render.com/docs/llms.txt` は docs のほかに記事・ブログ・変更履歴を並べ、`llms-full.txt` は docs だけを持つ。2026-11-18 の
+取得で、ローダーが読む項目は 411 (`/docs/` 225・`/articles/` 166・`/changelog/` 10・`/blog/` 10)。壊れていないファイルで
+「The file may be broken upstream …, report an issue」と案内していた (stdout と終了コードは正しい)。
+
+直し方: 比べる `llms.txt` の URL を、profile の `url` のディレクトリ (パスの最後の `/` まで。render なら `https://render.com/docs/`)
+の下にあるものに限る。ディレクトリそのもの (`https://render.com/docs`・`/docs.md`) も数え、`/docsearch` のように接頭辞だけ同じ
+パスは数えない。ホストは大文字小文字を区別せず、スキーム・ポート・パスは書かれたまま比べる。WARNING の行は数えたディレクトリを
+添える (`… lists 225 under https://render.com/docs/`)。ディレクトリの下に 1 件も無い索引 (`llms-full.txt` をサイトの別の場所や
+ミラーに置く source) は、今までどおりすべてを数える (0 件を数えると、どんなに壊れても警告が出なくなるため)。preset のキーは
+足さない。
+
+render の preset から `index_url` を外す案は採らない。`split: h1` で `page_url` が無く、ページの URL を `llms.txt` との突き合わせで
+付けている (137 ページ中 133) ので、外すと URL を失う。
+
+**きれいな写し** (`index_url` を持つ同梱 preset。2026-11-18 に作業用のディレクトリへ取り直したものと、既定のキャッシュの写し
+(取得は 2026-10-03〜11-17)。2 つの数は「取り直し / 既定のキャッシュ」):
+
+| preset | ページ | 数える URL (0.57.0 → 0.57.1) | 比 (0.57.1) | 警告 (0.57.0 → 0.57.1) |
+|---|---|---|---|---|
+| zod | 18 / 18 | 17 → 17 / 17 → 17 | 1.06 | 出ない → 出ない |
+| hono | 91 / 91 | 92 → 91 / 92 → 91 (外れるのは GitHub の 1 項目) | 1.00 | 出ない → 出ない |
+| render | 137 / — | 411 → 225 | 0.61 (0.57.0 の数え方では 0.33) | 出る → 出ない |
+| codex | 205 / 193 | 210 → 203 / 198 → 193 | 1.01 / 1.00 | 出ない → 出ない |
+| openai-plugins | 32 / — | 31 → 31 | 1.03 | 出ない → 出ない |
+| openai-api-docs | 245 / — | 247 → 247 | 0.99 | 出ない → 出ない |
+| factory | 135 / — | 136 → 136 | 0.99 | 出ない → 出ない |
+| pixai | 120 / 117 | 41 → 41 / 40 → 40 | 2.93 (3 言語のページ) | 出ない → 出ない |
+| claude-code | 209 / 231 | 216 → 216 / 239 → 239 | 0.97 | 出ない → 出ない |
+| claude-platform | 922 / 826 | 922 → 922 / 826 → 826 | 1.00 | 出ない → 出ない |
+| zed / amp / firebase | | | | `body: fetch` は `llms-full.txt` を分けないので、この警告を出さない |
+
+- codex で外れるのは `https://learn.chatgpt.com/docs/` の外の項目 (`/guides/` 4・`/resources`・`/videos`・
+  `developers.openai.com/community/…` の 7。既定のキャッシュでは 5)。うち 5 (既定のキャッシュでは 3) は `llms-full.txt` のページ
+  (タイトルの突き合わせで URL が付く) で、閾値が 105 → 101.5 ページ (99 → 96.5) に下がる
+- render の比が 1 に届かないのは、`/docs/` の下にも `llms-full.txt` に無いページがあるため (225 のうちページに当たるのは 133。
+  当たらない 92 は、クイックスタート 74 項目のうち 73、トピックごとのまとめ (`/docs/sandboxes/all` など) 2、ほか 17)
+
+**壊れた写し** (上の 16 組 (preset × 写し) のそれぞれで、きれいなもの・先頭 10〜95% で切ったもの 12 通り・閉じ記号を次の行に
+連結したもの 3 通り (すべて / 4 つに 1 つ / 無作為に 25%)。計 256 件):
+
+| 0.57.0 → 0.57.1 | 件数 | 内訳 |
+|---|---|---|
+| 比の警告が出る → 出ない | 3 | render のきれいな写し (直したもの)。render の 95% で切った写し (116 ページ。0.57.1 は 112.5 ページ未満で出る)。codex の既定のキャッシュの 60% で切った写し (97 ページ。閾値が 99 → 96.5) |
+| 出ない → 出る | 0 | 数える URL は減るだけなので、起きない |
+| ほかの 3 つの警告の行が変わる | 0 | |
+
+render の壊れた写しのうち、95% で切ったもの以外の 14 件 (2〜109 ページ) では引き続き出る。
+
+- 足さなかった読み: codex のように `url` のディレクトリの外のページを `llms-full.txt` が持つ source のために、ディレクトリの外の
+  項目のうちページの URL (タイトルの突き合わせで付いたものを含む) になったものも数える案。壊れたファイルではページと一緒にこの数も
+  減り (codex の既定のキャッシュの 60% で切った写しで 196 → 194)、97 ページの写しはやはり出ない。分割の結果で閾値が動くので採らない
+- 残るもの: render の比 0.61 は閾値 0.5 に近い。`/docs/` の下の項目が 274 を超える (`llms-full.txt` に無いページがさらに 50 ほど
+  増える) と、壊れていなくても出るようになる。`url` のディレクトリの外にページの URL を並べる索引では、ディレクトリの下の項目が
+  少ないほど警告が出にくくなる (1 件でもあれば、その数だけを数える)
+- render はサイトのルートにも同じ 2 つのファイルを置き (2026-11-18 の取得で、`https://render.com/llms-full.txt` と
+  `/docs/llms-full.txt`、`/llms.txt` と `/docs/llms.txt` がそれぞれ同じ内容の 200)、ファイル自身は最新版の置き場としてルートを
+  案内する。preset の `url` をルートに移すとディレクトリがサイト全体になり、411 項目をすべて数えて毎回出る警告が戻る。同梱の
+  preset の `url` が `/docs/` の下にあることは `test_the_bundled_render_preset_counts_only_its_docs` が固定する
 
 ## 3. 需要の根拠
 
