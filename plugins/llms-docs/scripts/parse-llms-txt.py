@@ -2608,7 +2608,7 @@ def _resolve_page_ref(docs: list[dict], page_ref: str, retry=None,
                     chosen = _title_to_slug(docs, found, page_ref, strip_suffix, retry)
                     if chosen is not None:
                         return chosen
-                _die_ambiguous_substring(field_name, page_ref, found, forms, retry)
+                _die_ambiguous_substring(field_name, page_ref, found, forms, strip_suffix, retry)
     # a profile that also takes a title (ai-sdk) cannot tell a slug from a
     # title that matched nothing: "for slug" would misname the latter
     if "slug" in forms and not is_url and not {"title", "url_substring"} & set(forms):
@@ -2651,13 +2651,27 @@ def _slug_choice(found: list, slug: str) -> int | None:
     return None
 
 
+def _url_is_ref(url: str | None, page_ref: str, strip_suffix: str | None) -> bool:
+    """True when *page_ref* is a full ``http(s)://`` URL (as the ``url`` form
+    takes one) and *url* is that URL: compared as the ``url`` form compares
+    them (``_ref_url_key``), and case-insensitively, as the substring forms
+    read a reference. Other URLs can hold the whole of it
+    (``https://nextjs.org/docs/app/guides`` is part of 80 longer URLs), and
+    then the ``url_substring`` form matches them all."""
+    return (bool(url) and re.match(r"https?://", page_ref) is not None
+            and _ref_url_key(url, strip_suffix).lower() == _ref_url_key(page_ref, strip_suffix).lower())
+
+
 def _likely_first(docs: list[dict], found: list, page_ref: str, strip_suffix: str | None) -> list:
     """*found* (``[(idx, doc), ...]`` of a title or URL substring, in page
     order) with the pages the reference most likely names first: a title
     that is the reference (case-insensitively, as written or without its
-    heading id), then a URL that ends in it (as the ``slug`` form reads it),
-    then the rest; each group in page order. The ambiguity error cuts the
-    list, and in page order the page titled ``tool`` was the 42nd."""
+    heading id), then a URL that ends in it (as the ``slug`` form reads it)
+    or, for a full URL, a URL that is it (``_url_is_ref``), then the rest;
+    each group in page order. The ambiguity error cuts the list, and in page
+    order the page titled ``tool`` was the 42nd, and the page at
+    ``https://nextjs.org/docs/app/guides`` the 23rd of the 81 pages whose URL
+    holds it."""
     needle = page_ref.lower()
     tails = {i for i, _url in _slug_pages(docs, page_ref, strip_suffix)[1]}
 
@@ -2665,7 +2679,7 @@ def _likely_first(docs: list[dict], found: list, page_ref: str, strip_suffix: st
         i, d = item
         if needle in {(d["title"] or "").lower(), (d.get("raw_title") or "").lower()}:
             return 0
-        return 1 if i in tails else 2
+        return 1 if i in tails or _url_is_ref(d["url"], page_ref, strip_suffix) else 2
 
     return sorted(found, key=group)
 
@@ -2674,11 +2688,15 @@ def _likely_first(docs: list[dict], found: list, page_ref: str, strip_suffix: st
 AMBIGUOUS_LIMIT = 20
 
 
-def _die_ambiguous_substring(field_name: str, page_ref: str, found: list, forms: tuple, retry=None) -> None:
+def _die_ambiguous_substring(field_name: str, page_ref: str, found: list, forms: tuple,
+                             strip_suffix: str | None = None, retry=None) -> None:
     """The ambiguity error of the ``title`` / ``url_substring`` forms: the
     first ``AMBIGUOUS_LIMIT`` of *found* (in ``_likely_first`` order), each
     with its command, and when that is not all of them, a line with how many
-    matched and how to name one of the others."""
+    matched and how to name one of the others. A full URL that is the URL of
+    one of them (``_url_is_ref``) is already the whole of it, and the other
+    URLs hold it: the line says so and asks for a page number rather than for
+    more of the URL or the full URL."""
     rows = [(i, d["title"] + (f" ({d['url']})" if d["url"] else "")) for i, d in found[:AMBIGUOUS_LIMIT]]
     if field_name == "title":
         ways = ["more of the title"]
@@ -2687,9 +2705,14 @@ def _die_ambiguous_substring(field_name: str, page_ref: str, found: list, forms:
                 ways.append("a longer URL tail")
             if {"url", "url_substring"} & set(forms):
                 ways.append("the full URL")
+    elif any(_url_is_ref(d["url"], page_ref, strip_suffix) for _i, d in found):
+        ways = []
     else:
         ways = ["more of the URL", "the full URL"]
-    narrow = "pass " + (", ".join(ways[:-1]) + ", or " + ways[-1] if len(ways) > 1 else ways[0])
+    if ways:
+        narrow = "pass " + (", ".join(ways[:-1]) + ", or " + ways[-1] if len(ways) > 1 else ways[0])
+    else:
+        narrow = "other URLs contain this whole URL, so pass a page number"
     die_ambiguous_page(f"{field_name} substring", page_ref, rows, retry, total=len(found), narrow=narrow)
 
 

@@ -1248,13 +1248,17 @@ class H3KeepsH2ResultsTest(_H3KeepsH2Cli):
         (on that ranking) only when they differ."""
         rows, ranked, heads = generic._search_rows, generic._ranked, generic._heading_rows
         pages = len(re.findall(r"(?m)^title: ", ALPHA_BETA))
+        # "beta notes" with --top-n 2: the same candidates, and the H3 index's
+        # rows also have [body-only] ones (the comparison leaves them out)
         for query, top_n, calls in (("gamma", "5", 1), ("alpha", "1", 1), ("alpha beta", "5", 1),
-                                    ("alpha beta", "2", 2)):
+                                    ("beta notes", "2", 1), ("alpha beta", "2", 2)):
             with self.subTest(query=query, top_n=top_n), \
                     mock.patch.object(generic, "_search_rows", side_effect=rows) as spy, \
                     mock.patch.object(generic, "_ranked", side_effect=ranked) as ranks, \
                     mock.patch.object(generic, "_heading_rows", side_effect=heads) as read:
-                self.search("ai-sdk", ("--file", str(self.file)), query, "--top-n", top_n)
+                out = self.search("ai-sdk", ("--file", str(self.file)), query, "--top-n", top_n)
+                if query == "beta notes":
+                    self.assertIn("[body-only]", out)
                 self.assertEqual(spy.call_count, calls)
                 self.assertEqual([c.args[1]["index_heading_level"] for c in ranks.call_args_list], [3, 2])
                 self.assertEqual(read.call_count, pages)

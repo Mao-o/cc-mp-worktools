@@ -97,10 +97,14 @@ schema 付きで起動された agent (Workflow の `agent(prompt, {schema})` �
   に完全一致するページが 1 件だけならそれに解決し、他の候補を stderr の `Note:` で、それを読むコマンド
   付きで知らせる (`hooks` は `en/hooks`。`en/agent-sdk/hooks` は別のページ)。候補のコマンドは
   `--max-chars` / `--limit` などの既定以外の値も引き継ぐ。タイトル・URL の部分一致の候補は、タイトルが参照と
-  (大文字小文字を無視して) ちょうど同じページ、URL が `/<参照>` で終わるページ、残りの順に並べ (それぞれページ順)、
-  先頭の 20 件を出す。20 件を超えるときは候補の後に `(showing 20 of 42 matches; pass more of the title, a longer URL
-  tail, or the full URL)` の行を出す (コマンドは付かない。挙げる方法は、その source の `page_ref_forms` が受け付ける
-  ものだけ)。同じ URL の別々のページの候補を 20 件で切ったときも、件数の行を出す
+  (大文字小文字を無視して) ちょうど同じページ、URL が `/<参照>` で終わるページ (参照が `http(s)://` で始まる完全な
+  URL なら、URL がその参照のページ。`url` の形と同じく `.md`・クエリ・`#…`・末尾の `/`・`page_url_strip_suffix` を
+  無視し、大文字小文字も無視して比べる)、残りの順に並べ (それぞれページ順)、先頭の 20 件を出す。20 件を超えるときは候補の後に `(showing 20 of 42 matches; pass more of
+  the title, a longer URL tail, or the full URL)` の行を出す (コマンドは付かない。挙げる方法は、その source の
+  `page_ref_forms` が受け付けるものだけ)。既定の `page_ref_forms` では、完全な URL も URL の部分一致として読むので、
+  その URL を含む長い URL のページにも当たる (`https://nextjs.org/docs/app/guides` は 81 件)。参照が候補のどれかの URL
+  そのものなら、件数の行は URL を足すことを勧めず `(showing 20 of 81 matches; other URLs contain this whole URL, so
+  pass a page number)` と出す。同じ URL の別々のページの候補を 20 件で切ったときも、件数の行を出す
 - **`ai-sdk` で複数のタイトルの一部に当たる参照**: 曖昧エラーにする前に slug として解き直し、URL がその段で終わる
   ページが 1 つ (複数なら `<lang>/<slug>` ちょうどの 1 つ) ならそれを開く (`openai` は 8 件のタイトルの一部で、URL が
   `/openai` で終わるのは `OpenAI` のページだけ)。stderr の `Note:` に、何件のタイトルの一部か、他のタイトルのページ
@@ -587,7 +591,8 @@ tags・H1 / H2 で全キーワードが当たり、本文にもヒットがあ�
 ヒットのある候補の下、ヒット 0 の行の上に置く。`h3_keeps_h2_results` の source では、H1 / H2 だけの索引なら出る
 本文ヒットのある行のうち一覧に無いものを、その索引での並びと表示のまま、ヒットのある行の下、ヒット 0 の行の上に足し、
 見出し行に件数を添える (今の行・順・1 行目は変えない)。`Next:` 行は本文ヒットのある上位 3 行から選ぶので、戻した行に
-付くのは、今の行で本文ヒットのある行が 3 未満のときだけ。
+付くのは、今の行で本文ヒットのある行 (`--include-changelog-priority` が無ければ Changelog / Release notes のページは
+数えない。戻した行はその行より上に入る) が 3 未満のときだけ。
 
 `--show-sections` の一覧は `index_heading_level` の段までの見出しを並べる。既定の `3` では、同梱 presets
 (汎用ローダーの source。2026-10 時点の各サイトの `llms-full.txt` で計測) の見出しの行数は全体で H1 / H2 だけのときの約 1.7 倍

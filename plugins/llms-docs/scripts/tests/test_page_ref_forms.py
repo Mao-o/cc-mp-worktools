@@ -483,6 +483,12 @@ def count_lines(err: str) -> list:
 TOOL_PAGES = ([(f"Tool kit {i}", f"https://example.com/docs/kit-{i}") for i in range(22)]
               + [("tool", "https://example.com/docs/reference/tool")])
 
+# 22 pages under https://example.com/docs/kit, and last the page at that URL:
+# its full URL is part of all 23 URLs
+KIT_URL = "https://example.com/docs/kit"
+KIT_PAGES = [(f"Kit part {i}", f"{KIT_URL}/part-{i}") for i in range(22)] + [("Kit", KIT_URL)]
+WHOLE_URL_LINE = "  (showing 20 of 23 matches; other URLs contain this whole URL, so pass a page number)"
+
 
 class AmbiguousListTest(unittest.TestCase):
     """The ambiguity error of a title / URL substring lists first the pages
@@ -527,6 +533,13 @@ class AmbiguousListTest(unittest.TestCase):
         pages = [("Guide two", "https://example.com/two"), ("Guide one", "https://example.com/docs/guide.md.txt")]
         self.assertEqual(candidates(resolve("guide", self.D, ".md.txt", pages=pages)[1]), [1, 0])
         self.assertEqual(candidates(resolve("guide", self.D, None, pages=pages)[1]), [0, 1])
+        # a URL substring that no title holds: the URL that ends in it first
+        urls = [("Page A", "https://example.com/docs/tool-a"), ("Page B", "https://example.com/docs/tool"),
+                ("Page C", "https://example.com/x/docs/tool-b")]
+        idx, err = resolve("docs/tool", self.D, pages=urls)
+        self.assertIsNone(idx)
+        self.assertTrue(err.startswith("Error: Ambiguous url substring 'docs/tool'. Matches:\n"), err)
+        self.assertEqual(candidates(err), [1, 0, 2])
         # a title as written (with its heading id) is the reference too: the
         # page titled "Setup {#start}" goes ahead of the one before it whose
         # title as written only holds it
@@ -558,6 +571,75 @@ class AmbiguousListTest(unittest.TestCase):
         idx, err = resolve("docs/x", self.D, pages=urls)
         self.assertTrue(err.startswith("Error: Ambiguous url substring 'docs/x'."), err)
         self.assertEqual(count_lines(err), ["  (showing 20 of 21 matches; pass more of the URL, or the full URL)"])
+
+    def test_a_full_url_that_other_urls_hold_lists_its_page_first(self):
+        """A full URL is part of the longer URLs under it, so the URL
+        substring form matches them all (nextjs's
+        ``https://nextjs.org/docs/app/guides`` matched 81 pages, and the page
+        at that URL was the 23rd, cut off). The page whose URL is the
+        reference (compared as the ``url`` form compares URLs, and
+        case-insensitively) comes first, and the count line asks for a page
+        number: the reference is that page's full URL already."""
+        # the reference in another case; the page's URL with what the url form
+        # ignores (a trailing "/", ".md", a query, a fragment)
+        cases = [(ref, KIT_URL) for ref in (KIT_URL, "https://example.com/DOCS/Kit")]
+        cases += [(KIT_URL, KIT_URL + tail) for tail in ("/", ".md", "?from=list", "#top")]
+        for ref, page_url in cases:
+            pages = KIT_PAGES[:22] + [("Kit", page_url)]
+            with self.subTest(ref=ref, page_url=page_url):
+                idx, err = resolve(ref, self.D, pages=pages)
+                self.assertIsNone(idx)
+                self.assertTrue(err.startswith(f"Error: Ambiguous url substring '{ref}'. Matches:\n"
+                                               f"  [22] Kit ({page_url})\n"), err)
+                self.assertEqual(candidates(err), [22] + list(range(19)))
+                self.assertEqual(count_lines(err), [WHOLE_URL_LINE])
+        # page_url_strip_suffix comes off the page's URL first, as in the url
+        # form; without the key, ".md.txt" is part of the URL
+        listed = [(t, u + ".md.txt") for t, u in KIT_PAGES]
+        for suffix, first, line in ((".md.txt", 22, WHOLE_URL_LINE),
+                                    (None, 0, "  (showing 20 of 23 matches; pass more of the URL, or the full URL)")):
+            with self.subTest(suffix=suffix):
+                idx, err = resolve(KIT_URL, self.D, suffix, pages=listed)
+                self.assertIsNone(idx)
+                self.assertEqual(len(candidates(err)), 20, err)
+                self.assertEqual(candidates(err)[0], first)
+                self.assertEqual(count_lines(err), [line])
+        # a URL that is no candidate's: cut short (every URL holds it), or with
+        # a "/" that the page's URL does not hold (that page is no candidate);
+        # more of the URL, or the full URL, names one: page order, as before
+        for ref, total in ((KIT_URL[:-1], 23), (KIT_URL + "/", 22)):
+            with self.subTest(ref=ref):
+                idx, err = resolve(ref, self.D, pages=KIT_PAGES)
+                self.assertIsNone(idx)
+                self.assertEqual(candidates(err), list(range(20)))
+                self.assertEqual(count_lines(err),
+                                 [f"  (showing 20 of {total} matches; pass more of the URL, or the full URL)"])
+        # at the cut: 20 matches are all listed (no count line); of 21, the
+        # page at the URL is the 21st in page order and is listed first
+        for subpages, lines in ((19, []), (20, ["  (showing 20 of 21 matches; other URLs contain this whole URL, "
+                                                "so pass a page number)"])):
+            with self.subTest(matches=subpages + 1):
+                idx, err = resolve(KIT_URL, self.D, pages=KIT_PAGES[:subpages] + KIT_PAGES[-1:])
+                self.assertIsNone(idx)
+                self.assertEqual(candidates(err), [subpages] + list(range(19)))
+                self.assertEqual(count_lines(err), lines)
+        # URL-shaped references that are no page's URL fail as any URL substring
+        for ref in ("https://", "https://example.com/", "https://example.com/docs/kit/-x", "https://example.com/\\_"):
+            with self.subTest(ref=ref):
+                idx, err = resolve(ref, self.D, pages=KIT_PAGES)
+                self.assertIsNone(idx)
+                self.assertNotIn("whole URL", err)
+        # a full URL that is part of titles, on pages with no URL: the titles are listed
+        idx, err = resolve(KIT_URL, self.D, pages=[(f"See {KIT_URL}", None), (f"Also {KIT_URL}", None)])
+        self.assertIsNone(idx)
+        self.assertTrue(err.startswith(f"Error: Ambiguous title substring '{KIT_URL}'."), err)
+        self.assertEqual(candidates(err), [0, 1])
+        # a reference with no http(s):// is no full URL (the url form does not
+        # take it either): its count line is any URL substring's
+        rel = [(t, u[len("https://example.com"):]) for t, u in KIT_PAGES]
+        idx, err = resolve("/docs/kit", self.D, pages=rel)
+        self.assertIsNone(idx)
+        self.assertEqual(count_lines(err), ["  (showing 20 of 23 matches; pass more of the URL, or the full URL)"])
 
     def test_the_pages_of_one_url(self):
         pages = [(f"Page {i}", "https://example.com/docs/same") for i in range(21)]
@@ -615,6 +697,105 @@ class AmbiguousListTest(unittest.TestCase):
                             self.assertEqual(code, 0, (line, err2))
                             self.assertIn(reached.format(n=n) + (f'"{title}"' if cmd == "sections" else title),
                                           opened)
+
+
+# The pages whose URL holds https://vercel.com/docs/connect in Vercel's
+# llms-full.txt (2026-10), in page order: the page at that URL is the 23rd.
+VERCEL_CONNECT_URL = "https://vercel.com/docs/connect"
+VERCEL_CONNECT = [
+    ("Authentication in Vercel Connect", "https://vercel.com/docs/connect/concepts/authentication"),
+    ("Connectors in Vercel Connect", "https://vercel.com/docs/connect/concepts/connectors"),
+    ("Connector installations in Vercel Connect", "https://vercel.com/docs/connect/concepts/installations"),
+    ("Vercel Connect Concepts", "https://vercel.com/docs/connect/concepts"),
+    ("Project links in Vercel Connect", "https://vercel.com/docs/connect/concepts/project-links"),
+    ("Provider tokens in Vercel Connect", "https://vercel.com/docs/connect/concepts/tokens"),
+    ("Webhook triggers for Vercel Connect", "https://vercel.com/docs/connect/concepts/triggers"),
+    ("Enterprise-Managed Authorization for Linear with Okta", "https://vercel.com/docs/connect/ema/linear"),
+    ("Enterprise-Managed Authorization (EMA)", "https://vercel.com/docs/connect/ema"),
+    ("Enterprise-Managed Authorization for Slack with Okta", "https://vercel.com/docs/connect/ema/slack"),
+    ("AI SDK and MCP with Vercel Connect", "https://vercel.com/docs/connect/frameworks/ai-sdk-and-mcp"),
+    ("Auth.js with Vercel Connect", "https://vercel.com/docs/connect/frameworks/authjs"),
+    ("Better Auth with Vercel Connect", "https://vercel.com/docs/connect/frameworks/better-auth"),
+    ("Chat SDK with Vercel Connect", "https://vercel.com/docs/connect/frameworks/chat-sdk"),
+    ("eve with Vercel Connect", "https://vercel.com/docs/connect/frameworks/eve"),
+    ("Frameworks and Adapters for Vercel Connect", "https://vercel.com/docs/connect/frameworks"),
+    ("TanStack AI with Vercel Connect", "https://vercel.com/docs/connect/frameworks/tanstack-ai"),
+    ("Vercel Connect product terms", "https://vercel.com/docs/connect/legal"),
+    ("Vercel Connect Limits", "https://vercel.com/docs/connect/limits"),
+    ("MCP Events", "https://vercel.com/docs/connect/mcp-events"),
+    ("Observability", "https://vercel.com/docs/connect/observability"),
+    ("Optimizing Vercel Connect Usage", "https://vercel.com/docs/connect/optimizing-usage"),
+    ("Vercel Connect", "https://vercel.com/docs/connect"),
+    ("Vercel Connect Pricing", "https://vercel.com/docs/connect/pricing"),
+    ("For Service Providers", "https://vercel.com/docs/connect/providers"),
+    ("Python SDK Reference", "https://vercel.com/docs/connect/python-sdk-reference"),
+    ("Quickstart", "https://vercel.com/docs/connect/quickstart"),
+    ("TypeScript SDK Reference", "https://vercel.com/docs/connect/ts-sdk-reference"),
+]
+
+
+class FullUrlRealPagesTest(unittest.TestCase):
+    """The bundled ``vercel`` preset (int / title / url_substring) on those
+    pages, in the frontmatter of its llms-full.txt, through ``--file`` and a
+    cache dir: the full URL of "Vercel Connect" is part of all 28 URLs, and
+    the page was the 23rd candidate, not among the 20 listed."""
+
+    def setUp(self):
+        self.sources = _loader.without_user_sources(self)
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        rule = "-" * 80
+        text = "# Vercel documentation\n\n" + "".join(
+            f'{rule}\ntitle: "{t}"\nsource: "{u}"\n{rule}\n\n# {t}\n\nzzq {t}\n\n' for t, u in VERCEL_CONNECT)
+        self.full = Path(self.tmp, "vercel-llms-full.txt")
+        self.full.write_text(text, encoding="utf-8")
+        cache = Path(self.tmp, "cache")
+        cache.mkdir()
+        preset = generic._read_sources_file(generic.PRESETS_FILE)["vercel"]
+        Path(generic._cache_path(str(cache), preset)).write_text(text, encoding="utf-8")
+        self.corpora = {"file": ["--file", str(self.full)],
+                        "cache-dir": ["--cache-dir", str(cache), "--max-age", "999999999"]}
+        # a printed command that dropped the corpus options would read an
+        # empty default cache and fail to fetch
+        for patcher in (mock.patch.dict(os.environ, {"LLMS_DOCS_CACHE_DIR": str(Path(self.tmp, "default-cache"))}),
+                        mock.patch("urllib.request.urlopen", side_effect=OSError("test: network disabled"))):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def cli(self, argv: list) -> tuple:
+        try:
+            return _loader.run_cli(generic, argv)
+        except Exception as e:  # a crash is a failure of the test, not an error of the run
+            self.fail(f"{argv} crashed: {e!r}")
+
+    def opened(self, argv: list) -> str:
+        """The first line ``sections`` prints for *argv* (it must open a page)."""
+        code, out, err = self.cli(argv)
+        self.assertEqual(code, 0, (argv, err))
+        return out.splitlines()[0]
+
+    def test_the_page_at_the_url_comes_first_and_the_commands_run_as_printed(self):
+        for label, corpus in self.corpora.items():
+            with self.subTest(corpus=label):
+                argv = [SCRIPT, "sections", "--source", "vercel", *corpus, "--", VERCEL_CONNECT_URL]
+                code, out, err = self.cli(argv)
+                self.assertEqual((code, out), (1, ""), err)
+                self.assertTrue(err.startswith(f"Error: Ambiguous url substring '{VERCEL_CONNECT_URL}'. Matches:\n"
+                                               f"  [22] Vercel Connect ({VERCEL_CONNECT_URL})\n"), err)
+                self.assertEqual(candidates(err), [22] + list(range(19)))
+                self.assertEqual(count_lines(err), ["  (showing 20 of 28 matches; other URLs contain this whole "
+                                                    "URL, so pass a page number)"])
+                # each candidate's command, split by the shell rules and run as
+                # printed, opens the page it names
+                lines = [ln.strip() for ln in err.splitlines() if ln.strip().startswith(SCRIPT + " ")]
+                self.assertEqual(len(lines), 20, err)
+                for n, line in zip(candidates(err), lines):
+                    self.assertEqual(self.opened(shlex.split(line, comments=True)),
+                                     f'Sections in [{n}] "{VERCEL_CONNECT[n][0]}"', line)
+                # the page number the count line asks for, in place of the URL,
+                # opens that page, listed or not
+                for n in (22, 27):
+                    self.assertEqual(self.opened(argv[:-1] + [str(n)]), f'Sections in [{n}] "{VERCEL_CONNECT[n][0]}"')
 
 
 class CliTest(unittest.TestCase):

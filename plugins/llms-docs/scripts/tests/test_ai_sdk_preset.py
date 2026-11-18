@@ -382,6 +382,26 @@ class TitleToSlugTest(_TitleToSlug):
             "Note: 'widget' also matches [8] https://ai-sdk.dev/en/guides/widget; resolved to [9] "
             "(exact <lang>/widget). For [8]: "), err)
 
+    def test_the_note_names_the_title_that_is_the_reference_first(self):
+        """The other titles are named in the order of the ambiguity list (the
+        title that is the reference first, then page order), and the Note's
+        command is for the first of them."""
+        self.write(_page("Widget guide", "https://ai-sdk.dev/docs/guides/widget-guide", "guide")
+                   + _page("widget", "https://ai-sdk.dev/docs/reference/widgets", "ref")
+                   + _page("Widgets", "https://ai-sdk.dev/docs/widget", "widgets"))
+        for label, corpus in self.corpora().items():
+            with self.subTest(corpus=label):
+                code, out, err = self.run_on(corpus, "sections", tail=("widget",))
+                self.assertEqual(code, 0, err)
+                self.assertEqual(out.splitlines()[0], 'Sections in [2] "Widgets"')
+                note = self.note(err, "widget")
+                self.assertIn("is part of 3 titles, and the URL of [2] ends in it; opened [2]. The other titles: "
+                              "[1] https://ai-sdk.dev/docs/reference/widgets, "
+                              "[0] https://ai-sdk.dev/docs/guides/widget-guide. For [1]: ", note)
+                code, opened, err = _loader.run_cli(generic, self.note_command(note, 1))
+                self.assertEqual(code, 0, err)
+                self.assertEqual(opened.splitlines()[0], 'Sections in [1] "widget"')
+
     def test_profiles_without_a_slug_after_the_title_are_unchanged(self):
         docs = self.docs()
         for forms, want, note in ((("int", "title", "url_substring"), None, False),
