@@ -1479,8 +1479,9 @@ def _norm(tok: str) -> str:
     exact shape — "iOS", "macOS", "tvOS" — is how brand/acronym tokens get
     written, and an ordinary English plural is essentially never mixed-
     case like this. Without this guard, a query for "iOS" would strip to
-    "io" and substring-match unrelated titles like "Configuration" or
-    "Migrations" purely by coincidence — especially harmful for sources
+    "io" and match unrelated titles purely by coincidence ("Ionic"; and
+    until 0.55.0, when the index score matched any substring,
+    "Configuration" or "Migrations") — especially harmful for sources
     with no full-corpus search fallback, where a handful of spurious "io"
     hits can crowd the intended page out of a small top-N candidate list.
     Deliberately narrower than "any token with 2+ capitals": an ALL-CAPS
@@ -1528,8 +1529,8 @@ def _norm_phrase(text: str) -> str:
     a longer phrase (e.g. ``_norm("uses")`` strips to ``"use"``, but a
     naive whole-string ``_norm("Common uses")`` — length 11 — would instead
     strip the trailing ``"es"`` off the *entire string* to ``"common us"``,
-    losing the substring match a plain, un-normalized ``"uses" in "common
-    uses"`` used to find). Normalizing word-by-word keeps every word's
+    losing the match a plain, un-normalized ``"uses" in "common uses"``
+    used to find). Normalizing word-by-word keeps every word's
     stemming decision local to that word, so a phrase and a bare keyword
     that share a final word always normalize that shared word the same way.
     """
@@ -1553,14 +1554,102 @@ def _joins_words(kw: str, words: list[str]) -> bool:
     return False
 
 
+def _is_word_char(ch: str) -> bool:
+    """An ASCII lowercase letter or digit, the characters a normalized
+    English word is made of. Deliberately not ``str.isalnum`` / ``re``'s
+    ``\\w``: those count Japanese (and every other script) as word
+    characters, so ``設定`` would stop matching ``フックの設定`` and
+    ``hooks`` would stop matching ``Claude Codeでhooksを使う``, where no
+    space separates the words."""
+    return "a" <= ch <= "z" or "0" <= ch <= "9"
+
+
+def _is_plural_s(word: str, i: int) -> bool:
+    """True when ``word[i]`` is an ``s`` that ends the word: nothing follows
+    it, or what follows is not a letter or digit (``URLs``, ``PDFs,``,
+    ``IDs.``)."""
+    return word[i] == "s" and (i + 1 == len(word) or not _is_word_char(word[i + 1].lower()))
+
+
+def _word_part_starts(text: str) -> frozenset:
+    """The offsets in ``_norm_phrase(text)`` where a part of a word starts,
+    other than the word's own start: right after a ``-`` / ``_`` (which
+    ``_norm`` removes, so ``ai-sdk-core`` becomes ``aisdkcore``) and at a
+    camelCase step, from a lowercase letter or digit to a capital
+    (``streamText``) or at the last capital of a run followed by a lowercase
+    letter (the ``M`` of ``UIMessage``). An offset past what the plural fold
+    left of the word is not one.
+
+    A run of capitals followed only by an ``s`` that ends the word has no
+    step at its last capital: the ``s`` is the plural of the acronym
+    (``URLs``, ``PDFs``, ``IDs``), so ``ls`` is not a part of ``URLs``.
+    ``UIMessages`` keeps its step (``essages`` follows the run), and so does
+    ``URLIsValid`` (the ``s`` does not end the word)."""
+    starts = set()
+    pos = 0
+    for word in text.split():
+        norm = _norm(word)
+        k = 0
+        prev = ""
+        for i, ch in enumerate(word):
+            if ch in "-_":
+                prev = ch
+                continue
+            if k and (prev in "-_"
+                      or (_is_word_char(prev) and "A" <= ch <= "Z")
+                      or ("A" <= prev <= "Z" and "A" <= ch <= "Z"
+                          and i + 1 < len(word) and "a" <= word[i + 1] <= "z"
+                          and not _is_plural_s(word, i + 1))):
+                if k < len(norm):
+                    starts.add(pos + k)
+            prev = ch
+            # the offset in the lowercased word ("İ" lowercases to 2 characters)
+            k += len(ch.lower())
+        pos += len(norm) + 1
+    return frozenset(starts)
+
+
+def _starts_word(kw: str, norm: str, raw: str) -> bool:
+    """True when the normalized keyword *kw* occurs in *norm*
+    (``_norm_phrase(raw)``) at the start of a word or of a word part
+    (``_word_part_starts``); what follows is free, so ``auth`` still finds
+    ``Authentication`` and ``text`` finds ``streamText``. An occurrence
+    inside a word does not count: ``citation`` is not in ``Elicitation``,
+    nor ``hooks`` in ``Webhooks``, nor ``ls`` in ``URLs`` (the plural ``s``
+    of an acronym starts no word part).
+
+    A start is an offset 0 or one after a character that is not
+    ``_is_word_char`` (a space, ``.``, ``(``, ``/``, Japanese ...). A keyword
+    that itself starts with such a character (``/hooks``, ``.claude``,
+    ``設定``) is matched as a substring, as before. The word parts are read
+    from *raw* only once an occurrence is found inside a word (most fields
+    hold a keyword at a word start or not at all)."""
+    if not _is_word_char(kw[0]):
+        return kw in norm
+    parts = None
+    p = norm.find(kw)
+    while p >= 0:
+        if p == 0 or not _is_word_char(norm[p - 1]):
+            return True
+        if parts is None:
+            parts = _word_part_starts(raw)
+        if p in parts:
+            return True
+        p = norm.find(kw, p + 1)
+    return False
+
+
 def score_entry(title: str, description: str, keywords,
                 *, tags=None, headings=None, headings_extra=None) -> int:
-    """Score a single index entry against *keywords* (case-insensitive substring).
+    """Score a single index entry against *keywords*: a keyword matches a
+    field when it starts a word or a word part there (``_starts_word``;
+    case-insensitive, the rest of the word is free). The body search
+    (``search_content_in_body``) still matches by substring.
 
     Returns total score (0 means no match). Scoring weights:
 
         title exact match  : +10
-        title substring    :  +5
+        title match        :  +5 (at the start of a word or a word part)
         tag match          :  +4 (if *tags* provided)
         description match  :  +2
         heading match      :  +1 (if *headings* provided)
@@ -1576,33 +1665,47 @@ def score_entry(title: str, description: str, keywords,
     exactly (10-11). The +1 alone still finds the API page by a function
     name.
 
+    A keyword found only inside a word scores nothing there, the bonus
+    included: ``citations`` against "Model Context Protocol (MCP)
+    Elicitation" (title, an ``elicitation`` tag, the description and an H2
+    all hold it only in "elicitation") scores 0 instead of 12, and stops
+    outranking the pages with a "Citations" heading. What this gives up,
+    since the rule cannot tell those apart from ``eli|citation``: the back
+    part of a closed lowercase compound (``agents`` in "subagents",
+    ``start`` in "Quickstart") and a word with a prefix (``install`` in
+    "Uninstall"); each still matches the whole word.
+
     Both the keyword and every comparison field are normalized before
     matching — so a plural query still finds a singular title (and vice
     versa), and a normalized whole-string match now counts as "exact"
-    (+10) rather than merely a substring (+5). *keywords* and *tags* are
-    already atomic single tokens (``query.split()`` / a tag list), so they
-    go through ``_norm()`` directly; *title*/*description*/*headings* are
-    free-text phrases and go through ``_norm_phrase()`` (word-by-word — see
-    its docstring for why applying ``_norm()`` to the whole phrase directly
-    would be wrong). Two equal raw strings are still equal after the same
-    deterministic transform is applied to both, so this cannot turn a
-    previously-exact match into a partial one — it only ever adds new
-    matches / upgrades partial matches to exact.
+    (+10) rather than merely a partial match (+5). *keywords* are
+    already atomic single tokens (``query.split()``), so they go through
+    ``_norm()`` directly; *title*/*description*/*tags*/*headings* go
+    through ``_norm_phrase()`` (word-by-word — see its docstring for why
+    applying ``_norm()`` to the whole phrase directly would be wrong; a tag
+    without whitespace normalizes the same either way, and a keyword that
+    equals it is found at offset 0). Two equal raw strings are still equal
+    after the same deterministic transform is applied to both, so this
+    cannot turn a previously-exact match into a partial one.
 
     A keyword made up entirely of characters ``_norm()`` strips (``-``,
     ``_``, or a mix, e.g. ``"_"``/``"--"``/``"_-"``) normalizes to ``""``.
-    Left unguarded, every ``kw_norm in <field>`` check below would then
-    trivially succeed for every entry (the empty string is a substring of
-    any string), turning a degenerate keyword into a universal match
-    instead of a no-op. Such keywords are skipped entirely — contributing
-    no score and not counting toward *keywords* for the all-keyword bonus
-    below — so e.g. a lone ``"_"`` keyword scores every entry 0 rather than
-    matching the whole corpus.
+    Left unguarded, every check below would then trivially succeed for
+    every entry (the empty string is a substring of any string), turning
+    a degenerate keyword into a universal match instead of a no-op. Such
+    keywords are skipped entirely — contributing no score and not counting
+    toward *keywords* for the all-keyword bonus below — so e.g. a lone
+    ``"_"`` keyword scores every entry 0 rather than matching the whole
+    corpus.
     """
-    title_norm = _norm_phrase(title or "")
-    desc_norm = _norm_phrase(description or "")
-    tags_norm = [_norm(t) for t in (tags or [])]
-    headings_norm = [_norm_phrase(h) for h in (headings or [])]
+    title_raw = title or ""
+    desc_raw = description or ""
+    title_norm = _norm_phrase(title_raw)
+    desc_norm = _norm_phrase(desc_raw)
+    tags_raw = list(tags or [])
+    tags_norm = [_norm_phrase(t) for t in tags_raw]
+    headings_raw = list(headings or [])
+    headings_norm = [_norm_phrase(h) for h in headings_raw]
     # Closed compounds: a query word like "statusline" / "subagent" also
     # matches the open spelling in the index ("Customize your status line").
     # Only whole consecutive words count ("status" + "line"), so a keyword
@@ -1612,7 +1715,8 @@ def score_entry(title: str, description: str, keywords,
     title_words = title_norm.split()
     desc_words = desc_norm.split()
     headings_words = [h.split() for h in headings_norm]
-    extra_norm = [_norm_phrase(h) for h in (headings_extra or [])]
+    extra_raw = list(headings_extra or [])
+    extra_norm = [_norm_phrase(h) for h in extra_raw]
     extra_words = [h.split() for h in extra_norm]
 
     total = 0
@@ -1628,19 +1732,20 @@ def score_entry(title: str, description: str, keywords,
 
         if kw_norm == title_norm:
             kw_score += 10
-        elif kw_norm in title_norm:
+        elif _starts_word(kw_norm, title_norm, title_raw):
             kw_score += 5
 
-        if any(kw_norm == t or kw_norm in t for t in tags_norm):
+        if any(_starts_word(kw_norm, t, raw) for t, raw in zip(tags_norm, tags_raw)):
             kw_score += 4
 
-        if kw_norm in desc_norm:
+        if _starts_word(kw_norm, desc_norm, desc_raw):
             kw_score += 2
 
-        heading_hit = any(kw_norm in h for h in headings_norm)
+        heading_hit = any(_starts_word(kw_norm, h, raw) for h, raw in zip(headings_norm, headings_raw))
         if heading_hit:
             kw_score += 1
-        extra_hit = not heading_hit and any(kw_norm in h for h in extra_norm)
+        extra_hit = not heading_hit and any(
+            _starts_word(kw_norm, h, raw) for h, raw in zip(extra_norm, extra_raw))
 
         # An H3 that contains the keyword as written does not skip the
         # closed-compound match on the title / description / H1-H2: "codemode"
@@ -1670,10 +1775,13 @@ def score_entry(title: str, description: str, keywords,
 
 
 # Function words dropped from a query before any matching (index score and
-# body search alike). Matching is by substring, so these hit nearly every
-# section ("in" is inside "within", "the" inside "there") and a query typed as
-# a heading ("Run hooks in the background") ranked pages on them. Kept small
-# and fixed on purpose: only words that carry no topic in a docs query.
+# body search alike). The body search matches by substring, so these hit
+# nearly every section ("in" is inside "within", "the" inside "there"); the
+# index score matches at the start of a word or word part, where they still
+# start many words ("in" starts "install", "the" starts "these"). A query
+# typed as a heading ("Run hooks in the background") ranked pages on them.
+# Kept small and fixed on purpose: only words that carry no topic in a docs
+# query.
 QUERY_STOPWORDS = frozenset({
     "a", "an", "the", "in", "on", "of", "to", "for", "with", "and", "or",
     "is", "are", "be", "when", "what", "how", "do", "does", "from", "by",
@@ -2918,8 +3026,10 @@ def print_metadata_header(title: str, *, source=None, tags=None, heading_path=No
 # Next hint
 # ---------------------------------------------------------------------------
 
-def next_hint(subcommand: str, *args: str) -> None:
-    """Print ``Next: {basename(sys.argv[0])} {subcommand} {args...}``.
+def hint_command(subcommand: str, *args: str) -> str:
+    """``{basename(sys.argv[0])} {subcommand} {args...}``: the command a
+    ``Next:`` line prints (``next_hint``), and the one a hint names in its
+    text, so the two are put together the same way.
 
     ``os.path.basename`` normalises the script name so the hint always points
     to the file the user invoked, even via a symlink or absolute path.
@@ -2928,7 +3038,12 @@ def next_hint(subcommand: str, *args: str) -> None:
     """
     basename = os.path.basename(sys.argv[0])
     extra = (" " + " ".join(args)) if args else ""
-    print(f"Next: {basename} {subcommand}{extra}")
+    return f"{basename} {subcommand}{extra}"
+
+
+def next_hint(subcommand: str, *args: str) -> None:
+    """Print ``Next: {hint_command(subcommand, *args)}``."""
+    print(f"Next: {hint_command(subcommand, *args)}")
 
 
 # ---------------------------------------------------------------------------

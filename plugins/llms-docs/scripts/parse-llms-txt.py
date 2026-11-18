@@ -84,6 +84,7 @@ from _common import (  # noqa: E402
     fetch_url,
     full_corpus_extra_hits,
     group_index_variants,
+    hint_command,
     is_low_priority,
     load_lines,
     next_hint,
@@ -1949,13 +1950,22 @@ def _ranked_entries(entries: list[dict], query: str, limit: int, keys: list) -> 
     return rows[:limit]
 
 
-_FETCH_ZERO_TIP = ("Tip: try broader keywords, or 'search-content -- \"<query>\"' (omit --page-ref to "
-                   "scan every page — slow on first run) to search page bodies directly")
-_PAGE_REF_ZERO_TIP = ("Tip: try broader keywords, or 'search-content --page-ref <page_ref> -- \"<query>\"' "
-                      "to search the body of one page (this source does not scan every page)")
+# These hints end with a whole command (``_hint_command``, put together like
+# the ``Next:`` lines), so the reader replaces its placeholder and adds
+# nothing: options added after a fragment such as ``sections -- <slug>`` land
+# after "--", where argparse reads them as positionals (exit 2). The
+# placeholder, maybe replaced with a ref or a word that starts with "-" (the
+# slug of ``docs/-beta.md``), goes after "--", and the value of --page-ref is
+# joined to it with "=" (argparse reads ``--page-ref -beta`` as an option
+# without its value). The command is the end of the line, not in quotes: a
+# shell-quoted path or query in it may hold "'".
+_FETCH_ZERO_TIP = ("Tip: try broader keywords, or search page bodies directly (omit --page-ref to "
+                   "scan every page — slow on first run): ")
+_PAGE_REF_ZERO_TIP = ("Tip: try broader keywords, or search the body of one page "
+                      "(this source does not scan every page): ")
 _SLUG_REF_NOTE = ("Note: llms-full.txt is not cached yet, so [ref] above is a URL slug, "
-                  "not an integer doc_idx. Run 'search' once (or 'sections <slug>' directly) "
-                  "to populate doc_idx numbering here too.")
+                  "not an integer doc_idx. Run 'search' once to populate doc_idx numbering here too, "
+                  "or list a slug's sections directly (that fetches llms-full.txt too): ")
 # With --file nothing is fetched: no entry matched one of its pages.
 _FILE_SLUG_REF_NOTE = "no entry matched a page of --file, so [ref] is a URL slug"
 
@@ -2011,12 +2021,14 @@ def _fetch_index_from_index(args, profile: dict) -> None:
     else:
         print(f"({len(entries)} documents total, {len(lines)} entries shown — {grouped} documents grouped)")
     print()
+    # a placeholder the reader replaces, maybe with a ref that starts with
+    # "-": the ref goes after "--", the options before it
     if joined:
-        next_hint("sections", "<page_ref>", *(_source_hint_args(args) + corpus_hint_args(args)))
+        next_hint("sections", *(_source_hint_args(args) + corpus_hint_args(args)), "--", "<page_ref>")
         if args.file is None and not fetch:
             print("  (llms-full.txt will be fetched automatically on first use)")
     else:
-        next_hint("sections", "<slug>", *(_source_hint_args(args) + corpus_hint_args(args)))
+        next_hint("sections", *(_source_hint_args(args) + corpus_hint_args(args)), "--", "<slug>")
         if args.file is not None:
             print(f"  ({_FILE_SLUG_REF_NOTE})")
         else:
@@ -2037,7 +2049,8 @@ def _search_index_from_index(args, profile: dict) -> None:
         refs = [str(i) for i in doc_of]
         if args.show_sections:
             print("WARNING: --show-sections is ignored: this source fetches each page on demand "
-                  "and search-index reads only llms.txt (use 'sections <page_ref>')", file=sys.stderr)
+                  "and search-index reads only llms.txt; to list a page's sections: "
+                  + _hint_command(args, "sections", "--", "<page_ref>"), file=sys.stderr)
     else:
         index_path, entries = _load_index(args, profile)
         if not args.query.strip():
@@ -2056,7 +2069,7 @@ def _search_index_from_index(args, profile: dict) -> None:
     if not scored:
         print("No matching documents found.")
         print()
-        print(_fetch_zero_tip(profile) if fetch else
+        print(_fetch_zero_tip(args, profile) if fetch else
               "Tip: try broader keywords, 'search' for an automatic full-text fallback, "
               "or 'search-content' to search bodies directly")
     for score, i, entry in scored:
@@ -2069,7 +2082,8 @@ def _search_index_from_index(args, profile: dict) -> None:
     print(f"({len(scored)} results, {len(entries)} documents searched)")
     print()
     if not any(i is not None for i in doc_of):
-        print(_SLUG_REF_NOTE if args.file is None else f"Note: {_FILE_SLUG_REF_NOTE}.")
+        print(_SLUG_REF_NOTE + _hint_command(args, "sections", "--", "<slug>") if args.file is None
+              else f"Note: {_FILE_SLUG_REF_NOTE}.")
         print()
     # a placeholder the reader replaces, maybe with a word that starts with
     # "-": the query goes after "--"
@@ -2108,8 +2122,14 @@ def _fetches_pages(profile: dict) -> bool:
     return profile.get("body") == "fetch"
 
 
-def _fetch_zero_tip(profile: dict) -> str:
-    return _PAGE_REF_ZERO_TIP if profile.get("search_content_needs_page_ref") else _FETCH_ZERO_TIP
+def _fetch_zero_tip(args, profile: dict) -> str:
+    """The zero-hit ``Tip:`` of ``search-index`` / ``search`` on a ``body:
+    "fetch"`` source and its ``search-content`` command: over one page where
+    the source does not scan every page."""
+    if profile.get("search_content_needs_page_ref"):
+        return _PAGE_REF_ZERO_TIP + _hint_command(args, "search-content", "--page-ref=<page_ref>",
+                                                  "--", '"<query>"')
+    return _FETCH_ZERO_TIP + _hint_command(args, "search-content", "--", '"<query>"')
 
 
 _ROBOTS_LOCK = threading.Lock()
@@ -2301,9 +2321,15 @@ def _search_content_fetch(args, profile: dict) -> None:
         targets = [_resolve_ref(profile, docs, args)]
     else:
         if profile["search_content_needs_page_ref"]:
+            # the query of this run is known: only the page is left to put in.
+            # A query with a newline (or another unprintable character) would
+            # split the line, so that one stays a placeholder
+            query = shlex.quote(args.query) if args.query.isprintable() else '"<query>"'
             die(f"--source {args.source} fetches only the pages a command needs, so 'search-content' "
                 f"does not scan all its {len(docs)} pages: use 'search' (fetches the top candidates), "
-                f"or give --page-ref <page_ref> (see 'search-index')", code=2)
+                f"or give --page-ref (see 'search-index'): "
+                + _hint_command(args, "search-content", "--page-ref=<page_ref>", "--", query),
+                code=2)
         targets = range(len(docs))
         if len(docs) > profile["search_content_warn_pages"]:
             print(f"WARNING: --page-ref not given. About to fetch and search all {len(docs)} pages "
@@ -2439,6 +2465,15 @@ def _source_hint_args(args, source: str | None = None) -> tuple:
     if getattr(args, "index_file", None) is not None:
         out += ["--index-file", shlex.quote(args.index_file)]
     return tuple(out)
+
+
+def _hint_command(args, subcommand: str, *words: str) -> str:
+    """The whole command a hint names in its text, put together like the
+    ``Next:`` lines (``hint_command`` is what ``next_hint`` prints): the
+    script, *subcommand*, this run's ``--source`` and corpus options right
+    after it, then *words*: ``--page-ref=<page_ref>`` when the hint has it,
+    ``--`` and the placeholder (or the query) after it."""
+    return hint_command(subcommand, *(_source_hint_args(args) + corpus_hint_args(args)), *words)
 
 
 def _no_index_hint(args, profile: dict) -> bool:
@@ -2853,7 +2888,9 @@ def cmd_fetch_index(args):
     else:
         print(f"({len(docs)} documents total)")
     print()
-    next_hint("sections", "<page_ref>", *(_source_hint_args(args) + corpus_hint_args(args)))
+    # a placeholder the reader replaces, maybe with a ref that starts with
+    # "-": the ref goes after "--", the options before it
+    next_hint("sections", *(_source_hint_args(args) + corpus_hint_args(args)), "--", "<page_ref>")
 
 
 def _page_ref_retry(args):
@@ -3184,7 +3221,8 @@ def cmd_search(args):
     if not results and not skipped:
         print("No matching documents found.")
         print()
-        print(_fetch_zero_tip(profile) if fetch else "Tip: try broader keywords or 'search-content' for a full-body scan")
+        print(_fetch_zero_tip(args, profile) if fetch
+              else "Tip: try broader keywords or 'search-content' for a full-body scan")
         print()
         texts, scope = _zero_hit_texts(profile, docs)
         render_zero_hits(args.query, texts,

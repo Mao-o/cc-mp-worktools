@@ -44,6 +44,10 @@ EXPECTED_MIN_CALLS = {
 }
 
 HINT_FUNC = "next_hint"
+# A hint that names a whole command in its text (a ``Tip:`` / ``Note:``)
+# builds it with ``hint_command``, which ``next_hint`` prints: the same
+# obligation, checked the same way.
+COMMAND_FUNC = "hint_command"
 REQUIRED_HELPER = "corpus_hint_args"
 
 # The shared command layer (``_commands.py``, 2wd.25 Phase 0) prints the
@@ -102,7 +106,7 @@ def _hint_calls(scope: ast.AST) -> list:
         sub for sub in ast.walk(scope)
         if isinstance(sub, ast.Call)
         and isinstance(sub.func, ast.Name)
-        and (sub.func.id == HINT_FUNC or _is_render_call(sub))
+        and (sub.func.id in (HINT_FUNC, COMMAND_FUNC) or _is_render_call(sub))
     ]
 
 

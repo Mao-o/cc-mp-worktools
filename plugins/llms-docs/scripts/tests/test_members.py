@@ -611,9 +611,17 @@ class MembersFixtureCasesTest(MembersRoundTripTest):
                     h_code, _o, h_err, _hc = env.run(argv, full_argv=True)
                     self.assertEqual(h_code, 0, (hint, h_err))
                 outcomes[query] = f"{len(rows_of(out))} rows, {len(hints)} hints"
-        # the cases are not all refused or all empty
-        self.assertEqual(outcomes, {"-kit": "7 rows, 3 hints", "weave\\_text": "0 rows, 2 hints",
-                                    "the of and": "6 rows, 3 hints", "!!! ???": "0 rows, 2 hints",
+        # the cases are not all refused or all empty. "-kit" and "the of and"
+        # have fewer rows since 0.55.0 (the index score matches a keyword at
+        # the start of a word or word part only): the AI SDK pages held "kit"
+        # only inside "Loomkit" (5 rows and their hint gone; the Claude Code
+        # rows have "kit" as a word), and Claude Code's "Quillon Desktop in a
+        # sandbox VM" ("and" inside "sandbox", 9 -> 2 points) and "Other hubs"
+        # ("the" inside "Other", 7 -> 2) fall out of the 5 index candidates
+        # search reads (behind the 2-point pages llms.txt lists before
+        # them), and "Quillon Tag" (2 points) takes a place
+        self.assertEqual(outcomes, {"-kit": "2 rows, 2 hints", "weave\\_text": "0 rows, 2 hints",
+                                    "the of and": "5 rows, 3 hints", "!!! ???": "0 rows, 2 hints",
                                     "--": "5 rows, 3 hints", "-": "10 rows, 3 hints"})
 
 

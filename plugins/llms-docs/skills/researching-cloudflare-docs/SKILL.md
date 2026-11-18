@@ -99,6 +99,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py" content <page_ref> "<h
 - 1 論点の基本は **`search` 1 回 → `content` 1〜2 回**。`search` の末尾の `Next:` 行は `doc_idx` と見出しが
   埋まったコマンドなので、見出しを手で写さずそのまま実行する (先頭の `parse-llms-txt.py` は
   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/parse-llms-txt.py"` に置き換える。`--source` などは `Next:` が引き継いでいる)
+- `Tip:` / `Note:` / `WARNING:` / `Error:` の行の末尾に出るコマンドも `Next:` 行と同じ形 (`--source` などを引き継ぐ)。
+  `<page_ref>` などのプレースホルダだけを埋め、先頭も同じように置き換えて実行する (オプションを後ろに足さない)
 - 同じ論点で `search` を **3 回外したら**、言い換えを続けない。`search-index` / `sections` で構造から当たるか、
   「ドキュメントに記載なし」として返す
 - **`--max-chars 0`** は、出力に `... (N chars truncated; ...)` が出て、既定の上限 (24000 字) で
@@ -144,6 +146,7 @@ schema 付きで起動された agent (`StructuredOutput` を持つ呼び出し�
   語は常に `--` の後ろに置くので、`--resume` のような語に差し替えても打てる)
 - 見つからないときは、同じ論点で `search` を 3 回まで試し (言い換えより `search-index` / `sections`)、
   それでも無ければ `fetch-index --compact --source <name>` で一覧を見るか「ドキュメントに記載なし」として返す
+- 索引の点数 (`search-index` と `search` の候補) は語・語の部分 (`-` / `_` の後、camelCase の段) の頭で照合するので、語全体で打つ (`agents` ではなく `subagents`)。本文の検索は部分一致のまま
 
 ## page_ref の指定方法
 

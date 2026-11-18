@@ -38,12 +38,14 @@ preset を置き換える。
   `firebase`) の出力が、専用 script が出した出力の記録 (`scripts/tests/fixtures/parity/golden/`) から変わる。ただし移行の比較
   (`scripts/tests/test_migration_parity.py` の `normalize`) が除く行 (1 行目のヘッダの括弧と直後の
   `(file: …)` などの行、`Next:` の script 名と既定の corpus・ファイルを指すオプション、`search` の
-  `"<query>"` プレースホルダ行で語を `--` の後ろに置く並び (`search --source x -- "<query>"`)、末尾の件数行、
-  行頭の `Tip:` / `Note:`、単位の語 `page` / `document`、`URL:` / `url:` の大文字小文字) と、
-  `GENERIC_INTENDED_DIFF` に理由を書いた意図した差は除く
+  `"<query>"` プレースホルダ行で語を `--` の後ろに置く並び (`search --source x -- "<query>"`) と
+  `fetch-index` の `<page_ref>` プレースホルダ行で ref を `--` の後ろに置く並び
+  (`sections --source x -- <page_ref>`)、末尾の件数行、行頭の `Tip:` / `Note:`、単位の語 `page` /
+  `document`、`URL:` / `url:` の大文字小文字) と、`GENERIC_INTENDED_DIFF` (旧 script が失敗して名前を
+  出したページを直接開く) と `GENERIC_INTENDED_DROPPED_ROWS` (結果の行が減る) に理由を書いた意図した差は除く
 - 専用 script が出した出力の記録 (`scripts/tests/fixtures/parity/golden/`) を書き換える。旧実装は
   削除済みで作り直せないため、記録を今の出力に合わせて直すと比較の基準が失われる。出力を変える
-  ときは、`normalize` の除外か `GENERIC_INTENDED_DIFF` に理由を書く
+  ときは、`normalize` の除外か `GENERIC_INTENDED_DIFF` / `GENERIC_INTENDED_DROPPED_ROWS` に理由を書く
 
 指摘しないもの (対象外として README に明記済み):
 
