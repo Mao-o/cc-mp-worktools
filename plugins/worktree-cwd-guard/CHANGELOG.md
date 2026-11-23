@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.9.0
+
+**`git worktree remove|move` の `<worktree>` を、git と同じく worktree の名前 (パスの末尾) としても読み、別の worktree を名前で指す形を止めるようにした (minor bump)。**
+`git worktree remove --force b` / `worktrees/b` / `.claude/worktrees/b` と `git worktree move b <dest>` は、今の場所に関係なく `.../b` の worktree を消す / 動かすのに、止まらなかった (0.8.1 まで。0.8.0 で見逃しとして挙げていた形)。
+対象を足す変更で、0.8.1 が止めていた形は止まったまま (比較の全入力で 0 件)。
+
+### 修正: `<worktree>` を worktree の名前として読む
+
+git は `<worktree>` をパスとして読む前に、`<worktree>` で終わる worktree のパス (区切りの直後から一致するもの) を数え、ちょうど 1 つならそれを選ぶ (2 つ以上ならパスとして読む)。0.8.1 まではパスとしての一致だけを見ていた。
+
+- 名前を照合するのは、git が読む repo がこの repo のときだけ (git dir の指定があればそれが対応付く checkout、無ければ今の場所で決まる)。他の repo の中 (`cd <他の repo>; git worktree remove b`) と repo の外では読まない。今の場所も git dir も決まらない形 (`cd "$Y"; git worktree remove b`) は、パスの読みと同じく止めない
+- 比べ方は core.ignorecase で変わる (macOS では既定で true で、`B` も `b` の worktree を選ぶ)。大文字小文字を区別する読みと区別しない読み (ASCII だけを小文字にし、NFC にそろえる。macOS の git は引数を NFC にそろえる) のそれぞれで数え、どちらかで別の worktree 1 つに決まれば止める
+- 名前は `git worktree list` が返すパス (realpath) と比べる。symlink を通して作った worktree も realpath の末尾で止め、symlink の綴り (`<link>/b`) は名前にならない (git も選ばない)
+- 自分の worktree に決まる名前 (`git worktree remove a`) は止めない (0.8.1 と同じ)
+
+### 実 git の実測
+
+bash 3.2 と `zsh -f` で本物の git (2.50) を走らせた結果 (○ = 別の worktree が消える / 動く):
+
+| 形 | 0.8.1 | 0.9.0 | 実測 |
+|---|---|---|---|
+| `git worktree remove --force b` / `-f b` / `-- b` / `b --force` / `worktrees/b` / `.claude/worktrees/b`、`git worktree move b <dest>` | allow | deny | ○ |
+| 上の形の前に `cd <main>;` / `git -C <main>` / `GIT_DIR=<main>/.git` / `--work-tree=<main>` / `env -C <main>` / `pushd <main>;` を付けたもの | allow | deny | ○ |
+| `git worktree remove --force B` / `.CLAUDE/Worktrees/B` / 大文字小文字だけ違う絶対パス (大文字小文字を区別しない FS) | allow | deny | ○ |
+| `git worktree remove --force café` を NFD で書いたもの | allow | deny | ○ |
+| `<repo の root からの相対パス>` / `/private` を外した `tmp/...` のように、パスの末尾として一致する語 | allow | deny | ○ |
+| `git worktree remove --force a` (自分の worktree) | allow | allow | 自分の worktree が消える |
+| `git worktree remove --force b/` / `./b` / `x/b` / `b/.` / `a/../b` / `t-b` (`wt-b` の途中から) / `-fb` / `--force=b` | allow | allow | git が失敗する |
+| `cd <他の repo>; git worktree remove --force b` / `GIT_DIR=<他の repo>/.git ...` / `git -C <他の repo> ...` | allow | allow | 他の repo の worktree が消える |
+| 2 つの worktree が同じ名前で終わるときの `git worktree remove --force b` | allow | allow | git が失敗する (パスとして読む) |
+
+0.8.1 と 0.9.0 に同じ 3,771 件の入力 (置き場 42 形 × 操作 12 形 × 語の組み合わせと、演算子・redirect・comment・置換・引用を付けた形) を流した。
+止める側を緩めた形は 0 件。通過 → 停止は 905 件で、全件を本物の git で走らせた:
+
+| 実測 | 件数 |
+|---|---|
+| 別の worktree が消える / 動く (止めた理由の worktree と一致) | 865 |
+| `sudo git ...` (測定の sudo は偽物で走らない。`sudo` を外した同じ形は消える) | 24 |
+| `mv ../b ../b2; git worktree remove --force b` (`mv` が動かす。git も同じ worktree を対象にする) | 1 |
+| git が失敗する (下の「受け入れている」を参照) | 15 |
+
+次の形は読みが実際と違うが、受け入れている:
+
+- git が失敗する形も止まる: main の名前 (`git worktree remove repo`。git は main を消さない。0.8.1 も main の絶対パスは止めていた) / `git -c core.ignorecase=false worktree remove B` (区別しない読みで止める) / 移動先の無い `git worktree move b`
+- 今の場所が決まらない形は止めない (見逃し。0.8.1 と同じ): `cd "$Y"; git worktree remove --force b` / `git -C "$Y" ...` (`Y` が空なら今の場所のまま走り、別の worktree が消える)
+- 置換の中の語は読まない (これまでどおり対象外): `git worktree remove --force "$(echo b)"`
+- repo の中に置いた別の repo (`cd <main>/vendor/<別の repo>; git worktree remove b`) は、この repo と読んで止まる (他の書き込み操作のパスの読みと同じ)
+- `git worktree list` が返すパスと realpath が食い違う置き場では、名前の一致を取り違えることがある (git 2.50 は worktree を作るときに realpath で持つ)
+
+### テストの追加
+
+- `tests/test_worktree_names.py`: `WorktreeNameTest` / `NameReadingTest` (大文字小文字だけが違う worktree など、FS で作れない一覧を組んで確かめる) / `NtpathNameTest` (Windows の区切りと大文字小文字) / `RealGitNameTest` (本物の git と本物の shell で、名前で指した worktree が消える / 動くことと、その形を止めることを固定する)
+
+テスト件数: 184 → 200 (追加 16・削除 0・統合 0)。
+
 ## 0.8.1
 
 **Windows で `cd <main>; cd ~+; git reset --hard` が止まらなかった不具合を直し、Windows の CI を直した (patch bump)。**
