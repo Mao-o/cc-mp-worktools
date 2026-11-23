@@ -1,0 +1,12 @@
+{
+  "name": "humanq",
+  "version": "0.2.0",
+  "description": "bd (beads) の判断待ち (human ラベル) を、この端末の全プロジェクト分まとめて localhost の画面に出し、ユーザーがそこで答えた内容を bd に書き戻す。SessionStart で登録とサーバーの起動、UserPromptSubmit で新しい回答を Claude に伝える",
+  "author": {
+    "name": "Mao"
+  },
+  "homepage": "https://github.com/Mao-o/cc-mp-worktools",
+  "repository": "https://github.com/Mao-o/cc-mp-worktools",
+  "license": "MIT",
+  "keywords": ["beads", "bd", "human-in-the-loop", "decision-queue"]
+}

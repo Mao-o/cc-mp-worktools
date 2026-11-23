@@ -1,0 +1,787 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>判断待ち</title>
+<style>
+:root {
+  --bg: #f6f5f1; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6a64; --line: #e3e1da;
+  --accent: #2f5fd0; --accent-ink: #ffffff; --accent-soft: #e8eefc;
+  --rec: #1f7a4d; --rec-soft: #e3f3ea; --warn: #b4441f; --p0: #b4441f; --p1: #c26a12; --p2: #4b6bb5; --p3: #6b6a64;
+  --toast-bg: #ffffff; --toast-line: #d3d0c6; --toast-shadow: rgba(0, 0, 0, .18);
+  --radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161614; --panel: #201f1c; --ink: #ecebe6; --muted: #9c9a92; --line: #34322d;
+    --accent: #7c9cf0; --accent-ink: #10131c; --accent-soft: #252c40;
+    --rec: #5cc28f; --rec-soft: #1c3127; --warn: #ec8a66; --p0: #ec8a66; --p1: #e7a65a; --p2: #8ea6e6; --p3: #9c9a92;
+    --toast-bg: #3a3833; --toast-line: #5a574f; --toast-shadow: rgba(0, 0, 0, .6);
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.65 -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif; }
+header { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bottom: 1px solid var(--line); }
+.bar { max-width: 860px; margin: 0 auto; padding: 12px 16px; display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+.bar h1 { font-size: 18px; margin: 0; }
+.bar .count { font-size: 18px; font-weight: 700; color: var(--accent); }
+.bar .meta { color: var(--muted); font-size: 13px; margin-left: auto; }
+.bar button { font-size: 13px; }
+#notice { background: var(--panel); border-bottom: 2px solid var(--warn); }
+#notice .inner { max-width: 860px; margin: 0 auto; padding: 10px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; color: var(--warn); font-weight: 600; }
+#notice button { font-size: 13px; }
+main { max-width: 860px; margin: 0 auto; padding: 8px 16px 64px; }
+h2 { font-size: 14px; color: var(--muted); font-weight: 600; margin: 28px 0 10px; letter-spacing: .02em; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; margin-bottom: 14px; scroll-margin-top: 72px; }
+.card.failed { border-color: var(--warn); }
+/* カード自身は tabindex="-1" で、畳んだカードの次にフォーカスを受ける (中のボタンには渡さない)。目印は枠だけにする */
+.card:focus { outline: none; }
+.card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.prio { font-weight: 700; padding: 1px 7px; border-radius: 999px; border: 1px solid currentColor; }
+h3 { font-size: 16px; margin: 30px 0 4px; display: flex; gap: 10px; align-items: baseline; }
+h3 .path { font-size: 12px; color: var(--muted); font-weight: 400; font-family: ui-monospace, Menlo, monospace; }
+.prio.p0 { color: var(--p0); } .prio.p1 { color: var(--p1); } .prio.p2 { color: var(--p2); } .prio.p3, .prio.p4 { color: var(--p3); }
+.id { font-family: ui-monospace, Menlo, monospace; cursor: pointer; }
+.title { font-size: 13px; color: var(--muted); margin: 6px 0 0; }
+.ask { font-size: 17px; font-weight: 700; margin: 10px 0 6px; }
+.ctx { margin: 0 0 12px; white-space: pre-wrap; }
+.opts { display: grid; gap: 8px; margin: 10px 0; }
+.opt { text-align: left; background: var(--panel); color: var(--ink); border: 1.5px solid var(--line);
+  border-radius: 8px; padding: 10px 12px; cursor: pointer; font: inherit; }
+.opt:hover { border-color: var(--accent); }
+.opt.sel { border-color: var(--accent); background: var(--accent-soft); }
+.opt .l { font-weight: 700; }
+.opt .d { display: block; color: var(--muted); font-size: 13.5px; margin-top: 2px; }
+.badge { font-size: 11px; font-weight: 700; color: var(--rec); background: var(--rec-soft); padding: 1px 7px; border-radius: 999px; margin-left: 6px; }
+textarea { width: 100%; min-height: 58px; resize: vertical; font: inherit; color: var(--ink); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.row { display: flex; gap: 10px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+button.primary { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 8px; padding: 8px 18px; font: inherit; font-weight: 700; cursor: pointer; }
+button.primary:disabled { opacity: .45; cursor: default; }
+button.ghost { background: none; color: var(--muted); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; font: inherit; cursor: pointer; }
+.err { color: var(--warn); font-size: 13px; overflow-wrap: anywhere; min-width: 0; }
+.errbox { margin-top: 8px; }
+.errbox:empty { display: none; }
+.errbox details { margin-top: 0; }
+.errbox summary.err { cursor: pointer; }
+.errbox pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 ui-monospace, Menlo, monospace; background: var(--bg);
+  border-radius: 8px; padding: 8px 10px; margin: 6px 0 0; max-height: 220px; overflow: auto; }
+details { margin-top: 12px; }
+summary { color: var(--muted); font-size: 13px; cursor: pointer; }
+.md code { font: .92em ui-monospace, Menlo, monospace; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+details pre { white-space: pre-wrap; word-break: break-word; font: 13px/1.6 ui-monospace, Menlo, monospace; background: var(--bg);
+  border-radius: 8px; padding: 10px 12px; margin: 8px 0 0; max-height: 420px; overflow: auto; }
+.ans { white-space: pre-wrap; margin: 8px 0 0; padding: 8px 12px; border-left: 3px solid var(--accent); background: var(--bg); border-radius: 0 8px 8px 0; }
+.empty { color: var(--muted); padding: 24px 0; text-align: center; }
+.banner { background: var(--panel); border: 1px solid var(--warn); color: var(--warn); border-radius: var(--radius); padding: 10px 14px; margin-top: 14px; overflow-wrap: anywhere; }
+/* 消える: 高さを畳みながら薄くして横へ。現れる: 高さを 0 から広げながら上から下りてくる。
+   畳みかけのカードが戻るときは、同じ遷移を逆向きに辿る。失敗で戻ったカードは .failed の枠が残り、一瞬 .flash で光る */
+.anim { overflow: hidden; transition: height .26s ease, opacity .2s ease, transform .26s ease, margin .26s ease, padding .26s ease, border-width .26s ease; }
+.leaving { opacity: 0; transform: translateX(14px); margin-bottom: 0; padding-top: 0; padding-bottom: 0; border-width: 0; }
+.incoming { opacity: 0; transform: translateY(-8px); margin-bottom: 0; padding-top: 0; padding-bottom: 0; border-width: 0; }
+.card.flash { animation: flash 1.8s ease-out; }
+@keyframes flash { 0%, 45% { box-shadow: 0 0 0 2px var(--warn); } 100% { box-shadow: 0 0 0 0 transparent; } }
+#toasts { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); display: grid; gap: 8px; z-index: 5; width: min(calc(100vw - 32px), 560px); pointer-events: none; }
+.toast { display: flex; gap: 10px; align-items: flex-start; pointer-events: auto; overflow-wrap: anywhere;
+  background: var(--toast-bg); color: var(--ink); border: 1px solid var(--toast-line); border-left: 4px solid var(--warn); border-radius: 8px;
+  padding: 10px 8px 10px 14px; box-shadow: 0 6px 20px var(--toast-shadow); font-size: 14px; animation: toast-in .25s ease-out; }
+.toast .toast-msg { flex: 1; min-width: 0; }
+.toast .toast-x { flex: none; background: none; border: 0; color: var(--muted); font: inherit; font-size: 18px; line-height: 1; padding: 0 6px; cursor: pointer; }
+.toast.out { animation: toast-out .3s ease forwards; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
+@keyframes toast-out { to { opacity: 0; transform: translateY(8px); } }
+@media (prefers-reduced-motion: reduce) {
+  .card.flash, .toast, .toast.out { animation: none; }
+  .anim { transition: none; }
+}
+</style>
+</head>
+<body>
+<header><div class="bar">
+  <h1>判断待ち</h1><span class="count" id="count">…</span>
+  <span class="meta" id="meta"></span>
+  <button class="ghost" id="notify" type="button">通知をオン</button>
+</div></header>
+<div id="notice" role="alert" hidden></div>
+<main id="main"></main>
+<div id="toasts" aria-live="polite"></div>
+<script>
+const TOKEN = "__TOKEN__";
+const POLL_MS = 15000;
+const REDUCED = !!(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches);
+const DRAFT_KEY = "humanq-drafts";
+const drafts = new Map();          // project + id -> {option, text}。sessionStorage にも置く (再読み込みで消えない)
+const openBodies = new Set();      // 開いている「チケット本文」(project + id)
+// 押したカードの送信の状態 (key -> {state, path, seq})。画面から隠している間だけ持つ。
+//   inflight: 送信中。データに居ても居なくても隠したまま (外すのは成功・失敗の処理だけ)
+//   done:     成功した。seq は成功した時点で始まっていた最後の読み込みの番号。それより後に始めた読み込みの
+//             データ (読めたプロジェクトのもの) が届けば、リストに居るかどうかに関係なく外す
+const pending = new Map();
+const errors = new Map();          // カードの key -> {summary, full} (送信の失敗。戻したカードに出す)
+let seen = null;                   // 前回までに見た判断待ち (通知用)
+let lastData = null;               // 最後に受け取ったデータ (正規化済み。書き換えない)
+let loadSeq = 0;                   // load の通し番号
+let rendered = false;              // 最初の描画が済んだ (それまでは入場の動きを付けない)
+let staleCount = 0;               // フォーカスがあって作り直しを後回しにしているカードの数
+
+function el(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") e.className = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else if (v !== undefined && v !== null && v !== false) e.setAttribute(k, v);
+  }
+  for (const c of kids.flat()) if (c !== null && c !== undefined && c !== false) e.append(c.nodeType ? c : String(c));
+  return e;
+}
+
+// ---- 通信 ----------------------------------------------------------------------------
+
+// written: 回答のコメントが書き込まれたか。サーバーが言ったときだけ true / false、分からなければ null (通信が切れた・内部エラーなど)。
+// op: 送信の種類 (answer | undo)。サーバーが返さなくても、送ったパスから分かる
+class ApiError extends Error {
+  constructor(message, info) { super(message); Object.assign(this, { status: 0, code: null, stage: null, written: null, op: null }, info); }
+}
+
+// 2xx でも JSON でなければ失敗にする。POST は {ok: true} が返ったときだけ成功
+async function api(path, body) {
+  const op = body ? ({ "/api/answer": "answer", "/api/undo": "undo" })[path] || null : null;
+  let r, text;
+  try {
+    r = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json", "X-Humanq-Token": TOKEN }, body: JSON.stringify(body) } : {});
+    text = await r.text();
+  } catch (e) {
+    throw new ApiError(`サーバーに届かない (${e.message})`, { status: 0, code: "network", op });
+  }
+  let j = null;
+  try { j = JSON.parse(text); } catch { /* JSON でない */ }
+  const obj = j !== null && typeof j === "object";
+  if (!r.ok) {
+    throw new ApiError((obj && typeof j.error === "string" && j.error) || `HTTP ${r.status}`,
+      { status: r.status, code: obj ? j.code || null : null, stage: obj ? j.stage || null : null,
+        written: obj && typeof j.written === "boolean" ? j.written : null, op: (obj && typeof j.op === "string" && j.op) || op });
+  }
+  if (!obj) throw new ApiError(`想定外の応答 (HTTP ${r.status}、JSON ではない)`, { status: r.status, code: "format", op });
+  if (body && j.ok !== true) throw new ApiError("想定外の応答 (ok が true でない)", { status: r.status, code: "format", op });
+  return j;
+}
+
+// 失敗の文: summary は 1 行 (トースト用)、full は全文 (カードの中に畳んで置く)
+function summarize(s, n = 120) {
+  const first = String(s).trim().split("\n")[0].trim();
+  return first.length > n ? first.slice(0, n - 1) + "…" : first;
+}
+const CHANGED_MSG = "問いが更新されました。見直してから送ってください";
+function explain(e) {
+  const full = String((e && e.message) || e);
+  let summary;
+  if (e.code === "changed") return { summary: CHANGED_MSG, full: CHANGED_MSG };
+  if (e.status === 0) summary = "サーバーに届きませんでした (画面のサーバーが止まっている可能性があります)";
+  else if (e.status === 413) summary = "補足が長すぎます";
+  else if (e.stage === "label") summary = (e.op === "undo" ? "取り消し" : "回答") + "は記録済みですが、ラベルの付け替えだけ失敗しました: " + summarize(full, 70);
+  else summary = summarize(full);
+  return { summary, full };
+}
+
+// ---- 下書き ---------------------------------------------------------------------------
+
+function saveDrafts() {
+  try { sessionStorage.setItem(DRAFT_KEY, JSON.stringify([...drafts].filter(([, d]) => d.option || d.text))); } catch { /* 使えなくてもよい */ }
+}
+try {
+  for (const [k, v] of JSON.parse(sessionStorage.getItem(DRAFT_KEY) || "[]"))
+    if (typeof k === "string" && v && typeof v === "object") drafts.set(k, { option: String(v.option || ""), text: String(v.text || "") });
+} catch { /* 読めなければ空のまま */ }
+
+// ---- 知らせ ---------------------------------------------------------------------------
+
+// ms のあいだ、タブが見えている間だけ数えて fn を呼ぶ。返り値は取り消し
+function whileVisible(ms, fn) {
+  let left = ms, last = Date.now();
+  const iv = setInterval(() => {
+    const now = Date.now();
+    if (!document.hidden) left -= now - last;
+    last = now;
+    if (left <= 0) { clearInterval(iv); fn(); }
+  }, 250);
+  return () => clearInterval(iv);
+}
+
+function toast(msg) {
+  const box = document.getElementById("toasts");
+  if ([...box.children].some(t => t.dataset.msg === msg && !t.classList.contains("out"))) return;
+  const close = el("button", { class: "toast-x", type: "button", "aria-label": "閉じる" }, "×");
+  const t = el("div", { class: "toast", role: "status", "data-msg": msg }, el("span", { class: "toast-msg" }, msg), close);
+  let gone = false, cancel = () => {};
+  const dismiss = () => {
+    if (gone) return;
+    gone = true; cancel();
+    if (REDUCED) { t.remove(); return; }
+    t.classList.add("out");
+    t.addEventListener("animationend", () => t.remove(), { once: true });
+    setTimeout(() => t.remove(), 600);
+  };
+  close.addEventListener("click", dismiss);
+  box.append(t);
+  cancel = whileVisible(6000, dismiss);
+}
+
+// 消えない案内 (サーバーが入れ替わった、など)
+function showNotice(msg, label, action) {
+  const box = document.getElementById("notice");
+  const btn = el("button", { class: "primary", type: "button" }, label);
+  btn.addEventListener("click", action);
+  box.replaceChildren(el("div", { class: "inner" }, el("span", {}, msg), btn));
+  box.hidden = false;
+}
+
+// ---- 動き (高さ・フォーカス) -------------------------------------------------------------
+
+function bump(e) { e._anim = (e._anim || 0) + 1; return e._anim; }
+
+// 遷移が終わったら .anim と高さの指定を外す (gen が変わっていたら、後から始まった動きの邪魔をしない)
+function settle(e, gen) {
+  let done = false;
+  const onEnd = ev => { if (ev.target === e && ev.propertyName === "height") fin(); };
+  const fin = () => {
+    e.removeEventListener("transitionend", onEnd);
+    if (done || e._anim !== gen) return;
+    done = true;
+    e.classList.remove("anim");
+    e.style.height = "";
+  };
+  e.addEventListener("transitionend", onEnd);
+  setTimeout(fin, 450);
+}
+
+// 新しい要素を、高さを 0 から広げて入れる
+function enter(e) {
+  if (REDUCED || !e.isConnected) return;
+  const full = e.offsetHeight;
+  if (!full) return;
+  const gen = bump(e);
+  e.classList.add("incoming");
+  e.style.height = "0px";
+  e.getBoundingClientRect();
+  e.classList.add("anim");
+  e.classList.remove("incoming");
+  e.style.height = full + "px";
+  settle(e, gen);
+}
+
+// 畳むカードがフォーカスを持っていたら、次のカード (無ければ前) の「カードそのもの」(tabindex="-1") へ移す。
+// ボタンや選択肢には移さない: 「回答する」を押した Enter のリピートや押し直しが、移った先の
+// 「取り消して判断待ちに戻す」や選択肢をそのまま押してしまうため。Tab を押せば中へ入れる
+function moveFocusAway(card) {
+  const all = [...document.querySelectorAll("#main .card")].filter(c => c === card || (!c.inert && !c.classList.contains("leaving")));
+  const i = all.indexOf(card);
+  const next = all[i + 1] || all[i - 1];
+  if (next) next.focus();
+}
+
+// 高さを畳みながら消し、終わったら DOM から外して onGone を呼ぶ。畳んでいる間は unleave で戻せる
+function leave(e, onGone) {
+  if (e._leave) return;
+  const st = { stop: () => {} };
+  e._leave = st;
+  const gone = () => { if (e._leave !== st) return; e.remove(); if (onGone) onGone(); };
+  const isCard = e.classList.contains("card");
+  if (isCard) {
+    if (e.contains(document.activeElement)) moveFocusAway(e);
+    e.inert = true;                  // 畳んでいる間は押せない・Tab で入れない
+  }
+  if (REDUCED || !e.isConnected) { gone(); return; }
+  bump(e);
+  e.style.height = e.offsetHeight + "px";
+  e.getBoundingClientRect();         // 今の高さを確定させてから畳む (でないと遷移が起きない)
+  e.classList.add("anim", "leaving");
+  e.style.height = "0px";
+  const onEnd = ev => { if (ev.target === e && ev.propertyName === "height") { st.stop(); gone(); } };
+  e.addEventListener("transitionend", onEnd);
+  const timer = setTimeout(() => { st.stop(); gone(); }, 450);
+  st.stop = () => { e.removeEventListener("transitionend", onEnd); clearTimeout(timer); };
+}
+
+// 畳みかけの要素を元に戻す。カードは逆向きに広げる。見出しなどの入れ物は、中のカードが広がるので即座に戻す
+function unleave(e) {
+  const st = e._leave;
+  if (!st) return;
+  e._leave = null;
+  st.stop();
+  const gen = bump(e);
+  if (!e.classList.contains("card")) {
+    e.classList.remove("anim", "leaving");
+    e.style.height = "";
+    return;
+  }
+  e.inert = false;
+  const cur = e.getBoundingClientRect().height;
+  e.style.transition = "none";
+  e.classList.remove("leaving");
+  e.style.height = "";
+  const full = e.offsetHeight;      // 本来の高さ
+  e.classList.add("leaving");
+  e.style.height = cur + "px";
+  e.getBoundingClientRect();
+  e.style.transition = "";
+  e.classList.remove("leaving");
+  e.style.height = full + "px";
+  settle(e, gen);
+}
+
+function flash(e) {
+  if (REDUCED) return;
+  e.classList.remove("flash");
+  void e.offsetWidth;
+  e.classList.add("flash");
+  e.addEventListener("animationend", () => e.classList.remove("flash"), { once: true });
+}
+
+// parent の子を wanted の並びにする。並びが合わないときだけ要素を動かす。
+// 畳んでいる最中の要素 (.leaving) はそのままにして、wanted に無い要素は外す
+function place(parent, wanted) {
+  wanted = wanted.filter(Boolean);
+  const want = new Set(wanted);
+  for (const c of [...parent.children]) if (!want.has(c) && !c.classList.contains("leaving")) c.remove();
+  let cur = parent.firstElementChild;
+  for (const node of wanted) {
+    while (cur && cur !== node && cur.classList.contains("leaving") && !want.has(cur)) cur = cur.nextElementSibling;
+    if (cur === node) { cur = cur.nextElementSibling; continue; }
+    parent.insertBefore(node, cur);
+  }
+}
+
+// ---- カード ---------------------------------------------------------------------------
+
+// `...` だけをコード表記にする (それ以外は textContent のまま)
+function md(tag, cls, text) {
+  const e = el(tag, { class: (cls ? cls + " " : "") + "md" });
+  String(text).split("`").forEach((part, i) => { if (part) e.append(i % 2 ? el("code", {}, part) : part); });
+  return e;
+}
+
+const qKey = (path, id) => "q\n" + path + "\n" + id;
+const aKey = (path, id) => "a\n" + path + "\n" + id;
+const shownLabels = it => (Array.isArray(it.labels) ? it.labels : []).filter(l => typeof l === "string" && (l.startsWith("plugin:") || l.startsWith("lane:")));
+// カードの表示に使う値の署名。変わったカードだけ作り直す (受け取ったときに 1 度だけ作る)
+const sigQ = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, shownLabels(it), it.q, it.description, it.notes]);
+const sigA = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, shownLabels(it), it.answer]);
+
+function head(it) {
+  const p = typeof it.priority === "number" ? it.priority : 9;
+  return el("div", { class: "head" },
+    el("span", { class: `prio p${p}` }, `P${p}`),
+    el("span", { class: "id", title: "クリックで ID をコピー", onclick: () => navigator.clipboard && navigator.clipboard.writeText(it.id) }, it.id),
+    el("span", {}, it.created_at),
+    ...shownLabels(it).map(l => el("span", {}, l.split(":")[1])));
+}
+
+function body(it) {
+  const t = [it.description, it.notes ? "--- notes\n" + it.notes : ""].filter(Boolean).join("\n\n");
+  const key = it.project + "\n" + it.id;
+  const d = el("details", { open: openBodies.has(key) }, el("summary", {}, "チケット本文"), el("pre", {}, t || "(本文なし)"));
+  d.addEventListener("toggle", () => { d.open ? openBodies.add(key) : openBodies.delete(key); });
+  return d;
+}
+
+const dkOf = it => it.project + "\n" + it.id;           // 下書きの key
+function dropDraft(it) { drafts.delete(dkOf(it)); saveDrafts(); }
+
+function buildQuestion(it) {
+  const key = qKey(it.project, it.id);
+  const dk = dkOf(it);
+  const q = it.q;
+  const d = drafts.get(dk) || { option: "", text: "" };
+  if (d.option && !(q && q.options.some(o => o.key === d.option))) d.option = "";   // 問いが変わって無くなった選択肢
+  drafts.set(dk, d);
+  const send = el("button", { class: "primary", type: "button" }, "回答する");
+  const area = el("textarea", { placeholder: q ? "補足 (任意)。選択肢に無い答えはここに書く" : "回答を書く" });
+  area.value = d.text;
+  const refresh = () => { send.disabled = !(d.option || d.text.trim()); };
+  area.addEventListener("input", () => { d.text = area.value; refresh(); saveDrafts(); });
+  const opts = q && q.options.length ? el("div", { class: "opts" }, q.options.map(o => {
+    const b = el("button", { class: "opt" + (d.option === o.key ? " sel" : ""), type: "button" },
+      md("span", "l", o.label), o.key === q.recommended ? el("span", { class: "badge" }, "推奨") : null,
+      o.desc ? md("span", "d", o.desc) : null);
+    b.addEventListener("click", () => {
+      d.option = d.option === o.key ? "" : o.key;
+      for (const s of b.parentNode.children) s.classList.remove("sel");
+      if (d.option) b.classList.add("sel");
+      refresh();
+      saveDrafts();
+    });
+    return b;
+  })) : null;
+  send.addEventListener("click", () => {
+    if (!(d.option || d.text.trim()) || pending.has(key)) return;
+    // 入力中で作り直しを後回しにしている間に問いが変わっていたら、送らずに作り直して見直してもらう
+    if (questionChanged(it)) { reviewChanged(key, it); return; }
+    // 下書きは成功するまで残す (失敗して戻ったカードに選択と補足がそのまま出る)。qsig は見ていた問いの署名
+    submit(key, it, "/api/answer", { project: it.project, id: it.id, option: d.option, text: d.text, qsig: it.qsig },
+      () => dropDraft(it));
+  });
+  refresh();
+  return el("section", { class: "card", "data-id": it.id, tabindex: "-1" },
+    head(it),
+    el("p", { class: "title" }, it.title),
+    md("p", "ask", q ? q.ask : it.title),
+    q && q.context ? md("p", "ctx", q.context) : null,
+    !q ? el("p", { class: "ctx" }, "問いがまだ整理されていません。本文を読んで自由に答えてください。") : null,
+    opts, area, el("div", { class: "row" }, send), el("div", { class: "errbox" }), body(it));
+}
+
+function buildAnswered(it) {
+  const key = aKey(it.project, it.id);
+  const b = el("button", { class: "ghost", type: "button" }, "取り消して判断待ちに戻す");
+  b.addEventListener("click", () => {
+    if (pending.has(key)) return;
+    submit(key, it, "/api/undo", { project: it.project, id: it.id });
+  });
+  return el("section", { class: "card", "data-id": it.id, tabindex: "-1" }, head(it), el("p", { class: "title" }, it.title),
+    el("p", { class: "ans" }, (it.answer || "(回答のコメントが見つからない)").replace(/^\[humanq\] /, "")),
+    el("div", { class: "row" }, b), el("div", { class: "errbox" }));
+}
+
+// 失敗の表示 (カードの枠と、中の全文)。エラーが変わったときだけ中身を作り直す
+function syncError(c, key) {
+  const e = errors.get(key);
+  c.el.classList.toggle("failed", !!e);
+  const box = c.el.querySelector(".errbox");
+  const shown = e ? e.summary + "\n" + e.full : "";
+  if (!box || box.dataset.shown === shown) return;
+  box.dataset.shown = shown;
+  box.replaceChildren();
+  if (!e) return;
+  box.append(e.full === e.summary
+    ? el("span", { class: "err" }, "送信できませんでした: " + e.summary)
+    : el("details", {}, el("summary", { class: "err" }, "送信できませんでした: " + e.summary), el("pre", {}, e.full)));
+}
+
+// ---- 描き直し (key ごとの突き合わせ) --------------------------------------------------------------
+// main の中身は作り直さない。プロジェクト → 節 (判断 / 作業・確認 / 回答済み) → カードの入れ物を key ごとに持ち、
+// 署名が変わったカードだけ作り直す。データから消えた (送信中のものも含む) カードは畳む。
+
+const cards = new Map();           // key -> {el, sig}
+const projs = new Map();           // path -> {el, h3, banner, groups: Map(kind -> {el, h2})}
+const TITLES = { dec: "判断", task: "作業・確認", ans: "回答済み・反映待ち" };
+let emptyNote = null, idleNote = null;
+
+// 入れ物を畳み終えたら (または空なら) 外す。onGone は外れたあとの片付け
+function retire(e, onGone) {
+  if (e._leave) return;
+  if (e.querySelector(".card")) leave(e, onGone);
+  else { e.remove(); onGone(); }
+}
+
+function render() {
+  if (!lastData) return false;
+  const main = document.getElementById("main");
+  const active = document.activeElement;
+  const seenKeys = new Set();
+  const entering = [];
+  const projEls = [];
+  const busyPaths = new Set();
+  let total = 0, idle = 0, stale = 0;
+
+  const ensureCard = (it, kind) => {
+    const key = (kind === "ans" ? aKey : qKey)(it.project, it.id);
+    seenKeys.add(key);
+    let c = cards.get(key);
+    if (c && c.el._leave) unleave(c.el);
+    let rebuild = false;
+    if (c && c.sig !== it._sig) {
+      if (c.el.contains(active)) stale++;      // 入力中のカードは、離れるまで作り直さない
+      else rebuild = true;
+    }
+    if (!c || rebuild) {
+      const fresh = !c;
+      c = { el: kind === "ans" ? buildAnswered(it) : buildQuestion(it), sig: it._sig };
+      cards.set(key, c);
+      if (fresh && rendered) entering.push(c.el);
+    }
+    syncError(c, key);
+    return c.el;
+  };
+
+  // 1. 今のデータから、どの入れ物にどのカードを並べるかを決める (DOM はまだ動かさない)
+  const plan = [];
+  for (const p of lastData.projects) {
+    const q = p.human.filter(i => !pending.has(qKey(p.path, i.id)));
+    const a = p.answered.filter(i => !pending.has(aKey(p.path, i.id)));
+    total += q.length;
+    if (!q.length && !a.length && p.ok) { idle++; continue; }
+    busyPaths.add(p.path);
+    let pr = projs.get(p.path);
+    if (pr) { if (pr.el._leave) unleave(pr.el); }
+    else {
+      pr = { el: el("div", { class: "proj" }), h3: el("h3", {}, p.name, el("span", { class: "path" }, p.path)), banner: null, groups: new Map() };
+      projs.set(p.path, pr);
+    }
+    pr.banner = p.ok ? null : (pr.banner || el("div", { class: "banner" }));
+    if (pr.banner) pr.banner.textContent = `bd を読めない: ${p.error}`;
+    const lists = {
+      dec: q.filter(i => !i.q || i.q.kind !== "task"),
+      task: q.filter(i => i.q && i.q.kind === "task"),
+      ans: a,
+    };
+    const groups = [];
+    for (const kind of ["dec", "task", "ans"]) {
+      if (!lists[kind].length) continue;
+      let g = pr.groups.get(kind);
+      if (g) { if (g.el._leave) unleave(g.el); }
+      else { g = { el: el("div", { class: "grp", "data-kind": kind }), h2: el("h2", {}) }; pr.groups.set(kind, g); }
+      g.h2.textContent = `${TITLES[kind]} (${lists[kind].length})`;
+      groups.push({ kind, g, els: [g.h2, ...lists[kind].map(i => ensureCard(i, kind))] });
+    }
+    plan.push({ pr, groups });
+  }
+
+  // 2. データに無い (送信中・サーバー側の理由で消えた) カードは畳む。畳んでいるカードには触らない。
+  //    place が外してしまわないよう、並べる前に済ませる
+  for (const [key, c] of cards) {
+    if (!seenKeys.has(key) && !c.el._leave) leave(c.el, () => { if (cards.get(key) === c) cards.delete(key); });
+  }
+  for (const k of [...errors.keys()]) if (!seenKeys.has(k) && !pending.has(k)) errors.delete(k);
+
+  // 3. 並べる。空になった節・プロジェクトは、中のカードが畳み終わってから外す
+  for (const { pr, groups } of plan) {
+    for (const { g, els } of groups) place(g.el, els);
+    const live = new Set(groups.map(x => x.kind));
+    for (const [kind, g] of pr.groups) if (!live.has(kind)) retire(g.el, () => { if (pr.groups.get(kind) === g) pr.groups.delete(kind); });
+    place(pr.el, [pr.h3, pr.banner, ...groups.map(x => x.g.el)]);
+    projEls.push(pr.el);
+  }
+  for (const [path, pr] of projs) {
+    if (!busyPaths.has(path)) retire(pr.el, () => { if (projs.get(path) === pr) projs.delete(path); });
+  }
+
+  emptyNote = emptyNote || el("p", { class: "empty" });
+  idleNote = idleNote || el("p", { class: "empty" });
+  emptyNote.textContent = `判断待ちはありません (登録 ${lastData.projects.length} プロジェクト)`;
+  idleNote.textContent = `ほか ${idle} プロジェクトは判断待ちなし`;
+  place(main, [busyPaths.size ? null : emptyNote, ...projEls, busyPaths.size && idle ? idleNote : null]);
+
+  // 新しく現れたカード (追加・失敗からの戻り・取り消し) だけ入場させる。最初の描画では動かさない
+  for (const e of entering) enter(e);
+  if (active && active !== document.body && active.isConnected && document.activeElement === document.body) active.focus({ preventScroll: true });
+  document.getElementById("count").textContent = `${total} 件`;
+  document.title = total ? `(${total}) 判断待ち` : "判断待ち";
+  staleCount = stale;
+  rendered = true;
+  return true;
+}
+
+// ---- 送信 ---------------------------------------------------------------------------------
+
+// 押した瞬間に畳み、送信は裏で行う。成功したらデータの反映を待ち、失敗したら読み直してから戻すか決める
+async function submit(key, it, path, body, onOk) {
+  pending.set(key, { state: "inflight", path: it.project, seq: 0 });
+  errors.delete(key);
+  try { render(); } catch (e) { console.error(e); }   // カードを畳み、件数・見出し・空の文言を数え直す。描けなくても送信は進める
+  try {
+    await api(path, body);
+  } catch (e) {
+    await failed(key, it, e);
+    return;
+  }
+  pending.set(key, { state: "done", path: it.project, seq: loadSeq });
+  // 畳んだ古い要素は使い回さない: 畳み終わる前に問い直されても、下書きの外れた (表示だけ前の選択が残る) 要素が戻らない
+  cards.delete(key);
+  if (onOk) onOk();
+  load();
+}
+
+function restore(key, info) {
+  pending.delete(key);
+  errors.set(key, info);
+  render();
+  const c = cards.get(key);
+  if (c) flash(c.el);
+}
+
+// 保留中 (入力中で作り直しを後回しにしている) のカードが見せている問いが、今のデータの問いと違うか。
+// 違えば、その問いの選択肢への回答は、見ていない意味で記録されかねない (サーバーも qsig で同じ検査をする)
+function questionChanged(it) {
+  const p = lastData && lastData.projects.find(x => x.path === it.project);
+  const cur = p && p.human.find(i => i.id === it.id);
+  return !!cur && cur.qsig !== it.qsig;
+}
+
+// 問いが変わっていた。選んだ選択肢は消し (補足は残し)、今のデータでカードを作り直して、見直してもらう
+function reviewChanged(key, it) {
+  const d = drafts.get(dkOf(it));
+  if (d) d.option = "";
+  saveDrafts();
+  cards.delete(key);
+  errors.set(key, explain({ code: "changed" }));
+  render();
+  const c = cards.get(key);
+  if (c) { flash(c.el); c.el.focus({ preventScroll: true }); }   // 押したボタンのある古いカードは外れたので、フォーカスを新しいカードへ
+  toast(`「${summarize(it.title, 24)}」(${it.id}): ${CHANGED_MSG}`);
+}
+
+// 失敗の後に読み直したら、チケットが出どころの一覧にもう無かったときの知らせ
+function missingNote(e, key, proj, it) {
+  const undo = key[0] === "a";
+  const src = undo ? "回答済み" : "判断待ち", dst = undo ? "判断待ち" : "回答済み";
+  if (e.written === true)                                  // サーバーが「記録した」と言っている
+    return e.stage === "label"
+      ? `${undo ? "取り消し" : "回答"}は記録済みです (ラベルの付け替えだけ失敗)。${dst}の一覧を確認してください`
+      : "送信の応答は失敗でしたが、反映されていました";
+  if (e.written === false || (e.status >= 400 && e.status < 500))   // 書く前に断られた
+    return `書き込めませんでした。チケットはもう${src}にありません`;
+  // 書けたか分からない (通信が切れた・サーバーの内部エラー): 行き先に居るなら書けている
+  const landed = (undo ? proj.human : proj.answered).some(i => i.id === it.id);
+  return landed ? "送信の応答は失敗でしたが、反映されていました"
+    : `書けたかどうか分かりません。チケットは今は${src}にありません。${dst}の一覧を確認してください`;
+}
+
+async function failed(key, it, e) {
+  const info = explain(e);
+  const label = `「${summarize(it.title, 24)}」(${it.id})`;
+  if (e.status === 403 && e.message === "token") {      // サーバーが入れ替わった (書き込みは何も起きていない)。下書きは再読み込みの後も使う
+    restore(key, info);
+    showNotice("画面のサーバーが入れ替わりました。ページを再読み込みしてください (入力した内容は残ります)", "再読み込み", () => location.reload());
+    return;
+  }
+  if (e.code === "gone") {                               // ほかで回答・反映済み。戻さず、読み直して今の状態を出す
+    pending.set(key, { state: "done", path: it.project, seq: loadSeq });
+    dropDraft(it);                                       // 問い直されたときに前の選択と補足を出さない
+    cards.delete(key);
+    toast(`${label}: ほかで回答・反映済みでした`);
+    load();
+    return;
+  }
+  const changed = e.code === "changed";                  // 見ていた問いが書き換わっていた (書き込みは何も起きていない)
+  if (changed) {
+    const d = drafts.get(dkOf(it));
+    if (d) d.option = "";                                // 選んだ選択肢は消す (補足は残す)
+    saveDrafts();
+    cards.delete(key);                                   // 読み直した今の問いで作り直す
+  }
+  const fresh = await load();                            // 先に今の状態を読む (書き込みが済んでいたら戻さない)
+  const proj = lastData && lastData.projects.find(p => p.path === it.project);
+  const present = !!proj && (key[0] === "q" ? proj.human : proj.answered).some(i => i.id === it.id);
+  if (!fresh || !proj || !proj.ok || present) {
+    restore(key, info);
+    toast(`${label}: ${changed ? info.summary : info.summary + "。カードを戻しました"}`);
+    return;
+  }
+  dropDraft(it);
+  cards.delete(key);
+  pending.delete(key);
+  render();
+  toast(`${label}: ${missingNote(e, key, proj, it)}`);
+}
+
+// ---- 読み込み -------------------------------------------------------------------------------
+
+function notifyNew(ids) {
+  if (seen === null) { seen = new Set(ids); return; }
+  const fresh = ids.filter(i => !seen.has(i));
+  seen = new Set(ids);
+  if (fresh.length && "Notification" in window && Notification.permission === "granted")
+    new Notification("判断待ちが増えました", { body: `${fresh.length} 件` });
+}
+
+// 受け取ったデータの形を確かめ、書き換えずに project と署名を足した新しいデータを返す。
+// 読めなかったプロジェクト (ok:false) は、前に読めたときのカードを残す (空に見せて入れ替えない)
+function normalize(raw, prev) {
+  if (!raw || !Array.isArray(raw.projects)) throw new Error("想定外のデータ (projects が配列でない)");
+  const projects = raw.projects.map(p => {
+    if (!p || typeof p.path !== "string" || !Array.isArray(p.human) || !Array.isArray(p.answered)) throw new Error("想定外のデータ (プロジェクトの形)");
+    const old = prev && prev.projects.find(x => x.path === p.path);
+    const conv = sig => i => {
+      if (!i || typeof i.id !== "string" || (i.q != null && (typeof i.q !== "object" || !Array.isArray(i.q.options)))) throw new Error("想定外のデータ (チケットの形)");
+      const x = { ...i, project: p.path };
+      x._sig = sig(x);
+      return x;
+    };
+    const keep = !p.ok && old;
+    return { path: p.path, name: p.name || p.path.split("/").pop(), ok: !!p.ok, error: p.error,
+      human: keep ? old.human : p.human.map(conv(sigQ)), answered: keep ? old.answered : p.answered.map(conv(sigA)) };
+  });
+  return { projects };
+}
+
+// 成功した送信の印を外す: その後に始めた読み込みのデータが、読めたプロジェクトについて届いたとき
+function settlePending(data, seq) {
+  for (const [key, st] of [...pending]) {
+    if (st.state !== "done" || seq <= st.seq) continue;
+    const p = data.projects.find(x => x.path === st.path);
+    if (!p || p.ok) pending.delete(key);
+  }
+}
+
+async function runLoad() {
+  const seq = ++loadSeq;
+  const meta = document.getElementById("meta");
+  let data;
+  try {
+    data = normalize(await api("/api/items"), lastData);
+  } catch (e) {
+    toast(`読み込めませんでした: ${summarize(e.message)}`);
+    return false;
+  }
+  lastData = data;
+  settlePending(data, seq);
+  notifyNew(data.projects.flatMap(p => p.human.map(i => p.path + "\n" + i.id)));
+  try {
+    render();
+    meta.textContent = "更新 " + new Date().toLocaleTimeString() + (staleCount ? " (入力中のカードの更新は保留)" : "");
+  } catch (e) {
+    console.error(e);
+    toast(`画面を描けませんでした: ${summarize(e.message)}`);
+    return false;
+  }
+  return true;
+}
+
+// 実行中なら捨てずに予約する (予約した読み込みは今の読み込みが終わってから新しく始まるので、成功の後のデータを読める)。
+// 返り値は、その読み込みが終わったとき true (読めたか) になる Promise
+let running = null, queued = null;
+function load() {
+  if (!running) {
+    running = runLoad().finally(() => { running = null; });
+    return running;
+  }
+  if (!queued) queued = running.then(() => { queued = null; return load(); });
+  return queued;
+}
+
+// ポインター (マウス・タッチ・ペン) を押している間は、focusout からの描き直しを始めない。
+// 後回しにしていたカードを作り直すと高さが変わり、その下のカードが押している最中に動いて、離したところにボタンが無くなる (click が消える)。
+// 離したあとに setTimeout 0 で描き直す: click は pointerup と同じ処理の中で届くので、その後になる
+let pointerDown = false, renderAfterPointer = false;
+const pointerUp = () => {
+  pointerDown = false;
+  if (renderAfterPointer) { renderAfterPointer = false; setTimeout(render, 0); }
+};
+// 主ボタン・タッチ・ペンだけ数える (右クリックのメニューが開くと pointerup が来ないことがある)。ウィンドウを離れたときも解く
+document.addEventListener("pointerdown", e => { if (e.button === 0) pointerDown = true; }, true);
+document.addEventListener("pointerup", pointerUp, true);
+document.addEventListener("pointercancel", pointerUp, true);
+window.addEventListener("blur", pointerUp);
+
+// 入力欄などのカードの中から外へフォーカスが移ったら、後回しにしていたカードを作り直す。
+// 移り先が無い (null) ときは待つ: ボタンを押している最中かもしれず、次の読み込みで直る
+document.addEventListener("focusout", e => {
+  if (!staleCount) return;
+  const to = e.relatedTarget;
+  const card = e.target.closest && e.target.closest(".card");
+  if (!card || !to || card.contains(to)) return;
+  if (pointerDown) { renderAfterPointer = true; return; }
+  setTimeout(render, 0);
+});
+const nb = document.getElementById("notify");
+if (!("Notification" in window) || Notification.permission === "granted") nb.hidden = true;
+nb.addEventListener("click", async () => { if (await Notification.requestPermission() === "granted") nb.hidden = true; });
+document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
+setInterval(load, POLL_MS);       // 裏のタブでも回す (増えたときの通知のため)
+load();
+</script>
+</body>
+</html>
