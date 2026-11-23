@@ -13,6 +13,8 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import string
+import unicodedata
 from dataclasses import dataclass
 
 from family import Family, norm, owner
@@ -292,12 +294,13 @@ def _resolve(base: str | None, path: str) -> str | None:
 
 def _git_targets(
     args: list[str], cwd: str | None, fam: Family, env: dict[str, str] | None = None
-) -> tuple[list[str], str | None, list[str]]:
-    """git の global option を読み、(書き換わる場所のパス一覧, 解決できない理由, 残りの引数) を返す。
+) -> tuple[list[str], str | None, list[str], bool]:
+    """git の global option を読み、(書き換わる場所のパス一覧, 解決できない理由, 残りの引数, git が読む repo がこの repo か) を返す。
 
     書き換わる場所は 2 つある: HEAD / index を持つ repo 側 (`-C` / `--git-dir` で決まる) と、
     作業ツリー側 (`--work-tree`。無ければ、`--git-dir` だけが効いているときは今の場所、それ以外は repo 側と同じ)。
     どちらかが別 checkout なら止める。一覧と理由の両方を返すことがある (`GIT_DIR` が決まっていて、今の場所が決まらないとき)。
+    repo は、git dir の指定があればそれが対応付く checkout、無ければ今の場所 (`-C` の後) で決まる。決まらなければ False。
     """
     here = cwd
     env = env or {}
@@ -319,7 +322,7 @@ def _git_targets(
             i += 1
         if name == "-C":
             if _dynamic(value):
-                return [], f"git -C {value}", args[i:]
+                return [], f"git -C {value}", args[i:], False
             here = _resolve(here, value)
         elif name == "--work-tree":
             work_tree = value
@@ -332,14 +335,15 @@ def _git_targets(
     if git_dir is not None:
         resolved = _resolve(here, git_dir)
         if resolved is None:
-            return [], f"--git-dir {git_dir}", rest
+            return [], f"--git-dir {git_dir}", rest, False
         mapped = dict(fam.gitdirs).get(resolved)
         if mapped is not None:
             targets.append(mapped)  # その git dir を持つ checkout の HEAD / index を書き換える
         elif resolved == fam.common_dir:
             targets.append(norm(os.path.dirname(fam.common_dir)))
         elif resolved.startswith(fam.common_dir.rstrip(os.sep) + os.sep):
-            return [], f"--git-dir {git_dir}", rest  # 同じ repo の、対応の分からない git dir
+            return [], f"--git-dir {git_dir}", rest, False  # 同じ repo の、対応の分からない git dir
+        in_repo = bool(targets)
         if work_tree is None:
             # git dir だけが効くとき、作業ツリーは今の場所になる (`GIT_DIR=<worktree>/.git git -C <main> reset --hard` は
             # main の作業ツリーを上書きする)。`git add` / `git commit` のように作業ツリーを書かない操作も同じに読む
@@ -349,27 +353,68 @@ def _git_targets(
                 unresolved = "cd の移動先"
     elif here is not None:
         targets.append(here)
+        in_repo = owner(here, fam) is not None  # git は今の場所から repo を探す
     else:
-        return [], "cd の移動先", rest
+        return [], "cd の移動先", rest, False
     if work_tree is not None:
         resolved = _resolve(here, work_tree)
         if resolved is None:
-            return [], f"--work-tree {work_tree}", rest
+            return [], f"--work-tree {work_tree}", rest, in_repo  # 作業ツリーが決まらなくても repo は決まっている
         targets.append(resolved)
-    return targets, unresolved, rest
+    return targets, unresolved, rest, in_repo
+
+
+def _worktree_operand(rest: list[str]) -> str | None:
+    """`git worktree remove|move <worktree>` の `<worktree>` の語。remove / move でなければ None。"""
+    if len(rest) < 2 or rest[1] not in ("remove", "move"):
+        return None
+    return next((a for a in rest[2:] if not a.startswith("-")), None)
 
 
 def _worktree_targets(rest: list[str], here: str | None) -> list[str]:
-    """`git worktree remove|move <path>` が消す / 動かす checkout。"""
-    if len(rest) < 2 or rest[1] not in ("remove", "move"):
-        return []
-    paths = [a for a in rest[2:] if not a.startswith("-")]
-    out = []
-    if paths:
-        resolved = _resolve(here, paths[0])
-        if resolved:
-            out.append(resolved)
-    return out
+    """`git worktree remove|move <path>` の `<path>` を、here からのパスとして読んだ先。"""
+    operand = _worktree_operand(rest)
+    resolved = _resolve(here, operand) if operand is not None else None
+    return [resolved] if resolved else []
+
+
+_ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+
+
+def _exact(text: str) -> str:
+    return text
+
+
+def _folded(text: str) -> str:
+    """大文字小文字を区別しない git (core.ignorecase) の比べ方。ASCII だけを小文字にし (`é` と `É` は別の名前)、
+    macOS の git が引数を NFC にそろえるのに合わせる。"""
+    return unicodedata.normalize("NFC", text).translate(_ASCII_LOWER)
+
+
+def _ends_with_name(path: str, name: str) -> bool:
+    """path が、区切りの直後 (か先頭) から name で終わるか。"""
+    start = len(path) - len(name)
+    return path.endswith(name) and (start == 0 or path[start - 1] == os.sep)
+
+
+def _worktree_by_name(rest: list[str], fam: Family) -> set[str]:
+    """`git worktree remove|move <worktree>` の `<worktree>` を、git が worktree の名前として解決する先。
+
+    git はパスとして読む前に、`<worktree>` で終わる worktree のパス (区切りの直後から一致するもの) を数え、ちょうど 1 つなら
+    それを選ぶ (2 つ以上ならパスとして読む)。今の場所に関係なく、`git worktree remove --force b` は `.../b` の worktree を消す。
+    比べ方は core.ignorecase (macOS では既定で true) で変わるので、区別する読みと区別しない読みのそれぞれで数え、
+    どちらかで 1 つに決まったものを返す。git が持つパスは realpath なので (`git worktree list` の行)、checkout root と比べる。
+    """
+    operand = _worktree_operand(rest)
+    if operand is None:
+        return set()
+    found = set()
+    for fold in (_exact, _folded):
+        name = fold(os.path.normcase(operand))
+        hits = [root for root in fam.roots if _ends_with_name(fold(root), name)]
+        if len(hits) == 1:
+            found.add(hits[0])
+    return found
 
 
 def _chdir_form(cmd: str, args: list[str], closes: bool = True) -> tuple[frozenset[str], list[str]]:
@@ -1026,17 +1071,24 @@ class _Analyzer:
         fam = self.fam
         note: Finding | None = None
         for here in sorted(heres, key=lambda h: h or ""):
-            targets, unresolved, rest = _git_targets(args, here, fam, env)
+            targets, unresolved, rest, in_repo = _git_targets(args, here, fam, env)
             if not rest:
                 return
             sub = rest[0]
             if sub == "worktree":
                 # 相対パスの基点は作業ツリーの指定や git dir で変わる。どの基点でも別の worktree なら止める
+                hits = []
                 for base in targets or [None]:
                     for path in _worktree_targets(rest, base):
                         o = owner(path, fam)
-                        if o is not None and o != fam.home and path == o:
-                            self._add(Finding(True, f"`git worktree {rest[1]}` が別の worktree ({o}) を対象にしている", o))
+                        if o is not None and path == o:
+                            hits.append(o)
+                # git はパスとして読む前に worktree の名前 (パスの末尾) として読む。名前を照合するのは、git が読む repo がこの repo のときだけ
+                if in_repo:
+                    hits += sorted(_worktree_by_name(rest, fam))
+                for o in hits:
+                    if o != fam.home:
+                        self._add(Finding(True, f"`git worktree {rest[1]}` が別の worktree ({o}) を対象にしている", o))
                 continue
             if not _is_mutating(sub, rest[1:]):
                 return
