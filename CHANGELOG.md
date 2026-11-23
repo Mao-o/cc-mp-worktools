@@ -15,6 +15,13 @@
 (更新判定のキーは各 plugin の `plugin.json` の `version`)、semver を振ると
 「plugin のバージョン」と混同されるため採っていません。
 
+## 2026-11-24
+
+### Added
+
+- plugin `humanq` を追加した (marketplace entry、README の Plugins / Privacy / Codex の表、
+  SECURITY.md の脅威モデルの前提)。bd の判断待ちを localhost の画面に出し、回答を bd に書き戻す
+
 ## 2026-11-17
 
 ### Changed
