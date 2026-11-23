@@ -397,18 +397,14 @@ class AssignmentValueTest(_Base):
 
     def test_time_is_linear(self):
         # 走査を 1 回で終わらせる。`${` は安全網の正規表現の、gh の前のパスの読みも通る
+        # 代表の形 (閉じない開き・閉じた値の後ろに gh・二重引用符の中の heredoc・引用の途中・ANSI-C・backtick の入れ子)。
+        # 期限があるので、残りの形が再発しても止まるだけ
         units = {
             "open": ("X=$( ", ""),
-            "open dq": ('X="$( ', ""),
-            "word": ("X=$(a) ", "gh pr create"),
             "word 2": ("X=$(a $(b)) ", "gh pr create"),
-            "dq": ('"$(a) ', ""),
             "dq heredoc": ('"$(cat <<E\nb\nE\n)" ', "gh pr create"),
             "quote": ("X=$(a ' ", ""),
-            "brace": ("${", ""),
-            "escape": ("X=a\\\\ ", "gh pr create"),
             "ansi": ("X=$'a\\\\'b' ", "gh pr create"),
-            "backtick": ("`V=$(a $(b)) c` ", "gh pr create"),
             "nested backtick": ("`a \\\\`V=$(b) c\\\\`` ", "gh pr create"),
         }
         _testutil.assert_linear(

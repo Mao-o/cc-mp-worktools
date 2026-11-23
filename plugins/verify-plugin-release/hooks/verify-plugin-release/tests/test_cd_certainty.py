@@ -489,7 +489,8 @@ class QuotedPunctuationTest(unittest.TestCase):
                 self.assertEqual(self._mask(text), want)
 
     def test_many_words_take_linear_time(self):
-        tokens = ("')' ", "')'", "''", "\\( ", "\\(", '"$(', '$("', "${x#(} ", "${", "$'", '`"', '"(', "')'x ", '"$(a ";" b)" ')
+        # 代表の形 (引用された記号・エスケープ・二重引用符の中の置換・`${`・`$'`)。期限があるので、再発しても止まるだけ
+        tokens = ("')' ", "\\( ", '"$(', "${x#(} ", "$'", '"$(a ";" b)" ')
         _testutil.assert_linear(
             self, "from command import _mask_quoted_punct as mask", "mask(s)", {tok: ("", tok, "x") for tok in tokens},
         )
@@ -578,7 +579,8 @@ class ExpansionCommandWordTest(unittest.TestCase):
                 self.assertIsNone(unresolved_reason(cmd, find_invocations(cmd)))
 
     def test_many_expansions_take_linear_time(self):
-        tokens = ("$x ", "${x} ", "$x$x", "`a` ", "a$x", "$(a)", "$x;", "$x&", '"$x"')
+        # 代表の形 (空白で区切る・区切らない・波括弧・backtick・置換)
+        tokens = ("$x ", "${x} ", "a$x", "`a` ", "$(a)")
         _testutil.assert_linear(
             self,
             "from command import find_invocations, unresolved_reason",

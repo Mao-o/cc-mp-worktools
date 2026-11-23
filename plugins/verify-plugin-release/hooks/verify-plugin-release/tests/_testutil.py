@@ -47,6 +47,12 @@ NO_BACKGROUND_GIT_SETTINGS = (
 )
 
 
+# 読み取りの期限 (reading.READ_SECONDS) のあとに、子の起動・kill と揺れで足してよい秒数。最悪の形の実時間の上限は
+# 形ごとに秒数を決めず、全部 `READ_SECONDS + ENDS_AFTER_DEADLINE` に揃える (期限があれば遅い形は止まるだけなので、
+# 守るのは「期限の中で必ず終わる」ことで、形ごとの速さではない)
+ENDS_AFTER_DEADLINE = 5
+
+
 # 別プロセスで走らせる時間の測定。hook が時間切れになるとコマンドは素通しになるので、固まっても suite を止めない
 _SCALING_SCRIPT = """\
 import json, sys, time
