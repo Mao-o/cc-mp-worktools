@@ -48,6 +48,8 @@ bash 3.2 と `zsh -f` で本物の git (2.50) を走らせた結果 (○ = 別�
 - 置換の中の語は読まない (これまでどおり対象外): `git worktree remove --force "$(echo b)"`
 - repo の中に置いた別の repo (`cd <main>/vendor/<別の repo>; git worktree remove b`) は、この repo と読んで止まる (他の書き込み操作のパスの読みと同じ)
 - `git worktree list` が返すパスと realpath が食い違う置き場では、名前の一致を取り違えることがある (git 2.50 は worktree を作るときに realpath で持つ)
+- 同じコマンドの前の操作で worktree の一覧が変わる形は止めない: 消える worktree と名前が重なっていたときの `git worktree prune && git worktree remove --force b` / 自分の worktree を消すか動かした後の `git worktree remove --force b` (名前は hook の時点の一覧で数え、git は走るときの一覧で数える)
+- 大文字小文字や NFC / NFD だけが違う相対パス (`git worktree remove ../B` / `cd ..; git worktree remove ./B`) は読まない (見逃し。0.8.1 と同じ。git はパスとしての読みでも core.ignorecase で比べる)
 
 ### テストの追加
 

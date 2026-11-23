@@ -158,6 +158,20 @@ class WorktreeNameTest(test_guard.GuardBase):
         self.assertEqual(self._decision("git worktree remove --force real/e"), "deny")
         self.assertIsNone(evaluate(bash("git worktree remove --force lnk/e", self.a)))
 
+    # 以下 2 件は characterization: 同じコマンドの手前の操作で worktree の一覧が変わる形は、意図的に止めない
+    # (名前は hook の時点の一覧で数え、git は走るときの一覧で数える。CHANGELOG の「受け入れている」に記載)。
+    def test_name_made_unique_by_an_earlier_prune_is_not_denied(self):
+        stale = Path(self._tmp.name) / "x" / "c"
+        _add_worktree(self.main, stale, "lane-xc")
+        shutil.rmtree(stale.parent)  # prunable。一覧にはまだ並ぶので、hook には `c` が 2 つに見える
+        cmd = "git worktree prune && git worktree remove --force c"
+        self.assertIsNone(evaluate(bash(cmd, self.a)))
+
+    def test_name_made_unique_by_removing_own_worktree_is_not_denied(self):
+        _add_worktree(self.main, Path(self._tmp.name) / "y" / "a", "lane-ya")
+        cmd = f'cd "{self.main}" && git worktree remove --force .claude/worktrees/a && git worktree remove --force a'
+        self.assertIsNone(evaluate(bash(cmd, self.a)))
+
 
 class NameReadingTest(unittest.TestCase):
     """名前の読みを、git を起動せずに組んだ checkout の一覧で確かめる (大文字小文字だけが違う worktree などを作れない FS でも)。"""
