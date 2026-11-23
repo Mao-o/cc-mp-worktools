@@ -85,9 +85,10 @@ class TestStripLeadingEnv(unittest.TestCase):
         ("test_no_assignment", "gh pr list", "gh pr list"),
         # `FOO=bar` だけのケースは剥がすと空コマンドになるので保持。
         ("test_assignment_only_kept", "FOO=bar", "FOO=bar"),
-        # 値に $() を含む場合は保守的に剥がさない。
-        ("test_subshell_value_kept", "FOO=$(date) gh pr list", "FOO=$(date) gh pr list"),
-        ("test_backtick_value_kept", "FOO=`date` gh pr list", "FOO=`date` gh pr list"),
+        # 値に $() / backtick を含む場合も、値を読まずに飛ばして後ろのコマンドを残す (v0.29.10。
+        # 0.29.9 までは剥がさず、後ろの gh を候補にしていなかった)。
+        ("test_subshell_value_skipped", "FOO=$(date) gh pr list", "gh pr list"),
+        ("test_backtick_value_skipped", "FOO=`date` gh pr list", "gh pr list"),
         ("test_empty_value", "FOO= gh pr list", "gh pr list"),
     )
 
@@ -236,8 +237,8 @@ class TestExtractCandidates(unittest.TestCase):
                 self.assertEqual(extract_candidates(command), expected)
 
     def test_assignment_with_command_substitution_keeps_detecting_the_inner_cli(self):
-        """値に `$(` / バッククォートを含む代入は `_parse_leading_env` が剥がさずに止まるため、
-        置換の中のパス付き CLI は basename 化で検出する (代入として返すと deny が allow に変わる)。"""
+        """値に `$(` / バッククォートを含む代入だけのセグメント (後ろにコマンドが無いので `_parse_leading_env` が剥がさない) は、
+        置換の中のパス付き CLI を basename 化で検出する (代入として返すと deny が allow に変わる)。"""
         cases = {
             "$() の中のパス付き firebase": ("X=$(/usr/bin/firebase deploy)", [("firebase deploy", {})]),
             "backtick の中のパス付き gh": ("X=`/usr/bin/gh pr create`", [("gh pr create`", {})]),

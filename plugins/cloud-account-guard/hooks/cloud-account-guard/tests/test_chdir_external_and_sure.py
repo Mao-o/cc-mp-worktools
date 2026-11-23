@@ -171,6 +171,9 @@ class PinnedSureChdirTests(base.PinnedInEveryDirTests):
         "git status | head; cd sub && firebase deploy",
         "true || echo x; cd sub && firebase deploy",
         "sleep 1 & cd sub && firebase deploy",
+        # 0.29.9 までの代入の値の読みを足す形 (置換の中のパス付きコマンド・空白を含む `${...}`。v0.29.10)
+        "cd sub && X=$(/bin/date +%s) firebase deploy",
+        "cd sub && X=${Y:-a b} firebase deploy",
     )
     # cd が走らなかった (後続に効かなかった) まま firebase が起動側で走りうる
     _MAYBE_AT_ORIGIN = (

@@ -314,6 +314,30 @@ class TestCannotSwitch(AutoSwitchBase):
         self.assertIn("トークン", reason)
         self.assertEqual(self.gh.switches(), [])
 
+    def test_unreadable_token_value_is_neither_checked_nor_switched(self):
+        """gh の token / host の env に読めない値を代入した gh は、照合も切替もしない (0.29.9 と同じ。v0.29.10)。
+
+        書き込むアカウントは代入したトークンで決まり、hook からは決められない。値を飛ばして起動時の
+        アカウントで照合すると、一致しないときに止め、自動切替でマシン全体の gh を切り替えてしまう。
+        """
+        self._write_accounts({"github": "Mao-o"})
+        for command in (
+            "GH_TOKEN=$(gh auth token --user Mao-o) gh pr create",
+            "GITHUB_TOKEN=`gh auth token` gh pr create",
+            "GH_ENTERPRISE_TOKEN=${T:-a b} gh pr create",
+            "GITHUB_ENTERPRISE_TOKEN=$((1)) gh pr create",
+            "GH_HOST=$(cat host) gh pr create",
+            "sudo -E GH_TOKEN=$(z) gh pr create",
+            "GH_TOKEN=$T X=$(z) gh pr create",
+        ):
+            with self.subTest(command=command), self._enabled():
+                self.assertIsNone(self._dispatch(command))
+                self.assertEqual(self.gh.calls, [])
+        # 対照: ほかの名前の代入は値を飛ばして gh を照合し、切り替える
+        with self._enabled():
+            self._context(self._dispatch("X=$(z) gh pr create"))
+        self.assertEqual(self.gh.active["github.com"], "Mao-o")
+
     def test_budget_exhausted_by_verification_skips_switch(self):
         """verify() で予算を使い切ったら、切替の CLI を起動しない。"""
         self._write_accounts({"github": "Mao-o"})
