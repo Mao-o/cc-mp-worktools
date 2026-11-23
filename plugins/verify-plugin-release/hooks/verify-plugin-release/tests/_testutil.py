@@ -47,9 +47,9 @@ NO_BACKGROUND_GIT_SETTINGS = (
 )
 
 
-# 読み取りの期限 (reading.READ_SECONDS) のあとに、子の起動・kill と揺れで足してよい秒数。最悪の形の実時間の上限は
-# 形ごとに秒数を決めず、全部 `READ_SECONDS + ENDS_AFTER_DEADLINE` に揃える (期限があれば遅い形は止まるだけなので、
-# 守るのは「期限の中で必ず終わる」ことで、形ごとの速さではない)
+# 読み取りの期限 (reading.READ_SECONDS) のあとに、子の起動・kill と揺れで足してよい秒数。子で読む形 (CHILD_FROM 以上・上限以下で
+# gh と pr を含む) の最悪の実時間の上限は、形ごとに秒数を決めず `READ_SECONDS + ENDS_AFTER_DEADLINE` に揃える (期限があれば遅い形は
+# 止まるだけ)。同じプロセスで読む形 (上限を超えるもの・CHILD_FROM 未満) には期限が効かないので、この秒数を使わない
 ENDS_AFTER_DEADLINE = 5
 
 

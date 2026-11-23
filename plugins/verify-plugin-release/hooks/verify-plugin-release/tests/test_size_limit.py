@@ -10,11 +10,9 @@ import _testutil  # noqa: F401
 
 import command
 from command import _READ_LIMIT, find_invocations, unresolved_reason
-from reading import READ_SECONDS
 
 _PKG = Path(__file__).resolve().parent.parent
 _REASON = "コマンドが長すぎて"
-_ENDS_BY = READ_SECONDS + _testutil.ENDS_AFTER_DEADLINE
 
 
 def _sized(head: str, size: int, tail: str = "") -> str:
@@ -157,9 +155,9 @@ class WordsTogetherStopTest(unittest.TestCase):
             )
             with self.subTest(unit=unit):
                 try:
-                    r = subprocess.run([sys.executable, "-c", script], cwd=_PKG, capture_output=True, text=True, timeout=_ENDS_BY)
+                    r = subprocess.run([sys.executable, "-c", script], cwd=_PKG, capture_output=True, text=True, timeout=30)
                 except subprocess.TimeoutExpired:
-                    self.fail(f"1 MB で {_ENDS_BY} 秒を超えた: {unit!r}")
+                    self.fail(f"1 MB で 30 秒を超えた: {unit!r}")
                 self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_dollar_quotes_are_quotes(self):
@@ -212,7 +210,7 @@ class TimeTest(unittest.TestCase):
         size = 1024 * 1024
         for unit in ("sh -c", "--repo=", "(a=' '", "\n", "a=$("):
             with self.subTest(unit=unit):
-                self.assertLess(self._run(f"'gh pr create; ' + {unit!r} * {size // len(unit)}"), _ENDS_BY)
+                self.assertLess(self._run(f"'gh pr create; ' + {unit!r} * {size // len(unit)}"), 10)
 
 
 if __name__ == "__main__":

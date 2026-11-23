@@ -28,7 +28,7 @@ _PKG = Path(__file__).resolve().parent.parent
 _SLOW = "gh pr create; " + "a=$(" * 255  # 空白で埋めると上限ちょうどで数秒かかる (2 部構成の最悪の形)
 _SLOW += " " * (_READ_LIMIT - len(_SLOW))
 _MARGIN = _testutil.ENDS_AFTER_DEADLINE  # 子の起動・kill と揺れの余裕
-# 語の長さの 2 乗 × 始まりの数で 3 乗になる形 (`-\w*c\w*`。以前に直したが、期限があれば再発しても止まるだけ)。実シェルでは先頭の gh pr create が走る
+# 語の長さの 2 乗 × 始まりの数で 3 乗になる形 (`-\w*c\w*`。以前に直した。再発すると期限に当たって止まるので、時間切れの理由で見分ける)。実シェルでは先頭の gh pr create が走る
 _CUBIC = "gh pr create --fill; " + "sh -c" * 100 + " -"
 _CUBIC += "c" * (_READ_LIMIT - len(_CUBIC))
 
@@ -136,7 +136,8 @@ class ReadDeadlineTest(unittest.TestCase):
         self.assertEqual(found, [])
 
     def test_worst_form_at_the_limit_ends_by_the_read_deadline(self):
-        # 読み終えるか止まるかは速度しだいだが、期限 + 余裕の中で必ず決まる。最悪の形の実時間の上限はこの 1 本だけが持つ
+        # 読み終えるか止まるかは速度しだいだが、期限 + 余裕の中で必ず決まる。子で読む形の最悪の実時間の上限はこの 1 本が持つ
+        # (同じプロセスで読む形の上限は、test_size_limit の TimeTest と test_heredoc_and_cd の指数時間のテストが持つ)
         bound = READ_SECONDS + _MARGIN
         for name, cmd in (("quadratic", _SLOW), ("cubic", _CUBIC)):
             with self.subTest(form=name):
@@ -144,11 +145,15 @@ class ReadDeadlineTest(unittest.TestCase):
                 best = float("inf")
                 for _ in range(2):
                     t = time.monotonic()
-                    read_command(cmd, Deadline(HOOK_BUDGET))
+                    _, reason = read_command(cmd, Deadline(HOOK_BUDGET))
                     best = min(best, time.monotonic() - t)
                     if best < bound:
                         break
                 self.assertLess(best, bound)
+                if name == "cubic":
+                    # 直した 3 乗の形は期限の中で読み終える (手元で約 0.1 秒で、期限 15 秒に十分な余裕がある)。
+                    # 時間切れで止まるのは 3 乗の再発 (旧 test_long_option_word_after_a_chain_of_nested_shells_is_not_cubic)
+                    self.assertNotIn("制限時間", reason or "")
 
     def test_read_is_capped_by_read_seconds_not_only_by_the_budget(self):
         with mock.patch.object(reading, "READ_SECONDS", 0.2):

@@ -352,8 +352,7 @@ class HeredocBodyTest(unittest.TestCase):
         # `&>f&>f ...` は前置きの中に実行位置の始まり (`&`) が並ぶ。前置きの繰り返しに上限が無いと、始まりごとに
         # 残り全部を読み直して個数の 2 乗の時間になる (8000 個で 10 秒)。リダイレクトの対象・代入の値・gh の
         # パスが区切りをまたいで読んでも同じになる。1000 個と 4000 個の時間の比で見る
-        # 代表の形 (始まりの `&` を含む・含まない、区切りの `;`、代入)。期限があるので、再発しても止まるだけ
-        tokens = ("&>f", "2>&1 ", ">f;", "a=1&", "a=1 ")
+        tokens = ("&>f", "&>f ", "2>&1 ", ">f;", ">f|", "a=1&", ">f>", "a=1 ")
         _testutil.assert_linear(
             self,
             "from command import find_invocations, unresolved_reason",
@@ -363,8 +362,10 @@ class HeredocBodyTest(unittest.TestCase):
 
     def test_opener_runs_take_linear_time(self):
         # 実行位置の始まり (`(` `{` backtick) が語の中に並ぶと、gh の前のパスと代入の値の読みが始まりごとに語の残りを読み直す
-        # 代表の形 (裸・パスの中・変数の後ろ・二重引用符の中・エスケープ・代入の値。開きは `(` `{` backtick `$(` `${` から 1 つずつ以上)
-        tokens = ("(", "`", "$(", "a/{", "a/${", "$x(", '"$(', "\\`", "a=(", "a=$(")
+        tokens = (
+            "(", "{", "`", "$(", "${", "a/(", "a/{", "a/`", "a/$(", "a/${", "$x(", "$x{", '"$(', "\\(", "\\{", "\\`",
+            "a=(", "a={", "a=`", "a=$(", "a=${",
+        )
         _testutil.assert_linear(
             self,
             "from command import find_invocations, unresolved_reason",
@@ -373,16 +374,18 @@ class HeredocBodyTest(unittest.TestCase):
         )
 
     def test_openers_split_inside_quotes_take_linear_time(self):
-        # 代表の形 (引用符・`\ `・`$(b c)`・backtick・リダイレクトの対象。それぞれ語を割る文字が違う)。期限があるので、残りの形が再発しても止まるだけ
-        tokens = ('$(a=" "', "(a=\\ ", "(a=$(b c)", "(a=`b c`", '(&>" "')
+        # 代入の値は引用符・`\ `・`$(b c)`・backtick の中をまたいで読むので、空白や `;` で語を割っても読み直しの長さは縮まない
+        tokens = ('$(a=" "', "(a=' '", "(a=\\ ", '(a=";"', "(a=$(b c)", "(a=`b c`", "{a=$'\\ '", '(>" "', '(2>" "', '(&>" "')
         cases = {t: ("gh pr create; ", t, " gh pr create") for t in tokens}
-        # 空行の並びは改行ごとに残りを読み直す。`\s` が読む文字はどれも同じなので、改行と CR だけ
+        # 空行の並びは改行ごとに残りを読み直す。`\s` が読む文字はどれも同じ
         cases["heredoc body"] = ("cat > f <<'E'\n", "x\n", "E\ngh pr create --body-file f")
         cases["blank lines"] = ("gh pr create\n", "\n", "x")
-        cases["cr"] = ("gh pr create\n", "\r\n", "x")
+        for name, unit in (("form feed", "\n\f"), ("vertical tab", "\n\v"), ("ideographic space", "\n\u3000"), ("cr", "\r\n")):
+            cases[name] = ("gh pr create\n", unit, "x")
         cases["blank lines in eval"] = ('eval " gh pr ; ', "\n \n", '"')
         # --repo の値は語の全部を読むので、次の `(gh -R` も値として読み直す
-        cases["repo after '('"] = ("gh pr create; ", "(gh -R ", "")
+        for start in ("(", ";", "\n"):
+            cases[f"repo after {start!r}"] = ("gh pr create; ", start + "gh -R ", "")
         cases["repo run"] = ("gh pr; ", "gh -R ", "")
         _testutil.assert_linear(
             self, "from command import find_invocations, unresolved_reason", "unresolved_reason(s, find_invocations(s))", cases,
@@ -415,7 +418,7 @@ class HeredocBodyTest(unittest.TestCase):
             self,
             "from command import unresolved_reason",
             "unresolved_reason(s, [])",
-            {tok: ("bash -c ' gh pr; ", tok, "'") for tok in ("${", "$(", "`", "a=(")},
+            {tok: ("bash -c ' gh pr; ", tok, "'") for tok in ("${", "$(", "(", "{", "`", "a=(")},
         )
 
     def test_too_many_openers_in_a_word_stop_only_with_a_pr_operation(self):
