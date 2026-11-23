@@ -212,30 +212,6 @@ class TimeTest(unittest.TestCase):
             with self.subTest(unit=unit):
                 self.assertLess(self._run(f"'gh pr create; ' + {unit!r} * {size // len(unit)}"), 10)
 
-    def test_long_option_word_after_a_chain_of_nested_shells_is_not_cubic(self):
-        # `-\w*c\w*` は語の長さの 2 乗、始まりの数を掛けて 3 乗 (100 個で 380 秒)。実シェルでは先頭の gh pr create が走る
-        script = (
-            "import time\n"
-            "from command import _READ_LIMIT, find_invocations, unresolved_reason\n"
-            "head = 'gh pr create --fill; ' + 'sh -c' * 100 + ' -'\n"
-            "s = head + 'c' * (_READ_LIMIT - len(head))\n"
-            "assert len(s) == _READ_LIMIT\n"
-            "t = time.perf_counter()\n"
-            "unresolved_reason(s, find_invocations(s))\n"
-            "print(time.perf_counter() - t)\n"
-        )
-        best = float("inf")
-        for _ in range(2):
-            try:
-                r = subprocess.run([sys.executable, "-c", script], cwd=_PKG, capture_output=True, text=True, timeout=30)
-            except subprocess.TimeoutExpired:
-                self.fail("上限ちょうどの形で 30 秒を超えた")
-            self.assertEqual(r.returncode, 0, r.stderr)
-            best = min(best, float(r.stdout))
-            if best < 8:
-                break
-        self.assertLess(best, 8)
-
 
 if __name__ == "__main__":
     unittest.main()
