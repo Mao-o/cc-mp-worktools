@@ -90,8 +90,9 @@ NOTE_BUDGET = (
 def requests_help(candidate: str) -> bool:
     """候補コマンドが `--help` (`--help=<値>` を含む) のトークンを持つか。
 
-    `gh auth git-credential --help` のようなヘルプの表示は、READONLY の `gh --help` の形に
-    当たらず通常の検証に乗る (deny / allow の判定は変えない)。ただ、ヘルプを見るために
+    `gh pr create --draft --help` のようなヘルプの表示は、READONLY の形 (`gh --help` と、
+    v0.30.0 からのサブコマンドの後ろの `--help`。直前が option の形は含まない) に当たらず
+    通常の検証に乗る (deny / allow の判定は変えない)。ただ、ヘルプを見るために
     マシン全体に効く切替をするのは釣り合わないので、自動切替の対象から外す (切り替えずに
     従来どおり deny する。安全側)。**`-h` は数えない** — gh の `auth` 配下では `-h` が
     `--hostname` の短い形で、`gh auth switch -h <host>` などの実際の操作になる。
