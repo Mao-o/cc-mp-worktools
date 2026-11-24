@@ -1,9 +1,11 @@
 """上限を超えるコマンドは読まずに分ける: 語が揃えば止め、揃わなければ通す。"""
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import _testutil  # noqa: F401
@@ -196,14 +198,23 @@ class TimeTest(unittest.TestCase):
             "print(time.perf_counter() - t)\n"
             "print(r)\n"
         )
+        # 子は理由 (日本語) を stdout に書く。Windows の pipe の既定は cp1252 で書けずに落ちるので、子も親も UTF-8 に固定する
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
         try:
-            r = subprocess.run([sys.executable, "-c", script], cwd=_PKG, capture_output=True, text=True, timeout=60)
+            r = subprocess.run(
+                [sys.executable, "-c", script], cwd=_PKG, capture_output=True, text=True, encoding="utf-8", env=env, timeout=60
+            )
         except subprocess.TimeoutExpired:
             self.fail(f"60 秒を超えた: {expr}")
         self.assertEqual(r.returncode, 0, r.stderr)
         seconds, reason = r.stdout.splitlines()[:2]
         self.assertIn(_REASON, reason)
         return float(seconds)
+
+    def test_child_output_does_not_depend_on_the_locale_encoding(self):
+        # 環境が子の stdout を cp1252 にしていても (Windows の既定)、日本語の理由を読める
+        with mock.patch.dict(os.environ, {"PYTHONIOENCODING": "cp1252"}):
+            self.assertLess(self._run("'gh pr create; ' + 'a=$(' * 262144"), 10)
 
     def test_forms_that_are_quadratic_to_read_stop_without_reading(self):
         # 読むと 1 MB で hook の時間切れをはるかに超える形 (`sh -c` の並びは 32 KB で 2〜3 秒で、2 乗で伸びるので 1 MB ならその約 1000 倍)
