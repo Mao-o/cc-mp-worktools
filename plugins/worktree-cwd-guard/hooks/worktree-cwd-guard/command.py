@@ -797,6 +797,24 @@ def analyze(command: str, cwd: str, fam: Family) -> list[Finding]:
 _Alt = tuple
 _OPS = re.compile(r"&&|\|\||\|&|;;|[|&;()\n]")
 
+# 状態の集合 (今の状態・移動が失敗した経路・`&` で戻す時点) の大きさの上限。普段の形は数個で収まる (git を含む実コマンド
+# 12,725 件で最大 6、この suite の入力で最大 4)。分岐ごとに行き先が割れる形は状態が倍々に増え、6 回の分岐で 64 に届く。
+# 上限に張り付いた形は状態の数に比例して遅くなるので (256 では 1,000 回の繰り返しで約 1.7 秒)、普段の最大の 10 倍ほどに抑えた。
+# README の「目的と限界」に同じ値を書いている
+_STATE_LIMIT = 64
+
+
+def _cap(alts: set[_Alt]) -> set[_Alt]:
+    """状態が上限を超えたら、作業ディレクトリもスタックも決まらない状態にまとめる。成否の別だけは残す。
+
+    `x || cd d1; x || cd d2; ...` (相対パス) や `x || pushd /d1; ...` は、分岐ごとに行き先かスタックが割れて、状態が倍々に増える。
+    hook が時間切れになると Claude Code はコマンドをそのまま走らせるので、形ごとではなく数で閉じる。まとめた後の git は、
+    行き先の決まらない移動の後ろと同じく注意だけにする (止めない)。絶対パスの `cd <dir>` / `git -C <dir>` は、まとめた後も読む。
+    """
+    if len(alts) <= _STATE_LIMIT:
+        return alts
+    return {(None, (), st) for st in {a[2] for a in alts}}
+
 
 class _Analyzer:
     """shell の実行をたどり、ありうる状態の集合を持ち回る。
@@ -879,8 +897,17 @@ class _Analyzer:
                 self._flush(seg, next_is_pipe=op in ("|", "|&"))
                 seg = []
                 self._operator(op)
+                self._bound()
         self._flush(seg, next_is_pipe=False)
         return self.findings
+
+    def _bound(self) -> None:
+        """状態の集合を上限 (`_STATE_LIMIT`) に収める。1 つのコマンドと演算子で増えるのは高々数倍なので、ここで毎回まとめれば足りる。"""
+        self.alts = _cap(self.alts)
+        self.failed_moves = _cap(self.failed_moves)
+        start, env, shvars = self.list_start
+        if len(start) > _STATE_LIMIT:
+            self.list_start = (frozenset(_cap(set(start))), env, shvars)
 
     def _operator(self, op: str) -> None:
         if op in ("&&", "||"):
