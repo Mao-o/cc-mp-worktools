@@ -33,10 +33,18 @@ _RO_AUTH_STATUS = r"^gh\s+auth\s+(status|list)\b"
 # deny されていた。この形を READONLY に足し、STATE_CHANGING と DISCLOSING からは外す
 # (下の `_unless_help`)。読み取りにするのは、次をすべて満たす形だけ:
 #
-# 1. 2 語目が gh の組み込みのコマンド (`_HELP_COMMANDS`)。alias と extension は `--help` を
-#    そのまま中身に渡す (gh 2.105 で実測: `gh alias set --shell zz 'echo RAN "$@"'` の後の
-#    `gh zz --help` は `RAN --help` を出す。`gh extension exec <name> --help` も extension を
-#    起動する)。alias と extension は組み込みと同じ名前を持てないので、名前で区別できる
+# 1. コマンドのパスが gh の組み込み (下の `_HELP_LEAVES` / `_HELP_GROUPS`)。alias と extension は
+#    `--help` をそのまま中身に渡す (gh 2.105 で実測: `gh alias set --shell 'pr zz' 'echo RAN "$@"'`
+#    の後の `gh pr zz --help` は `RAN --help` を出す。トップレベルの alias の `gh zz --help` も同じ。
+#    `gh extension exec <name> --help` も extension を起動する)。alias はトップレベルのほか、
+#    グループ (子を持つコマンド。`pr` / `auth` / `repo deploy-key` など) の下にも置ける
+#    (`gh alias set 'issue mine' ...` は gh 自身のヘルプの例)。置けないのは、組み込みと同じ名前と、
+#    末端 (子を持たないコマンド。`pr create` / `api` など) の下 (実測: どちらも `gh alias set` が
+#    「already a gh command」で拒否し、設定ファイルに直接書いても組み込みが勝つ)。extension は
+#    トップレベルにしか置けず、組み込みと同じ名前を持てない。そこで:
+#    - 末端は、後ろに語を置いてよい (`gh pr view 123 --help`。2〜5 の条件のもとで)
+#    - グループは、直後が `--help` の形 (`gh pr --help`) だけ。直後の語が組み込みの子でない形
+#      (`gh pr ship --help` / `gh pr -R o/r ship --help`) は alias でありうるので読み取りにしない
 # 2. `--help` がコマンド行の最後の語 (後ろはリダイレクトだけ)。後ろの `--help=false` は後勝ちで
 #    ヘルプを取り消す (実測: `gh pr create --help --help=false` は create を実行する)
 # 3. 直前の語が「値を取るかもしれない option」(`-` で始まり `=` を含まない語。`-` 単独は除く)
@@ -54,18 +62,70 @@ _RO_AUTH_STATUS = r"^gh\s+auth\s+(status|list)\b"
 # `<path> --help` / `<path> x --help` / `<path> x y --help` の 3 形がヘルプを出すことを、認証の無い
 # 一時 HOME で実測して決めた (位置引数の後ろの `--help` もヘルプになる = flag を最後まで読む)。
 #
-# 組み込みのコマンド (gh 2.105 の `gh help` の一覧)。外したもの:
-# - `copilot` / `extension`: 引数を別のプログラム (Copilot CLI / extension) に渡す
-# - `(preview)` と表示されるもの (`agent-task` / `discussion` / `event` / `skill`): 引数の扱いが
-#   版で変わりうる
+# 組み込みのコマンドのパス。gh 2.105 の `gh reference` の見出しから作り、子を持つパスをグループ、
+# 持たないパスを末端に分けた (`codespace ports` は実行もできるが子を持つのでグループに数える。
+# 安全側)。外したもの:
+# - `copilot` / `extension` と配下: 引数を別のプログラム (Copilot CLI / extension) に渡す
+# - `(preview)` と表示されるもの (`agent-task` / `discussion` / `event` / `skill`) と配下: 引数の
+#   扱いが版で変わりうる
+# - 組み込みの別名 (`gh issue ls` / `gh cs` など) と、`gh reference` に載らない hidden のコマンド。
+#   hidden の `auth git-credential` だけは、ヘルプを出すことを実測して末端に足した
 # 外したコマンドと alias (`gh co` など) の `--help` は従来どおり検証する (`gh help <command>` の形は
-# 読み取り)。
-_HELP_COMMANDS = (
-    "alias", "api", "attestation", "auth", "browse", "cache", "codespace",
-    "completion", "config", "gist", "gpg-key", "issue", "label", "licenses", "org",
-    "pr", "preview", "project", "release", "repo", "ruleset", "run", "search",
-    "secret", "ssh-key", "status", "variable", "workflow",
+# 読み取り)。gh の版が上がって組み込みが消えると、その名前を alias に使えるようになるので、表は
+# gh の版を上げたときに同じ規則で作り直す (docs/DEVELOPMENT.md の D13)。
+_HELP_GROUPS = (
+    "alias", "attestation", "auth", "cache", "codespace", "codespace ports", "config", "gist",
+    "gpg-key", "issue", "issue artifact", "label", "org", "pr", "preview", "project", "release",
+    "repo", "repo autolink", "repo deploy-key", "repo gitignore", "repo license", "ruleset", "run",
+    "search", "secret", "ssh-key", "variable", "workflow",
 )
+_HELP_LEAVES = (
+    "alias delete", "alias import", "alias list", "alias set", "api", "attestation download",
+    "attestation trusted-root", "attestation verify", "auth git-credential", "auth login",
+    "auth logout", "auth refresh", "auth setup-git", "auth status", "auth switch", "auth token",
+    "browse", "cache delete", "cache list", "codespace code", "codespace cp", "codespace create",
+    "codespace delete", "codespace edit", "codespace jupyter", "codespace list", "codespace logs",
+    "codespace ports forward", "codespace ports visibility", "codespace rebuild", "codespace ssh",
+    "codespace stop", "codespace view", "completion", "config clear-cache", "config get",
+    "config list", "config set", "gist clone", "gist create", "gist delete", "gist edit",
+    "gist list", "gist rename", "gist view", "gpg-key add", "gpg-key delete", "gpg-key list",
+    "issue artifact create", "issue artifact delete", "issue artifact download",
+    "issue artifact edit", "issue artifact list", "issue artifact view", "issue close",
+    "issue comment", "issue create", "issue delete", "issue develop", "issue edit", "issue list",
+    "issue lock", "issue pin", "issue reopen", "issue status", "issue transfer", "issue unlock",
+    "issue unpin", "issue view", "label clone", "label create", "label delete", "label edit",
+    "label list", "licenses", "org list", "pr checkout", "pr checks", "pr close", "pr comment",
+    "pr create", "pr diff", "pr edit", "pr list", "pr lock", "pr merge", "pr ready", "pr reopen",
+    "pr revert", "pr review", "pr status", "pr unlock", "pr update-branch", "pr view",
+    "preview prompter", "project close", "project copy", "project create", "project delete",
+    "project edit", "project field-create", "project field-delete", "project field-list",
+    "project item-add", "project item-archive", "project item-create", "project item-delete",
+    "project item-edit", "project item-list", "project link", "project list",
+    "project mark-template", "project unlink", "project view", "release create", "release delete",
+    "release delete-asset", "release download", "release edit", "release list", "release upload",
+    "release verify", "release verify-asset", "release view", "repo archive",
+    "repo autolink create", "repo autolink delete", "repo autolink list", "repo autolink view",
+    "repo clone", "repo create", "repo delete", "repo deploy-key add", "repo deploy-key delete",
+    "repo deploy-key list", "repo edit", "repo fork", "repo gitignore list", "repo gitignore view",
+    "repo license list", "repo license view", "repo list", "repo read-dir", "repo read-file",
+    "repo rename", "repo set-default", "repo sync", "repo unarchive", "repo view", "ruleset check",
+    "ruleset list", "ruleset view", "run cancel", "run delete", "run download", "run list",
+    "run rerun", "run view", "run watch", "search code", "search commits", "search issues",
+    "search prs", "search repos", "secret delete", "secret list", "secret set", "ssh-key add",
+    "ssh-key delete", "ssh-key list", "status", "variable delete", "variable get", "variable list",
+    "variable set", "workflow disable", "workflow enable", "workflow list", "workflow run",
+    "workflow view",
+)
+
+
+def _path_alternation(paths) -> str:
+    """パスの表を regex の選択にする (語の間は空白かタブ。長いパスを先に試す)。"""
+    return "(?:" + "|".join(
+        r"[ \t]+".join(re.escape(word) for word in path.split())
+        for path in sorted(paths, key=len, reverse=True)
+    ) + ")"
+
+
 # 語 (記号を含まない。先頭は `=` 以外)。
 _HELP_WORD = r"[A-Za-z0-9_./:@%+,-][A-Za-z0-9_./:@%+=,-]*"
 # `--help` の直前に置ける語: `-` で始まらない語 / `-` 単独 / `=` を含む option (`--title=x`)。
@@ -76,13 +136,19 @@ _HELP_CLOSED_WORD = (
 )
 # `--help` の後ろに置けるリダイレクト (`2>&1` / `>/dev/null` / `> out.txt` / `< /dev/null` /
 # `&>f`)。数字の付く形は空白の後ろだけ (`--help2>&1` は `--help2` という語になる)。
+# 空白の前置きは 1 通りにしか読めない形にする (`[ \t]+[0-9]*` と `[ \t]*` を並べると、`--help` の
+# 後ろのリダイレクトの数に指数の時間がかかる)。
 _HELP_REDIRECT = (
-    r"(?:(?:[ \t]+[0-9]*|[ \t]*)(?:>>|>&|>|<&|<)|[ \t]*&>>?)[ \t]*" + _HELP_WORD
+    r"(?:(?:[ \t]+[0-9]*)?(?:>>|>&|>|<&|<)|[ \t]*&>>?)[ \t]*" + _HELP_WORD
 )
 _SUBCOMMAND_HELP = (
-    r"gh[ \t]+(?:" + "|".join(_HELP_COMMANDS) + r")"
-    r"(?:(?:[ \t]+(?!--(?:[ \t]|$))" + _HELP_WORD + r")*[ \t]+" + _HELP_CLOSED_WORD + r")?"
-    r"[ \t]+--help(?:" + _HELP_REDIRECT + r")*[ \t]*$"
+    r"gh[ \t]+(?:"
+    # 末端: 後ろに語を置いてよい
+    + _path_alternation(_HELP_LEAVES)
+    + r"(?:(?:[ \t]+(?!--(?:[ \t]|$))" + _HELP_WORD + r")*[ \t]+" + _HELP_CLOSED_WORD + r")?"
+    # グループ: 直後が `--help` の形だけ
+    + r"|" + _path_alternation(_HELP_GROUPS)
+    + r")[ \t]+--help(?:" + _HELP_REDIRECT + r")*[ \t]*$"
 )
 _RO_SUBCOMMAND_HELP = r"^" + _SUBCOMMAND_HELP
 
@@ -150,8 +216,9 @@ READONLY_SAFE_OPTIONS = {
 # `gh auth token` は READONLY に無いので現状も検証対象だが、**形そのものが開示**
 # であることを宣言側に残す (将来 READONLY に足したときに素通しに戻らないように)。
 # ヘルプの形 (`gh auth token --help`。トークンは出ない) だけは除く (v0.30.0。`_unless_help`)。
-# `_RO_AUTH_STATUS` の行は除かない: `--show-token --help` は直前が option なので、そもそも
-# ヘルプの形に当たらない。
+# `_RO_AUTH_STATUS` の行は除かない: `--show-token --help` は直前が option なのでヘルプの形に
+# 当たらない。`--show-token=true --help` / `-t=1 --help` はヘルプの形に当たるが、DISCLOSING が
+# READONLY より先に効くので WRITE のまま (実際はヘルプを出すだけ。止める側に倒れる)。
 DISCLOSING = [
     (_RO_AUTH_STATUS, frozenset({"--show-token", "-t"})),
     (_unless_help(r"^gh\s+auth\s+token(?=\s|$)"), frozenset()),

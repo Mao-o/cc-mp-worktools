@@ -215,7 +215,8 @@ class TestOnlyWhereItWouldStop(AutoSwitchBase):
         0.30.0 からサブコマンドの後ろの `--help` の多く (`gh auth git-credential --help` /
         `gh pr create --help`) は READONLY で検証自体をしない (test_github_subcommand_help.py)。
         ここに並べるのは、それでも通常の検証に乗る `--help` 付きの形 (直前が option /
-        `--help=<値>` / 後ろに語が続く)。0.20.0 までは不一致で自動切替が走っていた
+        `--help=<値>` / 後ろに語が続く / グループの直後の語が組み込みの子でない (alias でありうる))。
+        0.20.0 までは不一致で自動切替が走っていた
         (内部バックログ)。判定は変えず deny のまま、切り替えなかった理由を添える。"""
         self._write_accounts({"github": "Mao-o"})
         for command in (
@@ -223,6 +224,7 @@ class TestOnlyWhereItWouldStop(AutoSwitchBase):
             "gh auth git-credential --hostname --help",
             "gh pr create --help=true",
             "gh pr create --help --fill",
+            "gh pr ship --help",
             "gh pr create --draft --help && gh issue create --help=true",
         ):
             with self.subTest(command=command):

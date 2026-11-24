@@ -264,7 +264,7 @@ commit される `.claude/settings.json` (プロジェクトの共有設定) に
 | 期待値が dict 形式なら、**全 host** が切り替えられる | どの host も切り替えない (一部だけ切り替えて deny、を作らない) |
 | `GH_TOKEN` / `GITHUB_TOKEN` / `GH_ENTERPRISE_TOKEN` / `GITHUB_ENTERPRISE_TOKEN` / `GH_HOST` が無い | 切り替えない (トークン env は `hosts.yml` より優先されるので切り替えても実行アカウントが変わらない / 切り替える host を決められない)。行頭の代入の値がコマンド置換・バッククォートなどで読めない形 (`GH_TOKEN=$(gh auth token --user x) gh pr create`) は、その gh を照合もしない (0.29.9 と同じ。v0.29.10)。値が変数参照の形 (`GH_TOKEN=$T gh ...` / `GH_TOKEN="$(cmd)" gh ...`) は、値を検証の env に入れないのでこの条件に当たらない (0.29.9 から) |
 | コマンド自身がアカウント状態を変える操作 (`gh auth refresh` 等) を含まない | 切り替えない (明示的な操作に hook の切替を重ねない) |
-| 対象のコマンドのうち `--help` の付かないものが 1 つ以上ある (すべてが `--help` 付き (`gh pr create --draft --help` など) ではない) (v0.21.0) | 切り替えない (ヘルプの表示のためにマシン全体の gh を動かさない)。deny は従来どおりで、切り替えなかった理由を添える。`-h` はヘルプとして数えない (gh の `auth` 配下では `--hostname` の短い形)。0.30.0 から、[サブコマンドの後ろの `--help`](#検証をスキップする-readonly-コマンド) の多く (`gh pr create --help`) はそもそも照合しないので、ここに来るのは直前が option の形などだけ |
+| 対象のコマンドのうち `--help` の付かないものが 1 つ以上ある (すべてが `--help` 付き (`gh pr create --draft --help` など) ではない) (v0.21.0) | 切り替えない (ヘルプの表示のためにマシン全体の gh を動かさない)。deny は従来どおりで、切り替えなかった理由を添える。`-h` はヘルプとして数えない (gh の `auth` 配下では `--hostname` の短い形)。0.30.0 から、[サブコマンドの後ろの `--help`](#検証をスキップする-readonly-コマンド) の多く (`gh pr create --help`) はそもそも照合しないので、ここに来るのは直前が option の形や、グループの直後の語が組み込みの子でない形 (`gh pr ship --help`。alias でありうる) などだけ |
 | 直前 60 秒以内に、同じ host を**別のアカウントへ**自動切替した記録が無い | 切り替えない (下の並行セッションのガード) |
 | 1 コマンド分の[検証時間の予算](#検証時間の予算-v0120)が残っている | 切り替えない |
 
@@ -834,7 +834,9 @@ firebase-tools は symlink を解かないパスで切替先を探すため。[�
   なり deny されるのを防ぐ (v0.7.0)
 - **gh のサブコマンドの後ろの `--help`** (v0.30.0): `gh auth switch --help` /
   `gh auth token --help` / `gh pr create --title x --help 2>&1` のように、組み込みの
-  コマンドに続く最後の語が `--help` の形 (後ろはリダイレクトだけ)。gh はヘルプを出して
+  コマンドに続く最後の語が `--help` の形 (後ろはリダイレクトだけ)。グループ (子を持つ
+  コマンド。`gh pr` / `gh auth` / `gh repo deploy-key` など) は直後が `--help` の形
+  (`gh pr --help`) だけ。gh はヘルプを出して
   終わり、コマンドを実行しない。[成功 cache の破棄](#切替ログイン系コマンドでの即時無効化-v080)
   と[切替と書込の連結](#切替と書込を同一コマンドに連結した形は-deny--v0150)にも数えない。
   次の形は従来どおり検証する:
@@ -844,9 +846,12 @@ firebase-tools は symlink を解かないパスで切替先を探すため。[�
   - `-h` (gh の `auth` 配下などでは `--hostname` の短い形。`gh auth switch -h <host>` は切替)
   - `--help` の後ろに語がある (`--help --help=false` は後勝ちでヘルプを取り消す) /
     `--` の後ろの `--help` / 引用符・`$`・glob・`~` などを含む語がある
-  - alias (`gh co` など) と extension は `--help` をそのまま中身に渡すので対象外。組み込みでも
-    `copilot` / `extension` (引数を別のプログラムに渡す) と `(preview)` と表示されるコマンド
-    (`agent-task` / `discussion` / `event` / `skill`) は対象外
+  - alias と extension は `--help` をそのまま中身に渡すので対象外。alias はトップレベル
+    (`gh co` など) のほか、グループの下にも置ける (`gh issue mine`。`gh alias set --help` の例)
+    ので、グループの直後の語が組み込みの子でない形 (`gh pr ship --help` /
+    `gh pr -R o/r ship --help`) は検証する。組み込みでも `copilot` / `extension` (引数を
+    別のプログラムに渡す) と `(preview)` と表示されるコマンド (`agent-task` / `discussion` /
+    `event` / `skill`)、組み込みの別名 (`gh issue ls` など) は対象外
 
   **対応は gh だけ**。aws / gcloud / kubectl / firebase のサブコマンドの後ろの `--help`
   (`firebase use --help` / `kubectl apply --help` など) は従来どおり検証する。

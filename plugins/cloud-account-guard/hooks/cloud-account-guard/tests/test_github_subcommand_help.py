@@ -10,7 +10,8 @@
 
 - option の値の位置の `--help` (`--title --help`) は値になり、コマンドが走る (実測)
 - `-h` は数えない (`gh auth switch -h <host>` は切替)
-- alias / extension は `--help` を中身に渡す (実測) ので、組み込みのコマンドだけ
+- alias / extension は `--help` を中身に渡す (実測) ので、組み込みのコマンドのパスだけ。alias は
+  グループ (子を持つコマンド。`gh pr`) の下にも置ける (実測) ので、グループは直後が `--help` の形だけ
 """
 from __future__ import annotations
 
@@ -91,6 +92,9 @@ HELP_FORMS = [
     ("gh api repos/o/r --help", WRITE),  # 位置引数の後ろもヘルプ (実測)
     ("gh pr view 123 --help", QUERY),
     ("gh repo deploy-key add --help", WRITE),
+    ("gh repo\tdeploy-key  add --help", WRITE),  # パスの語の間のタブ・複数の空白
+    ("gh repo deploy-key --help", WRITE),  # 2 段目のグループの直後
+    ("gh auth git-credential x --help", WRITE),  # hidden (実測でヘルプ)
     ("gh pr create --title x --help", WRITE),  # 値の後ろ
     ("gh pr create --title=x --help", WRITE),  # 値を `=` で付けた option の後ろ
     ("gh pr create -t=x --help", WRITE),
@@ -127,6 +131,9 @@ NOT_HELP_FORMS = [
     # bool の flag の直後も値の位置と区別できないので数えない (実際はヘルプ)
     ("gh pr create --draft --help", WRITE),
     ("gh auth status --show-token --help", WRITE),  # DISCLOSING のまま
+    # ヘルプの形に当たるが、DISCLOSING が READONLY より先に効く (実際はヘルプ。止める側)
+    ("gh auth status --show-token=true --help", WRITE),
+    ("gh auth status -t=1 --help", WRITE),
     # --help が最後の語ではない / 後ろで取り消しうる
     ("gh pr create --help --fill", WRITE),
     ("gh pr create --help --help=false", WRITE),
@@ -175,6 +182,20 @@ NOT_HELP_FORMS = [
     ("gh event listen --help", WRITE),
     ("gh cs ssh --help", WRITE),
     ("gh prx create --help", WRITE),
+    ("gh issue ls --help", WRITE),  # 組み込みの別名は表に入れていない
+    # グループの直後の語が組み込みの子でない形。gh はグループの下にも alias を置け、alias は
+    # `--help` を中身に渡す (実測: `gh alias set --shell 'pr zz' 'echo RAN "$@"'` の後の
+    # `gh pr zz --help` は `RAN --help`、`gh pr -R o/r zz --help` は `RAN -R o/r --help`)
+    ("gh issue mine --help", WRITE),  # gh alias set --help の例の名前
+    ("gh pr ship --help", WRITE),
+    ("gh auth sw --help", WRITE),
+    ("gh alias zz --help", WRITE),
+    ("gh repo deploy-key zz --help", WRITE),  # 2 段目のグループの下
+    ("gh pr -R o/r zz --help", WRITE),  # グループの option の後ろ
+    ("gh pr zz x --help", WRITE),
+    ("GH_CONFIG_DIR=cfg gh pr ship --help", WRITE),
+    ("gh pr -R o/r --help", WRITE),  # グループは直後が --help の形だけ
+    ("gh codespace ports zz --help", WRITE),
     # 書込・開示そのもの
     ("gh pr create", WRITE),
     ("gh auth token", WRITE),
@@ -210,18 +231,46 @@ class TestTier(_Case):
 
 
 class TestHelpCommands(_Case):
-    def test_every_listed_command_reads_help(self):
-        for name in github._HELP_COMMANDS:
-            for command in (f"gh {name} --help", f"gh {name} sub --help", f"gh {name} sub x --help"):
+    def test_every_leaf_reads_help(self):
+        """末端 (子を持たないパス) は、後ろに語を置いた形もヘルプ (末端の下には alias を置けない)。"""
+        for path in github._HELP_LEAVES:
+            for command in (f"gh {path} --help", f"gh {path} x --help", f"gh {path} x y --help"):
                 with self.subTest(command=command):
                     self.assertEqual(self.tier(command), ("github", READONLY))
 
+    def test_groups_read_help_only_directly(self):
+        """グループは直後が `--help` の形だけ。直後の語が組み込みの子でなければ alias でありうる。"""
+        for path in github._HELP_GROUPS:
+            with self.subTest(command=f"gh {path} --help"):
+                self.assertEqual(self.tier(f"gh {path} --help"), ("github", READONLY))
+            for command in (f"gh {path} zz --help", f"gh {path} zz x --help",
+                            f"gh {path} -R o/r zz --help"):
+                with self.subTest(command=command):
+                    name, tier = self.tier(command)
+                    self.assertEqual(name, "github")
+                    self.assertNotEqual(tier, READONLY)
+
+    def test_tables_are_split_by_children(self):
+        """子を持つパスがグループ、持たないパスが末端 (グループを末端に混ぜると、その下の alias が
+        読み取りになる)。グループはどれも表の中に子を持つ。"""
+        paths = github._HELP_LEAVES + github._HELP_GROUPS
+        self.assertEqual(len(set(paths)), len(paths), "表に重複か、両方に入ったパスがある")
+        self.assertGreater(len(github._HELP_GROUPS), 20)
+        self.assertGreater(len(github._HELP_LEAVES), 150)
+        for path in paths:
+            with self.subTest(path=path):
+                has_child = any(other.startswith(path + " ") for other in paths)
+                self.assertEqual(path in github._HELP_GROUPS, has_child)
+                if " " in path:
+                    self.assertIn(path.rsplit(" ", 1)[0], github._HELP_GROUPS)
+
     def test_passthrough_and_preview_commands_are_not_listed(self):
-        """引数を別のプログラムに渡す / (preview) のコマンドと alias は名前の表に無い。"""
+        """引数を別のプログラムに渡す / (preview) のコマンドと alias は表のパスの先頭に無い。"""
+        tops = {path.split()[0] for path in github._HELP_LEAVES + github._HELP_GROUPS}
         for name in ("copilot", "extension", "extensions", "ext", "agent-task", "discussion",
                      "event", "skill", "co", "cs"):
             with self.subTest(name=name):
-                self.assertNotIn(name, github._HELP_COMMANDS)
+                self.assertNotIn(name, tops)
                 self.assertNotEqual(self.tier(f"gh {name} --help")[1], READONLY)
 
     def test_command_name_must_be_a_whole_word(self):
@@ -458,18 +507,21 @@ class TestHelpRegexIsLinear(unittest.TestCase):
             best = min(best, time.perf_counter() - started)
         return best
 
-    def test_linear(self):
+    def _patterns(self):
         token = [p for p, _o in github.DISCLOSING if "auth\\s+token" in p]
         self.assertEqual(len(token), 1, github.DISCLOSING)
         self.assertEqual(len(github.STATE_CHANGING), 1)
-        patterns = (
+        return (
             re.compile(github._RO_SUBCOMMAND_HELP),
             re.compile(github.STATE_CHANGING[0]),
             re.compile(token[0]),
         )
+
+    def test_linear(self):
         worst = 0.0
-        for pattern in patterns:
-            for head in ("gh pr create", "gh auth switch", "gh auth token"):
+        for pattern in self._patterns():
+            for head in ("gh pr create", "gh auth switch", "gh auth token", "gh repo deploy-key add",
+                         "gh pr"):
                 for unit in self.UNITS:
                     for tail in self.TAILS:
                         small = self._best(pattern, head + unit * 5000 + tail)
@@ -478,6 +530,40 @@ class TestHelpRegexIsLinear(unittest.TestCase):
                         if small > 2e-4:
                             worst = max(worst, large / small)
         self.assertLess(worst, 10.0)
+
+    def test_blanks_inside_the_path_are_linear(self):
+        """パスの語の間に空白・タブを並べ、最後で外れる入力 (末端とグループの選択がそれぞれ空白を読む)。"""
+        worst = 0.0
+        for pattern in self._patterns():
+            for sep in (" ", "\t", " \t"):
+                for words in (("repo", "deploy-key", "add"), ("pr", "create"), ("pr",),
+                              ("auth", "token"), ("auth", "switch")):
+                    for tail in ("", " x", " --help x", " zz --help"):
+                        def text(n, words=words, sep=sep, tail=tail):
+                            return "gh" + "".join(sep * n + w for w in words) + tail
+                        small = self._best(pattern, text(5000))
+                        large = self._best(pattern, text(20000))
+                        self.assertLess(large, 1.0, (pattern.pattern[:40], sep, words, tail))
+                        if small > 2e-4:
+                            worst = max(worst, large / small)
+        self.assertLess(worst, 10.0)
+
+    def test_redirects_after_help_do_not_backtrack(self):
+        """`--help` の後ろのリダイレクトの並びが最後で外れる入力 (`... --help >f >f ... x`)。
+
+        リダイレクトの前の空白を 2 通りに読める形にすると、外れたときに並びの数の指数の時間が
+        かかる (22 個で 1 本約 0.9 秒)。test_linear の単位は `--help` の前に置くので、この経路を
+        通らない。"""
+        token = [p for p, _o in github.DISCLOSING if "auth\\s+token" in p]
+        self.assertEqual(len(token), 1, github.DISCLOSING)
+        for pattern in (github._RO_SUBCOMMAND_HELP, github.STATE_CHANGING[0], token[0]):
+            compiled = re.compile(pattern)
+            for unit in (" >f", " >>f", " <f", " >&2"):
+                with self.subTest(pattern=pattern[:30], unit=unit):
+                    text = "gh auth token --help" + unit * 22 + " x"
+                    started = time.perf_counter()
+                    compiled.search(text)
+                    self.assertLess(time.perf_counter() - started, 0.05)
 
 
 if __name__ == "__main__":

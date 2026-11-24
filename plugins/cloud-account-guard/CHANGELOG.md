@@ -15,23 +15,30 @@
   の後ろ)
 - 読み取りにするのは、組み込みのコマンドに続く最後の語 (後ろはリダイレクトだけ) が `--help` で、
   直前の語が `=` を含まない option ではなく、前に `--` が無く、語が引用符・`$`・glob などを含まない
-  形だけ。次は従来どおり検証する:
+  形だけ。グループ (子を持つコマンド。`gh pr` / `gh auth` / `gh repo deploy-key` など) は、直後が
+  `--help` の形 (`gh pr --help`) だけ。次は従来どおり検証する:
   - option の値の位置の `--help` (`gh pr create --title --help` / `gh auth switch -h --help` /
     `gh auth switch --user --help`。値になってコマンドが走る)。どの option が値を取るかは表を持たない
     ので、bool の flag の直後 (`--draft --help`。実際はヘルプ) も同じ扱い
   - `-h` (gh の `auth` 配下などで `--hostname` の短い形。`gh auth switch -h ghe.example.com` は切替のまま)
   - `--help` の後ろに語がある形 (`--help --help=false` は後勝ちでヘルプを取り消す)
-  - alias と extension (`--help` をそのまま中身に渡す)、組み込みの `copilot` / `extension`
-    (引数を別のプログラムに渡す) と `(preview)` と表示されるコマンド
+  - alias と extension (`--help` をそのまま中身に渡す)。alias はトップレベルのほか、グループの下にも
+    置ける (`gh issue mine`。`gh alias set --help` の例) ので、グループの直後の語が組み込みの子でない形
+    (`gh pr ship --help` / `gh pr -R o/r ship --help`) も検証する
+  - 組み込みの `copilot` / `extension` (引数を別のプログラムに渡す) と `(preview)` と表示されるコマンド、
+    組み込みの別名 (`gh issue ls` など)
 - 対応は gh だけ。aws / gcloud / kubectl / firebase のサブコマンドの後ろの `--help` は従来どおり
   検証する (`<cli> help <サブコマンド>` の形は従来どおり読み取り)
 - 形の決め方は gh 2.105 の実測 (認証の無い一時 HOME): 組み込みのサブコマンド (`copilot` /
   `extension` を除く) 232 個で
-  `<path> --help` / `<path> x --help` / `<path> x y --help` の 696 形がヘルプを出すこと、値の位置の
+  `<path> --help` / `<path> x --help` / `<path> x y --help` の 696 形がヘルプを出すこと (alias を
+  定義していないとき)、値の位置の
   `--help` (`--title --help` / `-dt --help` / `--body-file --help` / `-h --help`) と
-  `--help --help=false` と alias の `--help` がコマンドを実行すること。比較の入力 15,589 件のうち、
-  判定が変わったのはヘルプの形を含む入力だけで、読み取りにした 3,549 形はどれも bash 3.2 と
-  zsh で gh がヘルプを出すか引数のエラーで終わり、コマンドを実行しなかった
+  `--help --help=false` と alias の `--help` (トップレベルとグループの下の両方) がコマンドを実行する
+  こと、末端のコマンドの下と組み込みと同じ名前の alias は `gh alias set` が拒否し、設定ファイルに
+  直接書いても組み込みが勝つこと。比較の入力 17,491 件のうち、判定が変わったのはヘルプの形を含む
+  入力だけで、読み取りにした 4,386 形はどれも bash 3.2 と zsh で gh がヘルプを出して終わり、
+  コマンドを実行しなかった
 - 自動切替: 照合しなくなった `--help` の形は切替の対象にもならない。`gh auth switch --help && gh pr create`
   のように切替のヘルプと書込をつないだ行は、書込の不一致で自動切替するようになる (0.29.11 は連結の
   deny で止まり、切り替えなかった)
