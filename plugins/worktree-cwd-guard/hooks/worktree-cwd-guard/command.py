@@ -303,6 +303,15 @@ def _drive_readings() -> tuple[bool, ...]:
     return (False, True) if os.name == "nt" else (False,)
 
 
+def drive_spellings(path: str) -> tuple[str, ...]:
+    """path の綴りを、読み (`_drive_readings`) ごとに並べる (同じ綴りは 1 つにまとめる)。
+
+    Bash の行き先と同じ読みの和を、Write / Edit のパスと `WORKTREE_CWD_GUARD_ALLOW` にも当てるための入り口 (__main__)。
+    Windows では `/c/x` に `c:/x` を足す。POSIX と、ドライブの綴りでない語はそのまま 1 つ。
+    """
+    return tuple(dict.fromkeys(_msys_drive(path) if msys else path for msys in _drive_readings()))
+
+
 def _resolve(base: str | None, path: str, msys: bool = False) -> str | None:
     """base から見た path の正規化済み絶対パス。解決できなければ None。msys は Git Bash の読み (`_drive_readings`)。"""
     if _dynamic(path):

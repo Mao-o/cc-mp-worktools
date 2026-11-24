@@ -546,6 +546,89 @@ class NtpathEmulationTest(unittest.TestCase):
         self.assertTrue(self._blocked("cd /c/proj && git add .", fam=fam))
         self.assertFalse(self._blocked("git -C /c/proj reset --hard"))
 
+    # --- Write / Edit のパスと許可リスト (evaluate を通す) ---------------------
+
+    def _evaluate(self, data: dict, fam: family.Family | None = None, allow: str | None = None) -> dict | None:
+        # detect は git を起動するので、固定の family を返す。外側の env の MODE / ALLOW は外す
+        with (
+            mock.patch.dict(os.environ),
+            mock.patch.object(_ENTRY, "detect", lambda cwd: fam or self.fam),
+            mock.patch.object(ntpath, "isdir", lambda p: False),
+            mock.patch.object(os, "pathsep", ";"),
+        ):
+            os.environ.pop("WORKTREE_CWD_GUARD_MODE", None)
+            os.environ.pop("WORKTREE_CWD_GUARD_ALLOW", None)
+            if allow is not None:
+                os.environ["WORKTREE_CWD_GUARD_ALLOW"] = allow
+            return evaluate(data)
+
+    def _file(self, tool: str, path: str) -> dict:
+        key = "notebook_path" if tool == "NotebookEdit" else "file_path"
+        return {"tool_name": tool, "tool_input": {key: path, "content": "x"}, "cwd": self.A}
+
+    def test_git_bash_drive_path_in_file_tools(self):
+        # Claude Code は file_path を hook の前に `C:\...` の形に展開して渡す (公式 docs)。`/c/...` の綴りのまま届いたときも、
+        # Bash の行き先と同じく Git Bash の読み (`C:\x`) でも判定する
+        for tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+            for path in (
+                "/c/Users/other/repo/x.py",
+                "/C/Users/other/repo/x.py",
+                "/c/Users/other/wt-b/x.py",
+                "/c/Users/other/repo/.claude/worktrees/a/../../../x.py",
+                "C:\\Users\\other\\repo\\x.py",  # docs の形 (これまでも止めていた)
+            ):
+                with self.subTest(tool=tool, path=path):
+                    self.assertEqual(decision(self._evaluate(self._file(tool, path))), "deny")
+            for path in (
+                "/c/Users/other/repo/.claude/worktrees/a/x.py",  # 自分の worktree
+                "C:\\Users\\other\\repo\\.claude\\worktrees\\a\\x.py",
+                "/cc/Users/other/repo/x.py",  # ドライブの綴りではない
+                "/d/Users/other/repo/x.py",  # 別のドライブ (D:) は C: の checkout を指さない
+                "/c/Users/other/scratch.txt",  # repo の外
+            ):
+                with self.subTest(tool=tool, path=path):
+                    self.assertIsNone(self._evaluate(self._file(tool, path)))
+
+    def test_windows_reading_of_a_drive_path_in_file_tools_is_kept(self):
+        # `/c/proj/x.py` の Windows の読み (今のドライブの `\c\proj\x.py`) も残す (Bash の行き先と同じ和)
+        fam = self._family("C:\\c\\proj")
+        self.assertEqual(decision(self._evaluate(self._file("Write", "/c/proj/x.py"), fam)), "deny")
+        self.assertIsNone(self._evaluate(self._file("Write", "/c/proj/x.py")))
+
+    def test_file_tool_deny_names_the_file_once(self):
+        # 2 つの読みが同じ綴りになる形 (docs の `C:\...`) で、同じ理由を 2 回並べない
+        out = self._evaluate(self._file("Write", "C:\\Users\\other\\repo\\x.py"))
+        self.assertEqual(decision(out), "deny")
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertEqual(reason.count("配下のファイル"), 1, reason)
+
+    def test_allow_list_in_git_bash_spelling(self):
+        # deny の行き先と同じ綴り (`/c/...`。Git Bash の pwd もこの形を返す) で書いた root を許す
+        main_cmd, b_cmd = "git -C /c/Users/other/repo reset --hard", "git -C /c/Users/other/wt-b reset --hard"
+        for allow in (
+            "/c/Users/other/repo",
+            "/C/Users/other/repo/",
+            "C:\\Users\\other\\repo",
+            "C:/Users/other/repo",
+            "/c/x;/c/Users/other/repo",
+        ):
+            with self.subTest(allow=allow):
+                self.assertIsNone(self._evaluate(bash(main_cmd, self.A), allow=allow))
+                self.assertIsNone(self._evaluate(self._file("Write", "C:\\Users\\other\\repo\\x.py"), allow=allow))
+                self.assertIsNone(self._evaluate(self._file("Edit", "/c/Users/other/repo/x.py"), allow=allow))
+                self.assertEqual(decision(self._evaluate(bash(b_cmd, self.A), allow=allow)), "deny")
+                self.assertEqual(decision(self._evaluate(self._file("Write", "C:\\Users\\other\\wt-b\\x.py"), allow=allow)), "deny")
+        for allow in ("/cc/Users/other/repo", "/d/Users/other/repo", "/c/Users/other", "/c/Users/other/repo/.claude"):
+            with self.subTest(allow=allow):
+                self.assertEqual(decision(self._evaluate(bash(main_cmd, self.A), allow=allow)), "deny")
+                self.assertEqual(decision(self._evaluate(self._file("Write", "C:\\Users\\other\\repo\\x.py"), allow=allow)), "deny")
+
+    def test_windows_reading_of_a_drive_path_in_allow_list_is_kept(self):
+        # 許可リストの `/c/proj` の Windows の読み (`C:\c\proj`) も残す。和にしたので、これまで許していた root は許したまま
+        fam = self._family("C:\\c\\proj")
+        self.assertIsNone(self._evaluate(self._file("Write", "C:\\c\\proj\\x.py"), fam, allow="/c/proj"))
+        self.assertIsNone(self._evaluate(bash("git -C /c/proj reset --hard", self.A), fam, allow="/c/proj"))
+
 
 @unittest.skipIf(os.name == "nt", "POSIX のパスの読み")
 class PosixDrivePathTest(unittest.TestCase):
@@ -559,6 +642,23 @@ class PosixDrivePathTest(unittest.TestCase):
         for cmd in (f"git -C {main} reset --hard", f"cd {main}; git reset --hard", f"git worktree remove --force {main}"):
             with self.subTest(cmd=cmd):
                 self.assertTrue(any(f.blocked for f in command.analyze(cmd, a, fam)))
+
+    def test_file_tools_and_allow_list_read_drive_like_path_as_is(self):
+        # Write / Edit のパスと許可リストも、POSIX では `/c/x` をそのまま読む。Git Bash の読み (`c:/x`) を足すと
+        # 今の場所の下の相対パスになり、そこを指してしまう
+        n = family.norm
+        main = "/c/Users/other/repo"
+        a = main + "/.claude/worktrees/a"
+        fam = family.Family(home=n(a), roots=(n(main), n(a)), common_dir=n(main + "/.git"))
+        self.assertEqual(command.drive_spellings(main), (main,))
+        self.assertEqual(_ENTRY._file_findings("/c/x.py", main, fam), [])
+        with mock.patch.dict(os.environ), mock.patch.object(_ENTRY, "detect", lambda cwd: fam):
+            os.environ.pop("WORKTREE_CWD_GUARD_MODE", None)
+            os.environ.pop("WORKTREE_CWD_GUARD_ALLOW", None)
+            self.assertEqual(decision(evaluate(write(main + "/x.py", a))), "deny")
+            os.environ["WORKTREE_CWD_GUARD_ALLOW"] = main
+            self.assertEqual(_ENTRY._allowed_roots(), {n(main)})
+            self.assertIsNone(evaluate(write(main + "/x.py", a)))
 
 
 class EntryTest(HermeticGitTestCase):

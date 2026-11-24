@@ -55,8 +55,14 @@
     注意だけにし、`git -C $Y --work-tree=<dir> ...` は注意も出しません
   - Windows の Git Bash の綴りのうち `/c/x` / `/c` 以外の形。区切りに `\` を混ぜた `/c\x`、`/cygdrive/c/x`、
     ドライブの root より上に出る `..` (`/c/../c/x`)、Git Bash の root の下のパス (`/tmp` / `/usr` など) は
-    Git Bash の読みにせず、Windows の読みだけで判定します。`MSYS_NO_PATHCONV=1` などで変換を止めた git の `/c/x` も
+    Git Bash の読みにせず、Windows の読みだけで判定します (Bash の行き先、Write / Edit のパス、
+    `WORKTREE_CWD_GUARD_ALLOW` のどれも同じです)。`MSYS_NO_PATHCONV=1` などで変換を止めた git の `/c/x` も
     Git Bash の読みで判定するので、止めすぎることがあります
+- Write / Edit のパスは、Claude Code が hook に渡した値で判定します。Claude Code は hook の前にパスを絶対パスへ展開し、
+  Windows では `\` 区切りの `C:\...` の形で渡します (公式 docs)。書き込む先と hook に渡す値は同じものとして扱い、
+  Claude Code が `/c/x` を `C:\x` と今のドライブの `\c\x` のどちらに展開するかは確かめていません (Windows の実機で
+  測っていません)。`/c/...` の綴りのまま届いたときは、Bash の行き先と同じく Git Bash の読みと Windows の読みの
+  両方で判定し、どちらかで別の checkout なら止めます
 - `&&` / `||` の分岐ごとに行き先やディレクトリスタックが割れる形を何度も続け、追っている状態 (作業ディレクトリ・スタック・
   直前の成否の組) が 64 を超えると、そこから先の行き先を決めず、後ろの git は注意だけにします (`x || cd d1; x || cd d2; ...` を
   7 回以上続けた形など。状態は分岐のたびに倍になり、hook が時間切れになるとコマンドはそのまま走るためです)。zsh で `&` の
@@ -95,7 +101,7 @@ main checkout や repo の外で動く session では何もしません。
 |---|---|
 | Bash | 別の checkout を対象にした git の書き込み操作。対象は `cd` / `chdir` / `pushd` / `popd`、`git -C <dir>` / `--work-tree` / `--git-dir`、環境変数 `GIT_DIR` / `GIT_WORK_TREE` (コマンド前の代入・`env`・`export`。`env -i` / `env -u` による削除も反映) から決める。`--git-dir` / `GIT_DIR` には各 checkout の `<root>/.git` と `.git/worktrees/<name>` のどちらの形も読む。`--git-dir` / `GIT_DIR` だけが効いて作業ツリーの指定が無いときは、作業ツリーは今の場所になるので、git dir の checkout と今の場所の両方を見る (`GIT_DIR=<自分の worktree>/.git git -C <main> reset --hard` は main の作業ツリーを上書きする)。`git add` / `git commit` のように作業ツリーを書かない操作も同じに読む。`&&` / `||` は直前のコマンドの成否ごとに状態を分けて追う (`cd` は成功するものとして扱う。ただし `cd` / `pushd` / `popd` などの直後の `||` の右辺は、移動が失敗してその場に残った場合も判定する。右辺の後ろの git は移動が成功したものとして読む)。`&` は、bash では AND-OR list 全体を、zsh では最後の pipeline だけをサブシェルで動かすものとして扱う (`cd <main> && true & git ...` の `cd` は zsh では今の shell に残る)。pipeline の途中の要素や background で動く `cd` は外に残らないものとして扱う。shell で動きが割れる形は、コマンド全体を zsh の読みと bash の読みの両方で判定し、どちらかで別 checkout への書き込みになれば止める (pipeline の最後の要素の `cd` は zsh だけ残る。`&` の手前の `cd <dir> &&` も zsh だけ残る。`command cd` は bash だけ移動する。`chdir` / `cd -q` / `pushd -q` は zsh だけ移動する。`pushd -n` はどちらも移動しない)。`env` / `nohup` / `sudo` / `exec` の後ろの `cd` は子プロセスで走るので移動として読まない。`! <コマンド>` は成否を読まず、続く `&&` / `||` の後ろはどちらも実行しうるとして読む。書き込み操作 = `checkout` `switch` `commit` `reset` `restore` `stash` (`stash list` / `show` / `create` を除く) `add` `rm` `mv` `merge` `rebase` `cherry-pick` `revert` `pull` `am` `apply` (`--check` / `--stat` / `--numstat` / `--summary` だけで `--apply` を伴わないものを除く) `bisect` `clean` `checkout-index` `update-index`、`branch -m` / `-M` (checkout 中の branch の改名)、`submodule update` / `add` / `deinit` など、`sparse-checkout set` / `add` / `init` など。here-document の本文 (`cat > x.sh <<'EOF'` の中身) は実行されないので読まない。行末の comment (`# ...`) は改行の手前までを読み捨て、`\` + 改行で折り返した行は 1 行につないで読む (どちらも bash / zsh と同じ読み)。`env -C <dir>` のように wrapper が作業ディレクトリを変える形と、`&&` / `||` の後ろで実行されないかもしれない `cd` (移動した場合としない場合の両方を判定する) も追う。`builtin cd <dir>` は `cd` と同じに読む (`env builtin cd` のように外部プロセスで動く形は移動が残らないので読まない。`builtin pushd` / `builtin popd` と、行き先が決まらない `builtin cd` も読まない)。Windows では、行き先の `/c/...` を Git Bash の読み (`/c/x` は `C:\x`、`/c` は `C:\`。Git Bash の pwd もこの形を返す) と Windows の読み (今のドライブの `\c\x`) の両方で判定し、どちらかで別 checkout なら止める |
 | Bash | `git worktree remove` / `move` で別の worktree を対象にしたもの。相対パスは、git dir・作業ツリー・今の場所のどの基点でも別の worktree なら止める。git はパスとして読む前に worktree の名前 (パスの末尾。`b` / `worktrees/b` / `.claude/worktrees/b`) としても読むので、名前に一致する worktree (自分の worktree と main checkout を含む) がちょうど 1 つで、それが別の worktree のときも止める (2 つ以上に一致すると、git と同じくパスとして読む。git が読む repo がこの repo のときだけ。大文字小文字を区別する比べ方と区別しない比べ方のどちらかで決まれば止める)。上の読みで別の worktree に決まらず、git が読む repo か今の場所が決まらないとき (行き先の決まらない `cd "$X"` / `git -C "$X"` / `--work-tree="$X"` の後ろや、「目的と限界」に書いた状態の上限を超えた後) は止めず、名前が別の worktree に一致するか、名前で決まらない相対パス (`../wt-b` や、symlink を通る `wt/<name>` など。基点が決まらないので、綴りに関係なくどの worktree にも届きうる) なら注意だけ出す。対象の語が変数 (`"$X"` / `"../$X"`) のときは、どの worktree の名前にもパスにもなりうるので、git が読む repo がこの repo のときと repo が決まらないときは、今の場所が決まっていても注意だけ出す (他の repo の中と repo の外では何も出さない) |
-| Write / Edit / MultiEdit / NotebookEdit | 別の checkout 配下のファイルへの書き込み |
+| Write / Edit / MultiEdit / NotebookEdit | 別の checkout 配下のファイルへの書き込み。Windows では、`/c/...` の綴りのまま届いたパスを Bash の行き先と同じく Git Bash の読み (`C:\...`) と Windows の読み (今のドライブの `\c\...`) の両方で判定し、どちらかで別 checkout なら止める (公式 docs では、Claude Code は hook の前に `C:\...` の形へ展開して渡す) |
 
 止めないもの:
 
@@ -109,7 +115,7 @@ main checkout や repo の外で動く session では何もしません。
 | 環境変数 | 既定 | 内容 |
 |---|---|---|
 | `WORKTREE_CWD_GUARD_MODE` | `enforce` | `warn` = 止めずに伝える / `off` = 何もしない |
-| `WORKTREE_CWD_GUARD_ALLOW` | (空) | 書き込みを許す checkout の root。複数は OS のパス区切り (`:` / Windows は `;`) で並べる |
+| `WORKTREE_CWD_GUARD_ALLOW` | (空) | 書き込みを許す checkout の root。複数は OS のパス区切り (`:` / Windows は `;`) で並べる。Windows では Git Bash の綴り (`/c/Users/...`。Git Bash の pwd もこの形を返す) も、Git Bash の読みと Windows の読みの両方で読む |
 
 supervisor 役の session が worktree の中から意図して main 側を操作する場合は、
 `WORKTREE_CWD_GUARD_ALLOW` に main checkout の root を入れてください。
