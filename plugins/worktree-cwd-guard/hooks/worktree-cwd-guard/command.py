@@ -280,11 +280,34 @@ def _expand_home(path: str) -> str:
     return os.path.expanduser(path)
 
 
-def _resolve(base: str | None, path: str) -> str | None:
-    """base から見た path の正規化済み絶対パス。解決できなければ None。"""
+# Git Bash (MSYS) のドライブの綴り。`/c/x` と `/c` は、Git Bash では `C:\x` と `C:\` (pwd もこの形を返す)。
+# Windows の Python は今のドライブの `\c\x` と読む
+_MSYS_DRIVE = re.compile(r"/([A-Za-z])(?=/|$)")
+
+
+def _msys_drive(path: str) -> str:
+    """`/c/x` を `c:/x` に、`/c` を `c:/` に読み替える。ドライブの綴りでない語はそのまま返す。"""
+    m = _MSYS_DRIVE.match(path)
+    return f"{m.group(1)}:/{path[3:]}" if m else path
+
+
+def _drive_readings() -> tuple[bool, ...]:
+    """`/c/x` の綴りの読み (False = その OS の読み、True = Git Bash の読み) のうち、判定に使うもの。
+
+    Windows の Bash tool は Git Bash で動き、`cd /c/x` も `git -C /c/x` も `C:\\x` に届く。Windows の読みも残して和で判定する
+    (`MSYS_NO_PATHCONV=1` などで変換を止めると、git は `\\c\\x` を読む。和にすれば、これまで止めていた形は止まったまま)。
+    POSIX の `/c/x` はそのままのパスなので、Git Bash の読みはしない。
+    """
+    return (False, True) if os.name == "nt" else (False,)
+
+
+def _resolve(base: str | None, path: str, msys: bool = False) -> str | None:
+    """base から見た path の正規化済み絶対パス。解決できなければ None。msys は Git Bash の読み (`_drive_readings`)。"""
     if _dynamic(path):
         return None
     path = _expand_home(path)
+    if msys:
+        path = _msys_drive(path)
     if os.path.isabs(path):
         return norm(path)
     if base is None:
@@ -293,7 +316,7 @@ def _resolve(base: str | None, path: str) -> str | None:
 
 
 def _git_targets(
-    args: list[str], cwd: str | None, fam: Family, env: dict[str, str] | None = None
+    args: list[str], cwd: str | None, fam: Family, env: dict[str, str] | None = None, msys: bool = False
 ) -> tuple[list[str], str | None, list[str], bool]:
     """git の global option を読み、(書き換わる場所のパス一覧, 解決できない理由, 残りの引数, git が読む repo がこの repo か) を返す。
 
@@ -323,7 +346,7 @@ def _git_targets(
         if name == "-C":
             if _dynamic(value):
                 return [], f"git -C {value}", args[i:], False
-            here = _resolve(here, value)
+            here = _resolve(here, value, msys)
         elif name == "--work-tree":
             work_tree = value
         elif name == "--git-dir":
@@ -333,7 +356,7 @@ def _git_targets(
     targets: list[str] = []
     unresolved = None
     if git_dir is not None:
-        resolved = _resolve(here, git_dir)
+        resolved = _resolve(here, git_dir, msys)
         if resolved is None:
             return [], f"--git-dir {git_dir}", rest, False
         mapped = dict(fam.gitdirs).get(resolved)
@@ -357,7 +380,7 @@ def _git_targets(
     else:
         return [], "cd の移動先", rest, False
     if work_tree is not None:
-        resolved = _resolve(here, work_tree)
+        resolved = _resolve(here, work_tree, msys)
         if resolved is None:
             return [], f"--work-tree {work_tree}", rest, in_repo  # 作業ツリーが決まらなくても repo は決まっている
         targets.append(resolved)
@@ -371,10 +394,10 @@ def _worktree_operand(rest: list[str]) -> str | None:
     return next((a for a in rest[2:] if not a.startswith("-")), None)
 
 
-def _worktree_targets(rest: list[str], here: str | None) -> list[str]:
+def _worktree_targets(rest: list[str], here: str | None, msys: bool = False) -> list[str]:
     """`git worktree remove|move <path>` の `<path>` を、here からのパスとして読んだ先。"""
     operand = _worktree_operand(rest)
-    resolved = _resolve(here, operand) if operand is not None else None
+    resolved = _resolve(here, operand, msys) if operand is not None else None
     return [resolved] if resolved else []
 
 
@@ -715,14 +738,16 @@ def _analyze_tokens(tokens: list[str], cwd: str, fam: Family) -> list[Finding]:
     bash は折り返した list を切らない読みと切る読みの両方を通す。切らない読みは、`&` で手前の list の開始時点の変数に戻すので、
     改行のあとの git が見る変数を取り違えることがある (`export GIT_DIR=<worktree>/.git; command export GIT_DIR=<main>/.git &&` と
     改行のあとの `true & git -C <main> reset --hard`)。
+    Windows では、パスの綴りの読み (`_drive_readings`) ごとにも通す。
     """
     findings: list[Finding] = []
     seen: set[str] = set()
-    for shell, fold in (("zsh", True), ("bash", True), ("bash", False)):
-        for f in _Analyzer(cwd, fam, shell, fold).run(tokens):
-            if f.message not in seen:
-                seen.add(f.message)
-                findings.append(f)
+    for msys in _drive_readings():
+        for shell, fold in (("zsh", True), ("bash", True), ("bash", False)):
+            for f in _Analyzer(cwd, fam, shell, fold, msys).run(tokens):
+                if f.message not in seen:
+                    seen.add(f.message)
+                    findings.append(f)
     return findings
 
 
@@ -785,9 +810,10 @@ class _Analyzer:
     右辺が終わると (`&&` / `;` / 改行 / `&`) 捨てるので、`alts` の読みは減らない。
     """
 
-    def __init__(self, cwd: str, fam: Family, shell: str, fold: bool = True):
+    def __init__(self, cwd: str, fam: Family, shell: str, fold: bool = True, msys: bool = False):
         self.shell = shell  # この読みの shell ("zsh" / "bash")
         self.fold = fold  # `&&` / `||` の直後の区切りで list を切らない読みか
+        self.msys = msys  # パスの `/c/x` を Git Bash の読み (`C:\x`) で解決するか
         self.fam = fam
         self.findings: list[Finding] = []
         self._seen: set[str] = set()
@@ -1022,7 +1048,7 @@ class _Analyzer:
                         env[k] = v
             heres = {h for h, _, _ in alts}
             if chdir is not None:
-                heres = {_resolve(h, chdir) for h in heres}
+                heres = {_resolve(h, chdir, self.msys) for h in heres}
             self._check_git(seg[1:], heres, env)
         return self._both(alts)
 
@@ -1037,7 +1063,7 @@ class _Analyzer:
                 return failed
             words = _before_redirect(args[2:] if args[1:2] == ["--"] else args[1:])
             if words and not words[0].startswith(("+", "-")):
-                return {(here, stack + (_resolve(here, words[0]),), "ok")}
+                return {(here, stack + (_resolve(here, words[0], self.msys),), "ok")}
             return {(here, stack + (None,), "ok")}  # 語なしと `+1` はスタックを回す。次の popd の行き先は分からない
         shells, words = _chdir_form(cmd, args, self.braces > 0)
         if self.shell not in shells:
@@ -1046,7 +1072,7 @@ class _Analyzer:
             # 語の無い pushd はスタックの先頭と入れ替える (`pushd >x` / `pushd -q` も同じ)
             return {(None, stack + (here,), "ok")}
         dest = _cd_target(words)
-        new = _resolve(here, dest) if dest is not None else None
+        new = _resolve(here, dest, self.msys) if dest is not None else None
         return {(new, stack + (here,) if cmd == "pushd" else stack, "ok")}
 
     def _popd(self, args: list[str], here: str | None, stack: tuple) -> set[_Alt]:
@@ -1071,7 +1097,7 @@ class _Analyzer:
         fam = self.fam
         note: Finding | None = None
         for here in sorted(heres, key=lambda h: h or ""):
-            targets, unresolved, rest, in_repo = _git_targets(args, here, fam, env)
+            targets, unresolved, rest, in_repo = _git_targets(args, here, fam, env, self.msys)
             if not rest:
                 return
             sub = rest[0]
@@ -1079,7 +1105,7 @@ class _Analyzer:
                 # 相対パスの基点は作業ツリーの指定や git dir で変わる。どの基点でも別の worktree なら止める
                 hits = []
                 for base in targets or [None]:
-                    for path in _worktree_targets(rest, base):
+                    for path in _worktree_targets(rest, base, self.msys):
                         o = owner(path, fam)
                         if o is not None and path == o:
                             hits.append(o)
