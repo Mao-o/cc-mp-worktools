@@ -59,7 +59,10 @@ class TestLeadingDotSemantics(unittest.TestCase):
     """
 
     def test_bare_star_does_not_match_dotfiles(self):
-        # `git add *` / `cp * dst/` / `tar czf out.tgz *` / heredoc 内の `kb * 1024`
+        # `git add *` / `cp * dst/` / `tar czf out.tgz *` / heredoc 内の `kb * 1024`。
+        # 0.21.x までは fnmatchcase(".env", "*") = True を「危険な glob を打つ
+        # 時点で日常から逸脱している」として deny で許容していたが、実シェルの
+        # ``*`` は dotfile に展開されず、これらが全 mode で止まっていた。
         self.assertFalse(_glob_operand_is_dotenv_match("*"))
 
     def test_question_and_star_prefix_do_not_match_leading_dot(self):
@@ -172,14 +175,6 @@ class TestNonDotenvGlobAskOrAllow(unittest.TestCase):
 class TestEmptyAndEdgeCases(unittest.TestCase):
     def test_empty_returns_false(self):
         self.assertFalse(_glob_operand_is_dotenv_match(""))
-
-    def test_pure_star_returns_false(self):
-        # 0.21.x までは fnmatchcase(".env", "*") = True を「危険な glob を打つ
-        # 時点で日常から逸脱している」として deny で許容していたが、実シェルの
-        # ``*`` は dotfile に展開されず、`git add *` / `cp * dst/` /
-        # `tar czf out.tgz *` / heredoc 本文の `kb * 1024` が全 mode で止まって
-        # いた (``TestLeadingDotSemantics``)。
-        self.assertFalse(_glob_operand_is_dotenv_match("*"))
 
     def test_no_glob_chars_still_works(self):
         # glob 文字なし。fnmatchcase は exact match と同等になる

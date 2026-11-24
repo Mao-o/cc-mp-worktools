@@ -205,7 +205,7 @@ HERMETIC_GIT_ENV = {
 }
 
 # 外側の env にあると、テストの git が別の repo や別の config、別の template を見てしまう変数。git の hook や
-# `git -c` の配下から suite を流すと入る。外さないと、repo を作る helper の `init` / `config` / `commit` が外側の
+# `git -c` の配下から suite を流すと入る。外さないと、repo を作る helper の `init` / `commit` が外側の
 # repo に書き込む (`GIT_DIR` など)。`GIT_CONFIG_PARAMETERS` は `GIT_CONFIG_COUNT` に勝ち、旧来の
 # `GIT_CONFIG` があると `git config` の読み書き先がその file になる。`GIT_TEMPLATE_DIR` は helper の `git init`
 # が写す template を差し替える: template の `hooks/pre-commit` が helper の commit で走り、`info/exclude` が
@@ -242,7 +242,7 @@ def git(args: list[str], cwd, *, check: bool = True) -> subprocess.CompletedProc
 
     テストクラス側の env patch (`HermeticGitTestCase`) に頼ると、patch していないクラスが repo を
     作った時点で自動 maintenance が復活する (patch 済みなら同じ値の上書き)。外側の env に `GIT_DIR` などが
-    あるときも、patch していないクラスの `init` / `config` / `commit` が外側の repo に書き込む。repo を作る /
+    あるときも、patch していないクラスの `init` / `commit` が外側の repo に書き込む。repo を作る /
     commit する git は `subprocess.run` を直接書かず、必ずこれを通すこと (直接の起動は
     `test_hermetic_env.py` が検出する)。出力は bytes。`check=False` は、設定の問い合わせのように
     非ゼロ終了を assertion で見たいとき用。
@@ -250,12 +250,20 @@ def git(args: list[str], cwd, *, check: bool = True) -> subprocess.CompletedProc
     return subprocess.run(["git", *args], cwd=cwd, env=hermetic_env(), check=check, capture_output=True)
 
 
+# `init_repo` が repo の config に足す設定。`git config` で 1 件ずつ書くと git の起動が 3 回増える
+# (repo を作るテストの固定費の大半)。書かれる内容は `git config user.name test` などと同じ。
+_REPO_CONFIG = b"[user]\n\tname = test\n\temail = test@example.com\n[commit]\n\tgpgsign = false\n"
+
+
 def init_repo(cwd) -> None:
-    """commit できる状態の空の repo を作る (`git init` と user / gpgsign の設定)。"""
+    """commit できる状態の空の repo を作る (`git init` と user / gpgsign の設定)。
+
+    設定は `git config` を起動せず、`git init` が作った `.git/config` に追記する。改行は LF で書く
+    (Windows でも text mode の CRLF 変換を通さない)。
+    """
     git(["init", "--initial-branch=main"], cwd)
-    git(["config", "user.name", "test"], cwd)
-    git(["config", "user.email", "test@example.com"], cwd)
-    git(["config", "commit.gpgsign", "false"], cwd)
+    with open(os.path.join(cwd, ".git", "config"), "ab") as f:
+        f.write(_REPO_CONFIG)
 
 
 class HermeticGitTestCase(unittest.TestCase):
