@@ -412,6 +412,9 @@ UNLISTED = (
     f"case a in a) cd a;; esac; {_GH}",
     f"f() {{ cd a; }}; git push && cd b; {_GH}",
     f"CDPATH=/tmp; git push && cd a; {_GH}",
+    f"CDPATH+=/tmp; git push && cd a; {_GH}",
+    f"cdpath+=(/tmp); git push && cd a; {_GH}",
+    f"HOME+=/x; git push && cd ~; {_GH}",
     # 展開・glob・オプション・スタック・OLDPWD・`~user`
     f'git push && cd "$WT"; {_GH}',
     f"git push && cd a*; {_GH}",
@@ -844,6 +847,67 @@ class RealShellTest(unittest.TestCase):
                         with self.subTest(cmd=cmd, start=start.name, shell=shell[0], rc=rc):
                             self.assertLessEqual({os.path.realpath(p) for p in self.ran(shell, cmd, start, rc)}, listed)
         self.assertGreater(checked, 30)
+
+    def test_a_place_made_by_an_earlier_command_is_not_missed(self):
+        # hook の時点で無い行き先も、同じコマンドの前のほう (mkdir / git clone / git worktree add) が作ると shell はそこに入る。
+        # 候補を挙げるなら実際に gh が走った dir を含まなければならない (hook の時点で無い行き先を外すと、ここで漏れる)
+        git = shutil.which("git")
+        if git is None:
+            self.skipTest("git が無い")
+        entry = _load_entry()
+        world = self.top / "w" / "made"  # hook の cwd (repo の外)
+        world.mkdir()
+        src = _testutil.make_marketplace(self.top / "w" / "src", ["alpha"])
+        wt = self.top / "w" / "wt"
+        ghonly = self.top / "ghonly"  # 偽の gh だけを置き、git は本物を使う
+        ghonly.mkdir()
+        (ghonly / "gh").write_text('#!/bin/sh\necho "$PWD" >> "$GHLOG"\n')
+        (ghonly / "gh").chmod(0o755)
+        log = self.top / "gh-made.log"
+        env = {
+            **_testutil.HERMETIC_GIT_ENV, "PATH": f"{ghonly}:{os.path.dirname(git)}:/usr/bin:/bin", "GHLOG": str(log),
+            "HOME": str(self.top), "GIT_CEILING_DIRECTORIES": str(self.top),
+        }
+
+        def clean():
+            for d in (world / "made", world / "mp", src / "newsub", wt):
+                shutil.rmtree(d, ignore_errors=True)
+            subprocess.run([git, "-C", str(src), "worktree", "prune"], env=env, capture_output=True, check=False)
+            subprocess.run([git, "-C", str(src), "branch", "-D", "feat"], env=env, capture_output=True, check=False)
+            log.unlink(missing_ok=True)
+
+        for cmd, place in (
+            (f"mkdir -p made && cd made; {_GH}", world / "made"),
+            (f"mkdir -p made; true && cd made; {_GH}", world / "made"),
+            (f"git clone -q {src} mp && cd mp; {_GH}", world / "mp"),
+            (f"git clone -q {src} mp && cd mp || exit 1; {_GH}", world / "mp"),
+            (f"if [ -d mp ]; then cd mp; else git clone -q {src} mp && cd mp; fi; {_GH}", world / "mp"),
+            (f"mkdir -p {src}/newsub && cd {src}/newsub; {_GH}", src / "newsub"),
+            (f"git -C {src} worktree add -q {wt} -b feat && cd {wt}; {_GH}", wt),
+        ):
+            found, reason = _reading(cmd)
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(reason)
+                self.assertEqual(len(found), 1)
+                self.assertIsNotNone(found[0].cd_unresolved)
+                self.assertIsNotNone(found[0].cd_history)
+                clean()  # hook の時点: 行き先はまだ無い
+                with mock.patch.dict(os.environ, {"HOME": str(self.top)}):
+                    dirs = entry._possible_dirs(world, found[0].cd_history)
+                listed = None if dirs is None else {os.path.realpath(d) for d in dirs}
+            for shell in self.shells:
+                with self.subTest(cmd=cmd, shell=shell[0]):
+                    clean()
+                    subprocess.run(
+                        [*shell, "-c", cmd], cwd=world, env=env, stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
+                    )
+                    ran = log.read_text().split("\n")[:-1] if log.exists() else []
+                    # 前のコマンドが dir を作り、shell はそこで gh を走らせた (この世界が意図どおりであること)
+                    self.assertEqual([os.path.realpath(p) for p in ran], [os.path.realpath(place)])
+                    if listed is not None:
+                        self.assertIn(os.path.realpath(place), listed)
+        clean()
 
     def test_no_effect_runs_in_the_original_cwd(self):
         for cmd in NO_EFFECT:

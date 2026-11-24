@@ -1543,7 +1543,7 @@ def _command_words(segments: list[_Segment]) -> set[str]:
 
 
 def _defines_function_or_cd_context(tokens: list[str], segments: list[_Segment]) -> bool:
-    """関数定義 (`f() {` / `function f`) か、cd の行き先を変える代入 (CDPATH= / cdpath= / HOME=) があるか。
+    """関数定義 (`f() {` / `function f`) か、cd の行き先を変える代入 (CDPATH= / cdpath= / HOME= と、その += ) があるか。
 
     `grep function x` / `rg case x` の語は引数なので数えない。
     """
@@ -1558,7 +1558,8 @@ def _defines_function_or_cd_context(tokens: list[str], segments: list[_Segment])
     # `(case a in a) ...` の分岐の `)` は括弧の深さの読みをずらす
     if "case" in words and any("(" in tok for tok in tokens):
         return True
-    return any(tok.split("=", 1)[0] in ("CDPATH", "cdpath", "HOME") and "=" in tok for tok in tokens)
+    # `CDPATH+=x` / `cdpath+=(x)` の追記も行き先を変える
+    return any(tok.split("=", 1)[0].rstrip("+") in ("CDPATH", "cdpath", "HOME") and "=" in tok for tok in tokens)
 
 
 # 語として現れた pushd / popd (`if pushd` / `command pushd` / `Y=1 pushd` / `'pushd'` / `! pushd`。backtick の直後は _DIR_CHANGERS が見る)

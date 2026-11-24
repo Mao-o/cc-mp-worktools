@@ -190,8 +190,8 @@ def _load_config(root: Path, dl: Deadline) -> tuple[config.Config, str | None]:
     return cfg, note
 
 
-# Windows の Git Bash のドライブの綴り (`/c/Users/...` = `C:\Users\...`)
-_MSYS_DRIVE = re.compile(r"^/([A-Za-z])(?=/|$)")
+# Windows の Git Bash のドライブの綴り (`/c/Users/...` = `C:\Users\...`)。`$` は末尾の改行の手前でも当たるので `\Z` で終わりを見る
+_MSYS_DRIVE = re.compile(r"^/([A-Za-z])(?=/|\Z)")
 
 
 def _native(path: str) -> str:
@@ -215,24 +215,13 @@ _MAX_POSSIBLE_DIRS = 16
 def _searches_cdpath(step: str) -> bool:
     """shell が CDPATH の下で探す引数か (`/` か `~` で始まらず、最初の成分が `.` / `..` でない相対の名前。`a` / `a/b` / `.x`)。
 
-    bash も zsh も、CDPATH があると相対の名前を cwd より先に CDPATH の下で探すので、行き先の有無にかかわらず読み替わりうる。
+    bash は CDPATH があると相対の名前を cwd より先に CDPATH の下で探し (行き先が cwd の下にあっても読み替わる)、zsh は cwd に
+    無ければ CDPATH の下で探す。どちらも cwd の下だけでは決まらない。
     """
     native = _native(step)
     if native.startswith(("/", "~")) or native.split("/", 1)[0] in (".", ".."):
         return False
     return not (os.path.sep == "\\" and (native.startswith("\\") or re.match(r"[A-Za-z]:", native)))
-
-
-def _fails_if_missing(step: str) -> bool:
-    """行き先が無いとき、shell の cd が確かに失敗する (cwd が変わらない) か。
-
-    `..` を含む引数は、論理パスの行き先が無いと bash が書かれたままの物理パスで入り直すので、失敗するとは限らない。
-    Windows の `/tmp` のようなドライブの無い絶対パスは Git Bash が別の場所に読み替えるので、失敗するとは限らない。
-    """
-    native = _native(step)  # `/c/...` は `C:/...` になり、ここでのドライブの無い絶対パスに当たらない
-    if ".." in re.split(r"[\\/]", native):
-        return False
-    return not (os.path.sep == "\\" and native.startswith(("/", "\\")))
 
 
 def _possible_dirs(start: Path, history: tuple[str, ...]) -> list[Path] | None:
@@ -241,18 +230,23 @@ def _possible_dirs(start: Path, history: tuple[str, ...]) -> list[Path] | None:
     ループと関数の外では、cd は出てきた順に高々 1 回走り、走らないか失敗すれば cwd は変わらない。なので hook の cwd に
     cd の引数の部分列を順に当てた先がすべての候補になる (括弧の中やパイプの左の cd も足すので、候補は多めになる)。
     hook の環境に CDPATH があると、相対の名前は CDPATH の下の dir にも入りうるので挙げない。
+    行き先が hook の時点で無い組み合わせが 1 つでもあれば挙げない。同じコマンドの前のほう (`git clone URL d && cd d` /
+    `mkdir -p d`) で作られて shell が入りうるので、確かな cd の「移動先が存在しない」と同じく止める。
+    Windows のドライブの無い絶対パス (`/tmp`) も挙げない。Git Bash は別の場所 (`/tmp` は Windows の一時 dir) に
+    読み替えるが、Python は hook の cwd のドライブの下と読む。
     """
     if os.environ.get("CDPATH") and any(_searches_cdpath(s) for s in history):
         return None
     dirs = [start]
     for step in history:
+        if os.path.sep == "\\" and _native(step).startswith(("/", "\\")):
+            return None
         for base in list(dirs):
             target = _step(base, step)
-            if target.is_dir():
-                if target not in dirs:
-                    dirs.append(target)
-            elif not _fails_if_missing(step):
+            if not target.is_dir():
                 return None
+            if target not in dirs:
+                dirs.append(target)
         if len(dirs) > _MAX_POSSIBLE_DIRS:
             return None
     return dirs

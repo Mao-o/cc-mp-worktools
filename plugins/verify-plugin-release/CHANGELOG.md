@@ -15,11 +15,15 @@ cd が走ったかを決められないと repo を見る前に止めたので�
 - 挙げられない形は、これまでどおり止める: 引数なしの `cd`、変数・glob・波括弧・`~user` / `~+` / `~-` / `+1` / `=x` を含む引数、
   `cd -`、ループ・関数・`case` の中の cd、`chdir`、`cd A B`、語の並びで cd と読まなかった cd の語 (引用や `trap` の本文の中)、
   `eval` / `source` / `.` か展開で決まるコマンド語がある形、括弧が閉じない形、挙げた cwd が 16 を超える形
-- hook の環境に `CDPATH` があるときは、相対の名前 (`cd A` / `cd A/B`) を含む形を挙げない (bash も zsh も、cwd より先に
-  CDPATH の下を探す)。`./A`・`../A`・`~`・絶対パスは CDPATH を引かないので挙げる
-- 行き先が無い cd は失敗して cwd が変わらないものとして扱う。ただし、shell が別の場所に入りうる形は止める: `..` を含む引数
-  (論理パスの行き先が無いと、bash は書かれたままの物理パスで入り直す)、Windows でドライブの無い絶対パス (`/tmp` は
-  Git Bash が別の場所に読み替える)
+- hook の環境に `CDPATH` があるときは、相対の名前 (`cd A` / `cd A/B`) を含む形を挙げない (bash は cwd より先に、zsh は
+  cwd に無ければ CDPATH の下を探す)。`./A`・`../A`・`~`・絶対パスは CDPATH を引かないので挙げる
+- hook の時点で行き先が無い組み合わせが 1 つでもある形は挙げない (止める)。同じコマンドの前のほうで作られうるため
+  (`git clone URL d && cd d; gh pr create` / `mkdir -p d && cd d; gh pr create` / `git worktree add` の先)。確かな cd の
+  「移動先が存在しない」と同じ扱いで、前の cd の先から当てた組み合わせ (`(cd A); cd A` の `A/A`) だけが無い形も止める
+- Windows でドライブの無い絶対パス (`/tmp`) の cd を含む形は、行き先が在っても挙げない (止める)。Git Bash は別の場所
+  (`/tmp` は Windows の一時 dir) に読み替えるが、Python は hook の cwd のドライブの下と読む
+- `CDPATH+=` / `cdpath+=(...)` / `HOME+=` の追記も、cd の行き先を変える代入と読む (`CDPATH=` と同じく、後ろの cd は
+  確かな cd でも止める)
 
 ### Fixed
 
@@ -31,9 +35,15 @@ cd が走ったかを決められないと repo を見る前に止めたので�
 ### Tests
 
 - 挙げた cwd に、bash と `zsh -f` で実際に gh が走った dir が必ず入ることを、前のコマンドの成否と dir の有無を変えて確かめる
-  テストを足した (止めていた形の表と、新しく数え上げる形の表の全件)
+  テストを足した (止めていた形の表と、新しく数え上げる形の表の全件)。前のコマンドが行き先を作る形 (本物の `mkdir` /
+  `git clone` / `git worktree add`) も流す
 - plugin repo でない repo と repo の外で、確かでない cd の後ろを止めない形・止める形 (行き先に plugin repo がある、挙げられない、
-  `CDPATH` / `..`、上限、repo の確認の失敗) のテストを足した
+  `CDPATH` / `..`、hook の時点で無い行き先、上限、repo の確認の失敗) のテストを足した
+
+### Docs
+
+- README の「目的と限界」に、plugin repo かどうかは hook の時点の作業ツリーで決めるので、hook の時点で在る空の dir に
+  前のコマンドが clone する形 (`git clone URL empty && cd empty && gh pr create`) は確かな cd でも検査しないことを書いた
 
 ## 0.3.10
 

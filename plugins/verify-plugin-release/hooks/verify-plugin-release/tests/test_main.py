@@ -548,6 +548,8 @@ class UnsureCdPlacesTest(HermeticGitTestCase):
 
     def test_no_place_is_a_plugin_repo(self):
         for world in (self.plain, self.out):
+            # `(cd sub); cd sub` の、前の cd の先から当てた組み合わせ (sub/sub) も在る (無いと止める)
+            (world / "sub" / "sub").mkdir()
             other = shell_path(self.out if world == self.plain else self.plain)
             for cmd in (
                 "git push && cd sub; gh pr create -t x",
@@ -559,14 +561,42 @@ class UnsureCdPlacesTest(HermeticGitTestCase):
                 "cd sub | cat; cd sub; gh pr create -t x",
                 f"false && cd {other}; gh pr create -t x",
                 f"cd sub || cd {other}/sub; gh pr create -t x",
-                # 行き先が無い cd は失敗して cwd が変わらない (CDPATH が無いとき)
-                "[ -d nope ] && cd nope; gh pr create -t x",
-                "[ -d nope ] && cd ./nope; gh pr create -t x",
-                f"git push && cd {other}/nope; gh pr create -t x",
                 "git push && cd sub && gh pr ready 3; cd ..; gh pr create -t x",
             ):
                 with self.subTest(world=world.name, cmd=cmd):
                     self.assertEqual(self.outcome(cmd, world), "none")
+
+    def test_a_place_missing_at_hook_time_stops(self):
+        # hook の時点で行き先が無い組み合わせが 1 つでもあれば止める。同じコマンドの前のほうで作られて (`git clone URL d` /
+        # `mkdir -p d`) shell が入りうるので、確かな cd の「移動先が存在しない」と同じ扱い
+        for world in (self.plain, self.out):
+            other = shell_path(self.out if world == self.plain else self.plain)
+            for cmd in (
+                "[ -d nope ] && cd nope; gh pr create -t x",
+                "[ -d nope ] && cd ./nope; gh pr create -t x",
+                f"git push && cd {other}/nope; gh pr create -t x",
+                # 前の cd の先から当てた組み合わせ (sub/sub) だけが無い形も止める
+                "(cd sub); cd sub; gh pr create -t x",
+                "cd sub | cat; cd sub; gh pr create -t x",
+            ):
+                with self.subTest(world=world.name, cmd=cmd):
+                    self.assertEqual(self.outcome(cmd, world), "stop")
+
+    def test_a_place_made_by_an_earlier_command_stops(self):
+        # 行き先が hook の時点で無くても、前のコマンド (git clone / git worktree add / mkdir) が作ると shell はそこに入る。
+        # 作られる dir は plugin repo の clone / worktree / plugin repo の中
+        plugin = shell_path(self.plugin)
+        wt = shell_path(self.top / "wt")
+        for world in (self.plain, self.out):
+            for cmd in (
+                f"git clone -q {plugin} mp && cd mp; gh pr create --fill",
+                f"git clone -q {plugin} mp && cd mp || exit 1; gh pr create --fill",
+                f"if [ -d mp ]; then cd mp; else git clone -q {plugin} mp && cd mp; fi; gh pr create --fill",
+                f"mkdir -p {plugin}/newsub && cd {plugin}/newsub; gh pr create --fill",
+                f"git -C {plugin} worktree add -q {wt} -b feat && cd {wt}; gh pr create --fill",
+            ):
+                with self.subTest(world=world.name, cmd=cmd):
+                    self.assertEqual(self.outcome(cmd, world), "stop")
 
     def test_a_place_may_be_a_plugin_repo(self):
         plugin = shell_path(self.plugin)
@@ -599,39 +629,40 @@ class UnsureCdPlacesTest(HermeticGitTestCase):
                     self.assertEqual(self.outcome(cmd, world), "stop")
 
     def test_places_the_shell_may_reach_another_way_stop(self):
-        # CDPATH は相対の名前を cwd より先に CDPATH の下で探す (行き先が cwd の下にあっても)。`..` を含む引数は、論理パスが
-        # 無いと bash が物理パスで入り直す
+        # bash の CDPATH は相対の名前を cwd より先に CDPATH の下で探す (行き先が cwd の下にあっても)。zsh は cwd に無ければ
+        # CDPATH を引く。`..` を含む引数は、論理パスが無いと bash が物理パスで入り直す (行き先が無いので止まる)
         (self.top / "nope").mkdir()
         cases = (
             ("git push && cd nope; gh pr create -t x", {"CDPATH": str(self.top)}),
             ("git push && cd sub; gh pr create -t x", {"CDPATH": str(self.top)}),
             ("git push && cd sub/nope; gh pr create -t x", {"CDPATH": str(self.top)}),
+            # CDPATH を引かない形と相対の名前が混じる形 (どの行き先も在る)。相対の名前が 1 つでもあれば止める
+            (f"git push && cd {shell_path(self.out)} && cd sub; gh pr create -t x", {"CDPATH": str(self.top)}),
             ("git push && cd sub/../nope; gh pr create -t x", {}),
             ("git push && cd ../plain/../nope2; gh pr create -t x", {}),
         )
         for cmd, env in cases:
             with self.subTest(cmd=cmd, env=env), mock.patch.dict(os.environ, env):
                 self.assertEqual(self.outcome(cmd, self.plain), "stop")
-        # CDPATH があっても、`./` `../` で始まる形・`~`・絶対パスは CDPATH を引かない
+        # CDPATH があっても、`./` `../` で始まる形・`~`・絶対パスは CDPATH を引かない (行き先は在る dir で見る)
         with mock.patch.dict(os.environ, {"CDPATH": str(self.top)}):
             for cmd in (
-                "git push && cd ./nope; gh pr create -t x",
                 "git push && cd ./sub; gh pr create -t x",
                 "git push && cd ../out; gh pr create -t x",
-                f"git push && cd {shell_path(self.out)}/nope; gh pr create -t x",
+                f"git push && cd {shell_path(self.out)}/sub; gh pr create -t x",
             ):
                 with self.subTest(cmd=cmd):
                     self.assertEqual(self.outcome(cmd, self.plain), "none")
 
-    def test_cdpath_and_missing_place_rules(self):
+    def test_cdpath_rules(self):
         with mock.patch.object(os, "path", posixpath):
-            for step, searches, fails in (
-                ("a", True, True), ("a/b", True, True), ("", True, True), ("C:/x", True, True), ("\\x", True, True),
-                ("./a", False, True), ("../a", False, False), (".", False, True), ("..", False, False),
-                ("/x", False, True), ("~", False, True), ("~/a", False, True), ("a/../b", True, False), ("/x/..", False, False),
+            for step, searches in (
+                ("a", True), ("a/b", True), ("", True), ("C:/x", True), ("\\x", True),
+                ("./a", False), ("../a", False), (".", False), ("..", False),
+                ("/x", False), ("~", False), ("~/a", False), ("a/../b", True), ("/x/..", False),
             ):
                 with self.subTest(step=step):
-                    self.assertEqual((self.mod._searches_cdpath(step), self.mod._fails_if_missing(step)), (searches, fails))
+                    self.assertEqual(self.mod._searches_cdpath(step), searches)
 
     def test_every_subsequence_is_listed(self):
         # 前の cd が走らなくても後ろの cd は走りうる (`(cd sub); cd x` の x は hook の cwd の下)
@@ -705,7 +736,10 @@ class WindowsDriveSpellingTest(unittest.TestCase):
 
     def setUp(self):
         self.mod = _load_entry()
-        _FakeWindowsPath.REAL = {ntpath.normcase(p) for p in (self.PLUGIN, self.OTHER, self.HOME, "C:\\Users\\x", "C:\\")}
+        # `C:\tmp` も在る: ドライブの無い `/tmp` を Python は `C:\tmp` と読むが、Git Bash は Windows の一時 dir に入る
+        _FakeWindowsPath.REAL = {
+            ntpath.normcase(p) for p in (self.PLUGIN, self.OTHER, self.HOME, "C:\\Users\\x", "C:\\", "C:\\tmp")
+        }
         for patcher in (
             mock.patch.object(os, "path", ntpath),
             mock.patch.object(self.mod, "Path", _FakeWindowsPath),
@@ -748,6 +782,7 @@ class WindowsDriveSpellingTest(unittest.TestCase):
             ("/c", "C:/"),
             ("/c/", "C:/"),
             ("/c//x", "C:/x"),
+            ("/c\n", "/c\n"),
             ("/cd/x", "/cd/x"),
             ("/tmp", "/tmp"),
             ("c/x", "c/x"),
@@ -784,26 +819,37 @@ class WindowsDriveSpellingTest(unittest.TestCase):
     def test_unsure_drive_cd(self):
         self.assertEqual(self.outcome("git push && cd /c/Users/x/other; gh pr create -t x"), "none")
         self.assertIn("静的に解決できない", self.outcome("git push && cd /c/Users/x/repo; gh pr create -t x"))
-        # ドライブの無い絶対パスは Git Bash が別の場所 (`/tmp` は Windows の一時 dir) に読み替えるので、無くても止める
+        # ドライブの無い絶対パスは Git Bash が別の場所 (`/tmp` は Windows の一時 dir) に読み替えるので、`C:\tmp` が在っても止める
         self.assertIn("静的に解決できない", self.outcome("git push && cd /tmp; gh pr create -t x"))
         # hook の cwd も Git Bash の綴りで読む
         self.assertEqual(self.outcome("git push && cd /c/Users/x/other; gh pr create -t x", "/c/Users/me/proj"), "none")
         self.assertIn("静的に解決できない", self.outcome("git push && cd /c/nope; gh pr create -t x", "/c/Users/x/repo"))
-        self.assertEqual(self.outcome("git push && cd /c/nope; gh pr create -t x"), "none")
-        # ドライブのある絶対パスは CDPATH を引かない。相対の名前は CDPATH の下で見つかりうる
+        # hook の時点で無い行き先は、前のコマンドが作りうるので止める
+        self.assertIn("静的に解決できない", self.outcome("git push && cd /c/nope; gh pr create -t x"))
+        # ドライブのある絶対パスと `~` は CDPATH を引かない。相対の名前は CDPATH の下で見つかりうる
         with mock.patch.dict(os.environ, {"CDPATH": "C:\\Users\\x"}):
-            self.assertEqual(self.outcome("git push && cd /c/nope; gh pr create -t x"), "none")
-            self.assertEqual(self.outcome("git push && cd C:/nope; gh pr create -t x"), "none")
-            self.assertEqual(self.outcome("git push && cd ~/nope; gh pr create -t x"), "none")
+            self.assertEqual(self.outcome("git push && cd /c/Users/x/other; gh pr create -t x"), "none")
+            self.assertEqual(self.outcome("git push && cd C:/Users/x/other; gh pr create -t x"), "none")
+            self.assertEqual(self.outcome("git push && cd ~/proj; gh pr create -t x"), "none")
             self.assertIn("静的に解決できない", self.outcome("git push && cd nope; gh pr create -t x"))
 
-    def test_cdpath_and_missing_place_rules(self):
-        for step, searches, fails in (
-            ("a", True, True), ("/c/x", False, True), ("C:/x", False, True), ("C:\\x", False, True), ("\\x", False, False),
-            ("/tmp", False, False), ("~/a", False, True), ("./a", False, True), ("/c/x/../y", False, False),
+    def test_drive_less_absolute_path_is_not_listed(self):
+        # `/tmp` と `\tmp` は Python が `C:\tmp` と読み (在る)、Git Bash は別の場所に入るので挙げない。ドライブのある形は挙げる
+        start = _FakeWindowsPath(self.HOME)
+        for step in ("/tmp", "\\tmp"):
+            with self.subTest(step=step):
+                self.assertIsNone(self.mod._possible_dirs(start, (step,)))
+        dirs = self.mod._possible_dirs(start, ("C:/tmp",))
+        self.assertIsNotNone(dirs)
+        self.assertEqual({ntpath.normcase(str(d)) for d in dirs}, {ntpath.normcase(self.HOME), ntpath.normcase("C:\\tmp")})
+
+    def test_cdpath_rules(self):
+        for step, searches in (
+            ("a", True), ("/c/x", False), ("C:/x", False), ("C:\\x", False), ("\\x", False),
+            ("/tmp", False), ("~/a", False), ("./a", False), ("/c/x/../y", False),
         ):
             with self.subTest(step=step):
-                self.assertEqual((self.mod._searches_cdpath(step), self.mod._fails_if_missing(step)), (searches, fails))
+                self.assertEqual(self.mod._searches_cdpath(step), searches)
 
 
 @unittest.skipUnless(os.name == "nt", "Git Bash の綴りは Windows でだけ意味を持つ")
