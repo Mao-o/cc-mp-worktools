@@ -40,32 +40,41 @@ def _with(*extra: tuple[str, bool]) -> list[tuple[str, bool]]:
 class TestRootRelative(unittest.TestCase):
     """``root_relative`` は lexical (symlink / 実在確認なし) で root 相対 path を返す。"""
 
-    def test_absolute_under_root(self):
-        self.assertEqual(root_relative("/r/a/b.pem", "/r"), "a/b.pem")
+    # (ラベル = 畳む前のテスト名, path, root, 期待する root 相対 path)。
+    # 1 つのテストに複数の assert があったものは、同じラベルの行を並べてある
+    RELATIVE_CASES = (
+        ("test_absolute_under_root", "/r/a/b.pem", "/r", "a/b.pem"),
         # root 側の末尾 / と path 側の冗長な要素は正規化される
-        self.assertEqual(root_relative("/r/a/./b.pem", "/r/"), "a/b.pem")
-
-    def test_root_itself_is_none(self):
-        self.assertIsNone(root_relative("/r", "/r"))
-        self.assertIsNone(root_relative("/r/", "/r"))
-
-    def test_outside_root_is_none(self):
-        self.assertIsNone(root_relative("/other/a.pem", "/r"))
-        # 文字列 prefix の罠: /rx は /r 配下ではない
-        self.assertIsNone(root_relative("/rx/a.pem", "/r"))
-
-    def test_relative_path_is_taken_as_root_relative(self):
+        ("test_absolute_under_root", "/r/a/./b.pem", "/r/", "a/b.pem"),
         # Stop hook は git ls-files の相対 path を root 相対に組み立てて渡す
-        self.assertEqual(root_relative("a/b.pem", "/r"), "a/b.pem")
-        self.assertEqual(root_relative("./a/b.pem", "/r"), "a/b.pem")
+        ("test_relative_path_is_taken_as_root_relative", "a/b.pem", "/r", "a/b.pem"),
+        ("test_relative_path_is_taken_as_root_relative", "./a/b.pem", "/r", "a/b.pem"),
+    )
 
-    def test_relative_path_escaping_root_is_none(self):
-        self.assertIsNone(root_relative("../x.pem", "/r"))
-        self.assertIsNone(root_relative("a/../../x.pem", "/r"))
+    # (ラベル = 畳む前のテスト名, path, root)。root 相対にならない (None) 形
+    NONE_CASES = (
+        ("test_root_itself_is_none", "/r", "/r"),
+        ("test_root_itself_is_none", "/r/", "/r"),
+        ("test_outside_root_is_none", "/other/a.pem", "/r"),
+        # 文字列 prefix の罠: /rx は /r 配下ではない
+        ("test_outside_root_is_none", "/rx/a.pem", "/r"),
+        ("test_relative_path_escaping_root_is_none", "../x.pem", "/r"),
+        ("test_relative_path_escaping_root_is_none", "a/../../x.pem", "/r"),
+        ("test_no_root_is_none", "/r/a.pem", None),
+        ("test_no_root_is_none", "/r/a.pem", ""),
+    )
 
-    def test_no_root_is_none(self):
-        self.assertIsNone(root_relative("/r/a.pem", None))
-        self.assertIsNone(root_relative("/r/a.pem", ""))
+    def test_relative(self):
+        self.assertTrue(self.RELATIVE_CASES)
+        for case, path, root, expected in self.RELATIVE_CASES:
+            with self.subTest(case=case, path=path, root=root):
+                self.assertEqual(root_relative(path, root), expected)
+
+    def test_none(self):
+        self.assertTrue(self.NONE_CASES)
+        for case, path, root in self.NONE_CASES:
+            with self.subTest(case=case, path=path, root=root):
+                self.assertIsNone(root_relative(path, root))
 
 
 class TestPathRuleBasics(unittest.TestCase):
@@ -134,57 +143,43 @@ class TestPathRuleBasics(unittest.TestCase):
 
 
 class TestPathRuleWildcards(unittest.TestCase):
-    def test_single_star_does_not_cross_slash(self):
-        rules = _with(("fixtures/*.pem", True))
-        self.assertFalse(is_sensitive("/r/fixtures/a.pem", rules, root=ROOT))
-        self.assertTrue(is_sensitive("/r/fixtures/deep/a.pem", rules, root=ROOT))
-
-    def test_double_star_crosses_slash(self):
-        rules = _with(("fixtures/**/*.pem", True))
+    # (ラベル = 畳む前のテスト名, 除外 rule, 除外が効く path, 保護が残る path)。
+    # rule は既定 rules の後ろに ``!<rule>`` として足す
+    WILDCARD_CASES = (
+        ("test_single_star_does_not_cross_slash", "fixtures/*.pem",
+         ("/r/fixtures/a.pem",), ("/r/fixtures/deep/a.pem",)),
         # /**/ は 0 個以上のディレクトリ
-        self.assertFalse(is_sensitive("/r/fixtures/a.pem", rules, root=ROOT))
-        self.assertFalse(is_sensitive("/r/fixtures/deep/a.pem", rules, root=ROOT))
-        self.assertFalse(is_sensitive("/r/fixtures/d/e/f/a.pem", rules, root=ROOT))
-        self.assertTrue(is_sensitive("/r/other/a.pem", rules, root=ROOT))
-
-    def test_leading_double_star_matches_any_depth(self):
-        rules = _with(("**/fixtures/*.pem", True))
-        self.assertFalse(is_sensitive("/r/fixtures/x.pem", rules, root=ROOT))
-        self.assertFalse(is_sensitive("/r/a/b/fixtures/x.pem", rules, root=ROOT))
-        self.assertTrue(is_sensitive("/r/a/fixturesx/x.pem", rules, root=ROOT))
-
-    def test_trailing_double_star_matches_everything_inside(self):
-        rules = _with(("fixtures/**", True))
-        self.assertFalse(is_sensitive("/r/fixtures/a.pem", rules, root=ROOT))
-        self.assertFalse(is_sensitive("/r/fixtures/d/e.pem", rules, root=ROOT))
-        self.assertTrue(is_sensitive("/r/fixturesx/a.pem", rules, root=ROOT))
-
-    def test_inner_double_star_is_treated_as_single_star(self):
+        ("test_double_star_crosses_slash", "fixtures/**/*.pem",
+         ("/r/fixtures/a.pem", "/r/fixtures/deep/a.pem", "/r/fixtures/d/e/f/a.pem"),
+         ("/r/other/a.pem",)),
+        ("test_leading_double_star_matches_any_depth", "**/fixtures/*.pem",
+         ("/r/fixtures/x.pem", "/r/a/b/fixtures/x.pem"), ("/r/a/fixturesx/x.pem",)),
+        ("test_trailing_double_star_matches_everything_inside", "fixtures/**",
+         ("/r/fixtures/a.pem", "/r/fixtures/d/e.pem"), ("/r/fixturesx/a.pem",)),
         # gitignore: "Other consecutive asterisks are considered regular asterisks"
-        rules = _with(("cfg/a**b.pem", True))
-        self.assertFalse(is_sensitive("/r/cfg/aXb.pem", rules, root=ROOT))
-        self.assertTrue(is_sensitive("/r/cfg/a/b.pem", rules, root=ROOT))
+        ("test_inner_double_star_is_treated_as_single_star", "cfg/a**b.pem",
+         ("/r/cfg/aXb.pem",), ("/r/cfg/a/b.pem",)),
+        ("test_question_mark_does_not_cross_slash", "k?y/a.pem",
+         ("/r/key/a.pem",), ("/r/k/y/a.pem",)),
+        ("test_char_class", "certs/[ab].pem",
+         ("/r/certs/a.pem", "/r/certs/b.pem"), ("/r/certs/c.pem",)),
+        ("test_negated_char_class_does_not_match_slash", "c[!x]rts/a.pem",
+         ("/r/certs/a.pem",), ("/r/c/rts/a.pem",)),
+        ("test_unterminated_bracket_is_literal", "certs/k[1.pem",
+         ("/r/certs/k[1.pem",), ("/r/certs/k1.pem",)),
+    )
 
-    def test_question_mark_does_not_cross_slash(self):
-        rules = _with(("k?y/a.pem", True))
-        self.assertFalse(is_sensitive("/r/key/a.pem", rules, root=ROOT))
-        self.assertTrue(is_sensitive("/r/k/y/a.pem", rules, root=ROOT))
-
-    def test_char_class(self):
-        rules = _with(("certs/[ab].pem", True))
-        self.assertFalse(is_sensitive("/r/certs/a.pem", rules, root=ROOT))
-        self.assertFalse(is_sensitive("/r/certs/b.pem", rules, root=ROOT))
-        self.assertTrue(is_sensitive("/r/certs/c.pem", rules, root=ROOT))
-
-    def test_negated_char_class_does_not_match_slash(self):
-        rules = _with(("c[!x]rts/a.pem", True))
-        self.assertFalse(is_sensitive("/r/certs/a.pem", rules, root=ROOT))
-        self.assertTrue(is_sensitive("/r/c/rts/a.pem", rules, root=ROOT))
-
-    def test_unterminated_bracket_is_literal(self):
-        rules = _with(("certs/k[1.pem", True))
-        self.assertFalse(is_sensitive("/r/certs/k[1.pem", rules, root=ROOT))
-        self.assertTrue(is_sensitive("/r/certs/k1.pem", rules, root=ROOT))
+    def test_wildcards(self):
+        self.assertTrue(self.WILDCARD_CASES)
+        for case, rule, excluded, kept in self.WILDCARD_CASES:
+            rules = _with((rule, True))
+            self.assertTrue(excluded and kept, case)
+            for path in excluded:
+                with self.subTest(case=case, rule=rule, path=path):
+                    self.assertFalse(is_sensitive(path, rules, root=ROOT))
+            for path in kept:
+                with self.subTest(case=case, rule=rule, path=path):
+                    self.assertTrue(is_sensitive(path, rules, root=ROOT))
 
     def test_invalid_char_range_never_matches_instead_of_raising(self):
         """逆順の範囲 ``[z-a]`` は regex として不正 (Codex R2 P2)。例外を hook の
@@ -385,23 +380,29 @@ class TestRootRelativeWindowsSemantics(unittest.TestCase):
         from _shared.matcher import _root_relative
         return _root_relative(path, root, PureWindowsPath, ntpath.normpath)
 
-    def test_driveless_rooted_path_is_relativized(self):
-        self.assertEqual(self._rel("/r/config/prod.pem", "/r"), "config/prod.pem")
+    # (ラベル = 畳む前のテスト名, path, root, 期待する root 相対 path)
+    RELATIVE_CASES = (
+        ("test_driveless_rooted_path_is_relativized", "/r/config/prod.pem", "/r", "config/prod.pem"),
+        (
+            "test_drive_path_is_relativized_with_posix_separators",
+            "C:\\repo\\config\\prod.pem", "C:\\repo", "config/prod.pem",
+        ),
+        ("test_drive_comparison_is_case_insensitive", "c:\\Repo\\a.pem", "C:\\repo", "a.pem"),
+        (
+            "test_relative_path_is_taken_as_root_relative",
+            "config\\prod.pem", "C:\\repo", "config/prod.pem",
+        ),
+    )
 
-    def test_drive_path_is_relativized_with_posix_separators(self):
-        self.assertEqual(
-            self._rel("C:\\repo\\config\\prod.pem", "C:\\repo"), "config/prod.pem"
-        )
-
-    def test_drive_comparison_is_case_insensitive(self):
-        self.assertEqual(self._rel("c:\\Repo\\a.pem", "C:\\repo"), "a.pem")
+    def test_relative(self):
+        self.assertTrue(self.RELATIVE_CASES)
+        for case, path, root, expected in self.RELATIVE_CASES:
+            with self.subTest(case=case, path=path, root=root):
+                self.assertEqual(self._rel(path, root), expected)
 
     def test_outside_root_is_none(self):
         self.assertIsNone(self._rel("D:\\other\\a.pem", "C:\\repo"))
         self.assertIsNone(self._rel("/x/a.pem", "/r"))
-
-    def test_relative_path_is_taken_as_root_relative(self):
-        self.assertEqual(self._rel("config\\prod.pem", "C:\\repo"), "config/prod.pem")
 
 
 if __name__ == "__main__":

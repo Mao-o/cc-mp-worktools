@@ -25,9 +25,47 @@ commit 52113a1 で完了)。
   畳んだ範囲の格子点 453 → 1,908)。残りは、判定だけを見るテストのうち今回の形 (1 行判定・mode 違いの対・
   定数列のループ) に当たらなかったもの (表を default / auto の 2 mode か 5 mode で回すループなど。
   `TestGrepPatternPositional` / `TestOptionValueNotPath` / `TestRecommendedRemedyAllow` など 16 クラス 62 件。
-  cwd にファイルを置くものを含む) と、他のファイルの同型群 (未着手)
+  cwd にファイルを置くものを含む)。**他のファイルの同型群は 0.36.4 で畳んだ** (15 ファイル 35 クラスの
+  209 件をメソッド 40 件の表と subTest に。テスト件数 1,389 → 1,221)。見送ったのは
+  `test_npmrc_gate.py::TestAuthLineDetection` の 3 件 (docs と 1 対 1 で読める形にしてある)、
+  `test_e2e.py::TestE2EDotenvInfoPathsKeepVerdictAndEnvelope` の 3 件 (1 行で共通の helper を呼ぶだけ)、
+  クラスを跨ぐ同型群
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
+
+## 0.36.4
+
+**テスト整理 (挙動の変更なし)。redact-sensitive-reads の `test_bash_handler.py` 以外のファイルで、入力 1 つ → 結果 1 つを見る同型のテストを表と subTest に畳んだ (patch bump)。**
+hook・`hooks.json`・README の挙動は変わらない。製品コードは変えていない。テスト件数: redact 1,389 → **1,221**
+(15 ファイル 35 クラスの 209 件を、メソッド 40 件の表に畳んだ。配線の検査を 1 件足した)。`tests/*.py` は
+20,507 → 20,290 行。
+
+- 畳んだのは、`test_redaction_minimal.py` (型・prefix・status・envrc)、`test_e2e.py::TestE2EReadHandler` の
+  Bash の判定、`test_placeholders.py`、`test_grep_extraction.py`、`test_messages.py` (git subcommand・Read と
+  Bash の reason 文・DATA ブロックの折り畳み)、`test_envelope_shapes.py`、`test_segmentation.py` の heredoc、
+  `test_failclosed.py`、`test_patterns_loader.py` の `[project:]` セクション、`test_matcher_path_rules.py`、
+  `test_safepath.py`、`test_grep_handler.py` のブレース、`test_glob_dotenv.py`、`test_sanitize.py`、
+  `test_matcher.py` の大文字小文字。表は `(ラベル, 入力, 期待値)` の行で、ラベルは畳む前のテスト名。1 つの
+  テストに assert が複数あったもの・入力をループしていたものは、同じラベルの行を並べた。docstring と
+  コメントは行の上に移した。同じクラスで同じ形のテストは、すべて同じ表に入れた
+- 畳む前と同じ入力・同じ mode・同じ assert を流す。直接の添字 (`r["hookSpecificOutput"]["permissionDecision"]`
+  や `e["prefix"]`) は、判定が allow に退行したとき `KeyError` (ERROR) になっていたので、取り出しの helper
+  (`_decision`) か添字の前の `assertIn` に替え、assertion の失敗 (FAIL) で落ちるようにした
+- `test_failclosed.py::TestBashPatternsUnavailableDeny` は `test_bash_handler.py` の `DenyMatrix` に載せ、
+  patterns 読込失敗の deny を mode 6 列で見る (畳む前は default / auto / bypass の 3 列)。土台は
+  `test_bash_handler.py` に 1 つだけ置いて import する (`test_matcher_path_rules.py` が `test_matcher.py` の
+  定数を使うのと同じ形)。表を持つクラスの配線の検査は `assert_matrix_tables_wired` に切り出し、
+  `test_failclosed.py` にも `TestMatrixTablesAreWired` を足した
+- 見送ったもの: `test_npmrc_gate.py::TestAuthLineDetection` (docs と 1 対 1 で読める形にしてある) と
+  `test_e2e.py::TestE2EDotenvInfoPathsKeepVerdictAndEnvelope` (各テストが 1 行で mode を回す helper を呼ぶだけ)、
+  クラスを跨ぐ同型群 (クラスがそれぞれ文面のテンプレートや判定の観点に当たる)
+- 畳んだ検査が新しい表に移ったことは、旧版と新版の両方でテストを動かし、テストが製品コードと helper に
+  渡した引数と戻り値、assert の引数を記録して確かめた。消えた 209 件の記録は、どれも新しい表の同じラベルの
+  行に含まれる。旧テストが見た呼び出しの戻り値だけを別の値にする故障を 1 件ずつ入れ、旧テストが落とした
+  912 件のすべてを、新しい表のそのラベルの行が落とした
+- `test_patterns_loader.py::TestProjectHeaderWindowsComparison` と
+  `test_matcher_path_rules.py::TestRootRelativeWindowsSemantics` (Windows の意味論) は skip を付けておらず、
+  Windows の CI でもそのまま流れる
 
 ## 0.36.3
 

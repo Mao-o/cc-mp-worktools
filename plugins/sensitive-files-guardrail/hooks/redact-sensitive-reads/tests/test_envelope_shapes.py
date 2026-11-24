@@ -54,40 +54,24 @@ class TestEnvelopeShapes(unittest.TestCase):
         self.assertEqual(env["hook_event_name"], "PreToolUse")
         self.assertIsInstance(env["tool_input"], dict)
 
-    def test_read_envelope(self):
-        env = self._load("read")
-        self._assert_common(env)
-        self.assertEqual(env["tool_name"], "Read")
-        for k in _TOOL_INPUT_KEYS["read"]:
-            self.assertIn(k, env["tool_input"])
+    # (ラベル = 畳む前のテスト名, fixture 名, 期待する tool_name)
+    ENVELOPE_CASES = (
+        ("test_read_envelope", "read", "Read"),
+        ("test_bash_envelope", "bash", "Bash"),
+        ("test_edit_envelope", "edit", "Edit"),
+        ("test_write_envelope", "write", "Write"),
+        ("test_grep_envelope", "grep", "Grep"),
+    )
 
-    def test_bash_envelope(self):
-        env = self._load("bash")
-        self._assert_common(env)
-        self.assertEqual(env["tool_name"], "Bash")
-        for k in _TOOL_INPUT_KEYS["bash"]:
-            self.assertIn(k, env["tool_input"])
-
-    def test_edit_envelope(self):
-        env = self._load("edit")
-        self._assert_common(env)
-        self.assertEqual(env["tool_name"], "Edit")
-        for k in _TOOL_INPUT_KEYS["edit"]:
-            self.assertIn(k, env["tool_input"])
-
-    def test_write_envelope(self):
-        env = self._load("write")
-        self._assert_common(env)
-        self.assertEqual(env["tool_name"], "Write")
-        for k in _TOOL_INPUT_KEYS["write"]:
-            self.assertIn(k, env["tool_input"])
-
-    def test_grep_envelope(self):
-        env = self._load("grep")
-        self._assert_common(env)
-        self.assertEqual(env["tool_name"], "Grep")
-        for k in _TOOL_INPUT_KEYS["grep"]:
-            self.assertIn(k, env["tool_input"])
+    def test_envelopes(self):
+        self.assertTrue(self.ENVELOPE_CASES)
+        for case, name, tool_name in self.ENVELOPE_CASES:
+            with self.subTest(case=case, name=name):
+                env = self._load(name)
+                self._assert_common(env)
+                self.assertEqual(env["tool_name"], tool_name)
+                for k in _TOOL_INPUT_KEYS[name]:
+                    self.assertIn(k, env["tool_input"])
 
 
 

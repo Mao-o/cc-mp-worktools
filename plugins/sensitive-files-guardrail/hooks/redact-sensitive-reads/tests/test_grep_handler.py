@@ -327,49 +327,34 @@ class TestGrepGlobBraces(BaseGrep):
     だけ「分岐ごとに判定して最も強い結論を採る」を足した。
     """
 
-    def test_brace_branch_with_dotenv_denies(self):
-        for glob in ("{.env,x}", "{.env,*.py}", "**/{.env,a}", "{.env*,src}"):
-            with self.subTest(glob=glob):
-                self.assertEqual(
-                    _decision(self._grep({"pattern": "x", "glob": glob})), "deny"
-                )
-
-    def test_brace_branch_with_literal_sensitive_name_denies(self):
-        self.assertEqual(
-            _decision(self._grep({"pattern": "x", "glob": "{id_rsa,notes.txt}"})),
-            "deny",
-        )
-
-    def test_brace_suffix_expansion_denies(self):
+    # (ラベル = 畳む前のテスト名, glob, 期待する判定)。畳む前に glob を並べて
+    # ループしていたテストは、同じラベルの行を並べてある
+    BRACE_CASES = (
+        ("test_brace_branch_with_dotenv_denies", "{.env,x}", "deny"),
+        ("test_brace_branch_with_dotenv_denies", "{.env,*.py}", "deny"),
+        ("test_brace_branch_with_dotenv_denies", "**/{.env,a}", "deny"),
+        ("test_brace_branch_with_dotenv_denies", "{.env*,src}", "deny"),
+        ("test_brace_branch_with_literal_sensitive_name_denies", "{id_rsa,notes.txt}", "deny"),
         # ``.en{v,x}`` → ``.env`` / ``.enx``。分岐の 1 つが dotenv stem。
-        self.assertEqual(
-            _decision(self._grep({"pattern": "x", "glob": ".en{v,x}"})), "deny"
-        )
-
-    def test_harmless_brace_glob_is_ask_or_allow(self):
-        for glob in ("*.{ts,tsx}", "{src,lib}/**"):
-            with self.subTest(glob=glob):
-                self.assertEqual(
-                    _decision(self._grep({"pattern": "x", "glob": glob})), "ask"
-                )
-
-    def test_literal_only_brace_glob_is_ask(self):
-        """分岐が全部 literal 非機密でも ``{`` はワイルドカードなので ask。
-
-        Bash は ``{`` を hard-stop として ask に倒す (``cat {a,b}`` = ask)
-        ので、結論は Bash と揃う。
-        """
-        self.assertEqual(
-            _decision(self._grep({"pattern": "x", "glob": "{a,b}"})), "ask"
-        )
-
-    def test_unterminated_or_oversized_brace_is_ask_not_allow(self):
+        ("test_brace_suffix_expansion_denies", ".en{v,x}", "deny"),
+        ("test_harmless_brace_glob_is_ask_or_allow", "*.{ts,tsx}", "ask"),
+        ("test_harmless_brace_glob_is_ask_or_allow", "{src,lib}/**", "ask"),
+        # 分岐が全部 literal 非機密でも ``{`` はワイルドカードなので ask。
+        # Bash は ``{`` を hard-stop として ask に倒す (``cat {a,b}`` = ask)
+        # ので、結論は Bash と揃う。
+        ("test_literal_only_brace_glob_is_ask", "{a,b}", "ask"),
         # 展開できない形は「判定できない wildcard」として ask 側に落とす。
-        many = "{a,b}" * 9
-        for glob in ("{.env,x", "a{b{c,d}", many):
-            with self.subTest(glob=glob):
+        ("test_unterminated_or_oversized_brace_is_ask_not_allow", "{.env,x", "ask"),
+        ("test_unterminated_or_oversized_brace_is_ask_not_allow", "a{b{c,d}", "ask"),
+        ("test_unterminated_or_oversized_brace_is_ask_not_allow", "{a,b}" * 9, "ask"),
+    )
+
+    def test_brace_globs(self):
+        self.assertTrue(self.BRACE_CASES)
+        for case, glob, expected in self.BRACE_CASES:
+            with self.subTest(case=case, glob=glob):
                 self.assertEqual(
-                    _decision(self._grep({"pattern": "x", "glob": glob})), "ask"
+                    _decision(self._grep({"pattern": "x", "glob": glob})), expected
                 )
 
 

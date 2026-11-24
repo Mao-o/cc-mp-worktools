@@ -399,19 +399,21 @@ class TestIsEnvrcBasenameRegression(unittest.TestCase):
     ``is_envrc_basename`` のみ。判定境界 (deny/allow) には影響しない。
     """
 
-    def test_literal_envrc_is_true(self):
-        self.assertTrue(is_envrc_basename(".envrc"))
+    # (ラベル = 畳む前のテスト名, basename)
+    ENVRC_FAMILY_CASES = (
+        ("test_literal_envrc_is_true", ".envrc"),
+        # ``foo.envrc`` も shell script family なので True
+        ("test_named_envrc_script_is_true", "foo.envrc"),
+        # 大文字小文字を区別しない (case-insensitive) 判定なので True
+        ("test_uppercase_envrc_is_true", ".ENVRC"),
+        ("test_mixed_case_envrc_is_true", ".EnvRC"),
+    )
 
-    def test_named_envrc_script_is_true(self):
-        """``foo.envrc`` も shell script family なので True。"""
-        self.assertTrue(is_envrc_basename("foo.envrc"))
-
-    def test_uppercase_envrc_is_true(self):
-        """大文字小文字を区別しない (case-insensitive) 判定なので True。"""
-        self.assertTrue(is_envrc_basename(".ENVRC"))
-
-    def test_mixed_case_envrc_is_true(self):
-        self.assertTrue(is_envrc_basename(".EnvRC"))
+    def test_envrc_family_is_true(self):
+        self.assertTrue(self.ENVRC_FAMILY_CASES)
+        for case, name in self.ENVRC_FAMILY_CASES:
+            with self.subTest(case=case, name=name):
+                self.assertTrue(is_envrc_basename(name))
 
     def test_non_envrc_is_false(self):
         self.assertFalse(is_envrc_basename(".env"))
@@ -432,14 +434,18 @@ class TestIsDirenvLiteralRegression(unittest.TestCase):
     def test_literal_envrc_is_true(self):
         self.assertTrue(is_direnv_literal(".envrc"))
 
-    def test_named_envrc_script_is_false(self):
-        self.assertFalse(is_direnv_literal("foo.envrc"))
+    # (ラベル = 畳む前のテスト名, basename)
+    NOT_LITERAL_CASES = (
+        ("test_named_envrc_script_is_false", "foo.envrc"),
+        ("test_uppercase_envrc_is_false", ".ENVRC"),
+        ("test_mixed_case_envrc_is_false", ".EnvRC"),
+    )
 
-    def test_uppercase_envrc_is_false(self):
-        self.assertFalse(is_direnv_literal(".ENVRC"))
-
-    def test_mixed_case_envrc_is_false(self):
-        self.assertFalse(is_direnv_literal(".EnvRC"))
+    def test_non_literal_envrc_is_false(self):
+        self.assertTrue(self.NOT_LITERAL_CASES)
+        for case, name in self.NOT_LITERAL_CASES:
+            with self.subTest(case=case, name=name):
+                self.assertFalse(is_direnv_literal(name))
 
 
 class TestDotenvTypeExpansion(unittest.TestCase):
@@ -450,36 +456,41 @@ class TestDotenvTypeExpansion(unittest.TestCase):
         by_name = {k["name"]: k["type"] for k in info["keys"]}
         return by_name[key]
 
-    def test_url_postgres(self):
-        self.assertEqual(
-            self._type_of("K=postgresql://u:p@h:5432/d\n"), "url"
-        )
+    # (ラベル = 畳む前のテスト名, dotenv の本文, 期待する型)
+    TYPE_CASES = (
+        ("test_url_postgres", "K=postgresql://u:p@h:5432/d\n", "url"),
+        ("test_url_https", "K=https://example.com/api\n", "url"),
+        ("test_email", "K=user@example.com\n", "email"),
+        ("test_uuid", "K=550e8400-e29b-41d4-a716-446655440000\n", "uuid"),
+        ("test_uuid_uppercase", "K=550E8400-E29B-41D4-A716-446655440000\n", "uuid"),
+        ("test_aws_access_key_akia", "K=AKIAIOSFODNN7EXAMPLE\n", "aws_access_key"),
+        ("test_aws_access_key_asia", "K=ASIAIOSFODNN7EXAMPLE\n", "aws_access_key"),
+        (
+            "test_github_pat_classic",
+            "K=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+            "github_pat",
+        ),
+        (
+            "test_github_pat_user",
+            "K=ghu_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+            "github_pat",
+        ),
+        ("test_openai_key", "K=sk-proj-abcdefghijklmnopqrstuvwxyz\n", "openai_key"),
+        # 既存の jwt 判定は維持
+        (
+            "test_jwt_still_jwt",
+            "K=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ"
+            ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c\n",
+            "jwt",
+        ),
+        ("test_str_fallback", "K=arbitrary_random_value_here\n", "str"),
+    )
 
-    def test_url_https(self):
-        self.assertEqual(self._type_of("K=https://example.com/api\n"), "url")
-
-    def test_email(self):
-        self.assertEqual(self._type_of("K=user@example.com\n"), "email")
-
-    def test_uuid(self):
-        self.assertEqual(
-            self._type_of("K=550e8400-e29b-41d4-a716-446655440000\n"), "uuid"
-        )
-
-    def test_uuid_uppercase(self):
-        self.assertEqual(
-            self._type_of("K=550E8400-E29B-41D4-A716-446655440000\n"), "uuid"
-        )
-
-    def test_aws_access_key_akia(self):
-        self.assertEqual(
-            self._type_of("K=AKIAIOSFODNN7EXAMPLE\n"), "aws_access_key"
-        )
-
-    def test_aws_access_key_asia(self):
-        self.assertEqual(
-            self._type_of("K=ASIAIOSFODNN7EXAMPLE\n"), "aws_access_key"
-        )
+    def test_value_types(self):
+        self.assertTrue(self.TYPE_CASES)
+        for case, text, expected in self.TYPE_CASES:
+            with self.subTest(case=case, text=text):
+                self.assertEqual(self._type_of(text), expected)
 
     def test_stripe_secret_and_pk_rules_registered(self):
         # 値ベース test (`K=sk_live_<24chars>`) は GitHub Push Protection の
@@ -493,39 +504,6 @@ class TestDotenvTypeExpansion(unittest.TestCase):
         # pk_live_ / pk_test_ で 2 rule
         self.assertEqual(types.count("stripe_pk"), 2)
 
-    def test_github_pat_classic(self):
-        self.assertEqual(
-            self._type_of(
-                "K=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
-            ),
-            "github_pat",
-        )
-
-    def test_github_pat_user(self):
-        self.assertEqual(
-            self._type_of(
-                "K=ghu_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
-            ),
-            "github_pat",
-        )
-
-    def test_openai_key(self):
-        self.assertEqual(
-            self._type_of("K=sk-proj-abcdefghijklmnopqrstuvwxyz\n"),
-            "openai_key",
-        )
-
-    def test_jwt_still_jwt(self):
-        # 既存の jwt 判定は維持
-        text = (
-            "K=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ"
-            ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c\n"
-        )
-        self.assertEqual(self._type_of(text), "jwt")
-
-    def test_str_fallback(self):
-        self.assertEqual(self._type_of("K=arbitrary_random_value_here\n"), "str")
-
 
 class TestDotenvPrefix(unittest.TestCase):
     """0.9.0 prefix 検出 (Q3 採用)。識別子型のみ prefix を返す。"""
@@ -535,45 +513,45 @@ class TestDotenvPrefix(unittest.TestCase):
         by_name = {k["name"]: k for k in info["keys"]}
         return by_name[key]
 
-    def test_jwt_prefix_ey(self):
-        text = (
+    # (ラベル = 畳む前のテスト名, dotenv の本文, 期待する prefix)
+    PREFIX_CASES = (
+        (
+            "test_jwt_prefix_ey",
             "K=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ"
-            ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c\n"
-        )
-        self.assertEqual(self._entry(text)["prefix"], "ey")
+            ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c\n",
+            "ey",
+        ),
+        ("test_aws_prefix_akia", "K=AKIAIOSFODNN7EXAMPLE\n", "AKIA"),
+        ("test_aws_prefix_asia", "K=ASIAIOSFODNN7EXAMPLE\n", "ASIA"),
+        # Stripe prefix の値ベース test (sk_live_ / sk_test_ / pk_live_) は
+        # GitHub Push Protection の secret scanning との衝突回避のため削除。
+        # type 分類別 rule 数の assert は test_stripe_secret_and_pk_rules_registered
+        # で別途担保する (内部 _PREFIX_TYPE_MAP の構成確認)。
+        ("test_github_pat_prefix", "K=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", "ghp_"),
+        ("test_openai_prefix", "K=sk-proj-abcdefghijklmnopqrstuvwxyz\n", "sk-"),
+    )
 
-    def test_aws_prefix_akia(self):
-        e = self._entry("K=AKIAIOSFODNN7EXAMPLE\n")
-        self.assertEqual(e["prefix"], "AKIA")
+    # (ラベル = 畳む前のテスト名, dotenv の本文)
+    NO_PREFIX_CASES = (
+        ("test_no_prefix_for_str", "K=random_string_value\n"),
+        ("test_no_prefix_for_url", "K=https://example.com/api\n"),
+        ("test_no_prefix_for_bool", "K=true\n"),
+    )
 
-    def test_aws_prefix_asia(self):
-        e = self._entry("K=ASIAIOSFODNN7EXAMPLE\n")
-        self.assertEqual(e["prefix"], "ASIA")
+    def test_identifier_types_have_a_prefix(self):
+        self.assertTrue(self.PREFIX_CASES)
+        for case, text, expected in self.PREFIX_CASES:
+            with self.subTest(case=case, text=text):
+                e = self._entry(text)
+                self.assertIn("prefix", e)
+                self.assertEqual(e["prefix"], expected)
 
-    # Stripe prefix の値ベース test (sk_live_ / sk_test_ / pk_live_) は
-    # GitHub Push Protection の secret scanning との衝突回避のため削除。
-    # type 分類別 rule 数の assert は test_stripe_secret_and_pk_rules_registered
-    # で別途担保する (内部 _PREFIX_TYPE_MAP の構成確認)。
-
-    def test_github_pat_prefix(self):
-        e = self._entry("K=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
-        self.assertEqual(e["prefix"], "ghp_")
-
-    def test_openai_prefix(self):
-        e = self._entry("K=sk-proj-abcdefghijklmnopqrstuvwxyz\n")
-        self.assertEqual(e["prefix"], "sk-")
-
-    def test_no_prefix_for_str(self):
-        e = self._entry("K=random_string_value\n")
-        self.assertNotIn("prefix", e)
-
-    def test_no_prefix_for_url(self):
-        e = self._entry("K=https://example.com/api\n")
-        self.assertNotIn("prefix", e)
-
-    def test_no_prefix_for_bool(self):
-        e = self._entry("K=true\n")
-        self.assertNotIn("prefix", e)
+    def test_other_types_have_no_prefix(self):
+        self.assertTrue(self.NO_PREFIX_CASES)
+        for case, text in self.NO_PREFIX_CASES:
+            with self.subTest(case=case, text=text):
+                e = self._entry(text)
+                self.assertNotIn("prefix", e)
 
 
 class TestDotenvStatus(unittest.TestCase):
@@ -640,17 +618,20 @@ class TestDotenvStatus(unittest.TestCase):
         self.assertIn("<long>", e["status"])
         self.assertEqual(e["length"], 4097)
 
-    def test_looks_truncated_dotdotdot(self):
-        e = self._entry("K=secret_value...\n")
-        self.assertIn("<looks_truncated>", e["status"])
+    # (ラベル = 畳む前のテスト名, dotenv の本文)
+    LOOKS_TRUNCATED_CASES = (
+        ("test_looks_truncated_dotdotdot", "K=secret_value...\n"),
+        ("test_looks_truncated_marker", "K=secret<truncated>\n"),
+        ("test_looks_truncated_backslash", "K=secret\\\n"),
+    )
 
-    def test_looks_truncated_marker(self):
-        e = self._entry("K=secret<truncated>\n")
-        self.assertIn("<looks_truncated>", e["status"])
-
-    def test_looks_truncated_backslash(self):
-        e = self._entry("K=secret\\\n")
-        self.assertIn("<looks_truncated>", e["status"])
+    def test_looks_truncated(self):
+        self.assertTrue(self.LOOKS_TRUNCATED_CASES)
+        for case, text in self.LOOKS_TRUNCATED_CASES:
+            with self.subTest(case=case, text=text):
+                e = self._entry(text)
+                self.assertIn("status", e)
+                self.assertIn("<looks_truncated>", e["status"])
 
     def test_set_includes_length(self):
         e = self._entry("K=hello\n")
@@ -745,23 +726,21 @@ class TestDotenvInlineComment(unittest.TestCase):
         by_name = {k["name"]: k["type"] for k in info["keys"]}
         return by_name[key]
 
-    def test_num_with_inline_comment(self):
-        self.assertEqual(self._type_of("K=3000 # port\n"), "num")
+    # (ラベル = 畳む前のテスト名, dotenv の本文, 期待する型)
+    TYPE_CASES = (
+        ("test_num_with_inline_comment", "K=3000 # port\n", "num"),
+        ("test_bool_with_inline_comment", "K=true # flag\n", "bool"),
+        ("test_null_with_inline_comment", "K=null # note\n", "null"),
+        ("test_value_hash_no_space_is_string", "K=value#frag\n", "str"),
+        ("test_double_quoted_hash", 'K="a # b"\n', "str"),
+        ("test_single_quoted_hash", "K='a # b'\n", "str"),
+    )
 
-    def test_bool_with_inline_comment(self):
-        self.assertEqual(self._type_of("K=true # flag\n"), "bool")
-
-    def test_null_with_inline_comment(self):
-        self.assertEqual(self._type_of("K=null # note\n"), "null")
-
-    def test_value_hash_no_space_is_string(self):
-        self.assertEqual(self._type_of("K=value#frag\n"), "str")
-
-    def test_double_quoted_hash(self):
-        self.assertEqual(self._type_of('K="a # b"\n'), "str")
-
-    def test_single_quoted_hash(self):
-        self.assertEqual(self._type_of("K='a # b'\n"), "str")
+    def test_value_types_with_hash(self):
+        self.assertTrue(self.TYPE_CASES)
+        for case, text, expected in self.TYPE_CASES:
+            with self.subTest(case=case, text=text):
+                self.assertEqual(self._type_of(text), expected)
 
     def test_no_value_leak_inline_comment(self):
         text = (

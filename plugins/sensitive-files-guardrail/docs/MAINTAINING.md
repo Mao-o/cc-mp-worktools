@@ -362,9 +362,16 @@ plugin root (`plugins/sensitive-files-guardrail`) から実行する。**`cd` �
   全 mode で deny は `DenyMatrix` / `DENY_CASES`、全 mode で allow は `AllowMatrix` /
   `ALLOW_CASES`、`ask_or_allow` に倒れる形は `AskOrAllowMatrix` / `ASK_OR_ALLOW_CASES`
   (0.36.3 で `CASES` から改名)。表を足したクラスが土台を継承し忘れると行が 1 件も
-  検査されないので、`TestMatrixTablesAreWired` がそれを落とす。D2 の目標は件数削減
+  検査されないので、`TestMatrixTablesAreWired` がそれを落とす。土台を他のファイルで
+  使うときは `test_bash_handler` から import し、そのファイルにも
+  `assert_matrix_tables_wired(self, globals(), <基底>)` を呼ぶ `TestMatrixTablesAreWired` を
+  置く (0.36.4 の `test_failclosed.py`)。Bash の判定以外の「入力 1 つ → 結果 1 つ」も、
+  クラスの中の `(ラベル, 入力, 期待値)` の表と `subTest(case=ラベル, ...)` に畳む。ラベルは
+  畳む前のテスト名にし、表の名前に土台の名前 (`DENY_CASES` / `ALLOW_CASES` /
+  `ASK_OR_ALLOW_CASES`) を使わない (配線の検査が土台の表と見なす)。D2 の目標は件数削減
   ではなく「同型の畳み込みで格子点を増やす」こと (実績: 0.33.0 でメソッド 55 → 12、
-  格子点 55 → 216。0.36.3 でメソッド 397 → 225、畳んだ範囲の格子点 453 → 1,908)。
+  格子点 55 → 216。0.36.3 でメソッド 397 → 225、畳んだ範囲の格子点 453 → 1,908。
+  0.36.4 で他のファイルの 209 件をメソッド 40 件に)。
   件数を減らすために形を捨てないこと — 形状カバレッジの空白が過去の重大不具合 3 件の
   直接原因だった
 

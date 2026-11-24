@@ -174,17 +174,22 @@ class TestCaseInsensitive(unittest.TestCase):
         self.addCleanup(self._env_patcher.stop)
         os.environ.pop("SFG_CASE_SENSITIVE", None)
 
-    def test_uppercase_env_detected(self):
-        self.assertTrue(is_sensitive(".ENV", DEFAULT_RULES))
-        self.assertTrue(is_sensitive(".Env", DEFAULT_RULES))
+    # (ラベル = 畳む前のテスト名, 名前)。1 つのテストに複数の assert があった
+    # ものは、同じラベルの行を並べてある
+    UPPERCASE_CASES = (
+        ("test_uppercase_env_detected", ".ENV"),
+        ("test_uppercase_env_detected", ".Env"),
+        ("test_uppercase_key_detected", "ID_RSA"),
+        ("test_uppercase_key_detected", "ID_ED25519"),
+        ("test_uppercase_credentials_detected", "CREDENTIALS.JSON"),
+        ("test_uppercase_credentials_detected", "Credentials.json"),
+    )
 
-    def test_uppercase_key_detected(self):
-        self.assertTrue(is_sensitive("ID_RSA", DEFAULT_RULES))
-        self.assertTrue(is_sensitive("ID_ED25519", DEFAULT_RULES))
-
-    def test_uppercase_credentials_detected(self):
-        self.assertTrue(is_sensitive("CREDENTIALS.JSON", DEFAULT_RULES))
-        self.assertTrue(is_sensitive("Credentials.json", DEFAULT_RULES))
+    def test_uppercase_detected(self):
+        self.assertTrue(self.UPPERCASE_CASES)
+        for case, name in self.UPPERCASE_CASES:
+            with self.subTest(case=case, name=name):
+                self.assertTrue(is_sensitive(name, DEFAULT_RULES))
 
     def test_case_sensitive_opt_out(self):
         os.environ["SFG_CASE_SENSITIVE"] = "1"
