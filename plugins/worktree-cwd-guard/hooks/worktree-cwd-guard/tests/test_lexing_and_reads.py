@@ -11,6 +11,8 @@ from test_guard import bash, decision, evaluate
 
 
 class CommentAndContinuationTest(test_guard.GuardBase):
+    SHARE_REPO = True  # repo とその周りに何も書かない (GuardBase.SHARE_REPO)
+
     def assertDenied(self, cmds):
         for cmd in cmds:
             with self.subTest(cmd=cmd):
@@ -158,6 +160,8 @@ class HeredocDelimiterFormsTest(test_guard.GuardBase):
     その行から後ろの git をすべて捨てていた (zsh では後ろの git が実行される)。
     """
 
+    SHARE_REPO = True  # repo とその周りに何も書かない (GuardBase.SHARE_REPO)
+
     def test_commit_message_heredoc_with_unusual_delimiter(self):
         m = self.main
         for op, d in (("<<\\EOF", "EOF"), ("<<'END MSG'", "END MSG"), ("<<'2EOF'", "2EOF")):
@@ -249,6 +253,8 @@ class HeredocDelimiterFormsTest(test_guard.GuardBase):
 
 
 class ReadOnlyStashAndApplyTest(test_guard.GuardBase):
+    SHARE_REPO = True  # repo とその周りに何も書かない (GuardBase.SHARE_REPO)
+
     def test_reading_stash_and_apply_in_other_checkout_is_allowed(self):
         m = self.main
         for cmd in (

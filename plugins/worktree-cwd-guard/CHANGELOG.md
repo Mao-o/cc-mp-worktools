@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.10.1
+
+**テスト整理 (挙動の変更なし)。suite の実行時間を約 85 秒から約 38 秒にし、worktree の下の subdirectory を作業ディレクトリにしたテストを
+足した (patch bump)。** テストは消してもまとめてもいない (件数は足した 1 件だけ増えて 246 件)。
+
+### テスト整理 (挙動の変更なし): detect の結果を覚え、repo に何も書かないクラスで repo を共有する
+
+- 時間の半分以上は、製品の `family.detect` (`evaluate` を呼ぶたびに `git rev-parse` と `git worktree list` を起動する) が、同じテストの
+  同じ作業ディレクトリで git を繰り返し起動していたこと (1 件の中で `evaluate` を 258 回呼ぶテストもある)。残りの多くはテストごとの
+  repo の作成 (`make_repo`) だった
+- `GuardBase` (`tests/test_guard.py`) は、テストの間、作業ディレクトリごとに 1 回だけ本物の detect を走らせて覚え、`evaluate` に渡す
+  (entry module の `detect` を差し替える)。`family.detect` を直接呼ぶテストと、hook を subprocess で起動するテストは、今までどおり本物の
+  detect を通る。テストの途中で worktree を足す・消す・`.git` ファイルを書き換えた後に同じ作業ディレクトリで読むときは、`forget_family()`
+  で覚えを捨てる
+- repo とその周りに何も書かない 18 クラス (96 件) は、`SHARE_REPO = True` で、クラスの全テストが 1 つの repo と detect の覚えを共有する
+- 確かめたこと: 覚えた値を返しながら毎回本物の detect も呼んで比べる版で suite を流し、1,648 回の呼び出しで不一致は 0 件。共有したクラスの
+  各テストの前後で repo の木 (種類・大きさ・mtime・中身) が変わったものも 0 件。どちらの検査も、わざと壊した版 (worktree を足した後に覚えを
+  捨てない / symlink を作るクラスを共有にする) では検出した。製品コードの変異 15 件で、落ちるテストの集合が書き換え前と一致した (足したテストの
+  分を除く)
+
+### テストの追加: worktree の下の subdirectory を作業ディレクトリにする
+
+- worktree の下の subdirectory を作業ディレクトリにしたテストが無く、この session の worktree (`Family.home`) を `--show-toplevel` ではなく
+  作業ディレクトリから取る退行を検出できなかった。この退行のもとでは、subdirectory で作業する agent が subdirectory の外の自分の worktree
+  (root の `README.md`、`cd ../..` の後の git) に書くのを、別の checkout への書き込みとして止める
+- `GuardTest.test_subdirectory_of_own_worktree_is_still_home`: subdirectory から自分の worktree への Write と git の書き込みを止めないこと、
+  別の checkout への書き込みは subdirectory からでも止めることを見る
+
 ## 0.10.0
 
 **相対パスの移動を続けた形などで hook が時間切れになる (コマンドがそのまま走る) 経路を読み取りの期限で閉じ、`git worktree remove|move` の対象の語が

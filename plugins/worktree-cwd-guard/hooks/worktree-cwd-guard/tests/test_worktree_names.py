@@ -248,6 +248,7 @@ class WorktreeNameTest(test_guard.GuardBase):
         link = Path(self._tmp.name) / "lnk"
         link.symlink_to(real)
         _add_worktree(self.main, link / "e", "lane-e")
+        self.forget_family()  # worktree の一覧が変わった (GuardBase の detect の覚えを捨てる)
         self.assertEqual(self._decision("git worktree remove --force e"), "deny")
         self.assertEqual(self._decision("git worktree remove --force real/e"), "deny")
         self.assertIsNone(self._evaluate("git worktree remove --force lnk/e", self.a))

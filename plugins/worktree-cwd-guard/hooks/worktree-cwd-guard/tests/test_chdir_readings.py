@@ -14,6 +14,8 @@ GIT = "git reset --hard"
 
 
 class ChdirReadingBase(test_guard.GuardBase):
+    SHARE_REPO = True  # 子のクラスも含めて、repo とその周りに何も書かない (GuardBase.SHARE_REPO)
+
     def _evaluate(self, cmd):
         try:
             return evaluate(bash(cmd, self.a))

@@ -13,6 +13,8 @@ from test_guard import bash, decision, evaluate
 
 
 class BuiltinPrefixTest(test_guard.GuardBase):
+    SHARE_REPO = True  # repo とその周りに何も書かない (GuardBase.SHARE_REPO)
+
     def assertDenied(self, cmds):
         for cmd in cmds:
             with self.subTest(cmd=cmd):

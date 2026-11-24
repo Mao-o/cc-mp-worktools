@@ -30,7 +30,8 @@ def _load_entry():
     return mod
 
 
-evaluate = _load_entry().evaluate
+_ENTRY = _load_entry()
+evaluate = _ENTRY.evaluate
 
 
 def bash(command: str, cwd: Path) -> dict:
@@ -48,18 +49,55 @@ def decision(out: dict | None) -> str | None:
 class GuardBase(HermeticGitTestCase):
     """使い捨ての main checkout + linked worktree 2 つを用意する (他の test module も継承する)。"""
 
+    # True にしたクラスは、クラスの全テストで 1 つの repo と detect の覚えを共有する。
+    # repo とその周り (一時 dir) に何も書かないクラスだけに付ける (書くと、同じクラスの他のテストに漏れる)
+    SHARE_REPO = False
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        if cls.SHARE_REPO:
+            tmp = tempfile.TemporaryDirectory()
+            cls.addClassCleanup(tmp.cleanup)
+            cls._shared_repo = make_repo(Path(tmp.name))
+            cls._shared_families = {}
+
     def setUp(self):
         super().setUp()
-        self._tmp = tempfile.TemporaryDirectory()
-        self.main, self.a, self.b = make_repo(Path(self._tmp.name))
+        if self.SHARE_REPO:
+            self._tmp = None
+            self.main, self.a, self.b = self._shared_repo
+            self._families = self._shared_families
+        else:
+            self._tmp = tempfile.TemporaryDirectory()
+            self.main, self.a, self.b = make_repo(Path(self._tmp.name))
+            self._families = {}
         self._env = mock.patch.dict(os.environ, {}, clear=False)
         self._env.start()
         for k in ("WORKTREE_CWD_GUARD_MODE", "WORKTREE_CWD_GUARD_ALLOW"):
             os.environ.pop(k, None)
+        # evaluate は呼ぶたびに detect で git を 2 回起動する。テストの間は repo の形が変わらないので、cwd ごとに 1 回だけ
+        # 本物の detect を走らせて覚える (entry の global を差し替えるので、evaluate だけに効く。family.detect を直接呼ぶテストと、
+        # hook を subprocess で起動するテストは本物の detect を通る)。テストの途中で worktree を足す・消す・`.git` ファイルを
+        # 書き換えた後に、同じ cwd で evaluate を呼ぶなら self.forget_family() を呼ぶ
+        real = _ENTRY.detect
+
+        def remembered(cwd):
+            if cwd not in self._families:
+                self._families[cwd] = real(cwd)
+            return self._families[cwd]
+
+        patcher = mock.patch.object(_ENTRY, "detect", remembered)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def forget_family(self):
+        self._families.clear()
 
     def tearDown(self):
         self._env.stop()
-        self._tmp.cleanup()
+        if self._tmp is not None:
+            self._tmp.cleanup()
 
 
 class GuardTest(GuardBase):
@@ -79,6 +117,32 @@ class GuardTest(GuardBase):
         fam = family.detect(str(self.a))
         self.assertEqual(family.owner(family.norm(self.a / "x.py"), fam), family.norm(self.a))
         self.assertEqual(family.owner(family.norm(self.main / "x.py"), fam), family.norm(self.main))
+
+    def test_subdirectory_of_own_worktree_is_still_home(self):
+        # 自分の worktree の下の subdirectory で作業しても、この session の worktree は worktree の root (`--show-toplevel`)。
+        # 今の場所を root と読むと、subdirectory の外の自分の worktree (root の README.md や `cd ..`) への書き込みを、別の checkout として止める
+        sub = self.a / "src" / "pkg"
+        sub.mkdir(parents=True)
+        fam = family.detect(str(sub))
+        self.assertIsNotNone(fam)
+        self.assertEqual(fam.home, family.norm(self.a))
+        for payload in (
+            write(sub / "x.py", sub),
+            write("y.py", sub),
+            write(self.a / "README.md", sub),
+            write("../../README.md", sub),
+            bash("git reset --hard", sub),
+            bash("git add . && git commit -m x", sub),
+            bash("cd ../.. && git reset --hard", sub),
+            bash(f'git -C "{self.a}" reset --hard', sub),
+            bash("git -C .. checkout -- .", sub),
+        ):
+            with self.subTest(payload=payload["tool_input"]):
+                self.assertIsNone(evaluate(payload))
+        # 別の checkout への書き込みは subdirectory からでも止める (上の None が、判定の対象外になって通ったのではないことの対照)
+        for payload in (write(self.main / "README.md", sub), bash(f'git -C "{self.main}" reset --hard', sub), bash("cd ../../../../.. && git stash", sub)):
+            with self.subTest(payload=payload["tool_input"]):
+                self.assertEqual(decision(evaluate(payload)), "deny")
 
     # --- Bash ---------------------------------------------------------------
 
