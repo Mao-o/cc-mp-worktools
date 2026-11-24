@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.10.2
+
+**Windows で、Write / Edit のパスと `WORKTREE_CWD_GUARD_ALLOW` に書いた Git Bash の綴り (`/c/Users/...`) を、Bash の行き先と同じく
+Git Bash の読み (`C:\Users\...`) でも読むようにした (patch bump)。** あわせて、0.9.2 の Git Bash の読みの前提を Windows の CI で測るテストを足した。
+0.10.1 までは、Bash の行き先だけを 2 つの読みの和で判定し、Write / Edit のパスと許可リストは Windows の読み (今のドライブの `\c\Users\...`) だけで読んでいた。
+
+### 修正: Write / Edit のパスと許可リストも、Git Bash の読みとの和で読む
+
+- Write / Edit / MultiEdit / NotebookEdit のパスが `/c/Users/<u>/repo/x.py` の綴りのまま届くと、`\c\Users\...` と読み、別の checkout
+  (`C:\Users\<u>\repo`) への書き込みでも止めなかった。Bash の行き先と同じく、Windows の読みと Git Bash の読みの両方で判定し、
+  どちらかで別の checkout なら止める
+- 許可リストに `/c/Users/<u>/repo` と書くと、`\c\Users\...` と読み、`git -C /c/Users/<u>/repo ...` の deny の行き先 (`C:\Users\<u>\repo`) と
+  一致しなかった (コマンドに書いた `/c/...` の綴りや Git Bash の `pwd` の出力をそのまま許可リストに足しても止まったまま。
+  deny の文面に出る `c:\users\...` の綴りなら 0.10.1 でも一致する)。許可リストの各 root も 2 つの読みの両方で読む。
+  Windows の読みも残すので、これまで許していた root は許したまま
+- Claude Code の挙動: 公式 docs (hooks の PreToolUse の入力) は、Write / Edit / Read の `file_path` は常に絶対パスで、Claude Code が
+  `~` と相対パスを hook の前に展開し、Windows では Git Bash で動く hook にも `\` 区切りで渡す (例は `C:\\project\\src\\index.ts`) と書いている。
+  docs のとおりなら `/c/...` の綴りのまま届くことはなく、この修正は効かない (その値は書き込む先と同じものとして判定する)。
+  Claude Code が `/c/x` を `C:\x` と今のドライブの `\c\x` のどちらに展開するかは docs に無く、Windows の実機でも確かめていない。
+  docs と実装がずれて `/c/...` のまま届いた場合に、Bash の行き先と同じ読みで止める側に倒した
+- Bash の行き先と同じ読み替え (`command.drive_spellings`。中身は 0.9.2 の `_msys_drive`) を使うので、読み替える綴りも同じ
+  (`/c/x` と `/c` だけ。`/c\x`・`/cygdrive/c/x`・`/cc/x` は読み替えない)。Windows 以外では読み替えない。
+  README の「目的と限界」・「止める操作」・「設定」と AGENTS.md の指摘しないものに書いた
+
+### 比較
+
+0.10.1 と 0.10.2 の `evaluate` に同じ入力を流した (git は起動せず、checkout の一覧を固定した)。入力は、Write / Edit / MultiEdit / NotebookEdit
+のパス (checkout ごとの綴り 16 形 / 9 形と、その下のファイル、相対パス) と Bash の git (`git -C` / `cd` / `GIT_DIR` × 同じ綴り) に、
+許可リストの値 (なし / 綴りの変種 / `;` で並べた形) を掛けたもの。Windows の読みは `os.path` を `ntpath` に差し替え、今のドライブを `C:` とした。
+
+| 世界 | 件数 | 通過 → 停止 | 停止 → 通過 | 形 |
+|---|---|---|---|---|
+| Windows | 39,372 | 2,916 | 702 | 通過 → 停止はすべて、`/c/...` / `/C/...` の綴りのパスで別の checkout を指す Write / Edit (許可リストなしでも停止になるもの)。停止 → 通過はすべて、許可リストの `/c/...` / `/C/...` の綴りの Git Bash の読みが、止めていた checkout と一致したもの |
+| Windows (`C:\c\proj` などに checkout がある) | 92,628 | 10,548 | 1,202 | 上と同じ |
+| POSIX (`/c/Users/...` に checkout がある) | 12,390 | 0 | 0 | |
+| POSIX (`/c/...` は checkout の外) | 13,497 | 0 | 0 | |
+
+docs の形 (`C:\...`) のパスと、読み替えない綴り (`/cc/x` / `//c/x` / `/c\x` / `/cygdrive/c/x`) は、判定も文面も変わらない。
+別のドライブの `/d/...` は `D:\...` と読むので、C: の checkout は指さない (比較では D: に checkout を置いていない)。
+2 つの読みの綴りが違っても同じ行き先になる形 (`/c/../Users/...` のようにドライブの root より上に出る `..`) は、同じ理由を 1 回だけ並べる
+(比較の入力にこの形は無い)。
+
+### テストの追加: Git Bash が `/c/x` を `C:\x` と読む前提を Windows の CI で測る
+
+- 0.9.2 で Bash の行き先を Git Bash の読みでも判定するようにしたのは、「Git Bash は `cd /c/x`・`git -C /c/x`・`--git-dir=/c/x`・`GIT_DIR=/c/x` を
+  `C:\x` と読む」という前提に依る。この前提は実機で測っていなかった
+- `GitBashDrivePathTest` (`tests/test_git_dir_targets.py`): Windows で Git for Windows の bash.exe (`which bash` は WSL の bash に当たることが
+  あるので、git の場所から探す) があるときだけ走る。guard の判定は通さず、本物の Git Bash と git の解決結果 (`rev-parse --show-toplevel` /
+  `--absolute-git-dir`、`pwd -W`) が main と一致することだけを見る。比べる main は git の出力の側に揃える (runner の一時 dir が 8.3 の短縮名に
+  なりうるため)。Windows 以外では skip する
+- このテストが Windows の CI で落ちたら、前提が外れている。和で判定しているので、外れていても見逃しは増えず、止めすぎになる。
+  そのときは 0.9.2 の Git Bash の読みを見直す
+
+### テスト
+
+- `NtpathEmulationTest`: Write / Edit / MultiEdit / NotebookEdit の `/c/...` のパスを止め、自分の worktree・`/cc/x`・別のドライブ・repo の外は
+  止めないこと、Windows の読みも残すこと、docs の形のパスと、綴りの違う 2 つの読みが同じ行き先になるパスで、同じ理由を 2 回並べないこと。
+  2 つの読みが別々の checkout を指すとき、片方を許可リストで許しても、もう片方で止めること (両方を許したら通すこと)。
+  許可リストの `/c/...` の綴りで止めていた checkout を許し、許していない checkout は止めたままのこと、許可リストの Windows の読みも残すこと
+- `GitBashDrivePathTest` は、Git Bash の既定の読みを測るため、起動する bash の env から MSYS のパス変換を止める変数
+  (`MSYS_NO_PATHCONV` / `MSYS2_ARG_CONV_EXCL` / `MSYS2_ENV_CONV_EXCL`) を外す
+- `PosixDrivePathTest`: Windows 以外では、Write / Edit のパスと許可リストの `/c/x` を読み替えないこと
+
+テスト件数: 246 → 255 (追加 9・削除 0・統合 0)。
+
 ## 0.10.1
 
 **テスト整理 (挙動の変更なし)。suite の実行時間を約 85 秒から約 38 秒にし、worktree の下の subdirectory を作業ディレクトリにしたテストを

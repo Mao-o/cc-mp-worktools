@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -18,6 +19,27 @@ from _testutil import hermetic_env, sh
 from test_guard import bash, decision, evaluate
 
 RESET = "reset --hard"
+
+
+def _run(shell: list[str], cmd: str, cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [*shell, cmd], cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        stdin=subprocess.DEVNULL, timeout=30,
+    )
+
+
+def _git_bash() -> Path | None:
+    """Git for Windows の bash.exe。`which bash` は WSL の bash に当たることがあるので、git の場所から探す。
+
+    git は `<Git>\\cmd\\git.exe` / `<Git>\\bin\\git.exe` / `<Git>\\mingw64\\bin\\git.exe` のどれかで、bash は `<Git>\\bin\\bash.exe`。
+    """
+    git = shutil.which("git")
+    if git is None:
+        return None
+    for parent in Path(git).resolve().parents[1:3]:
+        if (parent / "bin" / "bash.exe").is_file():
+            return parent / "bin" / "bash.exe"
+    return None
 
 
 class GitDirOnlyWorkTreeTest(test_guard.GuardBase):
@@ -231,7 +253,7 @@ class RealGitTest(unittest.TestCase):
             (root / "README.md").write_text(f"dirty {name}\n", encoding="utf-8")
 
     def _run(self, shell: list[str], cmd: str) -> None:
-        subprocess.run([*shell, cmd], cwd=self.a, env=self.env, capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
+        _run(shell, cmd, self.a, self.env)
 
     def _shells(self):
         out = [["/bin/bash", "-c"]]
@@ -280,6 +302,56 @@ class RealGitTest(unittest.TestCase):
         rel = os.path.relpath(self.b, self.main)
         self._run(["/bin/bash", "-c"], f'cd "{self.main}"; git --git-dir="{self.a}/.git" --work-tree="{self.main}" worktree remove --force {rel}')
         self.assertFalse(self.b.exists())
+
+
+@unittest.skipUnless(os.name == "nt", "Windows の Git Bash の前提 (hook を呼ばず、git と shell の解決結果だけを確かめるテスト)")
+class GitBashDrivePathTest(unittest.TestCase):
+    """Git Bash が `/c/x` を `C:\\x` と読む前提を、本物の Git Bash と git で固定する。
+
+    Windows で Bash の行き先を Git Bash の読み (command.py の `_msys_drive`) でも判定するのは、この前提に依る。guard の判定は
+    通さない。このクラスが落ちたら前提が外れているので、Git Bash の読みを見直す (和で判定しているので、外れていても見逃しは増えず、
+    止めすぎになる)。
+    """
+
+    def setUp(self):
+        bash = _git_bash()
+        if bash is None:
+            self.skipTest("Git for Windows の bash.exe が見つからない")
+        self.shell = [str(bash), "-c"]
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.env = hermetic_env()
+        # 測るのは Git Bash の既定の読みなので、MSYS のパス変換を止める変数を外す (開発者の env に常設されていることがある)
+        for k in ("MSYS_NO_PATHCONV", "MSYS2_ARG_CONV_EXCL", "MSYS2_ENV_CONV_EXCL"):
+            self.env.pop(k, None)
+        main, self.a, _ = test_guard.make_repo(Path(tmp.name))
+        # runner の一時 dir は 8.3 の短縮名になりうるので、比べる main は git の出力の側に揃える
+        self.main = sh(main, "rev-parse", "--show-toplevel").strip()
+        self.drive, rest = os.path.splitdrive(self.main)
+        if not self.drive.endswith(":"):
+            self.skipTest(f"ドライブ文字の無いパス ({self.main})")
+        self.posix = "/" + self.drive[0].lower() + rest.replace("\\", "/")
+
+    def _bash(self, cmd: str) -> str:
+        r = _run(self.shell, cmd, self.a, self.env)
+        self.assertEqual(r.returncode, 0, f"{cmd}\n{r.stderr}")
+        return r.stdout.strip()
+
+    def assertSamePath(self, got: str, want: str) -> None:
+        self.assertEqual(os.path.normcase(os.path.normpath(got)), os.path.normcase(os.path.normpath(want)), got)
+
+    def test_drive_spelling_names_the_windows_path(self):
+        # 一時 dir のパスに空白や `~` (8.3 の短縮名) があっても 1 語で届くよう引用する (引用しても Git Bash はパスを読み替える)
+        top, git_dir = shlex.quote(self.posix), shlex.quote(self.posix + "/.git")
+        for cmd, want in (
+            (f"git -C {top} rev-parse --show-toplevel", self.main),
+            (f"cd {top} && pwd -W", self.main),
+            (f"cd /{self.drive[0].lower()} && pwd -W", self.drive + "\\"),
+            (f"git --git-dir={git_dir} rev-parse --absolute-git-dir", os.path.join(self.main, ".git")),
+            (f"GIT_DIR={git_dir} git rev-parse --absolute-git-dir", os.path.join(self.main, ".git")),
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertSamePath(self._bash(cmd), want)
 
 
 if __name__ == "__main__":
