@@ -2,6 +2,15 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.57.3] - 2026-11-24
+
+### 修正: `url_base` の source で、ホストを読めない相対 URL のページが全コマンドを traceback で止める
+
+- **症状**: `url_base` を持つ preset (Vite / Vitest) で、`llms-full.txt` のページの `url:` が、ホストを `urllib.parse.urlparse` が読めない形 (`//[name].example.com/guide/x.md` のような IPv6 アドレスでない角括弧のホスト、閉じない `[`、対の無い `]`、NFKC で `/` に変わる文字を含むホスト) だと、`urljoin` が `ValueError` を投げ、`fetch-index` / `search-index` / `search` / `sections` / `content` / `search-content` のすべてが、そのページだけでなくコマンド全体で終了コード 1 の traceback になった。0.57.2 の `urlsplit` と同じ種類の `ValueError`。手元のキャッシュの `llms-full.txt` に該当するページは無い (上流にこの形が入ったときに起きる)
+- **方針**: 結合できない URL は、書かれたまま残す (相対 URL のまま)。ページは本文もタイトルも見出しも今までどおり使え、`page_ref` に書かれたままの URL を渡せばそのページを引ける (結合した URL を渡しても当たらないだけで、エラーの扱いになる)。0.57.2 の「ホストを読めない URL は取得の失敗と同じ扱い」に揃えた。URL を捨てる案 (ページの URL を無しにする) は取らない。`url_base` を持つ同梱 preset は `llms-full.txt` の本文だけを読み、ページの取得をしないので、別の traceback は出ない
+- ホストを読める相対 URL の結合は変わらない (`/x.md`・`x.md`・`//cdn.example.com/x.md`・`//[::1]/x.md`・絶対 URL は旧版と同じ。`loop/stage` と手元のキャッシュ全ファイル × 同梱 preset の URL を比べて差 0)
+- テスト: `test_unreadable_url_base.py` を足した。ホストを読めない 5 形 (角括弧のホスト・閉じない `[`・対の無い `]`・NFKC の `/`・`//[name]`) を先頭のページに置いた 2 ページのファイルで、vite と vitest の両方について、URL が書かれたまま残りもう 1 ページは今までどおり結合されること、6 つのコマンドがどれも終了コード 0 で traceback を出さずもう 1 ページを返すこと、悪いページがあってもほかのページの一覧の行が変わらないこと、ホストを読める 5 形の結合が変わらないことを固定した
+
 ## [0.57.2] - 2026-11-24
 
 ### 修正: `respect_robots` の source で、ホストを読めない URL の項目が `search` / `sections` を traceback で止める

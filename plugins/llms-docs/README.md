@@ -417,7 +417,7 @@ presets だけを使う。場所は `--sources-file` > `$LLMS_DOCS_SOURCES_FILE`
 | `frontmatter_delimiter` | | `split: frontmatter` のとき、frontmatter を囲む行 (既定 `---`。`-` か `+` を 3 個以上)。Vercel は `-` 80 個 |
 | `line_prefix` | `split: line` で必須 | 区切り行の接頭辞。接頭辞のあとに URL が 1 つだけ続く行を区切りにする |
 | `page_url` | | ページ URL の取り方。`none` (既定) / `h1-link` (`split: h1` 専用。H1 全体が 1 つの `[タイトル](<url>)` のとき、リンクの文字をタイトル、リンク先を URL にする。リンクが 2 つある H1 やリンクの後ろに語がある H1 は読まない) / `frontmatter:<key>` / `line:<接頭辞>` (本文の先頭 10 行から探す) / `link:<リンク文字列>` (本文の先頭 20 行にある Markdown リンク `[<リンク文字列>](<url>)` の URL)。`split: line` では区切り行の URL を使う |
-| `url_base` | | ページ URL が相対 (`/guide.md`) のときに前に付ける基点 (URL として解決するので、基点のパスは `/…` で置き換わる) |
+| `url_base` | | ページ URL が相対 (`/guide.md`) のときに前に付ける基点 (URL として解決するので、基点のパスは `/…` で置き換わる。ホストを読めない相対 URL (`//[name].example.com/x.md` など) は結合できないので、書かれたまま残す) |
 | `url_prefix` | | ページ URL が相対のときに、そのまま前につなぐ文字列 (`https://kilo.ai/docs` + `/automate`)。`url_base` とは一緒に書けない |
 | `drop_lines` | | 本文から除く行の正規表現のリスト (行頭から照合したいときは `^` を付ける)。全ページに付く定型行 (「Skip to content」など) が検索に当たらないようにする。コードブロック内の行は除かない。ページ URL は除く前に読む |
 | `skip_empty` | | `true` で、本文が空 (空行と水平線だけ) のページを捨てる (Hono の `# Start of Hono documentation`、Codex のカテゴリ見出しのような見出しだけの行) |
