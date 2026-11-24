@@ -74,6 +74,12 @@ HOOK="${CLAUDE_PLUGIN_ROOT}/scripts"
 "$HOOK/pr-commit-safe.sh" /tmp/r4_commit.txt
 ```
 
+`allowed-tools` の `Bash` を完全一致の `Bash(<コマンド>)` に絞らず単独で付与しているのは、この skill が打つコマンドのどれにも呼び出しごとに変わる引数が付き、事前に列挙できないため (絞ると、寝かせている間の状態確認や往復ごとの commit・再 trigger が確認待ちで止まる):
+
+- 同梱スクリプトは引数を必須にしている: `pr-codex-status.sh` は PR 番号 (と任意の since)、`pr-codex-trigger.sh` は PR 番号 (と任意のサマリの本文かファイルパス)、`pr-commit-safe.sh` は commit message のファイルパス
+- `gh pr ready` / `gh pr checks` / `gh pr view` / `gh pr merge` は、手順では PR 番号を付けて打つ
+- 対象 repo のテスト・lint・検証のコマンドは repo ごとに違う
+
 ## 単発 PR / シンプルな merge のとき (1 review で完結)
 
 往復対応が想定されない PR (削除 commit / typo / 設定変更 等) でも Codex review

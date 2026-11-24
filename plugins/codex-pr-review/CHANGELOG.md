@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.2
+
+skill の `allowed-tools` が `Bash` を単独で付与している理由を書いた (挙動の変更なし、patch bump)。
+
+- `iterating-pr-codex-reviews` の `SKILL.md` に理由を足した。この skill が打つコマンドはどれも呼び出しごとに変わる
+  引数を取り、完全一致の `Bash(<コマンド>)` では列挙できない: 同梱スクリプトは PR 番号か commit message の
+  ファイルパスを必須にし (status は任意の since、trigger は任意のサマリも取る)、`gh pr ready` / `checks` / `view` /
+  `merge` は手順では PR 番号を付けて打ち、対象 repo のテスト・lint のコマンドは repo ごとに違う。付与そのものは変えていない
+- テスト: 単独の付与があるときだけ理由の段落があること、理由が手順で使う同梱スクリプトと `gh pr <sub>` を
+  すべて名指ししていること、同梱スクリプトが最初の引数なしでは gh / git を呼ばずに Usage を出して止まること
+
 ## 0.1.1
 
 icon と導入手順の追加 (挙動の変更なし、patch bump)。
