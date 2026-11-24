@@ -551,6 +551,38 @@ class RespectRobotsTest(unittest.TestCase):
         self.assertNotIn("using cached copy", err)
         self.assertIn("robots.txt disallows", err)
 
+    def run_safely(self, *argv):
+        try:
+            return self.run_g(*argv)
+        except Exception as e:  # a crash fails the assertions, not the run
+            self.fail(f"{argv} crashed: {e!r}")
+
+    def test_an_index_url_whose_host_cannot_be_read_is_a_failed_fetch(self):
+        # (an unclosed "[" is rejected by urlsplit on every Python)
+        bad = "https://[unreadable.example.com/llms.txt"
+        Path(self.sources).write_text(json.dumps({"sources": {"polite": {**self.profile, "index_url": bad}}}),
+                                      encoding="utf-8")
+        code, out, err = self.run_safely("search-index", "widgets")
+        self.assertEqual(code, 1, err)
+        self.assertEqual(out, "")
+        self.assertIn(f"Error: Failed to fetch {bad}: the host of the URL cannot be read (", err)
+        self.assertEqual(self.net.calls, [])
+
+    def test_a_stale_copy_of_a_page_whose_host_cannot_be_read_answers_with_a_warning(self):
+        bad = "https://unreadable].example.com/docs/page"
+        self.net.served[INDEX] = f"- [Unreadable page]({bad}): widgets\n" + LLMS
+        path = self._page_cache(bad)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        Path(path).write_text("# Unreadable\n\nthe copy\n", encoding="utf-8")
+        self._age(path)
+        code, out, err = self.run_safely("content", "0", "--max-age", "60")
+        self.assertEqual(code, 0, err)
+        self.assertIn("the copy", out)
+        self.assertIn("WARNING: fetch failed (the host of the URL cannot be read (", err)
+        self.assertIn("using cached copy", err)
+        self.assertNotIn(bad, self.net.calls)
+        self.assertEqual([c for c in self.net.calls if "unreadable" in c], [])
+
     def test_without_the_key_robots_is_never_read(self):
         profile = {k: v for k, v in PROFILE.items() if k != "respect_robots"}
         Path(self.sources).write_text(json.dumps({"sources": {"polite": profile}}), encoding="utf-8")
@@ -693,6 +725,20 @@ class RedirectTest(unittest.TestCase):
         self.assertEqual(_BrokenRobots.seen, ["/robots.txt"])
         self.assertIn("refused: could not read", err)
         self.assertNotIn("disallows", err)
+
+    def test_a_redirect_to_a_host_that_cannot_be_read_is_a_failed_fetch(self):
+        # urllib reads the target before the robots check is asked: its
+        # ValueError is a failed fetch too (an unclosed "[" fails everywhere)
+        _Server.elsewhere = "https://[unreadable.example.com/page"
+        try:
+            code, out, err = self.run_g({}, "content", "3")
+        except Exception as e:  # a crash fails the assertions, not the run
+            self.fail(f"crashed: {e!r}")
+        self.assertEqual(code, 1, err)
+        self.assertEqual(out, "")
+        self.assertIn("Error: Failed to fetch ", err)
+        self.assertIn("/docs/away: Invalid IPv6 URL", err)
+        self.assertIn("/docs/away", _Server.seen)
 
     def test_an_allowed_redirect_is_followed(self):
         code, out, err = self.run_g({}, "content", "2")

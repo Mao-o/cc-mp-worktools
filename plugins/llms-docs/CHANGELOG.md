@@ -2,6 +2,15 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.57.2] - 2026-11-24
+
+### 修正: `respect_robots` の source で、ホストを読めない URL の項目が `search` / `sections` を traceback で止める
+
+- **症状**: `respect_robots` を持つ `body: fetch` の preset (Firebase / Zed / Amp) で、`llms.txt` の項目のホストを `urllib.parse.urlsplit` が読めない (IPv6 アドレスでない角括弧のホスト `https://[your-instance].example.com/…` は Python 3.11.4 以降、閉じない `[` と対の無い `]` は全版、NFKC で `/` などに変わる文字を含むホスト) と、そのページを取る `search`・`sections`・`content`・`search-content` が `ValueError` の traceback で終了コード 1 になった。`search` は候補の 1 件でこれが起きると、ほかの候補も出さずに止まった。`robots.txt` を読む前の URL の分解が、取得の失敗として扱われていなかった。手元のキャッシュの `llms.txt` 8 本 (9,325 URL) には該当する項目は無い
+- **変更**: ホストを読めない URL は、読む `robots.txt` が決まらないので取得せず、`robots.txt` の拒否と同じく取得の失敗として扱う (`the host of the URL cannot be read (…), so there is no robots.txt to check and it is not fetched`)。`search` と `search-content` はその候補だけを `(skip: fetch failed …)` で飛ばしてほかの候補を続け、`sections` / `content` はそのページについて `Error: Failed to fetch …` で終了コード 1 になる。古いキャッシュがあれば、拒否のときと同じく WARNING を出してそれを返す。`index_url` を読めない sources.json の profile も同じ扱いになる。ページにもそのホストの `robots.txt` にも要求は出さない。読める URL の判定は変わらない (手元のキャッシュの 9,325 URL × 2 通りの `robots.txt` で旧版と一致)
+- 転送先のホストを読めないとき (urllib が転送先を分解する時点で `ValueError`) は、0.57.1 でも取得の失敗だった。挙動は変えずにテストで固定した
+- テスト: 同梱の 3 preset それぞれで、ホストを読めない 4 形の項目を先頭に置いた `llms.txt` に対して、`search` がその候補だけを飛ばしてほかの候補の本文を出すこと、`sections` / `content` / `--page-ref` の `search-content` がそのページを取得の失敗にし、ほかのページの `sections` は開くこと、firebase の全ページの `search-content` がその 1 件だけを飛ばすこと、どのコマンドもそのホストに要求を出さないことを固定した。`robots.txt` を読む同梱 preset がこの 3 つであることも確かめる。汎用の profile では、`index_url` を読めないときの終了と、古いキャッシュを WARNING 付きで返すこと、読めない転送先が取得の失敗になることを固定した
+
 ## [0.57.1] - 2026-11-18
 
 ### 修正: render を読むたびに、`llms.txt` と比べるページ数の警告が誤って出る

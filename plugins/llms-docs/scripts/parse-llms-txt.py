@@ -2307,8 +2307,16 @@ def _robots_refusal(args, profile: dict, url: str) -> str | None:
     """Why *url* must not be fetched, or ``None`` when the ``robots.txt`` of its
     host lets this loader fetch it. A site that forbids the URL and a file that
     could not be read stop the fetch alike, and read differently: the second
-    says nothing about what the site allows, and may pass on a later run."""
-    parts = urlsplit(url)
+    says nothing about what the site allows, and may pass on a later run.
+    A URL whose host ``urlsplit`` rejects (a bracketed host that is not an
+    IPv6 address, such as ``https://[name].example.com/``, an unbalanced
+    ``[`` or ``]``, or a host with a character that NFKC turns into one of
+    ``/?#@:``) names no ``robots.txt`` to read, so it is refused too: one
+    such ``llms.txt`` entry is one failed fetch, not the end of the command."""
+    try:
+        parts = urlsplit(url)
+    except ValueError as e:
+        return f"the host of the URL cannot be read ({e}), so there is no robots.txt to check and it is not fetched"
     origin = f"{parts.scheme}://{parts.netloc}"
     rules = _robots_rules(args, profile, origin)
     if isinstance(rules, str):
@@ -2386,7 +2394,9 @@ def _fetch_pages_concurrently(args, profile: dict, indexed_urls) -> tuple[dict, 
     """Fetch the ``(idx, url)`` pages ``page_fetch_workers`` at a time, each
     with ``page_fetch_timeout``: ``({idx: cache path}, [(idx, url, error)])``.
     A page that fails with no cache to fall back to is skipped, not fatal
-    (one dead link must not cost the other candidates). Threads: each fetch
+    (one dead link must not cost the other candidates; with
+    ``respect_robots``, neither must one whose host cannot be read:
+    ``_robots_refusal`` refuses it as a failed fetch). Threads: each fetch
     waits on the network. Only ``search`` uses this, on its bounded ``--top-n``
     candidates; ``search-content`` fetches one page at a time so that its
     results print as each page completes (``_search_content_fetch``). A URL
