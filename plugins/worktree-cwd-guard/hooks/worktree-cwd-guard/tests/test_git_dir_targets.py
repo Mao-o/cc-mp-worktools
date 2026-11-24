@@ -321,6 +321,9 @@ class GitBashDrivePathTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.env = hermetic_env()
+        # 測るのは Git Bash の既定の読みなので、MSYS のパス変換を止める変数を外す (開発者の env に常設されていることがある)
+        for k in ("MSYS_NO_PATHCONV", "MSYS2_ARG_CONV_EXCL", "MSYS2_ENV_CONV_EXCL"):
+            self.env.pop(k, None)
         main, self.a, _ = test_guard.make_repo(Path(tmp.name))
         # runner の一時 dir は 8.3 の短縮名になりうるので、比べる main は git の出力の側に揃える
         self.main = sh(main, "rev-parse", "--show-toplevel").strip()

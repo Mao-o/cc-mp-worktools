@@ -602,6 +602,39 @@ class NtpathEmulationTest(unittest.TestCase):
         reason = out["hookSpecificOutput"]["permissionDecisionReason"]
         self.assertEqual(reason.count("配下のファイル"), 1, reason)
 
+    def test_file_tool_deny_names_each_target_once(self):
+        # 2 つの読みの綴りが違っても、行き先が同じなら同じ理由を 2 回並べない (ドライブの root より上に出る `..` の形)
+        for path, extra in (
+            ("/c/../Users/other/repo/x.py", ()),
+            ("/C/../users/other/repo/x.py", ()),
+            ("/c/x/../../Users/other/repo/x.py", ()),
+            ("/c/../c/proj/x.py", ("C:\\c\\proj",)),  # どちらの読みでも `C:\c\proj\x.py`
+        ):
+            with self.subTest(path=path):
+                out = self._evaluate(self._file("Write", path), self._family(*extra))
+                self.assertEqual(decision(out), "deny")
+                reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+                self.assertEqual(reason.count("配下のファイル"), 1, reason)
+
+    def test_file_tool_both_readings_hit_other_checkouts(self):
+        # `/c/Users/other/repo/x.py` の Windows の読み (`C:\c\Users\other\repo`) と Git Bash の読み (main) が別々の checkout に
+        # 当たるとき、片方だけを許可リストに入れても、もう片方で止める (和の 2 つ目を読み落とさない)。両方の読みを許したら通す
+        fam = self._family("C:\\c\\Users\\other\\repo")
+        data = self._file("Write", "/c/Users/other/repo/x.py")
+        for allow, left in (
+            (None, ("c:\\c\\users\\other\\repo\\x.py", "c:\\users\\other\\repo\\x.py")),
+            ("C:\\c\\Users\\other\\repo", ("c:\\users\\other\\repo\\x.py",)),
+            ("C:\\Users\\other\\repo", ("c:\\c\\users\\other\\repo\\x.py",)),
+        ):
+            with self.subTest(allow=allow):
+                out = self._evaluate(data, fam, allow=allow)
+                self.assertEqual(decision(out), "deny")
+                reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+                self.assertEqual(reason.count("配下のファイル"), len(left), reason)
+                for target in left:
+                    self.assertIn(f"({target})", reason)
+        self.assertIsNone(self._evaluate(data, fam, allow="/c/Users/other/repo"))
+
     def test_allow_list_in_git_bash_spelling(self):
         # deny の行き先と同じ綴り (`/c/...`。Git Bash の pwd もこの形を返す) で書いた root を許す
         main_cmd, b_cmd = "git -C /c/Users/other/repo reset --hard", "git -C /c/Users/other/wt-b reset --hard"

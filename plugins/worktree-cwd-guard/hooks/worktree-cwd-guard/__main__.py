@@ -53,9 +53,10 @@ def _out(decision: str | None, text: str) -> dict:
 def _file_findings(path: str, cwd: str, fam: Family) -> list[command.Finding]:
     # Claude Code は Write / Edit のパスを hook の前に絶対パスへ展開して渡す (Windows では `\` 区切りの `C:\...`)。
     # `/c/x` の綴りのまま届いたときは、Bash の行き先と同じく Windows の読みと Git Bash の読みの和で判定する
+    # 綴りの違う 2 つの読みが同じ行き先になることがある (`/c/../c/proj` など)。同じ理由を 2 回並べないよう、行き先でまとめる
+    targets = (norm(s if os.path.isabs(s) else os.path.join(cwd, s)) for s in command.drive_spellings(path))
     findings = []
-    for spelled in command.drive_spellings(path):
-        target = norm(spelled if os.path.isabs(spelled) else os.path.join(cwd, spelled))
+    for target in dict.fromkeys(targets):
         o = owner(target, fam)
         if o is not None and o != fam.home:
             findings.append(command.Finding(True, f"別の checkout ({o}) 配下のファイル ({target}) に書き込もうとしている", o))

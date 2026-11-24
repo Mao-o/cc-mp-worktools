@@ -12,7 +12,8 @@ Git Bash の読み (`C:\Users\...`) でも読むようにした (patch bump)。*
   (`C:\Users\<u>\repo`) への書き込みでも止めなかった。Bash の行き先と同じく、Windows の読みと Git Bash の読みの両方で判定し、
   どちらかで別の checkout なら止める
 - 許可リストに `/c/Users/<u>/repo` と書くと、`\c\Users\...` と読み、`git -C /c/Users/<u>/repo ...` の deny の行き先 (`C:\Users\<u>\repo`) と
-  一致しなかった (deny の文面に従って同じ綴りを許可リストに足しても止まったまま)。許可リストの各 root も 2 つの読みの両方で読む。
+  一致しなかった (コマンドに書いた `/c/...` の綴りや Git Bash の `pwd` の出力をそのまま許可リストに足しても止まったまま。
+  deny の文面に出る `c:\users\...` の綴りなら 0.10.1 でも一致する)。許可リストの各 root も 2 つの読みの両方で読む。
   Windows の読みも残すので、これまで許していた root は許したまま
 - Claude Code の挙動: 公式 docs (hooks の PreToolUse の入力) は、Write / Edit / Read の `file_path` は常に絶対パスで、Claude Code が
   `~` と相対パスを hook の前に展開し、Windows では Git Bash で動く hook にも `\` 区切りで渡す (例は `C:\\project\\src\\index.ts`) と書いている。
@@ -36,7 +37,10 @@ Git Bash の読み (`C:\Users\...`) でも読むようにした (patch bump)。*
 | POSIX (`/c/Users/...` に checkout がある) | 12,390 | 0 | 0 | |
 | POSIX (`/c/...` は checkout の外) | 13,497 | 0 | 0 | |
 
-docs の形 (`C:\...`) のパスと、`/cc/x` / `//c/x` / `/c\x` / `/cygdrive/c/x` / 別のドライブ `/d/...` の綴りは、判定も文面も変わらない。
+docs の形 (`C:\...`) のパスと、読み替えない綴り (`/cc/x` / `//c/x` / `/c\x` / `/cygdrive/c/x`) は、判定も文面も変わらない。
+別のドライブの `/d/...` は `D:\...` と読むので、C: の checkout は指さない (比較では D: に checkout を置いていない)。
+2 つの読みの綴りが違っても同じ行き先になる形 (`/c/../Users/...` のようにドライブの root より上に出る `..`) は、同じ理由を 1 回だけ並べる
+(比較の入力にこの形は無い)。
 
 ### テストの追加: Git Bash が `/c/x` を `C:\x` と読む前提を Windows の CI で測る
 
@@ -52,11 +56,14 @@ docs の形 (`C:\...`) のパスと、`/cc/x` / `//c/x` / `/c\x` / `/cygdrive/c/
 ### テスト
 
 - `NtpathEmulationTest`: Write / Edit / MultiEdit / NotebookEdit の `/c/...` のパスを止め、自分の worktree・`/cc/x`・別のドライブ・repo の外は
-  止めないこと、Windows の読みも残すこと、docs の形のパスで同じ理由を 2 回並べないこと。許可リストの `/c/...` の綴りで止めていた checkout を
-  許し、許していない checkout は止めたままのこと、許可リストの Windows の読みも残すこと
+  止めないこと、Windows の読みも残すこと、docs の形のパスと、綴りの違う 2 つの読みが同じ行き先になるパスで、同じ理由を 2 回並べないこと。
+  2 つの読みが別々の checkout を指すとき、片方を許可リストで許しても、もう片方で止めること (両方を許したら通すこと)。
+  許可リストの `/c/...` の綴りで止めていた checkout を許し、許していない checkout は止めたままのこと、許可リストの Windows の読みも残すこと
+- `GitBashDrivePathTest` は、Git Bash の既定の読みを測るため、起動する bash の env から MSYS のパス変換を止める変数
+  (`MSYS_NO_PATHCONV` / `MSYS2_ARG_CONV_EXCL` / `MSYS2_ENV_CONV_EXCL`) を外す
 - `PosixDrivePathTest`: Windows 以外では、Write / Edit のパスと許可リストの `/c/x` を読み替えないこと
 
-テスト件数: 246 → 253 (追加 7・削除 0・統合 0)。
+テスト件数: 246 → 255 (追加 9・削除 0・統合 0)。
 
 ## 0.10.1
 
