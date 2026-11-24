@@ -53,7 +53,8 @@ import sys
 # 現状はすべて「Bash 単独」で、この検査の導入前から付いていたもの。
 # - llms-docs の skill は、引数が質問ごとに変わるスクリプトを打つので完全一致に絞れない
 #   (各 SKILL.md に理由がある)。skill 単位でなく skills 配下で許可する
-# - codex-pr-review は 1 skill 単位の許可で、絞り終えたら外す
+# - codex-pr-review の skill は、PR 番号やファイルパスが呼び出しごとに変わるので絞れない
+#   (理由は SKILL.md の同梱スクリプトの節)。1 skill 単位で許可する
 # 付与が 1 件も無い許可は、下の「実体の無い許可リスト」検査が FAIL にする。
 ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
     {

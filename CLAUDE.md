@@ -47,7 +47,8 @@ make lint
 # 1. plugin.json の version を bump
 # 2. CHANGELOG.md 更新
 # 3. git commit / push → PR → main へ merge
-#    (tag は main への merge 後に CI が自動で打つ。手で打たない)
+#    (push 時点の版の tag は main への merge 後に CI が自動で打つ。手で打たない。
+#     1 回の push に同じ plugin の bump が複数入ったときの途中の版だけは下の規約の例外)
 ```
 
 ## リリース tag の規約
@@ -55,13 +56,18 @@ make lint
 tag 名は **`<plugin-name>/v<version>`** (例: `sensitive-files-guardrail/v0.33.1`)。
 `plugin.json` の `version` と 1:1 に対応させる。
 
-- **手で打たない。** main への push で CI (`.github/workflows/validate.yml` の
+- **push 時点の版の tag は手で打たない。** main への push で CI (`.github/workflows/validate.yml` の
   `tag-plugin-releases` job) が、各 plugin の `plugin.json` の version に対応する
   tag が無ければ annotated tag を作って push する。validate / lint / tests が
   green のときだけ打つ
 - 既存 tag は**打ち替えない**。bump を忘れた場合は「打つ tag が無い」だけで、
   次に bump した push で作られる
-- 判定・作成ロジックは `scripts/backfill-plugin-tags.sh` に一本化 (既定は
+- **例外: 1 回の push に同じ plugin の bump が複数入ったときの途中の版。** CI が打つのは
+  push 時点の版だけなので、途中の版の tag は push する側が push のときに、その版が
+  main に入った commit へ CI と同じ書式の annotated tag で打つ (版と tag を 1:1 に
+  保つため)。その commit は CI を個別には通っていない (CI が流すのは push 時点の
+  commit だけ)。既存の tag は打ち替えない
+- push 時点の版の判定・作成ロジックは `scripts/backfill-plugin-tags.sh` に一本化 (既定は
   dry-run、`--apply` で作成 + push)。規約導入時の遡及付与と通常運用で同じコードを使う
 - **旧規約の bare tag (`v0.2.0` 〜 `v0.14.0`) はそのまま残すが、今後は打たない。**
   marketplace 全体を指すもの (`v0.2.0`) と個別 plugin のリリースを指すもの

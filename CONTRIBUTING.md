@@ -187,13 +187,18 @@ echo '{"cwd": "'"$PWD"'", "tool_name": "Read", "tool_input": {"file_path": "..."
 tag 名は **`<plugin-name>/v<version>`** です (例: `sensitive-files-guardrail/v0.33.1`)。
 `plugin.json` の `version` と 1:1 に対応します。
 
-- **手で打たないでください。** main への push で CI
+- **手で打たないでください** (push 時点の版の tag。例外は次の項目)。main への push で CI
   (`.github/workflows/validate.yml` の `tag-plugin-releases` job) が、各 plugin の
   `plugin.json` の version に対応する tag が無ければ annotated tag を作って push します。
   validate / lint / tests が green のときだけ打ちます
 - 既存 tag は**打ち替えません**。bump を忘れた場合は「打つ tag が無い」だけなので、
   次に bump した push で作られます
-- 判定・作成ロジックは `scripts/backfill-plugin-tags.sh` に一本化しています
+- **例外: 1 回の push に同じ plugin の bump が複数入ったときの途中の版。** CI が打つのは
+  push 時点の版だけなので、途中の版の tag は maintainer が push のときに、その版が
+  main に入った commit へ CI と同じ書式の annotated tag で打ちます (版と tag を 1:1 に
+  保つため)。その commit は CI を個別には通っていません (CI が流すのは push 時点の
+  commit だけ)。contributor が打つ必要はありません
+- push 時点の版の判定・作成ロジックは `scripts/backfill-plugin-tags.sh` に一本化しています
   (既定は dry-run、`--apply` で作成 + push)。規約導入時の遡及付与と通常運用で同じ
   コードを使うため、列挙ロジックが二重管理になりません
 - **旧規約の `v0.2.0` 〜 `v0.14.0` は残していますが、今後は打ちません。**

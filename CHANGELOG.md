@@ -15,6 +15,17 @@
 (更新判定のキーは各 plugin の `plugin.json` の `version`)、semver を振ると
 「plugin のバージョン」と混同されるため採っていません。
 
+## 2026-11-25
+
+### Changed
+
+- リリース tag の規約 (CLAUDE.md / README / CONTRIBUTING) に例外を足した。1 回の push に
+  同じ plugin の bump が複数入ったときの途中の版の tag は、push する側が push のときに、
+  その版が main に入った commit へ CI と同じ書式の annotated tag で打つ (版と tag を 1:1 に
+  保つため。その commit は CI を個別には通っていない)。「手で打たない」と「判定・作成ロジックの
+  一本化」は push 時点の版についての記述だと読めるように揃えた
+- `scripts/check_skill_allowed_tools.py` の ALLOWLIST のコメントを言い換えた (挙動の変更なし)
+
 ## 2026-11-24
 
 ### Added
