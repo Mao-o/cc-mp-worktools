@@ -23,30 +23,31 @@ from handlers.bash.operand_lexer import (
 class TestDotenvGlobMatch(unittest.TestCase):
     """``.env`` / ``.envrc`` に fnmatch する glob を True と判定する。"""
 
-    def test_dotenv_star(self):
+    # (ラベル = 畳む前のテスト名, glob)。1 つのテストに複数の assert があった
+    # ものは、同じラベルの行を並べてある
+    MATCH_CASES = (
         # fnmatchcase(".env", ".env*") = True
-        self.assertTrue(_glob_operand_is_dotenv_match(".env*"))
-
-    def test_dotenv_with_question(self):
+        ("test_dotenv_star", ".env*"),
         # fnmatchcase(".env", ".en?") = True
-        self.assertTrue(_glob_operand_is_dotenv_match(".en?"))
-
-    def test_dotenv_with_inner_char_class(self):
+        ("test_dotenv_with_question", ".en?"),
         # fnmatchcase(".env", ".e[n]v") = True
-        self.assertTrue(_glob_operand_is_dotenv_match(".e[n]v"))
-
-    def test_envrc_star(self):
-        self.assertTrue(_glob_operand_is_dotenv_match(".envrc*"))
-
-    def test_directory_glob_with_literal_dotenv_basename(self):
+        ("test_dotenv_with_inner_char_class", ".e[n]v"),
+        ("test_envrc_star", ".envrc*"),
         # 0.22.0: shell の pathname expansion は path 要素ごと。``*/.env`` は
         # ``sub/.env`` に展開される (bash 3.2 / zsh 実測) ので basename 部分
         # ``.env`` で判定する。0.21.x は operand 全体を fnmatch していて
         # ``fnmatchcase(".env", "*/.env")`` = False → ask_or_allow に落ちていた
-        self.assertTrue(_glob_operand_is_dotenv_match("*/.env"))
-        self.assertTrue(_glob_operand_is_dotenv_match("**/.env"))
-        self.assertTrue(_glob_operand_is_dotenv_match("*/.env*"))
-        self.assertTrue(_glob_operand_is_dotenv_match("sub*/.envrc"))
+        ("test_directory_glob_with_literal_dotenv_basename", "*/.env"),
+        ("test_directory_glob_with_literal_dotenv_basename", "**/.env"),
+        ("test_directory_glob_with_literal_dotenv_basename", "*/.env*"),
+        ("test_directory_glob_with_literal_dotenv_basename", "sub*/.envrc"),
+    )
+
+    def test_matches(self):
+        self.assertTrue(self.MATCH_CASES)
+        for case, glob in self.MATCH_CASES:
+            with self.subTest(case=case, glob=glob):
+                self.assertTrue(_glob_operand_is_dotenv_match(glob))
 
 
 class TestLeadingDotSemantics(unittest.TestCase):
@@ -148,28 +149,24 @@ class TestCommandEnablesDotglob(unittest.TestCase):
 class TestNonDotenvGlobAskOrAllow(unittest.TestCase):
     """dotenv stem に fnmatch しない glob は False (呼出側で ask_or_allow に格下げ)。"""
 
-    def test_dotenv_dot_star(self):
+    # (ラベル = 畳む前のテスト名, glob)
+    NO_MATCH_CASES = (
         # fnmatchcase(".env", ".env.*") = False (".env." 以降が必要)
-        self.assertFalse(_glob_operand_is_dotenv_match(".env.*"))
-
-    def test_dotenv_example_star(self):
+        ("test_dotenv_dot_star", ".env.*"),
         # fnmatchcase(".env", ".env.example*") = False
-        self.assertFalse(_glob_operand_is_dotenv_match(".env.example*"))
+        ("test_dotenv_example_star", ".env.example*"),
+        ("test_id_rsa_star", "id_rsa*"),
+        ("test_id_star", "id_*"),
+        ("test_star_key", "*.key"),
+        ("test_cred_star_json", "cred*.json"),
+        ("test_star_log", "*.log"),
+    )
 
-    def test_id_rsa_star(self):
-        self.assertFalse(_glob_operand_is_dotenv_match("id_rsa*"))
-
-    def test_id_star(self):
-        self.assertFalse(_glob_operand_is_dotenv_match("id_*"))
-
-    def test_star_key(self):
-        self.assertFalse(_glob_operand_is_dotenv_match("*.key"))
-
-    def test_cred_star_json(self):
-        self.assertFalse(_glob_operand_is_dotenv_match("cred*.json"))
-
-    def test_star_log(self):
-        self.assertFalse(_glob_operand_is_dotenv_match("*.log"))
+    def test_does_not_match(self):
+        self.assertTrue(self.NO_MATCH_CASES)
+        for case, glob in self.NO_MATCH_CASES:
+            with self.subTest(case=case, glob=glob):
+                self.assertFalse(_glob_operand_is_dotenv_match(glob))
 
 
 class TestEmptyAndEdgeCases(unittest.TestCase):

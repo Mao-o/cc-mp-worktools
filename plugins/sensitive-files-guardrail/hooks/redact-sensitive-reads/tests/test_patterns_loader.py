@@ -334,55 +334,55 @@ class TestParseLocalPatternsText(unittest.TestCase):
             _parse_patterns_text(text),
         )
 
-    def test_project_key_none_skips_all_sections(self):
-        from _shared.patterns import _parse_local_patterns_text
-        text = "!common.pem\n[project:/x]\n!only-x.pem\n"
-        self.assertEqual(
-            _parse_local_patterns_text(text, None),
+    # (ラベル = 畳む前のテスト名, patterns.local.txt の本文, project key, 期待する rules)。
+    # 1 つのテストに複数の assert があったものは、同じラベルの行を並べてある
+    SECTION_CASES = (
+        (
+            "test_project_key_none_skips_all_sections",
+            "!common.pem\n[project:/x]\n!only-x.pem\n", None,
             [("common.pem", True)],
-        )
-
-    def test_matching_section_included_in_file_order(self):
-        from _shared.patterns import _parse_local_patterns_text
-        text = (
-            "!common.pem\n[project:/x]\n!only-x.pem\n[project:/y]\n!only-y.pem\n"
-        )
-        self.assertEqual(
-            _parse_local_patterns_text(text, "/x"),
+        ),
+        (
+            "test_matching_section_included_in_file_order",
+            "!common.pem\n[project:/x]\n!only-x.pem\n[project:/y]\n!only-y.pem\n", "/x",
             [("common.pem", True), ("only-x.pem", True)],
-        )
-        self.assertEqual(
-            _parse_local_patterns_text(text, "/y"),
+        ),
+        (
+            "test_matching_section_included_in_file_order",
+            "!common.pem\n[project:/x]\n!only-x.pem\n[project:/y]\n!only-y.pem\n", "/y",
             [("common.pem", True), ("only-y.pem", True)],
-        )
-
-    def test_section_before_common_lines_preserves_file_order(self):
-        """セクションを共通行より前に書けば、出現順どおりセクション側が先に
-        評価される (last-match-wins は出現順で決まる、という既存契約を維持)。"""
-        from _shared.patterns import _parse_local_patterns_text
-        text = "[project:/x]\n*.pem\n\n!*.pem\n"
-        self.assertEqual(
-            _parse_local_patterns_text(text, "/x"),
+        ),
+        # セクションを共通行より前に書けば、出現順どおりセクション側が先に
+        # 評価される (last-match-wins は出現順で決まる、という既存契約を維持)。
+        (
+            "test_section_before_common_lines_preserves_file_order",
+            "[project:/x]\n*.pem\n\n!*.pem\n", "/x",
             [("*.pem", False), ("*.pem", True)],
-        )
+        ),
         # ヘッダー登場前の共通行が無いので、セクション不一致なら空。
-        self.assertEqual(_parse_local_patterns_text(text, None), [])
-
-    def test_header_path_normalized_trailing_slash(self):
-        from _shared.patterns import _parse_local_patterns_text
-        text = "[project:/x/y/]\n!foo.pem\n"
-        self.assertEqual(
-            _parse_local_patterns_text(text, "/x/y"),
+        (
+            "test_section_before_common_lines_preserves_file_order",
+            "[project:/x]\n*.pem\n\n!*.pem\n", None,
+            [],
+        ),
+        (
+            "test_header_path_normalized_trailing_slash",
+            "[project:/x/y/]\n!foo.pem\n", "/x/y",
             [("foo.pem", True)],
-        )
-
-    def test_unmatched_section_ignored(self):
-        from _shared.patterns import _parse_local_patterns_text
-        text = "!common.pem\n[project:/other]\n!ignored.pem\n"
-        self.assertEqual(
-            _parse_local_patterns_text(text, "/x"),
+        ),
+        (
+            "test_unmatched_section_ignored",
+            "!common.pem\n[project:/other]\n!ignored.pem\n", "/x",
             [("common.pem", True)],
-        )
+        ),
+    )
+
+    def test_sections(self):
+        from _shared.patterns import _parse_local_patterns_text
+        self.assertTrue(self.SECTION_CASES)
+        for case, text, key, expected in self.SECTION_CASES:
+            with self.subTest(case=case, text=text, key=key):
+                self.assertEqual(_parse_local_patterns_text(text, key), expected)
 
 
 def _make_worktree(tmp: Path, *, main: str = "main", name: str = "wt") -> tuple[Path, Path]:
@@ -1251,41 +1251,41 @@ class TestProjectHeaderWindowsComparison(unittest.TestCase):
         with mock.patch.object(patterns.os, "path", ntpath):
             return patterns._parse_local_patterns_text(text, key)
 
-    def test_forward_slash_header_matches_backslash_cwd(self):
-        self.assertEqual(
-            self._parse("[project:C:/work/repo]\n!x.pem\n", "C:\\work\\repo"),
-            [("x.pem", True)],
-        )
+    # (ラベル = 畳む前のテスト名, patterns.local.txt の本文, project key, 期待する rules)
+    HEADER_CASES = (
+        (
+            "test_forward_slash_header_matches_backslash_cwd",
+            "[project:C:/work/repo]\n!x.pem\n", "C:\\work\\repo", [("x.pem", True)],
+        ),
+        # ドライブ文字は常に大文字小文字を区別しないので揃える。
+        (
+            "test_drive_letter_case_is_folded",
+            "[project:c:\\work\\repo\\]\n!x.pem\n", "C:\\work\\repo", [("x.pem", True)],
+        ),
+        # ディレクトリ名の大文字小文字は畳まない (外部レビューの指摘)。
+        # Windows でもディレクトリ単位で大文字小文字を区別する設定があり、
+        # ``Repo`` と ``repo`` が別 repo になりうる。畳むと片方で承認した除外が
+        # 他方でも効くので、一致しない (= 除外が効かない) 安全側に倒す。
+        (
+            "test_directory_case_is_not_folded",
+            "[project:C:\\work\\Repo]\n!x.pem\n", "C:\\work\\repo", [],
+        ),
+        (
+            "test_other_project_does_not_match",
+            "[project:C:/work/other]\n!x.pem\n", "C:\\work\\repo", [],
+        ),
+        # key 側 (cwd 由来) が ``/`` 区切りでも一致する (Git Bash 等の cwd)。
+        (
+            "test_forward_slash_project_key_matches_backslash_header",
+            "[project:C:\\work\\repo]\n!x.pem\n", "C:/work/repo", [("x.pem", True)],
+        ),
+    )
 
-    def test_drive_letter_case_is_folded(self):
-        """ドライブ文字は常に大文字小文字を区別しないので揃える。"""
-        self.assertEqual(
-            self._parse("[project:c:\\work\\repo\\]\n!x.pem\n", "C:\\work\\repo"),
-            [("x.pem", True)],
-        )
-
-    def test_directory_case_is_not_folded(self):
-        """ディレクトリ名の大文字小文字は畳まない (外部レビューの指摘)。
-
-        Windows でもディレクトリ単位で大文字小文字を区別する設定があり、
-        ``Repo`` と ``repo`` が別 repo になりうる。畳むと片方で承認した除外が
-        他方でも効くので、一致しない (= 除外が効かない) 安全側に倒す。
-        """
-        self.assertEqual(
-            self._parse("[project:C:\\work\\Repo]\n!x.pem\n", "C:\\work\\repo"), []
-        )
-
-    def test_other_project_does_not_match(self):
-        self.assertEqual(
-            self._parse("[project:C:/work/other]\n!x.pem\n", "C:\\work\\repo"), []
-        )
-
-    def test_forward_slash_project_key_matches_backslash_header(self):
-        """key 側 (cwd 由来) が ``/`` 区切りでも一致する (Git Bash 等の cwd)。"""
-        self.assertEqual(
-            self._parse("[project:C:\\work\\repo]\n!x.pem\n", "C:/work/repo"),
-            [("x.pem", True)],
-        )
+    def test_header_comparison(self):
+        self.assertTrue(self.HEADER_CASES)
+        for case, text, key, expected in self.HEADER_CASES:
+            with self.subTest(case=case, text=text, key=key):
+                self.assertEqual(self._parse(text, key), expected)
 
 
 if __name__ == "__main__":

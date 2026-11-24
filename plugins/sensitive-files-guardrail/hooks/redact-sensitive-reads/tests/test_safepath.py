@@ -12,23 +12,18 @@ from core.safepath import classify, is_regular_directory, normalize, open_regula
 
 
 class TestNormalize(unittest.TestCase):
-    def test_relative(self):
-        self.assertEqual(
-            normalize("foo.txt", "/tmp"),
-            Path("/tmp/foo.txt"),
-        )
+    # (ラベル = 畳む前のテスト名, path, cwd, 期待する path)
+    NORMALIZE_CASES = (
+        ("test_relative", "foo.txt", "/tmp", Path("/tmp/foo.txt")),
+        ("test_absolute", "/etc/hosts", "/tmp", Path("/etc/hosts")),
+        ("test_dotdot", "../other/foo", "/tmp/sub", Path("/tmp/other/foo")),
+    )
 
-    def test_absolute(self):
-        self.assertEqual(
-            normalize("/etc/hosts", "/tmp"),
-            Path("/etc/hosts"),
-        )
-
-    def test_dotdot(self):
-        self.assertEqual(
-            normalize("../other/foo", "/tmp/sub"),
-            Path("/tmp/other/foo"),
-        )
+    def test_normalize(self):
+        self.assertTrue(self.NORMALIZE_CASES)
+        for case, path, cwd, expected in self.NORMALIZE_CASES:
+            with self.subTest(case=case, path=path, cwd=cwd):
+                self.assertEqual(normalize(path, cwd), expected)
 
 
 class _BaseTmp(unittest.TestCase):

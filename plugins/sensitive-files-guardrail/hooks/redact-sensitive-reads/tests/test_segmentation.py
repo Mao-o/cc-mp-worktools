@@ -27,69 +27,58 @@ from handlers.bash_handler import handle
 
 
 class TestHeredocBodyIsNotASegment(unittest.TestCase):
-    def test_quoted_delimiter_body_dropped(self):
-        cmd = "cat > x.py <<'PY'\nn = kb * 1024\nPY"
-        self.assertEqual(_split_command_on_operators(cmd), ["cat > x.py <<'PY'"])
-
-    def test_unquoted_delimiter_body_dropped(self):
-        self.assertEqual(
-            _split_command_on_operators("cat <<EOF\nhello\nEOF"), ["cat <<EOF"],
-        )
-
-    def test_double_quoted_and_backslash_delimiters(self):
-        self.assertEqual(
-            _split_command_on_operators('cat <<"EOF"\nbody\nEOF'), ['cat <<"EOF"'],
-        )
-        self.assertEqual(
-            _split_command_on_operators("cat <<\\EOF\nbody\nEOF"), ["cat <<\\EOF"],
-        )
-        self.assertEqual(
-            _split_command_on_operators("cat << EOF\nbody\nEOF"), ["cat << EOF"],
-        )
-
-    def test_dash_form_strips_leading_tabs(self):
-        cmd = "cat <<-EOF\n\tbody\n\tEOF\necho done"
-        self.assertEqual(_split_command_on_operators(cmd), ["cat <<-EOF", "echo done"])
-
-    def test_body_with_sensitive_looking_lines_dropped(self):
-        cmd = "cat <<'EOF' > notes.txt\ncat .env\n*\n.env\nEOF"
-        self.assertEqual(
-            _split_command_on_operators(cmd), ["cat <<'EOF' > notes.txt"],
-        )
-
-    def test_commands_on_the_operator_line_are_still_split(self):
-        cmd = "cat <<EOF && cat .env\nbody\nEOF"
-        self.assertEqual(_split_command_on_operators(cmd), ["cat <<EOF", "cat .env"])
-        cmd = "cat <<'EOF' | grep x\nfoo\nEOF"
-        self.assertEqual(_split_command_on_operators(cmd), ["cat <<'EOF'", "grep x"])
-
-    def test_commands_after_the_terminator_are_analyzed(self):
-        cmd = "cat <<EOF\nbody\nEOF\ncat .env"
-        self.assertEqual(_split_command_on_operators(cmd), ["cat <<EOF", "cat .env"])
-
-    def test_multiple_heredocs_consumed_in_order(self):
-        cmd = "cat <<A <<B\n1\nA\n2\nB\necho x"
-        self.assertEqual(_split_command_on_operators(cmd), ["cat <<A <<B", "echo x"])
-
-    def test_terminator_must_match_exactly(self):
+    # (ラベル = 畳む前のテスト名, コマンド, 期待する segment の列)。
+    # 1 つのテストに複数の assert があったものは、同じラベルの行を並べてある
+    SPLIT_CASES = (
+        ("test_quoted_delimiter_body_dropped",
+         "cat > x.py <<'PY'\nn = kb * 1024\nPY", ["cat > x.py <<'PY'"]),
+        ("test_unquoted_delimiter_body_dropped",
+         "cat <<EOF\nhello\nEOF", ["cat <<EOF"]),
+        ("test_double_quoted_and_backslash_delimiters",
+         'cat <<"EOF"\nbody\nEOF', ['cat <<"EOF"']),
+        ("test_double_quoted_and_backslash_delimiters",
+         "cat <<\\EOF\nbody\nEOF", ["cat <<\\EOF"]),
+        ("test_double_quoted_and_backslash_delimiters",
+         "cat << EOF\nbody\nEOF", ["cat << EOF"]),
+        ("test_dash_form_strips_leading_tabs",
+         "cat <<-EOF\n\tbody\n\tEOF\necho done", ["cat <<-EOF", "echo done"]),
+        ("test_body_with_sensitive_looking_lines_dropped",
+         "cat <<'EOF' > notes.txt\ncat .env\n*\n.env\nEOF", ["cat <<'EOF' > notes.txt"]),
+        ("test_commands_on_the_operator_line_are_still_split",
+         "cat <<EOF && cat .env\nbody\nEOF", ["cat <<EOF", "cat .env"]),
+        ("test_commands_on_the_operator_line_are_still_split",
+         "cat <<'EOF' | grep x\nfoo\nEOF", ["cat <<'EOF'", "grep x"]),
+        ("test_commands_after_the_terminator_are_analyzed",
+         "cat <<EOF\nbody\nEOF\ncat .env", ["cat <<EOF", "cat .env"]),
+        ("test_multiple_heredocs_consumed_in_order",
+         "cat <<A <<B\n1\nA\n2\nB\necho x", ["cat <<A <<B", "echo x"]),
         # 先頭空白付きの行は terminator ではない (``<<-`` でも tab 以外は剥がさない)
-        cmd = "cat <<EOF\n EOF\nEOF\necho x"
-        self.assertEqual(_split_command_on_operators(cmd), ["cat <<EOF", "echo x"])
-        cmd = "cat <<-EOF\n  EOF\n\tEOF\necho x"
-        self.assertEqual(_split_command_on_operators(cmd), ["cat <<-EOF", "echo x"])
-
-    def test_here_string_is_not_a_heredoc(self):
-        cmd = "cat <<< 'x'\ncat .env"
-        self.assertEqual(_split_command_on_operators(cmd), ["cat <<< 'x'", "cat .env"])
-
-    def test_unterminated_heredoc_falls_back_to_line_split(self):
+        ("test_terminator_must_match_exactly",
+         "cat <<EOF\n EOF\nEOF\necho x", ["cat <<EOF", "echo x"]),
+        ("test_terminator_must_match_exactly",
+         "cat <<-EOF\n  EOF\n\tEOF\necho x", ["cat <<-EOF", "echo x"]),
+        ("test_here_string_is_not_a_heredoc",
+         "cat <<< 'x'\ncat .env", ["cat <<< 'x'", "cat .env"]),
         # ``$((1<<2))`` の ``<<`` を heredoc と誤認して以降を丸ごと本文扱いすると、
         # 後続の ``cat .env`` が解析されずに auto で素通りする。terminator が
         # 見つからない ``<<`` は heredoc として扱わない (0.21.x と同じ行分割)
-        cmd = "echo $((1<<2))\ncat .env"
-        self.assertEqual(_split_command_on_operators(cmd), ["echo $((1<<2))", "cat .env"])
-        cmd = "cat <<EOF\nline1\nline2"
-        self.assertEqual(_split_command_on_operators(cmd), ["cat <<EOF", "line1", "line2"])
+        ("test_unterminated_heredoc_falls_back_to_line_split",
+         "echo $((1<<2))\ncat .env", ["echo $((1<<2))", "cat .env"]),
+        ("test_unterminated_heredoc_falls_back_to_line_split",
+         "cat <<EOF\nline1\nline2", ["cat <<EOF", "line1", "line2"]),
+        ("test_quoted_operator_is_not_a_heredoc",
+         "echo '<<EOF'\ncat .env", ["echo '<<EOF'", "cat .env"]),
+        ("test_quoted_operator_is_not_a_heredoc",
+         'echo "a <<EOF"\ncat .env', ['echo "a <<EOF"', "cat .env"]),
+        ("test_comment_after_operator_line",
+         "cat <<EOF # note\nbody\nEOF\necho x", ["cat <<EOF", "echo x"]),
+    )
+
+    def test_split(self):
+        self.assertTrue(self.SPLIT_CASES)
+        for case, cmd, expected in self.SPLIT_CASES:
+            with self.subTest(case=case, cmd=cmd):
+                self.assertEqual(_split_command_on_operators(cmd), expected)
 
     def test_arithmetic_shift_is_not_a_heredoc(self):
         # Codex R1 P1: ``$((1<<2))`` の ``<<`` はシフト演算子。terminator 未検出の
@@ -113,16 +102,6 @@ class TestHeredocBodyIsNotASegment(unittest.TestCase):
         for cmd, expected in cases.items():
             with self.subTest(cmd=cmd):
                 self.assertEqual(_split_command_on_operators(cmd), expected)
-
-    def test_quoted_operator_is_not_a_heredoc(self):
-        cmd = "echo '<<EOF'\ncat .env"
-        self.assertEqual(_split_command_on_operators(cmd), ["echo '<<EOF'", "cat .env"])
-        cmd = 'echo "a <<EOF"\ncat .env'
-        self.assertEqual(_split_command_on_operators(cmd), ['echo "a <<EOF"', "cat .env"])
-
-    def test_comment_after_operator_line(self):
-        cmd = "cat <<EOF # note\nbody\nEOF\necho x"
-        self.assertEqual(_split_command_on_operators(cmd), ["cat <<EOF", "echo x"])
 
     def test_operator_line_keeps_hard_stop(self):
         # ``<`` は hard-stop のまま (heredoc の行自体は ask_or_allow)

@@ -105,40 +105,34 @@ class TestExcludeHintBasename(unittest.TestCase):
 class TestGitSubcommandOf(unittest.TestCase):
     """``_git_subcommand_of`` (0.19.0): history builder の subcommand 推定。"""
 
-    def test_simple(self):
-        self.assertEqual(
-            M._git_subcommand_of("git show HEAD:.env", "HEAD:.env"), "show"
-        )
-
-    def test_skips_global_options(self):
-        self.assertEqual(
-            M._git_subcommand_of(
-                "git -C /repo -c k=v --git-dir=/x --no-pager diff .env", ".env"
-            ),
-            "diff",
-        )
-
-    def test_prefers_window_containing_operand(self):
-        self.assertEqual(
-            M._git_subcommand_of("git log && git add .env", ".env"), "add"
-        )
-
-    def test_falls_back_to_first_git_without_operand_match(self):
-        self.assertEqual(
-            M._git_subcommand_of("git log && git status", ".env"), "log"
-        )
-
-    def test_opt_equals_value_operand_matches_window(self):
+    # (ラベル = 畳む前のテスト名, コマンド, operand, 期待する subcommand)
+    SUBCOMMAND_CASES = (
+        ("test_simple", "git show HEAD:.env", "HEAD:.env", "show"),
+        (
+            "test_skips_global_options",
+            "git -C /repo -c k=v --git-dir=/x --no-pager diff .env", ".env", "diff",
+        ),
+        (
+            "test_prefers_window_containing_operand",
+            "git log && git add .env", ".env", "add",
+        ),
+        (
+            "test_falls_back_to_first_git_without_operand_match",
+            "git log && git status", ".env", "log",
+        ),
         # ``--pathspec-from-file=.env`` 由来の operand でも後段の git を選ぶ
-        self.assertEqual(
-            M._git_subcommand_of(
-                "git log && git rm --cached --pathspec-from-file=.env", ".env"
-            ),
-            "rm",
-        )
+        (
+            "test_opt_equals_value_operand_matches_window",
+            "git log && git rm --cached --pathspec-from-file=.env", ".env", "rm",
+        ),
+        ("test_empty_command", "", ".env", ""),
+    )
 
-    def test_empty_command(self):
-        self.assertEqual(M._git_subcommand_of("", ".env"), "")
+    def test_subcommand(self):
+        self.assertTrue(self.SUBCOMMAND_CASES)
+        for case, command, operand, expected in self.SUBCOMMAND_CASES:
+            with self.subTest(case=case, command=command, operand=operand):
+                self.assertEqual(M._git_subcommand_of(command, operand), expected)
 
     def test_unparseable_command_does_not_raise(self):
         # shlex 失敗 → 空白 split fallback。operate set に入らないので閲覧文面
@@ -728,25 +722,30 @@ class TestFitDataBlockAcrossFormats(unittest.TestCase):
         data = text.encode("utf-8")
         return redact(BytesIO(data), basename, len(data))
 
-    def test_dotenv_fold_keeps_closing_and_note(self):
-        reason = self._reason_for("dotenv", 90)
-        fitted = "\n".join(M._fit_data_block(reason, 900))
-        self.assertTrue(fitted.endswith("</DATA>"))
-        self.assertIn("real values are not in context", fitted)
+    # (ラベル = 畳む前のテスト名, 形式, 鍵の数, 末尾に残るべき note)
+    FOLD_CASES = (
+        (
+            "test_dotenv_fold_keeps_closing_and_note",
+            "dotenv", 90, "real values are not in context",
+        ),
+        (
+            "test_jsonlike_fold_keeps_closing_and_note",
+            "json", 90, "string scalar values are summarized to status tags",
+        ),
+        (
+            "test_opaque_yaml_fold_keeps_closing_and_note",
+            "yaml", 200, "nested structure not parsed",
+        ),
+    )
 
-    def test_jsonlike_fold_keeps_closing_and_note(self):
-        reason = self._reason_for("json", 90)
-        fitted = "\n".join(M._fit_data_block(reason, 900))
-        self.assertTrue(fitted.endswith("</DATA>"))
-        self.assertIn(
-            "string scalar values are summarized to status tags", fitted,
-        )
-
-    def test_opaque_yaml_fold_keeps_closing_and_note(self):
-        reason = self._reason_for("yaml", 200)
-        fitted = "\n".join(M._fit_data_block(reason, 900))
-        self.assertTrue(fitted.endswith("</DATA>"))
-        self.assertIn("nested structure not parsed", fitted)
+    def test_fold_keeps_closing_and_note(self):
+        self.assertTrue(self.FOLD_CASES)
+        for case, fmt, n, note in self.FOLD_CASES:
+            with self.subTest(case=case, fmt=fmt, n=n):
+                reason = self._reason_for(fmt, n)
+                fitted = "\n".join(M._fit_data_block(reason, 900))
+                self.assertTrue(fitted.endswith("</DATA>"))
+                self.assertIn(note, fitted)
 
 
 class TestEditDeny(unittest.TestCase):
@@ -979,47 +978,29 @@ class TestPolicyUnavailable(unittest.TestCase):
 class TestReadAsk(unittest.TestCase):
     """M2: Read handler の judgement-pause reason 文。"""
 
-    def test_symlink(self):
-        msg = M.read_ask("symlink")
-        self.assertIn("symlink", msg)
-        # 「続行しますか？」(人間 UI 語) は使わない
-        self.assertNotIn("続行しますか", msg)
-        # LLM が取れる next action
-        self.assertIn("再試行", msg)
+    # (ラベル = 畳む前のテスト名, kind, 文中に含む語, 文中に含まない語)。
+    # 「続行しますか？」(人間 UI 語) は使わない。「再試行」は LLM が取れる next action
+    MESSAGE_CASES = (
+        ("test_symlink", "symlink", ("symlink", "再試行"), ("続行しますか",)),
+        ("test_special", "special", ("FIFO", "再試行"), ("続行しますか",)),
+        # 内部バックログ: ディレクトリは special (FIFO/socket/device) とは
+        # 別の専用文言を持つこと
+        ("test_directory", "directory", ("ディレクトリ", "再試行"), ("FIFO", "続行しますか")),
+        ("test_io_error", "io_error", ("権限", "再試行"), ()),
+        ("test_normalize_failed", "normalize_failed", ("正規化", "再試行"), ()),
+        ("test_redaction_failed", "redaction_failed", ("redaction",), ()),
+        ("test_open_failed", "open_failed", ("symlink race", "再試行"), ()),
+    )
 
-    def test_special(self):
-        msg = M.read_ask("special")
-        self.assertIn("FIFO", msg)
-        self.assertNotIn("続行しますか", msg)
-        self.assertIn("再試行", msg)
-
-    def test_directory(self):
-        """内部バックログ: ディレクトリは special (FIFO/socket/device) とは
-        別の専用文言を持つこと。"""
-        msg = M.read_ask("directory")
-        self.assertIn("ディレクトリ", msg)
-        self.assertNotIn("FIFO", msg)
-        self.assertNotIn("続行しますか", msg)
-        self.assertIn("再試行", msg)
-
-    def test_io_error(self):
-        msg = M.read_ask("io_error")
-        self.assertIn("権限", msg)
-        self.assertIn("再試行", msg)
-
-    def test_normalize_failed(self):
-        msg = M.read_ask("normalize_failed")
-        self.assertIn("正規化", msg)
-        self.assertIn("再試行", msg)
-
-    def test_redaction_failed(self):
-        msg = M.read_ask("redaction_failed")
-        self.assertIn("redaction", msg)
-
-    def test_open_failed(self):
-        msg = M.read_ask("open_failed")
-        self.assertIn("symlink race", msg)
-        self.assertIn("再試行", msg)
+    def test_messages(self):
+        self.assertTrue(self.MESSAGE_CASES)
+        for case, kind, included, excluded in self.MESSAGE_CASES:
+            with self.subTest(case=case, kind=kind):
+                msg = M.read_ask(kind)
+                for word in included:
+                    self.assertIn(word, msg)
+                for word in excluded:
+                    self.assertNotIn(word, msg)
 
 
 class TestEditPause(unittest.TestCase):
@@ -1048,34 +1029,31 @@ class TestBashLenient(unittest.TestCase):
 
     LENIENT_SUFFIX = "判定不能のため確認を挟みます"
 
-    def test_hard_stop(self):
-        msg = M.bash_lenient("hard_stop")
-        self.assertIn("動的展開", msg)
-        # H2: 共通 suffix
-        self.assertIn(self.LENIENT_SUFFIX, msg)
-        # autonomous モードで通過する旨を文中で明示
-        self.assertIn("auto", msg)
-        self.assertIn("bypass", msg)
-
-    def test_opaque_prefix(self):
-        msg = M.bash_lenient("opaque_prefix")
-        self.assertIn("wrapper", msg)
-        self.assertIn(self.LENIENT_SUFFIX, msg)
-
-    def test_glob_uncertain(self):
-        """内部バックログ: glob operand の不確定 ask が opaque_prefix (wrapper /
-        インタプリタ文言) を誤流用していた。専用 kind で文言を分ける。"""
-        msg = M.bash_lenient("glob_uncertain")
-        self.assertIn("glob", msg)
-        self.assertIn(self.LENIENT_SUFFIX, msg)
+    # (ラベル = 畳む前のテスト名, kind, 文中に含む語, 文中に含まない語)。
+    # どの kind も H2 の共通 suffix (``LENIENT_SUFFIX``) を含むことは表の外で見る
+    MESSAGE_CASES = (
+        # autonomous モードで通過する旨 (auto / bypass) を文中で明示
+        ("test_hard_stop", "hard_stop", ("動的展開", "auto", "bypass"), ()),
+        ("test_opaque_prefix", "opaque_prefix", ("wrapper",), ()),
+        # 内部バックログ: glob operand の不確定 ask が opaque_prefix (wrapper /
+        # インタプリタ文言) を誤流用していた。専用 kind で文言を分ける。
         # 誤流用していた opaque_prefix 側の文言が紛れ込んでいないこと
-        self.assertNotIn("wrapper", msg)
-        self.assertNotIn("インタプリタ", msg)
+        ("test_glob_uncertain", "glob_uncertain", ("glob",), ("wrapper", "インタプリタ")),
+        ("test_residual_metachar", "residual_metachar", ("metachar",), ()),
+        ("test_tokenize_failed", "tokenize_failed", ("tokenize",), ()),
+        ("test_normalize_failed", "normalize_failed", ("正規化",), ()),
+    )
 
-    def test_residual_metachar(self):
-        msg = M.bash_lenient("residual_metachar")
-        self.assertIn("metachar", msg)
-        self.assertIn(self.LENIENT_SUFFIX, msg)
+    def test_messages(self):
+        self.assertTrue(self.MESSAGE_CASES)
+        for case, kind, included, excluded in self.MESSAGE_CASES:
+            with self.subTest(case=case, kind=kind):
+                msg = M.bash_lenient(kind)
+                for word in included:
+                    self.assertIn(word, msg)
+                self.assertIn(self.LENIENT_SUFFIX, msg)
+                for word in excluded:
+                    self.assertNotIn(word, msg)
 
     def test_shell_keyword_with_detail(self):
         msg = M.bash_lenient("shell_keyword", detail="if")
@@ -1086,16 +1064,6 @@ class TestBashLenient(unittest.TestCase):
     def test_shell_keyword_without_detail(self):
         # detail 省略でも壊れない
         msg = M.bash_lenient("shell_keyword")
-        self.assertIn(self.LENIENT_SUFFIX, msg)
-
-    def test_tokenize_failed(self):
-        msg = M.bash_lenient("tokenize_failed")
-        self.assertIn("tokenize", msg)
-        self.assertIn(self.LENIENT_SUFFIX, msg)
-
-    def test_normalize_failed(self):
-        msg = M.bash_lenient("normalize_failed")
-        self.assertIn("正規化", msg)
         self.assertIn(self.LENIENT_SUFFIX, msg)
 
 

@@ -105,6 +105,7 @@ class TestE2EReadHandler(unittest.TestCase):
 
         self.assertTrue(output.is_allow(result), msg=repr(result))
         self.assertIsNone(output.decision_of(result), msg=repr(result))
+        self.assertIn("hookSpecificOutput", result, msg=repr(result))
         hook = result["hookSpecificOutput"]
         self.assertEqual(hook["hookEventName"], "PreToolUse")
         self.assertNotIn("permissionDecision", hook)
@@ -378,30 +379,83 @@ class TestE2EReadHandler(unittest.TestCase):
         self.assertIn("保護そのもの", reason)
         self.assertNotIn("value_that_is_reasonably_long_0\n", reason)
 
-    def test_bash_cat_env_denies(self):
-        """Bash handler は ``cat .env`` を deny 固定 (0.2.0 で ask_or_deny → deny に変更)。"""
-        envelope = {
-            "tool_name": "Bash",
-            "tool_input": {"command": "cat .env", "description": "test"},
-            "cwd": self.tmp,
-            "permission_mode": "default",
-        }
-        result = _run_main(envelope, ["--tool", "bash"])
-        self.assertEqual(
-            result["hookSpecificOutput"]["permissionDecision"], "deny",
-        )
+    # --- Bash: 判定だけを見る形 (D2 の畳み込み) ------------------------------
+    #
+    # ``__main__`` の入口を通して判定と応答の形を見る。行列の土台
+    # (``test_bash_handler.DenyMatrix`` など) は ``handle`` を直接呼び、lenient allow
+    # の開示 note の有無も見分けないので、ここでは使わない。行ごとの mode は畳む前の
+    # テストと同じ。ラベルは畳む前のテスト名。
 
-    def test_bash_cat_env_bypass_denies(self):
+    # (ラベル, コマンド, mode)。deny 固定の形
+    BASH_DENY_CASES = (
+        # Bash handler は ``cat .env`` を deny 固定 (0.2.0 で ask_or_deny → deny に変更)
+        ("test_bash_cat_env_denies", "cat .env", "default"),
+        ("test_bash_cat_env_bypass_denies", "cat .env", "bypassPermissions"),
+        # auto モードでも glob 候補列挙で deny (0.3.2)
+        ("test_bash_auto_glob_dotenv_star_denies", "cat .env*", "auto"),
+    )
+
+    # (ラベル, コマンド, mode)。開示 note 付きの lenient allow に倒れる形
+    BASH_LENIENT_ALLOW_CASES = (
+        # 0.8.0: env-assignment prefix は opaque first token として ``ask_or_allow``。
+        # auto mode では allow (0.33.0 以降は開示 note 付き) に倒す。0.3.2〜0.7.x の prefix normalize
+        # 撤廃
+        ("test_bash_auto_env_prefix_dotenv_allows", "FOO=1 cat .env", "auto"),
+        # 0.8.0: ``/usr/bin/env`` のような任意 path exec は opaque first token →
+        # ``ask_or_allow``。auto mode で allow に倒る。0.3.2〜0.7.x の透過剥がしは撤廃
+        ("test_bash_auto_abs_env_basename_allows", "/usr/bin/env FOO=1 cat .env", "auto"),
+        # basename=cat は透過対象外 → opaque → auto で allow (0.3.2)
+        ("test_bash_auto_abs_cat_basename_allows", "/bin/cat .env", "auto"),
+        # 0.7.0: ``<`` を含む command は hard-stop と同じ ``ask_or_allow``。
+        # autonomous mode (auto / bypassPermissions) では allow (0.33.0 以降は開示 note 付き) に倒す。
+        # target 抽出 + literal/glob 一致での deny 固定は 0.7.0 で撤廃
+        ("test_bash_auto_input_redirect_allows", "cat < .env", "auto"),
+    )
+
+    # (ラベル, コマンド, mode)。開示 note の無い lenient allow に倒れる形
+    BASH_LENIENT_ALLOW_WITHOUT_NOTE_CASES = (
+        # ``*.log`` は既定 rules と交差しないため auto/default 共に allow (0.3.2)。
+        # 0.33.0: ``*.log`` は機密パターンらしい token ではないので開示 note も
+        # 付かない (``cat *.key`` との対は ``test_bash_handler`` 側)
+        ("test_bash_auto_star_log_allows", "cat *.log", "auto"),
+        # auto モードでは opaque wrapper (`bash -c`) を allow に倒す (0.3.2)。
+        # 0.33.0: payload に機密らしい token が無い (``date``) ので開示 note は
+        # 付かない。``bash -c 'cat .env'`` との対は ``test_bash_handler`` 側
+        ("test_bash_auto_opaque_wrapper_allows", "bash -c 'date'", "auto"),
+        # heredoc は target 抽出されず opaque → auto で allow (0.3.2)。
+        # 0.33.0: 本文に機密らしい token が無いので開示 note は付かない
+        ("test_bash_auto_heredoc_allows", "cat <<EOF\nhello\nEOF", "auto"),
+    )
+
+    def _run_bash(self, command: str, mode: str) -> dict:
         envelope = {
             "tool_name": "Bash",
-            "tool_input": {"command": "cat .env", "description": "test"},
+            "tool_input": {"command": command, "description": "test"},
             "cwd": self.tmp,
-            "permission_mode": "bypassPermissions",
+            "permission_mode": mode,
         }
-        result = _run_main(envelope, ["--tool", "bash"])
-        self.assertEqual(
-            result["hookSpecificOutput"]["permissionDecision"], "deny",
-        )
+        return _run_main(envelope, ["--tool", "bash"])
+
+    def test_bash_denies(self):
+        self.assertTrue(self.BASH_DENY_CASES)
+        for case, command, mode in self.BASH_DENY_CASES:
+            with self.subTest(case=case, command=command, mode=mode):
+                result = self._run_bash(command, mode)
+                self.assertEqual(_decision(result), "deny")
+
+    def test_bash_lenient_allows_with_note(self):
+        self.assertTrue(self.BASH_LENIENT_ALLOW_CASES)
+        for case, command, mode in self.BASH_LENIENT_ALLOW_CASES:
+            with self.subTest(case=case, command=command, mode=mode):
+                result = self._run_bash(command, mode)
+                self._assert_lenient_allow(result)
+
+    def test_bash_lenient_allows_without_note(self):
+        self.assertTrue(self.BASH_LENIENT_ALLOW_WITHOUT_NOTE_CASES)
+        for case, command, mode in self.BASH_LENIENT_ALLOW_WITHOUT_NOTE_CASES:
+            with self.subTest(case=case, command=command, mode=mode):
+                result = self._run_bash(command, mode)
+                self._assert_lenient_allow_without_note(result)
 
     def test_bash_echo_allows(self):
         envelope = {
@@ -426,125 +480,6 @@ class TestE2EReadHandler(unittest.TestCase):
         self.assertEqual(
             result["hookSpecificOutput"]["permissionDecision"], "deny",
         )
-
-    def test_bash_auto_glob_dotenv_star_denies(self):
-        """auto モードでも glob 候補列挙で deny (0.3.2)。"""
-        envelope = {
-            "tool_name": "Bash",
-            "tool_input": {"command": "cat .env*", "description": "test"},
-            "cwd": self.tmp,
-            "permission_mode": "auto",
-        }
-        result = _run_main(envelope, ["--tool", "bash"])
-        self.assertEqual(
-            result["hookSpecificOutput"]["permissionDecision"], "deny",
-        )
-
-    def test_bash_auto_star_log_allows(self):
-        """`*.log` は既定 rules と交差しないため auto/default 共に allow (0.3.2)。
-
-        0.33.0: ``*.log`` は機密パターンらしい token ではないので開示 note も
-        付かない (``cat *.key`` との対は ``test_bash_handler`` 側)。
-        """
-        envelope = {
-            "tool_name": "Bash",
-            "tool_input": {"command": "cat *.log", "description": "test"},
-            "cwd": self.tmp,
-            "permission_mode": "auto",
-        }
-        result = _run_main(envelope, ["--tool", "bash"])
-        self._assert_lenient_allow_without_note(result)
-
-    def test_bash_auto_opaque_wrapper_allows(self):
-        """auto モードでは opaque wrapper (`bash -c`) を allow に倒す (0.3.2)。
-
-        0.33.0: payload に機密らしい token が無い (``date``) ので開示 note は
-        付かない。``bash -c 'cat .env'`` との対は ``test_bash_handler`` 側。
-        """
-        envelope = {
-            "tool_name": "Bash",
-            "tool_input": {"command": "bash -c 'date'", "description": "test"},
-            "cwd": self.tmp,
-            "permission_mode": "auto",
-        }
-        result = _run_main(envelope, ["--tool", "bash"])
-        self._assert_lenient_allow_without_note(result)
-
-    def test_bash_auto_env_prefix_dotenv_allows(self):
-        """0.8.0: env-assignment prefix は opaque first token として ``ask_or_allow``。
-        auto mode では allow (= 空 dict) に倒す。0.3.2〜0.7.x の prefix normalize
-        撤廃。
-        """
-        envelope = {
-            "tool_name": "Bash",
-            "tool_input": {
-                "command": "FOO=1 cat .env", "description": "test",
-            },
-            "cwd": self.tmp,
-            "permission_mode": "auto",
-        }
-        result = _run_main(envelope, ["--tool", "bash"])
-        self._assert_lenient_allow(result)
-
-    def test_bash_auto_abs_env_basename_allows(self):
-        """0.8.0: ``/usr/bin/env`` のような任意 path exec は opaque first token →
-        ``ask_or_allow``。auto mode で allow に倒る。0.3.2〜0.7.x の透過剥がしは撤廃。
-        """
-        envelope = {
-            "tool_name": "Bash",
-            "tool_input": {
-                "command": "/usr/bin/env FOO=1 cat .env",
-                "description": "test",
-            },
-            "cwd": self.tmp,
-            "permission_mode": "auto",
-        }
-        result = _run_main(envelope, ["--tool", "bash"])
-        self._assert_lenient_allow(result)
-
-    def test_bash_auto_abs_cat_basename_allows(self):
-        """basename=cat は透過対象外 → opaque → auto で allow (0.3.2)。"""
-        envelope = {
-            "tool_name": "Bash",
-            "tool_input": {
-                "command": "/bin/cat .env", "description": "test",
-            },
-            "cwd": self.tmp,
-            "permission_mode": "auto",
-        }
-        result = _run_main(envelope, ["--tool", "bash"])
-        self._assert_lenient_allow(result)
-
-    def test_bash_auto_input_redirect_allows(self):
-        """0.7.0: ``<`` を含む command は hard-stop と同じ ``ask_or_allow``。
-
-        autonomous mode (auto / bypassPermissions) では allow (= 空 dict) に倒す。
-        target 抽出 + literal/glob 一致での deny 固定は 0.7.0 で撤廃。
-        """
-        envelope = {
-            "tool_name": "Bash",
-            "tool_input": {"command": "cat < .env", "description": "test"},
-            "cwd": self.tmp,
-            "permission_mode": "auto",
-        }
-        result = _run_main(envelope, ["--tool", "bash"])
-        self._assert_lenient_allow(result)
-
-    def test_bash_auto_heredoc_allows(self):
-        """heredoc は target 抽出されず opaque → auto で allow (0.3.2)。
-
-        0.33.0: 本文に機密らしい token が無いので開示 note は付かない。
-        """
-        envelope = {
-            "tool_name": "Bash",
-            "tool_input": {
-                "command": "cat <<EOF\nhello\nEOF", "description": "test",
-            },
-            "cwd": self.tmp,
-            "permission_mode": "auto",
-        }
-        result = _run_main(envelope, ["--tool", "bash"])
-        self._assert_lenient_allow_without_note(result)
 
     def test_edit_dotenv_denies(self):
         """Edit handler は既存 .env を deny 固定 (0.2.0)。"""

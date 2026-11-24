@@ -186,6 +186,41 @@ class AllowMatrix:
                     )
 
 
+def assert_matrix_tables_wired(
+    case: unittest.TestCase, namespace: dict, base: type,
+) -> None:
+    """``namespace`` の中で表 (``DENY_CASES`` など) を持つクラスが、その表を回す土台と
+    ``base`` (``self.tmp`` を用意する TestCase) を継承していることを ``case`` で検査する。
+
+    土台を使う他のファイル (``test_failclosed.py``) も、自分の ``globals()`` と基底を
+    渡してこれを呼ぶ。
+    """
+    pairs = (
+        ("DENY_CASES", DenyMatrix),
+        ("ALLOW_CASES", AllowMatrix),
+        ("ASK_OR_ALLOW_CASES", AskOrAllowMatrix),
+    )
+    tables = 0
+    for obj in list(namespace.values()):
+        if not isinstance(obj, type):
+            continue
+        for attr, mixin in pairs:
+            # 継承した表も見る。土台の既定値 () は偽なので土台自身は数えない
+            if getattr(obj, attr, ()):
+                tables += 1
+                with case.subTest(cls=obj.__name__, table=attr):
+                    case.assertTrue(
+                        issubclass(obj, mixin),
+                        f"{obj.__name__}.{attr} を回す {mixin.__name__} が基底に無い",
+                    )
+                    # base (= TestCase) が無いクラスは unittest に収集されない
+                    case.assertTrue(
+                        issubclass(obj, base),
+                        f"{obj.__name__} が {base.__name__} を継承していない (表が回らない)",
+                    )
+    case.assertGreater(tables, 0, "表が 1 つも見つからない (走査の前提が崩れた)")
+
+
 class TestMatrixTablesAreWired(unittest.TestCase):
     """表 (``DENY_CASES`` など) を持つクラスが、その表を回す土台を継承していること。
 
@@ -195,30 +230,7 @@ class TestMatrixTablesAreWired(unittest.TestCase):
     """
 
     def test_every_table_has_its_mixin(self):
-        pairs = (
-            ("DENY_CASES", DenyMatrix),
-            ("ALLOW_CASES", AllowMatrix),
-            ("ASK_OR_ALLOW_CASES", AskOrAllowMatrix),
-        )
-        tables = 0
-        for obj in list(globals().values()):
-            if not isinstance(obj, type):
-                continue
-            for attr, mixin in pairs:
-                # 継承した表も見る。土台の既定値 () は偽なので土台自身は数えない
-                if getattr(obj, attr, ()):
-                    tables += 1
-                    with self.subTest(cls=obj.__name__, table=attr):
-                        self.assertTrue(
-                            issubclass(obj, mixin),
-                            f"{obj.__name__}.{attr} を回す {mixin.__name__} が基底に無い",
-                        )
-                        # BaseBash (= TestCase) が無いクラスは unittest に収集されない
-                        self.assertTrue(
-                            issubclass(obj, BaseBash),
-                            f"{obj.__name__} が BaseBash を継承していない (表が回らない)",
-                        )
-        self.assertGreater(tables, 0, "表が 1 つも見つからない (走査の前提が崩れた)")
+        assert_matrix_tables_wired(self, globals(), BaseBash)
 
 
 class TestRenderFailureLogging(BaseBash):

@@ -17,6 +17,20 @@ from _testutil import FIXTURES  # noqa: F401
 from core import output
 from core.output import ask_or_allow, ask_or_deny, make_ask, make_deny
 
+# 判定の行列の土台は test_bash_handler.py に 1 つだけ置き、ここでは import して使う
+# (test_matcher_path_rules.py が test_matcher.py の DEFAULT_RULES を使うのと同じ形)
+from test_bash_handler import DenyMatrix, assert_matrix_tables_wired
+
+
+def _decision(r: dict) -> str | None:
+    """``permissionDecision`` を取り出す (無ければ ``None``)。
+
+    ``r["hookSpecificOutput"]["permissionDecision"]`` を直接書くと、判定が allow
+    (= 空 dict) に退行したとき ``KeyError`` になり、テストが assertion failure では
+    なく error で落ちる (``test_e2e._decision`` と同じ理由)。
+    """
+    return (r.get("hookSpecificOutput") or {}).get("permissionDecision")
+
 
 class TestOutputBuilders(unittest.TestCase):
     def test_make_deny_shape(self):
@@ -49,20 +63,22 @@ class TestAskOrDeny(unittest.TestCase):
 
     def test_bypass_returns_deny(self):
         r = ask_or_deny("reason", {"permission_mode": "bypassPermissions"})
-        self.assertEqual(r["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(_decision(r), "deny")
 
-    def test_default_returns_ask(self):
-        r = ask_or_deny("reason", {"permission_mode": "default"})
-        self.assertEqual(r["hookSpecificOutput"]["permissionDecision"], "ask")
-
-    def test_missing_mode_returns_ask(self):
-        r = ask_or_deny("reason", {})
-        self.assertEqual(r["hookSpecificOutput"]["permissionDecision"], "ask")
-
-    def test_auto_returns_ask(self):
+    # (ラベル = 畳む前のテスト名, envelope)
+    ASK_CASES = (
+        ("test_default_returns_ask", {"permission_mode": "default"}),
+        ("test_missing_mode_returns_ask", {}),
         # ask_or_deny は auto を lenient 扱いしない (旧仕様維持)
-        r = ask_or_deny("reason", {"permission_mode": "auto"})
-        self.assertEqual(r["hookSpecificOutput"]["permissionDecision"], "ask")
+        ("test_auto_returns_ask", {"permission_mode": "auto"}),
+    )
+
+    def test_returns_ask(self):
+        self.assertTrue(self.ASK_CASES)
+        for case, envelope in self.ASK_CASES:
+            with self.subTest(case=case, envelope=envelope):
+                r = ask_or_deny("reason", envelope)
+                self.assertEqual(_decision(r), "ask")
 
 
 class TestAskOrAllow(unittest.TestCase):
@@ -79,6 +95,7 @@ class TestAskOrAllow(unittest.TestCase):
     def _assert_lenient_allow(self, r: dict) -> None:
         self.assertTrue(output.is_allow(r), msg=repr(r))
         self.assertIsNone(output.decision_of(r), msg=repr(r))
+        self.assertIn("hookSpecificOutput", r, msg=repr(r))
         hook = r["hookSpecificOutput"]
         self.assertEqual(hook["hookEventName"], "PreToolUse")
         self.assertNotIn("permissionDecision", hook)
@@ -87,39 +104,40 @@ class TestAskOrAllow(unittest.TestCase):
         # reason 引数は allow では Claude に届かないチャネルなので、載せない
         self.assertNotIn("reason", hook["additionalContext"])
 
-    def test_auto_returns_allow(self):
-        r = ask_or_allow("reason", {"permission_mode": "auto"})
-        self._assert_lenient_allow(r)
-
-    def test_bypass_returns_allow(self):
-        r = ask_or_allow("reason", {"permission_mode": "bypassPermissions"})
-        self._assert_lenient_allow(r)
-
-    def test_default_returns_ask(self):
-        r = ask_or_allow("reason", {"permission_mode": "default"})
-        self.assertEqual(r["hookSpecificOutput"]["permissionDecision"], "ask")
-
-    def test_accept_edits_returns_ask(self):
-        # acceptEdits は Edit/Write 専用モード。Bash lenient の意図が無いため
-        # 明示的に非 lenient 維持 (ask に倒る)。
-        r = ask_or_allow("reason", {"permission_mode": "acceptEdits"})
-        self.assertEqual(r["hookSpecificOutput"]["permissionDecision"], "ask")
-
-    def test_dont_ask_returns_ask(self):
-        # dontAsk は明示的な非 lenient 判断として既存方針を維持する (ask に倒る)。
-        r = ask_or_allow("reason", {"permission_mode": "dontAsk"})
-        self.assertEqual(r["hookSpecificOutput"]["permissionDecision"], "ask")
-
-    def test_plan_returns_allow(self):
+    # (ラベル = 畳む前のテスト名, envelope)。lenient allow に倒れる mode
+    LENIENT_CASES = (
+        ("test_auto_returns_allow", {"permission_mode": "auto"}),
+        ("test_bypass_returns_allow", {"permission_mode": "bypassPermissions"}),
         # 0.13.0: plan を LENIENT_MODES に再追加 (ユーザー実機 2026-05-18 で plan
         # mode 中の Bash PreToolUse hook 発火を確認)。plan mode は副作用が plan
         # 承認まで保留される dry-run 状態のため autonomous と同等に lenient 扱い。
-        r = ask_or_allow("reason", {"permission_mode": "plan"})
-        self._assert_lenient_allow(r)
+        ("test_plan_returns_allow", {"permission_mode": "plan"}),
+    )
 
-    def test_missing_mode_returns_ask(self):
-        r = ask_or_allow("reason", {})
-        self.assertEqual(r["hookSpecificOutput"]["permissionDecision"], "ask")
+    # (ラベル = 畳む前のテスト名, envelope)。ask に倒れる mode
+    ASK_CASES = (
+        ("test_default_returns_ask", {"permission_mode": "default"}),
+        # acceptEdits は Edit/Write 専用モード。Bash lenient の意図が無いため
+        # 明示的に非 lenient 維持 (ask に倒る)。
+        ("test_accept_edits_returns_ask", {"permission_mode": "acceptEdits"}),
+        # dontAsk は明示的な非 lenient 判断として既存方針を維持する (ask に倒る)。
+        ("test_dont_ask_returns_ask", {"permission_mode": "dontAsk"}),
+        ("test_missing_mode_returns_ask", {}),
+    )
+
+    def test_returns_allow(self):
+        self.assertTrue(self.LENIENT_CASES)
+        for case, envelope in self.LENIENT_CASES:
+            with self.subTest(case=case, envelope=envelope):
+                r = ask_or_allow("reason", envelope)
+                self._assert_lenient_allow(r)
+
+    def test_returns_ask(self):
+        self.assertTrue(self.ASK_CASES)
+        for case, envelope in self.ASK_CASES:
+            with self.subTest(case=case, envelope=envelope):
+                r = ask_or_allow("reason", envelope)
+                self.assertEqual(_decision(r), "ask")
 
 
 class TestHandlerFailClosed(unittest.TestCase):
@@ -158,49 +176,31 @@ class _PatternsBase(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
 
-class TestBashPatternsUnavailableDeny(_PatternsBase):
+class TestBashPatternsUnavailableDeny(DenyMatrix, _PatternsBase):
     """0.3.2: Bash handler の patterns.txt 読込失敗は全 mode で deny 固定。
 
     patterns が読めない = 安全な policy が無い。bash は ``ask_or_allow`` を広く使う
     ため、policy 欠如時に lenient で素通りすることを避けて ``make_deny`` で全停止する。
+
+    判定は ``DenyMatrix`` が mode 6 列で見る (畳む前は default / auto / bypass の 3 列)。
+    読込の失敗は setUp で立て、テストの間ずっと効かせる。
     """
+
+    # 読込に失敗させるので、何を打っても deny になる (畳む前と同じ ``echo hi``)
+    DENY_CASES = (
+        ("test_default_deny / test_auto_deny / test_bypass_deny", "echo hi"),
+    )
+
+    def setUp(self):
+        super().setUp()
+        patcher = self._patch_load()
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _patch_load(self):
         return mock.patch(
             "handlers.bash_handler.load_patterns",
             side_effect=FileNotFoundError("test"),
-        )
-
-    def _make_envelope(self, mode: str) -> dict:
-        return {
-            "tool_name": "Bash",
-            "tool_input": {"command": "echo hi", "description": "test"},
-            "cwd": self.tmp,
-            "permission_mode": mode,
-        }
-
-    def test_default_deny(self):
-        from handlers.bash_handler import handle
-        with self._patch_load():
-            r = handle(self._make_envelope("default"))
-        self.assertEqual(
-            r["hookSpecificOutput"]["permissionDecision"], "deny"
-        )
-
-    def test_auto_deny(self):
-        from handlers.bash_handler import handle
-        with self._patch_load():
-            r = handle(self._make_envelope("auto"))
-        self.assertEqual(
-            r["hookSpecificOutput"]["permissionDecision"], "deny"
-        )
-
-    def test_bypass_deny(self):
-        from handlers.bash_handler import handle
-        with self._patch_load():
-            r = handle(self._make_envelope("bypassPermissions"))
-        self.assertEqual(
-            r["hookSpecificOutput"]["permissionDecision"], "deny"
         )
 
 
@@ -259,6 +259,14 @@ class TestMainCatchAll(_PatternsBase):
             ["hookSpecificOutput"]["permissionDecision"],
             "deny",
         )
+
+
+class TestMatrixTablesAreWired(unittest.TestCase):
+    """このファイルの表 (``DENY_CASES``) を持つクラスが土台と ``_PatternsBase`` を
+    継承していること (``test_bash_handler.TestMatrixTablesAreWired`` と同じ検査)。"""
+
+    def test_every_table_has_its_mixin(self):
+        assert_matrix_tables_wired(self, globals(), _PatternsBase)
 
 
 if __name__ == "__main__":
