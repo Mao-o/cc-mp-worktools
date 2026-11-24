@@ -18,7 +18,8 @@ Windows の Python は `/c/x` を今のドライブの `\c\x` と読むので、
   `--work-tree` / `GIT_WORK_TREE`、`git worktree remove|move` のパス、`env -C` / `sudo -D`)。ドライブの文字は大文字も読む (`/C/...`)
 - 読み替えるのは `/` の後に 1 文字と `/` (か語の終わり) が続く形だけ。`/cc/x` や、Windows 以外の `/c/x` (そこにあるパスのまま) は読み替えない
 - 次の形は Git Bash の読みにならないまま: 区切りに `\` を混ぜた `/c\x`、`/cygdrive/c/x`、ドライブの root より上に出る `..`
-  (`/c/../c/x`)、Git Bash の root の下のパス (`/tmp` / `/usr` など)。Write / Edit のファイルパスの読みは変えていない
+  (`/c/../c/x`)、Git Bash の root の下のパス (`/tmp` / `/usr` など)。Write / Edit のファイルパスの読みは変えていない。
+  README の目的と限界と AGENTS.md の指摘しないものにも同じ形を書いた
 
 ### 比較
 

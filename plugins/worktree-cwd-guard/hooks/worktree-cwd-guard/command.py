@@ -282,7 +282,7 @@ def _expand_home(path: str) -> str:
 
 # Git Bash (MSYS) のドライブの綴り。`/c/x` と `/c` は、Git Bash では `C:\x` と `C:\` (pwd もこの形を返す)。
 # Windows の Python は今のドライブの `\c\x` と読む
-_MSYS_DRIVE = re.compile(r"/([A-Za-z])(?=/|$)")
+_MSYS_DRIVE = re.compile(r"/([A-Za-z])(?=/|\Z)")
 
 
 def _msys_drive(path: str) -> str:

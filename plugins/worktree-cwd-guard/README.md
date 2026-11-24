@@ -53,6 +53,10 @@
   - 一覧に無い wrapper の後ろの git (`nice git -C <dir> ...` / `find . -exec git --git-dir=<dir>/.git add . \;`)
   - 行き先の一部だけが変数の形。`git --git-dir=<dir>/.git --work-tree=$X add .` は、ほかに分かる行き先があっても
     注意だけにし、`git -C $Y --work-tree=<dir> ...` は注意も出しません
+  - Windows の Git Bash の綴りのうち `/c/x` / `/c` 以外の形。区切りに `\` を混ぜた `/c\x`、`/cygdrive/c/x`、
+    ドライブの root より上に出る `..` (`/c/../c/x`)、Git Bash の root の下のパス (`/tmp` / `/usr` など) は
+    Git Bash の読みにせず、Windows の読みだけで判定します。`MSYS_NO_PATHCONV=1` などで変換を止めた git の `/c/x` も
+    Git Bash の読みで判定するので、止めすぎることがあります
 - shell が構文エラーにする書き方 (閉じない引用符・括弧、"$(...)" の中の comment など) を含む行から後ろは読みません。
   ただし、閉じない括弧・引用符・backtick か、終端行の無い here-document が残ったときは、読みが shell とずれている
   ことがあるため、comment や行の継続を整えない旧来の読みと、終端行の無い here-document を here-document と読まない

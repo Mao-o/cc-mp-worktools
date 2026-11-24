@@ -450,6 +450,7 @@ class NtpathEmulationTest(unittest.TestCase):
             f'cd "{main}" && git commit -m x',
             "git -C /C/Users/other/repo reset --hard",  # ドライブの文字の大文字
             "cd /c; cd Users/other/repo; git reset --hard",  # ドライブだけ
+            "cd /c/Users; git -C other/x/../repo reset --hard",  # 相対パスの途中の 1 文字の語はドライブではない
             f"env -C {main} git reset --hard",
             f"pushd {main}; git reset --hard",
             f"pushd -n {main}; popd; git reset --hard",
@@ -465,6 +466,8 @@ class NtpathEmulationTest(unittest.TestCase):
         # `/cc/x` はドライブではない。自分の worktree を `/c/...` で書いた形は止めない
         for cmd in (
             "git -C /cc/Users/other/repo reset --hard",
+            "git -C /d/Users/other/repo reset --hard",  # 別のドライブ (D:) は C: の checkout を指さない
+            'cd "/c\n"; cd Users/other/repo; git reset --hard',  # 語の終わりの前の改行はドライブの終わりではない
             "git -C /c/Users/other/repo/.claude/worktrees/a reset --hard",
             "cd /c/Users/other/repo/.claude/worktrees/a && git add .",
         ):
