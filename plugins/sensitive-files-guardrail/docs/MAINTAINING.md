@@ -357,11 +357,16 @@ plugin root (`plugins/sensitive-files-guardrail`) から実行する。**`cd` �
 - **同型ケースは subTest に畳む** (0.33.0、D2 の再定義)。「コマンド 1 形 × mode
   1 列」を 1 メソッドずつ並べると、形ごとに測る mode がまちまちになって網羅性が
   穴あきになる (畳む前は `coproc cat .env` が default だけ、`cat "$X"` が 3 列だった)。
-  `ask_or_allow` に倒れる形は `tests/test_bash_handler.py::AskOrAllowMatrix` を
-  継承して `CASES` に `(ラベル, コマンド)` を足すだけでよく、**mode 5 列は土台が
-  必ず回す**。D2 の目標は件数削減ではなく「同型の畳み込みで格子点を増やす」こと
-  (実績: メソッド 55 → 12、格子点 55 → 180)。件数を減らすために形を捨てないこと —
-  形状カバレッジの空白が過去の重大不具合 3 件の直接原因だった
+  `tests/test_bash_handler.py` で判定だけを見る形は、判定ごとの土台を継承して表に
+  `(ラベル, コマンド)` を足すだけでよく、**mode 6 列は土台が必ず回す**:
+  全 mode で deny は `DenyMatrix` / `DENY_CASES`、全 mode で allow は `AllowMatrix` /
+  `ALLOW_CASES`、`ask_or_allow` に倒れる形は `AskOrAllowMatrix` / `ASK_OR_ALLOW_CASES`
+  (0.36.3 で `CASES` から改名)。表を足したクラスが土台を継承し忘れると行が 1 件も
+  検査されないので、`TestMatrixTablesAreWired` がそれを落とす。D2 の目標は件数削減
+  ではなく「同型の畳み込みで格子点を増やす」こと (実績: 0.33.0 でメソッド 55 → 12、
+  格子点 55 → 216。0.36.3 でメソッド 397 → 225、畳んだ範囲の格子点 453 → 1,908)。
+  件数を減らすために形を捨てないこと — 形状カバレッジの空白が過去の重大不具合 3 件の
+  直接原因だった
 
 ## validate
 
