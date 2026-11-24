@@ -23,6 +23,82 @@ PATTERNS = [r"^gh(?=\s|$)"]
 # DISCLOSING が同じ文字列をキーに参照するため。literal を 2 箇所に書くと、片方を
 # 直したときに宣言が黙って無効化される)。
 _RO_AUTH_STATUS = r"^gh\s+auth\s+(status|list)\b"
+
+# --- サブコマンドの後ろの `--help` (v0.30.0) ---------------------------------------
+#
+# `gh <コマンド> <サブコマンド> ... --help` は gh がヘルプを出して終わり、コマンドを実行しない
+# (cobra は flag を解釈した直後、PersistentPreRun より前に help を見る)。0.29.x までは
+# READONLY の情報系が CLI 名直後の形 (`gh --help`) だけだったので、`gh auth switch --help` は
+# 切替 (STATE_CHANGING)、`gh auth token --help` は開示 (DISCLOSING) として扱われ、不一致で
+# deny されていた。この形を READONLY に足し、STATE_CHANGING と DISCLOSING からは外す
+# (下の `_unless_help`)。読み取りにするのは、次をすべて満たす形だけ:
+#
+# 1. 2 語目が gh の組み込みのコマンド (`_HELP_COMMANDS`)。alias と extension は `--help` を
+#    そのまま中身に渡す (gh 2.105 で実測: `gh alias set --shell zz 'echo RAN "$@"'` の後の
+#    `gh zz --help` は `RAN --help` を出す。`gh extension exec <name> --help` も extension を
+#    起動する)。alias と extension は組み込みと同じ名前を持てないので、名前で区別できる
+# 2. `--help` がコマンド行の最後の語 (後ろはリダイレクトだけ)。後ろの `--help=false` は後勝ちで
+#    ヘルプを取り消す (実測: `gh pr create --help --help=false` は create を実行する)
+# 3. 直前の語が「値を取るかもしれない option」(`-` で始まり `=` を含まない語。`-` 単独は除く)
+#    ではない。値を取る option の直後の `--help` は値になる (実測: `gh pr create --title --help` /
+#    `-dt --help` / `--body-file --help` / `gh auth switch -h --help` はどれも実行する)。
+#    どの option が値を取るかはサブコマンドごとに違い、hook は表を持たないので、bool の flag の
+#    直後 (`--draft --help`。実際はヘルプ) も読み取りにしない (検証は従来どおり)
+# 4. 前に `--` が無い (`--` の後ろは位置引数で、ヘルプにならない)
+# 5. 語が記号を含まない (英数字と `_./:@%+=,-` だけ。引用符・`$`・`*`・`{`・`~`・`#`・
+#    `\` などがあると、シェルが語を分け直す・値を差し込む・コメントにする余地があり、語の位置を
+#    文字列から決められない)。2 語目以降の語は `=` で始まらない (zsh の `=cmd` はパスに展開される)
+#
+# `-h` は数えない (gh の `auth` 配下などで `--hostname` の短い形。`gh auth switch -h <host>` は
+# 切替のまま)。`--help` を含む語の解釈 (2〜4) は gh 2.105 で、組み込みの全サブコマンドについて
+# `<path> --help` / `<path> x --help` / `<path> x y --help` の 3 形がヘルプを出すことを、認証の無い
+# 一時 HOME で実測して決めた (位置引数の後ろの `--help` もヘルプになる = flag を最後まで読む)。
+#
+# 組み込みのコマンド (gh 2.105 の `gh help` の一覧)。外したもの:
+# - `copilot` / `extension`: 引数を別のプログラム (Copilot CLI / extension) に渡す
+# - `(preview)` と表示されるもの (`agent-task` / `discussion` / `event` / `skill`): 引数の扱いが
+#   版で変わりうる
+# 外したコマンドと alias (`gh co` など) の `--help` は従来どおり検証する (`gh help <command>` の形は
+# 読み取り)。
+_HELP_COMMANDS = (
+    "alias", "api", "attestation", "auth", "browse", "cache", "codespace",
+    "completion", "config", "gist", "gpg-key", "issue", "label", "licenses", "org",
+    "pr", "preview", "project", "release", "repo", "ruleset", "run", "search",
+    "secret", "ssh-key", "status", "variable", "workflow",
+)
+# 語 (記号を含まない。先頭は `=` 以外)。
+_HELP_WORD = r"[A-Za-z0-9_./:@%+,-][A-Za-z0-9_./:@%+=,-]*"
+# `--help` の直前に置ける語: `-` で始まらない語 / `-` 単独 / `=` を含む option (`--title=x`)。
+_HELP_CLOSED_WORD = (
+    r"(?:[A-Za-z0-9_./:@%+,][A-Za-z0-9_./:@%+=,-]*"
+    r"|-"
+    r"|-[A-Za-z0-9_./:@%+,-]*=[A-Za-z0-9_./:@%+=,-]*)"
+)
+# `--help` の後ろに置けるリダイレクト (`2>&1` / `>/dev/null` / `> out.txt` / `< /dev/null` /
+# `&>f`)。数字の付く形は空白の後ろだけ (`--help2>&1` は `--help2` という語になる)。
+_HELP_REDIRECT = (
+    r"(?:(?:[ \t]+[0-9]*|[ \t]*)(?:>>|>&|>|<&|<)|[ \t]*&>>?)[ \t]*" + _HELP_WORD
+)
+_SUBCOMMAND_HELP = (
+    r"gh[ \t]+(?:" + "|".join(_HELP_COMMANDS) + r")"
+    r"(?:(?:[ \t]+(?!--(?:[ \t]|$))" + _HELP_WORD + r")*[ \t]+" + _HELP_CLOSED_WORD + r")?"
+    r"[ \t]+--help(?:" + _HELP_REDIRECT + r")*[ \t]*$"
+)
+_RO_SUBCOMMAND_HELP = r"^" + _SUBCOMMAND_HELP
+
+
+def _unless_help(pattern: str) -> str:
+    """anchored な `pattern` から、サブコマンドの後ろの `--help` の形を除いた pattern。
+
+    STATE_CHANGING (成功 cache の破棄と連結規則の切替側) と DISCLOSING (READONLY の取り消し) に
+    使う。除くのは `_RO_SUBCOMMAND_HELP` に当たる形だけなので、「pattern に当たり、ヘルプの形
+    ではない」ものは従来どおり当たる (`gh auth switch -h ghe.example.com` / `gh auth switch
+    --user --help` は切替のまま)。
+    """
+    assert pattern.startswith("^"), pattern
+    return r"^(?!" + _SUBCOMMAND_HELP + r")" + pattern[1:]
+
+
 READONLY = [
     _RO_AUTH_STATUS,
     # 認証系の素通しは「コマンド名で括る」のではなく **リモートに何も書かないと
@@ -58,6 +134,8 @@ READONLY = [
     #     付いていれば readonly にしない (値を取る flag なので `=false` で無効化不可)
     # 情報系 (バージョン / ヘルプ表示) はアカウント検証不要。
     r"^gh\s+(--version|--help|version|help)\b",
+    # サブコマンドの後ろの `--help` (v0.30.0。上の `_SUBCOMMAND_HELP` の説明)。
+    _RO_SUBCOMMAND_HELP,
 ]
 # `gh auth status` / `gh auth list` で「これが付いていても readonly」と言える option。
 # これ以外が付いていたら READONLY を取り消して QUERY に降格する (= 検証は走るが
@@ -71,9 +149,12 @@ READONLY_SAFE_OPTIONS = {
 # 「READONLY のコマンド名に一致する」だけでは素通しさせない (内部バックログ)。
 # `gh auth token` は READONLY に無いので現状も検証対象だが、**形そのものが開示**
 # であることを宣言側に残す (将来 READONLY に足したときに素通しに戻らないように)。
+# ヘルプの形 (`gh auth token --help`。トークンは出ない) だけは除く (v0.30.0。`_unless_help`)。
+# `_RO_AUTH_STATUS` の行は除かない: `--show-token --help` は直前が option なので、そもそも
+# ヘルプの形に当たらない。
 DISCLOSING = [
     (_RO_AUTH_STATUS, frozenset({"--show-token", "-t"})),
-    (r"^gh\s+auth\s+token(?=\s|$)", frozenset()),
+    (_unless_help(r"^gh\s+auth\s+token(?=\s|$)"), frozenset()),
 ]
 # リモート read (資源を変更しない)。不一致でも deny せず警告のみで通す。
 # **列挙した形だけ**を QUERY にする — ここは判定表を緩める唯一の方向なので、
@@ -91,7 +172,9 @@ QUERY = [
 # `gh auth refresh --scopes ...` 成功後に古い成功 cache が TTL 分残ってしまう。
 # ただし `--user` 無しの `refresh` はアクティブアカウントを変えないので、連結規則の
 # 切替側には数えない (下の `changes_identity`)。
-STATE_CHANGING = [r"^gh\s+auth\s+(switch|login|logout|refresh)\b"]
+# ヘルプの形 (`gh auth switch --help`) は状態を変えないので除く (v0.30.0。`_unless_help`)。
+# 除くと cache の破棄と連結規則の切替側の両方から外れる (dispatcher はどちらもこの表で決める)。
+STATE_CHANGING = [_unless_help(r"^gh\s+auth\s+(switch|login|logout|refresh)\b")]
 ACCOUNT_KEY = "github"
 
 # deny 文面で案内する remediation コマンド (引数付きの実コマンド形) の正規表現。

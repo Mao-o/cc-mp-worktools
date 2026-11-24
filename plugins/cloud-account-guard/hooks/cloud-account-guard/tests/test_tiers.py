@@ -408,7 +408,9 @@ class TestReadonlySafeOptionsContract(unittest.TestCase):
         from services import aws, gcloud, github
 
         for module, needle in (
-            (github, r"^gh\s+auth\s+token"),
+            # v0.30.0 から `^` の直後にヘルプの形を除く先読み (`_unless_help`) が入るので、
+            # `^` を含めずに照合する (先頭アンカは test_patterns_are_anchored_and_compile が見る)。
+            (github, r"gh\s+auth\s+token(?=\s|$)"),
             (aws, r"^aws\s+configure\s+export-credentials"),
             (aws, r"^aws\s+kms\s+decrypt"),
             (gcloud, "print-(access|identity)-token"),

@@ -742,7 +742,12 @@ read-only volume や quota 超過でアカウント登録までブロックし�
 
 **D13: 情報系コマンドの readonly 化** — 全 service の `--version` / `--help` /
 `version` / `help` を READONLY に入れる。診断コマンドが誤検証で deny されるのは
-全 service 共通の穴だったため一括対応。
+全 service 共通の穴だったため一括対応。v0.30.0 で gh だけ、サブコマンドの後ろの `--help`
+(`gh auth switch --help`) も READONLY に足した。形は文字列から「gh がヘルプを出して終わる」と
+言えるものだけに絞り (直前の語が値を取りうる option なら `--help` が値になる・alias と
+extension は `--help` を中身に渡す)、同じ regex を STATE_CHANGING と DISCLOSING の除外にも使う
+(`services/github.py` の `_unless_help`。dispatcher は変えない)。他 service は flag 表を決めて
+いないので対象外。
 
 **D14: 検出セグメントの併記** — verify 失敗の deny reason に
 `(検出コマンド: ...)` を付け、複合コマンドのどのセグメントが検証を起動したかを

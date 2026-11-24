@@ -212,16 +212,18 @@ class TestOnlyWhereItWouldStop(AutoSwitchBase):
     def test_help_commands_are_not_switched(self):
         """`--help` 付きのコマンド (ヘルプの表示) のために、マシン全体の gh を切り替えない。
 
-        `gh auth git-credential --help` などは READONLY の `gh --help` の形に当たらず、通常の
-        検証に乗る。0.20.0 までは不一致で自動切替が走っていた (内部バックログ)。判定は変えず
-        deny のまま、切り替えなかった理由を添える。"""
+        0.30.0 からサブコマンドの後ろの `--help` の多く (`gh auth git-credential --help` /
+        `gh pr create --help`) は READONLY で検証自体をしない (test_github_subcommand_help.py)。
+        ここに並べるのは、それでも通常の検証に乗る `--help` 付きの形 (直前が option /
+        `--help=<値>` / 後ろに語が続く)。0.20.0 までは不一致で自動切替が走っていた
+        (内部バックログ)。判定は変えず deny のまま、切り替えなかった理由を添える。"""
         self._write_accounts({"github": "Mao-o"})
         for command in (
-            "gh auth git-credential --help",
-            "gh auth --help",
-            "gh pr create --help",
+            "gh pr create --draft --help",
+            "gh auth git-credential --hostname --help",
             "gh pr create --help=true",
-            "gh pr create --help && gh issue create --help",
+            "gh pr create --help --fill",
+            "gh pr create --draft --help && gh issue create --help=true",
         ):
             with self.subTest(command=command):
                 with self._enabled():
@@ -239,7 +241,7 @@ class TestOnlyWhereItWouldStop(AutoSwitchBase):
             "gh api -h github.com -X DELETE repos/o/r",
             "gh pr create -h feature",
             "gh pr create --title 'see --help' --fill",
-            "gh issue create --help && gh pr create",
+            "gh issue create --draft --help && gh pr create",
         ):
             with self.subTest(command=command):
                 self.gh = FakeGh({"github.com": ["work", "Mao-o"]}, {"github.com": "work"})
