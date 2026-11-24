@@ -1279,7 +1279,7 @@ class TestCompoundAllow(BaseBash):
     )
 
     def test_non_safe_read_with_safe_redirect_stripped(self):
-        self.assertEqual(len(self.SAFE_REDIRECT_ON_NON_SAFE_READ), 4, "前提: 表が空でない")
+        self.assertEqual(len(self.SAFE_REDIRECT_ON_NON_SAFE_READ), 4, "前提: 対になる cat の 4 件と同じ 4 形を持つ")
         # 前提: make は residual metachar の検査に届く (safe_read なら下の行は剥離を見ない)
         r = handle(_make_envelope("make build > out.txt", self.tmp))
         self.assertEqual(_decision(r), "ask", "前提: 安全でないリダイレクトは default で ask")
@@ -1305,6 +1305,20 @@ class TestRedirectToNonNull(BaseBash):
     def test_append_redirect_default(self):
         r = handle(_make_envelope("echo foo >> out.txt", self.tmp))
         self.assertEqual(_decision(r), "ask")
+
+    # 安全リダイレクトを剥がすときに後ろの word を巻き込まない。安全リダイレクトの後ろに
+    # 安全でないリダイレクトが続く形は、residual metachar で default が ask のまま。
+    UNSAFE_AFTER_SAFE_REDIRECT = (
+        ("after_single_word", "make build 2>/dev/null > out.txt"),
+        ("after_two_words", "make build > /dev/null > out.txt"),
+    )
+
+    def test_unsafe_redirect_after_safe_redirect_keeps_ask(self):
+        self.assertEqual(len(self.UNSAFE_AFTER_SAFE_REDIRECT), 2, "前提: 表が空でない")
+        for label, cmd in self.UNSAFE_AFTER_SAFE_REDIRECT:
+            with self.subTest(case=label, cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(_decision(r), "ask", msg=f"{cmd!r} -> {_decision(r)!r}")
 
 
 class TestArbitraryPathExec(BaseBash):

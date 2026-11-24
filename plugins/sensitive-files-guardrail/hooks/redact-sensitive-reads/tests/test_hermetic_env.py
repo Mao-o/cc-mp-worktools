@@ -432,7 +432,7 @@ class TestHelpersStopBackgroundMaintenance(unittest.TestCase):
 
 class TestInitRepoWritesTheRepoConfig(unittest.TestCase):
     """`init_repo` が `git config` を起動せずに `.git/config` へ足した設定を、git が repo の config として
-    読めること (`--local` は repo の config だけを読む。global や env の値では埋まらない)。
+    読めること (`--local` は repo の config だけを読む。global や env の値では埋まらない)。`git init` が書いた設定 (`core.bare`) も残ること (追記でなく上書きすると消える)。
 
     追記の形 (改行・section の書き方) を git が読めない環境 (Windows の CI など) では、ここで落ちる。
     """
@@ -445,9 +445,12 @@ class TestInitRepoWritesTheRepoConfig(unittest.TestCase):
             _testutil.init_repo(repo)
             got = {
                 key: _testutil.git(["config", "--local", "--get", key], repo, check=False).stdout.decode().strip()
-                for key in ("user.name", "user.email", "commit.gpgsign")
+                for key in ("user.name", "user.email", "commit.gpgsign", "core.bare")
             }
-        self.assertEqual(got, {"user.name": "test", "user.email": "test@example.com", "commit.gpgsign": "false"})
+        self.assertEqual(
+            got,
+            {"user.name": "test", "user.email": "test@example.com", "commit.gpgsign": "false", "core.bare": "false"},
+        )
 
 
 class TestPlainBareOriginStartsNoMaintenance(unittest.TestCase):
