@@ -123,17 +123,53 @@ class WorktreeNameTest(test_guard.GuardBase):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(evaluate(bash(cmd, self.a)))
 
-    def test_unknown_place_is_not_denied(self):
-        # 今の場所や git dir が決まらなければ repo も決まらない (パスの読みと同じく止めない)。
-        # 共有 git dir の下の、どの checkout にも対応しない git dir は、git が repo として開けずに失敗する
+    def test_unknown_place_is_a_note(self):
+        # 今の場所や git dir が決まらなければ repo も決まらないので止めない。名前が別の worktree に一致するか、`..` / `.` / 末尾の
+        # 区切りを含む相対パスなら、ほかの書き込み (`cd "$Y"; git reset --hard`) と同じく注意を出す。
+        # 共有 git dir の下の、どの checkout にも対応しない git dir は、git が repo として開けずに失敗する (ほかの書き込みと同じく注意)
         for cmd in (
             'cd "$Y"; git worktree remove --force c',
             'git -C "$Y" worktree remove --force c',
             'GIT_DIR="$X" git worktree remove --force c',
             f'GIT_DIR="{self.main}/.git/worktrees/nosuch" git worktree remove --force c',
+            'cd "$Y"; git worktree move wt-b ../moved',
+            'cd "$Y"; git worktree remove --force ../wt-b',
+            'cd "$Y"; git worktree remove --force ./c',
+            'cd "$Y"; git worktree remove --force c/',
+            'cd "$Y"; git worktree remove --force x/../c',
+            # repo は決まるが、相対パスの基点の 1 つ (今の場所・作業ツリー) が決まらない
+            f'GIT_DIR="{self.main}/.git"; export GIT_DIR; cd "$Y"; git worktree remove --force ../../wt-b',
+            'git --work-tree="$X" worktree remove --force ../wt-b',
         ):
             with self.subTest(cmd=cmd):
-                self.assertNotEqual(self._decision(cmd), "deny")
+                self.assertEqual(self._decision(cmd), "context")
+        # repo が決まり、名前で別の worktree に決まれば止める (注意は足さない。止める理由には注意が載らないので、読みの結果で見る)
+        cmd = f'cd "$Y"; GIT_DIR="{self.a}/.git" git worktree remove --force c'
+        self.assertEqual(self._decision(cmd), "deny")
+        out = command.analyze(cmd, str(self.a), family.detect(str(self.a)))
+        self.assertEqual([f.blocked for f in out], [True], [f.message for f in out])
+        # 自分の worktree の名前、変数の語、repo の外の絶対パス、どの worktree の末尾にも一致しない素の相対パス
+        # (今の場所から読んだ先が worktree なら、その root は同じ綴りで終わる) は、何も出さない
+        outside = Path(self._tmp.name) / "plain"
+        for cmd in (
+            'cd "$Y"; git worktree remove --force a',
+            'cd "$Y"; git worktree remove --force "$Z"',
+            'git -C "$Y" worktree remove --force "$Z"',
+            'cd "$Y"; git worktree remove --force "../$Z"',
+            f'cd "$Y"; git worktree remove --force "{outside}"',
+            'cd "$Y"; git worktree remove --force zz',
+            'cd "$Y"; git worktree remove --force x/c',
+            # 対象の語が無い形と、remove / move 以外
+            'cd "$Y"; git worktree remove --force',
+            'cd "$Y"; git worktree list',
+            'cd "$Y"; git worktree prune',
+        ):
+            with self.subTest(cmd=cmd):
+                try:
+                    out = evaluate(bash(cmd, self.a))
+                except Exception as e:  # noqa: BLE001 - 読みの例外も判定の誤りとして数える
+                    self.fail(f"{cmd!r} で例外: {e!r}")
+                self.assertIsNone(out)
 
     def test_ambiguous_name_is_read_as_a_path(self):
         # 2 つの worktree が同じ名前で終わると、git は名前で選ばずにパスとして読む
@@ -141,6 +177,8 @@ class WorktreeNameTest(test_guard.GuardBase):
         self.assertIsNone(evaluate(bash("git worktree remove --force c", self.a)))
         self.assertEqual(self._decision("git worktree remove --force worktrees/c"), "deny")
         self.assertEqual(self._decision("git worktree remove --force x/c"), "deny")
+        # 今の場所が決まらなければ、パスとして読んだ先も決まらない (2 つのどちらでもありうるので注意)
+        self.assertEqual(self._decision('cd "$Y"; git worktree remove --force c'), "context")
 
     def test_symlinked_places(self):
         # 自分の場所を symlink から読んでも、自分の worktree の名前は止めない

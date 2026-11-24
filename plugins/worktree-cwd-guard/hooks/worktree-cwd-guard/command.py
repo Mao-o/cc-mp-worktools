@@ -440,6 +440,27 @@ def _worktree_by_name(rest: list[str], fam: Family) -> set[str]:
     return found
 
 
+def _worktree_may_be_other(rest: list[str], fam: Family, msys: bool = False) -> bool:
+    """git が読む repo か今の場所が決まらないときに、`git worktree remove|move <worktree>` が別の worktree を指しうるか。
+
+    名前 (パスの末尾) が別の worktree に一致するときと、名前で決まらない相対パスのうち行き先がどの worktree でもありうるもの
+    (`../wt-b` など。基点が決まらない) のときに True。自分の worktree の名前、絶対パス (パスとして読む側で判定する)、変数の語
+    (`"$Y"`。今の場所が決まっていても読まない)、どの worktree の末尾にも一致しない素の相対パス (`b` / `x/b`) は False。
+    """
+    operand = _worktree_operand(rest)
+    if operand is None or _dynamic(operand) or _resolve(None, operand, msys) is not None:
+        return False
+    names = _worktree_by_name(rest, fam)
+    if names:
+        return any(o != fam.home for o in names)
+    # 素の相対パスを今の場所から読んだ先が worktree なら、その root は同じ綴りで終わる (名前で一致する)。名前で決まらないのは、
+    # どの worktree の末尾にも一致しないとき (別の worktree ではない) と、2 つ以上に一致するとき (git はパスとして読む) だけ。
+    # `..` / `.` / 空の要素 (末尾の区切りや `//`) を含む綴りは、末尾が一致しなくても worktree の root に届く
+    if any(part in ("", ".", "..") for part in re.split("[/" + re.escape(os.sep) + "]", operand)):
+        return True
+    return any(_ends_with_name(fold(root), fold(os.path.normcase(operand))) for fold in (_exact, _folded) for root in fam.roots)
+
+
 def _chdir_form(cmd: str, args: list[str], closes: bool = True) -> tuple[frozenset[str], list[str]]:
     """`cd` / `chdir` / `pushd` の option を読み、(option と語の数の上で移動する shell の集合, 語) を返す。
 
@@ -805,15 +826,23 @@ _STATE_LIMIT = 64
 
 
 def _cap(alts: set[_Alt]) -> set[_Alt]:
-    """状態が上限を超えたら、作業ディレクトリもスタックも決まらない状態にまとめる。成否の別だけは残す。
+    """状態が上限を超えたら、成否ごとに 1 つの状態にまとめる。全状態で同じでない作業ディレクトリとスタックは、決まらないものにする。
 
     `x || cd d1; x || cd d2; ...` (相対パス) や `x || pushd /d1; ...` は、分岐ごとに行き先かスタックが割れて、状態が倍々に増える。
     hook が時間切れになると Claude Code はコマンドをそのまま走らせるので、形ごとではなく数で閉じる。まとめた後の git は、
     行き先の決まらない移動の後ろと同じく注意だけにする (止めない)。絶対パスの `cd <dir>` / `git -C <dir>` は、まとめた後も読む。
+
+    全状態で同じ作業ディレクトリとスタックは、そのまま残す。割れたスタックは、どの状態でも積まれている深さだけ、行き先の
+    分からない要素 (None) で残す。`()` にすると空のスタックと読まれ、popd が「失敗してその場に残る」読みになって止めすぎる
+    (`pushd /t/x; <上限を超える形>; cd <main>; popd; git reset --hard` の popd は、どの状態でも `/t/x` の手前に戻る)。
     """
     if len(alts) <= _STATE_LIMIT:
         return alts
-    return {(None, (), st) for st in {a[2] for a in alts}}
+    heres = {h for h, _, _ in alts}
+    stacks = {s for _, s, _ in alts}
+    here = next(iter(heres)) if len(heres) == 1 else None
+    stack = next(iter(stacks)) if len(stacks) == 1 else (None,) * min(len(s) for s in stacks)
+    return {(here, stack, st) for st in {a[2] for a in alts}}
 
 
 class _Analyzer:
@@ -1139,9 +1168,13 @@ class _Analyzer:
                 # git はパスとして読む前に worktree の名前 (パスの末尾) として読む。名前を照合するのは、git が読む repo がこの repo のときだけ
                 if in_repo:
                     hits += sorted(_worktree_by_name(rest, fam))
-                for o in hits:
-                    if o != fam.home:
-                        self._add(Finding(True, f"`git worktree {rest[1]}` が別の worktree ({o}) を対象にしている", o))
+                others = [o for o in hits if o != fam.home]
+                if unresolved and not others and _worktree_may_be_other(rest, fam, self.msys):
+                    # git が読む repo か今の場所 (相対パスの基点の 1 つ) が決まらない (行き先の決まらない cd の後ろや、状態が上限を
+                    # 超えた後) が、対象は別の worktree でありうる。ほかの書き込み (`cd "$X"; git reset --hard`) と同じく、止めずに注意を出す
+                    note = note or Finding(False, f"`git worktree {rest[1]}` の対象 ({unresolved}) を静的に解決できない")
+                for o in others:
+                    self._add(Finding(True, f"`git worktree {rest[1]}` が別の worktree ({o}) を対象にしている", o))
                 continue
             if not _is_mutating(sub, rest[1:]):
                 return

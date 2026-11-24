@@ -51,6 +51,11 @@ def or_pushd_abs(n: int) -> str:
     return "".join(f"x || pushd /t/d{i}; " for i in range(n))
 
 
+def or_pushd_n(n: int) -> str:
+    """`x || pushd -n /t/d<i>;`。bash の `pushd -n` は移動せずにスタックへ積むので、作業ディレクトリは同じままスタックが割れる。"""
+    return "".join(f"x || pushd -n /t/d{i}; " for i in range(n))
+
+
 def pipe_pushd(n: int) -> str:
     """`x | pushd /t/d0 | ... ;` (pipeline の要素の pushd)。0.9.2 の時点で既に増えない形 (増えないことを固定する)。"""
     return "x | " + " | ".join(f"pushd /t/d{i}" for i in range(n)) + "; "
@@ -152,6 +157,17 @@ class StateLimitTest(BoundedBase):
         self.verdict(f'cd "{MAIN}"; {or_cd(k)}{GIT}')
         self.assertEqual((self.peak, self.collapses), (command._STATE_LIMIT, 0))
 
+    def test_zsh_and_chain_before_background(self):
+        # zsh の `&` は手前の `cd <dir> &&` を今の shell に残すので、`&` で戻す候補は移動ごとに 1 つ増える。移動が 64 個
+        # (候補は最初の場所を含めて 65) で上限を超える (README の「目的と限界」)
+        def chain(n: int) -> str:
+            return "".join(f"cd /t/d{i} && " for i in range(n))
+
+        self.assertEqual(self.verdict(f'cd "{MAIN}" && {chain(command._STATE_LIMIT - 2)}true & {GIT}'), "deny")
+        self.assertEqual(self.collapses, 0)
+        self.assertEqual(self.verdict(f'cd "{MAIN}" && {chain(command._STATE_LIMIT - 1)}true & {GIT}'), "note")
+        self.assertGreater(self.collapses, 0)
+
     def test_absolute_targets_are_read_after_the_limit(self):
         head = or_cd(18)
         self.assertEqual(self.verdict(f'{head}cd "{MAIN}" && {GIT}'), "deny")
@@ -173,9 +189,66 @@ class StateLimitTest(BoundedBase):
         self.assertEqual(self.verdict(f'cd "{MAIN}"; {or_cd(k)}cd n || x || {GIT}'), "note")
         self.assertGreater(self.collapses, 0)
 
+    def test_collapse_keeps_shared_place_and_stack(self):
+        k = _limit_exponent()
+        for n in (k + 1, 18):
+            with self.subTest(n=n):
+                # 全状態で同じスタック (`pushd /t/x` で積んだ自分の worktree) は残す。popd はそこへ戻り、bash / zsh -f とも
+                # git は自分の worktree で動く
+                self.assertIsNone(self.verdict(f'pushd /t/x; {or_cd(n)}cd "{MAIN}"; popd; {GIT}'))
+                self.assertGreater(self.collapses, 0)
+                # 割れたスタックも、どの状態でも積まれている深さは残す (popd は失敗せず、行き先が決まらないので注意)
+                self.assertEqual(self.verdict(f'pushd /t/x; {or_pushd_abs(n)}cd "{MAIN}"; popd; {GIT}'), "note")
+                self.assertGreater(self.collapses, 0)
+                # どの状態でも積まれているとは言えない深さは残さない (`x` がずっと成功すればスタックは空で、popd は失敗して main に残る)
+                self.assertEqual(self.verdict(f'{or_pushd_abs(n)}cd "{MAIN}"; popd; {GIT}'), "deny")
+                # 全状態で同じ作業ディレクトリは残す (bash の `pushd -n` は移動せずにスタックだけを割る)
+                self.assertIsNone(self.verdict(f"{or_pushd_n(n)}{GIT}"))
+                self.assertGreater(self.collapses, 0)
+                self.assertEqual(self.verdict(f'cd "{MAIN}"; {or_pushd_n(n)}{GIT}'), "deny")
+        # スタックが main を指していれば、まとめた後も popd の行き先で止める
+        self.assertEqual(self.verdict(f'cd "{MAIN}"; pushd /t/x; {or_cd(18)}popd; {GIT}'), "deny")
+        self.assertGreater(self.collapses, 0)
+
+    def test_collapse_keeps_exported_git_dir(self):
+        # `&` で戻す時点をまとめても、export 済みの GIT_DIR と、export していない代入は残す (上限を超えた後も git dir の行き先は読む)
+        k = _limit_exponent()
+        self.assertEqual(self.verdict(f'export GIT_DIR="{MAIN}/.git"; {or_cd(k)}x; true & git add .'), "deny")
+        self.assertGreater(self.collapses, 0)
+        self.assertEqual(self.verdict(f'GIT_DIR="{MAIN}/.git"; {or_cd(k)}x; true & export GIT_DIR; git add .'), "deny")
+        self.assertGreater(self.collapses, 0)
+
+    def test_worktree_operand_after_the_limit_is_a_note(self):
+        # 上限を超えた後は git が読む repo と今の場所が決まらない。名前が別の worktree に一致するか、`..` を含む相対パスなら
+        # 注意を出す (止めない。0.9.2 は行き先ごとに読んで止めていた)
+        k = _limit_exponent()
+        rel = Path(os.path.relpath(B, A)).as_posix()
+        for rm in ("git worktree remove --force wt-b", "git worktree move wt-b /tmp/zz", f"git worktree remove --force {rel}"):
+            with self.subTest(rm=rm):
+                self.assertEqual(self.verdict(f"{or_cd(k)}{rm}"), "deny")
+                self.assertEqual(self.collapses, 0)
+                self.assertEqual(self.verdict(f"{or_cd(k + 1)}{rm}"), "note")
+                self.assertGreater(self.collapses, 0)
+                self.assertEqual(self.verdict(f'cd "{MAIN}"; {or_cd(18)}{rm}'), "note")
+        # git dir が決まって repo が決まっても、相対パスの基点の 1 つ (今の場所) が決まらなければ注意
+        gd = f'export GIT_DIR="{MAIN}/.git"; '
+        self.assertEqual(self.verdict(f"{gd}{or_cd(k)}git worktree remove --force {rel}"), "deny")
+        self.assertEqual(self.verdict(f"{gd}{or_cd(18)}git worktree remove --force {rel}"), "note")
+        self.assertGreater(self.collapses, 0)
+        # 自分の worktree の名前、変数の語、repo の外の絶対パス、どの worktree の末尾にも一致しない素の相対パスは、
+        # 上限を超えても何も出さない
+        outside = os.path.join(_BASE, "zz")  # ドライブ付きの絶対パス (Windows の `/t/zz` はドライブの無い相対の扱いになる版がある)
+        for rm in ("git worktree remove --force a", 'git worktree remove --force "$Y"', f'git worktree remove --force "{outside}"',
+                   "git worktree remove --force zz"):
+            with self.subTest(rm=rm):
+                self.assertIsNone(self.verdict(f"{or_cd(18)}{rm}"))
+                self.assertGreater(self.collapses, 0)
+
     def test_documented_limit_matches(self):
         root = Path(__file__).resolve().parents[3]
-        self.assertIn(f"が {command._STATE_LIMIT} を超える", (root / "README.md").read_text(encoding="utf-8"))
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        self.assertIn(f"が {command._STATE_LIMIT} を超える", readme)
+        self.assertIn(f"`&&` で移動を {command._STATE_LIMIT} 個以上", readme)
         self.assertIn(f"上限 ({command._STATE_LIMIT})", (root / "AGENTS.md").read_text(encoding="utf-8"))
 
     def test_time_grows_linearly(self):
