@@ -61,6 +61,8 @@ tag 名は **`<plugin-name>/v<version>`** (例: `sensitive-files-guardrail/v0.33
   green のときだけ打つ
 - 既存 tag は**打ち替えない**。bump を忘れた場合は「打つ tag が無い」だけで、
   次に bump した push で作られる
+- push の間に bump した途中の版の tag は、push のときに打つ (版と tag を 1:1 に
+  保つため)。既存の tag は打ち替えない
 - 判定・作成ロジックは `scripts/backfill-plugin-tags.sh` に一本化 (既定は
   dry-run、`--apply` で作成 + push)。規約導入時の遡及付与と通常運用で同じコードを使う
 - **旧規約の bare tag (`v0.2.0` 〜 `v0.14.0`) はそのまま残すが、今後は打たない。**
