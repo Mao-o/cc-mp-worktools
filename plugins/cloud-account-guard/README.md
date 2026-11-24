@@ -1473,15 +1473,17 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 
 - wrapper の long option の省略形 (`sudo --us root` / `sudo --chd sub` / `npx` の `--prefix` の省略形
   など) の後ろのクラウド CLI。検証が丸ごと抜ける
-- option 付きの `env` (`env -C dir` / `env -u X`) の後ろのクラウド CLI。候補にならず検証されない
+- option 付きの `env` (`env -C dir` / `env -u X`) と、option 付きの `mise exec` / `pnpm exec`
+  (`mise exec -C dir -- gcloud ...` / `pnpm exec -C dir aws ...`) の後ろのクラウド CLI。
+  option 付きは剥がさないので、候補にならず検証されない
 - 配列の閉じの直後に語の断片が続く代入 (`a=(1 2)y aws ...`) の後ろのクラウド CLI
 - コマンド語の無い heredoc に演算子が続く形 (`<<E && aws ...`) の後ろのクラウド CLI
 - heredoc と、シェル経由の wrapper (`watch` / `sudo -s` / `sudo -i` / `npx -c`) に引用符で包んで渡す
   複合コマンドを組み合わせた形 (`cat <<EOF && watch 'true && kubectl ...'` + 改行 + 本文 + `EOF` /
   `watch 'cat <<EOF && kubectl ...'`) の中のクラウド CLI。候補にならず検証されない。heredoc だけの形
   (`cat <<EOF && kubectl ...`) と wrapper だけの形 (`watch 'true && kubectl ...'`) は守る範囲
-- 代入の頭の珍しい形 (添字の中の空白、二重引用符の中の `$(` に heredoc を置いたもの)
-  の後ろのクラウド CLI
+- 代入の頭の珍しい形 (添字の中の空白 `a[ 1 ]=x aws ...`、二重引用符の中の `$(` に置いた heredoc の
+  本文に対応しない `"` がある形) の後ろのクラウド CLI
 - 旧式の算術展開 `$[...]` の中に空白がある代入 (`X=$[1 + 2] aws ...`) の後ろのクラウド CLI。
   `$[` を 1 つの値として読まず、中の空白で値を終える (空白の無い `X=$[1+2] aws ...` は守る範囲)
 - コマンド置換やバッククォートの中だけにあるクラウド CLI (`echo $(aws ...)` / 代入の値の
@@ -1501,6 +1503,18 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   FS)。firebase の `firebase use` の記録の照合で、綴りが firebase-tools と食い違いうる
 - `-E` の無い `sudo` の後ろの aws / gcloud。`sudo` は環境変数を消すが、固定の判定は hook の
   環境変数 (`AWS_PROFILE` など) で固定とみなす
+- `case` 文の分岐 (`case x in x) kubectl ...;; esac`) と関数定義 (`f() { kubectl ...; }; f`) の中の
+  クラウド CLI。分岐や定義の先頭の語を含む 1 つの断片として読むので候補にならず、検証されない
+  (`if` / `then` / `else` / `do` の中は検証する)
+- firebase の CLI 名の直後に置いた短い option `-j` (`firebase -j use <alias>`)。`--json` は剥がして
+  読むが `-j` は剥がさないので、切替として読まない。後ろの書込との連結 (`... && firebase deploy`) の
+  deny と、切替後の cache の破棄に乗らない。`--json` と書く
+- zsh の `&` の手前の `cd dir &&` の後ろのクラウド CLI (`cd dir && x & aws ...`)。zsh ではこの `cd` が
+  今のシェルに残って aws は dir で走るが (bash ではサブシェルなので残らない)、hook は `&` で区切って
+  起動したディレクトリの文脈で照合する
+- gcloud の設定ディレクトリを指す環境変数 `CLOUDSDK_CONFIG` (と、deny 文面の profile 案内に使う
+  `AWS_CONFIG_FILE`) の相対パス (`cd sub && CLOUDSDK_CONFIG=./c gcloud ...`)。hook は自分のカレント
+  ディレクトリで読むので、コマンドの `cd` の行き先の側のファイルを読むとは限らない。絶対パスで書く
 
 新しい形が見つかったときは「普段どおりに書くコマンドか」で範囲を決める。範囲外ならこの一覧に
 足す (読みや追跡は増やさない)。
@@ -1575,6 +1589,10 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 - `if false; then aws ...; fi` のように**実行されない分岐**の中身も候補になる。
   予約語 (`then` / `else` / `do`) を剥がして本体を検証対象にしている副作用で、
   条件の真偽までは静的に評価しない (実行される場合を取りこぼさない側に倒している)
+- 複数行にわたる配列の代入 (`a=(` + 改行 + `aws s3 ls` + 改行 + `)`) は、改行で区切って読むので
+  要素の行も候補になり、止まることがある (要素なので実際には実行されない。止めすぎ側)
+- シェルが構文エラーにする形 (配列の代入の中の here-document `a=(1 <<E` など) は、bash 3.2 (エラーの
+  行を捨てて次の行から読み続ける) とも zsh (全体を解析できず何も実行しない) とも違う読みになることがある
 - subshell 内のコマンド (`FOO=$(gh ...) cmd` の内側の gh) は検証対象外 (外側の `cmd` は
   v0.29.10 から検証する)
 - **切替と write を同一コマンドで連結した形は「検証できない」ので deny する**
