@@ -5,6 +5,16 @@ external-ai-assist の変更履歴。0.3.1 以前は CHANGELOG が無く、各�
 plugin.json の `version` は pin として働く (bump しない限り既存ユーザーに届かない) ため、
 version 据え置きで main に入った後続 commit はその version の節に併記している。
 
+## 0.18.3
+
+**`post-implementation-review` の「応答の途中のレビュー」を既定オフで確定した決定を `CLAUDE.md` に残した。ドキュメントのみの変更 (挙動の変更なし) で、patch bump。**
+
+### ドキュメント
+
+- `hooks/post-implementation-review/CLAUDE.md` の「応答の途中のレビュー」節の有効化の行から「オンにするかは方針判断として残す」を外し、既定オフで確定したこと (使いたい人が `EXTERNAL_AI_POST_REVIEW_MIDTURN=1` で有効にする) と、その根拠 (外部 AI CLI の起動回数が増えること、`asyncRewake` の実挙動が実機で未検証なこと) を書いた。既定オンを再検討するときは、nested claude での `asyncRewake` の検証が前提になる
+- 「残りうる条件」の「実機でも未確認」の記述 (`asyncRewake` を解さない古い CLI、サブエージェント内で発火したときの起床先) は、検証していないのでそのまま残した
+- コード・`hooks.json`・テストは変えていない
+
 ## 0.18.2
 
 **`post-implementation-review` で、大文字小文字だけが違う名前で編集したファイルを、Stop も commit レビューも送らずに誤った理由を通知していたのを直した。**

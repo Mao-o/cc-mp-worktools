@@ -746,7 +746,7 @@ try の外で走り、state 整理だけを `_quiet()` が個別に握り潰す�
 
 | 決めること | 決定 | 理由 |
 |---|---|---|
-| 有効化 | `EXTERNAL_AI_POST_REVIEW_MIDTURN=1` (**既定オフ**) | 外部 AI CLI の起動回数が増える。オンにするかは方針判断として残す。オフでは設定を読んで即 return (state も git も触らない。Stop の出力も 0.15.x と同じ) |
+| 有効化 | `EXTERNAL_AI_POST_REVIEW_MIDTURN=1` (**既定オフ**) | **既定オフで確定 (2026-11-24 決定。使いたい人が env で有効にする)**。オンにすると、1 回の応答の中で外部 AI CLI の起動が閾値を超えるたびに 1 回増える。加えて `asyncRewake` の実挙動 (応答中の注入のされ方・idle 時の起床・サブエージェント内で発火したときに誰が起きるか・対応する CLI の版) は実機で未検証で、既定オンにするならその検証 (nested claude) が前提になる。オフでは設定を読んで即 return (state も git も触らない。Stop の出力も 0.15.x と同じ) |
 | 閾値 | `EXTERNAL_AI_POST_REVIEW_MIDTURN_BYTES` (既定 `MAX_DIFF_BYTES` = 40000)。`>=` で発火 | 1 回の送信の上限と同じにして「1 塊たまったら送る」。測るのは Stop と同じ `_resolve_paths` + `_collect_diffs` を通した量 (除外・レビュー済み hash・空 diff は数えない)。0 は「毎回送る」ではなく既定に倒す |
 | claim の単位 | Stop と同じ `claim_pending` (その時点の pending 全部) → `_run_review` | 送る範囲・失敗時の復元・hash の記録を Stop と完全に共有する。**送る時刻だけが変わり、送る範囲は変わらない** |
 | 並走制御 | 閾値の 1 回目の判定はロックの外 (読み取りだけ)。閾値以上のときだけ Stop と同じ cursor lock (作業ツリー単位) を非ブロッキングで取り、ロックの下で測り直してから claim する | 子プロセスは常に 1 つという前提 (「ロックは 2 種類」節) を崩さない。閾値未満の計測でロックを握ると、同じ Bash の PostToolUse で並列に走る commit レビューが `NOTICE_LOCK_HELD` で見送られる (窓は 1 回きり)。取れなければ送らない (次の編集で再判定) |
