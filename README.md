@@ -220,9 +220,13 @@ sensitive-files-guardrail/v0.33.1
 session-facts/v0.12.0
 ```
 
-- **tag は手で打ちません。** main への push で CI が、各 plugin の `plugin.json` の
+- **push 時点の版の tag は手で打ちません。** main への push で CI が、各 plugin の `plugin.json` の
   version に対応する tag が無ければ annotated tag を作って push します
   (validate / lint / tests が green のときだけ)。
+- 例外は、1 回の push に同じ plugin の bump が複数入ったときの途中の版です。CI が打つのは
+  push 時点の版だけなので、途中の版の tag は maintainer が push のときに、その版が main に
+  入った commit へ同じ書式の annotated tag で打ちます (版と tag を 1:1 に保つため)。
+  その commit は CI を個別には通っていません。
 - 既存 tag は打ち替えません。
 - **旧規約の `v0.2.0` 〜 `v0.14.0` はそのまま残していますが、今後は打ちません。**
   marketplace 全体を指すもの (`v0.2.0`) と個別 plugin のリリースを指すもの
