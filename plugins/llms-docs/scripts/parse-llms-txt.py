@@ -1598,7 +1598,12 @@ def split_documents(lines: list[str], profile: dict) -> list[dict]:
     for d in docs:
         d.setdefault("description", "")
         if d["url"] and base and not re.match(r"^https?://", d["url"]):
-            d["url"] = urljoin(base, d["url"])
+            try:
+                d["url"] = urljoin(base, d["url"])
+            except ValueError:
+                # a host urlparse cannot read (``//[name].example.com/x.md``):
+                # keep the URL as written, so only fetching that page fails
+                pass
         elif d["url"] and prefix and not re.match(r"^https?://", d["url"]):
             # put in front as written: urljoin would drop the prefix's path
             # for a /path (Kilo Code's /docs)
