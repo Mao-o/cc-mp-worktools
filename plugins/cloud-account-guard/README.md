@@ -851,7 +851,8 @@ firebase-tools は symlink を解かないパスで切替先を探すため。[�
     ので、グループの直後の語が組み込みの子でない形 (`gh pr ship --help` /
     `gh pr -R o/r ship --help`) は検証する。組み込みでも `copilot` / `extension` (引数を
     別のプログラムに渡す) と `(preview)` と表示されるコマンド (`agent-task` / `discussion` /
-    `event` / `skill`)、組み込みの別名 (`gh issue ls` など) は対象外
+    `event` / `skill`)、組み込みの別名 (`gh issue ls` など) は対象外。組み込みの表は gh 2.105 のもの
+    (版の違いは[守らない範囲](#守る範囲と守らない範囲))
 
   **対応は gh だけ**。aws / gcloud / kubectl / firebase のサブコマンドの後ろの `--help`
   (`firebase use --help` / `kubectl apply --help` など) は従来どおり検証する。
@@ -1540,6 +1541,9 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 - gcloud の設定ディレクトリを指す環境変数 `CLOUDSDK_CONFIG` (と、deny 文面の profile 案内に使う
   `AWS_CONFIG_FILE`) の相対パス (`cd sub && CLOUDSDK_CONFIG=./c gcloud ...`)。hook は自分のカレント
   ディレクトリで読むので、コマンドの `cd` の行き先の側のファイルを読むとは限らない。絶対パスで書く
+- gh のサブコマンドの後ろの `--help` を読み取りにする表 (gh 2.105 の組み込みのコマンドのパス) にあって、
+  手元の gh では組み込みでない名前の alias / extension (gh 2.105 より古い gh で、後の版で組み込みになった
+  名前を alias にしている形など)。組み込みのヘルプとみなして読み取りにするので、alias の中身は照合されない
 
 新しい形が見つかったときは「普段どおりに書くコマンドか」で範囲を決める。範囲外ならこの一覧に
 足す (読みや追跡は増やさない)。
