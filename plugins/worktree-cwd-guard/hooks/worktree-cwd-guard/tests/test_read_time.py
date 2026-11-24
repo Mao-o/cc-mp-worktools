@@ -59,6 +59,24 @@ class SymlinkedPlaceDecisionTest(test_guard.GuardBase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(test_guard.decision(test_guard.evaluate(test_guard.bash(cmd, self.a))), want)
 
+    @unittest.skipIf(os.name == "nt", "Windows のパスは `..` を字面で畳んでから辿る (ntpath.realpath も Win32 の API も同じ)")
+    def test_dot_dot_after_a_symlink_climbs_from_its_target(self):
+        # symlink の後ろの `..` は、辿った先から上がる (git -C の chdir は物理的に辿る)。`..` を字面で畳んでから辿ると、
+        # 自分の worktree のままになり、main への git を通す
+        (self.main / "sub").mkdir(exist_ok=True)
+        try:
+            os.symlink(self.main / "sub", self.a / "to-sub")
+        except OSError as e:
+            self.skipTest(f"symlink を作れない: {e!r}")
+        for cmd in (
+            "git -C to-sub/.. reset --hard",
+            "git -C to-sub/../sub/.. reset --hard",
+            "cd to-sub && git -C .. reset --hard",
+            f'git -C "{self.a}/to-sub/.." reset --hard',
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(test_guard.decision(test_guard.evaluate(test_guard.bash(cmd, self.a))), "deny")
+
     def test_moves_after_a_symlink_loop(self):
         # Python 3.12 以前の realpath は symlink の環 (`m1` <-> `m2`) で辿るのをやめ、`<a>/m1/../to-main` を `<a>/to-main` (main への
         # symlink を含む) のまま返す。次の移動では全要素を辿り直して main に届く (どの版でも止める)。前の解決の値を基点に、移動した

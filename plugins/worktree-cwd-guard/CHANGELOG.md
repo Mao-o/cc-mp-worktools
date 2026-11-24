@@ -87,7 +87,8 @@ main の中に自分の worktree と別の worktree への symlink を置いた)
 ### テスト
 
 - `SymlinkedPlaceDecisionTest`: 相対パスの途中の symlink を辿って持ち主を決めること (自分の worktree の中の main への symlink は止め、main の中の
-  自分の worktree への symlink は止めない)。自分の worktree の中の symlink の環を `..` で横切った後の相対パスの移動 6 形を止めること (どの版でも)
+  自分の worktree への symlink は止めない)。自分の worktree の中の symlink の環を `..` で横切った後の相対パスの移動 6 形を止めること (どの版でも)。symlink の後ろの `..` は、辿った先から上がること
+  (`git -C <main の中の dir への symlink>/..` を止める。POSIX)
 - `CachedLoopDecisionTest`: checkout をまたぐ symlink の環 (main の中の `E` と自分の worktree の中の `S` が互いを指す) を `..` で外した後の移動 4 形を、
   0.9.3 と同じ持ち主に決めること (Python 3.13 以降は止める。3.12 以前は realpath が環で辿るのをやめ、自分の worktree のままになるので止めない。どの版でも流す)
 - `DeepRelativePathTest`: 相対パスを深くし続ける形 (区切りの空白の有無、引用した語、`..` / `.` を含む語、分岐で状態を上限ちょうどにした形、閉じない
@@ -104,7 +105,7 @@ main の中に自分の worktree と別の worktree への symlink を置いた)
   自分の worktree を動かす形・remove / move 以外では何も出さないこと (0.9.3 の「変数の語は何も出さない」を確かめていたテストを置き換えた)
 - `StateLimitTest`: 状態の上限を超えた後の変数の語も注意になること。時間の伸び方を測るテストは期限を外して測る
 
-テスト件数: 224 → 244 (追加 20・削除 0・統合 0)。
+テスト件数: 224 → 245 (追加 21・削除 0・統合 0)。
 
 ## 0.9.3
 
