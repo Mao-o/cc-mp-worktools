@@ -14,9 +14,35 @@ PR の手前で機械的に落とすのが目的です。
 Claude が普段の書き方で `gh pr create` / `gh pr ready` を実行したときに、version bump の
 忘れやテストの失敗を PR の手前で止めます。
 
-- shell の書き方は無数にあり、すべての経路を静的に解析することはできません。検出できない
-  形 (コマンド置換・`bash -c`・`pushd` など) は止める側に倒していますが、別の実行経路
+- shell の書き方は無数にあり、すべての経路を静的に解析することはできません。読めないと分かった
+  形 (コマンド置換・`bash -c`・`pushd` など) は止める側に倒していますが、普段書かない形では読めない
+  ことに気づかず、PR 操作を検査しないまま通すことがあります (下の一覧)。別の実行経路
   (スクリプトファイル経由、`gh api` で直接 PR を作る等) は対象外です
+- 次の書き方の PR 操作は、見つけられずに検査しないまま通すことがあります (普段の `gh pr create` の
+  書き方ではない形。意図して細工した形なので塞ぎません):
+  - `sudo` / `xargs` / パス付きの `env` (`/usr/bin/env`) の後ろに置いた PR 操作
+  - コマンド語をエスケープや引用で組み立てた形 (`g\h pr create`)、backtick の中で引用したコマンド語
+    (`` echo `'gh' pr create` ``)、`gh` と `pr` の間にリダイレクトや展開を挟む形
+    (`gh 2>/dev/null pr create` / `gh $e pr create` / `gh <<<x pr create`)
+  - 本文を読む shell の名前を、引用や展開で組み立てた形 (`b'as'h -c '...'` / `${SH:-bash} -c '...'`)
+  - `bash -c` の引数の中の、エスケープした引用の入れ子 (`bash -c "V=\"p q\" gh pr create"`)
+  - 珍しい代入や値の後ろの PR 操作 (`X+=1 gh pr create` / `X[0]=1 gh pr create` / `X=$[1 + 2] gh pr create` /
+    `X=(a b)gh pr create` / `X=<(echo a)#b gh pr create`)
+  - 展開で組み立てたコマンド語の `cd` (`${c}d <dir>`) と、`${x#(}` を含む語の後ろの `cd`。`cd` と読まないので、
+    移動先を追わずに元の cwd を検査します。また `cd` は成功するものとして検査先を決めるので、失敗した
+    `cd` の後ろの絶対パスの `cd` を採用して、別の場所を検査することがあります
+  - 構文エラーになる形 (閉じていない引用など) は、shell が実行しないので読みません
+- 安全網は「数えた実行位置の数」と「検出した呼び出しの数」を比べるだけなので、`\gh` と引用の中の
+  `$(gh ...)` を 1 つのコマンドに並べた形 (`\gh pr create -B main; echo "$(gh pr create -B other)"`) では、
+  数が合って別の `gh` の検査が抜けることがあります。意図して細工した形なので、うっかり予防の
+  範囲外として塞ぎません。同じ `gh` を単独で書けば、従来どおり止まります
+- 次の書き方は、PR 操作が無い、または検査先が 1 つに決まるのに止めることがあります。
+  `cd <絶対パス> && gh pr create` の形にするか、本文を `--body-file` で渡すと通ります:
+  - comment や引用符の中の `gh pr create` の文字列 (`echo hi # ; gh pr create` /
+    `gh pr create --body "a; $y gh pr create b"`)
+  - 走る cwd が 1 つに決まるのに、読みを足していない形 (`if ! cd A; then exit 1; fi; gh pr create` /
+    `cat x | (cd A && gh pr create)` / `[ -d A ] && { cd A; gh pr create; }` /
+    `cd A; make & wait; gh pr create`)
 - 環境変数 `VERIFY_PLUGIN_RELEASE_MODE` で止めずに通すこともできます
 - 最終的な品質保証は CI とレビューが担う前提です。この hook はその手前の早期警告です
 
