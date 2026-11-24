@@ -441,8 +441,11 @@ def sure_chdirs(command: str) -> frozenset[str]:
     だけ確実に効く。鎖が終わったら移動前も残すのは `segment_dirs` 側が行う。
     括弧は分解で落ちるので `(cd sub && firebase deploy)` は確実とみなさない。読みが 2 つ以上ある
     コマンド (`command_parser.extract_candidate_readings`) は、どの `cd` も確実とみなさない。
+    0.29.9 までの代入の値の読み (`legacy_values`) は数えない (シェルの読み方が割れるのではなく、
+    0.29.9 の候補を落とさないための読み。数えると `cd sub && X=$(/bin/date +%s) firebase deploy` の
+    `cd sub` を確実とみなさず、firebase を起動側でも確かめてしまう。v0.29.10)。
     """
-    if len(extract_candidate_readings(command)) != 1:
+    if len(extract_candidate_readings(command, legacy_values=False)) != 1:
         return frozenset()
     external = external_chdir_candidates(command)
     raw = split_with_separators(command)

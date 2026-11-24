@@ -264,7 +264,8 @@ xargs と同じ穴 (非数値の必須引数の取り逃し) が無いか、参�
 | `_strip_leading_syntax` | `(` `{` `!` / 予約語 / リダイレクト | `_WORD_TOKEN_RE` | `_arithmetic_span` | ✅ 共有 |
 | `_drop_wrapper_flags` / `_has_flag` / `_flag_argument` / `_wrapper_terminates` / `_command_is_query` | option トークン | `_WORD_TOKEN_RE` / `_VALUE_TOKEN_RE` | 該当なし | ✅ quote 対応 |
 | `_scan_heredoc_word` | delimiter の word | **自前** (word の定義そのもの) | 該当なし | ⭕ 意図的に独立 |
-| `_scan_value_end` (`_parse_leading_env`) | env 代入値の終端 | 自前 + `$(`/backtick で保守的に停止 | 該当なし | ⭕ 意図的に独立 (値の走査であって構文走査ではない) |
+| `_assignment_value_end` (`_parse_leading_env`。v0.29.10) | env 代入値の終端 | `_skip_opaque` (`(` だけは 1 文字。値の中の `((` を算術評価と読まない) | 経由 (`$((` は `$(` として 1 領域) | ✅ 共有 |
+| `_scan_value_end` (`_parse_leading_env` の 0.29.9 の読み・dynamic の判定、`_strip_command_path`) | 値に `$(` / backtick があるか・0.29.9 の値の終端 | 自前 + `$(`/backtick で停止 | 該当なし | ⭕ 意図的に独立 (0.29.9 の読みの再現。構文走査ではない) |
 | `cli_options.strip_leading_options` / `find_context_options` | option トークン | `shlex.split` | 該当なし | ✅ quote 対応 |
 | `dispatcher._match_service` / `_is_readonly` 等 | (正規化済み候補への regex) | 該当なし | 該当なし | ⭕ シェル構文を見ない |
 

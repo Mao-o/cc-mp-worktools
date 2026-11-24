@@ -262,7 +262,7 @@ commit される `.claude/settings.json` (プロジェクトの共有設定) に
 | mode が `enforce` で、その不一致が **deny になる** (WRITE tier。`"$readonly": "deny"` なら QUERY も) | 従来どおり。QUERY の不一致は警告して通す (読むだけのために他の作業の gh を動かさない)。`warn` / `off` では切り替えない |
 | 期待アカウントが **gh にログイン済み** (`gh auth status` に非アクティブのアカウントとして出ている) | deny + 「ログイン済みアカウントが見つかりません」の注記。ブラウザ認証が要るログインは自動化しない |
 | 期待値が dict 形式なら、**全 host** が切り替えられる | どの host も切り替えない (一部だけ切り替えて deny、を作らない) |
-| `GH_TOKEN` / `GITHUB_TOKEN` / `GH_ENTERPRISE_TOKEN` / `GITHUB_ENTERPRISE_TOKEN` / `GH_HOST` が無い | 切り替えない (トークン env は `hosts.yml` より優先されるので切り替えても実行アカウントが変わらない / 切り替える host を決められない) |
+| `GH_TOKEN` / `GITHUB_TOKEN` / `GH_ENTERPRISE_TOKEN` / `GITHUB_ENTERPRISE_TOKEN` / `GH_HOST` が無い | 切り替えない (トークン env は `hosts.yml` より優先されるので切り替えても実行アカウントが変わらない / 切り替える host を決められない)。行頭の代入の値がコマンド置換・バッククォートなどで読めない形 (`GH_TOKEN=$(gh auth token --user x) gh pr create`) は、その gh を照合もしない (0.29.9 と同じ。v0.29.10)。値が変数参照の形 (`GH_TOKEN=$T gh ...` / `GH_TOKEN="$(cmd)" gh ...`) は、値を検証の env に入れないのでこの条件に当たらない (0.29.9 から) |
 | コマンド自身がアカウント状態を変える操作 (`gh auth refresh` 等) を含まない | 切り替えない (明示的な操作に hook の切替を重ねない) |
 | 対象のコマンドのうち `--help` の付かないものが 1 つ以上ある (すべてが `--help` 付き (`gh auth git-credential --help` など) ではない) (v0.21.0) | 切り替えない (ヘルプの表示のためにマシン全体の gh を動かさない)。deny は従来どおりで、切り替えなかった理由を添える。`-h` はヘルプとして数えない (gh の `auth` 配下では `--hostname` の短い形) |
 | 直前 60 秒以内に、同じ host を**別のアカウントへ**自動切替した記録が無い | 切り替えない (下の並行セッションのガード) |
@@ -685,9 +685,21 @@ QUERY の不一致も止めたい場合は `accounts.local.json` に書く:
   その CLI のコマンドとは見ない (v0.21.4。`FOO=1 firebase deploy` のような代入 + コマンドと、
   次のセグメントのコマンドは従来どおり検出する。`FT=... "$FT" deploy` のように値を後でコマンドとして
   使う形は変数経由の一般則の範囲のまま。値に `$(` / バッククォートを含む代入
-  (`X=$(/usr/bin/firebase deploy)`) は従来どおり、置換の中の CLI を検出する)
+  (`X=$(/usr/bin/firebase deploy)`) は従来どおり、置換の中の CLI を検出する。後ろにコマンドが続く
+  `X=$(/usr/bin/firebase deploy) aws ...` は、その firebase と後ろの aws の両方を検出する (v0.29.10))
 - **先頭の環境変数割当**: `FOO=bar gh ...`。配列の代入・追記・要素の代入
-  (`a=(1 2) aws ...` / `a+=x aws ...` / `a[1]=x aws ...`) も剥がす (v0.29.2。値は検証に使わない)
+  (`a=(1 2) aws ...` / `a+=x aws ...` / `a[1]=x aws ...`) も剥がす (v0.29.2。値は検証に使わない)。
+  値にコマンド置換・バッククォート・算術展開・空白を含むパラメータ展開がある代入
+  (`X=$(cmd) aws ...` / ``X=`cmd` gh ...`` / `X=$((1 + 2)) gh ...` / `X=${Y:-a b} gh ...`) も、値を
+  読まずに飛ばして後ろのコマンドを照合する (v0.29.10。値は検証に使わず、hook の env で照合する。
+  前に同じキーへの静的な代入があれば、その値で照合する (`AWS_PROFILE=dev AWS_PROFILE=$(cmd) aws ...`
+  は dev。0.29.9 から)。0.29.9 までは後ろのコマンドを検証していなかった)。例外は gh の token / host の
+  env (`GH_TOKEN` / `GITHUB_TOKEN` / `GH_ENTERPRISE_TOKEN` / `GITHUB_ENTERPRISE_TOKEN` / `GH_HOST`) で、
+  ここに読めない値を代入したセグメントの gh は 0.29.9 と同じく読む。`GH_TOKEN=$(gh auth token --user x) gh pr create`
+  は照合も自動切替もしない (gh が書き込むアカウントは代入したトークンで決まり、hook からは決められない)。
+  `GH_TOKEN=$T gh ...` は 0.29.9 から照合している。同じ代入の後ろの gh 以外の CLI は照合する
+  (gh と同じセグメントにない CLI。シェル経由の wrapper の中で gh と並ぶ CLI (`GH_TOKEN=$(cmd) watch 'gh pr create && aws ...'` の aws) は、
+  セグメントごと 0.29.9 と同じく読むので照合しない)
 - **シェルで読み方が割れる形** (v0.29.2): bash 3.2 と zsh で分解が割れる形
   (パラメータ展開の中の素の `{`、配列代入の閉じの直後の `#`) と ANSI-C 引用符 `$'...'` を含む
   コマンドは、別の読みでも分解して候補の和集合を検証する
@@ -1014,7 +1026,10 @@ AWS_PROFILE=prod aws s3 ls
 - profile が異なれば短期キャッシュも別エントリになり、profile A の成功が
   profile B で誤って allow されることはない
 - 値に未展開の変数参照 (`AWS_PROFILE=$SOMEVAR`) を含む場合は静的に解決できない
-  ため検証 env には渡さない (コマンドからは剥がす)
+  ため検証 env には渡さない (コマンドからは剥がす)。値にコマンド置換・バッククォートを含む場合
+  (`AWS_PROFILE=$(cmd) aws ...`) も同じで、後ろの CLI は hook の env で照合する (v0.29.10)。
+  ただし前に同じキーへの静的な代入があれば、その値で照合する (`AWS_PROFILE=dev AWS_PROFILE=$(cmd) aws ...`
+  は dev で照合する。シェルでは後ろの値が勝つ。0.29.9 から)
 - kubectl の行頭の `KUBECONFIG=a.yaml kubectl apply ...` (起動時の値と違うもの) の deny は、
   同じ `KUBECONFIG` を前に付けた切替 (`KUBECONFIG=<絶対パス> kubectl config use-context <期待値>`)
   を案内する (v0.29.4)。相対パスの要素は、そのコマンドが走るディレクトリの絶対パスにする。
@@ -1448,7 +1463,8 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 
 - 素のコマンド (`aws s3 rm ...` / `firebase deploy` / `kubectl apply ...`)
 - `cd dir && <CLI>`、`;` / `&&` / `||` / `|` による連結
-- 前置きの環境変数の代入 (`AWS_PROFILE=x aws ...`)
+- 前置きの環境変数の代入 (`AWS_PROFILE=x aws ...`。値にコマンド置換を含む `X=$(cmd) aws ...` も。
+  値は読まずに、後ろの CLI を照合する)
 - よく使う透過 wrapper の素の形 (`sudo` / `env` / `npx` / `mise exec` など)
 - コンテキストを指定する option の正式な綴り (`--profile` / `--project` / `--context` /
   `--kubeconfig` / `--config` など)
@@ -1464,9 +1480,15 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   複合コマンドを組み合わせた形 (`cat <<EOF && watch 'true && kubectl ...'` + 改行 + 本文 + `EOF` /
   `watch 'cat <<EOF && kubectl ...'`) の中のクラウド CLI。候補にならず検証されない。heredoc だけの形
   (`cat <<EOF && kubectl ...`) と wrapper だけの形 (`watch 'true && kubectl ...'`) は守る範囲
-- 代入の頭の珍しい形 (`NAME+=`、添字の中の空白、二重引用符の中の `$(` に heredoc を置いたもの)
+- 代入の頭の珍しい形 (添字の中の空白、二重引用符の中の `$(` に heredoc を置いたもの)
   の後ろのクラウド CLI
-- コマンド置換やバッククォートの中だけにあるクラウド CLI (`echo $(aws ...)`)
+- 旧式の算術展開 `$[...]` の中に空白がある代入 (`X=$[1 + 2] aws ...`) の後ろのクラウド CLI。
+  `$[` を 1 つの値として読まず、中の空白で値を終える (空白の無い `X=$[1+2] aws ...` は守る範囲)
+- コマンド置換やバッククォートの中だけにあるクラウド CLI (`echo $(aws ...)` / 代入の値の
+  `X=$(aws ...) cmd`。後ろの `cmd` は照合する)
+- 二重引用符の中のコマンド置換に、さらに空白を含む二重引用符がある代入
+  (`X="$(git log --format="%h %s")" gh ...`) の後ろのクラウド CLI。引用符の対応を読み違えて
+  候補にならない
 - context option の値に `--` や `$(` を使う形 (`kubectl --context '$(id)' apply` /
   `kubectl --context -- apply`)。指定値として扱わず、現在値で照合する
 - シェル展開で option を作る形 (ブレース展開の `firebase deploy -{j,P} prod` / `{-j,-P} prod`、
@@ -1553,7 +1575,8 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 - `if false; then aws ...; fi` のように**実行されない分岐**の中身も候補になる。
   予約語 (`then` / `else` / `do`) を剥がして本体を検証対象にしている副作用で、
   条件の真偽までは静的に評価しない (実行される場合を取りこぼさない側に倒している)
-- subshell 内のコマンド (`FOO=$(gh ...) cmd` の内側の gh) は検証対象外
+- subshell 内のコマンド (`FOO=$(gh ...) cmd` の内側の gh) は検証対象外 (外側の `cmd` は
+  v0.29.10 から検証する)
 - **切替と write を同一コマンドで連結した形は「検証できない」ので deny する**
   (v0.15.0。[判定表](#切替と書込を同一コマンドに連結した形は-deny--v0150))。
   hook は実行前にしか動かないため切替後の状態は原理的に検証できず、通す側に倒すと

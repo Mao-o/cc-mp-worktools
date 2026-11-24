@@ -233,9 +233,29 @@ class TestUnregisteredButPinned(_Base):
             "source .env && gcloud run deploy",
             "declare -x AWS_PROFILE=other; aws s3 rm s3://b/x",
             "export AWS_REGION=x AWS_PROFILE=other; aws s3 rm s3://b/x",
+            # 値を読めない代入の後ろに代入が続く、代入だけのセグメント (v0.29.10)
+            "CLOUDSDK_CORE_ACCOUNT=$(z) X=1; gcloud run deploy",
+            "AWS_PROFILE=$(z) X=1; aws s3 rm s3://b/x",
+            "AWS_PROFILE=`z` X=1; aws s3 rm s3://b/x",
+            "AWS_PROFILE=$((1)) X=1; aws s3 rm s3://b/x",
         ):
             with self.subTest(command=command):
                 self.assertEqual(_decision(dispatch(command, str(self.project_dir))), "deny")
+
+    def test_temporary_assignment_with_unreadable_quote_keeps_pinned(self):
+        """`X=$(echo $'\\'') true` の X は true だけの env (bash 3.2 / zsh -f とも aws は hook の env で走る)。
+
+        0.29.9 は代入を剥がさずに残した断片を shlex で読めず、env の変更を不明として止めていた (v0.29.10)。
+        """
+        self._write_accounts({"github": "me"})
+        self._env(CLOUDSDK_CORE_ACCOUNT="a@example.com", AWS_PROFILE="prod")
+        for command in (
+            "X=$(echo $'\\'') true; aws s3 rm s3://b/x",
+            "X=$(echo $'\\'') true; gcloud run deploy",
+            "AWS_PROFILE=$(echo $'\\'') true; aws s3 rm s3://b/x",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(dispatch(command, str(self.project_dir)))
 
     def test_unrelated_env_change_keeps_pinned(self):
         self._write_accounts({"github": "me"})

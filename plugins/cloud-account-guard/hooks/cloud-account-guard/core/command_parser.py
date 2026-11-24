@@ -998,7 +998,13 @@ def split_with_separators(command: str) -> list[tuple[str, str]]:
 
 
 def _scan_value_end(cmd: str, start: int) -> int | None:
-    """代入値の終端 index を返す。$() や backtick が途中にあれば None (保守的 stop)。"""
+    """代入値の終端 index を返す。$() や backtick が途中にあれば None (保守的 stop)。
+
+    0.29.9 までの読み。0.29.10 からは、先頭の代入を剥がす `_parse_leading_env` は値の終端を
+    `_assignment_value_end` で求め、この関数は「0.29.9 が剥がすのをやめた値か」の判定
+    (値を集めない・`_LEGACY_VALUE_READING`) と、代入だけのセグメントの判定
+    (`_strip_command_path`) に使う。
+    """
     i = start
     n = len(cmd)
     in_sq = False
@@ -1039,13 +1045,41 @@ def _scan_value_end(cmd: str, start: int) -> int | None:
     return i
 
 
+def _assignment_value_end(cmd: str, start: int) -> int:
+    """先頭の代入の値の終端 index (引用符・置換・展開の外の空白かタブの位置。無ければ末尾) (v0.29.10)。
+
+    値の中のコマンド置換 `$(...)`・backtick・算術展開 `$((...))`・閉じたパラメータ展開 `${...}`・
+    引用符・エスケープは、分割 (`split_with_separators`) と同じ `_skip_opaque` で 1 領域として飛ばす
+    (中の空白で値を終えない)。0.29.9 までの `_scan_value_end` は `$(` / backtick で読むのをやめ、
+    `${Y:-a b}` は中の空白で値を終えていたので、後ろのコマンド (`X=$(z) aws s3 rm ...` の aws) を
+    候補にしていなかった。bash 3.2 / zsh -f とも、値を評価してから後ろのコマンドを走らせる。
+
+    `(` は 1 文字として読む (`_skip_opaque` の算術評価 `((...))` の読みを値に当てない。0.29.9 と
+    同じく、配列の値の形にならない `(` は値の一部)。閉じない引用符・`$(`・backtick は末尾までを
+    値とする (呼び出し側は後ろにコマンドが無いとして剥がさない)。
+    """
+    i = start
+    n = len(cmd)
+    while i < n:
+        ch = cmd[i]
+        if ch in " \t":
+            return i
+        if ch != "(":
+            end = _skip_opaque(cmd, i)
+            if end is not None and end > i:
+                i = end
+                continue
+        i += 1
+    return n
+
+
 def _unquote_env_value(raw: str) -> str | None:
     """env 代入値の shell quote を除去する。
 
     `prod` → `prod`, `"a b"` → `a b`, `a"b"c` → `abc`, `""` → ``。
     quote 除去後に未展開の変数参照 (`$VAR`) が残る値は静的に解決できないため
-    None を返す (= 収集しない)。`_scan_value_end` が `$(` / backtick で既に
-    stop しているので、ここで弾くのは `$VAR` 形式のみ。
+    None を返す (= 収集しない)。値に `$(` / backtick がある代入 (`_scan_value_end` が
+    None を返すもの) は、呼び出し側 (`_parse_leading_env`) がここへ渡さずに集めない。
     """
     try:
         parts = shlex.split(raw)
@@ -1229,47 +1263,140 @@ def expand_word_tilde(candidate: str, home: str) -> str:
     return "".join(out)
 
 
+# 0.29.9 までの代入の値の読み (`_LEGACY_VALUE_READING`)。先頭の代入の値に `$(` / backtick があると
+# 剥がすのをやめ、値の終端は `_scan_value_end` で求める (空白を含む `${...}` は中の空白で値を終える)。
+# 既定の読みは 0.29.10 から値を読まずに飛ばし、後ろのコマンドを候補にする。0.29.9 の読みが
+# コマンドの候補を作っていた形は 2 つある:
+#   - 剥がすのをやめた代入の語にパスがあると、`_strip_command_path` が basename に揃えて置換の中の
+#     パス付き CLI を候補にしていた (`X=$(/usr/bin/firebase deploy) aws ...` の
+#     `firebase deploy) aws ...`。`_inner_path_command`)
+#   - 空白を含む `${...}` の中の語から読み直していた (`X=${Y:- aws s3 rm x} gh ...` の
+#     `aws s3 rm x} gh ...`)
+# 既定の読みがこの形の代入を読んだとき (`_LEGACY_VALUE_SEEN`) だけ、この読みでも分解して候補の和集合を
+# 取る (`extract_candidate_readings`。0.29.9 が候補にしていたものを落とさない)。値に `$(` / backtick が
+# あるそれ以外の代入では、0.29.9 の候補は `NAME=` で始まる文字列のままで、どの CLI にも一致しない。
+_LEGACY_VALUE_READING = False
+# 分解の間に、上の形の代入を読んだか。
+_LEGACY_VALUE_SEEN = False
+_COMMAND_NAME = re.compile(r"[A-Za-z0-9_.@+-]+")
+# gh の token と host を決める env (`services/github.py` の `_TOKEN_ENV_VARS` と `_HOST_ENV_VAR`。
+# 一致は tests/test_assignment_value_skip.py が確かめる)。この env に読めない値 (検証の env に入れない
+# 値: `$(` / backtick / 空白を含む `${...}` / `$VAR` など) を代入したセグメントの gh は、セグメントごと
+# 0.29.9 の読みで分解し直す (`extract_candidates_with_separators`)。gh が書き込むアカウントは代入した
+# トークンで決まり、hook からは決められない (決められない形は deny しない)。値を飛ばして起動時の env の
+# アカウントで照合すると、一致しないときに止め、自動切替 (`gh auth switch`) まで走らせてしまう。
+# 0.29.9 はこの gh を、同じセグメントに値に `$(` / backtick がある代入があれば候補にせず
+# (`GH_TOKEN=$(gh auth token) gh ...` / `GH_TOKEN=$T X=$(z) gh ...`)、無ければ候補にしていた
+# (`GH_TOKEN=$T gh ...`)。どちらも 0.29.9 と同じになる (v0.29.10)。
+_GH_IDENTITY_ENV = frozenset(
+    {"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST"}
+)
+# セグメントの分解の間に、上の env に読めない値を代入した代入を剥がしたか。
+_GH_UNREAD_SEEN = False
+
+
+def _inner_path_command(word: str) -> bool:
+    """値に `$(` / backtick がある代入の語 (空白まで) で、0.29.9 の `_strip_command_path` が basename に
+    揃えると置換の中のパス付きコマンドの名前になる形か (v0.29.10)。
+
+    `X=$(/usr/bin/firebase` / ``X=`./bin/gh`` / `X=a$(/x/gh` が当たる。最後の `/` の後ろがコマンド名の
+    文字だけで、その `/` が閉じていない `$(` か backtick の中にあるもの。引用符のある語は 0.29.9 も
+    basename にしなかった。`/` が置換の外にある語 (`KUBECONFIG=$(pwd)/k.yaml` / `X=~/$(z)`) と、
+    置換が語の中で閉じる語 (`X=$(./get-token.sh)`) は、basename がコマンド名にならない
+    (`k.yaml` は置換の中のコマンドではなく、`get-token.sh)` はどの CLI にも一致しない) ので当てない
+    (0.29.9 の読みを足すと読みが 2 つになり、`cd` を確実とみなす判定 (`core/workdir.py` の
+    `sure_chdirs`) が外れる)。
+    """
+    if "'" in word or '"' in word:
+        return False
+    slash = word.rfind("/")
+    if slash < 0 or not _COMMAND_NAME.fullmatch(word[slash + 1:]):
+        return False
+    head = word[:slash]
+    if head.count("`") % 2:
+        return True  # backtick の中 (backtick は入れ子にならない)
+    opener = head.rfind("$(")
+    return opener >= 0 and ")" not in head[opener + 2:]
+
+
 def _parse_leading_env(cmd: str, home: str | None = None) -> tuple[str, dict[str, str]]:
     """先頭の `KEY=VALUE` 群を剥がし (残りコマンド, 収集 env dict) を返す。
 
-    剥がし条件は従来の strip_leading_env と同一:
-    - 値に $() / バッククォートが含まれると保守的に停止
-    - `FOO=bar` のみで後続コマンドが無いケースはそのまま返す (空コマンド化回避)
-    収集 env には静的に解決できた値のみ入る (`$VAR` を含む値はキーごと除外)。
+    剥がし条件:
+    - 値の終端は `_assignment_value_end` で求める。値にコマンド置換・backtick・算術展開・空白を
+      含むパラメータ展開があっても、値を読まずに飛ばして後ろのコマンドを残す (v0.29.10。
+      0.29.9 までは `$(` / backtick で剥がすのをやめ、`X=$(z) aws ...` の aws を候補にしていなかった)
+    - `FOO=bar` のみで後続コマンドが無いケースはそのまま返す (空コマンド化回避)。値を飛ばした
+      代入の後ろが代入だけのとき (`AWS_PROFILE=$(z) X=1`) は、最初に値を飛ばした代入から後ろを
+      返す (0.29.9 と同じ候補。`core/workdir.py` の `_env_names_changed` は候補の文字列から変えた
+      env の名前を読むので、飛ばした代入の名前を落とさない)
+    収集 env には静的に解決できた値のみ入る (`$VAR` を含む値と、`$(` / backtick を含む値は
+    キーごと除外)。検証は hook の env で行う。ただし前に同じキーへの静的な代入があれば、
+    その値が残る (`AWS_PROFILE=dev AWS_PROFILE=$(z) aws ...` は dev で照合する。0.29.9 から)。
     同一キーが複数回代入された場合は shell semantics に合わせ最右 (最後) を採用する。
     `home` を渡すと、値の `~` をシェルの代入と同じ規則で展開する (`_expand_assignment_tilde`)。
     シェル自身が行う代入 (wrapper の後ろではない) にだけ渡す。
+    `_LEGACY_VALUE_READING` の間は 0.29.9 までと同じく読む。
     """
+    global _LEGACY_VALUE_SEEN, _GH_UNREAD_SEEN
     collected: dict[str, str] = {}
+    # 最初に値を飛ばした (0.29.9 が剥がすのをやめた) 代入から後ろの文字列と、その前までに集めた env
+    first_dynamic = None
     while True:
         m = _ASSIGNMENT_HEAD.match(cmd)
         if not m:
             return cmd, collected
         # 配列の値 `(...)` は閉じ `)` の直後が空白のときだけ配列として剥がす。閉じの直後に語の
         # 断片が続く形 (`a=(x)y` / `a=(x)""`) や閉じない形 (`a=(1 2 aws ...`) は、0.29.1 までと
-        # 同じく `_scan_value_end` で値を読む (配列の経路だけにすると剥がすのをやめ、
+        # 同じく普通の値として読む (配列の経路だけにすると剥がすのをやめ、
         # `a=(x)y aws s3 rm ...` の aws を検証しなくなる。bash 3.2 では aws は走る)。
         end = None
+        dynamic = False
         if cmd.startswith("(", m.end()):
             end = _array_value_end(cmd, m.end())
             if end is not None and cmd[end:end + 1] not in (" ", "\t"):
                 end = None
         if end is None:
-            end = _scan_value_end(cmd, m.end())
-        if end is None:
-            return cmd, collected
+            legacy_end = _scan_value_end(cmd, m.end())
+            if _LEGACY_VALUE_READING:
+                if legacy_end is None:
+                    return cmd, collected
+                end = legacy_end
+            else:
+                end = _assignment_value_end(cmd, m.end())
+                # 値に `$(` / backtick がある (0.29.9 が剥がすのをやめた) 代入。値は集めない。
+                dynamic = legacy_end is None
+                if dynamic and first_dynamic is None:
+                    first_dynamic = (cmd, dict(collected))
+                if dynamic:
+                    if _inner_path_command(cmd.split(None, 1)[0]):
+                        _LEGACY_VALUE_SEEN = True
+                elif legacy_end != end:
+                    # 空白を含むパラメータ展開 (`X=${Y:- aws s3 rm x} ...`)。0.29.9 は展開の中の空白で
+                    # 値を終え、展開の中の語から読み直していた。wrapper の後ろの代入の形の引数は bash が
+                    # 展開の結果を語に分けるので、その語が走ることがある (`env X=${Y:- aws s3 rm x} gh ...`
+                    # は bash で aws が走る)。
+                    _LEGACY_VALUE_SEEN = True
         rest = cmd[end:]
+        if not rest and first_dynamic is not None:
+            # 値を飛ばした代入の後ろが代入だけ (コマンド語が無い)。`AWS_PROFILE=$(z) X=1; aws ...` の
+            # AWS_PROFILE は export 済みなら後ろの aws に効く。`X=1` だけを返すと、`core/workdir.py` の
+            # `_env_names_changed` が AWS_PROFILE を変えたと読まず、hook の env の AWS_PROFILE を
+            # ディレクトリ単位の固定として通してしまう。
+            return first_dynamic
         if not rest or rest[0] not in " \t":
             return cmd, collected
         key = m.group(1)
         # 配列の代入 (`a=(1 2)`)・追記 (`a+=x`)・要素の代入 (`a[1]=x`) は剥がすが、値は集めない
         # (静的な文字列の値として検証に渡せない)。0.29.1 までは剥がさず、`a=(1 2) aws ...` /
         # `a+=(x) aws ...` の aws を検証していなかった (bash 3.2 / zsh とも aws は走る)。
-        plain = not m.group(2) and not m.group(3) and not cmd.startswith("(", m.end())
+        plain = not m.group(2) and not m.group(3) and not cmd.startswith("(", m.end()) and not dynamic
         raw = cmd[m.end():end]
         if plain and home is not None:
             raw = _expand_assignment_tilde(raw, home)
         value = _unquote_env_value(raw) if plain else None
+        if value is None and key in _GH_IDENTITY_ENV:
+            _GH_UNREAD_SEEN = True
         if value is not None:
             # 同一キーの重複代入は shell と同じく最右 (最後) の値が勝つ。
             # `AWS_PROFILE=dev AWS_PROFILE=prod aws ...` は prod で実行されるため、
@@ -1855,9 +1982,11 @@ def _strip_command_path(cmd: str) -> str:
     # 先に剥がしている) は、コマンドの呼び出しではない。値が `/…/firebase-tools` で終わるだけで
     # basename に揃えると、firebase のコマンドとして検出され誤 deny になる。代入の値は
     # コマンド名として読まない。
-    # 値に `$(` / バッククォートがある代入は `_parse_leading_env` が剥がさずに止まる。その中の
-    # コマンド置換に書かれたパス付き CLI (`X=$(/usr/bin/firebase deploy)`) は従来どおり
-    # basename 化して検出する (ここで返すと deny が allow に変わる)。
+    # 値に `$(` / バッククォートがある代入だけのセグメントは、その中のコマンド置換に書かれた
+    # パス付き CLI (`X=$(/usr/bin/firebase deploy)`) を従来どおり basename 化して検出する
+    # (ここで返すと deny が allow に変わる)。後ろにコマンドがある形 (`X=$(/usr/bin/firebase deploy) aws ...`)
+    # は、既定の読みでは `_parse_leading_env` が代入を飛ばすのでここに来ず、0.29.9 までの読み
+    # (`_LEGACY_VALUE_READING`) でだけここに来る。
     am = _ASSIGNMENT_HEAD_RE.match(tok)
     if am and _scan_value_end(tok, am.end()) is not None:
         return cmd
@@ -2111,7 +2240,7 @@ def merge_readings(
 
 
 def extract_candidate_readings(
-    command: str,
+    command: str, legacy_values: bool = True,
 ) -> list[list[tuple[str, dict[str, str], str]]]:
     """コマンドの読み方ごとの `extract_candidates_with_separators` の結果 (先頭が既定の読み)。
 
@@ -2124,10 +2253,44 @@ def extract_candidate_readings(
     - ANSI-C の読み: `$'` があるとき。`$'...'` の中の `\'` で引用符を閉じない
       (`echo $'\'' ; aws ...` の aws は bash / zsh とも走る)。bash / zsh の読みも ANSI-C で読む
 
+    - 0.29.9 までの代入の値の読み (`_LEGACY_VALUE_READING`): 上の読み (既定の読みを含む) の分解で、
+      0.29.9 の読みがコマンドの候補を作っていた形の先頭の代入 (置換の中のパス付きコマンド・空白を含む
+      `${...}`) を読んだとき、その読みを 0.29.9 までの代入の値の読みでもう一度分解する
+      (`X=$(/usr/bin/firebase deploy) aws ...` の firebase を、0.29.9 と同じく候補に残す)。
+      シェルの読み方ではなく、0.29.9 の候補を落とさないための読みなので、`legacy_values=False` で
+      足さずに返せる (`core/workdir.py` の `sure_chdirs` は読みの数を数えるときに足さない。足すと
+      `cd sub && X=$(/bin/date +%s) firebase deploy` の `cd sub` を確実とみなさなくなる)
+
     どれも既定の読みに足す側で、既定の読みの候補は減らない。読みごとに区切りの並びを保つので、
     `cd` の追跡 (`core/workdir.py`) は読みごとに辿る。
     """
-    readings = [extract_candidates_with_separators(command)]
+    global _LEGACY_VALUE_SEEN
+    saved_seen = _LEGACY_VALUE_SEEN
+    _LEGACY_VALUE_SEEN = False
+    try:
+        readings = [extract_candidates_with_separators(command)]
+        legacy = [None] if _LEGACY_VALUE_SEEN else []
+        alternatives = _alternative_readings(command)
+        for zsh, bash in alternatives:
+            _LEGACY_VALUE_SEEN = False
+            with _reading(zsh, bash):
+                other = extract_candidates_with_separators(command)
+            if _LEGACY_VALUE_SEEN:
+                legacy.append((zsh, bash))
+            if other not in readings:
+                readings.append(other)
+        for config in legacy if legacy_values else ():
+            with _legacy_value_reading(config):
+                other = extract_candidates_with_separators(command)
+            if other not in readings:
+                readings.append(other)
+    finally:
+        _LEGACY_VALUE_SEEN = saved_seen
+    return readings
+
+
+def _alternative_readings(command: str) -> list[tuple[bool, bool]]:
+    """`extract_candidate_readings` が足す別の読み ((zsh の読みか, bash の読みか) の列)。"""
     alternatives = []
     # 起動条件は、分割器と同じく行の継続 (`\` + 改行) を取り除いた文字列で見る (`a=\` + 改行 + `(` も
     # 配列代入)。多めに起動しても候補が増えるだけで、既定の読みは変わらない。
@@ -2141,12 +2304,26 @@ def extract_candidate_readings(
         alternatives.append((False, True))
     if "${" in probe and probe.count("{") > probe.count("${"):
         alternatives.append((True, False))
-    for zsh, bash in alternatives:
-        with _reading(zsh, bash):
-            other = extract_candidates_with_separators(command)
-        if other not in readings:
-            readings.append(other)
-    return readings
+    return alternatives
+
+
+@contextlib.contextmanager
+def _legacy_value_reading(config: tuple[bool, bool] | None):
+    """0.29.9 までの代入の値の読み (`_LEGACY_VALUE_READING`) に切り替える (v0.29.10)。
+
+    `config` は重ねる別の読み (`_reading` の (zsh, bash))。None なら既定の読みのまま。
+    """
+    global _LEGACY_VALUE_READING
+    saved = _LEGACY_VALUE_READING
+    _LEGACY_VALUE_READING = True
+    try:
+        if config is None:
+            yield
+        else:
+            with _reading(*config):
+                yield
+    finally:
+        _LEGACY_VALUE_READING = saved
 
 
 @contextlib.contextmanager
@@ -2174,38 +2351,63 @@ def extract_candidates_with_separators(
     正規化して空になったセグメントは候補にならず、その区切りも捨てる。
     返すのは現在の読み (既定の読み) の結果だけ。別の読みも要るときは `extract_candidate_readings`。
     """
+    global _GH_UNREAD_SEEN
     out: list[tuple[str, dict[str, str], str]] = []
     # 行頭の代入の値の `~` はシェルが HOME に展開する (v0.29.5。`tilde_home`)。分割し直した中身
-    # (下の parts) は wrapper の引数か区切りの後ろで、0.29.4 までと同じく展開しない。
+    # (`_segment_candidates` の parts) は wrapper の引数か区切りの後ろで、0.29.4 までと同じく展開しない。
     home = tilde_home(command)
     for seg, sep in split_with_separators(command):
-        normalized, env, chdir, external, reread = _normalize_segment_chdir(seg, home=home)
-        if not normalized:
-            continue
-        # シェル経由 wrapper のクォートを剥がすと、中身が複合コマンドのことがある
-        # (`watch 'gh pr create && aws s3 rm x'`)。剥がした結果をもう一度分割して
-        # 各段を候補にする。分割が要らない通常のセグメントはここを素通りする。
-        # 前置きの代入を剥がした結果が区切りで始まるとき (分割が閉じない配列代入の中と読んだ
-        # `a=(<<E \` + 改行 + `a+=(x)y ; aws ...` の代入を剥がすと `; aws ...` が残る) も分割し直す。
-        # 区切りの付いたままの形を候補にすると、後ろの CLI に一致しない。
-        parts = split_with_separators(normalized)
-        if len(parts) > 1 or (parts and normalized[0] in ";&|"):
-            last = len(parts) - 1
-            for k, (part, inner_sep) in enumerate(parts):
-                inner, inner_env, inner_chdir, inner_external, inner_reread = _normalize_segment_chdir(part)
-                if inner:
-                    # 分割し直した段の語を Bash のシェルが読むかは、段を取り出した経路で決まる。シェル経由
-                    # wrapper の中身 (外側の `reread`) と、段自身がシェル経由 wrapper の形 (`inner_reread`) は
-                    # Bash のシェルの語と扱わない (`shell_string_candidates`)。heredoc の本文を落とした
-                    # 宣言行と、前置きの代入を剥がした残りは、Bash のシェルが読む語 (`cat <<EOF && kubectl --kubeconfig ~/a ...` の `~` は展開される)
-                    _note_chdir(
-                        inner, chdir or inner_chdir, external or inner_external, reread=reread or inner_reread
-                    )
-                    out.append((inner, {**env, **inner_env}, sep if k == last else inner_sep))
-            continue
-        _note_chdir(normalized, chdir, external, reread=reread)
-        out.append((normalized, env, sep))
+        _GH_UNREAD_SEEN = False
+        found = _segment_candidates(seg, sep, home)
+        # gh の token / host の env に読めない値を代入したセグメント
+        # (`GH_TOKEN=$(gh auth token --user x) gh pr create`) の gh は、0.29.9 と同じく読む
+        # (`_GH_IDENTITY_ENV`)。セグメントごと 0.29.9 の読みで分解し直す (0.29.9 の読みの中で印が立っても、
+        # 分解し直した結果は同じ)。
+        # gh の無いセグメント (`GH_TOKEN=$(z) aws ...`) は、ほかの代入と同じく値を飛ばして後ろを照合する。
+        if _GH_UNREAD_SEEN and any(cand.split(None, 1)[:1] == ["gh"] for cand, *_rest in found):
+            with _legacy_value_reading(None):
+                found = _segment_candidates(seg, sep, home)
+        for cand, env, cand_sep, chdir, external, reread in found:
+            _note_chdir(cand, chdir, external, reread=reread)
+            out.append((cand, env, cand_sep))
     return out
+
+
+def _segment_candidates(
+    seg: str, sep: str, home: str | None
+) -> list[tuple[str, dict[str, str], str, bool, bool, bool]]:
+    """1 つのセグメントの候補 (候補, env, 区切り, chdir, external, reread) の列
+    (`extract_candidates_with_separators` の 1 セグメント分。最後の 3 つは `_note_chdir` に渡す)。"""
+    normalized, env, chdir, external, reread = _normalize_segment_chdir(seg, home=home)
+    if not normalized:
+        return []
+    # シェル経由 wrapper のクォートを剥がすと、中身が複合コマンドのことがある
+    # (`watch 'gh pr create && aws s3 rm x'`)。剥がした結果をもう一度分割して
+    # 各段を候補にする。分割が要らない通常のセグメントはここを素通りする。
+    # 前置きの代入を剥がした結果が区切りで始まるとき (分割が閉じない配列代入の中と読んだ
+    # `a=(<<E \` + 改行 + `a+=(x)y ; aws ...` の代入を剥がすと `; aws ...` が残る) も分割し直す。
+    # 区切りの付いたままの形を候補にすると、後ろの CLI に一致しない。
+    parts = split_with_separators(normalized)
+    if len(parts) > 1 or (parts and normalized[0] in ";&|"):
+        found = []
+        last = len(parts) - 1
+        for k, (part, inner_sep) in enumerate(parts):
+            inner, inner_env, inner_chdir, inner_external, inner_reread = _normalize_segment_chdir(part)
+            if inner:
+                # 分割し直した段の語を Bash のシェルが読むかは、段を取り出した経路で決まる。シェル経由
+                # wrapper の中身 (外側の `reread`) と、段自身がシェル経由 wrapper の形 (`inner_reread`) は
+                # Bash のシェルの語と扱わない (`shell_string_candidates`)。heredoc の本文を落とした
+                # 宣言行と、前置きの代入を剥がした残りは、Bash のシェルが読む語 (`cat <<EOF && kubectl --kubeconfig ~/a ...` の `~` は展開される)
+                found.append((
+                    inner,
+                    {**env, **inner_env},
+                    sep if k == last else inner_sep,
+                    chdir or inner_chdir,
+                    external or inner_external,
+                    reread or inner_reread,
+                ))
+        return found
+    return [(normalized, env, sep, chdir, external, reread)]
 
 
 def _note_chdir(candidate: str, chdir: bool, external: bool, reread: bool = False) -> None:

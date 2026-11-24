@@ -331,8 +331,21 @@ QUERY が緩めるのは「アカウントが期待値と違う」「期待値�
 
 - **quote-aware 分割**: single/double quote・`$()`・backtick の内側にある
   `&&` / `;` / `|` / 改行は区切りにしない (手書き状態マシン)
-- **subshell を含む代入は保守的に stop**: `FOO=$(date) cmd` は剥がすと意味が
-  変わりうるため剥がさない
+- **値を読めない代入は値を飛ばす** (v0.29.10): `FOO=$(date) cmd` / ``FOO=`date` cmd`` /
+  `FOO=$((1 + 2)) cmd` / `FOO=${X:-a b} cmd` は、値を読まずに飛ばして後ろの `cmd` を候補にする
+  (値は検証の env に入れない。`$VAR` を含む値と同じ扱い)。0.29.9 までは「剥がすと意味が変わり
+  うる」として剥がさず、後ろの CLI を検証していなかった (bash 3.2 / zsh とも値を評価してから
+  `cmd` を走らせる)。0.29.9 の読みがコマンドの候補を作っていた 2 つの形 (置換の中のパス付き CLI を
+  basename で拾う `X=$(/usr/bin/firebase deploy) aws ...`、空白を含む `${...}` の中の語から読み直す
+  `X=${Y:- aws s3 rm x} gh ...`) は、0.29.9 の読みでも分解して候補の和集合を取る
+  (`_LEGACY_VALUE_READING`)。値の終端は分割と同じ `_skip_opaque` で求める。
+  0.29.9 の読みはシェルの読み方ではないので、`sure_chdirs` の読みの数には数えない
+  (`extract_candidate_readings(..., legacy_values=False)`)。値を飛ばした代入の後ろが代入だけの
+  セグメントは、0.29.9 と同じ候補 (最初に値を飛ばした代入から後ろ) を返す (`_env_names_changed` が
+  候補の文字列から変えた env の名前を読むため)。gh の token / host の env (`_GH_IDENTITY_ENV`) に
+  読めない値を代入したセグメントの gh は、セグメントごと 0.29.9 の読みで分解し直す
+  (書き込むアカウントを hook から決められない。`GH_TOKEN=$(cmd) gh ...` は 0.29.9 と同じく照合も
+  自動切替もしない)
 - **`env -i` / `env --` / `env -u NAME` は opaque**: 環境を書き換えるので剥がさない
   (= 静的解析対象外 → 検証スキップ)
 - **透過 wrapper は「env を素通しする」ものだけ**: `ssh` / `docker` /
