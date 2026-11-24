@@ -17,6 +17,7 @@ import re
 import shlex
 import stat
 import string
+import sys
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -305,6 +306,14 @@ def _drive_readings() -> tuple[bool, ...]:
     return (False, True) if os.name == "nt" else (False,)
 
 
+# 相対パスを、差分だけを辿る解決 (`_join_resolved`) で解決するか。Python 3.12 以前の realpath は symlink の環に当たると辿るのを
+# やめ、残りを字面のまま返す (`<wt>/m1/../to-main` が、symlink の `to-main` を含んだまま返る)。その値は realpath の不動点で
+# ないので、そこを基点に差分だけを辿ると、0.9.3 までの `norm(os.path.join(base, rel))` (移動のたびに全要素を辿り直す) と値が
+# 変わり、後の `cd .` / `cd sub` で `to-main` を辿らずに、別の checkout への git を見逃す。3.13 以降の realpath は環の後ろも
+# 辿るので、値は常に不動点。3.12 以前と Windows は realpath をそのまま呼び (深さの 2 乗の時間は残る)、遅い形は読み取りの期限で閉じる
+_REALPATH_SETTLES = sys.version_info >= (3, 13)
+
+
 def _resolve(base: str | None, path: str, msys: bool = False) -> str | None:
     """base (正規化済み) から見た path の正規化済み絶対パス。解決できなければ None。msys は Git Bash の読み (`_drive_readings`)。"""
     if _dynamic(path):
@@ -316,7 +325,9 @@ def _resolve(base: str | None, path: str, msys: bool = False) -> str | None:
         return norm(path)
     if base is None:
         return None
-    return _join_resolved(base, path)
+    if os.path is posixpath and _REALPATH_SETTLES:
+        return _join_resolved(base, path)
+    return norm(os.path.join(base, path))
 
 
 def _join_resolved(base: str, rel: str) -> str:
@@ -324,12 +335,11 @@ def _join_resolved(base: str, rel: str) -> str:
 
     realpath はパスの要素を先頭から 1 つずつ lstat するので、`cd a; cd a; ...` のように深くなる場所から毎回呼ぶと、深さの
     2 乗の時間になる (2,000 回で約 6 秒。hook が時間切れになるとコマンドはそのまま走る)。正規化済みの base は realpath の
-    不動点 (symlink・`.`・`..` を含まない) なので、rel の要素だけを POSIX の realpath と同じ規則で辿る: 空の要素と `.` は
-    飛ばし、`..` は辿った先の字面で 1 つ上がり、それ以外は lstat して、symlink に当たったらそこから先を realpath に任せる。
-    Windows の realpath は要素ごとに辿らない (区切りと大文字小文字の扱いも違う) ので、realpath をそのまま呼ぶ。
+    不動点 (Python 3.13 以降) なので、rel の要素だけを POSIX の realpath と同じ規則で辿る: 空の要素と `.` は飛ばし、`..` は
+    辿った先の字面で 1 つ上がり、それ以外は lstat して、symlink に当たったらそこから先を realpath に任せる。
+    `_resolve` が、Python 3.13 以降の POSIX でだけ呼ぶ (`_REALPATH_SETTLES`。Windows の realpath は要素ごとに辿らず、区切りと
+    大文字小文字の扱いも違う)。
     """
-    if os.path is not posixpath:
-        return norm(os.path.join(base, rel))
     path = base
     parts = rel.split("/")
     for i, name in enumerate(parts):
@@ -346,7 +356,7 @@ def _join_resolved(base: str, rel: str) -> str:
         except ValueError:  # NUL を含む語。realpath と同じ結果 (版によっては例外) にする
             delegate = True
         if delegate:
-            # 残りは元の綴りのまま渡す (`lnk//x` の `//` を詰めると、Python 3.11 の realpath が symlink の環で返す値と変わる)
+            # 残りは元の綴りのまま realpath に渡す (realpath と同じ値にする)
             return norm(posixpath.join(path, "/".join(parts[i:])))
         path = step
     return path
@@ -786,7 +796,8 @@ def _tokens(command: str, commenters: str) -> list[str] | None:
 # 安全網で、終わらない here-document を here-document と読まずに読み直す回数の上限
 _REREAD_LIMIT = 8
 
-# 読み取りの期限 (秒)。`analyze` の 1 回の呼び出し全体 (安全網の読み直しを含む) で 1 つ。git を含む実コマンドの読み取りは
+# 読み取りの期限 (秒)。`analyze` の 1 回の呼び出し全体 (安全網の読み直しを含む) で 1 つで、最初の読みを字句に分け終えたところ
+# から数える (`_Deadline.start`)。git を含む実コマンドの読み取りは
 # 最大でも数十ミリ秒。hook の timeout (hooks.json の 10 秒) を超えるとコマンドはそのまま走るので、遅くなる形を個別に閉じるのでは
 # なく、時間切れの経路そのものを閉じる。過ぎたら読むのをやめ、それまでの判定に注意を 1 つ足して返す (止めない)。
 # README の「目的と限界」に同じ値を書いている。None は期限なし (時間の伸び方を測るテスト用)
@@ -794,12 +805,21 @@ _READ_SECONDS: float | None = 3.0
 
 
 class _Deadline:
-    """`analyze` の 1 回の呼び出しの期限。"""
+    """`analyze` の 1 回の呼び出しの期限。最初の読みを字句に分け終えたところから数える (`start`)。"""
 
     def __init__(self, seconds: float | None):
         self.seconds = seconds
-        self._end = None if seconds is None else time.monotonic() + seconds
+        self._end: float | None = None  # `start` で決める
         self.passed = False
+
+    def start(self) -> None:
+        """期限を数え始める。2 回目以降は何もしない (安全網の読み直しも、最初の読みと同じ期限で読む)。
+
+        字句に分ける処理 (正規化と shlex) は打ち切れないので、そこを期限に入れると、長い 1 語 (引用した 0.6 MB ほど) を
+        字句に分けるだけで期限を使い切り、手前の git も読まずに注意だけになる (0.9.3 は読み終えて止めていた)。
+        """
+        if self._end is None and self.seconds is not None:
+            self._end = time.monotonic() + self.seconds
 
     def check(self) -> bool:
         """期限を過ぎたか。一度過ぎたら、以後はずっと True。"""
@@ -836,6 +856,8 @@ def _analyze_tokens(tokens: list[str], cwd: str, fam: Family, deadline: _Deadlin
 def _read(normalized: str, cwd: str, fam: Family, deadline: _Deadline | None = None) -> list[Finding]:
     # comment は正規化で捨てた。残った `#` は単語の一部
     tokens = _tokens(normalized, commenters="")
+    if deadline is not None:
+        deadline.start()
     return [] if tokens is None else _analyze_tokens(tokens, cwd, fam, deadline)
 
 
@@ -993,7 +1015,9 @@ class _Analyzer:
         seg: list[str] = []
         deadline = self.deadline
         for tok in tokens:
-            # 1 つの字句の仕事は、高々状態の数 (`_STATE_LIMIT`) × スタックの深さなので、字句ごとに見れば期限を大きく越えない
+            # 期限は字句ごとに見る。区切りの字句は 1 つの単純コマンドをまとめて処理し、その仕事は状態の数 (`_STATE_LIMIT`) ×
+            # 語の数・語の長さで伸びるので、移動 (`_simple`) と git (`_check_git`) では状態ごとにも見る。越えるのは、1 つの状態の
+            # 1 回の読み (1 つの相対パスの語の解決や、1 つの git の語) の分まで
             if deadline is not None and deadline.check():
                 return self.findings
             if not (tok and set(tok) <= set(_PUNCT)):
@@ -1174,6 +1198,8 @@ class _Analyzer:
         if cmd in _MOVERS and in_shell:
             out: set[_Alt] = set()
             for h, s, _ in alts:
+                if self.deadline is not None and self.deadline.check():
+                    break  # 状態ごとにも期限を見る (長い相対パスの語は、1 回の解決が語の長さの 2 乗)
                 out |= self._chdir(cmd, seg[1:], h, s)
             return out
         if _is_git(cmd):
@@ -1235,6 +1261,8 @@ class _Analyzer:
         fam = self.fam
         note: Finding | None = None
         for here in sorted(heres, key=lambda h: h or ""):
+            if self.deadline is not None and self.deadline.check():
+                break  # 語の多い 1 つの git (`git -C a -C a ...` を数万個) は、状態ごとの読みが重い
             targets, unresolved, rest, in_repo = _git_targets(args, here, fam, env, self.msys)
             if not rest:
                 return

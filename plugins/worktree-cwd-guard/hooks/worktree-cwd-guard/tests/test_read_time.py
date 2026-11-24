@@ -2,8 +2,8 @@
 
 相対パスの `cd a;` を続けると、行き先のパスが深くなる。realpath はパスの要素を先頭から lstat し直すので、移動のたびに呼ぶと深さの
 2 乗の時間になり、hook が時間切れになるとコマンドはそのまま走る (0.9.3 まで。`cd a;` 2,000 回で約 6 秒、`x || cd d<i>;` 6 回の後に
-`cd a;` 400 回で約 17 秒)。正規化済みの基点からの差分だけを辿るようにし、それでも遅い形 (状態の数 × スタックの深さなど) は、
-読み取りの期限で閉じる (期限を過ぎたら、それまでの判定に注意を足して返す)。
+`cd a;` 400 回で約 17 秒)。Python 3.13 以降の POSIX では正規化済みの基点からの差分だけを辿るようにし、それ以外の環境の相対パスと、
+それでも遅い形 (状態の数 × スタックの深さなど) は、読み取りの期限で閉じる (期限を過ぎたら、それまでの判定に注意を足して返す)。
 """
 from __future__ import annotations
 
@@ -27,7 +27,11 @@ import test_guard
 import test_state_limit
 from test_state_limit import GIT, MAIN, RESET, B, or_cd
 
-_POSIX_REALPATH = os.path is posixpath  # 差分だけを辿る解決は POSIX の realpath の規則 (Windows は期限だけで閉じる)
+_POSIX_REALPATH = os.path is posixpath
+# 差分だけを辿る解決は、Python 3.13 以降の POSIX でだけ使う (3.12 以前の realpath は symlink の環で辿るのをやめ、不動点でない値を
+# 返す。Windows の realpath は要素ごとに辿らない)。それ以外は realpath をそのまま呼び、遅い形は期限で閉じる
+_FAST_JOIN = _POSIX_REALPATH and sys.version_info >= (3, 13)
+_NO_FAST_JOIN = "差分だけを辿る解決は Python 3.13 以降の POSIX でだけ使う (それ以外は期限で閉じる: DeadlineTest)"
 
 
 def cd_a(n: int) -> str:
@@ -51,7 +55,7 @@ def _outcome(fn, *args):
         return ("raise", type(e).__name__)
 
 
-@unittest.skipUnless(_POSIX_REALPATH, "差分だけを辿る解決は POSIX の realpath の規則で、Windows は realpath をそのまま呼ぶ")
+@unittest.skipUnless(_FAST_JOIN, _NO_FAST_JOIN)
 class JoinResolvedTest(unittest.TestCase):
     """`_join_resolved(base, rel)` が `norm(os.path.join(base, rel))` と同じ値 (か同じ例外) になる。"""
 
@@ -124,6 +128,119 @@ class JoinResolvedTest(unittest.TestCase):
         self.assertEqual(command._resolve(self.base, "lup/base/lrel"), n(os.path.join(self.base, "d", "e")))
 
 
+def _old_step(here: str, rel: str) -> str:
+    """0.9.3 までの解決 (移動のたびに全要素を realpath し直す)。"""
+    return family.norm(rel) if rel.startswith("/") else family.norm(os.path.join(here, rel))
+
+
+@unittest.skipUnless(_POSIX_REALPATH, "symlink の環の扱いは POSIX の realpath の規則 (Windows は realpath をそのまま呼ぶ)")
+class ResolveChainTest(unittest.TestCase):
+    """移動を続けた `here = _resolve(here, rel)` の値が、0.9.3 までの式の連鎖と同じになる。
+
+    Python 3.12 以前の realpath は symlink の環に当たると辿るのをやめ、残りを字面のまま返す (`<wt>/m1/../to-main` が、symlink の
+    `to-main` を含んだまま返る)。その値は realpath の不動点でないので、そこを基点に差分だけを辿ると次の移動で値が変わる。
+    1 回の解決 (`JoinResolvedTest`) は不動点の基点から比べるので、ここで連鎖を比べる。
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        top = family.norm(tmp.name)
+        wt, main, other = (os.path.join(top, name) for name in ("wt", "main", "other"))
+        for d in (os.path.join(main, "sub", "deep"), os.path.join(wt, "x", "y"), other):
+            os.makedirs(d)
+        locked = os.path.join(wt, "locked")
+        os.makedirs(locked)
+        try:
+            for path, target in (
+                (os.path.join(wt, "to-main"), main),
+                (os.path.join(wt, "to-main-rel"), "../main"),
+                (os.path.join(wt, "lloop"), "lloop"),  # 自分を指す symlink
+                (os.path.join(wt, "m1"), "m2"),  # 互いを指す symlink
+                (os.path.join(wt, "m2"), "m1"),
+                (os.path.join(wt, "dang"), "nosuch/zz"),
+                (os.path.join(wt, "up"), ".."),
+                (os.path.join(wt, "dot"), "."),
+                (os.path.join(wt, "chain"), "to-main"),
+                (os.path.join(wt, "toloop-then-up"), "lloop/.."),
+                (os.path.join(wt, "x", "back"), "../.."),
+                (os.path.join(wt, "x", "loopdeep"), "../x/loopdeep"),
+                (os.path.join(main, "to-wt"), wt),
+                (os.path.join(main, "to-other"), "../other"),
+                (os.path.join(main, "lloop"), "lloop"),
+                (os.path.join(locked, "to-main"), main),
+            ):
+                os.symlink(target, path)
+        except (OSError, NotImplementedError) as e:
+            self.skipTest(f"symlink を作れない: {e!r}")
+        os.chmod(locked, 0)  # 中を lstat できない dir
+        self.addCleanup(os.chmod, locked, 0o755)
+        self.top, self.wt, self.main = top, family.norm(wt), family.norm(main)
+        self.names = [
+            "to-main", "to-main-rel", "lloop", "m1", "m2", "dang", "up", "dot", "to-wt", "to-other", "x", "y", "back",
+            "loopdeep", "chain", "toloop-then-up", "locked", "sub", "deep", "main", "wt", "other", "MAIN", "To-Main",
+            "..", "..", ".", "", "zz", "a",
+        ]
+        self.bases = [family.norm(p) for p in (wt, main, top, os.path.join(wt, "x"))]
+
+    def _chain(self, base: str, steps: list[str]) -> tuple[list, list]:
+        """steps を old (0.9.3 までの式) と new (`_resolve`) で持ち回り、各段の結果 (値か例外の型) を返す。"""
+        old, new = [], []
+        here_old = here_new = base
+        for rel in steps:
+            o, n = _outcome(_old_step, here_old, rel), _outcome(command._resolve, here_new, rel)
+            old.append(o)
+            new.append(n)
+            if o != n or o[0] == "raise":
+                break
+            here_old, here_new = o[1], n[1]
+        return old, new
+
+    def test_moves_after_a_symlink_loop(self):
+        # 環 (`m1` <-> `m2` / `lloop`) を `..` で横切った先の値を基点にした移動 (レビューと再現で挙がった形)
+        for base, steps in (
+            (self.wt, ["m1/../to-main", "."]),
+            (self.wt, ["m1/../to-main", "sub"]),
+            (self.wt, ["lloop/x/../../to-main", "sub"]),
+            (self.wt, [f"{self.wt}/m1/../to-main", "."]),
+            (self.wt, ["m1", "../to-main-rel/sub"]),
+            (self.wt, ["m1///deep", "../../to-main"]),
+        ):
+            with self.subTest(steps=steps):
+                old, new = self._chain(base, steps)
+                self.assertEqual(new, old)
+
+    def test_chained_moves_match_the_old_formula(self):
+        rng = random.Random(1124)
+        mismatches = []
+        for _ in range(4000):
+            base = rng.choice(self.bases)
+            steps = ["/".join(rng.choice(self.names) for _ in range(rng.randint(1, 4))) for _ in range(rng.randint(2, 5))]
+            old, new = self._chain(base, steps)
+            if old != new:
+                mismatches.append((base, steps, old[-1], new[-1]))
+        self.assertEqual(len(mismatches), 0, mismatches[:3])
+
+    def test_fast_path_only_where_realpath_returns_fixed_points(self):
+        # 差分だけを辿る解決を使う版では、環を横切った値も realpath の不動点 (そこを基点にしてよい)
+        if not command._REALPATH_SETTLES:
+            self.skipTest("この Python では差分だけを辿る解決を使わない")
+        for rel in ("m1/../to-main", "lloop/x/../../to-main", "m1///deep", "m1", "toloop-then-up/to-main"):
+            with self.subTest(rel=rel):
+                value = family.norm(os.path.join(self.wt, rel))
+                self.assertEqual(family.norm(value), value)
+
+    def test_without_the_fast_path_realpath_is_called_each_time(self):
+        # 差分だけを辿る解決を使わない版 (3.12 以前) は、0.9.3 と同じ式で解決する
+        def unused(*args):
+            raise self.failureException(f"差分だけを辿る解決を使った: {args!r}")
+
+        with mock.patch.object(command, "_REALPATH_SETTLES", False), mock.patch.object(command, "_join_resolved", unused):
+            for rel in ("m1/../to-main", "x/y", "to-main/sub", "..", "zz/../x"):
+                with self.subTest(rel=rel):
+                    self.assertEqual(command._resolve(self.wt, rel), _old_step(self.wt, rel))
+
+
 class SymlinkedPlaceDecisionTest(test_guard.GuardBase):
     """相対パスの途中の symlink は、どの段で現れても realpath で辿って持ち主を決める (本物の repo)。"""
 
@@ -144,6 +261,27 @@ class SymlinkedPlaceDecisionTest(test_guard.GuardBase):
         ):
             with self.subTest(cmd=cmd):
                 self.assertEqual(test_guard.decision(test_guard.evaluate(test_guard.bash(cmd, self.a))), want)
+
+    def test_moves_after_a_symlink_loop(self):
+        # Python 3.12 以前の realpath は symlink の環 (`m1` <-> `m2`) で辿るのをやめ、`<a>/m1/../to-main` を `<a>/to-main` (main への
+        # symlink を含む) のまま返す。次の移動では、0.9.3 と同じく全要素を辿り直して main に届く (どの版でも止める)
+        try:
+            os.symlink(self.main, self.a / "to-main")
+            os.symlink("m2", self.a / "m1")
+            os.symlink("m1", self.a / "m2")
+        except OSError as e:
+            self.skipTest(f"symlink を作れない: {e!r}")
+        (self.main / "sub").mkdir(exist_ok=True)
+        for cmd in (
+            "cd m1/../to-main; cd .; git reset --hard",
+            "cd m1/../to-main; cd sub; git reset --hard",
+            "cd m1/../to-main && cd sub && git reset --hard",
+            "cd m1/../to-main; git -C sub reset --hard",
+            "cd m1/../to-main; git -C . reset --hard",
+            f'cd "{self.a}/m1/../to-main"; cd .; git reset --hard',
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(test_guard.decision(test_guard.evaluate(test_guard.bash(cmd, self.a))), "deny")
 
 
 class LinearTimeTest(test_state_limit.BoundedBase):
@@ -176,7 +314,7 @@ class LinearTimeTest(test_state_limit.BoundedBase):
         self.assertLess(times[1] / times[0], 8.0, times)
         self.assertGreater(times[1] / times[0], 1.5, times)
 
-    @unittest.skipUnless(_POSIX_REALPATH, "Windows の realpath は要素ごとに辿らないので、期限だけで閉じる (DeadlineTest)")
+    @unittest.skipUnless(_FAST_JOIN, _NO_FAST_JOIN)
     def test_relative_cd_chain(self):
         # 区切りの空白の有無、引用した語、`..` / `.` を含む語でも同じ
         for unit, small, large in (("cd a; ", 1000, 4000), ("cd a;", 1000, 4000), ('cd "a b"; ', 1000, 4000),
@@ -184,7 +322,7 @@ class LinearTimeTest(test_state_limit.BoundedBase):
             with self.subTest(unit=unit):
                 self._assert_linear(lambda k, unit=unit: unit * k + GIT, small, large, None)
 
-    @unittest.skipUnless(_POSIX_REALPATH, "Windows の realpath は要素ごとに辿らないので、期限だけで閉じる (DeadlineTest)")
+    @unittest.skipUnless(_FAST_JOIN, _NO_FAST_JOIN)
     def test_two_part_sweep_at_the_state_limit(self):
         # 前半で状態を上限ちょうど (まとめない) に固定し、後半で相対パスを深くし続ける。状態の数が係数に掛かる
         k = test_state_limit._limit_exponent()
@@ -195,7 +333,7 @@ class LinearTimeTest(test_state_limit.BoundedBase):
             lambda m: or_cd(k - 1) + cd_a(m) + GIT + heredocs(9), 50, 200, None, peak=command._STATE_LIMIT, collapses=None
         )
 
-    @unittest.skipUnless(_POSIX_REALPATH, "Windows の realpath は要素ごとに辿らないので、期限だけで閉じる (DeadlineTest)")
+    @unittest.skipUnless(_FAST_JOIN, _NO_FAST_JOIN)
     def test_reported_shapes_finish_quickly(self):
         # 内部バックログに挙がった形が、期限に当たらずに 2 秒より短く読み終わる
         for name, cmd in (
@@ -263,12 +401,60 @@ class DeadlineTest(test_state_limit.BoundedBase):
         self.assertEqual(self.clock.moves, 10)
 
     def test_within_the_deadline_nothing_changes(self):
-        # zsh の読みと bash の 2 つの読みで移動を 3 つずつ (計 9) 読み、期限 (10) の手前で読み終える
-        cmd = f'{cd_a(3)}git -C "{B}" {RESET}'
-        out = self.findings(cmd)
+        # 読み (zsh の読みと bash の 2 つの読み。Windows ではパスの綴りの読みごとに倍) ごとに移動を 3 つずつ読み、期限の 1 秒手前で読み終える
+        readings = 3 * len(command._drive_readings())
+        with mock.patch.object(command, "_READ_SECONDS", 3 * readings + 1):
+            out = self.findings(f'{cd_a(3)}git -C "{B}" {RESET}')
+        self.assertEqual(self.clock.moves, 3 * readings)
         self.assertEqual([f.root for f in out], [family.norm(B)])
         self.assertEqual(self._note(out), [])
         self.assertIsNone(self.verdict("git status"))
+
+    def test_states_of_one_move_stop_at_the_deadline(self):
+        # 区切りの字句は、1 つの移動を状態の数だけ読む (`x || cd d<i>;` で割れた行き先ごと)。状態ごとにも期限を見て、過ぎたら
+        # 残りの状態を読まない (字句ごとにしか見ないと、期限を過ぎた字句の状態を全部読む: 1 + 2 + 4 + 8 = 15)
+        k = test_state_limit._limit_exponent()
+        out = self.findings(or_cd(k) + f'cd "{MAIN}"; {GIT}')
+        self.assertEqual(self.clock.moves, 10)
+        self.assertEqual([f.blocked for f in out], [False])
+        self.assertEqual(len(self._note(out)), 1)
+
+    def test_slow_tokenizing_alone_does_not_use_up_the_deadline(self):
+        # 字句に分ける処理 (正規化と shlex) は打ち切れない。期限は最初の読みを字句に分け終えてから数え、そこで期限を使い切って
+        # どの git も読まずに注意だけにすることはしない (引用した 0.6 MB ほどの 1 語。0.9.3 は読み終えて止めていた)
+        tokens = command._tokens
+
+        def slow_tokens(*args, **kwargs):
+            self.clock.now += 20
+            return tokens(*args, **kwargs)
+
+        with mock.patch.object(command, "_tokens", slow_tokens):
+            out = self.findings(f'git -C "{MAIN}" {RESET}')
+        self.assertEqual([(f.blocked, f.root) for f in out], [(True, family.norm(MAIN))])
+
+    def test_deadline_starts_once(self):
+        # 起点は最初の `start` だけ (安全網の読み直しが `start` を呼んでも期限を延ばさない)。始める前と、期限なしは過ぎない
+        def run() -> list[bool]:
+            deadline = command._Deadline(10)
+            seen = [deadline.check()]
+            self.clock.now = 100
+            deadline.start()
+            self.clock.now = 105
+            deadline.start()
+            seen.append(deadline.check())
+            self.clock.now = 110
+            seen.append(deadline.check())
+            unbounded = command._Deadline(None)
+            unbounded.start()
+            self.clock.now = 10**9
+            seen.append(unbounded.check())
+            return seen
+
+        try:
+            seen = run()
+        except Exception as e:  # noqa: BLE001 - 例外も期限の扱いの誤りとして数える
+            self.fail(f"期限の扱いが例外を投げた: {e!r}")
+        self.assertEqual(seen, [False, False, True, False])
 
     def test_nothing_is_read_after_the_deadline(self):
         with mock.patch.object(command, "_READ_SECONDS", 0):
@@ -333,6 +519,27 @@ class DeadlineTest(test_state_limit.BoundedBase):
             self.assertEqual(self.verdict(cmd), "deny")
 
 
+class DeadlineInOneGitTest(test_state_limit.BoundedBase):
+    """1 つの git の読みは、状態の数 x 語の数で重くなる (`git -C a -C a ...` を数万個並べた形)。状態ごとに期限を見る。"""
+
+    def test_states_of_one_git_stop_at_the_deadline(self):
+        clock = _FakeClock()
+        git_targets = command._git_targets
+
+        def ticking(*args, **kwargs):
+            clock.tick()
+            return git_targets(*args, **kwargs)
+
+        k = test_state_limit._limit_exponent()
+        with mock.patch.object(command, "time", types.SimpleNamespace(monotonic=clock.monotonic)), mock.patch.object(
+            command, "_git_targets", ticking
+        ), mock.patch.object(command, "_READ_SECONDS", 10):
+            out = self.findings(or_cd(k) + "git -C a reset --hard")
+        self.assertEqual(clock.moves, 10)
+        self.assertEqual([f.blocked for f in out], [False])
+        self.assertIn("期限", out[0].message)
+
+
 class ReadTimeHookTest(test_guard.GuardBase):
     """hook 全体 (git の起動を含む) が、hooks.json の timeout の半分より短い時間で返る。"""
 
@@ -365,8 +572,9 @@ class ReadTimeHookTest(test_guard.GuardBase):
             with self.subTest(name=name):
                 elapsed, out = self._run_hook(cmd)
                 self.assertLess(elapsed, timeout / 2, elapsed)
-                # POSIX は読み切って何も出さない。Windows は realpath が要素ごとに辿らないので、期限の注意になりうる
-                if _POSIX_REALPATH:
+                # 差分だけを辿る解決 (Python 3.13 以降の POSIX) は読み切って何も出さない。それ以外は realpath を移動のたびに
+                # 呼ぶので、期限の注意になりうる
+                if _FAST_JOIN:
                     self.assertIsNone(out)
                 else:
                     self.assertIn(test_guard.decision(out), (None, "context"))
