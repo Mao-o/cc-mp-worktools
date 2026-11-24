@@ -2,6 +2,13 @@
 
 All notable changes to this plugin will be documented here.
 
+## [0.57.4] - 2026-11-25
+
+### 文書: PixAI の日・韓のページの URL の引き方を SKILL.md に追記
+
+- PixAI の日本語・韓国語のページにも `URL:` 行を付けるために `index_url` を複数持てる形へ広げる案は、増えるのが検索結果の URL 行だけで読めるページは変わらず、改修 (複数のファイル・200 行前後) と取得回数の増加 (1 回から 3 回) に見合わないため採らない
+- 代わりに SKILL.md の「PixAI」の注意へ 1 行を足した。日・韓のページの URL が要るときは `/ja/llms.txt` / `/ko/llms.txt` を見る (コードと preset の挙動の変更なし)
+
 ## [0.57.3] - 2026-11-24
 
 ### 修正: `url_base` の source で、ホストを読めない相対 URL のページが全コマンドを traceback で止める
