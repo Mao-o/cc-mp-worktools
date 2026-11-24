@@ -210,6 +210,23 @@ class StateLimitTest(BoundedBase):
         self.assertEqual(self.verdict(f'cd "{MAIN}"; pushd /t/x; {or_cd(18)}popd; {GIT}'), "deny")
         self.assertGreater(self.collapses, 0)
 
+    def test_collapse_keeps_the_depth_per_outcome(self):
+        # 成功の側だけが pushd で積んだ時点でまとめても、成功の側には失敗の側の浅いスタックを持たせない
+        # (持たせると popd が「失敗して main に残る」読みになり、止めすぎる)。bash / zsh -f とも git は main で動かない
+        k = _limit_exponent()
+        for head in (or_cd(k - 1), or_pushd_abs(k - 1)):
+            for tail in (f'cd "{MAIN}" && popd; {GIT}', f'cd "{MAIN}"; popd; {GIT}'):
+                cmd = f"{head}x && pushd /t/z && x && {tail}"
+                with self.subTest(cmd=cmd[-60:]):
+                    self.assertNotEqual(self.verdict(cmd), "deny")
+                    self.assertGreater(self.collapses, 0)
+        # 本当にスタックが空の側があれば、まとめた後も止める (`x && x && cd <main> && popd` の popd は失敗して main に残る)
+        self.assertEqual(self.verdict(f'{or_cd(k - 1)}x && true && x && cd "{MAIN}" && popd; {GIT}'), "deny")
+        # 作業ディレクトリも成否ごとに決める。成功の側はどれも main にいるので、`&&` の後ろの git は main で動く (失敗の側の
+        # 割れた作業ディレクトリに引かれて決まらないものにしない)
+        self.assertEqual(self.verdict(f'{or_cd(k - 1)}x && pushd "{MAIN}" && x && {GIT}'), "deny")
+        self.assertGreater(self.collapses, 0)
+
     def test_collapse_keeps_exported_git_dir(self):
         # `&` で戻す時点をまとめても、export 済みの GIT_DIR と、export していない代入は残す (上限を超えた後も git dir の行き先は読む)
         k = _limit_exponent()
@@ -235,14 +252,55 @@ class StateLimitTest(BoundedBase):
         self.assertEqual(self.verdict(f"{gd}{or_cd(k)}git worktree remove --force {rel}"), "deny")
         self.assertEqual(self.verdict(f"{gd}{or_cd(18)}git worktree remove --force {rel}"), "note")
         self.assertGreater(self.collapses, 0)
-        # 自分の worktree の名前、変数の語、repo の外の絶対パス、どの worktree の末尾にも一致しない素の相対パスは、
-        # 上限を超えても何も出さない
+        # どの worktree の末尾にも一致しない素の相対パスも、今の場所が決まらなければ注意 (symlink を通れば別の worktree に届く。
+        # test_worktree_operand_through_a_symlink_after_the_limit)
+        self.assertEqual(self.verdict(f"{or_cd(18)}git worktree remove --force zz"), "note")
+        self.assertGreater(self.collapses, 0)
+        # 自分の worktree の名前、変数の語、repo の外の絶対パスは、上限を超えても何も出さない
         outside = os.path.join(_BASE, "zz")  # ドライブ付きの絶対パス (Windows の `/t/zz` はドライブの無い相対の扱いになる版がある)
-        for rm in ("git worktree remove --force a", 'git worktree remove --force "$Y"', f'git worktree remove --force "{outside}"',
-                   "git worktree remove --force zz"):
+        for rm in ("git worktree remove --force a", 'git worktree remove --force "$Y"', f'git worktree remove --force "{outside}"'):
             with self.subTest(rm=rm):
                 self.assertIsNone(self.verdict(f"{or_cd(18)}{rm}"))
                 self.assertGreater(self.collapses, 0)
+
+    def test_worktree_operand_through_a_symlink_after_the_limit(self):
+        # symlink を通る相対パス (`wt/feature` の `wt` が別の worktree の親への symlink、最後が別の worktree への symlink の `lnk`) は、
+        # 綴りが worktree の root の末尾に一致しない。上限までは今の場所から realpath で別の worktree に届くことを読んで止め
+        # (0.9.2 と同じ読み)、上限を超えて今の場所が決まらなくなっても、通さずに注意を出す。合成の checkout の一覧では symlink を
+        # 辿れないので、実在の dir で組む
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        base = family.norm(tmp.name)
+        main = os.path.join(base, "repo")
+        own = os.path.join(main, ".claude", "worktrees", "a")
+        other = os.path.join(base, "elsewhere", "feature")
+        for d in (own, other, os.path.join(main, ".git")):
+            os.makedirs(d)
+        try:
+            os.symlink(os.path.dirname(other), os.path.join(main, "wt"))
+            os.symlink(other, os.path.join(main, "lnk"))
+        except OSError as e:  # symlink を作れない環境 (権限の無い Windows など)
+            self.skipTest(f"symlink を作れない: {e!r}")
+        self.fam = family.Family(home=own, roots=(main, own, other), common_dir=os.path.join(main, ".git"))
+        k = _limit_exponent()
+
+        def verdict(cmd: str) -> str | None:
+            self.collapses = 0
+            out = command.analyze(cmd, own, self.fam)
+            if any(f.blocked for f in out):
+                return "deny"
+            return "note" if out else None
+
+        for rel in ("wt/feature", "lnk"):
+            rm = f"git worktree remove --force {rel}"
+            with self.subTest(rel=rel):
+                self.assertEqual(verdict(f'cd "{main}"; {or_cd(k)}{rm}'), "deny")
+                self.assertEqual(self.collapses, 0)
+                self.assertEqual(verdict(f'cd "{main}"; {or_cd(k + 1)}{rm}'), "note")
+                self.assertGreater(self.collapses, 0)
+                self.assertEqual(verdict(f'cd "{main}"; {or_cd(18)}{rm}'), "note")
+        # 対照: 名前 (パスの末尾) が別の worktree に一致する形は、上限を超えても注意
+        self.assertEqual(verdict(f'cd "{main}"; {or_cd(k + 1)}git worktree remove --force feature'), "note")
 
     def test_documented_limit_matches(self):
         root = Path(__file__).resolve().parents[3]

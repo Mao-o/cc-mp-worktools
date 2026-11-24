@@ -124,8 +124,9 @@ class WorktreeNameTest(test_guard.GuardBase):
                 self.assertIsNone(evaluate(bash(cmd, self.a)))
 
     def test_unknown_place_is_a_note(self):
-        # 今の場所や git dir が決まらなければ repo も決まらないので止めない。名前が別の worktree に一致するか、`..` / `.` / 末尾の
-        # 区切りを含む相対パスなら、ほかの書き込み (`cd "$Y"; git reset --hard`) と同じく注意を出す。
+        # 今の場所や git dir が決まらなければ repo も決まらないので止めない。名前が別の worktree に一致するか、名前で決まらない
+        # 相対パス (基点が決まらないので、綴りに関係なくどの worktree にも届きうる) なら、ほかの書き込み (`cd "$Y"; git reset --hard`)
+        # と同じく注意を出す。
         # 共有 git dir の下の、どの checkout にも対応しない git dir は、git が repo として開けずに失敗する (ほかの書き込みと同じく注意)
         for cmd in (
             'cd "$Y"; git worktree remove --force c',
@@ -137,6 +138,9 @@ class WorktreeNameTest(test_guard.GuardBase):
             'cd "$Y"; git worktree remove --force ./c',
             'cd "$Y"; git worktree remove --force c/',
             'cd "$Y"; git worktree remove --force x/../c',
+            # どの worktree の末尾にも一致しない素の相対パスも、symlink を通れば別の worktree に届く (下の symlink の行)
+            'cd "$Y"; git worktree remove --force zz',
+            'cd "$Y"; git worktree remove --force x/c',
             # repo は決まるが、相対パスの基点の 1 つ (今の場所・作業ツリー) が決まらない
             f'GIT_DIR="{self.main}/.git"; export GIT_DIR; cd "$Y"; git worktree remove --force ../../wt-b',
             'git --work-tree="$X" worktree remove --force ../wt-b',
@@ -148,8 +152,16 @@ class WorktreeNameTest(test_guard.GuardBase):
         self.assertEqual(self._decision(cmd), "deny")
         out = command.analyze(cmd, str(self.a), family.detect(str(self.a)))
         self.assertEqual([f.blocked for f in out], [True], [f.message for f in out])
-        # 自分の worktree の名前、変数の語、repo の外の絶対パス、どの worktree の末尾にも一致しない素の相対パス
-        # (今の場所から読んだ先が worktree なら、その root は同じ綴りで終わる) は、何も出さない
+        # symlink を通る相対パス (最後が別の worktree への symlink の `lnk`、途中が別の worktree の親への symlink の `wt/wt-b`) は、
+        # 綴りが worktree の root の末尾に一致しない。今の場所が決まれば realpath で別の worktree に届くことを読んで止め、
+        # 決まらなければ注意を出す (git は名前で決まらないとパスを realpath で比べ、その worktree を消す)
+        (self.main / "lnk").symlink_to(self.b)
+        (self.main / "wt").symlink_to(self.b.parent)
+        for rel in ("lnk", f"wt/{self.b.name}"):
+            with self.subTest(rel=rel):
+                self.assertEqual(self._decision(f'cd "{self.main}"; git worktree remove --force {rel}'), "deny")
+                self.assertEqual(self._decision(f'cd "$Y"; git worktree remove --force {rel}'), "context")
+        # 自分の worktree の名前、変数の語、repo の外の絶対パスは、何も出さない
         outside = Path(self._tmp.name) / "plain"
         for cmd in (
             'cd "$Y"; git worktree remove --force a',
@@ -157,8 +169,6 @@ class WorktreeNameTest(test_guard.GuardBase):
             'git -C "$Y" worktree remove --force "$Z"',
             'cd "$Y"; git worktree remove --force "../$Z"',
             f'cd "$Y"; git worktree remove --force "{outside}"',
-            'cd "$Y"; git worktree remove --force zz',
-            'cd "$Y"; git worktree remove --force x/c',
             # 対象の語が無い形と、remove / move 以外
             'cd "$Y"; git worktree remove --force',
             'cd "$Y"; git worktree list',
