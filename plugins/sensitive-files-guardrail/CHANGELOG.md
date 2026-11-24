@@ -23,6 +23,29 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.36.2
+
+**テスト整理 (挙動の変更なし)。redact-sensitive-reads の suite の重複を除き、空振りのテストを強めた (patch bump)。**
+hook・`hooks.json`・README の挙動は変わらない。製品コードは変えていない。テスト件数: redact 1,568 → **1,561**
+(完全に重複した 10 件を消し、3 件を足した)。
+
+- `tests/_testutil.py` の `init_repo` に、check-sensitive-files の 0.36.1 と同じ変更を移した。user / gpgsign の
+  設定は `git config` の 3 回の起動ではなく、`git init` が作った `.git/config` への追記 (LF) で書く
+  (repo 1 つあたりの git の起動が 4 → 1 回)。git が repo の config として読めること、`git init` が書いた
+  設定を消さないこと (`core.bare`) は `TestInitRepoWritesTheRepoConfig` が見る (check-sensitive-files 側の
+  同じテストにも足した。Windows の CI でも流れる)。床 (`test_hermetic_env.py`) の
+  起動列の前提 (`init` / `add` / `commit`) と docstring を check-sensitive-files と揃え、外側の `GIT_DIR` で
+  `git init` が外側の repo に向いた形 (`.git/config` に書けない) も、例外のまま crash させず失敗として報告する
+- 入力と判定が同じで、テストが使うクラスの文脈 (基底クラス・setUp) も同じ組の片方 10 件を消した (`test_bash_handler.py` 9 件、`test_glob_dotenv.py`
+  1 件)。消したテストが殺していた変異は、残した片割れを含む残りの suite がすべて殺すことを確かめた。
+  消したテストのコメント (経緯と理由) は残した片割れへ移した
+- `TestCompoundAllow` の cat の安全リダイレクト 4 件 (`2>/dev/null` / `&>/dev/null` / `> /dev/null` / `2>&1`)
+  は、cat が safe_read で residual metachar の検査を飛ばすため、リダイレクトを剥がさなくても allow になり、
+  剥離を見ていなかった。同じ 4 形を safe_read でないコマンド (`make build`) に付けた表のテストを足した
+  (剥がさない変異で default が ask になって落ちる。make が safe_read に入ると前提で落ちる)。安全リダイレクトの
+  後ろに安全でないリダイレクトが続く形 (`make build 2>/dev/null > out.txt` など) が ask のままであることも
+  足した (剥がしすぎる変異で allow になって落ちる)
+
 ## 0.36.1
 
 **テスト整理 (挙動の変更なし)。check-sensitive-files の suite で repo を作る固定費を減らした (patch bump)。**

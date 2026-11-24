@@ -272,15 +272,6 @@ class TestAllow(BaseBash):
         r = handle(_make_envelope("echo foo", self.tmp))
         self.assertTrue(output.is_allow(r))
 
-    def test_ls_allowed(self):
-        r = handle(_make_envelope("ls -la", self.tmp))
-        self.assertTrue(output.is_allow(r))
-
-    def test_cat_env_example_allowed(self):
-        # .env.example はテンプレート除外なので allow
-        r = handle(_make_envelope("cat .env.example", self.tmp))
-        self.assertTrue(output.is_allow(r))
-
     def test_cat_regular_file_allowed(self):
         r = handle(_make_envelope("cat README.md", self.tmp))
         self.assertTrue(output.is_allow(r))
@@ -1091,6 +1082,7 @@ class TestGlobLiteralExcludeAllow(BaseBash):
     """
 
     def test_dotenv_example_literal_allow(self):
+        # .env.example はテンプレート除外なので allow
         r = handle(_make_envelope("cat .env.example", self.tmp))
         self.assertTrue(output.is_allow(r))
 
@@ -1183,16 +1175,8 @@ class TestQuotedFdTarget(BaseBash):
         r = handle(_make_envelope("echo foo > '&2'", self.tmp, mode="auto"))
         self.assertTrue(output.is_allow(r))
 
-    def test_unquoted_single_token_fd_dup_stripped(self):
-        r = handle(_make_envelope("cat README.md 2>&1", self.tmp))
-        self.assertTrue(output.is_allow(r))
-
     def test_stderr_dup_stripped(self):
         r = handle(_make_envelope("echo foo >&2", self.tmp))
-        self.assertTrue(output.is_allow(r))
-
-    def test_dev_null_two_token_still_stripped(self):
-        r = handle(_make_envelope("cat README.md > /dev/null", self.tmp))
         self.assertTrue(output.is_allow(r))
 
 
@@ -1283,11 +1267,34 @@ class TestCompoundAllow(BaseBash):
         r = handle(_make_envelope("cat README.md 2>&1", self.tmp))
         self.assertTrue(output.is_allow(r))
 
+    # 上の cat の 4 件と同じ安全リダイレクトを、safe_read でないコマンドに付けた形。cat は 0.12.0 から
+    # safe_read で residual metachar の検査を飛ばすので、cat の行は安全リダイレクトを剥がさなくても
+    # allow になり、剥離を見ていない。safe_read でないコマンドは、剥がさないと residual metachar で
+    # default が ask になる。ラベルは対になる cat のテスト名の末尾。
+    SAFE_REDIRECT_ON_NON_SAFE_READ = (
+        ("stderr_discard", "make build 2>/dev/null"),
+        ("all_discard", "make build &>/dev/null"),
+        ("space_redirect", "make build > /dev/null"),
+        ("stderr_dup", "make build 2>&1"),
+    )
+
+    def test_non_safe_read_with_safe_redirect_stripped(self):
+        self.assertEqual(len(self.SAFE_REDIRECT_ON_NON_SAFE_READ), 4, "前提: 対になる cat の 4 件と同じ 4 形を持つ")
+        # 前提: make は residual metachar の検査に届く (safe_read なら下の行は剥離を見ない)
+        r = handle(_make_envelope("make build > out.txt", self.tmp))
+        self.assertEqual(_decision(r), "ask", "前提: 安全でないリダイレクトは default で ask")
+        for label, cmd in self.SAFE_REDIRECT_ON_NON_SAFE_READ:
+            with self.subTest(case=label, cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertTrue(output.is_allow(r), msg=f"{cmd!r} -> {_decision(r)!r}")
+
 
 class TestRedirectToNonNull(BaseBash):
     """/dev/null 以外への ``>`` リダイレクトは default=ask / auto/bypass=allow (0.3.2)。"""
 
     def test_redirect_to_file_default(self):
+        # echo は stdout 出力のみで「見る・数える」とは異なり、safe_read の allow-list
+        # (``TestSafeReadAllowlist``) の外。residual metachar の ask に倒れる。
         r = handle(_make_envelope("echo foo > out.txt", self.tmp))
         self.assertEqual(_decision(r), "ask")
 
@@ -1298,6 +1305,20 @@ class TestRedirectToNonNull(BaseBash):
     def test_append_redirect_default(self):
         r = handle(_make_envelope("echo foo >> out.txt", self.tmp))
         self.assertEqual(_decision(r), "ask")
+
+    # 安全リダイレクトを剥がすときに後ろの word を巻き込まない。安全リダイレクトの後ろに
+    # 安全でないリダイレクトが続く形は、residual metachar で default が ask のまま。
+    UNSAFE_AFTER_SAFE_REDIRECT = (
+        ("after_single_word", "make build 2>/dev/null > out.txt"),
+        ("after_two_words", "make build > /dev/null > out.txt"),
+    )
+
+    def test_unsafe_redirect_after_safe_redirect_keeps_ask(self):
+        self.assertEqual(len(self.UNSAFE_AFTER_SAFE_REDIRECT), 2, "前提: 表が空でない")
+        for label, cmd in self.UNSAFE_AFTER_SAFE_REDIRECT:
+            with self.subTest(case=label, cmd=cmd):
+                r = handle(_make_envelope(cmd, self.tmp))
+                self.assertEqual(_decision(r), "ask", msg=f"{cmd!r} -> {_decision(r)!r}")
 
 
 class TestArbitraryPathExec(BaseBash):
@@ -1456,6 +1477,8 @@ class TestSegmentHardStopReevaluate(BaseBash):
     def test_hard_stop_seg1_then_deny_seg2(self):
         # cat $X | head .env | wc -l — 0.10.0: 全体 hard-stop で ask
         # 0.11.0: seg1 hard-stop pending_ask → seg2 (head .env) で deny 確定
+        # 0.25.0 以降も、literal segment の deny は hard-stop segment の救済 scan
+        # (``TestHardStopLiteralOperandScan``) と無関係に先行する
         r = handle(_make_envelope("cat $X | head .env | wc -l", self.tmp))
         self.assertEqual(_decision(r), "deny")
 
@@ -2168,7 +2191,8 @@ class TestSafeReadAllowlist(BaseBash):
     """
 
     def test_grep_with_output_redirect_allow(self):
-        # 0.11.x: residual `>` で ask、0.12.0: grep allow-list で allow
+        # 0.11.x: residual `>` で ask、0.12.0: grep allow-list で allow。
+        # default mode でも allow (autonomous でなくても許可される。envelope の既定は default)
         r = handle(_make_envelope("grep foo README.md > /tmp/out", self.tmp))
         self.assertTrue(output.is_allow(r))
 
@@ -2177,6 +2201,8 @@ class TestSafeReadAllowlist(BaseBash):
         self.assertTrue(output.is_allow(r))
 
     def test_ls_with_output_redirect_allow(self):
+        # 書込み先が非機密なら allow (0.12.0 の調査ワンライナー意図。0.14.0 の
+        # ``TestMetadataRedirectTarget`` の機密 redirect 先の deny 後も維持)
         r = handle(_make_envelope("ls -la > /tmp/listing.txt", self.tmp))
         self.assertTrue(output.is_allow(r))
 
@@ -2229,22 +2255,10 @@ class TestSafeReadAllowlist(BaseBash):
         r = handle(_make_envelope("find . -name '*.py' > files.txt", self.tmp))
         self.assertEqual(_decision(r), "ask")
 
-    def test_echo_not_in_allowlist_still_ask(self):
-        # echo は stdout 出力のみで「見る・数える」とは異なる。allow-list 外。
-        r = handle(_make_envelope("echo foo > out.txt", self.tmp))
-        self.assertEqual(_decision(r), "ask")
-
     def test_grep_pipe_pure_read_allow(self):
         # pipe (`|`) は segment 分割なので各 segment は metachar 無し。
         # 両 segment が allow-list、operand 非機密 → allow。
         r = handle(_make_envelope("grep foo file.txt | head -n 5", self.tmp))
-        self.assertTrue(output.is_allow(r))
-
-    def test_grep_redirect_default_mode_allow(self):
-        # default mode でも allow (autonomous でなくても許可される)
-        r = handle(_make_envelope(
-            "grep foo README.md > /tmp/out", self.tmp, mode="default",
-        ))
         self.assertTrue(output.is_allow(r))
 
     def test_grep_background_ampersand_allow(self):
@@ -2416,12 +2430,6 @@ class TestMetadataOnlyAllow(BaseBash):
         # operand scan で deny (pre-0.14.0 と同じ、安全側)。
         r = handle(_make_envelope("git status -- .env", self.tmp))
         self.assertEqual(_decision(r), "deny")
-
-    def test_ls_dotenv_with_redirect_allow(self):
-        # ls は _SAFE_READ_FIRST_TOKENS でもあるため residual metachar を skip し、
-        # metadata-only で allow (出力はファイル名一覧のみ)
-        r = handle(_make_envelope("ls -la .env > /tmp/x", self.tmp))
-        self.assertTrue(output.is_allow(r))
 
     # --- 内容出力系 / 書込み形 / 保守的境界は従来挙動を維持 ---
     def test_cat_head_grep_dotenv_still_deny(self):
@@ -2664,14 +2672,13 @@ class TestMetadataRedirectTarget(BaseBash):
                 msg=f"tree >| .env with mode={mode} should deny but got {_decision(r)!r}",
             )
 
-    def test_ls_redirect_to_nonsensitive_allow(self):
-        # 書込み先が非機密なら従来通り allow (0.12.0 の調査ワンライナー意図を維持)
-        r = handle(_make_envelope("ls -la > /tmp/listing.txt", self.tmp))
-        self.assertTrue(output.is_allow(r))
-
     def test_ls_metadata_dotenv_redirect_nonsensitive_allow(self):
         # read operand が機密 (.env の metadata) でも書込み先が非機密なら allow。
         # ls は内容を出さない (metadata のみ) ので .env の値は露出しない。
+        # ls は _SAFE_READ_FIRST_TOKENS でもあるため residual metachar を skip し、
+        # metadata-only で allow になる (出力はファイル名一覧のみ。``TestMetadataOnlyAllow``)。
+        # 書込み先が非機密で read operand も非機密の形 (``ls -la > /tmp/listing.txt``) は
+        # ``TestSafeReadAllowlist.test_ls_with_output_redirect_allow`` が見る。
         r = handle(_make_envelope("ls -la .env > /tmp/x", self.tmp))
         self.assertTrue(output.is_allow(r))
 
@@ -3649,11 +3656,6 @@ class TestHardStopLiteralOperandScan(BaseBash):
         self.assertIn("${…}/.env", reason)
         # path 形の除外案内 (``!<相対パス>``) は変数部分が確定しないので出さない
         self.assertNotIn("!${…}", reason)
-
-    def test_compound_command_still_denies_on_literal_segment_first(self):
-        # 既存挙動の維持: literal segment の deny は救済 scan と無関係に先行。
-        r = handle(_make_envelope("cat $X | head .env | wc -l", self.tmp))
-        self.assertEqual(_decision(r), "deny")
 
 
 class TestVanishingExpansionWordReading(BaseBash):
