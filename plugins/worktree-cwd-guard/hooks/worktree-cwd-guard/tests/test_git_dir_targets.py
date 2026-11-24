@@ -176,6 +176,8 @@ class GitFileMappingTest(test_guard.GuardBase):
 class WorktreeBaseTest(test_guard.GuardBase):
     """`git worktree remove|move` の相対パスは、git dir・作業ツリー・今の場所のどの基点でも別の worktree なら止める。"""
 
+    SHARE_REPO = True  # repo とその周りに何も書かない (GuardBase.SHARE_REPO)
+
     def test_relative_path_from_any_base_is_denied(self):
         # 引用なしの語に書くので `/` 区切りにする (引用なしの `\` は shell が消し、`..\wt-b` は `..wt-b` になる。test_guard の NtpathEmulationTest)
         rel = Path(os.path.relpath(self.b, self.main)).as_posix()

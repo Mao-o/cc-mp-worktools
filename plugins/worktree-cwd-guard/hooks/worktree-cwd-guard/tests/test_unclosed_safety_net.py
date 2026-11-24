@@ -72,6 +72,8 @@ class UnclosedDetectionTest(unittest.TestCase):
 
 
 class UnionReadingTest(test_guard.GuardBase):
+    SHARE_REPO = True  # repo とその周りに何も書かない (GuardBase.SHARE_REPO)
+
     def _decide(self, cmd: str):
         return decision(evaluate(bash(cmd, self.a)))
 
