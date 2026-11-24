@@ -618,5 +618,140 @@ class FirebaseRobotsTest(unittest.TestCase):
         self.assertNotIn("disallows", err)
 
 
+# llms.txt entries whose host urllib.parse.urlsplit rejects (ValueError): a
+# bracketed host that is not an IPv6 address (Python 3.11.4 and later), an
+# unclosed "[" and a lone "]" (every version), and a host with a character
+# that NFKC turns into "/". Each host holds the marker "unreadable".
+UNREADABLE = {
+    "bracketed host": "https://[unreadable].example.com/docs/remote",
+    "unclosed [": "https://[unreadable.example.com/docs/remote",
+    "lone ]": "https://unreadable].example.com/docs/remote",
+    "NFKC slash": "https://unreadable\uff0fexample.com/docs/remote",  # U+FF0F FULLWIDTH SOLIDUS
+}
+UNREADABLE_REASON = "the host of the URL cannot be read ("
+
+
+def _rejected(url: str) -> bool:
+    from urllib.parse import urlsplit
+    try:
+        urlsplit(url)
+    except ValueError:
+        return True
+    return False
+
+
+class UnreadableHostTest(unittest.TestCase):
+    """A ``respect_robots`` preset whose ``llms.txt`` lists a URL that
+    ``urlsplit`` cannot read: that page is one failed fetch (skipped by
+    ``search``, a failed fetch for ``sections``), never a traceback, and
+    neither the page nor a ``robots.txt`` for its host is requested."""
+
+    # (index, robots, pages, robots.txt, a word in the titles of the bad entry
+    # and of at least one good page)
+    CASES = {
+        "zed": (ZED_INDEX, ZED_ROBOTS, ZED_PAGES, "User-agent: *\nAllow: /\n", "overview"),
+        "amp": (AMP_INDEX, AMP_ROBOTS, AMP_PAGES, "User-agent: *\nAllow: /\nDisallow: /auth/\n", "prompting"),
+        "firebase": (FIREBASE_INDEX, FIREBASE_ROBOTS, FIREBASE_PAGES, "User-agent: *\nDisallow: /byptwd/\n", "users"),
+    }
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.sources = os.path.join(self.tmp, "sources.json")
+        Path(self.sources).write_text(json.dumps({"sources": {}}), encoding="utf-8")
+
+    def net(self, name: str, bad: str) -> _Net:
+        """The entry with *bad* first (page 0), then the preset's pages, in a
+        new cache (the cached index of another case would answer instead)."""
+        index_url, robots_url, pages, robots, word = self.CASES[name]
+        index = _index_text(pages).replace("\n- [", f"\n- [Your instance {word}]({bad}): remote {word}\n- [", 1)
+        self.assertIn(bad, index)
+        self.cache = tempfile.mkdtemp(dir=self.tmp)
+        return _Net({index_url: index, robots_url: robots, **{u: b for u, (_t, _d, b) in pages.items()}})
+
+    def run_g(self, net, name, *argv):
+        with mock.patch("urllib.request.urlopen", side_effect=net):
+            try:
+                return _loader.run_cli(g, [SCRIPT, *argv, "--source", name, "--sources-file", self.sources,
+                                           "--cache-dir", self.cache])
+            except Exception as e:  # a crash fails the assertions, not the run
+                self.fail(f"{name} {argv} crashed: {e!r}")
+
+    def assert_refused(self, net, bad: str, err: str) -> None:
+        self.assertNotIn(bad, net.calls)  # the page is never requested
+        if _rejected(bad):
+            self.assertIn(UNREADABLE_REASON, err)
+            # nor a robots.txt for a host it could not name
+            self.assertEqual([c for c in net.calls if "unreadable" in c], [])
+
+    def test_the_cases_cover_every_bundled_source_that_reads_robots_txt(self):
+        with _loader_quiet():
+            polite = {name for name, p in presets().items() if p.get("respect_robots")}
+        self.assertEqual(polite, set(self.CASES))
+        # the forms every supported Python rejects run everywhere
+        self.assertTrue(_rejected(UNREADABLE["unclosed ["]))
+        self.assertTrue(_rejected(UNREADABLE["lone ]"]))
+
+    def test_search_skips_the_unreadable_candidate_and_keeps_the_others(self):
+        for name, (_i, _r, pages, _robots, word) in self.CASES.items():
+            for what, bad in UNREADABLE.items():
+                with self.subTest(name=name, url=what):
+                    net = self.net(name, bad)
+                    code, out, err = self.run_g(net, name, "search", word)
+                    self.assertEqual(code, 0, err)
+                    self.assertIn(f"(skip: fetch failed {bad}: ", err)
+                    self.assertIn("(1 documents skipped", out)
+                    self.assert_refused(net, bad, err)
+                    # the other candidates are fetched and searched
+                    good = [u for u, (t, _d, _b) in pages.items() if word in t.lower()]
+                    self.assertTrue(good, word)
+                    for url in good:
+                        self.assertIn(url, net.calls)
+                        self.assertIn(url, out)
+
+    def test_sections_of_the_unreadable_page_is_a_failed_fetch_and_the_others_open(self):
+        for name, (_i, _r, pages, _robots, _w) in self.CASES.items():
+            first = next(iter(pages))
+            for what, bad in UNREADABLE.items():
+                with self.subTest(name=name, url=what):
+                    net = self.net(name, bad)
+                    for cmd in ("sections", "content"):
+                        code, out, err = self.run_g(net, name, cmd, "0")
+                        self.assertEqual(code, 1, err)
+                        self.assertEqual(out, "")
+                        self.assertIn(f"Error: Failed to fetch {bad}: ", err)
+                        self.assert_refused(net, bad, err)
+                    code, out, err = self.run_g(net, name, "sections", "1")
+                    self.assertEqual(code, 0, err)
+                    self.assertIn(f"Sections in [1] \"{pages[first][0]}\"\n  URL: {first}\n", out)
+                    self.assertIn(first, net.calls)
+
+    def test_search_content_on_the_unreadable_page_is_a_failed_fetch(self):
+        for name in self.CASES:
+            for what, bad in UNREADABLE.items():
+                with self.subTest(name=name, url=what):
+                    net = self.net(name, bad)
+                    code, _out, err = self.run_g(net, name, "search-content", "remote", "--page-ref", "0")
+                    self.assertEqual(code, 1, err)
+                    self.assertIn(f"(skip: fetch failed {bad}: ", err)
+                    self.assertIn("could not fetch the --page-ref 0 page", err)
+                    self.assert_refused(net, bad, err)
+
+    def test_a_full_search_content_skips_the_unreadable_page(self):
+        # firebase scans every page (Zed and Amp ask for --page-ref)
+        _i, _r, pages, _robots, _w = self.CASES["firebase"]
+        for what, bad in UNREADABLE.items():
+            with self.subTest(url=what):
+                net = self.net("firebase", bad)
+                code, out, err = self.run_g(net, "firebase", "search-content", "properties")
+                self.assertEqual(code, 0, err)
+                self.assertIn(f"(skip: fetch failed {bad}: ", err)
+                self.assertIn("(1 documents skipped", out)
+                self.assertIn("A user has properties.", out)
+                self.assert_refused(net, bad, err)
+                for url in pages:
+                    self.assertIn(url, net.calls)
+
+
 if __name__ == "__main__":
     unittest.main()
