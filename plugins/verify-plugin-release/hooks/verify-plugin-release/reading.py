@@ -59,11 +59,17 @@ def read_command(command: str, budget: Deadline) -> tuple[list[Invocation], str 
         reason = data["reason"]
         if not isinstance(data["found"], list) or not (reason is None or (isinstance(reason, str) and reason)):
             raise TypeError("found / reason の型が違う")
-        return [Invocation(**{**d, "cd_steps": tuple(d["cd_steps"])}) for d in data["found"]], reason
+        return [Invocation(**{**d, **_tuples(d)}) for d in data["found"]], reason
     except subprocess.TimeoutExpired:
         return [], f"コマンドの読み取りが制限時間 ({seconds:.0f} 秒) で終わらないので{_ADVICE}"
     except Exception as e:  # noqa: BLE001 - 読めないものは止める (例外の種類で通す側に倒さない)
         return [], f"コマンドの読み取りの結果を受け取れない ({type(e).__name__}) ので{_ADVICE}"
+
+
+def _tuples(d: dict) -> dict:
+    """JSON で list になった Invocation の tuple のフィールドを戻す (cd_history の None はそのまま)。"""
+    history = d.get("cd_history")
+    return {"cd_steps": tuple(d["cd_steps"]), "cd_history": None if history is None else tuple(history)}
 
 
 def _child(lifetime: float) -> None:

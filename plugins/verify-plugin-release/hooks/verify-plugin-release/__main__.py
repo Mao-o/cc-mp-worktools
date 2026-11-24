@@ -190,16 +190,101 @@ def _load_config(root: Path, dl: Deadline) -> tuple[config.Config, str | None]:
     return cfg, note
 
 
+# Windows の Git Bash のドライブの綴り (`/c/Users/...` = `C:\Users\...`)。`$` は末尾の改行の手前でも当たるので `\Z` で終わりを見る
+_MSYS_DRIVE = re.compile(r"^/([A-Za-z])(?=/|\Z)")
+
+
+def _native(path: str) -> str:
+    """Git Bash の `/c/...` を Python が読む `C:/...` に読み替える (Windows だけ。POSIX の `/c` は `/c` のまま)。
+
+    読み替えないと `C:\\c\\Users\\...` (hook の cwd のドライブの下の `c`) と読み、存在しないとして止めていた。
+    """
+    m = _MSYS_DRIVE.match(path) if os.path.sep == "\\" else None
+    return f"{m.group(1).upper()}:/{path[m.end():].lstrip('/')}" if m else path
+
+
+def _step(base: Path, step: str) -> Path:
+    """cd を 1 つ進める。shell の cd と同じく論理パス (`..` は symlink を辿る前の親) で進める。"""
+    return Path(os.path.normpath(base / os.path.expanduser(_native(step))))
+
+
+# 走ったかもしれない cd の後ろで数え上げる cwd の数の上限 (超えたら数え上げずに止める)
+_MAX_POSSIBLE_DIRS = 16
+
+
+def _searches_cdpath(step: str) -> bool:
+    """shell が CDPATH の下で探す引数か (`/` か `~` で始まらず、最初の成分が `.` / `..` でない相対の名前。`a` / `a/b` / `.x`)。
+
+    bash は CDPATH があると相対の名前を cwd より先に CDPATH の下で探し (行き先が cwd の下にあっても読み替わる)、zsh は cwd に
+    無ければ CDPATH の下で探す。どちらも cwd の下だけでは決まらない。
+    """
+    native = _native(step)
+    if native.startswith(("/", "~")) or native.split("/", 1)[0] in (".", ".."):
+        return False
+    return not (os.path.sep == "\\" and (native.startswith("\\") or re.match(r"[A-Za-z]:", native)))
+
+
+def _possible_dirs(start: Path, history: tuple[str, ...]) -> list[Path] | None:
+    """走ったかもしれない cd の後ろで、shell が居うる cwd を全部挙げる。挙げきれなければ None (止める)。
+
+    ループと関数の外では、cd は出てきた順に高々 1 回走り、走らないか失敗すれば cwd は変わらない。なので hook の cwd に
+    cd の引数の部分列を順に当てた先がすべての候補になる (括弧の中やパイプの左の cd も足すので、候補は多めになる)。
+    hook の環境に CDPATH があると、相対の名前は CDPATH の下の dir にも入りうるので挙げない。
+    行き先が hook の時点で無い組み合わせが 1 つでもあれば挙げない。同じコマンドの前のほう (`git clone URL d && cd d` /
+    `mkdir -p d`) で作られて shell が入りうるので、確かな cd の「移動先が存在しない」と同じく止める。
+    Windows のドライブの無い絶対パス (`/tmp`) も挙げない。Git Bash は別の場所 (`/tmp` は Windows の一時 dir) に
+    読み替えるが、Python は hook の cwd のドライブの下と読む。
+    """
+    if os.environ.get("CDPATH") and any(_searches_cdpath(s) for s in history):
+        return None
+    dirs = [start]
+    for step in history:
+        if os.path.sep == "\\" and _native(step).startswith(("/", "\\")):
+            return None
+        for base in list(dirs):
+            target = _step(base, step)
+            if not target.is_dir():
+                return None
+            if target not in dirs:
+                dirs.append(target)
+        if len(dirs) > _MAX_POSSIBLE_DIRS:
+            return None
+    return dirs
+
+
+def _may_be_plugin_repo(inv: Invocation, start: Path, budget: Deadline) -> bool:
+    """確かでない cd の後ろの PR 操作が、plugin repo で走りうるか。確かめられなければ True (止める)。"""
+    if inv.cd_history is None:
+        return True
+    try:
+        dirs = _possible_dirs(start, inv.cd_history)
+    except (OSError, RuntimeError, ValueError):
+        return True
+    if dirs is None:
+        return True
+    for d in dirs:
+        try:
+            root = _repo_root(d, budget.sub(10))
+        except RepoLookupError:
+            return True
+        if root is not None and layout.is_plugin_repo(root):
+            return True
+    return False
+
+
 def _evaluate_one(inv: Invocation, cwd: str, mode: str, budget: Deadline) -> dict | None:
     soft = mode == "warn" or inv.draft
     if budget.remaining() <= 0:
         return _error(GateTimeout(f"hook 全体の制限時間 ({HOOK_BUDGET} 秒) を使い切った。{_SPLIT_ADVICE}"), soft)
-    workdir = Path(cwd or os.getcwd())
+    workdir = Path(_native(cwd or os.getcwd()))
     if inv.cd_unresolved is not None or inv.cd:
         # `cd "$WT" && gh pr create` のように移動先が静的に決まらない / 存在しない場合、
         # 検査する repo が分からない。素通しにせず「完了できなかった」として扱う。
         unresolved = inv.cd_unresolved or (inv.cd if any(c in inv.cd for c in "$`") else None)
         if unresolved is not None:
+            # 居うる cwd を数え上げられ、どれも plugin repo でなければ何もしない (plugin repo でない repo と repo の外で止めない)
+            if not _may_be_plugin_repo(inv, workdir, budget):
+                return None
             return _error(
                 RuntimeError(
                     f"cd の移動先 ({unresolved}) を静的に解決できない (cd が走らないことがある形を含む)。"
@@ -207,13 +292,12 @@ def _evaluate_one(inv: Invocation, cwd: str, mode: str, budget: Deadline) -> dic
                 ),
                 soft,
             )
-        # cd を 1 つずつ辿る。shell の cd と同じく論理パス (`..` は symlink を辿る前の親) で進め、
-        # 途中の移動先が無ければ止める (`cd 無い && cd ..` を `.` と読まないため)
+        # cd を 1 つずつ辿る。途中の移動先が無ければ止める (`cd 無い && cd ..` を `.` と読まないため)
         # 権限の無い dir・長すぎる名前・symlink の循環は is_dir / resolve が例外を投げる (Python 3.11〜3.13)。
         # hook が例外で終わるとコマンドがそのまま走るので、止める側に倒す
         try:
             for step in inv.cd_steps or (inv.cd,):
-                workdir = Path(os.path.normpath(workdir / os.path.expanduser(step)))
+                workdir = _step(workdir, step)
                 if not workdir.is_dir():
                     return _error(RuntimeError(f"cd の移動先 ({workdir}) が存在しない"), soft)
             workdir = workdir.resolve()

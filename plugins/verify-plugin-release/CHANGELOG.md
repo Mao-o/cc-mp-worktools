@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.4.0
+
+確かでない cd の後ろの PR 操作を、plugin repo でない repo と repo の外では止めないようにした (minor bump)。これまでは
+cd が走ったかを決められないと repo を見る前に止めたので、`git push && cd A; gh pr create` や `[ -d A ] && cd A; gh pr create`
+が、この hook の対象でない repo でも PR を作れなかった。あわせて、Windows の Git Bash の `/c/Users/...` の綴りを読むようにした。
+
+### Changed
+
+- 確かでない cd の後ろでは、shell が居うる cwd をすべて挙げ、どれも plugin repo でなければ何もしない。挙げるのは、hook の cwd に
+  それまでの cd を「走った / 走らなかった」の組み合わせで順に当てた先 (ループと関数の外では、cd は出てきた順に高々 1 回走り、
+  走らないか失敗すれば cwd は変わらないため)。括弧の中・パイプの左・`env` の後の cd も足すので、候補は多めになる (止める側)。
+  挙げた cwd の 1 つでも plugin repo なら、これまでどおり止める
+- 挙げられない形は、これまでどおり止める: 引数なしの `cd`、変数・glob・波括弧・`~user` / `~+` / `~-` / `+1` / `=x` を含む引数、
+  `cd -`、ループ・関数・`case` の中の cd、`chdir`、`cd A B`、語の並びで cd と読まなかった cd の語 (引用や `trap` の本文の中)、
+  `eval` / `source` / `.` か展開で決まるコマンド語がある形、括弧が閉じない形、挙げた cwd が 16 を超える形
+- hook の環境に `CDPATH` があるときは、相対の名前 (`cd A` / `cd A/B`) を含む形を挙げない (bash は cwd より先に、zsh は
+  cwd に無ければ CDPATH の下を探す)。`./A`・`../A`・`~`・絶対パスは CDPATH を引かないので挙げる
+- hook の時点で行き先が無い組み合わせが 1 つでもある形は挙げない (止める)。同じコマンドの前のほうで作られうるため
+  (`git clone URL d && cd d; gh pr create` / `mkdir -p d && cd d; gh pr create` / `git worktree add` の先)。確かな cd の
+  「移動先が存在しない」と同じ扱いで、前の cd の先から当てた組み合わせ (`(cd A); cd A` の `A/A`) だけが無い形も止める
+- Windows でドライブの無い絶対パス (`/tmp`) の cd を含む形は、行き先が在っても挙げない (止める)。Git Bash は別の場所
+  (`/tmp` は Windows の一時 dir) に読み替えるが、Python は hook の cwd のドライブの下と読む
+- `CDPATH+=` / `cdpath+=(...)` / `HOME+=` の追記も、cd の行き先を変える代入と読む (`CDPATH=` と同じく、後ろの cd は
+  確かな cd でも止める)
+- hook の時点で在る dir を同じコマンドの前のほうで plugin repo に変える形 (空の dir への clone・symlink の付け替え・
+  `rm -rf d && git clone URL d`) は、確かでない cd の後ろでも検査しない。0.3.10 は確かでない cd の後ろを一律に止めていたので
+  止まっていた (確かな cd では 0.3.10 も検査していない)。README の目的と限界に書いた
+
+### Fixed
+
+- Windows の Git Bash の `/c/Users/...` を `C:/Users/...` と読む。これまでは hook の cwd のドライブの下の `c` (`C:\c\Users\...`)
+  と読み、plugin repo かどうかに関係なく「cd の移動先が存在しない」で止めていた (止めすぎ。検査せずに通す向きの抜けではない)。
+  hook の cwd が同じ綴りで渡されたときも同じく読む。POSIX の `/c/...` はそのまま
+- ntpath に差し替えて Windows のパスの読みを確かめるテストと、Windows の CI でだけ走る実際のパスのテストを足した
+
+### Tests
+
+- 挙げた cwd に、bash と `zsh -f` で実際に gh が走った dir が必ず入ることを、前のコマンドの成否と dir の有無を変えて確かめる
+  テストを足した (止めていた形の表と、新しく数え上げる形の表の全件)。前のコマンドが行き先を作る形 (本物の `mkdir` /
+  `git clone` / `git worktree add`) も流す
+- plugin repo でない repo と repo の外で、確かでない cd の後ろを止めない形・止める形 (行き先に plugin repo がある、挙げられない、
+  `CDPATH` / `..`、hook の時点で無い行き先、上限、repo の確認の失敗) のテストを足した
+
+### Docs
+
+- README の「目的と限界」に、plugin repo かどうかは hook の時点の作業ツリーで決めるので、hook の時点で在る空の dir に
+  前のコマンドが clone する形 (`git clone URL empty && cd empty && gh pr create`) は確かな cd でも検査しないことを書いた
+
 ## 0.3.10
 
 README のみの変更 (hook 本体・テストの挙動の変更なし、patch bump)。「目的と限界」に、うっかり予防の範囲外として塞がない形をまとめて書いた。

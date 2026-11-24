@@ -9,12 +9,14 @@
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import _testutil
 
@@ -22,6 +24,13 @@ import command
 from command import find_invocations, unresolved_reason
 
 _GH = "gh pr create --fill"
+
+
+def _load_entry():
+    spec = importlib.util.spec_from_file_location("vpr_entry_cd", Path(__file__).resolve().parent.parent / "__main__.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 # gh は元の cwd で走る。止めずに元の cwd を検査する
 NO_EFFECT = (
@@ -367,6 +376,117 @@ class ClassificationTest(unittest.TestCase):
                 self.assertEqual((found[0].cd_steps, found[0].cd_unresolved), ((), None))
 
 
+# 確かでない cd の後ろで、走りうる cwd を数え上げる引数の並び (Invocation.cd_history)。括弧の中・パイプの左・`env` の後の
+# cd も足す (候補が増えるのは止める側)
+LISTED = (
+    (f"git push && cd a; {_GH}", ("a",)),
+    (f"[ -d a ] && cd a; {_GH}", ("a",)),
+    (f"cd a || cd b; {_GH}", ("a", "b")),
+    (f"cd a || cd /tmp; {_GH}", ("a", "/tmp")),
+    (f"true | cd a; {_GH}", ("a",)),
+    (f"if false; then cd a; fi; {_GH}", ("a",)),
+    (f"cd a && true & {_GH}", ("a",)),
+    (f"(cd a); cd b; {_GH}", ("a", "b")),
+    (f"cd a | cat; cd b; {_GH}", ("a", "b")),
+    (f"env cd a; cd b; {_GH}", ("a", "b")),
+    (f"git push && cd ./a && cd ~; {_GH}", ("./a", "~")),
+    (f"git push && cd ~/a; {_GH}", ("~/a",)),
+    (f"cd a && cd b && {_GH}", ("a", "b")),
+    (f"(cd a; {_GH})", ("a",)),
+    # パスの途中の cd・`--cd` などは cd の語ではない
+    (f"git push && cd /x/cd/y; {_GH}", ("/x/cd/y",)),
+    (f"git push --cd cd-x abcd && cd a; foo cd/x x/cd; {_GH}", ("a",)),
+    # `/` を含む展開の語は外部コマンド (cd にならない)
+    (f'git push && cd a; "$V"/make; {_GH}', ("a",)),
+)
+
+# 数え上げない (行き先を引数の並びから出せない)。止める
+UNLISTED = (
+    # 引数なし ($HOME)、zsh の `cd a b` ($PWD の置き換え)、ループの中 (何度も走る)
+    f"git push && cd; {_GH}",
+    f"git push && cd a b; {_GH}",
+    f"for i in 1; do cd a; done; {_GH}",
+    # 語の並びで cd と読まない移動・関数・case・CDPATH
+    f"git push && chdir a; {_GH}",
+    f"git push && $x cd a; {_GH}",
+    f"case a in a) cd a;; esac; {_GH}",
+    f"f() {{ cd a; }}; git push && cd b; {_GH}",
+    f"CDPATH=/tmp; git push && cd a; {_GH}",
+    f"CDPATH+=/tmp; git push && cd a; {_GH}",
+    f"cdpath+=(/tmp); git push && cd a; {_GH}",
+    f"HOME+=/x; git push && cd ~; {_GH}",
+    # 展開・glob・オプション・スタック・OLDPWD・`~user`
+    f'git push && cd "$WT"; {_GH}',
+    f"git push && cd a*; {_GH}",
+    f"git push && cd a?; {_GH}",
+    f"git push && cd [ab]; {_GH}",
+    f"git push && cd {{a,b}}; {_GH}",
+    f"git push && cd -; {_GH}",
+    f"git push && cd +1; {_GH}",
+    f"git push && cd =x; {_GH}",
+    f"git push && cd ~-; {_GH}",
+    f"git push && cd ~+/a; {_GH}",
+    f"git push && cd ~other/a; {_GH}",
+    # 読まなかった cd の語 (引用の中・trap の本文。DEBUG の trap は各コマンドの前に走る。引用と行の継続は外して数える)
+    f"trap 'cd /x' EXIT; git push && cd a; {_GH}",
+    f'git push && cd a; echo "cd b"; {_GH}',
+    f"trap 'c\"\"d /x' DEBUG; git push && cd a; {_GH}",
+    f"trap 'c\\\nd /x' DEBUG; git push && cd a; {_GH}",
+    # 今の shell で別のコードを走らせる語・展開で決まるコマンド語
+    f'eval "$X"; git push && cd a; {_GH}',
+    f". ./env.sh; git push && cd a; {_GH}",
+    f"source ./env.sh; git push && cd a; {_GH}",
+    f"builtin source ./env.sh; git push && cd a; {_GH}",
+    f"(. ./env.sh); git push && cd a; {_GH}",
+    f"c=c; ${{c}}d /x; git push && cd a; {_GH}",
+    f"git push && cd a; `foo`; {_GH}",
+)
+
+
+class CdHistoryTest(unittest.TestCase):
+    def test_every_cd_is_listed_in_order(self):
+        for cmd, want in LISTED:
+            with self.subTest(cmd=cmd):
+                found, reason = _reading(cmd)
+                self.assertIsNone(reason)
+                self.assertEqual(len(found), 1)
+                self.assertEqual(found[0].cd_history, want)
+
+    def test_moves_that_cannot_be_listed(self):
+        for cmd in UNLISTED:
+            with self.subTest(cmd=cmd):
+                found, reason = _reading(cmd)
+                self.assertIsNone(reason)
+                self.assertEqual(len(found), 1)
+                self.assertIsNotNone(found[0].cd_unresolved)
+                self.assertIsNone(found[0].cd_history)
+
+    def test_a_move_the_tracker_cannot_read_is_not_listed(self):
+        # 語の並びで読めない移動 (unsure_cd) の後は、読んだ cd の引数だけでは行き先が出ない
+        tracker = command._CdTracker([])
+        tracker.seen.append("a")
+        self.assertEqual(tracker.history(), ("a",))
+        tracker.unsure_cd()
+        self.assertIsNone(tracker.history())
+
+    def test_a_paren_left_open_is_not_listed(self):
+        # 括弧が閉じないまま括弧の中で gh を読む: 括弧の読みがずれていて、どの cd が効くか決まらない
+        found = find_invocations(f"git push && (cd a; {_GH}")
+        self.assertEqual(len(found), 1)
+        self.assertIsNone(found[0].cd_history)
+        self.assertEqual(find_invocations(f"git push && (cd a; {_GH})")[0].cd_history, ("a",))
+
+    def test_listable_words(self):
+        for arg, want in (
+            ("a", True), ("a/b", True), ("/x", True), ("./a", True), ("..", True), ("~", True), ("~/a", True),
+            ("C:\\Users\\me", True), ("/c/Users", True), ("", True),
+            ("$X", False), ("`x`", False), ("-", False), ("-P", False), ("a*", False), ("a?", False), ("[a]", False),
+            ("{a,b}", False), ("+1", False), ("=x", False), ("~-", False), ("~+", False), ("~1", False), ("~user/a", False),
+        ):
+            with self.subTest(arg=arg):
+                self.assertEqual(command._listable(arg), want)
+
+
 class QuotedPunctuationTest(unittest.TestCase):
     def test_unbalanced_brace_expansion_is_not_a_paren(self):
         # zsh は `${x#(}` で止まるので、実シェルの表には載せない (bash は a で走る)
@@ -683,7 +803,8 @@ class RealShellTest(unittest.TestCase):
         self.fake.mkdir()
         for name, body in {"gh": 'echo "$PWD" >> "$GHLOG"', "git": ":", "make": ":", "foo": ":"}.items():
             path = self.fake / name
-            path.write_text(f"#!/bin/sh\n{body}\nexit 0\n")
+            # RC で git / make / foo の終了コードを変える (既定は成功)
+            path.write_text(f"#!/bin/sh\n{body}\nexit ${{RC:-0}}\n")
             path.chmod(0o755)
         self.start = self.top / "w" / "start"
         (self.start / "a" / "b").mkdir(parents=True)
@@ -693,15 +814,100 @@ class RealShellTest(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def ran(self, shell: list[str], cmd: str) -> list[str]:
+    def ran(self, shell: list[str], cmd: str, start: Path | None = None, rc: int = 0) -> list[str]:
         log = self.top / "gh.log"
         log.unlink(missing_ok=True)
-        env = {"PATH": f"{self.fake}:/usr/bin:/bin", "GHLOG": str(log), "HOME": str(self.top)}
+        env = {"PATH": f"{self.fake}:/usr/bin:/bin", "GHLOG": str(log), "HOME": str(self.top), "RC": str(rc)}
         subprocess.run(
-            [*shell, "-c", cmd], cwd=self.start, env=env, stdin=subprocess.DEVNULL,
+            [*shell, "-c", cmd], cwd=start or self.start, env=env, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
         )
         return log.read_text().split("\n")[:-1] if log.exists() else []
+
+    def test_listed_dirs_hold_every_real_cwd(self):
+        # 数え上げた候補 (__main__._possible_dirs) に、実際に gh が走った dir が必ず入る。候補がどれも plugin repo でなければ
+        # hook は通すので、漏れると plugin repo で検査せずに走る。前のコマンドの成否 (RC) と dir の有無を変えて流す
+        entry = _load_entry()
+        bare = self.top / "w" / "bare"  # a も b も無い
+        bare.mkdir()
+        checked = 0
+        for cmd in (*MAYBE, *(c for c, _ in LISTED)):
+            found, reason = _reading(cmd)
+            if reason or len(found) != 1 or found[0].cd_unresolved is None or found[0].cd_history is None:
+                continue
+            for start in (self.start, bare):
+                with mock.patch.dict(os.environ, {"HOME": str(self.top)}):
+                    dirs = entry._possible_dirs(start, found[0].cd_history)
+                if dirs is None:
+                    continue
+                listed = {os.path.realpath(d) for d in dirs}
+                checked += 1
+                for shell in self.shells:
+                    for rc in (0, 1):
+                        with self.subTest(cmd=cmd, start=start.name, shell=shell[0], rc=rc):
+                            self.assertLessEqual({os.path.realpath(p) for p in self.ran(shell, cmd, start, rc)}, listed)
+        self.assertGreater(checked, 30)
+
+    def test_a_place_made_by_an_earlier_command_is_not_missed(self):
+        # hook の時点で無い行き先も、同じコマンドの前のほう (mkdir / git clone / git worktree add) が作ると shell はそこに入る。
+        # 候補を挙げるなら実際に gh が走った dir を含まなければならない (hook の時点で無い行き先を外すと、ここで漏れる)
+        git = shutil.which("git")
+        if git is None:
+            self.skipTest("git が無い")
+        entry = _load_entry()
+        world = self.top / "w" / "made"  # hook の cwd (repo の外)
+        world.mkdir()
+        src = _testutil.make_marketplace(self.top / "w" / "src", ["alpha"])
+        wt = self.top / "w" / "wt"
+        ghonly = self.top / "ghonly"  # 偽の gh だけを置き、git は本物を使う
+        ghonly.mkdir()
+        (ghonly / "gh").write_text('#!/bin/sh\necho "$PWD" >> "$GHLOG"\n')
+        (ghonly / "gh").chmod(0o755)
+        log = self.top / "gh-made.log"
+        env = {
+            **_testutil.HERMETIC_GIT_ENV, "PATH": f"{ghonly}:{os.path.dirname(git)}:/usr/bin:/bin", "GHLOG": str(log),
+            "HOME": str(self.top), "GIT_CEILING_DIRECTORIES": str(self.top),
+        }
+
+        def clean():
+            for d in (world / "made", world / "mp", src / "newsub", wt):
+                shutil.rmtree(d, ignore_errors=True)
+            subprocess.run([git, "-C", str(src), "worktree", "prune"], env=env, capture_output=True, check=False)
+            subprocess.run([git, "-C", str(src), "branch", "-D", "feat"], env=env, capture_output=True, check=False)
+            log.unlink(missing_ok=True)
+
+        for cmd, place in (
+            (f"mkdir -p made && cd made; {_GH}", world / "made"),
+            (f"mkdir -p made; true && cd made; {_GH}", world / "made"),
+            (f"git clone -q {src} mp && cd mp; {_GH}", world / "mp"),
+            (f"git clone -q {src} mp && cd mp || exit 1; {_GH}", world / "mp"),
+            (f"if [ -d mp ]; then cd mp; else git clone -q {src} mp && cd mp; fi; {_GH}", world / "mp"),
+            (f"mkdir -p {src}/newsub && cd {src}/newsub; {_GH}", src / "newsub"),
+            (f"git -C {src} worktree add -q {wt} -b feat && cd {wt}; {_GH}", wt),
+        ):
+            found, reason = _reading(cmd)
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(reason)
+                self.assertEqual(len(found), 1)
+                self.assertIsNotNone(found[0].cd_unresolved)
+                self.assertIsNotNone(found[0].cd_history)
+                clean()  # hook の時点: 行き先はまだ無い
+                with mock.patch.dict(os.environ, {"HOME": str(self.top)}):
+                    dirs = entry._possible_dirs(world, found[0].cd_history)
+                listed = None if dirs is None else {os.path.realpath(d) for d in dirs}
+            for shell in self.shells:
+                with self.subTest(cmd=cmd, shell=shell[0]):
+                    clean()
+                    subprocess.run(
+                        [*shell, "-c", cmd], cwd=world, env=env, stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
+                    )
+                    ran = log.read_text().split("\n")[:-1] if log.exists() else []
+                    # 前のコマンドが dir を作り、shell はそこで gh を走らせた (この世界が意図どおりであること)
+                    self.assertEqual([os.path.realpath(p) for p in ran], [os.path.realpath(place)])
+                    if listed is not None:
+                        self.assertIn(os.path.realpath(place), listed)
+        clean()
 
     def test_no_effect_runs_in_the_original_cwd(self):
         for cmd in NO_EFFECT:

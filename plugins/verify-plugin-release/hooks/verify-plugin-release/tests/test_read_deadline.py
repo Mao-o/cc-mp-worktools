@@ -108,6 +108,8 @@ class ChildResultTest(unittest.TestCase):
             "(gh pr create)",
             "echo あ😀; gh pr create -t あ😀",
             "echo '\ud800'; gh pr create",
+            "git push && cd a; cd b; gh pr create --fill",
+            "git push && cd; gh pr create --fill",
         ):
             cmd = _padded(head, CHILD_FROM + 10)
             with self.subTest(head=head):
@@ -115,7 +117,18 @@ class ChildResultTest(unittest.TestCase):
                 expected = find_invocations(cmd)
                 self.assertEqual(found, expected)
                 self.assertTrue(all(isinstance(inv, Invocation) and isinstance(inv.cd_steps, tuple) for inv in found))
+                self.assertTrue(all(inv.cd_history is None or isinstance(inv.cd_history, tuple) for inv in found))
                 self.assertEqual(reason, unresolved_reason(cmd, expected))
+
+    def test_cd_history_crosses_the_process_boundary(self):
+        cmd = _padded("git push && cd a; cd b; gh pr create --fill", CHILD_FROM)
+        found, _ = read_command(cmd, Deadline(60))
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].cd_history, ("a", "b"))
+        self.assertIsInstance(found[0].cd_history, tuple)
+        found, _ = read_command(_padded("git push && cd; gh pr create --fill", CHILD_FROM), Deadline(60))
+        self.assertEqual(len(found), 1)
+        self.assertIsNone(found[0].cd_history)
 
     def test_every_invocation_field_crosses_the_process_boundary(self):
         cmd = _padded("cd /a && gh pr create --base dev --draft --head w -R o/r", CHILD_FROM)

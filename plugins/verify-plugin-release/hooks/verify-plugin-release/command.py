@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 # shlex の punctuation_chars に改行を含め、改行も区切りとして扱う
 # (複数行のコマンドを 1 セグメントに潰さないため)。
@@ -158,6 +158,10 @@ class Invocation:
     cd_steps: tuple[str, ...] = ()
     # 静的に決まらない移動先 (`$` / `-` / サブシェル等の中の cd に続く相対の cd)。None = 決まる
     cd_unresolved: str | None = None
+    # PR 操作より前にある cd の引数を、括弧の内外や走るかどうかを問わず出てきた順に並べたもの。cd_unresolved のときに、
+    # shell が居うる cwd を数え上げるのに使う (どれも plugin repo でなければ止めない)。None = 数え上げられない
+    # (ループ・関数・引数なしの cd・展開や glob の引数・読まなかった cd の語・eval / source など)
+    cd_history: tuple[str, ...] | None = None
 
 
 # shell が単語の先頭と読む位置の直前に来る文字 (これらの直後の `#` からがコメント)
@@ -696,6 +700,17 @@ def _unstatic(arg: str) -> bool:
     return any(c in arg for c in "$`") or arg.startswith("-")
 
 
+def _listable(arg: str) -> bool:
+    """cd の行き先が引数の文字列だけで決まるか。
+
+    展開・glob (`*` `?` `[`)・波括弧の展開・オプション・zsh のディレクトリスタック (`+1`) と `=cmd` の展開・`~user` / `~+` /
+    `~-` (OLDPWD) は、shell が別の行き先に読み替えうるので決まらないとする。`~` と `~/x` は hook の HOME で読む (確かな cd と同じ)。
+    """
+    if _unstatic(arg) or any(c in arg for c in "*?[{") or arg.startswith(("+", "=")):
+        return False
+    return not arg.startswith("~") or arg == "~" or arg.startswith("~/")
+
+
 def _next_cd(state: _CdState, arg: str | None, uncertain_here: bool) -> _CdState:
     """確かな cd を 1 つ進める。相対パスは前の移動先に join し、絶対パス (`/` `~`) は置き換える。
 
@@ -784,6 +799,11 @@ class _CdTracker:
         self.guard = False  # 同じ and-or のリストの前のほうに、cd ではないコマンドがある
         self.pending = False  # guard の後ろの cd を読んだ。リストが終わると走ったか確かでなくなる
         self.in_case = False
+        # 読んだ cd の引数を、括弧の内外・走るかどうかを問わず出てきた順に (Invocation.cd_history)。括弧を閉じても戻さない
+        # (括弧の読みがずれても、shell が実際に走らせた cd を落とさない。余分な候補は止める側にしか効かない)
+        self.seen: list[str] = []
+        self.read = 0  # 語の並びで cd と読んだ数 (読まなかった cd の語があるかを数えて比べる)
+        self.opaque = False  # 引数の並びでは表せない移動があった (ループ・引数なし・語の並びで読まない cd など)
 
     def sync(self, depth: int) -> None:
         while len(self.frames) > depth:
@@ -864,6 +884,13 @@ class _CdTracker:
         args = _cd_arguments(words)
         arg = args[0] if args else None
         text = " ".join(words)
+        self.read += 1
+        # 引数なし ($HOME)・zsh の `cd a b` ($PWD の置き換え)・ループの中 (何度も走る)・展開や glob の引数は、引数を順に当てても
+        # 行き先が出ない
+        if arg is None or len(args) > 1 or self._in_loop() or not _listable(arg):
+            self.opaque = True
+        else:
+            self.seen.append(arg)
         if segment.depths[-1] > depth or text.count("`") % 2 or text.count("${") > text.count("}"):
             # `cd $(a | b); gh pr create`: 直後の区切りは引数の置換の中のもので、cd のものではない
             # (backtick と `${` は shlex が開きと閉じを分けないので、語の中で閉じているかを数える)
@@ -893,7 +920,12 @@ class _CdTracker:
         self.state = _CdState(self.state.steps, self.state.unresolved, True)
 
     def unsure_cd(self) -> None:
+        self.opaque = True
         self.state = _maybe_cd(self.state, None) if not self.state.steps else _unsettled(self.state)
+
+    def history(self) -> tuple[str, ...] | None:
+        """ここまでに読んだ cd の引数 (Invocation.cd_history)。行き先を数え上げられなければ None。"""
+        return None if self.opaque else tuple(self.seen)
 
     def scan_hidden(self, segment: _Segment, rest: list[str], wrappers: list[str]) -> None:
         """コマンド語として読まなかったが、移動しうる cd (`X=$(a b) cd d` / `$x cd d` / `command -p cd d`)。"""
@@ -1423,9 +1455,11 @@ def find_invocations(command: str) -> list[Invocation]:
         if not _is_gh(seg[0]):
             continue
         cd = tracker.state
+        history = None if unreadable else tracker.history()
         # 括弧が閉じないまま終わるのに括弧の中で gh を読んだ: 括弧の読みがシェルとずれていて、どの cd が効くか決まらない
         if depth > 0 and segments[-1].end_depth > 0:
             cd = _unsettled(cd)
+            history = None
         global_repo, rest = _split_global_flags(seg[1:])
         if not rest or rest[0] != "pr":
             continue
@@ -1457,9 +1491,45 @@ def find_invocations(command: str) -> list[Invocation]:
                 parsed=not _has_pr_op(rest[2:]),
                 cd_steps=cd.steps,
                 cd_unresolved=cd.unresolved or ("関数定義や CDPATH / HOME の後ろの cd" if unreadable else None),
+                cd_history=history,
             )
         )
+    if found and (_unread_cd_words(command, tracker.read) or _runs_code_in_place(segments)):
+        found = [replace(inv, cd_history=None) for inv in found]
     return found
+
+
+# cd / chdir の語 (引用符と `\` を外した文字列のどこか。`--cd` / `cd-x` / `abcd` とパスの途中 (`/x/cd/y`) は語ではない)
+_CD_WORD = re.compile(r"(?<![\w./-])(?:cd|chdir)(?![\w./-])")
+
+
+def _unread_cd_words(command: str, read: int) -> bool:
+    """語の並びで cd と読まなかった cd / chdir の語があるか (`eval "cd a"` / `trap 'cd a' EXIT` / 引数や本文の中の cd)。
+
+    shell が走らせるかを語の並びから決められないので、行き先を数え上げない (止める側。cd の引数と同じ語も数えすぎる)。
+    """
+    return len(_CD_WORD.findall(re.sub(r"""['"\\]""", "", _join_continuations(command)))) > read
+
+
+# 今の shell で別のコードを走らせる語 (中の cd は語の並びに現れない)
+_RUNS_CODE = frozenset({"eval", "source", "."})
+
+
+def _runs_code_in_place(segments: list[_Segment]) -> bool:
+    """eval / source / `.` か、展開で決まるコマンド語 (`${c}d` / `$CD` は cd になりうる) があるか。
+
+    `/` を含む展開の語 (`"$VENV"/bin/python`) は外部コマンドで、shell の cwd を変えない。見るのは前置きを外した先頭の語
+    (`(` も外れる) と `builtin` の次の語。語の途中の `(` の後ろ (`$(eval x)` / `<(. x)`) はサブシェルで、cwd を変えない。
+    """
+    for segment in segments:
+        rest = _strip_prefix(segment.tokens)[0]
+        words = rest[:1]
+        if rest[:1] == ["builtin"] and len(rest) > 1:
+            words.append(rest[1])
+        for word in words:
+            if word in _RUNS_CODE or (("$" in word or "`" in word) and "/" not in word):
+                return True
+    return False
 
 
 def _command_words(segments: list[_Segment]) -> set[str]:
@@ -1473,7 +1543,7 @@ def _command_words(segments: list[_Segment]) -> set[str]:
 
 
 def _defines_function_or_cd_context(tokens: list[str], segments: list[_Segment]) -> bool:
-    """関数定義 (`f() {` / `function f`) か、cd の行き先を変える代入 (CDPATH= / cdpath= / HOME=) があるか。
+    """関数定義 (`f() {` / `function f`) か、cd の行き先を変える代入 (CDPATH= / cdpath= / HOME= と、その += ) があるか。
 
     `grep function x` / `rg case x` の語は引数なので数えない。
     """
@@ -1488,7 +1558,8 @@ def _defines_function_or_cd_context(tokens: list[str], segments: list[_Segment])
     # `(case a in a) ...` の分岐の `)` は括弧の深さの読みをずらす
     if "case" in words and any("(" in tok for tok in tokens):
         return True
-    return any(tok.split("=", 1)[0] in ("CDPATH", "cdpath", "HOME") and "=" in tok for tok in tokens)
+    # `CDPATH+=x` / `cdpath+=(x)` の追記も行き先を変える
+    return any(tok.split("=", 1)[0].rstrip("+") in ("CDPATH", "cdpath", "HOME") and "=" in tok for tok in tokens)
 
 
 # 語として現れた pushd / popd (`if pushd` / `command pushd` / `Y=1 pushd` / `'pushd'` / `! pushd`。backtick の直後は _DIR_CHANGERS が見る)
