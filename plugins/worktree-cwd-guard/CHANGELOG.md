@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.9.1
+
+**README の「目的と限界」に、shell と読みがずれる書き方を範囲外として明記し、AGENTS.md の指摘しないものに同じ形を足した (docs のみ。patch bump)。**
+判定とコードは変えていない (挙動の変更なし)。
+
+### docs: 範囲外とした書き方の明記
+
+`bash` と `zsh -f` に偽の `git` を置いて実際に走らせ、現行の版の判定と突き合わせた形だけを載せた。載せた形のうち、別の checkout を書き換えるのに通るもの、書き込まないのに止めるもの、注意だけにするものを分けて書いた。
+
+- リダイレクトの位置 (`>/dev/null git -C <dir> ...` / `cd >/dev/null <dir>` を通し、`(cd <dir>)>/dev/null` を止めすぎる)
+- 成否の細かい読み (`exit`、wrapper の後ろの `:`、`time ( ... )` / `if ( ... )`、パイプの途中の `!`)
+- ディレクトリスタック (`cd -`、`popd --` / `popd +0` は注意だけ、`pushd +N` の後の `popd`)
+- `&` やパイプでつないだ複合コマンド、`&&` / `||` の直後の改行、zsh だけが受け付ける形
+- 環境変数 `GIT_DIR` / `GIT_WORK_TREE` の値を実行の分岐ごとには持たないこと (`test -f x && unset GIT_DIR; git reset`。出てきた順に全体へ反映する今の挙動のまま)
+- `export` 以外の書き方・`unset -f`・他の環境変数・綴りの違う git dir
+- backtick の中の改行で始めた here-document・語の途中の `#`・bash 3.2 だけが走らせる形
+- 一覧に無い wrapper (`nice` / `find -exec`)、行き先の一部だけが変数の形
+
+現行の版で既に直っていた形 (`<<\EOF` の本文を読まない、閉じない here-document の安全網、スタックが空の `popd`、`cd -x` の失敗、2 つの pipeline の読みの混合) と、実測で案の判定と違った形 (backtick の値を使った `GIT_DIR` は注意が出る) は載せていない。
+
 ## 0.9.0
 
 **`git worktree remove|move` の `<worktree>` を、git と同じく worktree の名前 (パスの末尾) としても読み、別の worktree を名前で指す形を止めるようにした (minor bump)。**

@@ -25,6 +25,34 @@
   - shell 関数・alias・script ファイル (`./deploy.sh` など) の中の git
   - `"$(...)"` や `` `...` `` の中の git
   - `for` / `case` などの制御構文で作業ディレクトリが変わる場合
+- 次の書き方は、shell と読みがずれることがあります。別の checkout への書き込みを見逃すことも、
+  書き込まない操作を止めることもあります (通常の agent の git 操作では使われない形):
+  - コマンド語や行き先より前に置いたリダイレクト (`>/dev/null git -C <dir> ...` / `cd >/dev/null <dir>`) と、
+    閉じ括弧の直後のリダイレクト (`(cd <dir>)>/dev/null; git ...` は止めすぎます)
+  - 成否の細かい読み。`exit` (`cd <dir> && git log && cd <own> || exit 1; git add .` は書き込まないのに止めます)、
+    wrapper の後ろの `:` (`env : || git -C <dir> ...`)、`time ( ... )` / `if ( ... )` の成否、パイプの途中の `!`
+    (`! printf a | cd <dir> || git ...`) は読みません
+  - ディレクトリスタックの操作: `cd -`、`popd --` / `popd +0` は行き先を決めず注意だけにします。
+    `pushd +N` の後の `popd` は行き先を取り違えます
+  - 波括弧・`if`・サブシェルを `&` やパイプでつないだ形 (`{ cd <dir>; } & git ...` は止めすぎます。
+    `cd <dir>; cd <own> && { true; } & git ...` と `cd <dir>; true | if true; then cd <own>; fi; git ...` は見逃します)、
+    `&&` / `||` の直後の改行 (`false &&` + 改行 + `git -C <dir> ...` は止めすぎます)、
+    zsh だけが受け付ける形 (`false && ; cd <dir>`)
+  - 環境変数 `GIT_DIR` / `GIT_WORK_TREE` の値は、実行の分岐ごとには持ちません。`cd` と成否は
+    `&&` / `||` の分岐ごとに追いますが、環境変数は全体で 1 つで、`export` / `unset` / 代入を出てきた順に
+    反映します。分岐の片方やパイプの要素の中だけで変わる形 (`test -f x && unset GIT_DIR; git reset` /
+    `git status || unset GIT_DIR; git add .` / `unset GIT_DIR | cat; git reset --hard`) は、
+    どの経路でも変わったものとして読みます
+  - `export` 以外の書き方で環境変数を渡す形 (`declare -x` / `typeset -x` / `set -a` /
+    `GIT_DIR=<dir>/.git export GIT_DIR` / `builtin export`)、`unset -f GIT_DIR`、`GIT_DIR` / `GIT_WORK_TREE`
+    以外の環境変数 (`GIT_INDEX_FILE=<dir>/.git/index git add .`)、綴りの違う git dir
+    (大文字小文字を区別しない FS での `<dir>/.GIT`)
+  - backtick の中の改行で始めた here-document (`` echo `cat <<E `` + 改行 + `` `; git -C <dir> ... `` + 改行 + `E`)、
+    語の途中の `#` (`x=(a b)#c ; git -C <dir> ...`)、bash 3.2 だけが走らせる形
+    (`git commit -m "$(cat <<'EOF'` + 改行 + `msg` + 改行 + `)" && git -C <dir> ...` + 改行 + `EOF`)
+  - 一覧に無い wrapper の後ろの git (`nice git -C <dir> ...` / `find . -exec git --git-dir=<dir>/.git add . \;`)
+  - 行き先の一部だけが変数の形。`git --git-dir=<dir>/.git --work-tree=$X add .` は、ほかに分かる行き先があっても
+    注意だけにし、`git -C $Y --work-tree=<dir> ...` は注意も出しません
 - shell が構文エラーにする書き方 (閉じない引用符・括弧、"$(...)" の中の comment など) を含む行から後ろは読みません。
   ただし、閉じない括弧・引用符・backtick か、終端行の無い here-document が残ったときは、読みが shell とずれている
   ことがあるため、comment や行の継続を整えない旧来の読みと、終端行の無い here-document を here-document と読まない
