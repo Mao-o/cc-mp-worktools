@@ -7,13 +7,17 @@
 
 行き先が変数などで静的に決まらない場合は「解決できない」として返し、呼び出し側は止めずに
 注意だけ出す (うっかりの予防が目的で、意図的なすり抜けへの対策ではないため)。
+読み取りが期限 (`_READ_SECONDS`) を超えたときも、それまでの判定に注意を足して返す。
 """
 from __future__ import annotations
 
 import os
+import posixpath
 import re
 import shlex
+import stat
 import string
+import time
 import unicodedata
 from dataclasses import dataclass
 
@@ -302,7 +306,7 @@ def _drive_readings() -> tuple[bool, ...]:
 
 
 def _resolve(base: str | None, path: str, msys: bool = False) -> str | None:
-    """base から見た path の正規化済み絶対パス。解決できなければ None。msys は Git Bash の読み (`_drive_readings`)。"""
+    """base (正規化済み) から見た path の正規化済み絶対パス。解決できなければ None。msys は Git Bash の読み (`_drive_readings`)。"""
     if _dynamic(path):
         return None
     path = _expand_home(path)
@@ -312,7 +316,40 @@ def _resolve(base: str | None, path: str, msys: bool = False) -> str | None:
         return norm(path)
     if base is None:
         return None
-    return norm(os.path.join(base, path))
+    return _join_resolved(base, path)
+
+
+def _join_resolved(base: str, rel: str) -> str:
+    """正規化済みの base に相対パス rel をつないだ先の `norm` (`norm(os.path.join(base, rel))` と同じ値)。
+
+    realpath はパスの要素を先頭から 1 つずつ lstat するので、`cd a; cd a; ...` のように深くなる場所から毎回呼ぶと、深さの
+    2 乗の時間になる (2,000 回で約 6 秒。hook が時間切れになるとコマンドはそのまま走る)。正規化済みの base は realpath の
+    不動点 (symlink・`.`・`..` を含まない) なので、rel の要素だけを POSIX の realpath と同じ規則で辿る: 空の要素と `.` は
+    飛ばし、`..` は辿った先の字面で 1 つ上がり、それ以外は lstat して、symlink に当たったらそこから先を realpath に任せる。
+    Windows の realpath は要素ごとに辿らない (区切りと大文字小文字の扱いも違う) ので、realpath をそのまま呼ぶ。
+    """
+    if os.path is not posixpath:
+        return norm(os.path.join(base, rel))
+    path = base
+    parts = rel.split("/")
+    for i, name in enumerate(parts):
+        if not name or name == ".":
+            continue
+        if name == "..":
+            path = posixpath.dirname(path)
+            continue
+        step = posixpath.join(path, name)
+        try:
+            delegate = stat.S_ISLNK(os.lstat(step).st_mode)
+        except OSError:  # 無いパス・長すぎるパス (realpath も symlink でないものとして続ける)
+            delegate = False
+        except ValueError:  # NUL を含む語。realpath と同じ結果 (版によっては例外) にする
+            delegate = True
+        if delegate:
+            # 残りは元の綴りのまま渡す (`lnk//x` の `//` を詰めると、Python 3.11 の realpath が symlink の環で返す値と変わる)
+            return norm(posixpath.join(path, "/".join(parts[i:])))
+        path = step
+    return path
 
 
 def _git_targets(
@@ -445,11 +482,15 @@ def _worktree_may_be_other(rest: list[str], fam: Family, msys: bool = False) -> 
 
     名前 (パスの末尾) が別の worktree に一致するときと、名前で決まらない相対パスのときに True。相対パスは基点が決まらないので、
     綴りに関係なくどの worktree にも届きうる (`../wt-b` や、symlink を通る `wt/<name>`・`lnk`。git は名前で決まらないとパスを
-    realpath で比べる)。自分の worktree の名前、絶対パス (パスとして読む側で判定する)、変数の語 (`"$Y"`。今の場所が決まって
-    いても読まない) は False。
+    realpath で比べる)。変数の語 (`"$Z"` / `"../$Z"`) も、どの worktree の名前にもパスにもなりうるので True。
+    自分の worktree の名前と絶対パス (パスとして読む側で判定する) は False。
     """
     operand = _worktree_operand(rest)
-    if operand is None or _dynamic(operand) or _resolve(None, operand, msys) is not None:
+    if operand is None:
+        return False
+    if _dynamic(operand):
+        return True
+    if _resolve(None, operand, msys) is not None:
         return False
     names = _worktree_by_name(rest, fam)
     if names:
@@ -745,8 +786,32 @@ def _tokens(command: str, commenters: str) -> list[str] | None:
 # 安全網で、終わらない here-document を here-document と読まずに読み直す回数の上限
 _REREAD_LIMIT = 8
 
+# 読み取りの期限 (秒)。`analyze` の 1 回の呼び出し全体 (安全網の読み直しを含む) で 1 つ。git を含む実コマンドの読み取りは
+# 最大でも数十ミリ秒。hook の timeout (hooks.json の 10 秒) を超えるとコマンドはそのまま走るので、遅くなる形を個別に閉じるのでは
+# なく、時間切れの経路そのものを閉じる。過ぎたら読むのをやめ、それまでの判定に注意を 1 つ足して返す (止めない)。
+# README の「目的と限界」に同じ値を書いている。None は期限なし (時間の伸び方を測るテスト用)
+_READ_SECONDS: float | None = 3.0
 
-def _analyze_tokens(tokens: list[str], cwd: str, fam: Family) -> list[Finding]:
+
+class _Deadline:
+    """`analyze` の 1 回の呼び出しの期限。"""
+
+    def __init__(self, seconds: float | None):
+        self.seconds = seconds
+        self._end = None if seconds is None else time.monotonic() + seconds
+        self.passed = False
+
+    def check(self) -> bool:
+        """期限を過ぎたか。一度過ぎたら、以後はずっと True。"""
+        if not self.passed and self._end is not None and time.monotonic() >= self._end:
+            self.passed = True
+        return self.passed
+
+    def finding(self) -> Finding:
+        return Finding(False, f"コマンドの読み取りが期限 ({self.seconds:g} 秒) を超えたため、途中から後ろの git を確かめていない")
+
+
+def _analyze_tokens(tokens: list[str], cwd: str, fam: Family, deadline: _Deadline | None = None) -> list[Finding]:
     """zsh の読みと bash の読みの両方で判定し、どちらかで見つかったものを返す。
 
     Bash tool の shell は環境で違い、`command cd` / `chdir` / `cd -q` などは shell で動きが割れる。shell ごとに通して読むので、
@@ -755,30 +820,38 @@ def _analyze_tokens(tokens: list[str], cwd: str, fam: Family) -> list[Finding]:
     bash は折り返した list を切らない読みと切る読みの両方を通す。切らない読みは、`&` で手前の list の開始時点の変数に戻すので、
     改行のあとの git が見る変数を取り違えることがある (`export GIT_DIR=<worktree>/.git; command export GIT_DIR=<main>/.git &&` と
     改行のあとの `true & git -C <main> reset --hard`)。
-    Windows では、パスの綴りの読み (`_drive_readings`) ごとにも通す。
+    Windows では、パスの綴りの読み (`_drive_readings`) ごとにも通す。期限を過ぎた後の読みは、最初の字句で返る。
     """
     findings: list[Finding] = []
     seen: set[str] = set()
     for msys in _drive_readings():
         for shell, fold in (("zsh", True), ("bash", True), ("bash", False)):
-            for f in _Analyzer(cwd, fam, shell, fold, msys).run(tokens):
+            for f in _Analyzer(cwd, fam, shell, fold, msys, deadline).run(tokens):
                 if f.message not in seen:
                     seen.add(f.message)
                     findings.append(f)
     return findings
 
 
-def _read(normalized: str, cwd: str, fam: Family) -> list[Finding]:
+def _read(normalized: str, cwd: str, fam: Family, deadline: _Deadline | None = None) -> list[Finding]:
     # comment は正規化で捨てた。残った `#` は単語の一部
     tokens = _tokens(normalized, commenters="")
-    return [] if tokens is None else _analyze_tokens(tokens, cwd, fam)
+    return [] if tokens is None else _analyze_tokens(tokens, cwd, fam, deadline)
 
 
 def analyze(command: str, cwd: str, fam: Family) -> list[Finding]:
     if "git" not in command:
         return []
+    deadline = _Deadline(_READ_SECONDS)
+    findings = _analyze(command, cwd, fam, deadline)
+    if deadline.passed:
+        findings.append(deadline.finding())
+    return findings
+
+
+def _analyze(command: str, cwd: str, fam: Family, deadline: _Deadline) -> list[Finding]:
     normalizer = _Normalizer(command)
-    findings = _read(normalizer.run(), cwd, fam)
+    findings = _read(normalizer.run(), cwd, fam, deadline)
     if not normalizer.unclosed:
         return findings
     # 安全網: 閉じない frame か終わらない here-document が残ったときは、正規化の読みが shell とずれて
@@ -788,15 +861,16 @@ def analyze(command: str, cwd: str, fam: Family) -> list[Finding]:
     # - 終わらない here-document を here-document と読まない読み (shell がそこを here-document と読まなければ、
     #   後ろの行はコマンドとして走る。読み直して新たに終わらないものが出れば、それも外して繰り返す)
     readings = []
-    legacy = _tokens(_legacy_strip_heredocs(command), commenters="#")
-    if legacy is not None:
-        readings.append(_analyze_tokens(legacy, cwd, fam))
+    if not deadline.check():
+        legacy = _tokens(_legacy_strip_heredocs(command), commenters="#")
+        if legacy is not None:
+            readings.append(_analyze_tokens(legacy, cwd, fam, deadline))
     ignore = frozenset(normalizer.open_heredocs)
     for _ in range(_REREAD_LIMIT):
-        if not ignore:
+        if not ignore or deadline.check():
             break
         again = _Normalizer(command, ignore)
-        readings.append(_read(again.run(), cwd, fam))
+        readings.append(_read(again.run(), cwd, fam, deadline))
         if again.open_heredocs <= ignore:
             break
         ignore |= again.open_heredocs
@@ -858,10 +932,13 @@ class _Analyzer:
     右辺が終わると (`&&` / `;` / 改行 / `&`) 捨てるので、`alts` の読みは減らない。
     """
 
-    def __init__(self, cwd: str, fam: Family, shell: str, fold: bool = True, msys: bool = False):
+    def __init__(
+        self, cwd: str, fam: Family, shell: str, fold: bool = True, msys: bool = False, deadline: _Deadline | None = None
+    ):
         self.shell = shell  # この読みの shell ("zsh" / "bash")
         self.fold = fold  # `&&` / `||` の直後の区切りで list を切らない読みか
         self.msys = msys  # パスの `/c/x` を Git Bash の読み (`C:\x`) で解決するか
+        self.deadline = deadline  # 過ぎたら、残りの字句を読まずに返す
         self.fam = fam
         self.findings: list[Finding] = []
         self._seen: set[str] = set()
@@ -914,7 +991,11 @@ class _Analyzer:
 
     def run(self, tokens: list[str]) -> list[Finding]:
         seg: list[str] = []
+        deadline = self.deadline
         for tok in tokens:
+            # 1 つの字句の仕事は、高々状態の数 (`_STATE_LIMIT`) × スタックの深さなので、字句ごとに見れば期限を大きく越えない
+            if deadline is not None and deadline.check():
+                return self.findings
             if not (tok and set(tok) <= set(_PUNCT)):
                 seg.append(tok)
                 continue
@@ -1170,10 +1251,16 @@ class _Analyzer:
                 if in_repo:
                     hits += sorted(_worktree_by_name(rest, fam))
                 others = [o for o in hits if o != fam.home]
-                if unresolved and not others and _worktree_may_be_other(rest, fam, self.msys):
-                    # git が読む repo か今の場所 (相対パスの基点の 1 つ) が決まらない (行き先の決まらない cd の後ろや、状態が上限を
-                    # 超えた後) が、対象は別の worktree でありうる。ほかの書き込み (`cd "$X"; git reset --hard`) と同じく、止めずに注意を出す
-                    note = note or Finding(False, f"`git worktree {rest[1]}` の対象 ({unresolved}) を静的に解決できない")
+                operand = _worktree_operand(rest)
+                if not others:  # 止めるときは注意を足さない
+                    if unresolved and _worktree_may_be_other(rest, fam, self.msys):
+                        # git が読む repo か今の場所 (相対パスの基点の 1 つ) が決まらない (行き先の決まらない cd の後ろや、状態が上限を
+                        # 超えた後) が、対象は別の worktree でありうる。ほかの書き込み (`cd "$X"; git reset --hard`) と同じく、止めずに注意を出す
+                        note = note or Finding(False, f"`git worktree {rest[1]}` の対象 ({unresolved}) を静的に解決できない")
+                    elif in_repo and operand is not None and _dynamic(operand):
+                        # git が読む repo はこの repo だが、対象の語が変数 (`git worktree remove "$X"`)。どの worktree の名前にもパスにも
+                        # なりうるので、ほかの書き込み (`git -C "$X" reset --hard`) と同じく、止めずに注意を出す
+                        note = note or Finding(False, f"`git worktree {rest[1]}` の対象 ({operand}) を静的に解決できない")
                 for o in others:
                     self._add(Finding(True, f"`git worktree {rest[1]}` が別の worktree ({o}) を対象にしている", o))
                 continue

@@ -14,7 +14,7 @@
 
 **目的はうっかりの予防で、意図的なすり抜けを防ぐ仕組みではありません。**
 
-- 行き先が変数 (`cd "$DIR"` / `git -C "$REPO"`) などで静的に決まらない操作は、止めずに注意だけ
+- 行き先が変数 (`cd "$DIR"` / `git -C "$REPO"` / `git worktree remove "$WT"`) などで静的に決まらない操作は、止めずに注意だけ
   出します。誤検知で agent の作業が止まるのを避けるためです
 - Bash の `>` / `cp` / `mv` / `rm` などによるファイル書き込みは見ません (git の書き込み操作と
   Write / Edit だけが対象です)
@@ -62,6 +62,11 @@
   7 回以上続けた形など。状態は分岐のたびに倍になり、hook が時間切れになるとコマンドはそのまま走るためです)。zsh で `&` の
   手前に `&&` で移動を 64 個以上つないだ形 (`cd <main> && cd /t/d1 && ... && true & git ...`) も、`&` で戻す候補が 64 を
   超えるので同じです。超えた後も、絶対パスの `cd <dir>` / `pushd <dir>` / `git -C <dir>` の行き先は読みます
+- コマンドの読み取りには期限 (3 秒) があります。普段のコマンドは数十ミリ秒で読み終えますが、分岐とディレクトリスタックを
+  深く重ねた形 (`x || cd d1; ...` を 6 回続けた後に `pushd <dir>;` を数千回続けた形など) は読むのに時間がかかり、hook が
+  時間切れになるとコマンドはそのまま走ります。期限を過ぎたら、そこまでに見つけた書き込みは止め、残りは読まずに注意だけ
+  出します (期限より後ろにある別の checkout への git は見逃します)。Windows では、相対パスの `cd` を数千回続けた形も
+  期限に当たることがあります
 - shell が構文エラーにする書き方 (閉じない引用符・括弧、"$(...)" の中の comment など) を含む行から後ろは読みません。
   ただし、閉じない括弧・引用符・backtick か、終端行の無い here-document が残ったときは、読みが shell とずれている
   ことがあるため、comment や行の継続を整えない旧来の読みと、終端行の無い here-document を here-document と読まない
@@ -89,7 +94,7 @@ main checkout や repo の外で動く session では何もしません。
 | ツール | 止める条件 |
 |---|---|
 | Bash | 別の checkout を対象にした git の書き込み操作。対象は `cd` / `chdir` / `pushd` / `popd`、`git -C <dir>` / `--work-tree` / `--git-dir`、環境変数 `GIT_DIR` / `GIT_WORK_TREE` (コマンド前の代入・`env`・`export`。`env -i` / `env -u` による削除も反映) から決める。`--git-dir` / `GIT_DIR` には各 checkout の `<root>/.git` と `.git/worktrees/<name>` のどちらの形も読む。`--git-dir` / `GIT_DIR` だけが効いて作業ツリーの指定が無いときは、作業ツリーは今の場所になるので、git dir の checkout と今の場所の両方を見る (`GIT_DIR=<自分の worktree>/.git git -C <main> reset --hard` は main の作業ツリーを上書きする)。`git add` / `git commit` のように作業ツリーを書かない操作も同じに読む。`&&` / `||` は直前のコマンドの成否ごとに状態を分けて追う (`cd` は成功するものとして扱う。ただし `cd` / `pushd` / `popd` などの直後の `||` の右辺は、移動が失敗してその場に残った場合も判定する。右辺の後ろの git は移動が成功したものとして読む)。`&` は、bash では AND-OR list 全体を、zsh では最後の pipeline だけをサブシェルで動かすものとして扱う (`cd <main> && true & git ...` の `cd` は zsh では今の shell に残る)。pipeline の途中の要素や background で動く `cd` は外に残らないものとして扱う。shell で動きが割れる形は、コマンド全体を zsh の読みと bash の読みの両方で判定し、どちらかで別 checkout への書き込みになれば止める (pipeline の最後の要素の `cd` は zsh だけ残る。`&` の手前の `cd <dir> &&` も zsh だけ残る。`command cd` は bash だけ移動する。`chdir` / `cd -q` / `pushd -q` は zsh だけ移動する。`pushd -n` はどちらも移動しない)。`env` / `nohup` / `sudo` / `exec` の後ろの `cd` は子プロセスで走るので移動として読まない。`! <コマンド>` は成否を読まず、続く `&&` / `||` の後ろはどちらも実行しうるとして読む。書き込み操作 = `checkout` `switch` `commit` `reset` `restore` `stash` (`stash list` / `show` / `create` を除く) `add` `rm` `mv` `merge` `rebase` `cherry-pick` `revert` `pull` `am` `apply` (`--check` / `--stat` / `--numstat` / `--summary` だけで `--apply` を伴わないものを除く) `bisect` `clean` `checkout-index` `update-index`、`branch -m` / `-M` (checkout 中の branch の改名)、`submodule update` / `add` / `deinit` など、`sparse-checkout set` / `add` / `init` など。here-document の本文 (`cat > x.sh <<'EOF'` の中身) は実行されないので読まない。行末の comment (`# ...`) は改行の手前までを読み捨て、`\` + 改行で折り返した行は 1 行につないで読む (どちらも bash / zsh と同じ読み)。`env -C <dir>` のように wrapper が作業ディレクトリを変える形と、`&&` / `||` の後ろで実行されないかもしれない `cd` (移動した場合としない場合の両方を判定する) も追う。`builtin cd <dir>` は `cd` と同じに読む (`env builtin cd` のように外部プロセスで動く形は移動が残らないので読まない。`builtin pushd` / `builtin popd` と、行き先が決まらない `builtin cd` も読まない)。Windows では、行き先の `/c/...` を Git Bash の読み (`/c/x` は `C:\x`、`/c` は `C:\`。Git Bash の pwd もこの形を返す) と Windows の読み (今のドライブの `\c\x`) の両方で判定し、どちらかで別 checkout なら止める |
-| Bash | `git worktree remove` / `move` で別の worktree を対象にしたもの。相対パスは、git dir・作業ツリー・今の場所のどの基点でも別の worktree なら止める。git はパスとして読む前に worktree の名前 (パスの末尾。`b` / `worktrees/b` / `.claude/worktrees/b`) としても読むので、名前に一致する worktree (自分の worktree と main checkout を含む) がちょうど 1 つで、それが別の worktree のときも止める (2 つ以上に一致すると、git と同じくパスとして読む。git が読む repo がこの repo のときだけ。大文字小文字を区別する比べ方と区別しない比べ方のどちらかで決まれば止める)。上の読みで別の worktree に決まらず、git が読む repo か今の場所が決まらないとき (行き先の決まらない `cd "$X"` / `git -C "$X"` / `--work-tree="$X"` の後ろや、「目的と限界」に書いた状態の上限を超えた後) は止めず、名前が別の worktree に一致するか、名前で決まらない相対パス (`../wt-b` や、symlink を通る `wt/<name>` など。基点が決まらないので、綴りに関係なくどの worktree にも届きうる) なら注意だけ出す |
+| Bash | `git worktree remove` / `move` で別の worktree を対象にしたもの。相対パスは、git dir・作業ツリー・今の場所のどの基点でも別の worktree なら止める。git はパスとして読む前に worktree の名前 (パスの末尾。`b` / `worktrees/b` / `.claude/worktrees/b`) としても読むので、名前に一致する worktree (自分の worktree と main checkout を含む) がちょうど 1 つで、それが別の worktree のときも止める (2 つ以上に一致すると、git と同じくパスとして読む。git が読む repo がこの repo のときだけ。大文字小文字を区別する比べ方と区別しない比べ方のどちらかで決まれば止める)。上の読みで別の worktree に決まらず、git が読む repo か今の場所が決まらないとき (行き先の決まらない `cd "$X"` / `git -C "$X"` / `--work-tree="$X"` の後ろや、「目的と限界」に書いた状態の上限を超えた後) は止めず、名前が別の worktree に一致するか、名前で決まらない相対パス (`../wt-b` や、symlink を通る `wt/<name>` など。基点が決まらないので、綴りに関係なくどの worktree にも届きうる) なら注意だけ出す。対象の語が変数 (`"$X"` / `"../$X"`) のときは、どの worktree の名前にもパスにもなりうるので、git が読む repo がこの repo のときと repo が決まらないときは、今の場所が決まっていても注意だけ出す (他の repo の中と repo の外では何も出さない) |
 | Write / Edit / MultiEdit / NotebookEdit | 別の checkout 配下のファイルへの書き込み |
 
 止めないもの:

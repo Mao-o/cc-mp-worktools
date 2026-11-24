@@ -256,9 +256,13 @@ class StateLimitTest(BoundedBase):
         # test_worktree_operand_through_a_symlink_after_the_limit)
         self.assertEqual(self.verdict(f"{or_cd(18)}git worktree remove --force zz"), "note")
         self.assertGreater(self.collapses, 0)
-        # 自分の worktree の名前、変数の語、repo の外の絶対パスは、上限を超えても何も出さない
+        # 変数の語は、上限に関係なく注意 (どの worktree の名前にもパスにもなりうる)
+        for n in (k, 18):
+            with self.subTest(n=n):
+                self.assertEqual(self.verdict(f'{or_cd(n)}git worktree remove --force "$Y"'), "note")
+        # 自分の worktree の名前と repo の外の絶対パスは、上限を超えても何も出さない
         outside = os.path.join(_BASE, "zz")  # ドライブ付きの絶対パス (Windows の `/t/zz` はドライブの無い相対の扱いになる版がある)
-        for rm in ("git worktree remove --force a", 'git worktree remove --force "$Y"', f'git worktree remove --force "{outside}"'):
+        for rm in ("git worktree remove --force a", f'git worktree remove --force "{outside}"'):
             with self.subTest(rm=rm):
                 self.assertIsNone(self.verdict(f"{or_cd(18)}{rm}"))
                 self.assertGreater(self.collapses, 0)
@@ -309,6 +313,7 @@ class StateLimitTest(BoundedBase):
         self.assertIn(f"`&&` で移動を {command._STATE_LIMIT} 個以上", readme)
         self.assertIn(f"上限 ({command._STATE_LIMIT})", (root / "AGENTS.md").read_text(encoding="utf-8"))
 
+    @mock.patch.object(command, "_READ_SECONDS", None)  # 読み切る時間を測る (期限で打ち切ると伸び方を測れない)
     def test_time_grows_linearly(self):
         # 上限に張り付いた形は、繰り返しの数に比例して時間が伸びる (倍々にならない)。小さい側も上限に届いていることを確かめる
         small, large = 300, 1200
