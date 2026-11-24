@@ -12,12 +12,9 @@
 from __future__ import annotations
 
 import os
-import posixpath
 import re
 import shlex
-import stat
 import string
-import sys
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -306,16 +303,8 @@ def _drive_readings() -> tuple[bool, ...]:
     return (False, True) if os.name == "nt" else (False,)
 
 
-# 相対パスを、差分だけを辿る解決 (`_join_resolved`) で解決するか。Python 3.12 以前の realpath は symlink の環に当たると辿るのを
-# やめ、残りを字面のまま返す (`<wt>/m1/../to-main` が、symlink の `to-main` を含んだまま返る)。その値は realpath の不動点で
-# ないので、そこを基点に差分だけを辿ると、0.9.3 までの `norm(os.path.join(base, rel))` (移動のたびに全要素を辿り直す) と値が
-# 変わり、後の `cd .` / `cd sub` で `to-main` を辿らずに、別の checkout への git を見逃す。3.13 以降の realpath は環の後ろも
-# 辿るので、値は常に不動点。3.12 以前と Windows は realpath をそのまま呼び (深さの 2 乗の時間は残る)、遅い形は読み取りの期限で閉じる
-_REALPATH_SETTLES = sys.version_info >= (3, 13)
-
-
 def _resolve(base: str | None, path: str, msys: bool = False) -> str | None:
-    """base (正規化済み) から見た path の正規化済み絶対パス。解決できなければ None。msys は Git Bash の読み (`_drive_readings`)。"""
+    """base から見た path の正規化済み絶対パス。解決できなければ None。msys は Git Bash の読み (`_drive_readings`)。"""
     if _dynamic(path):
         return None
     path = _expand_home(path)
@@ -325,41 +314,7 @@ def _resolve(base: str | None, path: str, msys: bool = False) -> str | None:
         return norm(path)
     if base is None:
         return None
-    if os.path is posixpath and _REALPATH_SETTLES:
-        return _join_resolved(base, path)
     return norm(os.path.join(base, path))
-
-
-def _join_resolved(base: str, rel: str) -> str:
-    """正規化済みの base に相対パス rel をつないだ先の `norm` (`norm(os.path.join(base, rel))` と同じ値)。
-
-    realpath はパスの要素を先頭から 1 つずつ lstat するので、`cd a; cd a; ...` のように深くなる場所から毎回呼ぶと、深さの
-    2 乗の時間になる (2,000 回で約 6 秒。hook が時間切れになるとコマンドはそのまま走る)。正規化済みの base は realpath の
-    不動点 (Python 3.13 以降) なので、rel の要素だけを POSIX の realpath と同じ規則で辿る: 空の要素と `.` は飛ばし、`..` は
-    辿った先の字面で 1 つ上がり、それ以外は lstat して、symlink に当たったらそこから先を realpath に任せる。
-    `_resolve` が、Python 3.13 以降の POSIX でだけ呼ぶ (`_REALPATH_SETTLES`。Windows の realpath は要素ごとに辿らず、区切りと
-    大文字小文字の扱いも違う)。
-    """
-    path = base
-    parts = rel.split("/")
-    for i, name in enumerate(parts):
-        if not name or name == ".":
-            continue
-        if name == "..":
-            path = posixpath.dirname(path)
-            continue
-        step = posixpath.join(path, name)
-        try:
-            delegate = stat.S_ISLNK(os.lstat(step).st_mode)
-        except OSError:  # 無いパス・長すぎるパス (realpath も symlink でないものとして続ける)
-            delegate = False
-        except ValueError:  # NUL を含む語。realpath と同じ結果 (版によっては例外) にする
-            delegate = True
-        if delegate:
-            # 残りは元の綴りのまま realpath に渡す (realpath と同じ値にする)
-            return norm(posixpath.join(path, "/".join(parts[i:])))
-        path = step
-    return path
 
 
 def _git_targets(
@@ -1199,7 +1154,7 @@ class _Analyzer:
             out: set[_Alt] = set()
             for h, s, _ in alts:
                 if self.deadline is not None and self.deadline.check():
-                    break  # 状態ごとにも期限を見る (長い相対パスの語は、1 回の解決が語の長さの 2 乗)
+                    break  # 状態ごとにも期限を見る (相対パスの解決は全要素を辿り直すので、深い場所や長い語で重い)
                 out |= self._chdir(cmd, seg[1:], h, s)
             return out
         if _is_git(cmd):
