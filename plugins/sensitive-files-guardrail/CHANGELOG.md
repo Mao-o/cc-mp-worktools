@@ -16,12 +16,52 @@ commit 52113a1 で完了)。
   公開の保守者ガイド (`docs/MAINTAINING.md`) の新設だけは 0.19.1 で先行した
 - **D2** (tests 整理) — **0.33.0 で着手**。目標を「件数削減」から「同型ケースの
   subTest 化で重複を畳む (格子点は増やす)」に再定義し、`ask_or_allow` 系 6 クラスを
-  `AskOrAllowMatrix` 土台へ畳んだ (メソッド 55 → 12 / 格子点 55 → 180)。
+  `AskOrAllowMatrix` 土台へ畳んだ (メソッド 55 → 12 / 格子点 55 → 216。0.33.0 の
+  記録の「180」は 5 mode で数えた誤りで、土台は当初から 6 mode を回していた)。
   当初の数値目標 (≈500 件) は**廃止**する — 形状カバレッジを削る危険があり、
   過去の重大不具合 3 件は「件数では見えない入力形状の空白」が原因だったため。
-  残りの同型群 (`test_bash_handler.py` のその他) は未着手
+  **0.36.3 で `test_bash_handler.py` の判定だけを見るテストの大半を畳んだ**
+  (`DenyMatrix` / `AllowMatrix` を足し、28 クラスの 241 件をメソッド 397 → 225 に。
+  畳んだ範囲の格子点 453 → 1,908)。残りは、判定だけを見るテストのうち今回の形 (1 行判定・mode 違いの対・
+  定数列のループ) に当たらなかったもの (表を default / auto の 2 mode か 5 mode で回すループなど。
+  `TestGrepPatternPositional` / `TestOptionValueNotPath` / `TestRecommendedRemedyAllow` など 16 クラス 62 件。
+  cwd にファイルを置くものを含む) と、他のファイルの同型群 (未着手)
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
+
+## 0.36.3
+
+**テスト整理 (挙動の変更なし)。redact-sensitive-reads の `test_bash_handler.py` で、判定 (deny / ask / allow) だけを見るテストを判定の行列に畳んだ (patch bump)。**
+hook・`hooks.json`・README の挙動は変わらない。製品コードは変えていない。テスト件数: redact 1,561 → **1,389**
+(`test_bash_handler.py` は 397 → 225。畳んだ 241 件の検査は表の行と subTest に移り、消えた検査は無い)。
+`test_bash_handler.py` は 4,666 → 3,912 行。
+
+- `AskOrAllowMatrix` と同じ作りの土台を 2 つ足した。`DenyMatrix` は全 mode で deny、`AllowMatrix` は全 mode
+  で allow を見る (`AllowMatrix` の検査は畳む前と同じ `output.is_allow` だけ)。1 つのクラスに複数の土台を載せる
+  ので、表の名前は土台ごとに `DENY_CASES` / `ALLOW_CASES` / `ASK_OR_ALLOW_CASES` に分けた (`AskOrAllowMatrix` の
+  `CASES` は `ASK_OR_ALLOW_CASES` に改名)。どの土台も `permission_mode` の 6 値を必ず回す
+- 畳んだのは、1 行判定 (コマンド 1 つ → 判定 1 つ) を持つ 27 クラスの、判定だけを見るテスト 230 件
+  (1 行判定 166 件、mode 違いの対、`cmd` 変数と 2 mode の形、コマンドを並べたループ)。どのコマンドも 6 mode で
+  流し、全 deny・全 allow・ask_or_allow (default / acceptEdits / dontAsk で ask、auto / bypassPermissions /
+  plan で allow) のどれかに揃い、畳む前の検査がその中に含まれることを確かめてから表に入れた。元のテスト名は
+  行のラベルに残し、mode 違いの対 (`test_x_default` と `test_x_auto` など) は 1 行にまとめてラベルを ` / ` で
+  つないだ。docstring とコメントは行の上に移した
+- 判定のほかに reason も見る 3 件 (`cp` / `mv` の `.envrc` の案内) と、`_redirect_write_targets` の単体テスト
+  8 件は、それぞれのクラスの中で表と subTest に畳んだ
+- 畳む前はコマンドごとに測る mode がまちまちだった (`TestCompoundDeny` の 6 形は default だけ、`cat .env` は
+  default / auto / bypass を別々のメソッドで)。畳んだ範囲の格子点は 453 → 1,908 (321 行 × 6 mode = 1,926 から、同じコマンドの行が 2 つある 3 組の重複を除く)
+  に増えた
+- 表を持つクラスが土台を継承し忘れると、表の行が 1 件も検査されないままテストが緑になる。これを落とす
+  `TestMatrixTablesAreWired` を足した (表の名前の書き間違いは、各土台の冒頭の空のガードが落とす)。`BaseBash` を
+  継承し忘れて unittest に収集されないクラスと、親クラスから継承した表も見る
+- `TestUriVcsPathspec` の 4 行は basename がどれも `.env` で終わり、0.34.0 で既定 patterns に入った `*.env` が
+  コロンで分割しなくても deny にするので、pathspec / URI のコロン分割を外しても suite が緑のままだった。
+  分割した後ろの basename でだけ一致する `git show HEAD:id_rsa` と `scp host:id_rsa .` の行を足した
+- `AskOrAllowMatrix` の docstring (「mode 5 列」「36 形 × 5 mode = 180 格子点」) と `docs/MAINTAINING.md`
+  (「mode 5 列は土台が必ず回す」「格子点 55 → 180」) は誤りで、土台は 0.33.0 から 6 mode (36 形 × 6 = 216 格子点)
+  を回していたので直した
+- `docs/MATRIX.md` の glob 行にあったテストへの参照 (`TestSuffixDotenvOperand::test_star_dot_env_glob_stays_lenient`)
+  を、畳んだ先の表の行 (`ASK_OR_ALLOW_CASES` のラベル) に直した
 
 ## 0.36.2
 
