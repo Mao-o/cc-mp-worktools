@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.9
+
+テストの修正 (hook 本体の挙動の変更なし、patch bump)。Windows の CI で、子の Python に実時間を測らせるテストが落ちていた。
+
+### Fixed
+
+- 子の Python が理由 (日本語) を stdout に書くテストで、子の stdout を UTF-8 に固定し (`PYTHONIOENCODING=utf-8`)、親も UTF-8 で読むようにした。Windows では pipe につないだ子の stdout が cp1252 になり、日本語を書けずに子が落ちていた (0.3.7 で入ったテストで、これまで Windows の CI を通っていなかった)。環境が子の stdout を cp1252 にしていても通ることを見るテストを足した
+- 同じ plugin のテストで子の Python を起こしている他の箇所は、stdout に書くのが数値と JSON だけ (JSON は ASCII にエスケープされる) なので変更不要。hook 本体は起動時に stdout / stderr を UTF-8 に固定しているので、Windows でも日本語の出力は書ける
+
 ## 0.3.8
 
 テスト整理 (挙動の変更なし、patch bump)。読み取りと hook 全体に期限が入ったので、子で読む形は素通しではなく止まるだけになり、形ごとの実時間の上限を別々に持つ価値が下がった。CI の時間と、遅い Windows runner での揺れを減らすため、その上限を 1 本にまとめた。
