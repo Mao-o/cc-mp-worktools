@@ -42,7 +42,7 @@ Claude が普段の書き方で `gh pr create` / `gh pr ready` を実行した�
     `gh pr create --body "a; $y gh pr create b"`)
   - 走る cwd が 1 つに決まるのに、読みを足していない形 (`if ! cd A; then exit 1; fi; gh pr create` /
     `cat x | (cd A && gh pr create)` / `[ -d A ] && { cd A; gh pr create; }` /
-    `cd A; make & wait; gh pr create`)
+    `cd A; make & wait; gh pr create`)。hook の cwd か cd の行き先のどれかが plugin repo のときだけ止めます
 - 環境変数 `VERIFY_PLUGIN_RELEASE_MODE` で止めずに通すこともできます
 - 最終的な品質保証は CI とレビューが担う前提です。この hook はその手前の早期警告です
 
@@ -127,7 +127,16 @@ cwd を変えるか確かでない cd の後ろも止めます: `cd A || cd B` �
 `[ -d A ] && cd A; gh pr create` (`&&` の前に別のコマンドがあり後ろが `;` か改行で続く形。`make && cd A && gh pr create` は検査します)、
 `if` の分岐を閉じた後、ループ・`case`・関数の中、`command cd` / `time cd` (シェルで読みが割れます)、引数なしの `cd`、
 `CDPATH=` / `HOME=` の代入がある形。止まったら `cd <絶対パス> && gh pr create` の形にしてください。
+ただし、確かでない cd の後ろでも、shell が居うる cwd (hook の cwd に、それまでの cd を走った・走らなかったの組み合わせで
+当てた先) をすべて挙げられ、どれも plugin repo でなければ何もしません。plugin repo でない repo と repo の外で
+`git push && cd A; gh pr create` や `[ -d A ] && cd A; gh pr create` を止めないためです。挙げた cwd の 1 つでも plugin repo なら
+止めます。挙げられない形も止めます: 引数なしの `cd`、変数・glob・`~user` / `~-` を含む引数、`cd -`、ループ・関数・`case` の中の cd、
+`chdir`、読まなかった `cd` の語 (引用や `trap` の本文の中)、`eval` / `source` / `.` や展開で決まるコマンド語がある形、
+hook の環境に `CDPATH` があるときの相対の名前 (`cd A` / `cd A/B`。`./A`・`../A`・`~`・絶対パスは CDPATH を引かないので挙げる)、
+行き先が無いのに shell が入りうる cd (`..` を含む引数、Windows のドライブの無い絶対パス)、挙げた cwd が 16 を超える形。
+行き先が無いそれ以外の cd は、失敗して cwd が変わらないものとして扱います。
 `eval "cd A"` や `. ./env.sh` の中の cd は読みません。
+Windows の Git Bash の `/c/Users/...` の綴りは、移動先も hook の cwd も `C:/Users/...` と読みます。
 heredoc の本文はコマンドとして読まないので、本文に `'` があっても止めません。区切り語に引用がある
 heredoc (`<<'EOF'` など) の本文に `gh pr create` の使い方を書いても止めません (引用の無い区切り語の
 本文の `$(...)` は shell が実行するので、従来どおり止めます)。
