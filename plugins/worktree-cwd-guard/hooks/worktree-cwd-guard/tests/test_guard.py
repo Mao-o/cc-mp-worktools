@@ -324,6 +324,25 @@ class GuardTest(GuardBase):
                 self.assertIsNone(evaluate(bash(f'git -C "{alias}" reset --hard', self.a)))
                 self.assertIsNone(evaluate(write(Path(alias) / "x.py", self.a)))
 
+    @unittest.skipUnless(os.name == "nt", "Windows の Git Bash の綴り")
+    def test_git_bash_drive_path_on_windows(self):
+        def git_bash(p: Path) -> str:
+            drive, rest = os.path.splitdrive(str(p))
+            if not drive.endswith(":"):
+                self.skipTest(f"ドライブ文字の無いパス ({p})")
+            return "/" + drive[0].lower() + rest.replace("\\", "/")
+
+        self.assertEqual(decision(evaluate(bash(f'git -C "{git_bash(self.main)}" reset --hard', self.a))), "deny")
+        self.assertEqual(decision(evaluate(bash(f'cd "{git_bash(self.b)}"; git reset --hard', self.a))), "deny")
+        self.assertIsNone(evaluate(bash(f'git -C "{git_bash(self.a)}" reset --hard', self.a)))
+
+    def test_drive_like_path_off_windows_is_a_plain_path(self):
+        # Windows でなければ `/c/x` はそのままのパスで、Git Bash の読み (`C:\x`) はしない
+        # (POSIX で `c:/x` と読むと今の場所の下の相対パスになり、main の下として止めてしまう)
+        for cmd in (f'cd "{self.main}"; git -C /c/x reset --hard', f'cd "{self.main}"; cd /c && git add .'):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(evaluate(bash(cmd, self.a)))
+
     def test_main_checkout_session_is_not_guarded(self):
         self.assertIsNone(evaluate(bash(f'git -C "{self.b}" checkout main', self.main)))
 
@@ -354,6 +373,12 @@ class GuardTest(GuardBase):
         self.assertEqual(decision(evaluate(bash(f'git -C "{self.b}" checkout -b oops', self.a))), "deny")
 
 
+def _windows_realpath(path: str) -> str:
+    # 今のドライブを C: とした Windows の realpath (ドライブの無い `\c\x` は `C:\c\x`)。
+    # POSIX の上の ntpath.realpath はドライブを補わず、実機の Windows は今のドライブで補うので、どの OS でも同じ読みにそろえる
+    return ntpath.normpath(path if ntpath.splitdrive(path)[0] else "C:" + path)
+
+
 class NtpathEmulationTest(unittest.TestCase):
     """`os.path` を ntpath に差し替え、Windows のパスの読みをどの OS でも確かめる (git は起動しない)。"""
 
@@ -366,22 +391,27 @@ class NtpathEmulationTest(unittest.TestCase):
         for patcher in (
             mock.patch.object(os, "path", ntpath),
             mock.patch.object(os, "sep", "\\"),
+            mock.patch.object(os, "name", "nt"),
+            mock.patch.object(ntpath, "realpath", _windows_realpath),
             mock.patch.dict(os.environ, {"USERPROFILE": "C:\\Users\\me", "USERNAME": "me"}),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
+        self.fam = self._family()
+
+    def _family(self, *extra: str) -> family.Family:
         n = family.norm
-        self.fam = family.Family(
+        return family.Family(
             home=n(self.A),
-            roots=(n(self.MAIN), n(self.A), n(self.B)),
+            roots=(n(self.MAIN), n(self.A), n(self.B), *(n(e) for e in extra)),
             common_dir=n(self.MAIN + "\\.git"),
         )
 
-    def _blocked(self, cmd: str, homes: tuple[str, ...] = ()) -> bool:
+    def _blocked(self, cmd: str, homes: tuple[str, ...] = (), fam: family.Family | None = None) -> bool:
         # 実在するディレクトリを固定する (実機の `C:\Users` の中身に左右されないように)
         real = {family.norm(h) for h in homes}
         with mock.patch.object(ntpath, "isdir", lambda p: family.norm(p) in real):
-            return any(f.blocked for f in command.analyze(cmd, self.A, self.fam))
+            return any(f.blocked for f in command.analyze(cmd, self.A, fam or self.fam))
 
     def test_tilde_word_without_a_home_stays_under_the_place(self):
         # expanduser は `~+` を `C:\Users\+` と推測する。実際の shell は `~+` / `~+/x` で main に残り、
@@ -410,6 +440,61 @@ class NtpathEmulationTest(unittest.TestCase):
         self.assertTrue(self._blocked(f'cd "{self.MAIN}"; git worktree remove --force ../wt-b'))
         # 引用なしの `\` は shell が消す (git が受け取るのは `..wt-b` で、別の worktree を指さない)
         self.assertFalse(self._blocked(f'cd "{self.MAIN}"; git worktree remove --force {rel}'))
+
+    def test_git_bash_drive_path_names_the_drive(self):
+        # Windows の Bash tool は Git Bash で動き、`/c/x` は `C:\x` (pwd もこの形を返す)。行き先を読むどの入り口でも止める
+        main, b = "/c/Users/other/repo", "/c/Users/other/wt-b"
+        for cmd in (
+            f"git -C {main} reset --hard",
+            f"cd {main}; git reset --hard",
+            f'cd "{main}" && git commit -m x',
+            "git -C /C/Users/other/repo reset --hard",  # ドライブの文字の大文字
+            "cd /c; cd Users/other/repo; git reset --hard",  # ドライブだけ
+            "cd /c/Users; git -C other/x/../repo reset --hard",  # 相対パスの途中の 1 文字の語はドライブではない
+            f"env -C {main} git reset --hard",
+            f"pushd {main}; git reset --hard",
+            f"pushd -n {main}; popd; git reset --hard",
+            f"git --git-dir={main}/.git reset --hard",
+            f"GIT_DIR={main}/.git git reset --hard",
+            f"git --work-tree={main} reset --hard",
+            f"git worktree remove --force {b}",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(self._blocked(cmd))
+
+    def test_git_bash_drive_path_needs_one_letter_and_a_separator(self):
+        # `/cc/x` はドライブではない。自分の worktree を `/c/...` で書いた形は止めない
+        for cmd in (
+            "git -C /cc/Users/other/repo reset --hard",
+            "git -C /d/Users/other/repo reset --hard",  # 別のドライブ (D:) は C: の checkout を指さない
+            'cd "/c\n"; cd Users/other/repo; git reset --hard',  # 語の終わりの前の改行はドライブの終わりではない
+            "git -C /c/Users/other/repo/.claude/worktrees/a reset --hard",
+            "cd /c/Users/other/repo/.claude/worktrees/a && git add .",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertFalse(self._blocked(cmd))
+
+    def test_windows_reading_of_a_drive_path_is_kept(self):
+        # `/c/proj` の Windows の読み (今のドライブの `\c\proj`) も残す。`MSYS_NO_PATHCONV=1` などで変換を止めた git はそこを読み、
+        # 読みの和にすれば、これまで止めていた形は止まったまま
+        fam = self._family("C:\\c\\proj")
+        self.assertTrue(self._blocked("git -C /c/proj reset --hard", fam=fam))
+        self.assertTrue(self._blocked("cd /c/proj && git add .", fam=fam))
+        self.assertFalse(self._blocked("git -C /c/proj reset --hard"))
+
+
+@unittest.skipIf(os.name == "nt", "POSIX のパスの読み")
+class PosixDrivePathTest(unittest.TestCase):
+    """POSIX の `/c/...` は、そこにある checkout をそのまま指す (git は起動しない)。"""
+
+    def test_drive_like_root_is_read_as_is(self):
+        n = family.norm
+        main = "/c/Users/other/repo"
+        a = main + "/.claude/worktrees/a"
+        fam = family.Family(home=n(a), roots=(n(main), n(a)), common_dir=n(main + "/.git"))
+        for cmd in (f"git -C {main} reset --hard", f"cd {main}; git reset --hard", f"git worktree remove --force {main}"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(any(f.blocked for f in command.analyze(cmd, a, fam)))
 
 
 class EntryTest(HermeticGitTestCase):

@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.9.2
+
+**Windows で、Git Bash の綴りのパス (`/c/Users/...`) で別の checkout を指す git の書き込みが止まらなかった不具合を直した (patch bump)。**
+`git -C /c/Users/<u>/repo reset --hard` / `cd /c/Users/<u>/repo; git reset --hard` は main を書き換えるのに通っていた (0.9.1 まで。`C:/Users/...` と書けば止まっていた)。
+Git Bash の pwd はこの形を返すので、Windows では普段の書き方になる。
+
+### 修正: `/c/...` を Git Bash の読みでも解決する
+
+Windows の Bash tool は Git Bash で動き、`/c/x` は `C:\x`、`/c` は `C:\` になる (`cd` などの組み込みも、git に渡す引数も)。
+Windows の Python は `/c/x` を今のドライブの `\c\x` と読むので、checkout の `C:\Users\...` と一致しなかった。
+
+- Windows では、コマンド全体を Windows の読みと Git Bash の読みの両方で判定し、どちらかで別 checkout への書き込みになれば止める
+  (zsh の読みと bash の読みの両方で判定するのと同じ形)。Windows の読みを残すのは、`MSYS_NO_PATHCONV=1` などで変換を止めた git が
+  `\c\x` を読むためで、和にしたので 0.9.1 が止めていた形は止まったまま
+- 読み替えるのは、行き先を読むすべての入り口 (`cd` / `chdir` / `pushd` / `pushd -n` の行き先、`git -C`、`--git-dir` / `GIT_DIR`、
+  `--work-tree` / `GIT_WORK_TREE`、`git worktree remove|move` のパス、`env -C` / `sudo -D`)。ドライブの文字は大文字も読む (`/C/...`)
+- 読み替えるのは `/` の後に 1 文字と `/` (か語の終わり) が続く形だけ。`/cc/x` や、Windows 以外の `/c/x` (そこにあるパスのまま) は読み替えない
+- 次の形は Git Bash の読みにならないまま: 区切りに `\` を混ぜた `/c\x`、`/cygdrive/c/x`、ドライブの root より上に出る `..`
+  (`/c/../c/x`)、Git Bash の root の下のパス (`/tmp` / `/usr` など)。Write / Edit のファイルパスの読みは変えていない。
+  README の目的と限界と AGENTS.md の指摘しないものにも同じ形を書いた
+
+### 比較
+
+0.9.1 と 0.9.2 に同じ 5,264 件の入力 (行き先の綴り 39 形 / 17 形 × 操作 47 形) を、4 つの世界で流した。
+Windows の読みは `os.path` を `ntpath` に差し替え、今のドライブを `C:` とした。実際の Git Bash では確かめていない。
+
+| 世界 | 通過・注意 → 停止 | 停止 → 通過・注意 | 形 |
+|---|---|---|---|
+| Windows | 472 | 0 | Git Bash の綴りで main / 別の worktree を指す形 (`/c/...` / `/C/...` / 引用 / 末尾の `/` や `/.` / `//`)、`cd /c; cd Users/...`、自分の worktree から `cd ..` で main に出る形 |
+| Windows (`C:\c\proj` に worktree がある) | 472 | 0 | 上と同じ。`git -C /c/proj ...` は 0.9.1 と同じく止まる (Git Bash の読みに置き換えるだけにすると、この世界の 102 件が止まらなくなる) |
+| POSIX (`/c/Users/...` に checkout がある) | 0 | 0 | |
+| POSIX (`/c/...` は checkout の外) | 0 | 0 | |
+
+ドライブではない綴り (`/cc/x` / `//c/x` / `/c:/x` / `/cygdrive/c/x` / 別のドライブ `/d/...`) と、自分の worktree を指す形 (`cd ..` で main に出るものを除く) は、どの世界でも変わらない。
+
+### テスト
+
+- `NtpathEmulationTest`: Git Bash の綴りを行き先の各入り口で止めること、`/cc/x` と自分の worktree を止めないこと、Windows の読みも残すこと。
+  `os.name` を `nt` にし、ドライブの無いパスを `C:` で補う realpath に差し替えた (POSIX の上の ntpath はドライブを補わず、実機は今のドライブで補う)
+- `GuardTest`: Windows 以外では `/c/x` を読み替えないこと (読み替えると main の下の相対パスになって止めすぎる)。Windows の実機では、本物の repo を Git Bash の綴りで指して止めること
+- `PosixDrivePathTest`: POSIX の `/c/...` は、そこにある checkout をそのまま指すこと
+
+テスト件数: 202 → 208 (追加 6・削除 0・統合 0)。
+
 ## 0.9.1
 
 **README の「目的と限界」に、shell と読みがずれる書き方を範囲外として明記し、AGENTS.md の指摘しないものに同じ形を足した (docs のみ。patch bump)。**

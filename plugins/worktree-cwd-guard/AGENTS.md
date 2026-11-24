@@ -29,7 +29,7 @@
   (`test -f x && unset GIT_DIR; git reset`)。`cd` と成否は分岐ごとに追うが、環境変数は全体で 1 つ
 - README の「目的と限界」に挙げた、shell と読みがずれる書き方 (リダイレクトの位置・成否の細かい読み・
   ディレクトリスタック・`&` / パイプと複合コマンド・`export` 以外の書き方と他の環境変数・here-document の位置・
-  一覧に無い wrapper・行き先の一部だけが変数の形)
+  一覧に無い wrapper・行き先の一部だけが変数の形・Windows の Git Bash の綴りのうち読み替えない形)
 - 行き先が変数で決まり静的に解決できない操作を、止めずに注意だけ出すこと (設計どおり)
 - 利用者が環境変数 (`WORKTREE_CWD_GUARD_MODE` / `WORKTREE_CWD_GUARD_ALLOW`) で無効化・緩和できること
 
