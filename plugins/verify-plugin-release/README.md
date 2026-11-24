@@ -37,16 +37,17 @@ Claude が普段の書き方で `gh pr create` / `gh pr ready` を実行した�
   数が合って別の `gh` の検査が抜けることがあります。意図して細工した形なので、うっかり予防の
   範囲外として塞ぎません。同じ `gh` を単独で書けば、従来どおり止まります
 - plugin repo かどうかは hook の時点の作業ツリーで決めます。同じコマンドの前のほうで、hook の時点で在る
-  空の dir に clone する形 (`git clone URL empty && cd empty && gh pr create`) は、確かな cd でも検査しません
-  (普段は clone と PR の作成を 1 つのコマンドにまとめず、clone 先も先に作らないので塞ぎません)
+  dir を plugin repo に変える形 (空の dir への clone `git clone URL empty && cd empty && gh pr create`・
+  `ln -sfn <plugin repo> link` での付け替え・`rm -rf d && git clone URL d` での取り直し) は、確かな cd でも、
+  確かでない cd の後ろでも検査しません (普段は clone と PR の作成を 1 つのコマンドにまとめないので塞ぎません)
 - 次の書き方は、PR 操作が無い、または検査先が 1 つに決まるのに止めることがあります。
   `cd <絶対パス> && gh pr create` の形にするか、本文を `--body-file` で渡すと通ります:
   - comment や引用符の中の `gh pr create` の文字列 (`echo hi # ; gh pr create` /
     `gh pr create --body "a; $y gh pr create b"`)
   - 走る cwd が 1 つに決まるのに、読みを足していない形 (`if ! cd A; then exit 1; fi; gh pr create` /
     `cat x | (cd A && gh pr create)` / `[ -d A ] && { cd A; gh pr create; }` /
-    `cd A; make & wait; gh pr create`)。hook の cwd か cd の行き先のどれかが plugin repo のときか、
-    行き先が hook の時点で無いときだけ止めます
+    `cd A; make & wait; gh pr create`)。hook の cwd か cd の行き先のどれかが plugin repo のとき、
+    行き先が hook の時点で無いとき、hook の環境に `CDPATH` があるとき (相対の名前の cd) に止めます
 - 環境変数 `VERIFY_PLUGIN_RELEASE_MODE` で止めずに通すこともできます
 - 最終的な品質保証は CI とレビューが担う前提です。この hook はその手前の早期警告です
 

@@ -24,6 +24,9 @@ cd が走ったかを決められないと repo を見る前に止めたので�
   (`/tmp` は Windows の一時 dir) に読み替えるが、Python は hook の cwd のドライブの下と読む
 - `CDPATH+=` / `cdpath+=(...)` / `HOME+=` の追記も、cd の行き先を変える代入と読む (`CDPATH=` と同じく、後ろの cd は
   確かな cd でも止める)
+- hook の時点で在る dir を同じコマンドの前のほうで plugin repo に変える形 (空の dir への clone・symlink の付け替え・
+  `rm -rf d && git clone URL d`) は、確かでない cd の後ろでも検査しない。0.3.10 は確かでない cd の後ろを一律に止めていたので
+  止まっていた (確かな cd では 0.3.10 も検査していない)。README の目的と限界に書いた
 
 ### Fixed
 

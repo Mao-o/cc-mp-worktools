@@ -836,9 +836,9 @@ class WindowsDriveSpellingTest(unittest.TestCase):
     def test_drive_less_absolute_path_is_not_listed(self):
         # `/tmp` と `\tmp` は Python が `C:\tmp` と読み (在る)、Git Bash は別の場所に入るので挙げない。ドライブのある形は挙げる
         start = _FakeWindowsPath(self.HOME)
-        for step in ("/tmp", "\\tmp"):
-            with self.subTest(step=step):
-                self.assertIsNone(self.mod._possible_dirs(start, (step,)))
+        for history in (("/tmp",), ("\\tmp",), ("C:/tmp", "/tmp")):
+            with self.subTest(history=history):
+                self.assertIsNone(self.mod._possible_dirs(start, history))
         dirs = self.mod._possible_dirs(start, ("C:/tmp",))
         self.assertIsNotNone(dirs)
         self.assertEqual({ntpath.normcase(str(d)) for d in dirs}, {ntpath.normcase(self.HOME), ntpath.normcase("C:\\tmp")})
