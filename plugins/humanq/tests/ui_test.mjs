@@ -2,7 +2,7 @@
 //
 //   PLAYWRIGHT_PATH=<playwright の index.mjs> node tests/ui_test.mjs
 //
-// PLAYWRIGHT_PATH が無ければ `import("playwright")` を使う。サーバー (humanq.py) は 8770〜8779 の空いている
+// PLAYWRIGHT_PATH が無ければ `import("playwright")` を使う。サーバー (humanq.py) は OS が選んだ空きの
 // ポートと一時の state dir で起動し、/api/items・/api/answer・/api/undo は page.route の台本で返す
 // (遅延・失敗・データの変化を決定的に作るため。bd は要らない)。poll の setInterval は止めて、
 // ページの load() を直接呼んで進める。HUMANQ_SERVER_DIR で別の server/ を試せる。
@@ -30,18 +30,18 @@ async function loadPlaywright() {
 // スクロールバーが幅を取らない。Windows / Linux の Chrome や、macOS の「スクロールバーを常に表示」の画面を測るため)
 let browser, sbBrowser, server, stateDir, baseUrl;
 
-function portFree(port) {
-  return new Promise(resolve => {
+// OS に空きを選ばせる (port 0)。固定の範囲を順に調べると、同じマシンで suite と同時に回したとき取り合う
+function osPort() {
+  return new Promise((resolve, reject) => {
     const s = net.createServer();
-    s.once("error", () => resolve(false));
-    s.listen(port, "127.0.0.1", () => s.close(() => resolve(true)));
+    s.once("error", reject);
+    s.listen(0, "127.0.0.1", () => { const { port } = s.address(); s.close(() => resolve(port)); });
   });
 }
 
 async function startServer() {
-  let port = 0;
-  for (let p = 8770; p <= 8779; p++) if (await portFree(p)) { port = p; break; }
-  assert.ok(port, "8770〜8779 に空きが無い");
+  const port = await osPort();
+  assert.ok(port, "空きポートを OS から得られない");
   stateDir = mkdtempSync(path.join(os.tmpdir(), "humanq-ui-"));
   server = spawn("python3", [path.join(SERVER_DIR, "humanq.py"), "--state-dir", stateDir, "--port", String(port)],
     { stdio: ["ignore", "inherit", "inherit"] });
