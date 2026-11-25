@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.10.0
+
+### プロジェクトごとの CLI の決め方 (br への対応の土台。br の読み書きはまだ無い)
+
+- `server/registry.py` に `project_kind(root, cli)` を置いた。`.beads/` の中のファイルの印だけで `bd` / `br` / `unknown` / `conflict` と理由を返す (CLI は打たない。hook とサーバーの両方が使う)。br の印: `.beads/.gitignore` の `.br_history` か `fsqlite` を含む行 (コメント行は読まない)・`.br_history/`・`*-fsqlite-ns-*`・`.br-db-*.lock`。bd の印: `metadata.json` の `database` か `backend` が `dolt`・`embeddeddolt/`。br の印だけなら br、bd の印だけなら bd、両方なら conflict、どちらの印も無く `metadata.json` の `database` が `.db` で終わるなら unknown、どれにも当たらなければ bd (今までどおり)。`issues.jsonl` の有無は使わない
+- 明示の設定として、hook の env `HUMANQ_BEADS_CLI` (`bd` / `br` / `auto`、未設定は `auto`。前後の空白と大文字小文字は無視) を足した。指定に反する印があれば conflict、無ければ指定どおり。SessionStart の hook が `projects.json` の各 entry に `"cli"` (指定か null) も書き、サーバーはこの値と印で決める。不正な値は `auto` として扱い、SessionStart の出力に 1 行だけ警告する
+- unknown・conflict・br のプロジェクトでは、どの CLI も起動しない。`/api/items` の各プロジェクトは `ok:false`・`writable:false`・`error` を返す (unknown・conflict は「bd と br のどちらで読むか決められない (理由)。`HUMANQ_BEADS_CLI` で指定してください」、br は「br のプロジェクトにはまだ対応していません」)。br を bd の `.beads/` に向けて打つと、エラーを出さずに空の一覧を返して `.beads/` に dolt のファイルを作るので、br は br と確定した dir にだけ打つ前提にしている
+- `/api/items` の各プロジェクトに `cli` (`bd` / `br` / `null`) と `writable` を足した (既存の key は変えていない)。bd として読むプロジェクトは、読みに失敗しても `writable:true`
+- `POST /api/answer`・`/api/undo` は、`writable:false` のプロジェクトに対して CLI を打つ前に 400 `{code: "readonly", op}` を返す
+- `/api/summary` に `ok` と `error` を足した (既存の key は残す)。今までは読めなかったプロジェクトも `human: 0` を返し、hook が「判断待ち 0 件」と言ってしまっていた。hook は `ok:false` のとき「このプロジェクトの判断待ちを読めない: <error>」と伝え、件数は言わない。UserPromptSubmit は読めなかった応答で、伝えた回答の記憶を消さない
+- 設定や印が変わったときは、キャッシュの時間内でも読み直す (ファイルを見るだけ)
+
+### 変えていないもの
+
+- bd のプロジェクトの読み書き・bd の argv・画面・CSP は変えていない (サーバーが打つ bd の argv の列の固定は、テストを変えずに通る)。画面のバナーの文言は 0.8.0 で CLI に依らない形になっている
+
+### テスト
+
+- `tests/test_project_kind.py` を足した。判定の各行 (br の印 4 種と、`.gitignore` の 2 語・bd の印・両方・印なしの SQLite の形・何も無い形・`issues.jsonl` だけ・コメント行だけの `.gitignore`・明示の 3 値と不正値) を 1 件ずつ、偽の bd・br を PATH に置いて、bd の形の dir では br が 1 回も呼ばれないこと、br・unknown・conflict ではどの CLI も呼ばれないこと、`HUMANQ_BEADS_CLI=br` を bd の形に向けると conflict で `.beads/dolt` が作られないこと、`writable:false` への POST が CLI を呼ばずに 400 readonly になること、summary の `ok:false`、hook の出力が「0 件」と言わないこと、不正値の警告が 1 行だけなことを固定した
+- `server/humanq.py` が CLI の名前の文字列を持たない検査 (`tests/test_backend.py`) のため、種別の名前は `registry.BD` / `registry.BR` を使う
+
 ## 0.9.0
 
 ### 画面

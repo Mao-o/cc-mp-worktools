@@ -191,6 +191,15 @@ def load_project(repo: str) -> dict:
     return {"human": human, "answered": answered}
 
 
+def unreadable(kind: str, reason: str) -> dict:
+    """bd として読めないプロジェクトの結果 (どの CLI も起動しない)。kind は registry.project_kind の bd 以外。
+    cli は br と決まったときだけ "br"、決められない (unknown / conflict) ときは None。"""
+    if kind == registry.BR:
+        return {"ok": False, "writable": False, "cli": registry.BR, "error": "br のプロジェクトにはまだ対応していません"}
+    return {"ok": False, "writable": False, "cli": None,
+            "error": f"bd と br のどちらで読むか決められない ({reason})。{registry.CLI_ENV} で指定してください"}
+
+
 class Store:
     """プロジェクトごとの読みの直列化とキャッシュ。書き込みもプロジェクトごとに 1 本ずつ。"""
 
@@ -198,7 +207,7 @@ class Store:
         self.state_dir = state_dir
         self._locks: dict[str, threading.Lock] = {}
         self._wlocks: dict[str, threading.Lock] = {}
-        self._cache: dict[str, tuple[float, dict]] = {}
+        self._cache: dict[str, tuple[float, dict, tuple[str, str]]] = {}
         self._guard = threading.Lock()
         self._refreshing: set[str] = set()
         self._pool = ThreadPoolExecutor(max_workers=4)
@@ -210,18 +219,29 @@ class Store:
     def projects(self) -> list[str]:
         return registry.live_projects(self.state_dir)
 
+    def route(self, repo: str) -> tuple[str, str]:
+        """repo を読み書きする CLI の種別 (bd / br / unknown / conflict) と理由。ファイルの印だけで決め、CLI は打たない。"""
+        return registry.project_kind(repo, registry.project_cli(self.state_dir, repo))
+
     def project(self, repo: str) -> dict:
         with self._lock(self._locks, repo):
+            route = self.route(repo)
+            kind, reason = route
             hit = self._cache.get(repo)
-            if hit and time.monotonic() - hit[0] < CACHE_SEC:
+            # 設定 (HUMANQ_BEADS_CLI) や印が変わったら、キャッシュの時間内でも読み直す (ファイルを見るだけで安い)
+            if hit and hit[2] == route and time.monotonic() - hit[0] < CACHE_SEC:
                 return hit[1]
+            if kind != registry.BD:
+                data = {**unreadable(kind, reason), "human": [], "answered": []}
+                self._cache[repo] = (time.monotonic(), data, route)
+                return data
             try:
-                data = {"ok": True, **load_project(repo)}
+                data = {"ok": True, **load_project(repo), "cli": registry.BD, "writable": True}
             except BdError as e:
-                data = {"ok": False, "error": str(e), "human": [], "answered": []}
+                data = {"ok": False, "error": str(e), "human": [], "answered": [], "cli": registry.BD, "writable": True}
             except Exception as e:  # noqa: BLE001  想定外の形の出力でも、そのプロジェクトだけを読めないことにする
-                data = {"ok": False, "error": f"{type(e).__name__}: {e}", "human": [], "answered": []}
-            self._cache[repo] = (time.monotonic(), data)
+                data = {"ok": False, "error": f"{type(e).__name__}: {e}", "human": [], "answered": [], "cli": registry.BD, "writable": True}
+            self._cache[repo] = (time.monotonic(), data, route)
             return data
 
     def peek(self, repo: str) -> dict | None:
@@ -388,7 +408,9 @@ def make_handler(store: Store, port: int, token: str, page: str, version: str):
                 d = store.project(repo) if q.get("fresh") == "1" else store.peek(repo)
                 if d is None:
                     return self._json(200, {"pending": True})
-                self._json(200, {"human": len(d["human"]), "answered": [x["id"] for x in d["answered"]]})
+                # ok:false (読めないプロジェクト) の human は 0 でも「0 件」ではない。hook はこれを見て「読めない」と伝える
+                self._json(200, {"human": len(d["human"]), "answered": [x["id"] for x in d["answered"]],
+                                 "ok": d.get("ok", True), "error": d.get("error")})
             else:
                 self._send(404, b"not found", "text/plain")
 
@@ -416,6 +438,8 @@ def make_handler(store: Store, port: int, token: str, page: str, version: str):
                 fn = {"/api/answer": store.answer, "/api/undo": store.undo}.get(self.path)
                 if fn is None:
                     return self._json(404, {"error": "not found"})
+                if store.route(repo)[0] != registry.BD:      # CLI を打つ前に断る (br・決められないプロジェクトには書かない)
+                    return self._json(400, {"error": "このプロジェクトは書き込めない", "code": "readonly", "op": op})
                 try:
                     sig = fn(repo, body)
                 finally:
