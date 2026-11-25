@@ -1013,7 +1013,9 @@ flag** は、その値を検証に反映する。従来は hook の既定コン�
   (`watch kubectl ... ~/x` / `sudo -i kubectl ... ~/x`) は Bash のシェルが先に展開するが、wrapper を
   剥がした後の文字列からは包んだ形かどうかを区別できないので、展開しない側に倒す (0.29.5 と同じ読み)。
   heredoc を置いた行の後ろの段 (`cat <<EOF && kubectl --kubeconfig ~/x ...`) は Bash のシェルが読む語
-  なので展開する
+  なので展開する。行の先頭の段がシェル経由の wrapper でも、区切りが wrapper の引用符の外にあれば
+  (`watch 'cat' <<EOF && kubectl --kubeconfig ~/x ...` / `sudo -i cat <<EOF | kubectl ...`)、後ろの段は
+  外のシェルが読むので展開する (v0.30.4。0.30.3 までは wrapper の中身と読んで展開しなかった)
 - ユーザーの zsh で `setopt magic_equal_subst` が有効だと、`--kubeconfig=~/x` の `~` も zsh が HOME に
   展開する。hook は展開しない読み (bash と `zsh -f` の既定) で照合するので、この設定では照合先と
   CLI が読むファイルが食い違いうる
@@ -1081,7 +1083,15 @@ AWS_PROFILE=prod aws s3 ls
   `$HOME` / `${HOME}`、引数の `.` (`kubectl apply -k .` / `git add .`) は数えない)、シェル経由の
   wrapper の中身 (`watch '...'` / `sudo -i ...` / `npx -c '...'`)。heredoc を置いた行の後ろの段の
   代入 (`cat <<EOF && KUBECONFIG=~/x kubectl ...`) は Bash のシェルが行う代入なので展開する (v0.30.2。
-  0.30.1 までは展開せず、作業ディレクトリの `~/x` を探して誤 deny になっていた)
+  0.30.1 までは展開せず、作業ディレクトリの `~/x` を探して誤 deny になっていた)。行の先頭の段がシェル経由の
+  wrapper で、区切りが wrapper の引用符の外にある行 (`watch 'cat' <<EOF && KUBECONFIG=~/x kubectl ...`) の
+  後ろの段も同じ (v0.30.4)
+- 予約語の `time` の後ろの代入 (`time KUBECONFIG=~/x kubectl ...`) も、シェル自身が行う代入なので展開する
+  (v0.30.4。0.30.3 までは wrapper の後ろの引数と読み、作業ディレクトリの `~/x` を探していた。そこに期待値どおりの
+  kubeconfig があれば、kubectl が読む HOME の下が違っても通していた)。予約語として読まれない `time`
+  (`X=1 time ...` / `\time ...` / `nohup time ...`) は外部の time で、代入の形の語をコマンド名として起動しようと
+  して失敗し後ろの CLI は走らないので、従来どおり展開しない。option 付きの `time -p` (zsh は `-p` をコマンド名と
+  して起動する) と、`time` の後ろの wrapper の後ろの代入 (`time env KUBECONFIG=~/x ...`) も展開しない
 
 ### 透過 wrapper を跨ぐときの env 伝播
 
