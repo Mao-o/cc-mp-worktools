@@ -225,11 +225,16 @@ function whileVisible(ms, fn) {
 }
 
 // 知らせのトースト。opts.kind が "ok" なら成功の知らせ (.toast.ok)。opts.action ({label, run}) で、閉じるの前にボタンを置く
-// (押すとトーストを閉じてから run を呼ぶ)。同じ key (既定は文そのもの) のトーストが出ている間は重ねない
+// (押すとトーストを閉じてから run を呼ぶ)。同じ key (既定は文そのもの) のトーストが出ている間は重ねない。
+// 同時に出すのは TOAST_MAX まで: 超えるときは、いちばん古いものを閉じるの経路で閉じる (action は走らせない)。
+// 低い画面で知らせが積み上がると、古いトーストのボタンが画面の上に出るため。回答の取り消しは回答済みのカードにも残る
+const TOAST_MAX = 3;
 function toast(msg, opts = {}) {
   const box = document.getElementById("toasts");
   const key = opts.key || msg;
   if ([...box.children].some(t => t.dataset.key === key && !t.classList.contains("out"))) return;
+  const live = [...box.children].filter(t => !t.classList.contains("out"));
+  for (const old of live.slice(0, Math.max(0, live.length - TOAST_MAX + 1))) old.querySelector(".toast-x").click();
   const close = el("button", { class: "toast-x", type: "button", "aria-label": "閉じる" }, "×");
   const act = opts.action ? el("button", { class: "toast-act", type: "button" }, opts.action.label) : null;
   const t = el("div", { class: opts.kind ? "toast " + opts.kind : "toast", role: "status", "data-msg": msg, "data-key": key },
@@ -700,7 +705,7 @@ async function failed(key, it, e) {
   }
   if (e.code === "gone") {                               // ほかで回答・反映済み。戻さず、読み直して今の状態を出す
     pending.set(key, { state: "done", path: it.project, seq: loadSeq });
-    dropDraft(it);                                       // 問い直されたときに前の選択と補足を出さない
+    if (key[0] === "q") dropDraft(it);                  // 回答の gone だけ。取り消しの gone で、問い直された新しい問いの下書きを消さない
     dropAnsweredToasts(it);                              // 前の回答の知らせの「取り消す」は、ほかで反映された今の状態に合わない
     cards.delete(key);
     toast(`${label}: ほかで回答・反映済みでした`);
@@ -722,7 +727,7 @@ async function failed(key, it, e) {
     toast(`${label}: ${changed ? info.summary : info.summary + "。カードを戻しました"}`);
     return;
   }
-  dropDraft(it);
+  if (key[0] === "q") dropDraft(it);       // 取り消しの失敗では、問い直された新しい問いの下書きを消さない
   cards.delete(key);
   pending.delete(key);
   render();

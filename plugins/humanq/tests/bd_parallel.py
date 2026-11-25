@@ -82,7 +82,8 @@ class Pool:
             to_w_r, to_w_w = os.pipe()
             from_w_r, from_w_w = os.pipe()
             # cwd は親のまま (相対パスの env が親と同じものを指す)。script は絶対パスなので sys.path[0] は script の dir
-            p = subprocess.Popen([sys.executable, self.script, "--bd-worker", str(to_w_r), str(from_w_w)],
+            # -W error などの起動の flag も渡す (渡さないと、直列なら ERROR になる警告が worker では通る)
+            p = subprocess.Popen([sys.executable, *subprocess._args_from_interpreter_flags(), self.script, "--bd-worker", str(to_w_r), str(from_w_w)],
                                  stdin=subprocess.DEVNULL, pass_fds=(to_w_r, from_w_w), env=self.env)
             os.close(to_w_r)
             os.close(from_w_w)
@@ -173,6 +174,14 @@ class RemoteTest(unittest.TestCase):
     def shortDescription(self):
         return self.orig.shortDescription()
 
+    def debug(self):                                 # TestSuite.debug() の経路。worker の結果を例外として上げる (黙って通さない)
+        rec = self.pool.result(self.name)
+        st, text = rec.get("status"), rec.get("text", "")
+        if st == "skip":
+            raise unittest.SkipTest(text)
+        if st not in ("ok", "xfail"):
+            raise (RemoteFailure if st == "fail" else RemoteError)("\n" + (text or f"worker の結果: {rec!r}"))
+
     def run(self, result=None):
         result.startTest(self)
         try:
@@ -232,8 +241,9 @@ def parallel_suite(tests, script: str, jobs: int, wanted, env_extra: dict | None
     """tests のうち wanted(t) が真のものを worker に回す suite を作る。回すものが無ければ tests をそのまま返す。"""
     flat = list(flatten(tests))
     remote = [t for t in flat if wanted(t)]
-    if not remote:
-        return tests
+    mods = {sys.modules.get(type(t).__module__) for t in remote}
+    if not remote or any(hasattr(m, "setUpModule") or hasattr(m, "tearDownModule") for m in mods):
+        return tests                             # worker は module 単位の fixture を回さないので、直列と結果が分かれる形は並列にしない
     names = [name_of(t) for t in remote]
     pool = Pool(script, names, jobs, env_extra)
     local = [t for t in flat if not wanted(t)]

@@ -29,9 +29,11 @@ import tempfile
 import threading
 import time
 import traceback
+import types
 import unittest
 import urllib.error
 import urllib.request
+import warnings
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -911,6 +913,9 @@ if os.environ.get(POOL_DUMMY_ENV) == "1":
         def test_exit(self):
             os._exit(3)                              # worker ごと落ちる
 
+        def test_deprecation_warning(self):          # -W error なら ERROR (直列と同じ)
+            warnings.warn("古い API", DeprecationWarning)
+
         @unittest.expectedFailure
         def test_xfail(self):
             self.assertEqual(1, 2)
@@ -942,6 +947,15 @@ if os.environ.get(POOL_DUMMY_ENV) == "1":
             mark = os.environ.get("HUMANQ_TEST_POOL_MARK")
             if mark:                                 # setUpClass で skip したときも class cleanup が回ることを親が見る
                 cls.addClassCleanup(lambda: Path(mark, f"skip-cleanup-{os.getpid()}").write_text(""))
+            raise unittest.SkipTest("setUpClass でわざと skip")
+
+        def test_never(self):
+            pass
+
+    class PoolDummySkippedBrokenCleanup(unittest.TestCase):
+        @classmethod
+        def setUpClass(cls):                         # skip しても、class cleanup の失敗は直列と同じく ERROR
+            cls.addClassCleanup(lambda: 1 / 0)
             raise unittest.SkipTest("setUpClass でわざと skip")
 
         def test_never(self):
@@ -1048,7 +1062,7 @@ class ParallelRunner(unittest.TestCase):
 
     def test_a_failing_class_teardown_in_a_worker_is_an_error(self):
         # 直列 (HUMANQ_TEST_JOBS=1・クラス名指定) では tearDownClass と class cleanup の失敗は ERROR になる。並列でも同じにする
-        for name in ("PoolDummyBrokenTeardown.test_ok", "PoolDummyBrokenCleanup.test_ok"):
+        for name in ("PoolDummyBrokenTeardown.test_ok", "PoolDummyBrokenCleanup.test_ok", "PoolDummySkippedBrokenCleanup.test_never"):
             with self.subTest(name=name):
                 r = self.run_remote([name], jobs=1)
                 self.assertEqual(r.failures, [])
@@ -1072,6 +1086,38 @@ class ParallelRunner(unittest.TestCase):
             r = self.run_remote(["PoolDummy.test_ok"], jobs=1, script=self.fake_worker(body))
         self.assertEqual((self.names_of(r.errors), r.failures, r.skipped), (["PoolDummy.test_ok"], [], []))
         self.assertIn("待っても結果が来ない", r.errors[0][1])
+
+    def test_a_module_with_module_fixtures_stays_serial(self):
+        # worker は setUpModule / tearDownModule を回さない。回すと、直列なら ERROR になる module の fixture の失敗が通る
+        mod = types.ModuleType("humanq_pool_modfix")
+        Case = type("Case", (unittest.TestCase,), {"__module__": mod.__name__, "test_x": lambda self: None})
+        tests = unittest.TestSuite([Case("test_x")])
+        with mock.patch.dict(sys.modules, {mod.__name__: mod}):
+            for fixture in ("setUpModule", "tearDownModule"):
+                with self.subTest(fixture=fixture):
+                    setattr(mod, fixture, lambda: None)
+                    self.assertIs(bd_parallel.parallel_suite(tests, SCRIPT, 2, lambda t: True), tests)
+                    delattr(mod, fixture)
+            self.assertIsInstance(bd_parallel.parallel_suite(tests, SCRIPT, 2, lambda t: True), bd_parallel.ParallelSuite)
+
+    def test_the_worker_gets_the_interpreter_flags(self):
+        # `python -W error -m unittest` の -W は env に出ない。worker の起動に渡さないと、直列なら ERROR の警告が worker では通る
+        with mock.patch.object(subprocess, "_args_from_interpreter_flags", return_value=["-Werror::DeprecationWarning"]):
+            r = self.run_remote(["PoolDummy.test_deprecation_warning"], jobs=1)
+        self.assertEqual((self.names_of(r.errors), r.failures), (["PoolDummy.test_deprecation_warning"], []))
+
+    def test_debug_does_not_pass_a_remote_failure(self):
+        # TestSuite.debug() は結果を集めずに例外を上げる経路。RemoteTest がそこで黙って通らない
+        for name, exc in (("PoolDummy.test_fail", bd_parallel.RemoteFailure), ("PoolDummy.test_error", bd_parallel.RemoteError),
+                          ("PoolDummy.test_skip", unittest.SkipTest)):
+            with self.subTest(name=name):
+                class Stub(unittest.TestCase):
+                    def runTest(self):
+                        pass
+                suite = bd_parallel.parallel_suite(unittest.TestSuite([Stub()]), SCRIPT, 1, lambda t: True,
+                                                   {POOL_DUMMY_ENV: "1"}, name_of=lambda t, n=name: n)
+                with self.assertRaises(exc):
+                    suite.debug()
 
     def test_a_worker_that_answers_wrongly_does_not_pass(self):
         cases = {
