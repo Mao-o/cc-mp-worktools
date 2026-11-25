@@ -9,7 +9,7 @@ bd を通す読み書きのシナリオ (BdScenarios) は 2 通りで回す:
   使い捨てのプロジェクトで行う (本物の bd の DB には書かない)
 モジュールごと読み込んだとき (discover など) は、この 2 つのシナリオを HUMANQ_TEST_JOBS 個 (既定 3) のプロセスで
 並列に回す (下の「並列のプロセスで回す」。1 で直列)。
-サーバーのプロセスを起動する確認は 8770〜8779 の空いているポートで、シナリオの中の HTTP は OS が選んだポートで行う。
+サーバーのプロセスを起動する確認も、シナリオの中の HTTP も、OS が選んだポートで行う (同じマシンで suite を同時に回しても取り合わない)。
 HUMANQ_SERVER_DIR で別の server/ を試せる。
 """
 from __future__ import annotations
@@ -52,11 +52,11 @@ QUESTION = {"humanq": {"v": 1, "kind": "decision", "ask": "Q?", "context": "c", 
 
 
 def free_port() -> int:
-    for p in range(8770, 8780):
-        with socket.socket() as s:
-            if s.connect_ex(("127.0.0.1", p)) != 0:
-                return p
-    raise RuntimeError("8770〜8779 に空きが無い")
+    # OS に空きを選ばせる (port 0)。固定の範囲を順に調べると、同じマシンで suite を同時に回したとき、
+    # 調べてから使うまでの間にもう一方が同じ番号を選んで、お互いのサーバーを掴む
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 def fetch(url: str, data: bytes | None = None, headers: dict | None = None):
@@ -202,6 +202,38 @@ class ServerTokenAndHeaders(unittest.TestCase):
                 self.assertEqual(low.get("x-frame-options"), "DENY", path)
         finally:
             stop(p)
+
+
+class FreePort(unittest.TestCase):
+    def hold(self, port: int) -> socket.socket:
+        """番号を bind だけして握る (listen はしない)。握れないなら、返された番号がすでに誰かのものだったということ"""
+        s = socket.socket()
+        self.addCleanup(s.close)
+        try:
+            s.bind(("127.0.0.1", port))
+        except OSError as e:
+            self.fail(f"free_port が返した {port} をすでに誰かが使っている: {e}")
+        return s
+
+    def test_free_port_skips_a_port_that_is_bound_but_not_listening(self):
+        # 範囲を connect で調べる実装は、bind しただけで listen していない番号を「空き」と読み、同じ番号を返す
+        first = free_port()
+        self.hold(first)
+        second = free_port()
+        self.assertNotEqual(first, second, "bind 済みの番号をもう一度返した (同時に回した suite と取り合う)")
+
+    def test_free_port_gives_distinct_numbers_while_each_is_held(self):
+        held, ports = [], []
+        try:
+            for _ in range(5):
+                p = free_port()
+                held.append(self.hold(p))
+                ports.append(p)
+        finally:
+            for s in held:
+                s.close()
+        self.assertEqual(len(ports), 5)
+        self.assertEqual(len(set(ports)), 5, ports)
 
 
 HOOK_PATH = SERVER_DIR.parent / "hooks" / "humanq_hook.py"
