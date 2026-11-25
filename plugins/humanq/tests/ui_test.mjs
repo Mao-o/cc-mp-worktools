@@ -1389,3 +1389,76 @@ test("作成日の横に「作成から N 日」が出る。当日は「今日�
     assert.equal(await date(acard(page, "t-E5")), "2026-11-20 (作成から 7 日)");
   }, {}, page => page.clock.install({ time: new Date(2026, 10, 27, 12, 0, 0) }));
 });
+
+// ---- 0.5.0: 長い背景 (context) は 5 行で畳む ------------------------------------------------------------
+
+const lines = n => Array.from({ length: n }, (_, i) => `ctx line ${i + 1}`).join("\n");
+const withCtx = (id, n) => { const it = item(id); return { ...it, q: { ...it.q, context: lines(n) } }; };
+const ctxMore = (page, id) => qcard(page, id).locator("button.ctxmore");
+const ctxMetrics = (page, id) => qcard(page, id).locator("p.ctx").evaluate(e => ({
+  h: e.getBoundingClientRect().height, lh: parseFloat(getComputedStyle(e).lineHeight), sh: e.scrollHeight }));
+
+test("10 行の背景は 5 行分以下に畳まれ、「続きを読む」で全文が見え、「閉じる」で戻る", async () => {
+  const s = new Script([proj(P1, [withCtx("t-A1", 10)])]);
+  await withPage(s, async page => {
+    await waitFor(async () => await ctxMore(page, "t-A1").isVisible(), 3000, "続きを読むが出る");
+    assert.equal(await ctxMore(page, "t-A1").textContent(), "続きを読む");
+    assert.equal(await ctxMore(page, "t-A1").getAttribute("aria-expanded"), "false");
+    assert.equal(await ctxMore(page, "t-A1").getAttribute("type"), "button");
+    const m = await ctxMetrics(page, "t-A1");
+    assert.ok(m.h <= m.lh * 5 + 1, `畳んだ高さが 5 行を超える: ${m.h} / ${m.lh}`);
+    assert.ok(m.sh > m.h + 1, "全文が畳まれていない");
+    await ctxMore(page, "t-A1").click();
+    const o = await ctxMetrics(page, "t-A1");
+    assert.ok(o.h >= o.lh * 10 - 1, `開いても全文が見えない: ${o.h} / ${o.lh}`);
+    assert.equal(await ctxMore(page, "t-A1").textContent(), "閉じる");
+    assert.equal(await ctxMore(page, "t-A1").getAttribute("aria-expanded"), "true");
+    await ctxMore(page, "t-A1").click();
+    const c = await ctxMetrics(page, "t-A1");
+    assert.ok(c.h <= c.lh * 5 + 1, "閉じても畳まれない");
+    assert.equal(await ctxMore(page, "t-A1").textContent(), "続きを読む");
+  });
+});
+
+test("3 行の背景と、ちょうど 5 行の背景では「続きを読む」が出ない。問いの無いカードにも出ない", async () => {
+  const none = { ...item("t-C3"), q: null };
+  const s = new Script([proj(P1, [withCtx("t-A1", 3), withCtx("t-B2", 5), none])]);
+  await withPage(s, async page => {
+    assert.equal(await ctxMore(page, "t-A1").count(), 1);
+    assert.equal(await ctxMore(page, "t-A1").isVisible(), false);
+    assert.equal(await ctxMore(page, "t-B2").isVisible(), false);
+    assert.equal(await ctxMore(page, "t-C3").count(), 0);
+    assert.match(await qcard(page, "t-C3").textContent(), /問いがまだ整理されていません/);
+    const m = await ctxMetrics(page, "t-A1");
+    assert.ok(m.h < m.lh * 3 + 1 && m.h >= m.lh * 3 - 1, "3 行の背景が 3 行で出ていない");
+  });
+});
+
+test("開いた背景は、データが変わっても開いたまま。ほかのカードは畳んだまま", async () => {
+  const s = new Script([proj(P1, [withCtx("t-A1", 10), withCtx("t-B2", 10)])]);
+  await withPage(s, async page => {
+    await waitFor(async () => await ctxMore(page, "t-A1").isVisible(), 3000, "続きを読む");
+    await ctxMore(page, "t-A1").click();
+    await page.locator("h1").click();            // フォーカスをカードの外へ (フォーカスのあるカードは作り直しを後回しにするため)
+    assert.equal(await page.evaluate(() => document.activeElement === document.body), true);
+    await qcard(page, "t-A1").evaluate(e => { e.dataset.mark = "old"; });
+    s.projects[0].human[0].title = "changed title";
+    await page.evaluate(() => load());
+    await waitFor(async () => /changed title/.test(await qcard(page, "t-A1").textContent()), 3000, "A の題が変わる");
+    await waitFor(async () => (await qcard(page, "t-A1").count()) === 1, 3000, "A が 1 枚");
+    assert.equal(await qcard(page, "t-A1").evaluate(e => e.dataset.mark || ""), "", "A が作り直されていない (旧い要素のまま)");
+    const o = await ctxMetrics(page, "t-A1");
+    assert.ok(o.h >= o.lh * 10 - 1, "データの更新で畳まれた");
+    assert.equal(await ctxMore(page, "t-A1").textContent(), "閉じる");
+    assert.equal(await ctxMore(page, "t-B2").textContent(), "続きを読む");
+  });
+});
+
+test("幅 375・高さ 812 で、10 行の背景のカードの最初の選択肢が最初の画面に入る", async () => {
+  const s = new Script([proj(P1, [withCtx("t-A1", 10)])]);
+  await withPage(s, async page => {
+    await waitFor(async () => await ctxMore(page, "t-A1").isVisible(), 3000, "続きを読む");
+    const b = await qcard(page, "t-A1").locator(".opt").first().boundingBox();
+    assert.ok(b.y >= 0 && b.y + b.height <= 812, `最初の選択肢が画面の外: y=${b.y} h=${b.height}`);
+  }, { viewport: { width: 375, height: 812 } });
+});
