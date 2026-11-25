@@ -204,6 +204,37 @@ class ServerTokenAndHeaders(unittest.TestCase):
             stop(p)
 
 
+class AnswerSig(unittest.TestCase):
+    """回答の署名 (humanq.asig / last_of) の性質。bd を通す照合はシナリオ (BdScenarios) の側で見る。"""
+
+    def test_the_sig_tells_apart_what_the_count_alone_cannot(self):
+        self.assertNotEqual(humanq.asig(1, "[humanq] 回答: 案A (a)"), humanq.asig(1, "[humanq] 回答: 案B (b)"),
+                            "件数が同じでも本文が違えば別の回答 (コメントが消された・並びが崩れたときに取り違えない)")
+        self.assertNotEqual(humanq.asig(1, "[humanq] 回答: 案A (a)"), humanq.asig(3, "[humanq] 回答: 案A (a)"),
+                            "本文が同じでも件数が違えば別の回答 (同じ案での答え直し)")
+        # 書いた本文と bd から読み直した本文で、前後の空白 (末尾の改行) だけが違っても同じ回答 (送り直しの判定と同じ扱い)
+        self.assertEqual(humanq.asig(2, "[humanq] 回答: 案A (a)\n"), humanq.asig(2, "[humanq] 回答: 案A (a)"))
+
+    def test_last_of_counts_only_humanq_comments(self):
+        mark = "[humanq] 回答: 案A (a)\n"
+        cs = [{"text": "エージェントのメモ"}, {"text": "[humanq] 回答: 案B (b)\n"}, {"text": humanq.UNDO_HEAD + "\n"},
+              {"text": "問い直した"}, {"text": mark}, {"text": "後のメモ"}]
+        self.assertEqual(humanq.last_of(cs), (mark, humanq.asig(3, mark)))
+        self.assertEqual(humanq.last_of([{"text": "メモだけ"}]), ("", humanq.asig(0, None)))
+        self.assertNotEqual(humanq.asig(0, None), "", "コメントが無いときの署名が、読めなかったときの空の署名と同じ")
+
+    def test_comments_of_an_unexpected_shape_are_not_counted(self):
+        # 本文が文字列でない・dict でない要素は数えない (例外で回答や一覧を止めない)
+        mark = "[humanq] 回答: 案A (a)\n"
+        for odd in ({"text": 5}, {"text": ["[humanq] x"]}, {"text": None}, {}, "[humanq] 文字列だけ", None):
+            with self.subTest(odd=odd):
+                try:
+                    got = humanq.last_of([{"text": mark}, odd])
+                except Exception as e:  # noqa: BLE001
+                    self.fail(f"想定外の形のコメントで例外: {type(e).__name__}: {e}")
+                self.assertEqual(got, (mark, humanq.asig(1, mark)))
+
+
 class FreePort(unittest.TestCase):
     def hold(self, port: int) -> socket.socket:
         """番号を bind だけして握る (listen はしない)。握れないなら、返された番号がすでに誰かのものだったということ"""
@@ -352,6 +383,19 @@ class BdScenarios:
         registry.register(sd, self.repo)
         return humanq.Store(sd)
 
+    def write(self, fn, body: dict, raises: type | None = None):
+        """Store の書き込み (store.answer / store.undo) を呼ぶ。想定外の例外は FAIL にする (実装の変異で別の型の例外が
+        漏れたとき、テストが走っていない ERROR に数えない)。raises を渡すと、その型の例外が上がることを確かめて返す。"""
+        try:
+            fn(self.repo, body)
+        except Exception as e:  # noqa: BLE001
+            if raises is not None and isinstance(e, raises):
+                return e
+            self.fail(f"{fn.__name__} が想定外の例外を上げた: {type(e).__name__}: {e}")
+        if raises is not None:
+            self.fail(f"{fn.__name__} が {raises.__name__} を上げなかった")
+        return None
+
     def test_human_and_answered_both_listed_only_as_answered(self):
         iid = self.new_question(labels=("human", "answered"))
         data = humanq.load_project(self.repo)
@@ -363,18 +407,14 @@ class BdScenarios:
         store = self.store()
         restore = self.failing("label remove human")
         try:
-            with self.assertRaises(humanq.BdError) as cm:
-                store.answer(self.repo, {"id": iid, "option": "a", "text": "補足"})
-            self.assertEqual(getattr(cm.exception, "stage", None), "label")
-            self.assertIs(getattr(cm.exception, "written", None), True)
+            e = self.write(store.answer, {"id": iid, "option": "a", "text": "補足"}, raises=humanq.BdError)
+            self.assertEqual(getattr(e, "stage", None), "label")
+            self.assertIs(getattr(e, "written", None), True)
             self.assertEqual(len([c for c in self.comments(iid) if c.startswith("[humanq]")]), 1)
             self.assertEqual(self.labels(iid) & {"human", "answered"}, {"human", "answered"})
         finally:
             restore()
-        try:
-            store.answer(self.repo, {"id": iid, "option": "a", "text": "補足"})  # 送り直し
-        except humanq.BdError as e:
-            self.fail(f"失敗を外した後の送り直しが失敗した: {e}")
+        self.write(store.answer, {"id": iid, "option": "a", "text": "補足"})  # 送り直し (失敗を外した後)
         self.assertEqual(len([c for c in self.comments(iid) if c.startswith("[humanq]")]), 1, "送り直しでコメントが二重になった")
         self.assertEqual(self.labels(iid) & {"human", "answered"}, {"answered"})
 
@@ -383,14 +423,10 @@ class BdScenarios:
         store = self.store()
         restore = self.failing("label remove human")
         try:
-            with self.assertRaises(humanq.BdError):
-                store.answer(self.repo, {"id": iid, "option": "a", "text": ""})
+            self.write(store.answer, {"id": iid, "option": "a", "text": ""}, raises=humanq.BdError)
         finally:
             restore()
-        try:
-            store.answer(self.repo, {"id": iid, "option": "b", "text": ""})
-        except humanq.BdError as e:
-            self.fail(f"失敗を外した後の回答が失敗した: {e}")
+        self.write(store.answer, {"id": iid, "option": "b", "text": ""})        # 失敗を外した後の回答
         marks = [c for c in self.comments(iid) if c.startswith("[humanq]")]
         self.assertEqual(len(marks), 2)
         self.assertIn("案B", marks[-1])
@@ -400,9 +436,7 @@ class BdScenarios:
         store = self.store()
         restore = self.failing("label remove human", times=1)
         try:
-            store.answer(self.repo, {"id": iid, "option": "a", "text": ""})
-        except humanq.BdError as e:
-            self.fail(f"1 回だけの失敗が再試行で通らなかった: {e}")
+            self.write(store.answer, {"id": iid, "option": "a", "text": ""})   # 1 回だけの失敗は再試行で通る
         finally:
             restore()
         self.assertEqual(self.calls("label remove human"), 2)
@@ -560,10 +594,7 @@ class BdScenarios:
         self.assertEqual(json.loads(body).get("op"), "answer")
         self.assertEqual(json.loads(body).get("stage"), "label")
         iid2 = self.new_question()
-        try:
-            store.answer(self.repo, {"id": iid2, "option": "a"})
-        except humanq.BdError as e:
-            self.fail(f"失敗を外した後の回答が失敗した: {e}")
+        self.write(store.answer, {"id": iid2, "option": "a"})                 # 失敗を外した後の回答
         restore = self.failing("label add human")
         try:
             code, _, body = self.post(port, "/api/undo", {"project": self.repo, "id": iid2})
@@ -575,14 +606,13 @@ class BdScenarios:
     def test_both_labels_after_a_partial_undo_is_a_question_again(self):
         iid = self.new_question()
         store = self.store()
-        store.answer(self.repo, {"id": iid, "option": "a"})
+        self.write(store.answer, {"id": iid, "option": "a"})
         restore = self.failing("label remove answered")
         try:
-            with self.assertRaises(humanq.WriteError) as cm:
-                store.undo(self.repo, {"id": iid})
+            e = self.write(store.undo, {"id": iid}, raises=humanq.WriteError)
         finally:
             restore()
-        self.assertEqual((cm.exception.stage, cm.exception.written), ("label", True))
+        self.assertEqual((e.stage, e.written), ("label", True))
         self.assertEqual(self.labels(iid) & {"human", "answered"}, {"human", "answered"})
         data = humanq.load_project(self.repo)
         self.assertIn(iid, [i["id"] for i in data["human"]], "取り消したチケットが判断待ちに出ない")
@@ -593,8 +623,7 @@ class BdScenarios:
         store = self.store()
         restore = self.failing("label remove human")
         try:
-            with self.assertRaises(humanq.WriteError):
-                store.answer(self.repo, {"id": iid, "option": "a"})
+            self.write(store.answer, {"id": iid, "option": "a"}, raises=humanq.WriteError)
         finally:
             restore()
         data = humanq.load_project(self.repo)
@@ -605,11 +634,11 @@ class BdScenarios:
     def test_answer_after_the_question_was_asked_again_is_recorded(self):
         iid = self.new_question()
         store = self.store()
-        store.answer(self.repo, {"id": iid, "option": "a"})
+        self.write(store.answer, {"id": iid, "option": "a"})
         self.add_comment(iid, "問いを書き直した: 案を 1 つ足した")             # README の手順 4
         bdc(self.repo, "label", "add", iid, "human")
         bdc(self.repo, "label", "remove", iid, "answered")
-        store.answer(self.repo, {"id": iid, "option": "a"})                  # 10 分以内に同じ選択肢
+        self.write(store.answer, {"id": iid, "option": "a"})                 # 10 分以内に同じ選択肢
         texts = self.comments(iid)
         self.assertEqual(len(texts), 3, texts)
         self.assertTrue(texts[-1].startswith("[humanq] 回答: 案A (a)"), "問い直しの後の回答が記録されていない")
@@ -623,11 +652,11 @@ class BdScenarios:
                 bdc(self.repo, "update", iid, "--status", status)
                 store = self.store()
                 self.assertIn(iid, [i["id"] for i in humanq.load_project(self.repo)["human"]])
-                store.answer(self.repo, {"id": iid, "option": "a"})
+                self.write(store.answer, {"id": iid, "option": "a"})
                 data = humanq.load_project(self.repo)
                 self.assertIn(iid, [i["id"] for i in data["answered"]], "回答したチケットがどの一覧にも出ない")
                 self.assertNotIn(iid, [i["id"] for i in data["human"]])
-                store.undo(self.repo, {"id": iid})                           # 取り消しも Gone にならない
+                self.write(store.undo, {"id": iid})                          # 取り消しも Gone にならない
                 self.assertIn(iid, [i["id"] for i in humanq.load_project(self.repo)["human"]])
 
     def test_human_and_answered_both_on_an_in_progress_ticket_show_once_as_answered(self):
@@ -641,6 +670,145 @@ class BdScenarios:
         iid = self.new_question(labels=("answered",))
         bdc(self.repo, "close", iid)
         self.assertNotIn(iid, [i["id"] for i in humanq.load_project(self.repo)["answered"]])
+
+    # ---- 0.7.0: 取り消しの照合 (回答の署名 asig) ----
+    # 画面は回答の成功の応答と回答済みの一覧で回答の署名を受け取り、取り消しに付けて送る。サーバーは今の最後の
+    # [humanq] コメントの署名と照合し、違えば 409 stale で何も書かない
+
+    def post_json(self, port: int, path: str, body: dict) -> tuple[int, dict]:
+        code, _, raw = self.post(port, path, body)
+        try:
+            j = json.loads(raw)
+        except ValueError:
+            self.fail(f"{path} の応答が JSON でない: {code} {raw[:200]!r}")
+        self.assertIsInstance(j, dict, raw)
+        return code, j
+
+    def answer_sig(self, port: int, iid: str, option: str) -> str:
+        code, j = self.post_json(port, "/api/answer", {"project": self.repo, "id": iid, "option": option})
+        self.assertEqual(code, 200, j)
+        self.assertIsInstance(j.get("asig"), str, f"回答の成功の応答に署名が無い: {j}")
+        self.assertTrue(j["asig"], j)
+        return j["asig"]
+
+    def undo_http(self, port: int, iid: str, **extra) -> tuple[int, dict]:
+        return self.post_json(port, "/api/undo", {"project": self.repo, "id": iid, **extra})
+
+    def answered_now(self, port: int, iid: str) -> dict:
+        code, _, raw = fetch(f"http://127.0.0.1:{port}/api/items")
+        self.assertEqual(code, 200, raw)
+        ps = json.loads(raw)["projects"]
+        self.assertEqual(len(ps), 1, ps)
+        found = [i for i in ps[0]["answered"] if i["id"] == iid]
+        self.assertEqual(len(found), 1, ps[0])
+        return found[0]
+
+    def test_undo_from_a_stale_answer_does_not_undo_the_answer_given_since(self):
+        # 案 A で答える → 別のタブで取り消して案 B で答え直す → 最初のタブに残った案 A のトーストの「取り消す」
+        iid = self.new_question()
+        port = self.serve(self.store())
+        sig_a = self.answer_sig(port, iid, "a")
+        code, j = self.undo_http(port, iid, asig=sig_a)                      # 別のタブ (その時点では今の回答)
+        self.assertEqual(code, 200, j)
+        sig_b = self.answer_sig(port, iid, "b")
+        self.assertNotEqual(sig_a, sig_b)
+        before = self.comments(iid)
+        writes = (self.calls("comments add"), self.calls("label"))
+        code, j = self.undo_http(port, iid, asig=sig_a)
+        self.assertEqual((code, j.get("code"), j.get("op")), (409, "stale", "undo"), j)
+        self.assertEqual(self.comments(iid), before, "署名の違う取り消しがコメントを書いた")
+        self.assertEqual((self.calls("comments add"), self.calls("label")), writes, "署名の違う取り消しが bd に書き込んだ")
+        self.assertEqual(self.labels(iid) & {"human", "answered"}, {"answered"}, "今の回答 (案 B) が取り消された")
+        self.assertTrue(before and before[-1].startswith("[humanq] 回答: 案B (b)"), before)
+        code, j = self.undo_http(port, iid, asig=sig_b)                      # 今の回答の署名なら取り消せる
+        self.assertEqual(code, 200, j)
+        self.assertEqual(self.labels(iid) & {"human", "answered"}, {"human"})
+
+    def test_undo_from_a_stale_answer_with_the_same_text_is_refused(self):
+        # 案 A → 取り消し → 案 A で答え直す: 本文が同じでも別の回答なので、前の回答の署名では取り消さない
+        iid = self.new_question()
+        port = self.serve(self.store())
+        sig1 = self.answer_sig(port, iid, "a")
+        code, j = self.undo_http(port, iid, asig=sig1)
+        self.assertEqual(code, 200, j)
+        sig2 = self.answer_sig(port, iid, "a")
+        self.assertNotEqual(sig1, sig2, "同じ本文で答え直した回答が、前の回答と同じ署名になる")
+        n = len(self.comments(iid))
+        code, j = self.undo_http(port, iid, asig=sig1)
+        self.assertEqual((code, j.get("code")), (409, "stale"), j)
+        self.assertEqual(len(self.comments(iid)), n, "署名の違う取り消しがコメントを書いた")
+        self.assertEqual(self.labels(iid) & {"human", "answered"}, {"answered"})
+
+    def test_answered_items_carry_the_sig_the_answer_returned(self):
+        # 回答済みのカードの取り消しも同じ照合を通る: 一覧の asig は回答の応答の asig と同じで、それで取り消せる。
+        # エージェントのコメントが回答の前と後に挟まっても変わらない (署名が数えるのは [humanq] のコメントだけ)
+        iid = self.new_question()
+        port = self.serve(self.store())
+        self.add_comment(iid, "エージェントのメモ: 問いを書いた")
+        sig = self.answer_sig(port, iid, "a")
+        self.add_comment(iid, "エージェントのメモ: 回答を読む前の作業")
+        self.assertEqual(self.answered_now(port, iid).get("asig"), sig)
+        code, j = self.undo_http(port, iid, asig=sig)
+        self.assertEqual(code, 200, j)
+        self.assertEqual(self.labels(iid) & {"human", "answered"}, {"human"})
+
+    def test_an_answered_ticket_without_a_humanq_comment_is_undone_by_its_card(self):
+        # answered だけが付き [humanq] のコメントが無いチケットも、一覧の署名で取り消せる。
+        # 一覧でコメントを読めなかったときの署名は、コメントが無いときの署名とも合わない
+        iid = self.new_question(labels=("answered",))
+        port = self.serve(self.store())
+        restore = self.failing("comments", times=1)
+        try:
+            unread = self.answered_now(port, iid)
+        finally:
+            restore()
+        code, j = self.undo_http(port, iid, asig=unread.get("asig"))
+        self.assertEqual((code, j.get("code")), (409, "stale"), (unread, j))
+        it = self.answered_now(port, iid)
+        self.assertIsInstance(it.get("asig"), str, it)
+        code, j = self.undo_http(port, iid, asig=it["asig"])
+        self.assertEqual(code, 200, j)
+        self.assertEqual(self.labels(iid) & {"human", "answered"}, {"human"})
+
+    def test_a_resent_answer_returns_the_sig_of_the_comment_already_there(self):
+        # 途中で失敗した回答の送り直し (コメントは書かずにラベルだけ直す) も、残っている回答の署名を返す
+        iid = self.new_question()
+        port = self.serve(self.store())
+        restore = self.failing("label remove human")
+        try:
+            code, j = self.post_json(port, "/api/answer", {"project": self.repo, "id": iid, "option": "a"})
+        finally:
+            restore()
+        self.assertEqual((code, j.get("stage")), (502, "label"), j)
+        sig = self.answer_sig(port, iid, "a")
+        self.assertEqual(len([c for c in self.comments(iid) if c.startswith("[humanq]")]), 1, "送り直しでコメントが二重になった")
+        self.assertEqual(self.answered_now(port, iid).get("asig"), sig, "送り直しの応答の署名が、残っている回答の署名と違う")
+
+    def test_an_answer_whose_comments_could_not_be_read_is_not_undone_by_its_card(self):
+        # 一覧を作るときに回答のコメントを読めなかったチケットには、どの回答とも合わない署名を付ける
+        # (null だと「署名を送らない古い画面」と読まれて照合を素通りする)
+        iid = self.new_question()
+        port = self.serve(self.store())
+        self.answer_sig(port, iid, "a")
+        restore = self.failing("comments", times=1)
+        try:
+            it = self.answered_now(port, iid)
+        finally:
+            restore()
+        self.assertEqual(it.get("answer"), "", it)
+        self.assertIsInstance(it.get("asig"), str, it)
+        code, j = self.undo_http(port, iid, asig=it["asig"])
+        self.assertEqual((code, j.get("code")), (409, "stale"), j)
+        self.assertEqual(self.labels(iid) & {"human", "answered"}, {"answered"})
+
+    def test_undo_without_asig_is_still_accepted(self):
+        # 署名を送らない古い画面 (更新の前から開いたままのタブ) の取り消しは、今までどおり受け付ける
+        iid = self.new_question()
+        port = self.serve(self.store())
+        self.answer_sig(port, iid, "a")
+        code, j = self.undo_http(port, iid)
+        self.assertEqual(code, 200, j)
+        self.assertEqual(self.labels(iid) & {"human", "answered"}, {"human"})
 
 
 @unittest.skipUnless(HAVE_BD, "bd が無い")
@@ -783,15 +951,19 @@ class WithFakeBd(BdScenarios, unittest.TestCase):
 
         p = project()
         self.assertEqual([i["id"] for i in p["human"]], [iid])
-        code, _, body = self.post(port, "/api/answer", {"project": self.repo, "id": iid, "option": "a", "qsig": p["human"][0]["qsig"]})
-        self.assertEqual(code, 200, body)
+        code, j = self.post_json(port, "/api/answer", {"project": self.repo, "id": iid, "option": "a", "qsig": p["human"][0]["qsig"]})
+        self.assertEqual(code, 200, j)
         p = project()
         self.assertEqual(([i["id"] for i in p["human"]], [i["id"] for i in p["answered"]]), ([], [iid]))
         self.assertTrue(p["answered"][0]["answer"].startswith("[humanq] 回答: 案A (a)"), p["answered"][0])
-        code, _, body = self.post(port, "/api/undo", {"project": self.repo, "id": iid})
-        self.assertEqual(code, 200, body)
+        # 取り消しは画面と同じく回答の署名を付けて送る。照合は回答の応答・一覧・取り消しの読みに相乗りし、bd の呼び出しを増やさない
+        self.assertEqual(p["answered"][0].get("asig"), j.get("asig"), (p["answered"][0], j))
+        code, j = self.undo_http(port, iid, asig=j.get("asig"))
+        self.assertEqual(code, 200, j)
 
-        entries = self.log_entries()[start:]
+        self.assertEqual(self.normalized_argv(self.log_entries()[start:], iid), self.GOLDEN)
+
+    def normalized_argv(self, entries: list[dict], iid: str) -> list[list[str]]:
         self.assertEqual({e["prog"] for e in entries}, {"bd"})
         got = []
         for e in entries:
@@ -802,7 +974,20 @@ class WithFakeBd(BdScenarios, unittest.TestCase):
                 self.assertRegex(os.path.basename(argv[k + 1]), r"^humanq-.*\.md$")
                 argv[k + 1] = "<tmp>"
             got.append(argv)
-        self.assertEqual(got, self.GOLDEN)
+        return got
+
+    def test_a_stale_undo_only_reads(self):
+        # 署名の違う取り消しは、反映待ちの一覧とコメントを読むだけで、bd に何も書かない
+        iid = self.new_question()
+        port = self.serve(self.store())
+        sig_a = self.answer_sig(port, iid, "a")
+        code, j = self.undo_http(port, iid, asig=sig_a)
+        self.assertEqual(code, 200, j)
+        self.answer_sig(port, iid, "b")
+        start = len(self.log_entries())
+        code, j = self.undo_http(port, iid, asig=sig_a)
+        self.assertEqual((code, j.get("code")), (409, "stale"), j)
+        self.assertEqual(self.normalized_argv(self.log_entries()[start:], iid), [self.ANSWERED_LIST, self.COMMENTS])
 
     def test_fake_has_the_quirks_of_bd_1_3_4(self):
         def run(*args):

@@ -68,6 +68,10 @@ class Changed(ValueError):
     """画面が見ていた問いと、今の問いが違う。書き込みは何も起きていない。"""
 
 
+class Stale(ValueError):
+    """取り消そうとした回答が、今の最後の [humanq] コメントと違う (ほかで取り消して答え直された)。書き込みは何も起きていない。"""
+
+
 def bd(repo: str, *args: str) -> str:
     try:
         p = subprocess.run(["bd", "-C", repo, *args], capture_output=True, text=True, timeout=60)
@@ -139,24 +143,43 @@ def shape(i: dict) -> dict:
     }
 
 
-def last_marked(repo: str, iid: str) -> dict | None:
-    """最後の [humanq] コメント (回答か取り消し)。無ければ None。"""
-    for c in reversed(bd_json(repo, "comments", iid)):
-        if isinstance(c, dict) and (c.get("text") or "").startswith(MARK):
-            return c
-    return None
+def marked(cs: list) -> list[dict]:
+    """[humanq] のコメント (回答と取り消し) を、bd が返した順 (古い順) に。本文が文字列でないコメントは数えない
+    (回答の書き込みは全部のコメントを数えるので、想定外の形の 1 件で回答を止めない)。"""
+    return [c for c in cs if isinstance(c, dict) and isinstance(c.get("text"), str) and c["text"].startswith(MARK)]
+
+
+def asig(n: int, text: str | None) -> str:
+    """回答の署名。n はそのコメントがチケットの何件目の [humanq] コメントか (1 から)、text はその本文
+    (None は [humanq] のコメントが無い)。画面は回答の成功の応答と回答済みの一覧で受け取り、取り消しに付けて送る。
+    サーバーは今の最後の [humanq] コメントの署名と照合し、違えば取り消さない (ほかのタブ・セッションで取り消して
+    答え直された後に、前の回答の「取り消す」で今の回答を取り消さないため)。
+    件数を入れるのは、同じ本文の答え直し (案 A → 取り消し → 案 A) を前の回答と分けるため。[humanq] のコメントは
+    このサーバーだけがプロジェクトごとに 1 本ずつ書くので、件数は間にエージェントのコメントが挟まっても変わらない。
+    回答を書いた後に bd を読み直さずに決まる (コメントの id は bd が付けるので、知るには読み直しが要る)。"""
+    core = None if text is None else [n, text.strip()]
+    return hashlib.sha256(json.dumps(core, ensure_ascii=False).encode()).hexdigest()[:16]
+
+
+def last_of(cs: list) -> tuple[str, str]:
+    """最後の [humanq] コメントの本文と、その署名。コメントが無ければ本文は空。"""
+    ms = marked(cs)
+    return (ms[-1]["text"], asig(len(ms), ms[-1]["text"])) if ms else ("", asig(0, None))
 
 
 def list_answered(repo: str) -> list:
     return bd_json(repo, "list", "--status", ANSWERED_STATUSES, "--label", "answered", "--flat", "-n", "0")
 
 
-def last_answer(repo: str, iid: str) -> str:
+def last_answer(repo: str, iid: str) -> tuple[str, str]:
+    """回答済みのカードに出す、最後の [humanq] コメントの本文と署名。
+    コメントを読めなければ ("", "")。空の署名はどの回答の署名とも合わないので、そのカードからの取り消しは照合で断られる
+    (None にすると、署名を送らない古い画面と同じに読まれて照合を素通りする)。"""
     try:
-        c = last_marked(repo, iid)
+        cs = bd_json(repo, "comments", iid)
     except BdError:
-        return ""
-    return (c.get("text") or "") if c else ""
+        return "", ""
+    return last_of(cs)
 
 
 def _prio(x: dict):
@@ -168,7 +191,7 @@ def load_project(repo: str) -> dict:
     answered = []
     for i in list_answered(repo):
         s = shape(i)
-        s["answer"] = last_answer(repo, s["id"])
+        s["answer"], s["asig"] = last_answer(repo, s["id"])
         answered.append(s)
     answered.sort(key=_prio)
     # 両方のラベルが付いたチケットは、書き込みの途中か、ラベルの付け替えに失敗したもの。画面が二重に出さないよう、
@@ -241,7 +264,8 @@ class Store:
         datas = list(self._pool.map(self.project, repos))  # DB が別なので並べて読める
         return [{"path": r, "name": Path(r).name, **d} for r, d in zip(repos, datas)]
 
-    def answer(self, repo: str, body: dict) -> None:
+    def answer(self, repo: str, body: dict) -> str:
+        """返り値は回答の署名 (asig)。成功の応答に入れ、画面はその回答の取り消しに付けて送る。"""
         iid, key = body.get("id"), body.get("option") or ""
         text = str(body.get("text") or "").strip()
         with self._lock(self._wlocks, repo):
@@ -260,16 +284,18 @@ class Store:
                 raise ValueError("選択肢を選ぶか、回答を書いてください")
             head = f"{MARK} 回答: {opt['label']} ({key})" if opt else f"{MARK} 回答: (自由記述)"
             # 送り直しても壊れない: 同じ本文のコメントが最後に残っていれば書かず、ラベルだけを直す
-            _record(repo, iid, head + ("\n\n" + text if text else "") + "\n")
+            sig = _record(repo, iid, head + ("\n\n" + text if text else "") + "\n")
             _swap(repo, iid, add="answered", remove="human")
+            return sig
 
     def undo(self, repo: str, body: dict) -> None:
         iid = body.get("id")
+        seen = body.get("asig")            # 取り消す回答の署名。送らない古い画面は検査しない
         with self._lock(self._wlocks, repo):
             cur = {i.get("id") for i in list_answered(repo)}
             if iid not in cur:
                 raise Gone("反映待ちに無い (もう反映されたか、取り消し済み)")
-            _record(repo, iid, UNDO_HEAD + "\n")
+            _record(repo, iid, UNDO_HEAD + "\n", expect=seen)
             _swap(repo, iid, add="human", remove="answered")
 
 
@@ -283,16 +309,22 @@ def _recent(comment: dict) -> bool:
     return (datetime.now(timezone.utc) - t).total_seconds() <= RESEND_SEC
 
 
-def _record(repo: str, iid: str, text: str) -> None:
+def _record(repo: str, iid: str, text: str, expect: str | None = None) -> str:
     """[humanq] のコメントを 1 件書く。チケットの最後のコメント (全体) が同じ本文で新しければ (送り直し) 書かない。
     最後の [humanq] コメントではなく最後のコメントを見る: 間にエージェントの問い直しのコメントが挟まっていれば、
-    それは新しい問いへの回答なので書く。"""
+    それは新しい問いへの回答なので書く。
+    expect (取り消す回答の署名) を渡すと、今の最後の [humanq] コメントの署名と違えば何も書かずに Stale を上げる。
+    照合は送り直しの判定と同じ読みで行う (bd の呼び出しを増やさない)。
+    返り値は、書いたコメント (送り直しなら残っているもの) の署名。回答済みの一覧の署名 (last_of) と同じ値になる。"""
     try:
         cs = bd_json(repo, "comments", iid)
+        if expect is not None and expect != last_of(cs)[1]:
+            raise Stale("この回答はもう最新ではない (ほかで答え直されている。画面を更新してください)")
         last = cs[-1] if cs and isinstance(cs[-1], dict) else None
         if last and (last.get("text") or "").strip() == text.strip() and _recent(last):
-            return
+            return last_of(cs)[1]
         _comment(repo, iid, text)
+        return asig(len(marked(cs)) + 1, text)
     except BdError as e:
         raise WriteError(str(e), "comment", False) from e
 
@@ -397,14 +429,17 @@ def make_handler(store: Store, port: int, token: str, page: str, version: str):
                 if fn is None:
                     return self._json(404, {"error": "not found"})
                 try:
-                    fn(repo, body)
+                    sig = fn(repo, body)
                 finally:
                     store.invalidate(repo)
-                self._json(200, {"ok": True})
+                # 回答の成功には回答の署名 (asig) を入れる。取り消しの成功は {ok: true} だけ
+                self._json(200, {"ok": True} if sig is None else {"ok": True, "asig": sig})
             except Gone as e:
                 self._json(400, {"error": str(e), "code": "gone", "op": op})
             except Changed as e:
                 self._json(409, {"error": str(e), "code": "changed", "op": op})
+            except Stale as e:
+                self._json(409, {"error": str(e), "code": "stale", "op": op})
             except (ValueError, json.JSONDecodeError) as e:
                 self._json(400, {"error": str(e), "op": op})
             except BdError as e:

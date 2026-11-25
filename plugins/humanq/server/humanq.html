@@ -210,6 +210,7 @@ function summarize(s, n = 120) {
   return first.length > n ? first.slice(0, n - 1) + "…" : first;
 }
 const CHANGED_MSG = "問いが更新されました。見直してから送ってください";
+const STALE_MSG = "取り消しませんでした。この回答はもう最新ではありません (ほかで答え直されています)";
 function explain(e) {
   const full = String((e && e.message) || e);
   let summary;
@@ -280,11 +281,13 @@ function toast(msg, opts = {}) {
 // スクロールしなくても取り消せるよう「取り消す」を付ける。フォーカスはここへ移さない: 回答の後は次のカードそのものへ移す
 // (moveFocusAway)。「回答する」を押した Enter のリピートや押し直しで、取り消しが押されないため。
 // key に project と id を入れる: 題の頭 24 字と選択肢が同じ別のチケットの知らせ (取り消す先が違う) を重ね抑止で消さない。
-// 同じチケットの前の答えの知らせは閉じてから出す (前の答えの「取り消す」から今の答えを取り消さない)
-function answeredToast(it, label) {
+// 同じチケットの前の答えの知らせは閉じてから出す (前の答えの「取り消す」から今の答えを取り消さない)。
+// asig は成功の応答が返した、この回答の署名。「取り消す」はこれを付けて送り、ほかのタブ・セッションで答え直されていれば
+// サーバーが断る (このタブを通らない変化は、上の閉じる処理では拾えない)
+function answeredToast(it, label, asig) {
   const msg = `「${summarize(it.title, 24)}」に回答しました: ${summarize(label, 40)}`;
   dropAnsweredToasts(it);
-  toast(msg, { kind: "ok", key: ["ok", it.project, it.id, msg].join("\n"), action: { label: "取り消す", run: () => undoAnswer(it) } });
+  toast(msg, { kind: "ok", key: ["ok", it.project, it.id, msg].join("\n"), action: { label: "取り消す", run: () => undoAnswer(it, asig) } });
 }
 
 // そのチケットの回答の成功の知らせを閉じる。回答済みのカードで取り消したとき・答え直したとき・ほかで回答や取り消しが
@@ -454,9 +457,11 @@ function ageText(created) {
   const n = Math.round((Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()) - Date.UTC(+m[1], +m[2] - 1, +m[3])) / 86400000);
   return n < 0 ? "" : n === 0 ? "今日" : `作成から ${n} 日`;
 }
-// カードの表示に使う値の署名。変わったカードだけ作り直す (受け取ったときに 1 度だけ作る)
+// カードの表示に使う値の署名。変わったカードだけ作り直す (受け取ったときに 1 度だけ作る)。
+// 回答済みのカードには回答の署名 (asig) も入れる: 同じ本文で答え直された回答 (案 A → 取り消し → 案 A) でも作り直し、
+// 「取り消して判断待ちに戻す」が今の回答の署名を送るようにする
 const sigQ = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, ageText(it.created_at), shownLabels(it), it.q, it.description, it.notes]);
-const sigA = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, ageText(it.created_at), shownLabels(it), it.answer]);
+const sigA = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, ageText(it.created_at), shownLabels(it), it.answer, it.asig]);
 
 function head(it) {
   const p = typeof it.priority === "number" ? it.priority : 9;
@@ -534,10 +539,10 @@ function buildQuestion(it) {
     // 入力中で作り直しを後回しにしている間に問いが変わっていたら、送らずに作り直して見直してもらう
     if (questionChanged(it)) { reviewChanged(key, it); return; }
     // 下書きは成功するまで残す (失敗して戻ったカードに選択と補足がそのまま出る)。qsig は見ていた問いの署名。
-    // 成功の知らせには、送った時点の選択を出す (成功すると下書きは消える)
+    // 成功の知らせには、送った時点の選択と、応答が返した回答の署名を渡す (成功すると下書きは消える)
     const chosen = d.option && q ? q.options.find(o => o.key === d.option) : null;
     submit(key, it, "/api/answer", { project: it.project, id: it.id, option: d.option, text: d.text, qsig: it.qsig },
-      () => { dropDraft(it); answeredToast(it, chosen ? chosen.label : "(自由記述)"); });
+      res => { dropDraft(it); answeredToast(it, chosen ? chosen.label : "(自由記述)", res.asig); });
   });
   refresh();
   return el("section", { class: "card", "data-id": it.id, tabindex: "-1" },
@@ -550,15 +555,17 @@ function buildQuestion(it) {
 }
 
 // 回答を取り消して判断待ちに戻す (回答済みのカードのボタンと、回答の成功のトーストの「取り消す」)。
-// 送り先は project と id だけで決まるので、回答済みのカードがまだ作られていなくても送れる。失敗と 400 gone は、
+// 送り先は project と id だけで決まるので、回答済みのカードがまだ作られていなくても送れる。失敗と 400 gone・409 stale は、
 // カードの有無に関係なく failed() がトーストで知らせる。成功したら読み直して、カードは判断待ちに戻る。
 // 戻ったカードに下書きは戻さない (空のまま): 回答の成功で下書きは消してあり、押し間違えた選択をそのまま戻すと
-// 同じ答えを押し直しやすい。送った回答の本文は bd のコメントに残っている
-function undoAnswer(it) {
+// 同じ答えを押し直しやすい。送った回答の本文は bd のコメントに残っている。
+// asig は取り消す回答の署名 (トーストは成功の応答の値、カードは回答済みの一覧の値)。サーバーは今の回答の署名と違えば
+// 409 stale で断る。署名が分からないときは空で送る (付けないと署名を送らない古い画面と同じに読まれ、照合されない)
+function undoAnswer(it, asig) {
   const key = aKey(it.project, it.id);
   dropAnsweredToasts(it);                   // カードで取り消したら、その回答の知らせ (「取り消す」付き) も閉じる
   if (pending.has(key)) return;             // もう一方の取り消しで送信中
-  submit(key, it, "/api/undo", { project: it.project, id: it.id });
+  submit(key, it, "/api/undo", { project: it.project, id: it.id, asig: typeof asig === "string" ? asig : "" });
 }
 
 // 回答済みの本文。1 行目の末尾の " (<key>)" は、その key が問いの選択肢のどれかと一致するときだけ外す
@@ -574,7 +581,7 @@ function answerText(it) {
 
 function buildAnswered(it) {
   const b = el("button", { class: "ghost", type: "button" }, "取り消して判断待ちに戻す");
-  b.addEventListener("click", () => undoAnswer(it));
+  b.addEventListener("click", () => undoAnswer(it, it.asig));    // カードが出している回答の署名
   return el("section", { class: "card", "data-id": it.id, tabindex: "-1" }, head(it), el("p", { class: "title" }, it.title),
     el("p", { class: "ans" }, answerText(it)),
     el("div", { class: "row" }, b), el("div", { class: "errbox" }));
@@ -716,8 +723,9 @@ async function submit(key, it, path, body, onOk) {
   pending.set(key, { state: "inflight", path: it.project, seq: 0 });
   errors.delete(key);
   try { render(); } catch (e) { console.error(e); }   // カードを畳み、件数・見出し・空の文言を数え直す。描けなくても送信は進める
+  let res;
   try {
-    await api(path, body);
+    res = await api(path, body);
   } catch (e) {
     await failed(key, it, e);
     return;
@@ -725,7 +733,7 @@ async function submit(key, it, path, body, onOk) {
   pending.set(key, { state: "done", path: it.project, seq: loadSeq });
   // 畳んだ古い要素は使い回さない: 畳み終わる前に問い直されても、下書きの外れた (表示だけ前の選択が残る) 要素が戻らない
   cards.delete(key);
-  if (onOk) onOk();
+  if (onOk) onOk(res);                      // 成功の応答 (回答なら asig を持つ)
   load();
 }
 
@@ -782,12 +790,14 @@ async function failed(key, it, e) {
     showNotice("画面のサーバーが入れ替わりました。ページを再読み込みしてください (入力した内容は残ります)", "再読み込み", () => location.reload());
     return;
   }
-  if (e.code === "gone") {                               // ほかで回答・反映済み。戻さず、読み直して今の状態を出す
+  // gone: ほかで回答・反映済み。stale: 取り消そうとした回答は、ほかで取り消して答え直されていた (409。何も書いていない)。
+  // どちらも戻さず、読み直して今の状態を出す (stale なら、回答済みのカードが今の回答で出直す)
+  if (e.code === "gone" || e.code === "stale") {
     pending.set(key, { state: "done", path: it.project, seq: loadSeq });
     if (key[0] === "q") dropDraft(it);                  // 回答の gone だけ。取り消しの gone で、問い直された新しい問いの下書きを消さない
     dropAnsweredToasts(it);                              // 前の回答の知らせの「取り消す」は、ほかで反映された今の状態に合わない
     cards.delete(key);
-    toast(`${label}: ほかで回答・反映済みでした`);
+    toast(`${label}: ${e.code === "stale" ? STALE_MSG : "ほかで回答・反映済みでした"}`);
     load();
     return;
   }
