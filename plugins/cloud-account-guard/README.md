@@ -1071,7 +1071,10 @@ AWS_PROFILE=prod aws s3 ls
   展開する)、wrapper の後ろの代入の形の引数 (`env KUBECONFIG=~/x ...`。bash だけが展開する)、
   コマンドが `HOME` を書き換えうるとき (コマンドに `HOME` の語、`${HOME:=x}`、ファイルを読む `.`
   (`. ./env.sh`)、`source` / `eval` がある。名前の一部の `HOME` (`XDG_CONFIG_HOME`)、読むだけの
-  `$HOME` / `${HOME}`、引数の `.` (`kubectl apply -k .` / `git add .`) は数えない)
+  `$HOME` / `${HOME}`、引数の `.` (`kubectl apply -k .` / `git add .`) は数えない)、シェル経由の
+  wrapper の中身 (`watch '...'` / `sudo -i ...` / `npx -c '...'`)。heredoc を置いた行の後ろの段の
+  代入 (`cat <<EOF && KUBECONFIG=~/x kubectl ...`) は Bash のシェルが行う代入なので展開する (v0.30.2。
+  0.30.1 までは展開せず、作業ディレクトリの `~/x` を探して誤 deny になっていた)
 
 ### 透過 wrapper を跨ぐときの env 伝播
 
@@ -1522,6 +1525,12 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   `"` がある形 (`--body "$(cat <<'EOF'` + 改行 + `3" screens` + 改行 + `EOF` + 改行 + `)" && aws ...`)。
   中の引用符が対になる普段の形は守る範囲 (`gh pr create --title "$(git log -1 --format="%h %s")" && aws ...`、
   heredoc の本文に `'` があるだけの `git commit -m "$(cat <<'EOF'` … `)" && gh pr create`)
+- 引用符で包まないコマンド置換 (`$(...)`) の中の heredoc の本文に、`'`・対にならない `"` や backtick・
+  対応しない `(` がある形の後ろのクラウド CLI (`X=$(cat <<'EOF'` + 改行 + `don't` + 改行 + `EOF` + 改行 +
+  `) && aws ...` / `gh pr create --body $(cat <<'EOF'` … `) && aws ...`)。hook は置換の中の heredoc の本文を
+  読み分けず、本文の引用符と括弧で置換の閉じを見失うので、候補にならず検証されない。zsh ではこの形が走る
+  (bash 3.2 は構文エラーにする)。置換を二重引用符で包む普段の形 (`X="$(cat <<'EOF'` … `)" && aws ...`) は、
+  本文に `'` があっても守る範囲
 - context option の値に `--` や `$(` を使う形 (`kubectl --context '$(id)' apply` /
   `kubectl --context -- apply`)。指定値として扱わず、現在値で照合する
 - シェル展開で option を作る形 (ブレース展開の `firebase deploy -{j,P} prod` / `{-j,-P} prod`、

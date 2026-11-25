@@ -497,6 +497,8 @@ class TestHelpRegexIsLinear(unittest.TestCase):
 
     UNITS = (" -x", " a", " a=b", " 2>&1", " >>f", " <<-x", "  ", " >")
     TAILS = ("", " --help $", " -x --help", " --help 2>&1")
+    # 4 倍の入力で、線形なら比は約 4、2 乗なら約 16。
+    LIMIT = 10.0
 
     @staticmethod
     def _best(pattern, text):
@@ -506,6 +508,30 @@ class TestHelpRegexIsLinear(unittest.TestCase):
             pattern.search(text)
             best = min(best, time.perf_counter() - started)
         return best
+
+    def _times(self, pattern, small_text, large_text):
+        """small と large の時間 (それぞれの最小値)。
+
+        比が LIMIT 以上になった点だけ、両方を最大 3 回まで測り足して最小値を更新する。負荷の
+        揺れは時間を伸ばす向きにしか働かないので、測り足すほど最小値は揺れの無い時間に近づき、
+        2 乗なら何度測っても比は 16 前後のまま残る。並走の負荷 (load 4〜5) の下で、1 回ずつの
+        測定の比の最悪値が 10.13 になって落ちたことがある。
+        """
+        small = self._best(pattern, small_text)
+        large = self._best(pattern, large_text)
+        for _ in range(3):
+            if large >= 1.0 or small <= 2e-4 or large / small < self.LIMIT:
+                break
+            small = min(small, self._best(pattern, small_text))
+            large = min(large, self._best(pattern, large_text))
+        return small, large
+
+    def _assert_linear(self, pattern, small_text, large_text, where):
+        """large が 1 秒未満で、small が 0.2 ms を超えるなら比が LIMIT 未満 (最初に外れた点で落ちる)。"""
+        small, large = self._times(pattern, small_text, large_text)
+        self.assertLess(large, 1.0, where)
+        if small > 2e-4:
+            self.assertLess(large / small, self.LIMIT, where)
 
     def _patterns(self):
         token = [p for p, _o in github.DISCLOSING if "auth\\s+token" in p]
@@ -518,22 +544,16 @@ class TestHelpRegexIsLinear(unittest.TestCase):
         )
 
     def test_linear(self):
-        worst = 0.0
         for pattern in self._patterns():
             for head in ("gh pr create", "gh auth switch", "gh auth token", "gh repo deploy-key add",
                          "gh pr"):
                 for unit in self.UNITS:
                     for tail in self.TAILS:
-                        small = self._best(pattern, head + unit * 5000 + tail)
-                        large = self._best(pattern, head + unit * 20000 + tail)
-                        self.assertLess(large, 1.0, (pattern.pattern[:40], unit, tail))
-                        if small > 2e-4:
-                            worst = max(worst, large / small)
-        self.assertLess(worst, 10.0)
+                        self._assert_linear(pattern, head + unit * 5000 + tail, head + unit * 20000 + tail,
+                                            (pattern.pattern[:40], head, unit, tail))
 
     def test_blanks_inside_the_path_are_linear(self):
         """パスの語の間に空白・タブを並べ、最後で外れる入力 (末端とグループの選択がそれぞれ空白を読む)。"""
-        worst = 0.0
         for pattern in self._patterns():
             for sep in (" ", "\t", " \t"):
                 for words in (("repo", "deploy-key", "add"), ("pr", "create"), ("pr",),
@@ -541,12 +561,8 @@ class TestHelpRegexIsLinear(unittest.TestCase):
                     for tail in ("", " x", " --help x", " zz --help"):
                         def text(n, words=words, sep=sep, tail=tail):
                             return "gh" + "".join(sep * n + w for w in words) + tail
-                        small = self._best(pattern, text(5000))
-                        large = self._best(pattern, text(20000))
-                        self.assertLess(large, 1.0, (pattern.pattern[:40], sep, words, tail))
-                        if small > 2e-4:
-                            worst = max(worst, large / small)
-        self.assertLess(worst, 10.0)
+                        self._assert_linear(pattern, text(5000), text(20000),
+                                            (pattern.pattern[:40], sep, words, tail))
 
     def test_redirects_after_help_do_not_backtrack(self):
         """`--help` の後ろのリダイレクトの並びが最後で外れる入力 (`... --help >f >f ... x`)。

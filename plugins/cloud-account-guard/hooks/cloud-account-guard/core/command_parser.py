@@ -2354,7 +2354,8 @@ def extract_candidates_with_separators(
     global _GH_UNREAD_SEEN
     out: list[tuple[str, dict[str, str], str]] = []
     # 行頭の代入の値の `~` はシェルが HOME に展開する (v0.29.5。`tilde_home`)。分割し直した中身
-    # (`_segment_candidates` の parts) は wrapper の引数か区切りの後ろで、0.29.4 までと同じく展開しない。
+    # (`_segment_candidates` の parts) は、heredoc の本文を落とした行の段なら展開し、シェル経由
+    # wrapper の中身なら 0.29.4 までと同じく展開しない (v0.30.2)。
     home = tilde_home(command)
     for seg, sep in split_with_separators(command):
         _GH_UNREAD_SEEN = False
@@ -2391,8 +2392,15 @@ def _segment_candidates(
     if len(parts) > 1 or (parts and normalized[0] in ";&|"):
         found = []
         last = len(parts) - 1
+        # 段の行頭の代入の値の `~` も、Bash のシェルが行う代入なら展開する (v0.30.2。
+        # `cat <<EOF && KUBECONFIG=~/a kubectl ...`)。シェル経由 wrapper の中身 (外側の `reread`) の
+        # 代入は、wrapper が起動するシェルが読み直すので展開しない (option の値の `~` と同じ条件)。
+        # 段の中の wrapper の後ろの代入は `_normalize_segment_chdir` が展開しない。
+        part_home = None if reread else home
         for k, (part, inner_sep) in enumerate(parts):
-            inner, inner_env, inner_chdir, inner_external, inner_reread = _normalize_segment_chdir(part)
+            inner, inner_env, inner_chdir, inner_external, inner_reread = _normalize_segment_chdir(
+                part, home=part_home
+            )
             if inner:
                 # 分割し直した段の語を Bash のシェルが読むかは、段を取り出した経路で決まる。シェル経由
                 # wrapper の中身 (外側の `reread`) と、段自身がシェル経由 wrapper の形 (`inner_reread`) は
