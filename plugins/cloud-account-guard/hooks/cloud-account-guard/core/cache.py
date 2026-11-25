@@ -109,8 +109,8 @@ def _cache_dir() -> Path | None:
 def state_dir() -> Path | None:
     """cache dir (`_cache_dir`)。成功 cache 以外の状態を同じ dir に置く呼び出し側の入口。
 
-    None なら状態を読まないし書かない (dispatcher の deprecation 案内は、1 日 1 回に絞れず
-    毎回出す)。
+    None なら状態を読まないし書かない (dispatcher の deprecation 案内は 1 日 1 回に、検証の対象外の
+    CLI の知らせ (`core/unverified.py`) はセッション × エージェントごとに 1 回に絞れず、毎回出す)。
     """
     return _cache_dir()
 

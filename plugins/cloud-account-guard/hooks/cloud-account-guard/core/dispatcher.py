@@ -12,7 +12,7 @@ from pathlib import Path
 
 from core import (
     auto_switch, budget, cache, cli_config, cli_options, command_parser, mode, output, paths,
-    shell_word, tiers, workdir,
+    shell_word, tiers, unverified, workdir,
 )
 from core.command_parser import extract_candidate_readings, merge_readings
 from services import ALL as SERVICES
@@ -894,14 +894,32 @@ def _unregistered_error(svc, where: str, *, stops: bool) -> str:
     return head + _missing_key_hint(svc.ACCOUNT_KEY)
 
 
-def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
+def _dispatch_impl(
+    command: str, cwd: str, trace: dict | None, found: dict | None = None
+) -> dict | None:
     """`dispatch()` の実処理。`trace` は `CLOUD_ACCOUNT_GUARD_DEBUG=1` 時のみ
-    非 None で、判定表そのものには影響しない (観測専用)。"""
+    非 None で、判定表そのものには影響しない (観測専用)。
+
+    `found` を渡すと、分解で見つけた検証の対象外の CLI の名前 (`core/unverified.py`) を
+    `found["unverified"]` に入れる (v0.31.0)。知らせを付けるのは `dispatch()` で、判定には使わない。
+    """
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR") or cwd
     if not project_dir:
         return None
 
     targets, switching, segments = _analyze_command(command, trace)
+    if found is not None:
+        # 知らせのための検出は、検証より前に、対象外の CLI を含まないコマンドでも走る。ここで例外が
+        # 抜けると __main__ の最終防波堤が判定 (deny を含む) を「内部エラーのため検証をスキップ」に
+        # 置き換えるので、握って「対象外の CLI なし」にし、下の検証を続ける。
+        try:
+            found["unverified"] = unverified.detect(
+                seg[2] for seg in segments if seg is not _READING_BREAK
+            )
+        except Exception:  # noqa: BLE001
+            found["unverified"] = []
+        if trace is not None:
+            trace["unverified"] = list(found["unverified"])
     # 各セグメントが走るディレクトリ (Bash の cwd + コマンド中の cd) と起動リポジトリ。
     # 起動リポジトリの外で走る target は照合せずに止める (`_outside_error`)。
     launch_root = workdir.launch_root(project_dir)
@@ -1417,7 +1435,9 @@ def _trace_decision(result: dict | None) -> str:
     return "unknown"
 
 
-def dispatch(command: str, cwd: str) -> dict | None:
+def dispatch(
+    command: str, cwd: str, session_id: str | None = None, agent_id: str | None = None
+) -> dict | None:
     """PreToolUse エントリポイント。
 
     `CLOUD_ACCOUNT_GUARD_DEBUG=1` のときのみ、分解結果 (segments / matched
@@ -1430,22 +1450,71 @@ def dispatch(command: str, cwd: str) -> dict | None:
     解除する。解除しないと、同一プロセスで dispatch を繰り返す経路 (テスト) や
     hook timeout の制約が無い経路 (builder) に締切が残り、既定の subprocess
     timeout が黙って縮む。
+
+    `session_id` と `agent_id` は hook input の値。検証の対象外の CLI の知らせ
+    (`_with_unverified_notice`) を、セッション × エージェント (メインは `agent_id` 無し) ごとに 1 回に
+    絞るのに使う (v0.31.0)。判定には使わない。
     """
     budget.start()
     try:
-        return _dispatch_with_trace(command, cwd)
+        found: dict = {}
+        result = _dispatch_with_trace(command, cwd, found)
+        return _with_unverified_notice(
+            result, found.get("unverified"), session_id, agent_id=agent_id
+        )
     finally:
         budget.clear()
 
 
-def _dispatch_with_trace(command: str, cwd: str) -> dict | None:
+def _is_deny(result: dict | None) -> bool:
+    if not isinstance(result, dict):
+        return False
+    hook_output = result.get("hookSpecificOutput")
+    return isinstance(hook_output, dict) and hook_output.get("permissionDecision") == "deny"
+
+
+def _with_unverified_notice(
+    result: dict | None, names, session_id, agent_id=None
+) -> dict | None:
+    """検証の対象外の CLI (`core/unverified.py`) が候補にあれば、判定の結果に知らせを足す (v0.31.0)。
+
+    判定は変えない: allow (None) は知らせだけの `additionalContext` に、警告 (`additionalContext`) は
+    その後ろに知らせを足す。**deny には足さず、知らせたことも記録しない** — deny の本文は deny の理由
+    だけにする (`_dispatch_impl` の errors の扱いと同じ)。止められたコマンドを分けて打ち直したときなど、
+    次に通ったコマンドで知らせる。
+
+    知らせの処理で何が起きても、判定の結果をそのまま返す (例外を dispatch() の外に出すと、__main__ の
+    最終防波堤が判定を「内部エラーのため検証をスキップ」に置き換える)。検証より前に走る検出
+    (`_dispatch_impl` の `unverified.detect`) の例外も、同じ理由でその場で握る。
+
+    1 回に絞る単位は「セッション × エージェント × CLI」(`unverified.claim`)。`agent_id` はサブエージェントの
+    中で発火したときだけ hook input に付く (メインは無い)。
+    """
+    if not names or _is_deny(result):
+        return result
+    try:
+        fresh = unverified.claim(names, session_id, agent_id)
+        if not fresh:
+            return result
+        text = unverified.notice(fresh)
+        if result is None:
+            return output.warn(text)
+        hook_output = result["hookSpecificOutput"]
+        context = hook_output.get("additionalContext")
+        merged = f"{context}\n\n{text}" if context else text
+        return {**result, "hookSpecificOutput": {**hook_output, "additionalContext": merged}}
+    except Exception:  # noqa: BLE001
+        return result
+
+
+def _dispatch_with_trace(command: str, cwd: str, found: dict | None = None) -> dict | None:
     """`dispatch()` の本体 (予算の張り替えを含まない)。"""
     if not _debug_enabled():
-        return _dispatch_impl(command, cwd, None)
+        return _dispatch_impl(command, cwd, None, found)
 
     trace: dict = {"segments": [], "cache_hit": {}, "verify_ms": {}, "auto_switch": {}}
     start = time.monotonic()
-    result = _dispatch_impl(command, cwd, trace)
+    result = _dispatch_impl(command, cwd, trace, found)
     trace["elapsed_ms"] = round((time.monotonic() - start) * 1000, 2)
     trace["decision"] = _trace_decision(result)
     try:

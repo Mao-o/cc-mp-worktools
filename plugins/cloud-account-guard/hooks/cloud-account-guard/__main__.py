@@ -22,8 +22,12 @@ def main() -> None:
         return
 
     cwd = input_data.get("cwd", "")
+    # 検証の対象外の CLI の知らせを、セッション × エージェントごとに 1 回に絞るのに使う (判定には
+    # 使わない)。`agent_id` はサブエージェントの中で発火したときだけ付く (メインは無い)。
+    session_id = input_data.get("session_id")
+    agent_id = input_data.get("agent_id")
     try:
-        result = dispatch(command, cwd)
+        result = dispatch(command, cwd, session_id=session_id, agent_id=agent_id)
     except Exception as e:  # noqa: BLE001
         # dispatch() 内の未捕捉例外を最終防波堤で拾う。ここで拾わないと
         # 非ゼロ終了 + JSON 無しになり、公式仕様上は non-blocking error として

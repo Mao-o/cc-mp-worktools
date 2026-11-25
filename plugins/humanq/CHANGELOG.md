@@ -19,6 +19,20 @@
 
 - サーバー・API・hook は変えていない。CSP も変えていない。並び順 (プロジェクト → 節 → 優先度) と見出しのタグ (h3 / h2) も変えていない
 
+## 0.8.1
+
+### 内部の作り直し (挙動の変更なし)
+
+- bd と話すコード (起動・argv・`--json` の出力の読み・問いを置く metadata のキー・コメントの並び) を `server/backend.py` に移した。`server/humanq.py` は CLI に依らない形の値 (一覧の行とコメント) だけを読む。後で別の beads の CLI に対応するとき、CLI の差をこの層に閉じ込めるための土台
+- 層の約束: 一覧の行は `{id, title, priority, labels, created_at, description, notes, question_raw}` (値は CLI が返したまま。空の既定値は読む側が補う。`question_raw` は問いの生の値)。コメントは `{text, created_at}` で、必ず古い順に返す (bd は古い順で返すので、並べ替えずに渡す)
+- bd の argv・出力の解釈・画面と hook への応答・エラー文は変えていない。サーバーが打つ bd の argv の列の固定 (偽の bd) と本物の bd のシナリオは、テストを変えずに通る
+- 違いは 1 つだけ: 回答済みの一覧の出力に dict でない要素が混ざっていたとき、前の要素のコメントを読む前に失敗する (今までは前の要素のコメントを 1 回読んでから、同じ失敗になっていた)。画面に出るのは今までと同じ失敗 (そのプロジェクトだけを読めない)
+
+### テスト
+
+- `tests/test_backend.py` を足した。`humanq.bd` の差し替えが読み書きのすべての bd の呼び出しに届くこと (本物の bd が無い環境でも)、一覧の行とコメントの形、`--json` の出力の読み (0 件の形・envelope・JSON でないもの)、bd を起動できないとき・非 0 で終わったときの失敗、`humanq.question()` が metadata の dict を今までどおり受け付けること、`server/humanq.py` が bd の argv の語と `subprocess` を持たないことを固定した
+- `tests/test_server.py` のシナリオが `humanq.load_project` と `humanq.bd_json` (0 件の形) を直接呼ぶところを、想定外の例外を FAIL にする helper に通した (実装の変異で例外が漏れたとき、テストが走っていない ERROR に見せない)。assertion は変えていない。作り直しの後のコードは、変える前の `tests/test_server.py` でも全部通ることを確かめている
+
 ## 0.8.0
 
 ### 画面

@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.31.0
+
+### Added: 検証の対象外のクラウド CLI を使ったことを知らせる
+
+- 検証の対象外のクラウド CLI (`wrangler` / `cf`) がコマンドの位置に現れたら、allow のまま `additionalContext` で
+  「cloud-account-guard はこの CLI のアカウントを照合していない」ことを知らせる。対象外の CLI を使い始めたことに
+  気づけるようにするため。判定 (allow / deny) は変えない
+- 候補は検証と同じ分解 (wrapper を剥がした形。`npx wrangler deploy` / `npx wrangler@3 deploy` / `cd app && wrangler ...`
+  など) から取り、新しい読みは足さない。引数の位置 (`npm install -D wrangler`) や `$(...)` の中は数えない。
+  検証と同じ分解で見つけるので、検証が読まない起動の形 (`pnpm wrangler` / `yarn wrangler` / `bunx wrangler`
+  など) では知らせも出ない
+- 同じセッション (hook input の `session_id`) の同じエージェント (メインと各サブエージェント) では、CLI ごとに
+  1 回だけ出す。エージェントは hook input の `agent_id` (サブエージェントの中で発火したときだけ付く) で分ける。
+  サブエージェントはメインと同じ `session_id` を持ち、知らせはツールを呼んだエージェントにだけ届くので、
+  メインとサブエージェントは互いの記録で黙らない。記録は成功 cache と同じ dir に置く。
+  `session_id` が無い・記録の dir を使えない・記録を作れないときは、1 回に絞れないので毎回出す
+  (deprecation の案内と同じ倒し方)
+- deny になるコマンドには足さず、知らせたことも記録しない (deny の本文は deny の理由だけにする)。次に通った
+  コマンドで知らせる。警告 (リモート read の不一致など) の `additionalContext` には後ろに足す。検証モードには
+  よらない (`off` / `warn` でも出す)
+- 知らせのための処理 (検出・記録・本文の結合) で例外が起きても、判定の結果をそのまま返す (検出は検証より前に
+  走るので、ここで例外が抜けると deny が内部エラーの fail-open に化けるため)
+- 対象外の CLI の一覧は `core/unverified.py` の 1 か所。検証に対応したら外す (外し忘れは、services の PATTERNS と
+  重なる名前として契約テストが検出する)
+
 ## 0.30.5
 
 ### Fixed: 予約語の `time` の後ろと、シェル経由 wrapper を先頭に置いた heredoc の行の後ろの段で、代入と option の `~` を展開していなかった
