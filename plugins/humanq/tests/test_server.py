@@ -396,9 +396,16 @@ class BdScenarios:
             self.fail(f"{fn.__name__} が {raises.__name__} を上げなかった")
         return None
 
+    def load(self) -> dict:
+        """humanq.load_project を呼ぶ。想定外の例外は FAIL にする (write と同じ理由)。"""
+        try:
+            return humanq.load_project(self.repo)
+        except Exception as e:  # noqa: BLE001
+            self.fail(f"load_project が例外を上げた: {type(e).__name__}: {e}")
+
     def test_human_and_answered_both_listed_only_as_answered(self):
         iid = self.new_question(labels=("human", "answered"))
-        data = humanq.load_project(self.repo)
+        data = self.load()
         self.assertNotIn(iid, [i["id"] for i in data["human"]])
         self.assertIn(iid, [i["id"] for i in data["answered"]])
 
@@ -503,6 +510,12 @@ class BdScenarios:
             humanq.load_project = real
 
     def test_bd_json_rejects_non_list(self):
+        def listed(*args):
+            try:
+                return humanq.bd_json(self.repo, *args)
+            except Exception as e:  # noqa: BLE001  実装の変異で上がった例外を、走っていない ERROR にしない
+                self.fail(f"bd_json が例外を上げた: {type(e).__name__}: {e}")
+
         real = humanq.bd
         try:
             humanq.bd = lambda repo, *a: '{"issues": []}'
@@ -512,9 +525,9 @@ class BdScenarios:
             with self.assertRaises(humanq.BdError):
                 humanq.bd_json(self.repo, "list")
             humanq.bd = lambda repo, *a: "No human-needed beads found.\n"
-            self.assertEqual(humanq.bd_json(self.repo, "human", "list"), [])
+            self.assertEqual(listed("human", "list"), [])
             humanq.bd = lambda repo, *a: "null\n"
-            self.assertEqual(humanq.bd_json(self.repo, "human", "list"), [])
+            self.assertEqual(listed("human", "list"), [])
         finally:
             humanq.bd = real
 
@@ -533,7 +546,9 @@ class BdScenarios:
         bdc(self.repo, "comments", "add", iid, "-f", f)
 
     def item(self, iid: str, key: str = "human") -> dict:
-        return next(i for i in humanq.load_project(self.repo)[key] if i["id"] == iid)
+        found = [i for i in self.load()[key] if i["id"] == iid]
+        self.assertEqual(len(found), 1, f"{iid} が {key} に 1 件ない: {found}")
+        return found[0]
 
     # 1. 問いの署名
     def test_qsig_follows_what_the_question_shows(self):
@@ -614,7 +629,7 @@ class BdScenarios:
             restore()
         self.assertEqual((e.stage, e.written), ("label", True))
         self.assertEqual(self.labels(iid) & {"human", "answered"}, {"human", "answered"})
-        data = humanq.load_project(self.repo)
+        data = self.load()
         self.assertIn(iid, [i["id"] for i in data["human"]], "取り消したチケットが判断待ちに出ない")
         self.assertNotIn(iid, [i["id"] for i in data["answered"]])
 
@@ -626,7 +641,7 @@ class BdScenarios:
             self.write(store.answer, {"id": iid, "option": "a"}, raises=humanq.WriteError)
         finally:
             restore()
-        data = humanq.load_project(self.repo)
+        data = self.load()
         self.assertNotIn(iid, [i["id"] for i in data["human"]])
         self.assertIn(iid, [i["id"] for i in data["answered"]])
 
@@ -651,25 +666,25 @@ class BdScenarios:
                 iid = self.new_question()
                 bdc(self.repo, "update", iid, "--status", status)
                 store = self.store()
-                self.assertIn(iid, [i["id"] for i in humanq.load_project(self.repo)["human"]])
+                self.assertIn(iid, [i["id"] for i in self.load()["human"]])
                 self.write(store.answer, {"id": iid, "option": "a"})
-                data = humanq.load_project(self.repo)
+                data = self.load()
                 self.assertIn(iid, [i["id"] for i in data["answered"]], "回答したチケットがどの一覧にも出ない")
                 self.assertNotIn(iid, [i["id"] for i in data["human"]])
                 self.write(store.undo, {"id": iid})                          # 取り消しも Gone にならない
-                self.assertIn(iid, [i["id"] for i in humanq.load_project(self.repo)["human"]])
+                self.assertIn(iid, [i["id"] for i in self.load()["human"]])
 
     def test_human_and_answered_both_on_an_in_progress_ticket_show_once_as_answered(self):
         iid = self.new_question(labels=("human", "answered"))
         bdc(self.repo, "update", iid, "--status", "in_progress")
-        data = humanq.load_project(self.repo)
+        data = self.load()
         self.assertNotIn(iid, [i["id"] for i in data["human"]])
         self.assertIn(iid, [i["id"] for i in data["answered"]])
 
     def test_closed_tickets_are_not_listed_as_answered(self):
         iid = self.new_question(labels=("answered",))
         bdc(self.repo, "close", iid)
-        self.assertNotIn(iid, [i["id"] for i in humanq.load_project(self.repo)["answered"]])
+        self.assertNotIn(iid, [i["id"] for i in self.load()["answered"]])
 
     # ---- 0.7.0: 取り消しの照合 (回答の署名 asig) ----
     # 画面は回答の成功の応答と回答済みの一覧で回答の署名を受け取り、取り消しに付けて送る。サーバーは今の最後の
