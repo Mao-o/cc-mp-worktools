@@ -1572,6 +1572,10 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 新しい形が見つかったときは「普段どおりに書くコマンドか」で範囲を決める。範囲外ならこの一覧に
 足す (読みや追跡は増やさない)。
 
+検証の対象外のクラウド CLI (`wrangler` / `cf`) は照合せずに通し、コマンドの位置に現れたら対象外であることを
+`additionalContext` で知らせる (v0.31.0。同じセッションでは CLI ごとに 1 回。deny はせず、deny したコマンドには
+足さない。一覧は `hooks/cloud-account-guard/core/unverified.py`)。
+
 ## 既知の制限
 
 - **QUERY tier の「読むだけ」はコマンド形で判定している** (v0.14.0)。`aws \S+

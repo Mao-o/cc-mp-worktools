@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.31.0
+
+### Added: 検証の対象外のクラウド CLI を使ったことを知らせる
+
+- 検証の対象外のクラウド CLI (`wrangler` / `cf`) がコマンドの位置に現れたら、allow のまま `additionalContext` で
+  「cloud-account-guard はこの CLI のアカウントを照合していない」ことを知らせる。対象外の CLI を使い始めたことに
+  気づけるようにするため。判定 (allow / deny) は変えない
+- 候補は検証と同じ分解 (wrapper を剥がした形。`npx wrangler deploy` / `npx wrangler@3 deploy` / `cd app && wrangler ...`
+  など) から取り、新しい読みは足さない。引数の位置 (`npm install -D wrangler`) や `$(...)` の中は数えない。
+  検証の分解でも剥がさない wrapper (`bunx` / `pnpm wrangler` / `yarn wrangler`) の後ろも数えない
+- 同じセッション (hook input の `session_id`) では CLI ごとに 1 回だけ出す。記録は成功 cache と同じ dir に置く。
+  `session_id` が無い・記録の dir を使えない・記録を作れないときは、1 回に絞れないので毎回出す
+  (deprecation の案内と同じ倒し方)
+- deny になるコマンドには足さず、知らせたことも記録しない (deny の本文は deny の理由だけにする)。次に通った
+  コマンドで知らせる。警告 (リモート read の不一致など) の `additionalContext` には後ろに足す。検証モードには
+  よらない
+- 対象外の CLI の一覧は `core/unverified.py` の 1 か所。検証に対応したら外す (外し忘れは、services の PATTERNS と
+  重なる名前として契約テストが検出する)
+
 ## 0.30.4
 
 ### Added (開発者向け): 照合の組を比べる道具 (`tests/oracle/`)
