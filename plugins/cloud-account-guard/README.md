@@ -1513,6 +1513,9 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   (`mise exec -C dir -- gcloud ...` / `pnpm exec -C dir aws ...`) の後ろのクラウド CLI。
   option 付きは剥がさないので、候補にならず検証されない
 - 配列の閉じの直後に語の断片が続く代入 (`a=(1 2)y aws ...`) の後ろのクラウド CLI
+- 期待値を登録した service で、identity env に値を読めない代入をした形 (`AWS_PROFILE=$(cmd) aws ...`)。
+  代入した値ではなく起動時の値で照合する (起動時の値が期待どおりなら通る)。期待値が未登録でディレクトリ単位の
+  固定で通す service では、この形を固定とみなさない
 - コマンド語の無い heredoc に演算子が続く形 (`<<E && aws ...`) の後ろのクラウド CLI
 - heredoc と、シェル経由の wrapper (`watch` / `sudo -s` / `sudo -i` / `npx -c`) に引用符で包んで渡す
   複合コマンドを組み合わせた形 (`cat <<EOF && watch 'true && kubectl ...'` + 改行 + 本文 + `EOF` /

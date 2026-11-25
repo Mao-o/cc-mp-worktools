@@ -342,6 +342,7 @@ def _analyze_command(
     tier_map: dict = {}
     switching: list = []
     segments: list[tuple] = []
+    unread_memo: list[dict] = []
     readings = extract_candidate_readings(command)
     default_count = len(readings[0])
     # option の値の `~` をシェルと同じく HOME に展開する (v0.29.6)。HOME を変えうるコマンドでは
@@ -376,7 +377,14 @@ def _analyze_command(
         # `aws --profile a s3 rm && aws --profile b s3 rm` が 1 エントリに畳まれ、
         # 後段 (b) が検証されないまま誤 allow される。
         ctx = _context_override(cand, svc, None if cand in reread else tilde)
-        key = (svc, tuple(sorted(inline_env.items())), tuple(sorted(ctx.items())))
+        # 値を読めなかった前置きの代入のキー (v0.30.3) も grouping key に含める。値を読めない代入は
+        # inline env に入らないので、含めないと印の付いた候補 (`AWS_PROFILE=$(cmd) aws s3 ls`) と
+        # 印の無い候補 (`&& aws s3 rm ...`) が 1 エントリに畳まれ、固定の判定 (`_pinned`) が印の和を
+        # 上書きに数えて、固定で走る後者まで未登録の判定に戻す。
+        if not unread_memo:
+            unread_memo.append(command_parser.unread_env_candidates(command))
+        unread_keys = tuple(sorted(unread_memo[0].get(cand, ())))
+        key = (svc, tuple(sorted(inline_env.items())), tuple(sorted(ctx.items())), unread_keys)
         if key not in cand_map:
             cand_map[key] = []
             tier_map[key] = tier
@@ -389,7 +397,7 @@ def _analyze_command(
         cand_map[key].append((cand, forms[-1]))
     targets: list = []
     for key in order:
-        svc, env_items, ctx_items = key
+        svc, env_items, ctx_items, _unread = key
         targets.append(
             (svc, cand_map[key], dict(env_items), dict(ctx_items), tier_map[key])
         )

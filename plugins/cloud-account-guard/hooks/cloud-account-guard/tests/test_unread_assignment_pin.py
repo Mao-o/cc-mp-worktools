@@ -91,8 +91,11 @@ class UnreadKeysTests(unittest.TestCase):
             (f"AWS_PROFILE=~/x {AWS}", {}),
             # 別のコマンドの代入 (代入はそのコマンドだけ)
             (f"AWS_PROFILE=$(echo q) true; {AWS}", {"true": {"AWS_PROFILE"}}),
-            # 代入だけのセグメント (後ろへの効き目は `core/workdir.py` の `segment_env_changes` が数える)。
-            # 最初に値を飛ばした代入から後ろの断片を候補にするので、印はその代入より前のものだけ
+            # 代入だけのセグメント。最初に値を飛ばした代入から後ろの断片を候補にするので、印はその代入より
+            # 前のものだけ。後ろのコマンドへの効き目は `core/workdir.py` の `segment_env_changes` が
+            # `$(cmd)` (置換の中に空白が無い値) でだけ数える。置換の中に空白がある値 (`$(echo q)`) や、前に
+            # 静的な代入が並ぶ形は前段の env の変更としても数えておらず、固定のある世界では aws を固定で通す
+            # (0.30.2 と同じ。別途)
             (f"AWS_PROFILE=$(echo q) X=1; {AWS}", {}),
             (f"Y=$P AWS_PROFILE=$(echo q) X=1; {AWS}", {"AWS_PROFILE=$(echo q) X=1": {"Y"}}),
         ):
@@ -209,6 +212,35 @@ class PinnedOverrideTests(_Base):
         self.assertEqual(decision, "warn", reason)
         self.assertIn("キーがありません", reason)
         self.assertEqual(self._decision("aws s3 ls s3://b"), ("allow", ""))
+
+    def test_marked_query_does_not_unpin_an_unmarked_write(self):
+        """印の付いた QUERY と、印の無い (固定で走る) WRITE は別の target に分ける。
+
+        1 つに畳むと tier は WRITE、固定の判定は印の和を上書きに数え、固定で走る WRITE まで未登録の deny に
+        なる。静的な上書きの対照 (inline env が違うので別の target) と同じく警告に留める。
+        """
+        for accounts in ({"github": "me"}, None):
+            path = self.project_dir / ".claude" / "cloud-account-guard" / "accounts.local.json"
+            if accounts is None:
+                path.unlink(missing_ok=True)
+            else:
+                self._write_accounts(accounts)
+            for command in (
+                f"AWS_PROFILE=$(echo prod) aws s3 ls s3://b && {AWS}",
+                f"{AWS} && AWS_PROFILE=$(echo prod) aws s3 ls s3://b",
+                f"AWS_PROFILE=$P aws s3 ls s3://b; {AWS}",
+                "CLOUDSDK_CORE_ACCOUNT=$(echo b@example.com) gcloud compute instances list"
+                " && gcloud run deploy x",
+                # 静的な上書きの対照
+                f"AWS_PROFILE=prod aws s3 ls s3://b && {AWS}",
+            ):
+                with self.subTest(command=command, accounts=accounts):
+                    decision, reason = self._decision(command)
+                    self.assertEqual(decision, "warn", reason)
+            # 印の付いた候補自身が WRITE なら、これまでどおり deny
+            with self.subTest(accounts=accounts, write=True):
+                decision, reason = self._decision(f"AWS_PROFILE=$(echo prod) {AWS} && aws s3 ls s3://b")
+                self.assertEqual(decision, "deny", reason)
 
     def test_registered_value_is_still_checked_with_the_hook_env(self):
         """期待値を登録した service の照合は変えない (値を読めない代入は hook の env で照合する。0.29.10)。"""

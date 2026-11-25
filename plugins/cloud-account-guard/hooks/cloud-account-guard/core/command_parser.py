@@ -1998,6 +1998,12 @@ def _strip_command_path(cmd: str) -> str:
     tok = m.group(1)
     if "'" in tok or '"' in tok:
         return cmd
+    # リダイレクトの語 (`2>/dev/null` / `</dev/null`) はコマンド名ではない。前置きの代入の後ろに置いた
+    # リダイレクト (`AWS_PROFILE=prod 2>/dev/null aws ...`) は、同じラウンドで `_strip_leading_syntax` より
+    # 先にここに来るので、basename に揃えると `null aws ...` になり、後ろの CLI が候補にならない (v0.30.3)。
+    # 次のラウンドの `_strip_leading_syntax` が剥がす。
+    if _LEADING_REDIRECT_RE.match(tok):
+        return cmd
     # `NAME=値` の代入だけのセグメント (後ろにコマンド語が無い。後ろにあれば `_parse_leading_env` が
     # 先に剥がしている) は、コマンドの呼び出しではない。値が `/…/firebase-tools` で終わるだけで
     # basename に揃えると、firebase のコマンドとして検出され誤 deny になる。代入の値は
@@ -2440,9 +2446,16 @@ def _segment_candidates(
         # (`AWS_PROFILE=prod cat <<EOF | aws ...` の aws は起動時の AWS_PROFILE で走る。bash 3.2 /
         # zsh -f で実測)。0.30.2 までは後ろの段にも継いでいた。シェル経由 wrapper の中身
         # (`AWS_PROFILE=prod watch 'true && aws ...'`) は wrapper が起動するシェルに渡るので全段に効く。
-        # 前置きの代入を剥がした残りが区切りで始まるとき (代入の後ろにコマンド語が無い) は、その
-        # 代入が export 済みの変数なら後ろのコマンドに効くので、0.30.2 までと同じく全段に継ぐ。
-        first_only = heredoc and not reread and normalized[0] not in ";&|"
+        # 区切りが wrapper の引用符の外にある行 (`AWS_PROFILE=prod watch 'true' <<EOF && aws ...`) の
+        # 後ろの段は外のシェルで走るので、wrapper の有無によらず先頭の段だけ (heredoc の本文を落とした
+        # 行に引用符の外の区切りがあるかで分ける)。
+        # 前置きの代入を剥がした残りが `;` / `&&` / `||` で始まるとき (代入の後ろにコマンド語が無い) は、
+        # その代入が export 済みの変数なら後ろのコマンドに効くので、0.30.2 までと同じく全段に継ぐ。
+        # `|` / `&` で始まるときは、後ろの段がサブシェルで走るのでどの段にも継がない。
+        line_stages = heredoc and len(split_with_separators(_strip_heredoc_bodies(seg))) > 1
+        no_word_here = normalized.startswith((";", "&&", "||"))
+        no_word_sub = not no_word_here and normalized[:1] in "|&"
+        first_only = line_stages and not no_word_here
         for k, (part, inner_sep) in enumerate(parts):
             (
                 inner, inner_env, inner_chdir, inner_external, inner_reread, inner_unread, _heredoc
@@ -2452,7 +2465,7 @@ def _segment_candidates(
                 # wrapper の中身 (外側の `reread`) と、段自身がシェル経由 wrapper の形 (`inner_reread`) は
                 # Bash のシェルの語と扱わない (`shell_string_candidates`)。heredoc の本文を落とした
                 # 宣言行と、前置きの代入を剥がした残りは、Bash のシェルが読む語 (`cat <<EOF && kubectl --kubeconfig ~/a ...` の `~` は展開される)
-                inherits = not first_only or k == 0
+                inherits = not first_only or (k == 0 and not no_word_sub)
                 outer_env = env if inherits else {}
                 outer_unread = unread if inherits else frozenset()
                 found.append((

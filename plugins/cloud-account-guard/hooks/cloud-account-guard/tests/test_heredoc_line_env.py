@@ -14,9 +14,10 @@
 
 | 段の由来 | 外側の前置きの代入 |
 |---|---|
-| heredoc の本文を落とした行 | 先頭の段だけ |
+| heredoc の本文を落とした行 (先頭の段がシェル経由 wrapper でも、区切りが引用符の外なら) | 先頭の段だけ |
 | シェル経由 wrapper の中身 (`watch '...'` / `npx -c '...'`) | 全段 (wrapper が起動するシェルに渡る) |
-| 前置きの代入を剥がした残りが区切りで始まる (コマンド語の無い代入) | 全段 (0.30.2 と同じ) |
+| 前置きの代入を剥がした残りが `;` / `&&` / `||` で始まる (コマンド語の無い代入) | 全段 (0.30.2 と同じ) |
+| 前置きの代入を剥がした残りが `|` / `&` で始まる heredoc の行 | どの段にも継がない (サブシェル) |
 
 表の各行は `ShellAgreementTests` が bash 3.2 と zsh -f で全段の env を実際に取って確かめる。
 """
@@ -74,6 +75,22 @@ SHELL_TABLE = [
     "cd sub && AWS_PROFILE=prod cat <<EOF && aws s3 rm s3://b/c\nx\nEOF",
     "! AWS_PROFILE=prod cat <<EOF | aws s3 cp - s3://b/n\nx\nEOF",
     "AWS_PROFILE=prod cat <<A && KUBECONFIG=~/k.yaml cat <<B && aws s3 rm s3://b/two\na\nA\nb\nB",
+    # 先頭の段がシェル経由 wrapper でも、区切りが wrapper の引用符の外なら後ろの段は外のシェルで走る
+    "AWS_PROFILE=prod watch 'cat' <<EOF && aws s3 rm s3://b/wc\nx\nEOF",
+    "AWS_PROFILE=prod npx -c 'cat' <<EOF && aws s3 rm s3://b/nc\nx\nEOF",
+    "KUBECONFIG=~/k.yaml watch 'cat' <<EOF | kubectl apply -f -\nkind: x\nEOF",
+    "GH_CONFIG_DIR=/g npx -c 'cat' <<'EOF'; gh pr create --title wc\nx\nEOF",
+    "AWS_PROFILE=prod watch 'true' <<EOF && aws s3 rm s3://b/f3a\nx\nEOF",
+    "AWS_PROFILE=prod npx -c 'true' <<EOF ; aws s3 rm s3://b/f3b\nx\nEOF",
+    "KUBECONFIG=~/k.yaml watch 'true' <<EOF && kubectl delete po f3c\nx\nEOF",
+    # コマンド語の無い代入の後ろにリダイレクトを挟む形 (`;` / `&&` が続けば全段、`|` / `&` が続けば
+    # サブシェルなのでどの段にも効かない)
+    "AWS_PROFILE=prod 2>/dev/null <<EOF ; aws s3 rm s3://b/nwr\nx\nEOF",
+    "AWS_PROFILE=prod <<EOF >/dev/null && aws s3 rm s3://b/f1b\nx\nEOF",
+    "KUBECONFIG=~/k.yaml </dev/null <<EOF ; kubectl delete po f1c\nx\nEOF",
+    "AWS_PROFILE=prod 2>./err.txt <<EOF ; aws s3 rm s3://b/f1d\nx\nEOF",
+    "AWS_PROFILE=prod <<EOF 2>/dev/null | aws s3 cp - s3://b/nwp\nx\nEOF",
+    "AWS_PROFILE=prod <<EOF | aws s3 cp - s3://b/nwq\nx\nEOF",
     # 全段に継ぐ由来: シェル経由 wrapper の中身 (heredoc の本文があっても)
     "AWS_PROFILE=prod watch 'true && aws s3 rm s3://b/w && kubectl delete po w'",
     "AWS_PROFILE=prod npx -c 'true && aws s3 rm s3://b/npx'",
@@ -381,6 +398,29 @@ class DispatchTests(BaseWithTmpProject):
                     self.assertEqual(self._run(command), "allow")
             # シェル経由 wrapper の中身は前置きの値で走るので、そのまま照合する (deny)
             self.assertEqual(self._run("AWS_PROFILE=other watch 'true && aws s3 rm s3://b/k'"), "deny")
+
+    def test_redirects_and_wrappers_on_the_heredoc_line(self):
+        """起動時の値が期待どおりで前置きの値が期待外の世界。シェルが前置きの値で走らせる後ろの CLI は deny、
+        起動時の値で走らせる後ろの CLI は allow (値は `ShellAgreementTests` の表の同じ形)。"""
+        with mock.patch.dict(os.environ, {"AWS_PROFILE": "prod", "GH_CONFIG_DIR": "/g", "CLOUDSDK_CONFIG": "/gc"}):
+            for command, want in (
+                # コマンド語の無い代入の後ろの `/` を含むリダイレクト: `;` / `&&` の後ろは前置きの値で走る
+                ("AWS_PROFILE=other 2>/dev/null <<EOF ; aws s3 rm s3://b/k\nx\nEOF", "deny"),
+                ("AWS_PROFILE=other <<EOF >/dev/null && aws s3 rm s3://b/k\nx\nEOF", "deny"),
+                ("AWS_PROFILE=other 2>./err.txt <<EOF ; aws s3 rm s3://b/k\nx\nEOF", "deny"),
+                ("AWS_PROFILE=other <<EOF ; aws s3 rm s3://b/k\nx\nEOF", "deny"),
+                # `|` の後ろはサブシェルなので起動時の値で走る
+                ("AWS_PROFILE=other <<EOF | aws s3 cp - s3://b/k\nx\nEOF", "allow"),
+                ("AWS_PROFILE=other <<EOF 2>/dev/null | aws s3 cp - s3://b/k\nx\nEOF", "allow"),
+                # 先頭の段のシェル経由 wrapper の引用符の外の後ろの段は、外のシェルで起動時の値で走る
+                ("AWS_PROFILE=other watch 'true' <<EOF && aws s3 rm s3://b/k\nx\nEOF", "allow"),
+                ("AWS_PROFILE=other npx -c 'true' <<EOF ; aws s3 rm s3://b/k\nx\nEOF", "allow"),
+                # heredoc の無い行の前置きの代入の後ろのリダイレクトも、後ろの CLI を前置きの値で照合する
+                ("AWS_PROFILE=other 2>/dev/null aws s3 rm s3://b/k", "deny"),
+                ("AWS_PROFILE=other </dev/null aws s3 rm s3://b/k", "deny"),
+            ):
+                with self.subTest(command=command):
+                    self.assertEqual(self._run(command), want)
 
 
 if __name__ == "__main__":
