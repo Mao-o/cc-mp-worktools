@@ -2087,6 +2087,9 @@ def shell_string_candidates(command: str) -> frozenset[str]:
     `sudo -i kubectl ... ~/a`) は Bash のシェルが先に展開するが、wrapper を剥がした後の文字列からは
     包んだ形かどうかを区別できないので、展開しない側に倒す (0.29.5 と同じ読み)。heredoc の本文を
     落とした宣言行を分割し直した段 (`cat <<EOF && kubectl ...`) は Bash のシェルが読む語なので含めない。
+    宣言行の先頭の段がシェル経由の wrapper でも、引用符の外の区切りの後ろの段
+    (`watch 'cat' <<EOF && kubectl ...` / `sudo -i cat <<EOF | kubectl ...` の kubectl) は外のシェルが
+    走らせるので含めない (v0.30.4)。
     同じ文字列の候補が wrapper 無しでも現れるときも含める (呼び出し側は展開しない側に倒す)。
     読みは `extract_candidate_readings` と同じ。
     """
@@ -2150,6 +2153,17 @@ def _normalize_segment_chdir(
     引数の `~` を展開するが zsh は展開しない (`env K=~/a ...`。bash 3.2 / zsh -f で実測)。
     そこは 0.29.4 までと同じく展開しない。
 
+    ただし、セグメントの先頭の構文 (`(` / `{` / `!` / `then` など) とリダイレクトの後ろに、代入・
+    wrapper・パスの正規化 (`\\time` / `/usr/bin/time`) を挟まずに置いた option の無い `time` は
+    bash / zsh の予約語で、後ろの代入はシェル自身が行う (`time K=~/a kubectl ...` の `~` は両方の
+    シェルが HOME に展開する。v0.30.4)。剥がした後も展開を続ける。予約語として読まない位置
+    (`X=1 time` / `\\time` / `nohup time` / 2 つ目の `time`) の `time` は外部の time で、代入の形の語を
+    コマンド名として起動しようとして失敗し、後ろの CLI は走らない (`X=1 time` は zsh では構文エラー。
+    bash 3.2 / zsh -f で実測)。そこと
+    option 付きの `time -p` (zsh は `-p` をコマンド名として起動する) は従来どおり展開しない。
+    bash 3.2 が予約語と読まない `! time` / `if time` / `| time` / `2>/dev/null time` は、zsh だけが
+    予約語と読んで後ろの CLI を走らせる (そのとき `~` は HOME に展開される) ので、展開する側に含める。
+
     3 つ目は、剥がした `sudo` の flag 領域に作業ディレクトリを変える option
     (`_SUDO_CHDIR_FLAGS`) があったか。4 つ目は、シェル自身で走らせる wrapper
     (`_IN_SHELL_WRAPPERS`) 以外の wrapper を剥がしたか、パス付きのコマンド名を basename に
@@ -2184,6 +2198,8 @@ def _normalize_segment_chdir(
     raw = cmd
     cmd = _strip_heredoc_bodies(cmd)
     heredoc = cmd != raw
+    # 次の語を `time` の予約語として読める位置か (代入・wrapper・パスの正規化をまだ挟んでいない。docstring)
+    reserved_position = True
     for _ in range(max_iter):
         before = cmd
         # 構文プレフィックス → 先頭 env → コマンド名のパス正規化 の順。
@@ -2192,14 +2208,19 @@ def _normalize_segment_chdir(
         # 両方を 1 ラウンドで畳めるようにしてある。
         cmd = _strip_leading_syntax(cmd)
         round_unread: set[str] = set()
+        assigned = cmd
         cmd, env = _parse_leading_env(cmd, home, round_unread)
+        if cmd != assigned:
+            reserved_position = False  # `X=1 time ...` の time は外部の time
         collected.update(env)  # 内側 (後段) が外側を上書きする
         unread.difference_update(env)
         unread.update(round_unread)
         pathed = cmd
         cmd = _strip_command_path(cmd)
-        if cmd != pathed and "/" in pathed.split(None, 1)[0]:
-            external = True  # `/usr/bin/cd sub` は外部の cd (`\cd` は組み込みのまま)
+        if cmd != pathed:
+            reserved_position = False  # `\time` / `/usr/bin/time` は予約語ではない
+            if "/" in pathed.split(None, 1)[0]:
+                external = True  # `/usr/bin/cd sub` は外部の cd (`\cd` は組み込みのまま)
         # sudo を剥がす直前の判定: preserve-env 指定が無ければ、ここまでに集めた
         # pre-sudo env を sudo が scrub するので破棄する。剥がし自体は
         # _strip_one_wrapper に委ねる (sudo の flag 消費規則と一致させる)。
@@ -2217,12 +2238,14 @@ def _normalize_segment_chdir(
                 reread = True
             # option 付きの `time -p` / `time --` / `builtin --` は、zsh では後ろの cd を走らせない
             # (bash も `time --` は走らせない)。シェル内の wrapper とみなさず外部側に倒す
-            if not toks or toks[0] not in _IN_SHELL_WRAPPERS or (
-                len(toks) > 1 and toks[1].startswith("-")
-            ):
+            optioned = len(toks) > 1 and toks[1].startswith("-")
+            if not toks or toks[0] not in _IN_SHELL_WRAPPERS or optioned:
                 external = True
             cmd = stripped
-            home = None  # wrapper の後ろの代入の形の引数は展開しない (docstring)
+            # wrapper の後ろの代入の形の引数は展開しない。予約語の `time` の後ろの代入は展開する (docstring)
+            if not (reserved_position and toks[:1] == ["time"] and not optioned):
+                home = None
+            reserved_position = False
             continue
         # wrapper は剥がれなかったが構文 / env / パスの正規化が進んだなら、
         # その結果に対してもう一度 wrapper 判定をやり直す。
@@ -2440,6 +2463,9 @@ def _segment_candidates(
         # `cat <<EOF && KUBECONFIG=~/a kubectl ...`)。シェル経由 wrapper の中身 (外側の `reread`) の
         # 代入は、wrapper が起動するシェルが読み直すので展開しない (option の値の `~` と同じ条件)。
         # 段の中の wrapper の後ろの代入は `_normalize_segment_chdir` が展開しない。
+        # 先頭の段がシェル経由 wrapper でも、heredoc の本文を落とした行の引用符の外の区切りの後ろの段
+        # (下の `outer`。`watch 'cat' <<EOF && KUBECONFIG=~/a kubectl ...`) は外のシェルが走らせるので、
+        # 外側の `reread` を継がない (v0.30.4。0.30.3 までは全段を wrapper の中身として読んでいた)。
         part_home = None if reread else home
         # 外側の前置きの代入 (env と、値を読めなかった代入のキー) が効く段も、段を取り出した経路で
         # 決まる (v0.30.3)。heredoc の本文を落とした行の前置きの代入は、行の先頭のコマンドにだけ効く
@@ -2461,14 +2487,18 @@ def _segment_candidates(
         no_word_sub = not no_word_here and normalized[:1] in "|&"
         first_only = line_stages and not no_word_here
         for k, (part, inner_sep) in enumerate(parts):
+            # heredoc の本文を落とした行の、引用符の外の区切りの後ろの段 (先頭の段の外。heredoc の無い行と、
+            # 外の区切りの無い行は head_parts が段の数になるので当たらない)
+            outer = k >= head_parts
             (
                 inner, inner_env, inner_chdir, inner_external, inner_reread, inner_unread, _heredoc
-            ) = _normalize_segment_chdir(part, home=part_home)
+            ) = _normalize_segment_chdir(part, home=home if outer else part_home)
             if inner:
                 # 分割し直した段の語を Bash のシェルが読むかは、段を取り出した経路で決まる。シェル経由
                 # wrapper の中身 (外側の `reread`) と、段自身がシェル経由 wrapper の形 (`inner_reread`) は
                 # Bash のシェルの語と扱わない (`shell_string_candidates`)。heredoc の本文を落とした
-                # 宣言行と、前置きの代入を剥がした残りは、Bash のシェルが読む語 (`cat <<EOF && kubectl --kubeconfig ~/a ...` の `~` は展開される)
+                # 宣言行と、前置きの代入を剥がした残りは、Bash のシェルが読む語 (`cat <<EOF && kubectl --kubeconfig ~/a ...` の `~` は展開される)。
+                # 先頭の段がシェル経由 wrapper の行でも、`outer` の段は Bash のシェルが読む語
                 inherits = not first_only or (k < head_parts and not no_word_sub)
                 outer_env = env if inherits else {}
                 outer_unread = unread if inherits else frozenset()
@@ -2478,7 +2508,7 @@ def _segment_candidates(
                     sep if k == last else inner_sep,
                     chdir or inner_chdir,
                     external or inner_external,
-                    reread or inner_reread,
+                    (reread and not outer) or inner_reread,
                     frozenset(outer_unread.difference(inner_env)) | inner_unread,
                 ))
         return found

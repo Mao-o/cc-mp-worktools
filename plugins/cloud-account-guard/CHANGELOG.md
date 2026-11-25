@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.30.5
+
+### Fixed: 予約語の `time` の後ろと、シェル経由 wrapper を先頭に置いた heredoc の行の後ろの段で、代入と option の `~` を展開していなかった
+
+- `time KUBECONFIG=~/k.yaml kubectl apply ...` の `~` を、行頭の代入 (0.29.5) と同じく HOME に展開してから照合する。
+  0.30.3 までは `time` を wrapper として剥がした後ろの代入を「wrapper の引数」と読んで展開せず、作業ディレクトリの
+  `./~/k.yaml` を照合していた。普段は止めすぎ側 (ファイルが無く deny) だが、作業ディレクトリに `~` という名前の
+  ディレクトリがあり、その下に期待値どおりの kubeconfig があると、kubectl が読む HOME の下のファイルが違っても通して
+  いた。option の無い `time` は bash 3.2 / zsh -f の予約語で、後ろの代入はシェル自身が行う (どちらも HOME に展開する)。
+  `{ time ...; }` / `( time ... )` / `true && time ...` / `then time ...` / `time ! ...` / `time ( ... )` と、
+  heredoc を置いた行の後ろの段 (`cat <<EOF && time KUBECONFIG=~/k.yaml kubectl ...`) も同じ。`! time` / `if time` /
+  `| time` / `2>/dev/null time` は zsh だけが予約語と読み (bash 3.2 は外部の time を起動し、代入の形の語をコマンド名
+  として起動しようとして失敗するので CLI は走らない)、zsh では HOME に展開して走るので、同じく展開する
+- 予約語として読まれない `time` (`X=1 time ...` / `\time ...` / `/usr/bin/time ...` / `nohup time ...` /
+  `time time ...` の 2 つ目) は外部の time で、bash 3.2 と zsh -f のどちらでも後ろの CLI は走らないので、従来どおり展開しない。
+  option 付きの `time -p ...` (zsh は `-p` をコマンド名として起動する) と、`time` の後ろの wrapper の後ろの代入
+  (`time env KUBECONFIG=~/x ...`。bash だけが展開する) も従来どおり
+- heredoc を置いた行の先頭の段がシェル経由の wrapper で、区切りが wrapper の引用符の外にある行
+  (`watch 'cat' <<EOF && KUBECONFIG=~/k.yaml kubectl ...` / `sudo -i cat <<EOF | kubectl --kubeconfig ~/k.yaml ...` /
+  `npx -c 'cat' <<EOF ; ...`) の後ろの段の代入と option の `~` も展開する。0.30.3 までは行の全段を wrapper の中身
+  (wrapper が起動するシェルが読み直す語) と読んでいた。後ろの段は外のシェルが走らせるので、heredoc を置いたほかの行
+  (0.30.2) と同じく HOME に展開する。wrapper の中身の段 (`npx -c 'true && kubectl --kubeconfig ~/x ...' <<EOF ; ...` の
+  中の kubectl) と、後ろの段自身がシェル経由の wrapper の形 (`... <<EOF && watch 'kubectl --kubeconfig ~/x ...'`) は
+  従来どおり展開しない
+- 作業ディレクトリを変える wrapper の印 (`sudo -i` / `sudo -D`) と外部プログラムの `cd` の印は、従来どおり行の全段に
+  継ぐ (どちらも決められない側に倒れる印。0.30.3 と同じ)
+
+### 比較
+
+- 生成した 86,520 形 (行頭の `time` の前置き 35 種 × `time` の形 16 種 × 代入 13 種 × CLI と、heredoc の行の先頭の段
+  28 種 × 区切り語 7 種 × 区切り 7 種 × 後ろの段 22 種 × 本文 2 種ほか) の候補・env・option の値を 0.30.3 と比べた。
+  候補の文字列・区切り・作業ディレクトリを変える wrapper の印・外部 cd の印・読めない代入の印は全形で同じで、差は
+  env の値の `~` の展開 (29,728 形)、option の値の `~` の展開 (3,724 形)、値に効かない「wrapper の中身」の印の
+  外れ (9,443 形) だけ
+- 値が変わった 33,452 候補を bash 3.2 と zsh -f で走らせ、偽の CLI が受け取った env と引数を取った (`||` の後ろや
+  前の段の失敗で走らない段は、区切りを `;` にした形でも走らせた)。両方のシェルで走り新しい値と一致 30,394、
+  zsh だけで走り一致 2,261 (`! time` / `if time` / `| time` / `2>/dev/null time` など)、bash だけで走り一致 14、
+  どちらのシェルでも CLI が走らない 783 (行の継続で代入の値と CLI の名前がつながる形、`time X | time ...` の
+  2 つ目の `time` など)。一致しない候補は 0
+- kubectl の照合を、HOME の下と作業ディレクトリの `./~/` の下に別の current-context を置いた 2 つの世界で
+  dispatch した (変わった形の 9 形に 1 つと、変わらない形 3,000)。HOME の下が期待値の世界で deny → allow 198 形・
+  警告 → allow 2,277 形、`./~/` の下が期待値の世界で allow → deny 191 形・allow → 警告 1,786 形で、どれも上の
+  シェルの実測と一致する (9 形はどちらのシェルでも CLI が走らない形)。ほかの遷移は 0。固定のある世界・sub だけの
+  `firebase use` の記録・起動 repo の外・自動切替の世界 (2,445 形) の判定と切替の回数は 0.30.3 と同じ
+
 ## 0.30.4
 
 ### Added (開発者向け): 照合の組を比べる道具 (`tests/oracle/`)
