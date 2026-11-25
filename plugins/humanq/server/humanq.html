@@ -55,6 +55,17 @@ header { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bot
 @media (max-width: 640px) {
   #toc .inner { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 6px; }
 }
+/* 絞り込みと検索の帯 (目次の帯の下。sticky にはしない)。操作部品は選べる値が 2 つ以上あるときだけ出す */
+#filters .inner { max-width: 860px; margin: 0 auto; padding: 10px 16px 2px; display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end; }
+.fld { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--muted); min-width: 0; }
+.fld[hidden] { display: none; }
+.fld input, .fld select { font: inherit; font-size: 13px; color: var(--ink); background: var(--panel); border: 1px solid var(--control-line); border-radius: 8px; padding: 4px 8px; max-width: 100%; }
+.fld input { width: 240px; }
+.fld select { max-width: 220px; }
+.fcount { font-size: 13px; color: var(--muted); padding-bottom: 5px; }
+#fclear { font-size: 13px; padding: 3px 12px; }
+#fclear[hidden] { display: none; }
+@media (max-width: 640px) { .fld.fsearch { flex: 1 1 100%; } .fld.fsearch input { width: 100%; } }
 main { max-width: 860px; margin: 0 auto; padding: 8px 16px 64px; }
 h3 { font-size: 14px; color: var(--muted); font-weight: 600; margin: 28px 0 10px; letter-spacing: .02em; }
 /* カードの scroll-margin-top: sticky のヘッダー (--head-h。JS が測る) と、止まったプロジェクトの見出し (h2。1 行で約 36px) の下に 10px 空ける。
@@ -171,6 +182,15 @@ details pre { white-space: pre-wrap; word-break: break-word; font: 13px/1.6 ui-m
 </div></header>
 <div id="notice" role="alert" hidden></div>
 <nav id="toc" aria-label="プロジェクトの目次" hidden><div class="inner" id="tocin"></div></nav>
+<form id="filters" role="search" aria-label="絞り込みと検索" hidden><div class="inner">
+  <label class="fld fsearch"><span>検索</span><input id="fq" type="search" placeholder="題・問い・背景・選択肢・ID" autocomplete="off"></label>
+  <label class="fld" hidden><span>プロジェクト</span><select id="fproject"></select></label>
+  <label class="fld" hidden><span>種別</span><select id="fkind"></select></label>
+  <label class="fld" hidden><span>優先度</span><select id="fprio"></select></label>
+  <label class="fld" hidden><span>ラベル</span><select id="flabel"></select></label>
+  <span class="fcount" id="fcount" aria-live="polite" hidden></span>
+  <button class="ghost" id="fclear" type="button" hidden>解除</button>
+</div></form>
 <main id="main"></main>
 <div id="toasts" aria-live="polite"></div>
 <script>
@@ -712,6 +732,94 @@ function retire(e, onGone) {
   else { e.remove(); onGone(); }
 }
 
+// ---- 絞り込みと検索 (表示の側だけ。サーバーと bd / br の読みは変えない) ---------------------------------
+// 状態は URL の query (project / kind / prio / label / q) に持つ (再読み込みで残る)。帯の部品は作り直さない
+// (入力中の文字が 15 秒ごとの読み込みで消えない)。選択肢の一覧は、変わったときだけ書き換える。
+// 隠すのは表示だけ: 判断待ちの件数 (ヘッダー・タイトル・通知) は全件を数え、下書きと失敗の表示は残す
+
+const FILTER_KEYS = ["project", "kind", "prio", "label", "q"];
+const flt = { project: "", kind: "", prio: "", label: "", q: "" };
+try { const sp = new URLSearchParams(location.search); for (const k of FILTER_KEYS) flt[k] = sp.get(k) || ""; } catch { /* 読めなければ絞り込み無し */ }
+const filterActive = () => FILTER_KEYS.some(k => flt[k] !== "");
+let instantRender = false;         // 絞り込みを変えたことによる描き直し: 隠れるカードを畳まず外し、現れるカードに入場の動きを付けない
+
+function syncUrl() {
+  try {
+    const sp = new URLSearchParams(location.search);
+    for (const k of FILTER_KEYS) { if (flt[k] !== "") sp.set(k, flt[k]); else sp.delete(k); }
+    const s = sp.toString();
+    history.replaceState(null, "", location.pathname + (s ? "?" + s : "") + location.hash);
+  } catch { /* URL に書けなくても絞り込みは効く */ }
+}
+
+const prioOf = it => (typeof it.priority === "number" ? it.priority : 9);
+const kindOf = it => (!it.q ? "none" : it.q.kind === "task" ? "task" : "decision");
+const KIND_LABELS = { decision: "判断 (decision)", task: "作業・確認 (task)", none: "問いなし" };
+// 検索の対象: 題・問い (ask)・背景 (context)・選択肢の label・ID。大文字小文字を区別しない部分一致 (項目ごとに照合し、項目をまたがない)
+function searchFields(it) {
+  const q = it.q || {};
+  return [it.id, it.title, q.ask, q.context, ...(Array.isArray(q.options) ? q.options.map(o => o && o.label) : [])]
+    .filter(x => typeof x === "string").map(x => x.toLowerCase());
+}
+function matchesFilter(it) {
+  if (flt.project !== "" && it.project !== flt.project) return false;
+  if (flt.kind !== "" && kindOf(it) !== flt.kind) return false;
+  if (flt.prio !== "" && String(prioOf(it)) !== flt.prio) return false;
+  if (flt.label !== "" && !shownLabels(it).includes(flt.label)) return false;
+  const needle = flt.q.trim().toLowerCase();
+  return !needle || searchFields(it).some(f => f.includes(needle));
+}
+
+const filterBox = document.getElementById("filters");
+const fq = document.getElementById("fq");
+fq.value = flt.q;
+// opts は [値, 表示, title] の並び。今の値が一覧に無いとき (URL の値・データから消えた値) は足して、解除できる状態を保つ
+function setSelect(id, field, all, opts, minChoices) {
+  const sel = document.getElementById(id);
+  const list = opts.slice();
+  if (flt[field] !== "" && !list.some(o => o[0] === flt[field])) list.push([flt[field], flt[field] + " (該当なし)"]);
+  const sig = JSON.stringify([all, list]);
+  if (sel.dataset.sig !== sig) {
+    sel.dataset.sig = sig;
+    sel.replaceChildren(el("option", { value: "" }, all), ...list.map(o => el("option", { value: o[0], title: o[2] }, o[1])));
+  }
+  sel.value = flt[field];
+  sel.parentNode.hidden = !(opts.length >= minChoices || flt[field] !== "");
+}
+function syncFilterBar(total, visible) {
+  const projects = [], kinds = new Set(), prios = new Set(), labels = new Set();
+  let any = false;
+  for (const p of lastData.projects) {
+    const items = [...p.human, ...p.answered];
+    if (items.length || !p.ok) projects.push(p);      // 読めなかったプロジェクトも選べる (バナーだけを見られる)
+    for (const i of items) { any = true; kinds.add(kindOf(i)); prios.add(prioOf(i)); for (const l of shownLabels(i)) labels.add(l); }
+  }
+  const act = filterActive();
+  filterBox.hidden = !(any || act);
+  setSelect("fproject", "project", "すべてのプロジェクト", projects.map(p => [p.path, p.name, p.path]), 2);
+  setSelect("fkind", "kind", "すべての種別", ["decision", "task", "none"].filter(k => kinds.has(k)).map(k => [k, KIND_LABELS[k]]), 2);
+  setSelect("fprio", "prio", "すべての優先度", [...prios].sort((a, b) => a - b).map(n => [String(n), "P" + n]), 2);
+  setSelect("flabel", "label", "すべてのラベル", [...labels].sort().map(l => [l, l]), 1);
+  const cnt = document.getElementById("fcount");
+  cnt.textContent = act ? `${total} 件中 ${visible} 件を表示` : "";
+  cnt.hidden = !act;
+  document.getElementById("fclear").hidden = !act;
+}
+function applyFilter() {
+  syncUrl();
+  instantRender = true;
+  try { render(); } catch (e) { console.error(e); } finally { instantRender = false; }
+}
+fq.addEventListener("input", () => { flt.q = fq.value; applyFilter(); });
+for (const [id, field] of [["fproject", "project"], ["fkind", "kind"], ["fprio", "prio"], ["flabel", "label"]])
+  document.getElementById(id).addEventListener("change", e => { flt[field] = e.target.value; applyFilter(); });
+document.getElementById("fclear").addEventListener("click", () => {
+  for (const k of FILTER_KEYS) flt[k] = "";
+  fq.value = "";
+  applyFilter();
+});
+filterBox.addEventListener("submit", e => e.preventDefault());   // 検索欄で Enter を押しても、ページを読み直さない
+
 function render() {
   if (!lastData) return false;
   const main = document.getElementById("main");
@@ -721,7 +829,8 @@ function render() {
   const projEls = [];
   const chips = [];                  // 目次の帯に並べるチップ (プロジェクトの順)
   const busyPaths = new Set();
-  let total = 0, idle = 0, stale = 0;
+  const hiddenKeys = new Set();      // 絞り込みで隠しているカード (畳まずに外す。失敗の表示は残す)
+  let total = 0, visible = 0, idle = 0, stale = 0, anyItems = false;
 
   const ensureCard = (it, kind) => {
     const key = (kind === "ans" ? aKey : qKey)(it.project, it.id);
@@ -746,10 +855,17 @@ function render() {
   // 1. 今のデータから、どの入れ物にどのカードを並べるかを決める (DOM はまだ動かさない)
   const plan = [];
   for (const p of lastData.projects) {
-    const q = p.human.filter(i => !pending.has(qKey(p.path, i.id)));
-    const a = p.answered.filter(i => !pending.has(aKey(p.path, i.id)));
-    total += q.length;
-    if (!q.length && !a.length && p.ok) { idle++; continue; }
+    const q0 = p.human.filter(i => !pending.has(qKey(p.path, i.id)));
+    const a0 = p.answered.filter(i => !pending.has(aKey(p.path, i.id)));
+    total += q0.length;                // ヘッダーの件数は絞り込みに関係なく全件
+    if (!q0.length && !a0.length && p.ok) { idle++; continue; }
+    if (q0.length || a0.length) anyItems = true;
+    const q = q0.filter(matchesFilter), a = a0.filter(matchesFilter);
+    for (const i of q0) if (!q.includes(i)) hiddenKeys.add(qKey(p.path, i.id));
+    for (const i of a0) if (!a.includes(i)) hiddenKeys.add(aKey(p.path, i.id));
+    visible += q.length;
+    // 絞り込みで中身が無くなったプロジェクトは出さない。読めなかったプロジェクトのバナーは、別のプロジェクトを選んでいるときだけ隠す
+    if (!q.length && !a.length && (p.ok || (flt.project !== "" && flt.project !== p.path))) continue;
     busyPaths.add(p.path);
     let pr = projs.get(p.path);
     if (pr) { if (pr.el._leave) unleave(pr.el); }
@@ -783,9 +899,11 @@ function render() {
   // 2. データに無い (送信中・サーバー側の理由で消えた) カードは畳む。畳んでいるカードには触らない。
   //    place が外してしまわないよう、並べる前に済ませる
   for (const [key, c] of cards) {
-    if (!seenKeys.has(key) && !c.el._leave) leave(c.el, () => { if (cards.get(key) === c) cards.delete(key); });
+    if (seenKeys.has(key) || c.el._leave) continue;
+    if (hiddenKeys.has(key) && instantRender) { c.el.remove(); cards.delete(key); continue; }   // 絞り込みを変えた: 畳む動きは付けない
+    leave(c.el, () => { if (cards.get(key) === c) cards.delete(key); });
   }
-  for (const k of [...errors.keys()]) if (!seenKeys.has(k) && !pending.has(k)) errors.delete(k);
+  for (const k of [...errors.keys()]) if (!seenKeys.has(k) && !pending.has(k) && !hiddenKeys.has(k)) errors.delete(k);
 
   // 3. 並べる。空になった節・プロジェクトは、中のカードが畳み終わってから外す
   for (const { pr, groups } of plan) {
@@ -801,15 +919,16 @@ function render() {
 
   emptyNote = emptyNote || el("p", { class: "empty" });
   idleNote = idleNote || el("p", { class: "empty" });
-  emptyNote.textContent = `判断待ちはありません (登録 ${lastData.projects.length} プロジェクト)`;
+  emptyNote.textContent = filterActive() && anyItems ? "絞り込みに合うものはありません (解除すると全件に戻ります)" : `判断待ちはありません (登録 ${lastData.projects.length} プロジェクト)`;
   idleNote.textContent = `ほか ${idle} プロジェクトは判断待ちなし`;
-  place(main, [busyPaths.size ? null : emptyNote, ...projEls, busyPaths.size && idle ? idleNote : null]);
+  place(main, [busyPaths.size ? null : emptyNote, ...projEls, busyPaths.size && idle && !filterActive() ? idleNote : null]);
+  syncFilterBar(total, visible);
   // 目次の帯: 判断待ち・回答済みが無くなった (送信中を除いて)・データから消えたプロジェクトのチップは、見出しを畳み終わるのを待たずに外す
   place(document.getElementById("tocin"), chips);
   document.getElementById("toc").hidden = !chips.length;
 
   // 新しく現れたカード (追加・失敗からの戻り・取り消し) だけ入場させる。最初の描画では動かさない
-  for (const e of entering) enter(e);
+  if (!instantRender) for (const e of entering) enter(e);
   if (active && active !== document.body && active.isConnected && document.activeElement === document.body) active.focus({ preventScroll: true });
   document.getElementById("count").textContent = `${total} 件`;
   document.title = total ? `(${total}) 判断待ち` : "判断待ち";

@@ -2207,3 +2207,308 @@ for (const scheme of ["light", "dark"]) {
     });
   });
 }
+
+// ---- 絞り込みと検索 ------------------------------------------------------------------------------
+
+// 3 プロジェクト × 判断待ち 12 件 (計 36 件) と、各プロジェクトに回答済み 1 件。
+// 件 i (1〜12) の性質: 優先度 (i + プロジェクトの番号) % 4 / 種別 6 の倍数は task・i % 6 === 5 は問い無し・ほかは decision /
+// ラベル 3 の倍数は area:ui・4 の倍数は needs-review / 7 番の背景に "Widget Factory" / 9 番の選択肢の label に "Rollback plan" /
+// 3 番の選択肢の desc にだけ "hidden-desc-only" (desc は検索の対象外)
+const FPATHS = ["/work/alpha", "/work/beta", "/work/gamma"];
+function manyScript() {
+  const projects = FPATHS.map((path, pi) => {
+    const tag = path.split("/").pop();
+    const human = Array.from({ length: 12 }, (_, k) => {
+      const i = k + 1;
+      const kind = i % 6 === 0 ? "task" : i % 6 === 5 ? "none" : "decision";
+      const base = item(`${tag[0]}-${String(i).padStart(2, "0")}`, {
+        title: `${tag} thing ${i}`, priority: (i + pi) % 4,
+        labels: [i % 3 === 0 ? "area:ui" : null, i % 4 === 0 ? "needs-review" : null].filter(Boolean),
+      });
+      const q = kind === "none" ? null : { ...base.q, kind, ask: `Ask ${tag} number ${i}`,
+        context: i === 7 ? "Mentions the Widget Factory" : "",
+        options: [{ key: "a", label: i === 9 ? "Use Rollback plan" : "案A", desc: i === 3 ? "hidden-desc-only" : "" },
+                  { key: "b", label: "案B", desc: "" }] };
+      return { ...base, q };
+    });
+    return proj(path, human, [answeredItem(`${tag[0]}-ans`)]);
+  });
+  return new Script(projects);
+}
+const FALL = s => s.projects.flatMap(p => p.human.map(i => ({ ...i, project: p.path })));
+const AALL = s => s.projects.flatMap(p => p.answered.map(i => ({ ...i, project: p.path })));
+const pcards = page => page.locator("#main section.card:has(textarea)");
+const acards = page => page.locator("#main section.card:has(.ans)");
+const lastNum = i => Number(i.title.split(" ").pop());
+
+// 数えた結果を、画面と同じ述語に頼らず、台本の表から別に数える
+const FILTER_CASES = [
+  { name: "プロジェクト beta", set: { project: "/work/beta" }, pred: i => i.project === "/work/beta", want: 12 },
+  { name: "種別 decision", set: { kind: "decision" }, pred: i => i.q !== null && i.q.kind === "decision", want: 24 },
+  { name: "種別 task", set: { kind: "task" }, pred: i => i.q !== null && i.q.kind === "task", want: 6 },
+  { name: "種別 問いなし", set: { kind: "none" }, pred: i => i.q === null, want: 6 },
+  { name: "優先度 P0", set: { prio: "0" }, pred: i => i.priority === 0, want: 9 },
+  { name: "優先度 P3", set: { prio: "3" }, pred: i => i.priority === 3, want: 9 },
+  { name: "ラベル area:ui", set: { label: "area:ui" }, pred: i => i.labels.includes("area:ui"), want: 12 },
+  { name: "ラベル needs-review", set: { label: "needs-review" }, pred: i => i.labels.includes("needs-review"), want: 9 },
+  { name: "検索: 題", set: { q: "alpha" }, pred: i => i.title.includes("alpha"), want: 12 },
+  { name: "検索: 題 (部分一致)", set: { q: "thing 1" }, pred: i => [1, 10, 11, 12].includes(lastNum(i)), want: 12 },
+  { name: "検索: 問い (ask)", set: { q: "number 4" }, pred: i => i.q !== null && i.q.ask.endsWith("number 4"), want: 3 },
+  { name: "検索: 背景 (大文字小文字を区別しない)", set: { q: "WIDGET factory" }, pred: i => i.q !== null && i.q.context.includes("Widget Factory"), want: 3 },
+  { name: "検索: 選択肢の label", set: { q: "rollback" }, pred: i => i.q !== null && i.q.options.some(o => o.label.includes("Rollback")), want: 3 },
+  { name: "検索: 選択肢の desc は対象外", set: { q: "hidden-desc-only" }, pred: () => false, want: 0 },
+  { name: "検索: ID", set: { q: "b-07" }, pred: i => i.id === "b-07", want: 1 },
+  { name: "検索: ID (大文字)", set: { q: "B-07" }, pred: i => i.id === "b-07", want: 1 },
+  { name: "検索: 前後の空白は無視", set: { q: "  b-07  " }, pred: i => i.id === "b-07", want: 1 },
+  { name: "検索: 該当なし", set: { q: "zzz-none" }, pred: () => false, want: 0 },
+  { name: "組み合わせ: beta × task", set: { project: "/work/beta", kind: "task" }, pred: i => i.project === "/work/beta" && i.q !== null && i.q.kind === "task", want: 2 },
+  { name: "組み合わせ: P1 × area:ui × 検索 gamma", set: { prio: "1", label: "area:ui", q: "gamma" },
+    pred: i => i.priority === 1 && i.labels.includes("area:ui") && i.title.includes("gamma"), want: 1 },
+];
+
+async function applyFilterSet(page, set) {
+  if (set.project !== undefined) await page.selectOption("#fproject", set.project);
+  if (set.kind !== undefined) await page.selectOption("#fkind", set.kind);
+  if (set.prio !== undefined) await page.selectOption("#fprio", set.prio);
+  if (set.label !== undefined) await page.selectOption("#flabel", set.label);
+  if (set.q !== undefined) await page.fill("#fq", set.q);
+}
+
+test("絞り込みと検索: 30 件以上の台本で、条件ごとに判断待ち・回答済みの件数が正しく、「N 件中 M 件を表示」が出て、ヘッダーの件数は変わらない", async () => {
+  const s = manyScript();
+  assert.equal(FALL(s).length, 36, "台本が 36 件でない");
+  await withPage(s, async page => {
+    assert.equal((await pcards(page).count()), 36);
+    assert.equal(await page.locator("#count").innerText(), "36 件");
+    // 何も絞っていないときは、件数の表示も「解除」も出さない
+    assert.equal(await page.locator("#fcount").isVisible(), false);
+    assert.equal(await page.locator("#fclear").isVisible(), false);
+    for (const c of FILTER_CASES) {
+      const want = FALL(s).filter(c.pred).length;
+      assert.equal(want, c.want, `${c.name}: 台本の表の数え直しと手で数えた件数が違う`);
+      await applyFilterSet(page, c.set);
+      await waitFor(async () => (await pcards(page).count()) === want, 3000, `${c.name}: 判断待ち ${want} 件`).catch(() => {});
+      assert.equal(await pcards(page).count(), want, `${c.name}: 判断待ちの件数`);
+      const wantAns = AALL(s).filter(c.pred).length;
+      assert.equal(await acards(page).count(), wantAns, `${c.name}: 回答済みの件数`);
+      assert.equal(await page.locator("#fcount").innerText(), `36 件中 ${want} 件を表示`, `${c.name}: 件数の表示`);
+      assert.equal(await page.locator("#fclear").isVisible(), true, `${c.name}: 解除のボタン`);
+      assert.equal(await page.locator("#count").innerText(), "36 件", `${c.name}: ヘッダーの件数は全件のまま`);
+      assert.equal(await page.title(), "(36) 判断待ち", `${c.name}: タイトルの件数は全件のまま`);
+      await page.click("#fclear");
+      assert.equal(await pcards(page).count(), 36, `${c.name}: 解除で全件に戻る`);
+      assert.equal(await page.inputValue("#fq"), "", `${c.name}: 解除で検索欄が空に戻る`);
+      assert.equal(await page.locator("#fcount").isVisible(), false);
+    }
+  });
+});
+
+test("絞り込み: 全部隠れたら「絞り込みに合うものはありません」を出し、解除で戻る。隠れたプロジェクトの見出しと目次のチップは出さない", async () => {
+  const s = manyScript();
+  await withPage(s, async page => {
+    await page.fill("#fq", "zzz-none");
+    assert.equal(await pcards(page).count(), 0);
+    assert.match(await page.locator("#main .empty").innerText(), /絞り込みに合う/);
+    assert.equal(await page.locator("h2").count(), 0);
+    assert.equal(await page.locator("#toc").isHidden(), true);
+    assert.equal(await page.locator("#count").innerText(), "36 件");
+    await page.fill("#fq", "b-07");
+    assert.deepEqual(await page.locator("h2 .pname").allInnerTexts(), ["beta"]);
+    assert.deepEqual(await page.locator(".tocchip").evaluateAll(es => es.map(e => e.dataset.path)), ["/work/beta"]);
+    await page.click("#fclear");
+    assert.deepEqual(await page.locator("h2 .pname").allInnerTexts(), ["alpha", "beta", "gamma"]);
+    assert.equal(await page.locator("#main .empty").count(), 0);
+  });
+});
+
+test("絞り込み: 検索の入力中に 15 秒ごとの読み込み (load) が来ても、入力・フォーカス・絞り込みが保たれ、新しい一致が加わる", async () => {
+  const s = manyScript();
+  await withPage(s, async page => {
+    await page.locator("#fq").click();
+    await page.keyboard.type("widget");
+    assert.equal(await pcards(page).count(), 3);
+    await page.evaluate(() => { document.getElementById("fq").__mark = "same-node"; });
+    s.projects[1].human[0].title = "beta renamed Widget";       // 読み込みの間に、一致する題が 1 件増える
+    s.projects[2].human[6].q.context = "no longer";            // 一致していた背景が 1 件消える
+    await page.evaluate(() => load());
+    await waitFor(async () => (await page.locator("#meta").innerText()).includes("更新"), 3000, "読み込み");
+    await waitFor(async () => (await pcards(page).count()) === 3, 3000, "読み込み後も 3 件 (増 1・減 1)").catch(() => {});
+    assert.equal(await pcards(page).count(), 3);
+    assert.deepEqual(await pcards(page).locator(".id").allInnerTexts().then(a => a.sort()), ["a-07", "b-01", "b-07"]);
+    assert.equal(await page.inputValue("#fq"), "widget", "入力した文字が消えた");
+    assert.equal(await page.evaluate(() => document.getElementById("fq").__mark), "same-node", "検索欄が作り直された");
+    assert.equal(await page.evaluate(() => document.activeElement.id), "fq", "検索欄のフォーカスが外れた");
+    await page.keyboard.type("x");                              // 読み込み後もそのまま打ち続けられる
+    assert.equal(await page.inputValue("#fq"), "widgetx");
+    assert.equal(await pcards(page).count(), 0);
+  });
+});
+
+test("絞り込み: 選んでいる値が読み込みで変わらず、選択肢の一覧が変わっても選びが保たれる。データから消えた値は「該当なし」で残り、解除できる", async () => {
+  const s = manyScript();
+  await withPage(s, async page => {
+    await page.selectOption("#flabel", "needs-review");
+    // 選択肢の一覧は全文で、種別・優先度の一覧は決まった順と文言で出る
+    assert.deepEqual(await page.locator("#flabel option").allInnerTexts(), ["すべてのラベル", "area:ui", "needs-review"]);
+    assert.deepEqual(await page.locator("#fprio option").allInnerTexts(), ["すべての優先度", "P0", "P1", "P2", "P3"]);
+    assert.deepEqual(await page.locator("#fkind option").allInnerTexts(), ["すべての種別", "判断 (decision)", "作業・確認 (task)", "問いなし"]);
+    assert.deepEqual(await page.locator("#fproject option").allInnerTexts(), ["すべてのプロジェクト", "alpha", "beta", "gamma"]);
+    await page.evaluate(() => { document.querySelector("#flabel option:nth-child(2)").__mark = "same-node"; });
+    await page.evaluate(() => load());                                // 一覧が変わらないときは、選択肢を作り直さない (開いている一覧を閉じない)
+    assert.equal(await page.evaluate(() => document.querySelector("#flabel option:nth-child(2)").__mark), "same-node");
+    for (const p of s.projects) for (const i of p.human) i.labels = i.labels.filter(l => l !== "needs-review");   // ラベルがデータから消えた
+    await page.evaluate(() => load());
+    await waitFor(async () => (await page.locator("#flabel option:checked").innerText()).includes("該当なし"), 3000, "選びが残る").catch(() => {});
+    assert.equal(await page.locator("#flabel").inputValue(), "needs-review");
+    await waitFor(async () => (await pcards(page).count()) === 0, 3000, "読み込みで一致が無くなった (畳む動きの後)").catch(() => {});
+    assert.equal(await pcards(page).count(), 0);
+    assert.match(await page.locator("#flabel option:checked").innerText(), /needs-review.*該当なし/);
+    await page.click("#fclear");
+    assert.equal(await pcards(page).count(), 36);
+  });
+});
+
+test("絞り込み: URL の query (project / kind / prio / label / q) から復元され、変えると URL に出て、再読み込みしても残り、解除で query から消える (関係ない query は残す)", async () => {
+  const s = manyScript();
+  await withPage(s, async page => {
+    const qs = o => "?" + new URLSearchParams(o).toString();
+    await page.goto(baseUrl + qs({ project: "/work/beta", kind: "decision", prio: "2", label: "area:ui", q: "beta", keep: "1" }));
+    await ready(page);
+    const want = FALL(s).filter(i => i.project === "/work/beta" && i.q !== null && i.q.kind === "decision" && i.priority === 2
+      && i.labels.includes("area:ui") && i.title.includes("beta")).length;
+    assert.equal(want, 1, "台本: 該当は 1 件のはず");
+    assert.equal(await pcards(page).count(), want);
+    assert.equal(await page.locator("#fcount").innerText(), `36 件中 ${want} 件を表示`);
+    assert.deepEqual(await page.evaluate(() => ["fproject", "fkind", "fprio", "flabel", "fq"].map(id => document.getElementById(id).value)),
+      ["/work/beta", "decision", "2", "area:ui", "beta"]);
+    // 変えると URL に出る。再読み込みしても残る
+    await page.selectOption("#fprio", "0");
+    assert.equal(new URL(page.url()).searchParams.get("prio"), "0");
+    assert.equal(new URL(page.url()).searchParams.get("keep"), "1", "関係ない query が消えた");
+    await page.reload();
+    await ready(page);
+    assert.deepEqual(await page.evaluate(() => ["fproject", "fkind", "fprio", "flabel", "fq"].map(id => document.getElementById(id).value)),
+      ["/work/beta", "decision", "0", "area:ui", "beta"]);
+    const want2 = FALL(s).filter(i => i.project === "/work/beta" && i.q !== null && i.q.kind === "decision" && i.priority === 0
+      && i.labels.includes("area:ui") && i.title.includes("beta")).length;
+    assert.equal(await pcards(page).count(), want2, "再読み込みの後の件数");
+    // 解除すると、絞り込みの query だけが消える
+    await page.click("#fclear");
+    assert.equal(new URL(page.url()).search, "?keep=1");
+    assert.equal(await pcards(page).count(), 36);
+    // 検索欄を空にしても query から消える
+    await page.fill("#fq", "abc");
+    assert.equal(new URL(page.url()).searchParams.get("q"), "abc");
+    await page.fill("#fq", "");
+    assert.equal(new URL(page.url()).searchParams.has("q"), false);
+  });
+});
+
+test("絞り込み: 隠れたカードの下書きは、戻ったときに残っている。検索欄で Enter を押してもページは読み直されない", async () => {
+  const s = manyScript();
+  await withPage(s, async page => {
+    await qcard(page, "b-03").locator(".opt").nth(1).click();
+    await qcard(page, "b-03").locator("textarea").fill("memo-keep");
+    await page.evaluate(() => { window.__same = "page"; });
+    await page.fill("#fq", "alpha");
+    assert.equal(await qcard(page, "b-03").count(), 0, "隠れていない");
+    await page.press("#fq", "Enter");
+    assert.equal(await page.evaluate(() => window.__same), "page", "Enter でページが読み直された");
+    assert.equal(await page.locator("#main .leaving").count(), 0, "絞り込みで隠すカードに畳む動きが付いた");
+    await page.click("#fclear");
+    assert.equal(await page.locator("#main .anim, #main .incoming").count(), 0, "絞り込みを解除して現れるカードに入場の動きが付いた");
+    assert.equal(await qcard(page, "b-03").locator("textarea").inputValue(), "memo-keep");
+    assert.equal(await qcard(page, "b-03").locator(".opt").nth(1).getAttribute("aria-pressed"), "true");
+  });
+});
+
+test("絞り込み: 送信に失敗して戻ったカードは、隠して戻しても失敗の表示が残る", async () => {
+  const s = manyScript();
+  s.answerResult = () => ({ status: 502, body: { error: "bd boom" } });
+  await withPage(s, async page => {
+    await answerFirst(page, "a-01");
+    await waitFor(async () => (await qcard(page, "a-01").locator(".errbox").innerText()).includes("bd boom"), 3000, "失敗の表示");
+    await page.fill("#fq", "beta");
+    assert.equal(await qcard(page, "a-01").count(), 0);
+    await page.click("#fclear");
+    assert.match(await qcard(page, "a-01").locator(".errbox").innerText(), /bd boom/);
+    assert.equal(await qcard(page, "a-01").evaluate(e => e.classList.contains("failed")), true);
+  });
+});
+
+test("絞り込み: 操作部品は選べる値が 2 つ以上あるときだけ出る (プロジェクト 1 つ・ラベル無し・優先度 1 種類なら検索欄だけ)。URL に値があれば出る", async () => {
+  const s = new Script([proj(P1, [item("t-A1"), item("t-B2")])]);
+  await withPage(s, async page => {
+    assert.equal(await page.locator("#fq").isVisible(), true);
+    for (const id of ["fproject", "fkind", "fprio", "flabel"]) assert.equal(await page.locator("#" + id).isVisible(), false, id);
+    await page.goto(baseUrl + "?label=ghost");
+    await ready(page);
+    assert.equal(await page.locator("#flabel").isVisible(), true, "URL に値があるのに解除する手段が出ない");
+    assert.equal(await pcards(page).count(), 0);
+    await page.click("#fclear");
+    assert.equal(await pcards(page).count(), 2);
+  });
+});
+
+test("絞り込み: 回答済みのカードにも効き、判断待ちが 0 件の絞り込みでも回答済みは出る", async () => {
+  const s = manyScript();
+  await withPage(s, async page => {
+    await page.selectOption("#fproject", "/work/gamma");
+    assert.deepEqual(await acards(page).locator(".id").allInnerTexts(), ["g-ans"]);
+    await page.fill("#fq", "g-ans");
+    assert.equal(await pcards(page).count(), 0);
+    assert.deepEqual(await acards(page).locator(".id").allInnerTexts(), ["g-ans"]);
+    assert.equal(await page.locator("#fcount").innerText(), "36 件中 0 件を表示");
+    await page.fill("#fq", "a-ans");
+    assert.equal(await acards(page).count(), 0, "別のプロジェクトの回答済みは出ない");
+  });
+});
+
+test("絞り込み: 検索語は項目をまたいで一致しない (ID の末尾と題の頭をつなげた語は 0 件)。URL の q に改行があっても同じ", async () => {
+  const s = manyScript();
+  await withPage(s, async page => {
+    await page.goto(baseUrl + "?" + new URLSearchParams({ q: "b-07\nbeta thing 7" }).toString());
+    await ready(page);
+    assert.equal(await pcards(page).count(), 0, "ID と題を改行でつないだ語が一致した");
+    await page.goto(baseUrl + "?" + new URLSearchParams({ q: "beta thing 7" }).toString());
+    await ready(page);
+    assert.deepEqual(await pcards(page).locator(".id").allInnerTexts(), ["b-07"]);
+  });
+});
+
+test("絞り込み: 判断待ちも回答済みも無いときは帯を出さない。絞り込みが URL にあれば出す (解除できるように)", async () => {
+  const s = new Script([proj(P1, [], [])]);
+  await withPage(s, async page => {
+    assert.equal(await page.locator("#filters").isHidden(), true);
+    await page.goto(baseUrl + "?q=abc");
+    await ready(page);
+    assert.equal(await page.locator("#filters").isVisible(), true);
+    assert.equal(await page.locator("#fq").inputValue(), "abc");
+    await page.click("#fclear");
+    assert.equal(await page.locator("#filters").isHidden(), true);
+  });
+});
+
+test("絞り込み: 判断待ちなしのプロジェクトの文は絞り込み中は出さない。目次のチップの件数は表示中の件数。読めなかったプロジェクトのバナーは、別のプロジェクトを選んだときだけ隠れる", async () => {
+  const s = manyScript();
+  s.projects.push(proj("/work/idle", [], []), proj("/work/broken", [], [], false));
+  await withPage(s, async page => {
+    const idle = page.locator("#main .empty");
+    assert.match(await idle.innerText(), /ほか 1 プロジェクトは判断待ちなし/);
+    assert.equal(await page.locator(".banner").count(), 1);
+    assert.deepEqual(await page.locator(".tocchip .tocn").allInnerTexts(), ["12", "12", "12"]);
+    await page.selectOption("#fkind", "task");
+    assert.equal(await idle.count(), 0, "絞り込み中に「ほか N プロジェクトは判断待ちなし」が出た");
+    assert.deepEqual(await page.locator(".tocchip .tocn").allInnerTexts(), ["2", "2", "2"], "チップの件数が表示中の件数でない");
+    assert.equal(await page.locator(".banner").count(), 1, "ほかの絞り込みで、読めなかったプロジェクトのバナーが隠れた");
+    assert.deepEqual(await page.locator("#fproject option").allInnerTexts(), ["すべてのプロジェクト", "alpha", "beta", "gamma", "broken"],
+      "読めなかったプロジェクトが選択肢に無い (idle は項目が無いので出ない)");
+    await page.selectOption("#fproject", "/work/beta");
+    assert.equal(await page.locator(".banner").count(), 0, "別のプロジェクトを選んでいるのにバナーが出た");
+    assert.deepEqual(await page.locator(".tocchip .tocn").allInnerTexts(), ["2"]);
+    await page.selectOption("#fproject", "/work/broken");
+    assert.equal(await page.locator(".banner").count(), 1, "そのプロジェクトを選んだのにバナーが出ない");
+    await page.click("#fclear");
+    assert.match(await idle.innerText(), /ほか 1 プロジェクトは判断待ちなし/);
+  });
+});
