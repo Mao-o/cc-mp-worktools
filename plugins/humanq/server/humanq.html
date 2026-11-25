@@ -7,18 +7,20 @@
 <style>
 :root {
   --bg: #f6f5f1; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6a64; --line: #e3e1da;
+  --control-line: #85827a;   /* 操作部品 (選択肢・補足欄) の枠。背景に対して 3:1 以上 (--line は区切り線用) */
   --accent: #2f5fd0; --accent-ink: #ffffff; --accent-soft: #e8eefc;
   --d1-fg: #ffffff; --d1-bg: #3a3a36; --d1-bd: #3a3a36;
   --d2-fg: #8a3d00; --d2-bg: #fff4e5; --d2-bd: #b45f06;
   --d3-fg: #5b3d99; --d3-bg: #f1ebfb; --d3-bd: #7a5bc0;
   --d4-fg: #55544e; --d4-bg: #f0efea; --d4-bd: #77766f;
-  --rec: #1f7a4d; --rec-soft: #e3f3ea; --warn: #b4441f; --p0: #b4441f; --p1: #c26a12; --p2: #4b6bb5; --p3: #6b6a64;
+  --rec: #1f7a4d; --rec-soft: #e3f3ea; --warn: #b4441f; --p0: #b4441f; --p1: #a85a0a; --p2: #4b6bb5; --p3: #6b6a64;
   --toast-bg: #ffffff; --toast-line: #d3d0c6; --toast-shadow: rgba(0, 0, 0, .18);
   --radius: 10px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #161614; --panel: #201f1c; --ink: #ecebe6; --muted: #9c9a92; --line: #34322d;
+    --control-line: #76736a;
     --accent: #7c9cf0; --accent-ink: #10131c; --accent-soft: #252c40;
     --d1-fg: #161614; --d1-bg: #ecebe6; --d1-bd: #ecebe6;
     --d2-fg: #f2b36b; --d2-bg: #3a2a17; --d2-bd: #c98a3f;
@@ -54,8 +56,8 @@ header { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bot
   #toc .inner { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 6px; }
 }
 main { max-width: 860px; margin: 0 auto; padding: 8px 16px 64px; }
-h2 { font-size: 14px; color: var(--muted); font-weight: 600; margin: 28px 0 10px; letter-spacing: .02em; }
-/* カードの scroll-margin-top: sticky のヘッダー (--head-h。JS が測る) と、止まったプロジェクトの見出し (h3。1 行で約 36px) の下に 10px 空ける。
+h3 { font-size: 14px; color: var(--muted); font-weight: 600; margin: 28px 0 10px; letter-spacing: .02em; }
+/* カードの scroll-margin-top: sticky のヘッダー (--head-h。JS が測る) と、止まったプロジェクトの見出し (h2。1 行で約 36px) の下に 10px 空ける。
    フォーカスが移ったカード (moveFocusAway) の上端が、止まった見出しの下に隠れないように */
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; margin-bottom: 14px; scroll-margin-top: calc(var(--head-h, 64px) + 46px); }
 .card.failed { border-color: var(--warn); }
@@ -68,17 +70,19 @@ h2 { font-size: 14px; color: var(--muted); font-weight: 600; margin: 28px 0 10px
    止まったときに下のカードを隠しすぎないよう 1 行 (約 36px) に収め、名前とパスは溢れたら … で切る (パスを先に縮める。
    overflow: hidden の flex item は min-width が 0 に決まるので、min-width は書かない)。
    z-index は、動いている (transform・opacity の付いた) カードより上に描くため */
-h3 { font-size: 16px; line-height: 26px; margin: 26px 0 0; padding: 4px 0; display: flex; gap: 10px; align-items: baseline;
+h2 { font-size: 16px; line-height: 26px; margin: 26px 0 0; padding: 4px 0; display: flex; gap: 10px; align-items: baseline;
   position: sticky; top: var(--head-h, 0px); z-index: 1; background: var(--bg); }
-h3:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-h3 .pname { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-h3 .path { flex: 1 1 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+h2:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+h2 .pname { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+h2 .path { flex: 1 1 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: 12px; color: var(--muted); font-weight: 400; font-family: ui-monospace, Menlo, monospace; }
 /* 目次のチップで飛ぶ先は .proj (見出しの入れ物) で、その上端をヘッダーの下に合わせる。余白が無いと入れ物の上端が画面の上端に来て、
    見出しは止まってヘッダーの下に出るが、その下の節の見出しと最初のカードの上がヘッダーと見出しの下に隠れる */
 .proj { scroll-margin-top: var(--head-h, 0px); }
 .prio.p0 { color: var(--p0); } .prio.p1 { color: var(--p1); } .prio.p2 { color: var(--p2); } .prio.p3, .prio.p4 { color: var(--p3); }
-.id { font-family: ui-monospace, Menlo, monospace; cursor: pointer; }
+button.id { font-family: ui-monospace, Menlo, monospace; font-size: inherit; color: inherit; background: none; border: 0; padding: 0; margin: 0; cursor: pointer; }
+.copied { color: var(--rec); font-weight: 600; }
+.copied:empty { display: none; }
 .title { font-size: 13px; color: var(--muted); margin: 6px 0 0; }
 .ask { font-size: 17px; font-weight: 700; margin: 10px 0 6px; }
 .ctx { margin: 0 0 12px; white-space: pre-wrap; }
@@ -88,7 +92,7 @@ h3 .path { flex: 1 1 0; overflow: hidden; text-overflow: ellipsis; white-space: 
 button.ctxmore { background: none; border: 0; color: var(--accent); font: inherit; font-size: 13px; padding: 2px 0; cursor: pointer; }
 button.ctxmore[hidden] { display: none; }
 .opts { display: grid; gap: 8px; margin: 10px 0; }
-.opt { text-align: left; background: var(--panel); color: var(--ink); border: 1.5px solid var(--line);
+.opt { text-align: left; background: var(--panel); color: var(--ink); border: 1.5px solid var(--control-line);
   border-radius: 8px; padding: 10px 12px; cursor: pointer; font: inherit; }
 .opt:hover { border-color: var(--accent); }
 .opt.sel { border-color: var(--accent); background: var(--accent-soft); }
@@ -103,7 +107,7 @@ button.ctxmore[hidden] { display: none; }
 .depth-調査 { color: var(--d3-fg); background: var(--d3-bg); border-color: var(--d3-bd); }
 .depth-見送り { color: var(--d4-fg); background: var(--d4-bg); border-color: var(--d4-bd); }
 textarea { width: 100%; min-height: 58px; resize: vertical; font: inherit; color: var(--ink); background: var(--bg);
-  border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  border: 1px solid var(--control-line); border-radius: 8px; padding: 8px 10px; }
 .row { display: flex; gap: 10px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
 button.primary { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 8px; padding: 8px 18px; font: inherit; font-weight: 700; cursor: pointer; }
 button.primary:disabled { opacity: .45; cursor: default; }
@@ -289,7 +293,7 @@ function toast(msg, opts = {}) {
   for (const old of live.slice(0, Math.max(0, live.length - TOAST_MAX + 1))) old.querySelector(".toast-x").click();
   const close = el("button", { class: "toast-x", type: "button", "aria-label": "閉じる" }, "×");
   const act = opts.action ? el("button", { class: "toast-act", type: "button" }, opts.action.label) : null;
-  const t = el("div", { class: opts.kind ? "toast " + opts.kind : "toast", role: "status", "data-msg": msg, "data-key": key },
+  const t = el("div", { class: opts.kind ? "toast " + opts.kind : "toast", "data-msg": msg, "data-key": key },
     el("span", { class: "toast-msg" }, msg), act, close);
   let gone = false, cancel = () => {};
   const dismiss = () => {
@@ -507,13 +511,25 @@ function ageText(created) {
 const sigQ = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, ageText(it.created_at), shownLabels(it), it.q, it.description, it.notes]);
 const sigA = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, ageText(it.created_at), shownLabels(it), it.answer, it.asig]);
 
+// ID をクリップボードへ。結果は ID の隣に 1.5 秒だけ出す (押した後に何も起きないと、コピーできたか分からない)
+const COPIED_MS = 1500;
+async function copyId(id, out) {
+  let ok = false;
+  try { await navigator.clipboard.writeText(id); ok = true; } catch { /* 権限なし・非対応 */ }
+  out.textContent = ok ? "コピーしました" : "コピーできませんでした";
+  clearTimeout(out._t);
+  out._t = setTimeout(() => { out.textContent = ""; }, COPIED_MS);
+}
+
 function head(it) {
   const p = typeof it.priority === "number" ? it.priority : 9;
   const labels = shownLabels(it);
   const age = ageText(it.created_at);
+  const copied = el("output", { class: "copied" });     // コピーの結果の知らせ (output は暗黙の role=status。.head > span には数えない)
   return el("div", { class: "head" },
     el("span", { class: `prio p${p}` }, `P${p}`),
-    el("span", { class: "id", title: "クリックで ID をコピー", onclick: () => navigator.clipboard && navigator.clipboard.writeText(it.id) }, it.id),
+    el("button", { class: "id", type: "button", title: "押すと ID をコピー", onclick: () => copyId(it.id, copied) }, it.id),
+    copied,
     el("span", {}, age ? `${it.created_at} (${age})` : it.created_at),
     ...labels.slice(0, MAX_LABELS).map(l => el("span", {}, l)),
     labels.length > MAX_LABELS ? el("span", { title: labels.join("\n") }, `+${labels.length - MAX_LABELS}`) : null);
@@ -548,6 +564,10 @@ function context(it, text) {
   return box;
 }
 
+// カードの名前にする要素の id (カードを作るたびに新しい番号。project や id は空白や記号を含みうるので使わない)
+let labelSeq = 0;
+const nextLabelId = () => "card-label-" + (++labelSeq);
+
 const dkOf = it => it.project + "\n" + it.id;           // 下書きの key
 function dropDraft(it) { drafts.delete(dkOf(it)); saveDrafts(); }
 
@@ -559,20 +579,21 @@ function buildQuestion(it) {
   if (d.option && !(q && q.options.some(o => o.key === d.option))) d.option = "";   // 問いが変わって無くなった選択肢
   drafts.set(dk, d);
   const send = el("button", { class: "primary", type: "button" }, "回答する");
-  const area = el("textarea", { placeholder: q && q.options.length ? "補足 (任意)。選択肢に無い答えはここに書く"
+  const area = el("textarea", { "aria-label": q && q.options.length ? "補足" : "回答", placeholder: q && q.options.length ? "補足 (任意)。選択肢に無い答えはここに書く"
     : q && q.kind === "task" ? "結果を書く" : "回答を書く" });
   area.value = d.text;
   const refresh = () => { send.disabled = !(d.option || d.text.trim()); };
   area.addEventListener("input", () => { d.text = area.value; refresh(); saveDrafts(); });
   const opts = q && q.options.length ? el("div", { class: "opts" }, q.options.map(o => {
     const rec = o.key === q.recommended;
-    const b = el("button", { class: "opt" + (rec ? " rec" : "") + (d.option === o.key ? " sel" : ""), type: "button" },
+    const b = el("button", { class: "opt" + (rec ? " rec" : "") + (d.option === o.key ? " sel" : ""), type: "button",
+      "aria-pressed": String(d.option === o.key) },
       rec ? el("span", { class: "badge" }, "推奨") : null, optLabel(o.label),
       o.desc ? md("span", "d", o.desc) : null);
     b.addEventListener("click", () => {
       d.option = d.option === o.key ? "" : o.key;
-      for (const s of b.parentNode.children) s.classList.remove("sel");
-      if (d.option) b.classList.add("sel");
+      for (const s of b.parentNode.children) { s.classList.remove("sel"); s.setAttribute("aria-pressed", "false"); }
+      if (d.option) { b.classList.add("sel"); b.setAttribute("aria-pressed", "true"); }
       refresh();
       saveDrafts();
     });
@@ -589,10 +610,12 @@ function buildQuestion(it) {
       res => { dropDraft(it); answeredToast(it, chosen ? chosen.label : "(自由記述)", res.asig); });
   });
   refresh();
-  return el("section", { class: "card", "data-id": it.id, tabindex: "-1" },
+  const ask = md("p", "ask", q ? q.ask : it.title);
+  ask.id = nextLabelId();                                   // カードの名前 (aria-labelledby)
+  return el("section", { class: "card", "data-id": it.id, tabindex: "-1", "aria-labelledby": ask.id },
     head(it),
     q ? el("p", { class: "title" }, it.title) : null,      // 問いが無いときは、ask の位置にタイトルを出すので重ねない
-    md("p", "ask", q ? q.ask : it.title),
+    ask,
     q && q.context ? context(it, q.context) : null,
     !q ? el("p", { class: "ctx" }, "問いがまだ整理されていません。本文を読んで自由に答えてください。") : null,
     opts, area, el("div", { class: "row" }, send), el("div", { class: "errbox" }), body(it));
@@ -626,7 +649,8 @@ function answerText(it) {
 function buildAnswered(it) {
   const b = el("button", { class: "ghost", type: "button" }, "取り消して判断待ちに戻す");
   b.addEventListener("click", () => undoAnswer(it, it.asig));    // カードが出している回答の署名
-  return el("section", { class: "card", "data-id": it.id, tabindex: "-1" }, head(it), el("p", { class: "title" }, it.title),
+  const title = el("p", { class: "title", id: nextLabelId() }, it.title);
+  return el("section", { class: "card", "data-id": it.id, tabindex: "-1", "aria-labelledby": title.id }, head(it), title,
     el("p", { class: "ans" }, answerText(it)),
     el("div", { class: "row" }, b), el("div", { class: "errbox" }));
 }
@@ -651,7 +675,7 @@ function syncError(c, key) {
 // 署名が変わったカードだけ作り直す。データから消えた (送信中のものも含む) カードは畳む。
 
 const cards = new Map();           // key -> {el, sig}
-const projs = new Map();           // path -> {el, h3, banner, chip, groups: Map(kind -> {el, h2})}
+const projs = new Map();           // path -> {el, h2, banner, chip, groups: Map(kind -> {el, h3})}
 const TITLES = { dec: "判断", task: "作業・確認", ans: "回答済み・反映待ち" };
 let emptyNote = null, idleNote = null;
 
@@ -677,7 +701,7 @@ function syncChip(pr, p, q) {
 function jumpTo(path) {
   const pr = projs.get(path);
   if (!pr) return;                   // チップは同じ描き直しで見出しと一緒に外れるので、普通は届かない
-  pr.h3.focus({ preventScroll: true });
+  pr.h2.focus({ preventScroll: true });
   pr.el.scrollIntoView({ block: "start", behavior: REDUCED ? "auto" : "smooth" });
 }
 
@@ -731,7 +755,7 @@ function render() {
     if (pr) { if (pr.el._leave) unleave(pr.el); }
     else {
       pr = { el: el("div", { class: "proj" }),
-        h3: el("h3", { tabindex: "-1" }, el("span", { class: "pname" }, p.name), el("span", { class: "path", title: p.path }, p.path)),
+        h2: el("h2", { tabindex: "-1" }, el("span", { class: "pname" }, p.name), el("span", { class: "path", title: p.path }, p.path)),
         banner: null, chip: null, groups: new Map() };
       projs.set(p.path, pr);
     }
@@ -749,9 +773,9 @@ function render() {
       if (!lists[kind].length) continue;
       let g = pr.groups.get(kind);
       if (g) { if (g.el._leave) unleave(g.el); }
-      else { g = { el: el("div", { class: "grp", "data-kind": kind }), h2: el("h2", {}) }; pr.groups.set(kind, g); }
-      g.h2.textContent = `${TITLES[kind]} (${lists[kind].length})`;
-      groups.push({ kind, g, els: [g.h2, ...lists[kind].map(i => ensureCard(i, kind))] });
+      else { g = { el: el("div", { class: "grp", "data-kind": kind }), h3: el("h3", {}) }; pr.groups.set(kind, g); }
+      g.h3.textContent = `${TITLES[kind]} (${lists[kind].length})`;
+      groups.push({ kind, g, els: [g.h3, ...lists[kind].map(i => ensureCard(i, kind))] });
     }
     plan.push({ pr, groups });
   }
@@ -768,7 +792,7 @@ function render() {
     for (const { g, els } of groups) place(g.el, els);
     const live = new Set(groups.map(x => x.kind));
     for (const [kind, g] of pr.groups) if (!live.has(kind)) retire(g.el, () => { if (pr.groups.get(kind) === g) pr.groups.delete(kind); });
-    place(pr.el, [pr.h3, pr.banner, ...groups.map(x => x.g.el)]);
+    place(pr.el, [pr.h2, pr.banner, ...groups.map(x => x.g.el)]);
     projEls.push(pr.el);
   }
   for (const [path, pr] of projs) {

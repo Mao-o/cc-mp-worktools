@@ -368,8 +368,8 @@ test("1 件しかないプロジェクトで失敗しても、見出しの入れ
     await answerFirst(page, "t-A1");
     await waitFor(async () => (await page.locator("section.card.failed").count()) === 1, 3000, "カードが戻る");
     await page.waitForTimeout(500);
-    assert.equal(await page.locator("h3").count(), 1);
     assert.equal(await page.locator("h2").count(), 1);
+    assert.equal(await page.locator("h3").count(), 1);
     assert.equal(await page.locator(".empty").count(), 0);
     assert.equal(await page.locator(".leaving, .anim").count(), 0, "畳みの状態が残っている");
     assert.equal((await page.locator("#count").textContent()).trim(), "1 件");
@@ -477,21 +477,21 @@ test("トーストの表示時間は、タブが見えている間だけ数え�
 
 // ---- 5. 件数 ---------------------------------------------------------------------------------
 
-test("押した直後に h2 の件数・空の見出し・「判断待ちはありません」が更新される", async () => {
+test("押した直後に h3 の件数・空の見出し・「判断待ちはありません」が更新される", async () => {
   const s = new Script([proj(P1, [item("t-A1")]), proj(P2, [item("t-B2"), item("t-C3")])]);
   await withPage(s, async page => {
     s.hold("answer");                                            // POST はずっと返らない
-    const h2s = () => page.$$eval("h2", es => es.map(e => e.textContent));
+    const h2s = () => page.$$eval("h3", es => es.map(e => e.textContent));
     assert.deepEqual(await h2s(), ["判断 (1)", "判断 (2)"]);
     await answerFirst(page, "t-B2");
     await waitFor(async () => JSON.stringify(await h2s()) === JSON.stringify(["判断 (1)", "判断 (1)"]), 3000, "beta の件数が 1");
     await answerFirst(page, "t-A1");
-    await waitFor(async () => (await page.$$eval("h3", es => es.map(e => e.textContent))).length === 1, 3000, "alpha の見出しが消える");
+    await waitFor(async () => (await page.$$eval("h2", es => es.map(e => e.textContent))).length === 1, 3000, "alpha の見出しが消える");
     await answerFirst(page, "t-C3");
     await waitFor(async () => (await page.locator(".empty").count()) === 1 &&
       /判断待ちはありません/.test(await page.locator(".empty").textContent()), 3000, "空の文言");
     // 空の見出しは、中のカードが畳み終わったら外れる
-    await waitFor(async () => (await page.locator("h2").count()) === 0 && (await page.locator("h3").count()) === 0, 3000, "見出しが全部外れる");
+    await waitFor(async () => (await page.locator("h3").count()) === 0 && (await page.locator("h2").count()) === 0, 3000, "見出しが全部外れる");
     assert.equal((await page.locator("#count").textContent()).trim(), "0 件");
   });
 });
@@ -1787,11 +1787,11 @@ for (const scheme of ["light", "dark"]) {
 }
 
 // ---- 0.9.0: プロジェクトの目次の帯と、止まるプロジェクトの見出し -----------------------------------------------------
-// 帯 (#toc) はヘッダーの下に置き、sticky にはしない。プロジェクトの見出し (h3) は sticky のヘッダーの下に止まる
+// 帯 (#toc) はヘッダーの下に置き、sticky にはしない。プロジェクトの見出し (h2) は sticky のヘッダーの下に止まる
 
 const tocChips = page => page.locator("#toc .tocchip");
 const chipOf = (page, p) => page.locator(`#toc .tocchip[data-path="${p}"]`);
-const h3Of = (page, p) => page.locator(`h3:has(.path:text-is("${p}"))`);
+const projHeadOf = (page, p) => page.locator(`h2:has(.path:text-is("${p}"))`);
 const headBottom = page => page.evaluate(() => document.querySelector("header").getBoundingClientRect().bottom);
 // 待っても満たされなければ assertion の失敗にする (時間切れを、テストが走っていない例外と分ける)
 const until = (fn, ms, what) => waitFor(fn, ms, what).catch(e => assert.fail(e.message));
@@ -1805,8 +1805,8 @@ const many = (pfx, n) => Array.from({ length: n }, (_, i) => item(`t-${pfx}${i +
 // 描画を 2 回進める。ResizeObserver (ヘッダーの高さ → --head-h) は次の描画の手前で届くので、幅を変えた直後の測りはこれを挟む
 const frames = page => page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
 // path の見出しの位置と、その中心 (名前の上) が他の要素に隠れず見えているか。見出しが無ければ null
-const h3Shown = (page, p) => page.evaluate(p => {
-  const h = [...document.querySelectorAll("h3")].find(e => (e.querySelector(".path") || {}).textContent === p);
+const projHeadShown = (page, p) => page.evaluate(p => {
+  const h = [...document.querySelectorAll("h2")].find(e => (e.querySelector(".path") || {}).textContent === p);
   if (!h) return null;
   const r = h.getBoundingClientRect();
   const hit = r.top + r.height / 2 >= 0 && r.top + r.height / 2 < innerHeight ? document.elementFromPoint(r.left + 12, r.top + r.height / 2) : null;
@@ -1835,14 +1835,14 @@ test("目次の帯: 判断待ちか回答済みがあるプロジェクトごと
       { path: P2, name: "beta", n: "2", p0: true },
       { path: P4, name: "delta", n: "0", p0: false },
     ]);
-    assert.equal(await h3Of(page, P5).count(), 1, "前提: 読めなかったプロジェクトの見出しが出ていない");
+    assert.equal(await projHeadOf(page, P5).count(), 1, "前提: 読めなかったプロジェクトの見出しが出ていない");
     // 読み上げの名前は「名前: 判断待ち N 件」(P0 があれば「、P0 あり」)
     assert.equal(await page.getByRole("button", { name: "beta: 判断待ち 2 件、P0 あり", exact: true }).count(), 1);
     assert.equal(await page.getByRole("button", { name: "alpha: 判断待ち 2 件", exact: true }).count(), 1);
     // 帯はヘッダーのすぐ下 (案内が出ていないとき) で、最初のプロジェクトの見出しより上
     const pos = await page.evaluate(() => ({ head: document.querySelector("header").getBoundingClientRect().bottom,
-      toc: document.getElementById("toc").getBoundingClientRect().toJSON(), h3: document.querySelector("h3").getBoundingClientRect().top }));
-    assert.ok(Math.abs(pos.toc.top - pos.head) <= 1 && pos.toc.height > 10 && pos.toc.bottom <= pos.h3, `帯の位置 ${JSON.stringify(pos)}`);
+      toc: document.getElementById("toc").getBoundingClientRect().toJSON(), h2: document.querySelector("h2").getBoundingClientRect().top }));
+    assert.ok(Math.abs(pos.toc.top - pos.head) <= 1 && pos.toc.height > 10 && pos.toc.bottom <= pos.h2, `帯の位置 ${JSON.stringify(pos)}`);
     // P0 の印の色は --p0
     const colors = await page.evaluate(() => {
       const m = [...document.querySelectorAll("#toc .tocp0")].find(e => getComputedStyle(e).display !== "none");
@@ -1901,25 +1901,25 @@ test("目次のチップを押すと、そのプロジェクトの見出しが�
   await withPage(s, async page => {
     assert.equal(await tocChips(page).count(), 2);
     assert.equal(await page.locator("#toc").isVisible(), true, "帯が見えていない");
-    const before = await h3Shown(page, P2);
+    const before = await projHeadShown(page, P2);
     assert.ok(before && before.top > before.vh, `前提: beta の見出しが最初の画面の外にない ${JSON.stringify(before)}`);
-    // 押したのと同じ処理の中で測る。見出しの下の節の見出し (h2) も、止まった見出しに隠れず見えている
+    // 押したのと同じ処理の中で測る。見出しの下の節の見出し (h3) も、止まった見出しに隠れず見えている
     const r = await page.evaluate(p => {
       document.querySelector(`#toc .tocchip[data-path="${p}"]`).click();
-      const h = [...document.querySelectorAll("h3")].find(e => e.querySelector(".path").textContent === p);
-      const h2 = h.parentElement.querySelector("h2");
+      const h = [...document.querySelectorAll("h2")].find(e => e.querySelector(".path").textContent === p);
+      const h3 = h.parentElement.querySelector("h3");
       return { top: h.getBoundingClientRect().top, bottom: h.getBoundingClientRect().bottom, vh: innerHeight,
-        h2: h2 ? h2.getBoundingClientRect().top : null,
+        h3: h3 ? h3.getBoundingClientRect().top : null,
         head: document.querySelector("header").getBoundingClientRect().bottom, focused: document.activeElement === h };
     }, P2);
     assert.ok(Math.abs(r.top - r.head) <= 1 && r.bottom <= r.vh, `押したその場で beta の見出しがヘッダーのすぐ下に来ない ${JSON.stringify(r)}`);
-    assert.ok(r.h2 !== null && r.h2 >= r.bottom, `飛んだ先で、見出しの下の「判断 (N)」が止まった見出しの下に隠れる ${JSON.stringify(r)}`);
+    assert.ok(r.h3 !== null && r.h3 >= r.bottom, `飛んだ先で、見出しの下の「判断 (N)」が止まった見出しの下に隠れる ${JSON.stringify(r)}`);
     assert.ok(r.focused, "フォーカスが見出しに移らない");
-    const shown = await h3Shown(page, P2);
+    const shown = await projHeadShown(page, P2);
     assert.ok(shown && shown.visible && shown.text.startsWith("beta"), `beta の見出しが見えていない ${JSON.stringify(shown)}`);
     // 上のプロジェクトへも戻れる (帯はスクロールで流れている。Playwright が帯まで戻してから押す)
     await chipOf(page, P1).click();
-    const a = await h3Shown(page, P1);
+    const a = await projHeadShown(page, P1);
     assert.ok(a && Math.abs(a.top - a.head) <= 1 && a.visible, `alpha の見出しがヘッダーのすぐ下に来ない ${JSON.stringify(a)}`);
   }, { reducedMotion: "reduce" });
 });
@@ -1931,11 +1931,11 @@ test("動きを減らす設定でなければ、チップを押すと滑らか�
     assert.equal(await page.locator("#toc").isVisible(), true, "帯が見えていない");
     const r0 = await page.evaluate(p => {
       document.querySelector(`#toc .tocchip[data-path="${p}"]`).click();
-      return [...document.querySelectorAll("h3")].find(e => e.querySelector(".path").textContent === p).getBoundingClientRect().top;
+      return [...document.querySelectorAll("h2")].find(e => e.querySelector(".path").textContent === p).getBoundingClientRect().top;
     }, P2);
     const hb = await headBottom(page);
     assert.ok(r0 - hb > 100, `押したその場で移った (滑らかでない): ${r0} / ヘッダーの下 ${hb}`);
-    await until(async () => { const b = await h3Shown(page, P2); return Math.abs(b.top - b.head) <= 1; }, 4000, "beta の見出しがヘッダーのすぐ下に止まる");
+    await until(async () => { const b = await projHeadShown(page, P2); return Math.abs(b.top - b.head) <= 1; }, 4000, "beta の見出しがヘッダーのすぐ下に止まる");
   });
 });
 
@@ -1946,19 +1946,19 @@ test("長いページをスクロールしても、今いるプロジェクト�
       await page.setViewportSize({ width: w, height: h });
       await frames(page);
       await scrollCardTo(page, "t-A3", 200);                                           // alpha のカードの途中
-      const a = await h3Shown(page, P1), b = await h3Shown(page, P2);
+      const a = await projHeadShown(page, P1), b = await projHeadShown(page, P2);
       assert.ok(a && b, `幅 ${w}: 見出しが無い`);
       assert.ok(Math.abs(a.top - a.head) <= 1 && a.visible && a.text.startsWith("alpha"), `幅 ${w}: alpha の途中で alpha の見出しが見えない ${JSON.stringify(a)}`);
       assert.ok(b.top > a.bottom + 100, `幅 ${w}: beta の見出しが上に来ている ${JSON.stringify(b)}`);
       // 止まった見出しは、下を流れるカードが透けない背景を持ち、動いている (transform の付いた) カードより上に描かれる
-      const bg = await page.evaluate(() => [getComputedStyle(document.querySelector("h3")).backgroundColor, getComputedStyle(document.body).backgroundColor]);
+      const bg = await page.evaluate(() => [getComputedStyle(document.querySelector("h2")).backgroundColor, getComputedStyle(document.body).backgroundColor]);
       assert.equal(bg[0], bg[1], `幅 ${w}: 見出しの背景がページの背景でない`);
       await page.evaluate(() => { for (const c of document.querySelectorAll("section.card")) c.style.transform = "translateX(0px)"; });
-      const moving = await h3Shown(page, P1);
+      const moving = await projHeadShown(page, P1);
       assert.ok(moving && moving.visible, `幅 ${w}: 動いているカードが止まった見出しの上に描かれる`);
       await page.evaluate(() => { for (const c of document.querySelectorAll("section.card")) c.style.transform = ""; });
       await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));   // いちばん下 (beta の最後のカード)
-      const a2 = await h3Shown(page, P1), b2 = await h3Shown(page, P2);
+      const a2 = await projHeadShown(page, P1), b2 = await projHeadShown(page, P2);
       assert.ok(a2 && b2, `幅 ${w}: 下までスクロールしたら見出しが無い`);
       assert.ok(Math.abs(b2.top - b2.head) <= 1 && b2.visible && b2.text.startsWith("beta"), `幅 ${w}: 下まで行くと beta の見出しが見えない ${JSON.stringify(b2)}`);
       assert.ok(!a2.visible && a2.bottom <= a2.head + 1, `幅 ${w}: beta の中で alpha の見出しが残っている ${JSON.stringify(a2)}`);
@@ -1977,7 +1977,7 @@ test("ヘッダーの高さが変わると (幅が狭くなって「(古いデ�
     const h1 = await headBottom(page);
     assert.ok(h1 > h0 + 10, `前提: ヘッダーが折り返していない (${h0} → ${h1})`);
     await scrollCardTo(page, "t-A3", 200);
-    await until(async () => { const a = await h3Shown(page, P1); return Math.abs(a.top - a.head) <= 1 && a.visible; }, 2000, "見出しが新しいヘッダーのすぐ下に止まる");
+    await until(async () => { const a = await projHeadShown(page, P1); return Math.abs(a.top - a.head) <= 1 && a.visible; }, 2000, "見出しが新しいヘッダーのすぐ下に止まる");
   });
 });
 
@@ -1987,10 +1987,10 @@ test("止まった見出しの下に隠れたカードにフォーカスが移�
     await scrollCardTo(page, "t-A3", 12);                                              // カードの上端がヘッダーの 12px 下 (止まった見出しの下)
     const r = await page.evaluate(() => {
       const c = [...document.querySelectorAll("section.card")].find(e => e.querySelector(".id").textContent === "t-A3");
-      const h3 = document.querySelector("h3");
-      const before = c.getBoundingClientRect().top, h3Bottom = h3.getBoundingClientRect().bottom;
+      const h2 = document.querySelector("h2");
+      const before = c.getBoundingClientRect().top, h3Bottom = h2.getBoundingClientRect().bottom;
       c.focus();
-      return { before, h3Bottom, after: c.getBoundingClientRect().top, h3After: h3.getBoundingClientRect().bottom, focused: document.activeElement === c };
+      return { before, h3Bottom, after: c.getBoundingClientRect().top, h3After: h2.getBoundingClientRect().bottom, focused: document.activeElement === c };
     });
     assert.ok(r.focused && r.before < r.h3Bottom, `前提: カードの上端が止まった見出しに隠れていない ${JSON.stringify(r)}`);
     assert.ok(r.after >= r.h3After, `フォーカスが移ったカードの上端が、止まった見出しの下に隠れる ${JSON.stringify(r)}`);
@@ -2004,9 +2004,9 @@ test("キーボードでチップを押すと、フォーカスは見出しへ�
     assert.equal(await page.locator("#toc").isVisible(), true, "帯が見えていない");
     await chipOf(page, P2).focus();
     await page.keyboard.press("Enter");
-    assert.ok(await h3Of(page, P2).evaluate(e => e === document.activeElement), "フォーカスが beta の見出しに無い");
+    assert.ok(await projHeadOf(page, P2).evaluate(e => e === document.activeElement), "フォーカスが beta の見出しに無い");
     // キーボードで移ったときは、フォーカスの目印 (アクセントの実線の枠) が見出しに出る
-    assert.deepEqual(await h3Of(page, P2).evaluate(e => [e.matches(":focus-visible"), getComputedStyle(e).outlineStyle]), [true, "solid"]);
+    assert.deepEqual(await projHeadOf(page, P2).evaluate(e => [e.matches(":focus-visible"), getComputedStyle(e).outlineStyle]), [true, "solid"]);
     const y0 = await page.evaluate(() => scrollY);
     await page.keyboard.press("Tab");
     const r = await page.evaluate(() => {
@@ -2032,7 +2032,7 @@ test("幅 375 では、プロジェクトが多く名前とパスが長くても
       chipW: Math.max(0, ...chips.map(c => c.getBoundingClientRect().width)), bandW: inner ? inner.clientWidth : 0,
       nameInside: chips.every(c => { const n = c.querySelector(".tocname"); return !!n && n.getBoundingClientRect().right <= c.getBoundingClientRect().right + 0.5; }),
       scrollable: !!inner && inner.scrollWidth > inner.clientWidth,
-      h3s: [...document.querySelectorAll("h3")].map(h => {
+      h3s: [...document.querySelectorAll("h2")].map(h => {
         const name = h.querySelector(".pname");
         return { h: h.getBoundingClientRect().height, cut: !!name && name.scrollWidth > name.clientWidth + 1, long: h.textContent.includes("とても長い") };
       }) };
@@ -2053,7 +2053,7 @@ test("幅 375 では、プロジェクトが多く名前とパスが長くても
     }
     // 帯の中を横にスクロールした先の最後のチップも押せて、そのプロジェクトの見出しがヘッダーの下・画面の中に来る
     await chipOf(page, paths[7]).click();
-    const last = await h3Shown(page, paths[7]);
+    const last = await projHeadShown(page, paths[7]);
     assert.ok(last && last.top >= last.head - 1 && last.bottom <= last.vh && last.visible, `最後のプロジェクトへ飛べない ${JSON.stringify(last)}`);
     // 幅の広い画面では帯は折り返し、長い名前のチップも帯の幅に収まる (ページが横にスクロールしない)
     await page.setViewportSize({ width: 1280, height: 720 });
@@ -2064,3 +2064,146 @@ test("幅 375 では、プロジェクトが多く名前とパスが長くても
     assert.ok(w.chipW <= w.bandW && w.nameInside, `幅 1280 で長い名前のチップが帯からはみ出す (${w.chipW} > ${w.bandW})`);
   }, { viewport: { width: 375, height: 700 }, reducedMotion: "reduce" });
 });
+
+// ---- 0.10.0: アクセシビリティ (見出しの階層・名前・押した状態・ID のコピー・コントラスト) -----------------------------------
+// 見出しは h1 (画面) → h2 (プロジェクト) → h3 (節)。カードは問いで名前が付き、選択肢は押した状態を持つ。
+// ID はキーボードで届くボタン。トーストの読み上げは入れ物の aria-live だけに任せる。枠と文字の色は WCAG の比を満たす
+
+test("見出しは h1 → h2 (プロジェクト) → h3 (節) の順で、文言と件数は変わらない。カードは問いで名前が付く", async () => {
+  const s = new Script([proj(P1, [item("t-A1")]), proj(P2, [item("t-B2"), item("t-C3", { q: null })], [answeredItem("t-D4")])]);
+  await withPage(s, async page => {
+    const heads = await page.$$eval("h1, h2, h3", es => es.map(e => ({ level: Number(e.tagName[1]), text: e.textContent })));
+    assert.deepEqual(heads.map(h => h.level), [1, 2, 3, 2, 3, 3], JSON.stringify(heads));
+    assert.deepEqual(heads.filter(h => h.level === 3).map(h => h.text), ["判断 (1)", "判断 (2)", "回答済み・反映待ち (1)"]);
+    assert.deepEqual(await page.$$eval("h2 .pname", es => es.map(e => e.textContent)), ["alpha", "beta"]);
+    assert.equal(await page.locator(".proj > h2").count(), 2);
+    assert.equal(await page.locator(".proj .grp > h3").count(), 3);
+    // カードの名前: 問いがあれば問い、問いが無ければタイトル、回答済みはタイトル
+    assert.equal(await page.getByRole("region", { name: "ask t-A1" }).count(), 1);
+    assert.equal(await page.getByRole("region", { name: "ask t-B2" }).count(), 1);
+    assert.equal(await page.getByRole("region", { name: "title t-C3" }).count(), 1);
+    assert.equal(await page.getByRole("region", { name: "title t-D4" }).count(), 1);
+    const ids = await page.$$eval("section.card", cs => cs.map(c => c.getAttribute("aria-labelledby")));
+    assert.equal(ids.length, 4);
+    assert.equal(new Set(ids).size, 4, "カードの名前の id が重なる");
+    // 見た目は見出しの役に付いている: プロジェクト (h2) は大きく sticky、節 (h3) は小さく sticky でない
+    const looks = await page.evaluate(() => ["h2", "h3"].map(t => { const c = getComputedStyle(document.querySelector(t)); return [c.fontSize, c.position]; }));
+    assert.deepEqual(looks, [["16px", "sticky"], ["14px", "static"]]);
+  });
+});
+
+test(".opt は aria-pressed を持ち、押すたびに true と false が切り替わる。ほかの選択肢を押せば移る", async () => {
+  const s = new Script([proj(P1, [item("t-A1")])]);
+  await withPage(s, async page => {
+    const opts = qcard(page, "t-A1").locator(".opt");
+    assert.equal(await opts.count(), 2);
+    const states = () => opts.evaluateAll(es => es.map(e => e.getAttribute("aria-pressed")));
+    assert.deepEqual(await states(), ["false", "false"]);
+    await opts.nth(0).click();
+    assert.deepEqual(await states(), ["true", "false"]);
+    await opts.nth(0).click();
+    assert.deepEqual(await states(), ["false", "false"]);
+    await opts.nth(0).click();
+    await opts.nth(1).click();
+    assert.deepEqual(await states(), ["false", "true"]);
+    assert.deepEqual(await opts.evaluateAll(es => es.map(e => e.classList.contains("sel"))), [false, true], "見た目の選択と aria-pressed が食い違う");
+  });
+});
+
+test("読み込み直した画面でも、下書きで選んだ選択肢は aria-pressed=true で出る", async () => {
+  const s = new Script([proj(P1, [item("t-A1")])]);
+  await withPage(s, async page => {
+    await qcard(page, "t-A1").locator(".opt").nth(1).click();
+    await page.reload();
+    await ready(page);
+    assert.deepEqual(await qcard(page, "t-A1").locator(".opt").evaluateAll(es => es.map(e => e.getAttribute("aria-pressed"))), ["false", "true"]);
+  });
+});
+
+test("textarea に空でない aria-label がある。選択肢があれば「補足」、無ければ「回答」", async () => {
+  const s = new Script([proj(P1, [item("t-A1"), item("t-B2", { q: null }),
+    item("t-C3", { q: { kind: "task", ask: "ask t-C3", context: "", recommended: "", options: [] } })])]);
+  await withPage(s, async page => {
+    const label = id => qcard(page, id).locator("textarea").getAttribute("aria-label");
+    assert.equal(await label("t-A1"), "補足");
+    assert.equal(await label("t-B2"), "回答");
+    assert.equal(await label("t-C3"), "回答");
+  });
+});
+
+// .copied の文字が want になるのを待つ。待ちが尽きたら、時間切れの例外ではなく assertion で落とす
+async function copiedIs(page, want, ms, what) {
+  await waitFor(async () => (await page.locator(".copied").innerText()) === want, ms, what).catch(() => {});
+  assert.equal(await page.locator(".copied").innerText(), want, what);
+}
+
+test(".id はボタンで Tab で届き、Enter でクリップボードに id が入って「コピーしました」が約 1.5 秒出る", async () => {
+  const s = new Script([proj(P1, [item("t-A1")])]);
+  await withPage(s, async page => {
+    const idBtn = qcard(page, "t-A1").locator(".id");
+    assert.deepEqual(await idBtn.evaluate(e => [e.tagName, e.type]), ["BUTTON", "button"]);
+    assert.equal(await idBtn.innerText(), "t-A1", "ボタンの文字が ID そのものでない");
+    // Tab だけで届く (先頭から数えて十分な回数のうちに)
+    let reached = false;
+    for (let i = 0; i < 20 && !reached; i++) {
+      await page.keyboard.press("Tab");
+      reached = await page.evaluate(() => document.activeElement.matches("section.card .id"));
+    }
+    assert.ok(reached, ".id に Tab で届かない");
+    assert.equal(await page.locator(".copied").innerText(), "", "押す前から知らせが出ている");
+    await page.keyboard.press("Enter");
+    await copiedIs(page, "コピーしました", 2000, "「コピーしました」");
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), "t-A1");
+    await copiedIs(page, "", 3000, "知らせが消える");
+    assert.equal(await idBtn.innerText(), "t-A1", "知らせで ID の文字が変わった");
+  }, { permissions: ["clipboard-read", "clipboard-write"] });
+});
+
+test("クリップボードに書けないときは「コピーできませんでした」と出る", async () => {
+  const s = new Script([proj(P1, [item("t-A1")])]);
+  await withPage(s, async page => {
+    await page.evaluate(() => { Object.defineProperty(navigator, "clipboard", { value: { writeText: () => Promise.reject(new Error("denied")) }, configurable: true }); });
+    await qcard(page, "t-A1").locator(".id").click();
+    await copiedIs(page, "コピーできませんでした", 2000, "失敗の知らせ");
+  });
+});
+
+test(".toast に role が無く、読み上げは入れ物 (#toasts) の aria-live だけ", async () => {
+  const s = new Script([proj(P1, [item("t-A1")])]);
+  await withPage(s, async page => {
+    assert.equal(await page.locator("#toasts").getAttribute("aria-live"), "polite");
+    await page.evaluate(() => { toast("失敗の知らせ"); toast("成功の知らせ", { kind: "ok", action: { label: "取り消す", run: () => {} } }); });
+    assert.equal(await page.locator(".toast").count(), 2);
+    assert.deepEqual(await page.locator(".toast").evaluateAll(es => es.map(e => e.hasAttribute("role"))), [false, false]);
+    assert.equal(await page.locator("#toasts [role]").count(), 0);
+  });
+});
+
+for (const scheme of ["light", "dark"]) {
+  test(`${scheme}: .opt と textarea の枠は背景 (自身の背景とカードの背景) に対して 3:1 以上。P1 の文字はカードの背景に対して 4.5:1 以上`, async () => {
+    const s = new Script([proj(P1, [item("t-A1")])]);
+    await withPage(s, async page => {
+      await page.emulateMedia({ colorScheme: scheme });
+      const m = await page.evaluate(() => {
+        const card = document.querySelector("section.card:has(textarea)");
+        const cs = e => getComputedStyle(e);
+        const part = e => ({ bd: cs(e).borderTopColor, bg: cs(e).backgroundColor, bw: cs(e).borderTopWidth });
+        return { card: cs(card).backgroundColor, opt: part(card.querySelector(".opt:not(.rec)")), area: part(card.querySelector("textarea")),
+          p1: { fg: cs(card.querySelector(".prio.p1")).color }, line: cs(card).borderTopColor };
+      });
+      const calc = await page.evaluate(([fnSrc, m]) => {
+        const ratio = eval(`(${fnSrc})()`);
+        return { optOwn: ratio(m.opt.bd, m.opt.bg), optCard: ratio(m.opt.bd, m.card), areaOwn: ratio(m.area.bd, m.area.bg),
+          areaCard: ratio(m.area.bd, m.card), p1: ratio(m.p1.fg, m.card) };
+      }, [RATIO_FN.toString(), m]);
+      assert.ok(parseFloat(m.opt.bw) > 0 && parseFloat(m.area.bw) > 0, "枠が引かれていない");
+      assert.ok(calc.optOwn >= 3, `${scheme} .opt の枠 / 自身の背景 ${calc.optOwn.toFixed(2)}`);
+      assert.ok(calc.optCard >= 3, `${scheme} .opt の枠 / カードの背景 ${calc.optCard.toFixed(2)}`);
+      assert.ok(calc.areaOwn >= 3, `${scheme} textarea の枠 / 自身の背景 ${calc.areaOwn.toFixed(2)}`);
+      assert.ok(calc.areaCard >= 3, `${scheme} textarea の枠 / カードの背景 ${calc.areaCard.toFixed(2)}`);
+      assert.ok(calc.p1 >= 4.5, `${scheme} .prio.p1 の文字 / カードの背景 ${calc.p1.toFixed(2)}`);
+      // 区切り線 (--line) は変えていない: カードの枠は操作部品の枠と別の色
+      assert.notEqual(m.line, m.opt.bd, `${scheme} カードの枠が操作部品の枠と同じ色になった (--line を変えた)`);
+    });
+  });
+}
