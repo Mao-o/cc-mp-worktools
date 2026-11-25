@@ -2,8 +2,14 @@
 
     python3 -m unittest discover -s tests
 
-bd が PATH に無ければ skip する。bd が要るテストは、一時ディレクトリに git init + bd init した使い捨てのプロジェクトで行う
-(本物の bd の DB には書かない)。HTTP の確認は 8770〜8779 の空いているポートで行う。
+bd を通す読み書きのシナリオ (BdScenarios) は 2 通りで回す:
+- WithFakeBd: 偽の bd (tests/fake_beads.py) で回す。本物の bd が無い環境 (CI) でも skip しない。
+  サーバーが打つ bd の argv の列も、ここで固定する (test_golden_argv)
+- WithBd: 本物の bd で回す。bd が PATH に無ければ skip する。一時ディレクトリに git init + bd init した
+  使い捨てのプロジェクトで行う (本物の bd の DB には書かない)
+モジュールごと読み込んだとき (discover など) は、この 2 つのシナリオを HUMANQ_TEST_JOBS 個 (既定 3) のプロセスで
+並列に回す (下の「並列のプロセスで回す」。1 で直列)。
+サーバーのプロセスを起動する確認は 8770〜8779 の空いているポートで、シナリオの中の HTTP は OS が選んだポートで行う。
 HUMANQ_SERVER_DIR で別の server/ を試せる。
 """
 from __future__ import annotations
@@ -11,6 +17,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import queue
 import re
 import shutil
 import signal
@@ -21,15 +28,21 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
+import types
 import unittest
 import urllib.error
 import urllib.request
-from http.server import ThreadingHTTPServer
+import warnings
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 SERVER_DIR = Path(os.environ.get("HUMANQ_SERVER_DIR") or HERE.parent / "server")
 sys.path.insert(0, str(SERVER_DIR))
+sys.path.insert(0, str(HERE))                   # bd_parallel (`-m unittest tests.test_server` のように親から指したときも読む)
+import bd_parallel  # noqa: E402
 import humanq  # noqa: E402
 import registry  # noqa: E402
 
@@ -91,6 +104,28 @@ def bdc(repo: str, *args: str) -> str:
     p = subprocess.run(["bd", "-C", repo, *args], capture_output=True, text=True, timeout=60)
     assert p.returncode == 0, f"bd {args}: {p.stderr or p.stdout}"
     return p.stdout
+
+
+FAKE_BEADS = HERE / "fake_beads.py"
+FAKE_BIN_DIRS: set[str] = set()        # 偽の bd を置いた dir (realpath)。WithBd がそこの bd を拾っていないことを確かめる
+
+
+def install_fake(bin_dir: str, prog: str = "bd") -> str:
+    """tests/fake_beads.py を bin_dir に prog の名前で置く。偽物は argv[0] の basename で振る舞いを決めるので、
+    名前を変えた写しにし、shebang を今の python に替えて実行権限を付ける (元のファイルの mode に頼らない)。"""
+    _, _, body = FAKE_BEADS.read_text(encoding="utf-8").partition("\n")
+    shebang = "#!/usr/bin/env python3" if re.search(r"\s", sys.executable) else "#!" + sys.executable
+    dst = os.path.join(bin_dir, prog)
+    Path(dst).write_text(shebang + "\n" + body, encoding="utf-8")
+    os.chmod(dst, 0o755)
+    FAKE_BIN_DIRS.add(os.path.realpath(bin_dir))
+    return dst
+
+
+def argv_has(words: list[str], args) -> bool:
+    """words が args にこの順で現れるか (間に別の語を挟んでよい)。偽の bd の FAKE_BEADS_FAIL と同じ規則。"""
+    it = iter(args)
+    return all(any(a == w for a in it) for w in words)
 
 
 class ServerTokenAndHeaders(unittest.TestCase):
@@ -249,32 +284,29 @@ class HookEnsureServer(unittest.TestCase):
         self.assertEqual(self.ping()["pid"], pid)
 
 
-@unittest.skipUnless(HAVE_BD, "bd が無い")
-class WithBd(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.tmp = tempfile.mkdtemp(prefix="humanq-bd-")
-        cls.repo = os.path.join(cls.tmp, "proj")
-        os.makedirs(cls.repo)
-        subprocess.run(["git", "init", "-q", cls.repo], check=True)
-        subprocess.run(["bd", "init", "--non-interactive", "--quiet", "--skip-agents", "--skip-hooks", "-p", "hq"],
-                       cwd=cls.repo, check=True, capture_output=True, timeout=120)
-        cls.n = 0
+class BdScenarios:
+    """bd を通す読み書きのシナリオ。本物の bd (WithBd) と偽の bd (WithFakeBd) の両方で回す。
 
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
+    サブクラスは self.repo と self.tmp (bd init 済みの使い捨てのプロジェクトと、その置き場) と、次の 2 つを用意する:
+      failing(rule, times=None): bd の呼び出しのうち、argv に rule の語がこの順で現れるものを失敗させる
+                                  (times を付けると最初の times 回だけ)。返り値を呼ぶと元に戻す
+      calls(rule): setUp から後に、argv に rule の語がこの順で現れた bd の呼び出しの数"""
+
+    repo: str
+    tmp: str
+    n = 0
 
     def new_question(self, labels=("human",)) -> str:
+        # metadata とラベルは create で一緒に付ける (本物の bd は 1 回の呼び出しに 0.2 秒以上かかるので、3 回を 1 回にする)
         type(self).n += 1
-        out = bdc(self.repo, "create", f"question {self.n}", "-p", "1", "--json")
-        iid = json.loads(out)["id"]
         meta = os.path.join(self.tmp, f"meta{self.n}.json")
         Path(meta).write_text(json.dumps(QUESTION))
-        bdc(self.repo, "update", iid, "--metadata", "@" + meta)
-        for lab in labels:
-            bdc(self.repo, "label", "add", iid, lab)
-        return iid
+        out = bdc(self.repo, "create", f"question {self.n}", "-p", "1", "-l", ",".join(labels), "--metadata", "@" + meta, "--json")
+        created = json.loads(out)
+        assert isinstance(created, dict) and "id" in created, out
+        assert set(created.get("labels") or []) == set(labels), f"create がラベルを付けていない: {out}"
+        assert created.get("metadata") == QUESTION, f"create が metadata を付けていない: {out}"
+        return created["id"]
 
     def comments(self, iid: str) -> list[str]:
         return [c["text"] for c in json.loads(bdc(self.repo, "comments", iid, "--json") or "[]")]
@@ -297,15 +329,7 @@ class WithBd(unittest.TestCase):
     def test_resend_after_partial_write_keeps_one_comment(self):
         iid = self.new_question()
         store = self.store()
-        real = humanq.bd
-        fail = {"on": True}
-
-        def flaky(repo, *args):
-            if fail["on"] and "remove" in args and "human" in args:
-                raise humanq.BdError("label remove boom")
-            return real(repo, *args)
-
-        humanq.bd = flaky
+        restore = self.failing("label remove human")
         try:
             with self.assertRaises(humanq.BdError) as cm:
                 store.answer(self.repo, {"id": iid, "option": "a", "text": "補足"})
@@ -313,30 +337,28 @@ class WithBd(unittest.TestCase):
             self.assertIs(getattr(cm.exception, "written", None), True)
             self.assertEqual(len([c for c in self.comments(iid) if c.startswith("[humanq]")]), 1)
             self.assertEqual(self.labels(iid) & {"human", "answered"}, {"human", "answered"})
-            fail["on"] = False
-            store.answer(self.repo, {"id": iid, "option": "a", "text": "補足"})      # 送り直し
         finally:
-            humanq.bd = real
+            restore()
+        try:
+            store.answer(self.repo, {"id": iid, "option": "a", "text": "補足"})  # 送り直し
+        except humanq.BdError as e:
+            self.fail(f"失敗を外した後の送り直しが失敗した: {e}")
         self.assertEqual(len([c for c in self.comments(iid) if c.startswith("[humanq]")]), 1, "送り直しでコメントが二重になった")
         self.assertEqual(self.labels(iid) & {"human", "answered"}, {"answered"})
 
     def test_resend_with_a_different_answer_adds_a_comment(self):
         iid = self.new_question()
         store = self.store()
-        real = humanq.bd
-
-        def flaky(repo, *args):
-            if "remove" in args and "human" in args:
-                raise humanq.BdError("label remove boom")
-            return real(repo, *args)
-
-        humanq.bd = flaky
+        restore = self.failing("label remove human")
         try:
             with self.assertRaises(humanq.BdError):
                 store.answer(self.repo, {"id": iid, "option": "a", "text": ""})
         finally:
-            humanq.bd = real
-        store.answer(self.repo, {"id": iid, "option": "b", "text": ""})
+            restore()
+        try:
+            store.answer(self.repo, {"id": iid, "option": "b", "text": ""})
+        except humanq.BdError as e:
+            self.fail(f"失敗を外した後の回答が失敗した: {e}")
         marks = [c for c in self.comments(iid) if c.startswith("[humanq]")]
         self.assertEqual(len(marks), 2)
         self.assertIn("案B", marks[-1])
@@ -344,30 +366,27 @@ class WithBd(unittest.TestCase):
     def test_label_step_is_retried_once(self):
         iid = self.new_question()
         store = self.store()
-        real = humanq.bd
-        calls = {"n": 0}
-
-        def once(repo, *args):
-            if "remove" in args and "human" in args:
-                calls["n"] += 1
-                if calls["n"] == 1:
-                    raise humanq.BdError("transient")
-            return real(repo, *args)
-
-        humanq.bd = once
+        restore = self.failing("label remove human", times=1)
         try:
             store.answer(self.repo, {"id": iid, "option": "a", "text": ""})
+        except humanq.BdError as e:
+            self.fail(f"1 回だけの失敗が再試行で通らなかった: {e}")
         finally:
-            humanq.bd = real
-        self.assertEqual(calls["n"], 2)
+            restore()
+        self.assertEqual(self.calls("label remove human"), 2)
         self.assertEqual(self.labels(iid) & {"human", "answered"}, {"answered"})
 
     def serve(self, store: humanq.Store):
-        port = free_port()
-        srv = ThreadingHTTPServer(("127.0.0.1", port), humanq.make_handler(store, port, "tok", "<html></html>", "t"))
+        # ポートは OS に選ばせる (port 0)。シナリオは並列のプロセスで回るので、8770〜8779 から選ぶと取り合いになる。
+        # handler は Host の検査に実際のポートを使うので、bind した後に作って差し込む
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
+        port = srv.server_address[1]
+        srv.RequestHandlerClass = humanq.make_handler(store, port, "tok", "<html></html>", "t")
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         self.addCleanup(srv.server_close)
         self.addCleanup(srv.shutdown)
+        code, _, body = fetch(f"http://127.0.0.1:{port}/api/ping")      # handler が bind したポートを Host に使っている
+        self.assertEqual(code, 200, body)
         return port
 
     def post(self, port: int, path: str, body: dict):
@@ -378,18 +397,11 @@ class WithBd(unittest.TestCase):
         iid = self.new_question()
         store = self.store()
         port = self.serve(store)
-        real = humanq.bd
-
-        def flaky(repo, *args):
-            if "add" in args and "answered" in args:
-                raise humanq.BdError("label add boom")
-            return real(repo, *args)
-
-        humanq.bd = flaky
+        restore = self.failing("label add answered")
         try:
             code, _, body = self.post(port, "/api/answer", {"project": self.repo, "id": iid, "option": "a"})
         finally:
-            humanq.bd = real
+            restore()
         j = json.loads(body)
         self.assertEqual((code, j.get("stage"), j.get("written")), (502, "label", True), j)
         gone_code, _, gone_body = self.post(port, "/api/answer", {"project": self.repo, "id": "hq-nothing", "option": "a"})
@@ -454,18 +466,6 @@ class WithBd(unittest.TestCase):
         Path(f).write_text(text)
         bdc(self.repo, "comments", "add", iid, "-f", f)
 
-    def failing(self, *needles: str):
-        """needles を全部含む引数の bd 呼び出しを失敗させる。返り値を呼ぶと元に戻す。"""
-        real = humanq.bd
-
-        def flaky(repo, *args):
-            if all(n in args for n in needles):
-                raise humanq.BdError("boom")
-            return real(repo, *args)
-
-        humanq.bd = flaky
-        return lambda: setattr(humanq, "bd", real)
-
     def item(self, iid: str, key: str = "human") -> dict:
         return next(i for i in humanq.load_project(self.repo)[key] if i["id"] == iid)
 
@@ -520,7 +520,7 @@ class WithBd(unittest.TestCase):
         iid = self.new_question()
         store = self.store()
         port = self.serve(store)
-        restore = self.failing("add", "answered")
+        restore = self.failing("label add answered")
         try:
             _, _, body = self.post(port, "/api/answer", {"project": self.repo, "id": iid, "option": "a"})
         finally:
@@ -528,8 +528,11 @@ class WithBd(unittest.TestCase):
         self.assertEqual(json.loads(body).get("op"), "answer")
         self.assertEqual(json.loads(body).get("stage"), "label")
         iid2 = self.new_question()
-        store.answer(self.repo, {"id": iid2, "option": "a"})
-        restore = self.failing("add", "human")
+        try:
+            store.answer(self.repo, {"id": iid2, "option": "a"})
+        except humanq.BdError as e:
+            self.fail(f"失敗を外した後の回答が失敗した: {e}")
+        restore = self.failing("label add human")
         try:
             code, _, body = self.post(port, "/api/undo", {"project": self.repo, "id": iid2})
         finally:
@@ -541,7 +544,7 @@ class WithBd(unittest.TestCase):
         iid = self.new_question()
         store = self.store()
         store.answer(self.repo, {"id": iid, "option": "a"})
-        restore = self.failing("remove", "answered")
+        restore = self.failing("label remove answered")
         try:
             with self.assertRaises(humanq.WriteError) as cm:
                 store.undo(self.repo, {"id": iid})
@@ -556,7 +559,7 @@ class WithBd(unittest.TestCase):
     def test_both_labels_after_a_partial_answer_stay_answered(self):
         iid = self.new_question()
         store = self.store()
-        restore = self.failing("remove", "human")
+        restore = self.failing("label remove human")
         try:
             with self.assertRaises(humanq.WriteError):
                 store.answer(self.repo, {"id": iid, "option": "a"})
@@ -608,5 +611,569 @@ class WithBd(unittest.TestCase):
         self.assertNotIn(iid, [i["id"] for i in humanq.load_project(self.repo)["answered"]])
 
 
+@unittest.skipUnless(HAVE_BD, "bd が無い")
+class WithBd(BdScenarios, unittest.TestCase):
+    """本物の bd で回す (bd が PATH にある手元だけ)。失敗は humanq.bd を差し替えて作る。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="humanq-bd-")
+        cls.repo = os.path.join(cls.tmp, "proj")
+        os.makedirs(cls.repo)
+        subprocess.run(["git", "init", "-q", cls.repo], check=True)
+        subprocess.run(["bd", "init", "--non-interactive", "--quiet", "--skip-agents", "--skip-hooks", "-p", "hq"],
+                       cwd=cls.repo, check=True, capture_output=True, timeout=120)
+        cls.n = 0
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def setUp(self):
+        found = shutil.which("bd")
+        self.assertIsNotNone(found)
+        self.assertNotIn(os.path.realpath(os.path.dirname(found)), FAKE_BIN_DIRS, "WithBd が偽の bd を拾っている (PATH が戻っていない)")
+        real = humanq.bd
+        self._rules: list[list] = []          # [語の列, 残りの回数 (None は何回でも)]
+        self._calls: list[tuple] = []
+
+        def recorded(repo, *args):
+            self._calls.append(args)
+            for r in self._rules:
+                if argv_has(r[0], args) and (r[1] is None or r[1] > 0):
+                    if r[1] is not None:
+                        r[1] -= 1
+                    raise humanq.BdError("boom")
+            return real(repo, *args)
+
+        humanq.bd = recorded
+        self.addCleanup(setattr, humanq, "bd", real)
+
+    def failing(self, rule: str, times: int | None = None):
+        r = [rule.split(), times]
+        self._rules.append(r)
+
+        def restore():
+            if r in self._rules:
+                self._rules.remove(r)
+        return restore
+
+    def calls(self, rule: str) -> int:
+        return sum(1 for a in self._calls if argv_has(rule.split(), a))
+
+
+class WithFakeBd(BdScenarios, unittest.TestCase):
+    """偽の bd (tests/fake_beads.py) で回す。本物の bd が無い環境 (CI) でも skip しない。
+
+    偽物を置いた dir を PATH の先頭に入れるのは、テストごとの setUp で行い addCleanup で戻す (HAVE_BD はモジュールの
+    読み込み時に決まるので、偽物を PATH に残したままにしない)。プロジェクトはテストごとに作り直す (偽物の init は速い)。
+    失敗は env の FAKE_BEADS_FAIL で偽物に作らせ、呼び出しは FAKE_BEADS_LOG の記録で数える。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bin_tmp = tempfile.mkdtemp(prefix="humanq-fakebin-")
+        cls.bin = os.path.join(cls.bin_tmp, "bin")
+        os.makedirs(cls.bin)
+        install_fake(cls.bin)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.bin_tmp, ignore_errors=True)
+
+    def setUp(self):
+        leaked = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d and os.path.realpath(d) in FAKE_BIN_DIRS]
+        self.assertEqual(leaked, [], "前のテストの偽の bd が PATH に残っている")
+        self.tmp = tempfile.mkdtemp(prefix="humanq-fakebd-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.log = os.path.join(self.tmp, "calls.jsonl")
+        env = mock.patch.dict(os.environ, {"PATH": self.bin + os.pathsep + os.environ.get("PATH", ""), "FAKE_BEADS_LOG": self.log})
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("FAKE_BEADS_FAIL", None)
+        self.assertEqual(os.path.realpath(shutil.which("bd") or ""), os.path.realpath(os.path.join(self.bin, "bd")))
+        self.repo = os.path.join(self.tmp, "proj")
+        os.makedirs(self.repo)
+        bdc(self.repo, "init", "--non-interactive", "--quiet", "--skip-agents", "--skip-hooks", "-p", "hq")
+
+    def failing(self, rule: str, times: int | None = None):
+        prev = os.environ.get("FAKE_BEADS_FAIL")
+        spec = rule if times is None else f"{rule}:{times}"
+        os.environ["FAKE_BEADS_FAIL"] = f"{prev};{spec}" if prev else spec
+
+        def restore():
+            if prev is None:
+                os.environ.pop("FAKE_BEADS_FAIL", None)
+            else:
+                os.environ["FAKE_BEADS_FAIL"] = prev
+        return restore
+
+    def log_entries(self) -> list[dict]:
+        try:
+            lines = Path(self.log).read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            return []
+        return [json.loads(x) for x in lines if x.strip()]
+
+    def calls(self, rule: str) -> int:
+        return sum(1 for e in self.log_entries() if argv_has(rule.split(), e["argv"]))
+
+    # 今のサーバーが打つ bd の argv の 6 形を、読み → 回答 → 読み → 取り消しの順に並べたもの。
+    # bd を利用している人の挙動を、後で呼び出しを作り直しても変えないための固定 (<repo> <id> <tmp> は置き換えて比べる)
+    HUMAN_LIST = ["-C", "<repo>", "human", "list", "--json"]
+    ANSWERED_LIST = ["-C", "<repo>", "list", "--status", "open,in_progress,blocked,deferred", "--label", "answered",
+                     "--flat", "-n", "0", "--json"]
+    COMMENTS = ["-C", "<repo>", "comments", "<id>", "--json"]
+    COMMENT_ADD = ["-C", "<repo>", "--actor", "user/humanq", "comments", "add", "<id>", "-f", "<tmp>"]
+    ADD_ANSWERED = ["-C", "<repo>", "--actor", "user/humanq", "label", "add", "<id>", "answered"]
+    REMOVE_HUMAN = ["-C", "<repo>", "--actor", "user/humanq", "label", "remove", "<id>", "human"]
+    ADD_HUMAN = ["-C", "<repo>", "--actor", "user/humanq", "label", "add", "<id>", "human"]
+    REMOVE_ANSWERED = ["-C", "<repo>", "--actor", "user/humanq", "label", "remove", "<id>", "answered"]
+    GOLDEN = [
+        HUMAN_LIST, ANSWERED_LIST,                                              # 読み (回答済みは 0 件)
+        HUMAN_LIST, COMMENTS, COMMENT_ADD, ADD_ANSWERED, REMOVE_HUMAN,          # 回答
+        HUMAN_LIST, ANSWERED_LIST, COMMENTS,                                    # 読み (回答済みの本文を読む)
+        ANSWERED_LIST, COMMENTS, COMMENT_ADD, ADD_HUMAN, REMOVE_ANSWERED,       # 取り消し
+    ]
+
+    def test_golden_argv(self):
+        iid = self.new_question()
+        port = self.serve(self.store())
+        start = len(self.log_entries())
+        items = f"http://127.0.0.1:{port}/api/items"
+
+        def project():
+            code, _, body = fetch(items)
+            self.assertEqual(code, 200, body)
+            ps = json.loads(body)["projects"]
+            self.assertEqual(len(ps), 1, ps)
+            self.assertTrue(ps[0]["ok"], ps[0])
+            return ps[0]
+
+        p = project()
+        self.assertEqual([i["id"] for i in p["human"]], [iid])
+        code, _, body = self.post(port, "/api/answer", {"project": self.repo, "id": iid, "option": "a", "qsig": p["human"][0]["qsig"]})
+        self.assertEqual(code, 200, body)
+        p = project()
+        self.assertEqual(([i["id"] for i in p["human"]], [i["id"] for i in p["answered"]]), ([], [iid]))
+        self.assertTrue(p["answered"][0]["answer"].startswith("[humanq] 回答: 案A (a)"), p["answered"][0])
+        code, _, body = self.post(port, "/api/undo", {"project": self.repo, "id": iid})
+        self.assertEqual(code, 200, body)
+
+        entries = self.log_entries()[start:]
+        self.assertEqual({e["prog"] for e in entries}, {"bd"})
+        got = []
+        for e in entries:
+            argv = ["<repo>" if a == self.repo else "<id>" if a == iid else a for a in e["argv"]]
+            if "-f" in argv:
+                k = argv.index("-f")
+                self.assertLess(k + 1, len(argv), argv)
+                self.assertRegex(os.path.basename(argv[k + 1]), r"^humanq-.*\.md$")
+                argv[k + 1] = "<tmp>"
+            got.append(argv)
+        self.assertEqual(got, self.GOLDEN)
+
+    def test_fake_has_the_quirks_of_bd_1_3_4(self):
+        def run(*args):
+            p = subprocess.run(["bd", "-C", self.repo, *args], capture_output=True, text=True, timeout=30)
+            return p.returncode, p.stdout, p.stderr
+
+        def as_json(out: str, what: str):
+            try:
+                return json.loads(out)
+            except ValueError:
+                self.fail(f"{what}: JSON でない: {out!r}")
+
+        self.assertEqual(run("human", "list", "--json")[:2], (0, "null\n"), "human list は 0 件で null")
+        rc, out, _ = run("list", "--status", "open", "--json")
+        self.assertEqual((rc, as_json(out, "list")), (0, []), "list は 0 件で []")
+        rc, _, err = run("human", "list", "--label", "x", "--json")
+        self.assertEqual(rc, 1)
+        self.assertIn("unknown flag: --label", err)
+
+        created = as_json(bdc(self.repo, "create", "plain", "-p", "2", "--json"), "create")
+        self.assertIn("id", created)
+        iid = created["id"]
+        bdc(self.repo, "label", "add", iid, "human")
+        rc, out, _ = run("human", "list", "--json")
+        items = as_json(out, "human list")
+        self.assertIsInstance(items, list)
+        self.assertEqual(len(items), 1, items)
+        self.assertNotIn("metadata", items[0], "metadata が無いチケットは key を出さない")
+        self.assertEqual(items[0].get("labels"), ["human"])
+        bdc(self.repo, "label", "add", iid, "answered")
+        rc, out, _ = run("human", "list", "--json")
+        listed = as_json(out, "human list")
+        self.assertEqual(len(listed), 1, listed)
+        self.assertEqual(listed[0].get("labels"), ["answered", "human"], "labels は名前の順 (付けた順ではない)")
+
+        f = os.path.join(self.tmp, "c.md")
+        Path(f).write_text("first\n")
+        bdc(self.repo, "--actor", "user/humanq", "comments", "add", iid, "-f", f)
+        Path(f).write_text("second\n")
+        bdc(self.repo, "comments", "add", iid, "-f", f)
+        cs = as_json(bdc(self.repo, "comments", iid, "--json"), "comments")
+        self.assertIsInstance(cs, list)
+        self.assertEqual(len(cs), 2, cs)
+        self.assertEqual([c.get("text") for c in cs], ["first\n", "second\n"], "古い順")
+        self.assertEqual(set(cs[0]), {"id", "issue_id", "author", "text", "created_at"})
+        self.assertEqual((cs[0]["author"], cs[0]["issue_id"]), ("user/humanq", iid))
+        self.assertNotEqual(cs[1]["author"], "user/humanq")
+        self.assertRegex(cs[0]["id"], r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+        rc, out, _ = run("comments", "hq-nothing", "--json")
+        self.assertEqual(rc, 1)
+        self.assertIn("no issue found", str(as_json(out, "comments の error").get("error")))
+
+        p = subprocess.run(["bd", "-C", self.tmp, "human", "list", "--json"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 1, ".beads/ の無い dir")
+        self.assertIn("no beads project found", p.stderr)
+
+        Path(self.repo, ".beads", "metadata.json").write_text(json.dumps({"database": "beads.db", "jsonl_export": "issues.jsonl"}))
+        rc, _, err = run("human", "list", "--json")
+        self.assertEqual(rc, 1)
+        self.assertTrue(err.startswith("Error: historical SQLite workspace detected;"), err)
+
+    def test_failure_rule_counts_per_project(self):
+        iid = self.new_question()
+        restore = self.failing("label remove human", times=1)
+        try:
+            for args in (["label", "remove", iid, "answered"], ["human", "list"], ["label", "add", iid, "human"]):
+                p = subprocess.run(["bd", "-C", self.repo, *args], capture_output=True, text=True, timeout=30)
+                self.assertEqual(p.returncode, 0, f"語の列に当たらない呼び出しを失敗させた: {args}")
+            p = subprocess.run(["bd", "-C", self.repo, "--actor", "x", "label", "remove", iid, "human"], capture_output=True, text=True, timeout=30)
+            self.assertEqual(p.returncode, 1, "1 回目は失敗する")
+            p = subprocess.run(["bd", "-C", self.repo, "label", "remove", iid, "human"], capture_output=True, text=True, timeout=30)
+            self.assertEqual(p.returncode, 0, "2 回目は通る")
+        finally:
+            restore()
+        self.assertEqual(self.calls("label remove human"), 2)
+        always = self.failing("label add answered")
+        p = subprocess.run(["bd", "-C", self.repo, "label", "add", iid, "answered"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 1, "回数を付けない規則は毎回失敗させる")
+        always()
+        p = subprocess.run(["bd", "-C", self.repo, "label", "add", iid, "answered"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 0, "元に戻した後も失敗する")
+
+
+# ---- bd のシナリオを並列のプロセスで回す (道具は tests/bd_parallel.py) ---------------------------------------
+#
+# BdScenarios のテスト (WithBd と WithFakeBd) は、モジュールごと読み込まれたとき (discover・`-m unittest test_server`)
+# に限り、このファイルを --bd-worker で起動した worker で並列に回す。各 worker は自分の setUpClass (bd init した一時の
+# プロジェクト・偽の bd を置いた dir) を持つ。テストを名前で指したとき (`-m unittest test_server.WithBd` など) と
+# HUMANQ_TEST_JOBS=1 のときは今までどおり直列。
+
+JOBS_ENV = "HUMANQ_TEST_JOBS"
+DEFAULT_JOBS = 3
+POOL_DUMMY_ENV = "HUMANQ_TEST_POOL_DUMMY"     # 並列の道具の自己検査 (ParallelRunner) が、worker にだけ置くテスト
+SCRIPT = str(Path(__file__).resolve())
+
+
+def jobs_from_env() -> int:
+    try:
+        return int(os.environ.get(JOBS_ENV) or DEFAULT_JOBS)
+    except ValueError:
+        return DEFAULT_JOBS
+
+
+def is_bd_scenario(t) -> bool:
+    # クラスごと skip されたもの (bd が無いときの WithBd) は親に残して、親で skip を報告する (worker を起こすまでもない)
+    return isinstance(t, BdScenarios) and not getattr(type(t), "__unittest_skip__", False)
+
+
+def module_suite(tests, jobs: int):
+    """モジュールごと読み込んだときの suite。jobs が 1 以下なら直列のまま返す。"""
+    return tests if jobs <= 1 else bd_parallel.parallel_suite(tests, SCRIPT, jobs, is_bd_scenario)
+
+
+def load_tests(loader, tests, pattern):
+    return module_suite(tests, jobs_from_env())
+
+
+if os.environ.get(POOL_DUMMY_ENV) == "1":
+    class PoolDummy(unittest.TestCase):
+        """ParallelRunner だけが worker に置くテスト (親では定義しないので、discover には出ない)。"""
+
+        def test_ok(self):
+            pass
+
+        def test_fail(self):
+            self.assertEqual(1, 2, "わざと落とす")
+
+        def test_error(self):
+            raise KeyError("わざと例外")
+
+        def test_skip(self):
+            self.skipTest("わざと skip")
+
+        def test_subtest_fail(self):
+            for i in range(2):
+                with self.subTest(i=i):
+                    self.assertEqual(i, 0)
+
+        def test_exit(self):
+            os._exit(3)                              # worker ごと落ちる
+
+        def test_deprecation_warning(self):          # -W error なら ERROR (直列と同じ)
+            warnings.warn("古い API", DeprecationWarning)
+
+        @unittest.expectedFailure
+        def test_xfail(self):
+            self.assertEqual(1, 2)
+
+        @unittest.expectedFailure
+        def test_xpass(self):
+            pass
+
+        @classmethod
+        def tearDownClass(cls):                      # worker の終わりに呼ばれたことを親が見る
+            mark = os.environ.get("HUMANQ_TEST_POOL_MARK")
+            if mark:
+                Path(mark, f"teardown-{os.getpid()}").write_text("")
+
+    class PoolDummyBrokenClass(unittest.TestCase):
+        @classmethod
+        def setUpClass(cls):
+            mark = os.environ.get("HUMANQ_TEST_POOL_MARK")
+            if mark:                                 # setUpClass が落ちたときも class cleanup が回ることを親が見る
+                cls.addClassCleanup(lambda: Path(mark, f"broken-cleanup-{os.getpid()}").write_text(""))
+            raise RuntimeError("setUpClass をわざと落とす")
+
+        def test_never(self):
+            pass
+
+    class PoolDummySkippedClass(unittest.TestCase):
+        @classmethod
+        def setUpClass(cls):
+            mark = os.environ.get("HUMANQ_TEST_POOL_MARK")
+            if mark:                                 # setUpClass で skip したときも class cleanup が回ることを親が見る
+                cls.addClassCleanup(lambda: Path(mark, f"skip-cleanup-{os.getpid()}").write_text(""))
+            raise unittest.SkipTest("setUpClass でわざと skip")
+
+        def test_never(self):
+            pass
+
+    class PoolDummySkippedBrokenCleanup(unittest.TestCase):
+        @classmethod
+        def setUpClass(cls):                         # skip しても、class cleanup の失敗は直列と同じく ERROR
+            cls.addClassCleanup(lambda: 1 / 0)
+            raise unittest.SkipTest("setUpClass でわざと skip")
+
+        def test_never(self):
+            pass
+
+    class PoolDummyBrokenTeardown(unittest.TestCase):
+        @classmethod
+        def tearDownClass(cls):
+            raise RuntimeError("tearDownClass をわざと落とす")
+
+        def test_ok(self):
+            pass
+
+    class PoolDummyBrokenCleanup(unittest.TestCase):
+        @classmethod
+        def setUpClass(cls):
+            cls.addClassCleanup(lambda: 1 / 0)
+
+        def test_ok(self):
+            pass
+
+
+class ParallelRunner(unittest.TestCase):
+    """並列の道具が、worker の結果を取りこぼしたり別の結果に読み替えたりしないこと (落ちたテストが通ったことに
+    ならない)。worker にだけ置いたテスト (PoolDummy) を、本物の道具で回して親の result を見る。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="humanq-pool-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def run_remote(self, names: list[str], jobs: int = 2, script: str = SCRIPT) -> unittest.TestResult:
+        class Stub(unittest.TestCase):               # 親の側の元のテスト (id と表示だけ借りる)
+            def runTest(self):
+                pass
+        self.assertEqual(len(set(names)), len(names))
+        tests = unittest.TestSuite()
+        stubs = {}
+        for n in names:
+            s = Stub()
+            stubs[id(s)] = n
+            tests.addTest(s)
+        suite = bd_parallel.parallel_suite(tests, script, jobs, lambda t: True,
+                                           {POOL_DUMMY_ENV: "1", "HUMANQ_TEST_POOL_MARK": self.tmp},
+                                           name_of=lambda t: stubs[id(t)])
+        self.assertIsInstance(suite, bd_parallel.ParallelSuite)
+        remotes = [t for t in bd_parallel.flatten(suite) if isinstance(t, bd_parallel.RemoteTest)]
+        self.assertEqual(sorted(t.name for t in remotes), sorted(names))
+        result = unittest.TestResult()
+        suite.run(result)
+        self.assertEqual(result.testsRun, len(names))
+        return result
+
+    def fake_worker(self, body: str) -> str:
+        """--bd-worker の代わりに置く script (結果の読み違いを作る)。argv[2] が名前を読む fd、argv[3] が結果を書く fd。"""
+        path = os.path.join(self.tmp, "fake_worker.py")
+        Path(path).write_text("import os, sys\nrd = os.fdopen(int(sys.argv[2]))\nwr = os.fdopen(int(sys.argv[3]), 'w')\n" + body)
+        return path
+
+    @staticmethod
+    def names_of(pairs) -> list[str]:
+        return sorted(t.name for t, _ in pairs)
+
+    def test_each_status_is_reported_as_it_was(self):
+        names = ["PoolDummy.test_ok", "PoolDummy.test_fail", "PoolDummy.test_error", "PoolDummy.test_skip",
+                 "PoolDummy.test_subtest_fail", "PoolDummyBrokenClass.test_never", "PoolDummySkippedClass.test_never",
+                 "PoolDummy.test_nothing", "Nowhere.test_x"]
+        r = self.run_remote(names)
+        self.assertEqual(self.names_of(r.failures), ["PoolDummy.test_fail", "PoolDummy.test_subtest_fail"])
+        self.assertEqual(self.names_of(r.errors), ["Nowhere.test_x", "PoolDummy.test_error", "PoolDummy.test_nothing",
+                                                  "PoolDummyBrokenClass.test_never"])
+        # setUpClass の SkipTest は直列と同じく skip (ERROR にしない)
+        self.assertEqual(sorted((t.name, why) for t, why in r.skipped),
+                         [("PoolDummy.test_skip", "わざと skip"), ("PoolDummySkippedClass.test_never", "setUpClass でわざと skip")])
+        marks = sorted(n.split("-")[0] for n in os.listdir(self.tmp) if "-cleanup-" in n)
+        self.assertEqual(marks, ["broken", "skip"], "setUpClass が落ちた・skip したクラスの class cleanup が回っていない")
+        texts = {t.name: text for t, text in r.failures + r.errors}
+        self.assertIn("わざと落とす", texts["PoolDummy.test_fail"], "worker の traceback が親に届かない")
+        self.assertIn("RemoteFailure", texts["PoolDummy.test_fail"])
+        self.assertIn("KeyError", texts["PoolDummy.test_error"])
+        self.assertIn("RemoteError", texts["PoolDummy.test_error"], "例外は ERROR のまま (FAIL にしない)")
+        self.assertIn("setUpClass をわざと落とす", texts["PoolDummyBrokenClass.test_never"])
+
+    def test_expected_failures_and_teardown(self):
+        r = self.run_remote(["PoolDummy.test_xfail", "PoolDummy.test_xpass", "PoolDummy.test_ok"], jobs=1)
+        self.assertEqual((r.failures, r.errors), ([], []))
+        self.assertEqual(self.names_of(r.expectedFailures), ["PoolDummy.test_xfail"])
+        self.assertEqual(sorted(t.name for t in r.unexpectedSuccesses), ["PoolDummy.test_xpass"])
+        self.assertFalse(r.wasSuccessful(), "予期しない成功が成功として数えられた")
+        marks = [n for n in os.listdir(self.tmp) if n.startswith("teardown-")]
+        self.assertEqual(len(marks), 1, "worker の終わりに tearDownClass が 1 回呼ばれていない")
+
+    def test_a_worker_that_dies_does_not_pass_its_tests(self):
+        r = self.run_remote(["PoolDummy.test_exit", "PoolDummy.test_ok"], jobs=1)   # worker が落ちた後の 1 件は誰も走らせない
+        self.assertEqual(r.failures, [])
+        remote = [(t, x) for t, x in r.errors if isinstance(t, bd_parallel.RemoteTest)]
+        self.assertEqual(self.names_of(remote), ["PoolDummy.test_exit", "PoolDummy.test_ok"])
+        extra = [x for t, x in r.errors if not isinstance(t, bd_parallel.RemoteTest)]
+        self.assertEqual(len(extra), 1, "異常終了した worker の rc が ERROR にならない")
+        self.assertIn("rc=[3]", extra[0])
+        self.assertEqual(r.skipped, [])
+        texts = {t.name: text for t, text in remote}
+        self.assertIn("結果を返さずに終わった", texts["PoolDummy.test_exit"])
+        self.assertIn("どの worker もこのテストを走らせなかった", texts["PoolDummy.test_ok"])
+
+    def test_a_failing_class_teardown_in_a_worker_is_an_error(self):
+        # 直列 (HUMANQ_TEST_JOBS=1・クラス名指定) では tearDownClass と class cleanup の失敗は ERROR になる。並列でも同じにする
+        for name in ("PoolDummyBrokenTeardown.test_ok", "PoolDummyBrokenCleanup.test_ok", "PoolDummySkippedBrokenCleanup.test_never"):
+            with self.subTest(name=name):
+                r = self.run_remote([name], jobs=1)
+                self.assertEqual(r.failures, [])
+                self.assertEqual(len(r.errors), 1, "worker の tearDownClass / class cleanup の失敗が親に届かない")
+                self.assertIn("tearDownClass", str(r.errors[0][0]))
+                self.assertIn("rc=[1]", r.errors[0][1])
+                self.assertFalse(r.wasSuccessful())
+
+    def test_the_worker_runs_in_the_parents_cwd(self):
+        # 相対パスの env (HUMANQ_SERVER_DIR=server など) が、親と worker で同じものを指すように
+        body = ("import json\nn = rd.readline().strip()\nok = os.getcwd() == %r\n"
+                "wr.write(json.dumps({'name': n, 'status': 'ok' if ok else 'fail', 'text': 'worker の cwd: ' + os.getcwd()}) + '\\n')\n"
+                "wr.flush()\n" % os.getcwd())
+        r = self.run_remote(["PoolDummy.test_ok"], jobs=1, script=self.fake_worker(body))
+        self.assertEqual(r.failures, [], "worker の cwd が親と違う")
+        self.assertEqual((r.errors, r.skipped), ([], []))
+
+    def test_a_result_that_never_comes_is_an_error(self):
+        body = "import time\nrd.readline()\ntime.sleep(3)\n"           # 名前を受け取ったまま答えない
+        with mock.patch.object(bd_parallel, "RESULT_WAIT", 0.5):
+            r = self.run_remote(["PoolDummy.test_ok"], jobs=1, script=self.fake_worker(body))
+        self.assertEqual((self.names_of(r.errors), r.failures, r.skipped), (["PoolDummy.test_ok"], [], []))
+        self.assertIn("待っても結果が来ない", r.errors[0][1])
+
+    def test_a_module_with_module_fixtures_stays_serial(self):
+        # worker は setUpModule / tearDownModule を回さない。回すと、直列なら ERROR になる module の fixture の失敗が通る
+        mod = types.ModuleType("humanq_pool_modfix")
+        Case = type("Case", (unittest.TestCase,), {"__module__": mod.__name__, "test_x": lambda self: None})
+        tests = unittest.TestSuite([Case("test_x")])
+        with mock.patch.dict(sys.modules, {mod.__name__: mod}):
+            for fixture in ("setUpModule", "tearDownModule"):
+                with self.subTest(fixture=fixture):
+                    setattr(mod, fixture, lambda: None)
+                    self.assertIs(bd_parallel.parallel_suite(tests, SCRIPT, 2, lambda t: True), tests)
+                    delattr(mod, fixture)
+            self.assertIsInstance(bd_parallel.parallel_suite(tests, SCRIPT, 2, lambda t: True), bd_parallel.ParallelSuite)
+
+    def test_the_worker_gets_the_interpreter_flags(self):
+        # `python -W error -m unittest` の -W は env に出ない。worker の起動に渡さないと、直列なら ERROR の警告が worker では通る
+        with mock.patch.object(subprocess, "_args_from_interpreter_flags", return_value=["-Werror::DeprecationWarning"]):
+            r = self.run_remote(["PoolDummy.test_deprecation_warning"], jobs=1)
+        self.assertEqual((self.names_of(r.errors), r.failures), (["PoolDummy.test_deprecation_warning"], []))
+
+    def test_debug_does_not_pass_a_remote_failure(self):
+        # TestSuite.debug() は結果を集めずに例外を上げる経路。RemoteTest がそこで黙って通らない
+        for name, exc in (("PoolDummy.test_fail", bd_parallel.RemoteFailure), ("PoolDummy.test_error", bd_parallel.RemoteError),
+                          ("PoolDummy.test_skip", unittest.SkipTest)):
+            with self.subTest(name=name):
+                class Stub(unittest.TestCase):
+                    def runTest(self):
+                        pass
+                suite = bd_parallel.parallel_suite(unittest.TestSuite([Stub()]), SCRIPT, 1, lambda t: True,
+                                                   {POOL_DUMMY_ENV: "1"}, name_of=lambda t, n=name: n)
+                with self.assertRaises(exc):
+                    suite.debug()
+
+    def test_a_worker_that_answers_wrongly_does_not_pass(self):
+        cases = {
+            "別のテストの名前": 'rd.readline()\nwr.write(\'{"name": "PoolDummy.test_other", "status": "ok"}\\n\')\nwr.flush()\n',
+            "JSON でない": "rd.readline()\nwr.write('ok\\n')\nwr.flush()\n",
+            "status が無い": 'n = rd.readline().strip()\nwr.write(\'{"name": "%s"}\\n\' % n)\nwr.flush()\n',
+        }
+        for what, body in cases.items():
+            with self.subTest(what=what):
+                r = self.run_remote(["PoolDummy.test_ok"], jobs=1, script=self.fake_worker(body))
+                self.assertEqual((self.names_of(r.errors), r.failures, r.skipped), (["PoolDummy.test_ok"], [], []))
+
+    def test_jobs_1_keeps_the_suite_serial(self):
+        tests = unittest.defaultTestLoader.loadTestsFromTestCase(WithFakeBd)
+        self.assertGreater(tests.countTestCases(), 0)
+        self.assertIs(module_suite(tests, 1), tests)
+        self.assertIsInstance(module_suite(tests, 2), bd_parallel.ParallelSuite)
+        plain = unittest.TestSuite([ParallelRunner("test_jobs_1_keeps_the_suite_serial")])
+        self.assertIs(module_suite(plain, 3), plain, "BdScenarios でないテストを worker に回した")
+        with mock.patch.dict(os.environ, {JOBS_ENV: "1"}):
+            self.assertEqual(jobs_from_env(), 1)
+        with mock.patch.dict(os.environ, {JOBS_ENV: "x"}):
+            self.assertEqual(jobs_from_env(), DEFAULT_JOBS)
+
+    def test_module_load_sends_bd_scenarios_to_workers(self):
+        with mock.patch.dict(os.environ, {JOBS_ENV: "3"}):
+            suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
+        flat = list(bd_parallel.flatten(suite))
+        remote = {type(t.orig).__name__ for t in flat if isinstance(t, bd_parallel.RemoteTest)}
+        local = {type(t).__name__ for t in flat if not isinstance(t, bd_parallel.RemoteTest)}
+        self.assertEqual(remote, {"WithBd", "WithFakeBd"} if HAVE_BD else {"WithFakeBd"})
+        self.assertIn("WithBd", remote if HAVE_BD else local, "bd が無いときの WithBd は親に残して、親で skip を報告する")
+        self.assertEqual(local & {"WithFakeBd"}, set())
+        self.assertIn("ParallelRunner", local)
+        self.assertEqual(len(flat), suite.countTestCases())
+        names = [t.name for t in flat if isinstance(t, bd_parallel.RemoteTest)]
+        self.assertEqual(len(names), len(set(names)), "同じテストを 2 度配る")
+        for t in flat:                               # 報告の id と表示は元のテストのまま (落ちたテストを名前で追える)
+            if isinstance(t, bd_parallel.RemoteTest):
+                self.assertEqual(t.name, f"{type(t.orig).__name__}.{t.orig._testMethodName}")
+                self.assertTrue(t.id().endswith("." + t.name), t.id())
+                self.assertEqual((t.id(), str(t)), (t.orig.id(), str(t.orig)))
+
+    def test_a_skipped_scenario_class_stays_in_the_parent(self):
+        @unittest.skip("bd が無い")
+        class Skipped(BdScenarios, unittest.TestCase):
+            pass
+
+        class Plain(BdScenarios, unittest.TestCase):
+            pass
+        self.assertFalse(is_bd_scenario(Skipped("test_items_carry_qsig")))
+        self.assertTrue(is_bd_scenario(Plain("test_items_carry_qsig")))
+        self.assertFalse(is_bd_scenario(ParallelRunner("test_a_skipped_scenario_class_stays_in_the_parent")))
+
+
 if __name__ == "__main__":
+    if len(sys.argv) == 4 and sys.argv[1] == "--bd-worker":
+        sys.exit(bd_parallel.worker_main(sys.modules[__name__], int(sys.argv[2]), int(sys.argv[3])))
     unittest.main()

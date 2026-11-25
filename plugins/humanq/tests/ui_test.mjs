@@ -26,7 +26,9 @@ async function loadPlaywright() {
 
 // ---- サーバーとブラウザ -------------------------------------------------------------
 
-let browser, server, stateDir, baseUrl;
+// sbBrowser は常時表示のスクロールバーを出せるブラウザ (Playwright の headless は既定で --hide-scrollbars を付け、
+// スクロールバーが幅を取らない。Windows / Linux の Chrome や、macOS の「スクロールバーを常に表示」の画面を測るため)
+let browser, sbBrowser, server, stateDir, baseUrl;
 
 function portFree(port) {
   return new Promise(resolve => {
@@ -55,10 +57,12 @@ before(async () => {
   await startServer();
   const pw = await loadPlaywright();
   browser = await pw.chromium.launch({ headless: true });
+  sbBrowser = await pw.chromium.launch({ headless: true, ignoreDefaultArgs: ["--hide-scrollbars"] });
 });
 
 after(async () => {
   if (browser) await browser.close();
+  if (sbBrowser) await sbBrowser.close();
   if (server) server.kill("SIGTERM");
   if (stateDir) rmSync(stateDir, { recursive: true, force: true });
 });
@@ -124,8 +128,8 @@ class Script {
   releaseAll() { for (const r of this.releases) r(); }
 }
 
-async function withPage(script, fn, ctxOptions = {}, setup = null) {
-  const ctx = await browser.newContext(ctxOptions);
+async function withPage(script, fn, ctxOptions = {}, setup = null, b = browser) {
+  const ctx = await b.newContext(ctxOptions);
   const page = await ctx.newPage();
   const errors = [];
   page.on("pageerror", e => errors.push(String(e)));
@@ -860,4 +864,445 @@ test("取り消しのラベルの付け替えだけ失敗したときは、「�
     assert.match(t, /判断待ちの一覧/);
     await waitFor(async () => (await qcard(page, "t-A1").count()) === 1, 3000, "判断待ちに出る");
   });
+});
+
+// ---- 0.3.0: 回答の成功の知らせと、そこからの取り消し・トーストの位置 ---------------------------------------
+
+const okToasts = page => page.locator("#toasts .toast.ok:not(.out)");
+const undoInToast = page => okToasts(page).getByRole("button", { name: "取り消す" });
+// 2 つの矩形が重なるか (辺が接するだけなら重ならない)
+const overlaps = (a, b) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+
+test("回答が成功すると、成功のトースト (.toast.ok) に題と選んだ選択肢の label が出る。補足だけの回答は (自由記述)", async () => {
+  const long = "とても長い題".repeat(6);                                         // 36 字: 24 字に切る
+  const longLabel = "とても長い選択肢の名前".repeat(5);                             // 55 字: 40 字に切る
+  const c3 = item("t-C3");
+  const s = new Script([proj(P1, [item("t-A1"), item("t-B2", { title: long }),
+    { ...c3, q: { ...c3.q, recommended: null, options: [{ key: "a", label: longLabel, desc: "" }] } }])]);
+  await withPage(s, async page => {
+    await qcard(page, "t-A1").locator(".opt").nth(1).click();                  // 案B
+    await qcard(page, "t-A1").locator("button.primary").click();
+    await okToasts(page).first().waitFor({ timeout: 3000 });
+    assert.equal(await okToasts(page).count(), 1);
+    assert.equal(await okToasts(page).first().locator(".toast-msg").innerText(), "「title t-A1」に回答しました: 案B");
+    assert.equal(await undoInToast(page).count(), 1, "「取り消す」が無い");
+    assert.equal(await okToasts(page).first().evaluate(e => getComputedStyle(e).borderLeftColor), "rgb(31, 122, 77)", "成功の色 (--rec) でない");
+    await qcard(page, "t-B2").locator("textarea").fill("memo");               // 選択肢を選ばず補足だけ
+    await qcard(page, "t-B2").locator("button.primary").click();
+    await waitFor(async () => (await okToasts(page).count()) === 2, 3000, "2 件目の成功のトースト");
+    assert.equal(await okToasts(page).nth(1).locator(".toast-msg").innerText(), `「${long.slice(0, 23)}…」に回答しました: (自由記述)`);
+    await answerFirst(page, "t-C3");                                            // 長い label
+    await waitFor(async () => (await okToasts(page).count()) === 3, 3000, "3 件目の成功のトースト");
+    assert.equal(await okToasts(page).nth(2).locator(".toast-msg").innerText(), `「title t-C3」に回答しました: ${longLabel.slice(0, 39)}…`);
+    assert.equal(await page.locator("#toasts .toast:not(.ok)").count(), 0, "成功なのに失敗のトーストが出た");
+  });
+});
+
+test("トーストの「取り消す」は、回答済みのカードが作られる前でも /api/undo を {project,id} で送り、カードは空で判断待ちに戻る", async () => {
+  const s = new Script([proj(P1, [item("t-A1"), item("t-B2")])]);
+  await withPage(s, async page => {
+    await qcard(page, "t-A1").locator(".opt").nth(1).click();
+    await qcard(page, "t-A1").locator("textarea").fill("memo");
+    const releaseItems = s.hold("items");                                      // 成功の後の読み込みを止める: 回答済みのカードはまだ作られない
+    await qcard(page, "t-A1").locator("button.primary").click();
+    await okToasts(page).first().waitFor({ timeout: 3000 });
+    assert.equal(await acard(page, "t-A1").count(), 0, "回答済みのカードがもう作られている");
+    await undoInToast(page).click({ timeout: 3000 });
+    await waitFor(() => s.undos.length === 1, 3000, "取り消しの POST");
+    assert.deepEqual(s.undos[0], { project: P1, id: "t-A1" });
+    releaseItems();
+    await waitFor(async () => (await qcard(page, "t-A1").count()) >= 1, 3000, "判断待ちに戻る");
+    await single(page, "t-A1");
+    assert.equal(await acard(page, "t-A1").count(), 0, "回答済みに残っている");
+    assert.equal(await qcard(page, "t-A1").locator("textarea").inputValue(), "", "下書きは戻さない");
+    assert.equal(await qcard(page, "t-A1").locator(".opt.sel").count(), 0, "選択は戻さない");
+    assert.equal(await page.locator("#toasts .toast:not(.out)").count(), 0, "押したトーストが残っている、または取り消しの成功に知らせが出た");
+    assert.equal((await page.locator("#count").textContent()).trim(), "2 件");
+  });
+});
+
+test("回答済みのカードが出た後でも、トーストの「取り消す」でそのカードは判断待ちに戻る", async () => {
+  const s = new Script([proj(P1, [item("t-A1"), item("t-B2")])]);
+  await withPage(s, async page => {
+    await answerFirst(page, "t-A1");
+    await waitFor(async () => (await acard(page, "t-A1").count()) === 1, 3000, "回答済みに出る");
+    await undoInToast(page).click({ timeout: 3000 });
+    await waitFor(() => s.undos.length === 1, 3000, "取り消しの POST");
+    assert.deepEqual(s.undos[0], { project: P1, id: "t-A1" });
+    await waitFor(async () => (await qcard(page, "t-A1").count()) === 1, 3000, "判断待ちに戻る");
+    await waitFor(async () => (await acard(page, "t-A1").count()) === 0, 3000, "回答済みから消える");
+  });
+});
+
+test("回答済みのカードで取り消したら、その回答の成功のトーストも閉じる。答え直した後は今の答えのトーストだけが残り、今の答えは取り消されない", async () => {
+  const s = new Script([proj(P1, [item("t-A1"), item("t-B2")])]);
+  await withPage(s, async page => {
+    await answerFirst(page, "t-A1");                                          // 案A
+    await okToasts(page).first().waitFor({ timeout: 3000 });
+    await waitFor(async () => (await acard(page, "t-A1").count()) === 1, 3000, "回答済みに出る");
+    const releaseUndo = s.hold("undo");                                      // カードの取り消しの POST は止めておく
+    await acard(page, "t-A1").getByRole("button", { name: "取り消して判断待ちに戻す" }).click();
+    await waitFor(() => s.undos.length === 1, 3000, "カードの取り消しの POST");
+    // 送信中でも、取り消した回答の「取り消す」はもう押せない (押せると、取り消し済みのチケットに 2 度目を送る)
+    await waitFor(async () => (await okToasts(page).count()) === 0, 3000, "取り消した回答の成功のトースト (「取り消す」付き) が残っている");
+    assert.equal(await undoInToast(page).count(), 0, "取り消した回答の「取り消す」が押せる");
+    releaseUndo();
+    await waitFor(async () => (await qcard(page, "t-A1").count()) >= 1, 3000, "判断待ちに戻る");
+    await single(page, "t-A1");
+    await qcard(page, "t-A1").locator(".opt").nth(1).click();                // 案B で答え直す
+    await qcard(page, "t-A1").locator("button.primary").click();
+    await waitFor(async () => (await okToasts(page).count()) === 1, 3000, "答え直しの成功のトースト");
+    assert.deepEqual(await okToasts(page).locator(".toast-msg").allInnerTexts(), ["「title t-A1」に回答しました: 案B"]);
+    await waitFor(async () => (await acard(page, "t-A1").count()) === 1, 3000, "答え直した回答が回答済みに出る");
+    await page.waitForTimeout(300);
+    assert.equal(s.undos.length, 1, "取り消しが二重に送られた、または今の答えが取り消された");
+    assert.deepEqual(s.answers.map(a => a.option), ["a", "b"]);
+    assert.equal(await qcard(page, "t-A1").count(), 0, "今の答えが取り消されて判断待ちに戻った");
+  });
+});
+
+test("トーストの「取り消す」が 400 gone なら、カードが無くても「ほかで回答・反映済み」と知らせる。ほかの失敗は回答済みのカードを戻して知らせる", async () => {
+  const s = new Script([proj(P1, [item("t-A1"), item("t-B2")])]);
+  s.undoResult = () => ({ status: 400, body: { error: "反映待ちに無い", code: "gone", op: "undo" } });   // エージェントがもう拾った
+  await withPage(s, async page => {
+    const releaseItems = s.hold("items");
+    await answerFirst(page, "t-A1");
+    await undoInToast(page).click({ timeout: 3000 });
+    await waitFor(() => s.undos.length === 1, 3000, "取り消しの POST");
+    await page.locator("#toasts .toast:not(.ok)").first().waitFor({ timeout: 3000 });
+    assert.equal(await acard(page, "t-A1").count(), 0, "このテストはカードが無いときの知らせを見る");
+    assert.equal(await page.locator("#toasts .toast:not(.ok)").first().locator(".toast-msg").innerText(), "「title t-A1」(t-A1): ほかで回答・反映済みでした");
+    releaseItems();
+    await waitFor(async () => (await acard(page, "t-A1").count()) === 1, 3000, "今の状態 (回答済み) が出る");
+    assert.equal(await qcard(page, "t-A1").count(), 0, "判断待ちに戻した");
+  });
+  const s2 = new Script([proj(P1, [item("t-A1"), item("t-B2")])]);
+  s2.undoResult = () => ({ status: 502, body: { error: "bd boom", stage: "comment", written: false, op: "undo" } });
+  await withPage(s2, async page => {
+    const releaseItems = s2.hold("items");
+    await answerFirst(page, "t-A1");
+    await undoInToast(page).click({ timeout: 3000 });
+    await waitFor(() => s2.undos.length === 1, 3000, "取り消しの POST");
+    assert.equal(await acard(page, "t-A1").count(), 0);
+    releaseItems();
+    await page.locator("#toasts .toast:not(.ok)").first().waitFor({ timeout: 3000 });
+    assert.equal(await page.locator("#toasts .toast:not(.ok)").first().locator(".toast-msg").innerText(), "「title t-A1」(t-A1): bd boom。カードを戻しました");
+    await waitFor(async () => (await page.locator("section.card.failed:has(.ans)").count()) === 1, 3000, "回答済みのカードが赤い枠で出る");
+    assert.match(await acard(page, "t-A1").locator(".errbox").innerText(), /bd boom/);
+  });
+});
+
+test("回答が成功した直後に Enter を押し続けても、トーストの「取り消す」は押されない (フォーカスはトーストに移らない)", async () => {
+  // 次のカード (回答済み) があるときと、次のカードが無いとき
+  for (const projects of [[proj(P1, [item("t-B2")], [answeredItem("t-A1")])], [proj(P1, [item("t-B2")])]]) {
+    const s = new Script(projects);
+    await withPage(s, async page => {
+      await qcard(page, "t-B2").locator(".opt").first().click();
+      await qcard(page, "t-B2").locator("button.primary").focus();
+      await page.keyboard.press("Enter");
+      await page.waitForTimeout(50);
+      await page.keyboard.press("Enter");                                    // キーのリピートや押し直し
+      await okToasts(page).first().waitFor({ timeout: 3000 });
+      await page.keyboard.press("Enter");                                    // トーストが出た後にも押す
+      await page.waitForTimeout(300);
+      assert.deepEqual(s.answers.map(a => a.id), ["t-B2"]);
+      assert.deepEqual(s.undos, [], "取り消しが送られた");
+      assert.equal(await okToasts(page).count(), 1, "トーストが閉じた");
+      assert.ok(await page.evaluate(() => !document.activeElement || !document.activeElement.closest("#toasts")), "フォーカスがトーストに移った");
+    });
+  }
+});
+
+test("成功のトーストにも、同じ知らせの重ね抑止と、見えている間だけ数える表示時間が効く", async () => {
+  const s = new Script([proj(P1, [item("t-A1")])]);
+  const setHidden = (page, v) => page.evaluate(h => Object.defineProperty(document, "hidden", { configurable: true, get: () => h }), v);
+  await withPage(s, async page => {
+    await answerFirst(page, "t-A1");
+    await okToasts(page).first().waitFor({ timeout: 3000 });
+    // 同じチケットの同じ知らせは重ねない。同じ文でも別のプロジェクトのチケットなら (取り消す先が違うので) 出す
+    await page.evaluate(p => answeredToast({ project: p, id: "t-A1", title: "title t-A1" }, "案A"), P1);
+    assert.equal(await okToasts(page).count(), 1, "同じ知らせが重なった");
+    await page.evaluate(p => answeredToast({ project: p, id: "t-A1", title: "title t-A1" }, "案A"), P2);
+    assert.equal(await okToasts(page).count(), 2, "別のチケットの知らせが抑止された");
+    await okToasts(page).nth(1).locator(".toast-x").click();                 // 同時に出すのは 3 つまでなので、下の失敗の知らせ 2 つの前に 1 つ閉じる
+    // 失敗の知らせ (key を渡さない) は、今までどおり文そのもので重ねない
+    await page.evaluate(() => { toast("同じ失敗の知らせ"); toast("同じ失敗の知らせ"); toast("別の失敗の知らせ"); });
+    assert.equal(await page.locator("#toasts .toast:not(.ok):not(.out)").count(), 2, "失敗の知らせの重ね抑止が効かない");
+    await setHidden(page, true);
+    await page.clock.runFor(10000);                                          // 裏のタブで 10 秒
+    assert.equal(await okToasts(page).count(), 1, "見えていない間にトーストが消えた");
+    await setHidden(page, false);
+    await page.clock.runFor(7000);
+    await waitFor(async () => (await page.locator("#toasts .toast").count()) === 0, 3000, "見えている間に 6 秒経てば消える");
+  }, {}, page => page.clock.install({ time: 0 }));
+});
+
+test("トーストの「取り消す」を、閉じる動きの間にもう一度押しても、取り消しは 1 回しか呼ばれない", async () => {
+  const s = new Script([proj(P1, [item("t-A1")])]);
+  await withPage(s, async page => {
+    // run の回数を直接数える (回答の取り消しは送信中の止めがあるので、POST の数では 2 度目の run を見分けられない)
+    const r = await page.evaluate(() => {
+      window.__runs = 0;
+      toast("押し直しの確認", { kind: "ok", key: "double", action: { label: "取り消す", run: () => { window.__runs++; } } });
+      const t = [...document.querySelectorAll("#toasts .toast")].find(e => e.dataset.key === "double");
+      const act = t.querySelector(".toast-act");
+      act.click();
+      const closing = t.classList.contains("out") && t.isConnected;           // 閉じる動き (300ms) の途中
+      act.click();
+      return { closing, runs: window.__runs };
+    });
+    assert.ok(r.closing, "1 回目の click の後、トーストが閉じる動きに入っていない (このテストの前提)");
+    assert.equal(r.runs, 1, "閉じる動きの間の 2 回目の click で、もう一度 run が呼ばれた");
+    await waitFor(async () => (await page.locator("#toasts .toast").count()) === 0, 3000, "トーストが外れる");
+    assert.equal(await page.evaluate(() => window.__runs), 1);
+  });
+});
+
+test("reduced-motion では、成功のトーストも動かさず、閉じたらすぐ外す", async () => {
+  const s = new Script([proj(P1, [item("t-A1")])]);
+  await withPage(s, async page => {
+    await answerFirst(page, "t-A1");
+    await okToasts(page).first().waitFor({ timeout: 3000 });
+    assert.equal(await okToasts(page).first().evaluate(e => getComputedStyle(e).animationName), "none");
+    await okToasts(page).first().locator(".toast-x").click();
+    assert.equal(await page.locator("#toasts .toast").count(), 0, "閉じたのに残っている");
+  }, { reducedMotion: "reduce" });
+});
+
+test("幅の広い画面では、トーストは右下に出て、カードの「回答する」と横に重ならない。幅 640 以下では下に全幅で出る", async () => {
+  const s = new Script([proj(P1, [item("t-A1"), item("t-B2"), item("t-C3")])]);
+  await withPage(s, async page => {
+    await answerFirst(page, "t-A1");
+    await okToasts(page).first().waitFor({ timeout: 3000 });
+    for (const [w, h] of [[1280, 800], [700, 800], [641, 800]]) {
+      await page.setViewportSize({ width: w, height: h });
+      const box = await page.locator("#toasts").boundingBox();
+      assert.ok(Math.abs(box.x + box.width - (w - 16)) <= 1 && Math.abs(box.y + box.height - (h - 16)) <= 1, `幅 ${w}: 右下に無い ${JSON.stringify(box)}`);
+      const btns = await page.locator("section.card:not(.leaving) button.primary").all();
+      assert.ok(btns.length >= 2, `幅 ${w}: 「回答する」が無い`);
+      for (const b of btns) {
+        const r = await b.boundingBox();
+        assert.ok(r.x + r.width <= box.x, `幅 ${w}: 「回答する」(${r.x}〜${r.x + r.width}) がトーストの横幅 (${box.x}〜) に入る`);
+      }
+    }
+    await page.setViewportSize({ width: 640, height: 800 });
+    const box = await page.locator("#toasts").boundingBox();
+    assert.ok(box.x <= 8 && box.x + box.width >= 640 - 8, `幅 640: 全幅でない ${JSON.stringify(box)}`);
+  });
+});
+
+test("幅 375 では、トーストは下に全幅で出て、ページの最後までスクロールすればどの「回答する」とも重ならない", async () => {
+  // 長い題の成功のトーストを 2 つ重ねる (低いトーストなら、もとの下の余白に収まってしまう)。最後のカードは別のプロジェクトの C
+  const long = "とても長い題".repeat(5);
+  const s = new Script([proj(P1, [item("t-A1", { title: long }), item("t-B2", { title: long + "2" })]), proj(P2, [item("t-C3")])]);
+  await withPage(s, async page => {
+    await answerFirst(page, "t-A1");
+    await okToasts(page).first().waitFor({ timeout: 3000 });
+    await answerFirst(page, "t-B2");
+    await waitFor(async () => (await okToasts(page).count()) === 2, 3000, "2 つ目の成功のトースト");
+    await waitFor(async () => (await acard(page, "t-A1").count()) === 1 && (await acard(page, "t-B2").count()) === 1, 3000, "回答済みに出る");
+    await waitFor(async () => (await page.locator(".leaving, .anim").count()) === 0, 3000, "動きが終わる");
+    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+    const vp = page.viewportSize();
+    const box = await page.locator("#toasts").boundingBox();
+    assert.ok(box.x <= 8 && box.x + box.width >= vp.width - 8, `全幅でない ${JSON.stringify(box)}`);
+    assert.ok(box.y + box.height >= vp.height - 8 - 1, `下に無い ${JSON.stringify(box)}`);
+    const last = await qcard(page, "t-C3").locator("button.primary").boundingBox();
+    assert.ok(last.y >= 0 && last.y + last.height <= vp.height, `最後の「回答する」が画面に入っていない ${JSON.stringify(last)}`);
+    // 台本の確かめ: 足した余白 (main の下の padding のうち 64px を超える分) が無ければ、最後の「回答する」はトーストの下に入る高さか
+    const added = await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector("main")).paddingBottom) - 64);
+    const below = vp.height - (last.y + last.height) - added;          // 余白を足さないときの、最後の「回答する」の下から画面の下まで
+    assert.ok(below < vp.height - box.y, `トーストが低く、余白の足しを試せていない (下 ${below}px、トーストの上端まで ${vp.height - box.y}px)`);
+    for (const b of await page.locator("section.card button.primary").all()) {
+      const r = await b.boundingBox();
+      if (r && r.y + r.height > 0 && r.y < vp.height)
+        assert.ok(!overlaps(r, box), `「回答する」${JSON.stringify(r)} がトースト ${JSON.stringify(box)} と重なる`);
+    }
+  }, { viewport: { width: 375, height: 700 } });
+});
+
+test("ほかで取り消されて判断待ちに戻ったチケットに答え直したら、前の答えの成功のトーストは閉じ、ほかのチケットのトーストは残る", async () => {
+  const s = new Script([proj(P1, [item("t-A1"), item("t-B2"), item("t-C3")])]);
+  await withPage(s, async page => {
+    await answerFirst(page, "t-A1");                                          // 案A
+    await okToasts(page).first().waitFor({ timeout: 3000 });
+    await answerFirst(page, "t-B2");
+    await waitFor(async () => (await okToasts(page).count()) === 2, 3000, "B の成功のトースト");
+    s.moveToHuman({ project: P1, id: "t-A1" });                               // 別のタブで A を取り消した
+    await page.evaluate(() => load());
+    await waitFor(async () => (await qcard(page, "t-A1").count()) === 1, 3000, "A が判断待ちに戻る");
+    await qcard(page, "t-A1").locator(".opt").nth(1).click();                // 案B で答え直す
+    await qcard(page, "t-A1").locator("button.primary").click();
+    await waitFor(() => s.answers.length === 3, 3000, "答え直しの POST");
+    await waitFor(async () => (await okToasts(page).locator(".toast-msg").allInnerTexts()).includes("「title t-A1」に回答しました: 案B"), 3000, "答え直しの成功のトースト");
+    await waitFor(async () => (await okToasts(page).count()) === 2, 3000, "前の答え (案A) の成功のトーストが残っている");
+    assert.deepEqual((await okToasts(page).locator(".toast-msg").allInnerTexts()).sort(),
+      ["「title t-A1」に回答しました: 案B", "「title t-B2」に回答しました: 案A"], "ほかのチケットの知らせまで閉じた");
+  });
+});
+
+test("答え直しが 400 gone (ほかで回答済み) なら、そのチケットの前の答えの成功のトーストも閉じる", async () => {
+  const s = new Script([proj(P1, [item("t-A1"), item("t-B2")])]);
+  await withPage(s, async page => {
+    await answerFirst(page, "t-A1");
+    await okToasts(page).first().waitFor({ timeout: 3000 });
+    s.moveToHuman({ project: P1, id: "t-A1" });                               // 別のタブで取り消した
+    await page.evaluate(() => load());
+    await waitFor(async () => (await qcard(page, "t-A1").count()) === 1, 3000, "A が判断待ちに戻る");
+    assert.equal(await okToasts(page).count(), 1, "このテストは前の答えの知らせが残っている状態から始める");
+    s.answerResult = () => ({ status: 400, body: { error: "判断待ちに無い", code: "gone", op: "answer" } });   // その後、別のタブで答えた
+    await answerFirst(page, "t-A1");
+    await page.locator("#toasts .toast:not(.ok)").first().waitFor({ timeout: 3000 });
+    assert.equal(await page.locator("#toasts .toast:not(.ok)").first().locator(".toast-msg").innerText(), "「title t-A1」(t-A1): ほかで回答・反映済みでした");
+    await waitFor(async () => (await okToasts(page).count()) === 0, 3000, "前の答えの成功のトースト (今の状態に合わない「取り消す」付き) が残っている");
+  });
+});
+
+test("トーストは、カードの操作の行のボタン (「回答する」「取り消して判断待ちに戻す」) と重ならない。常時表示のスクロールバーがあっても同じ", async () => {
+  const long = "とても長い題".repeat(5);
+  const ids = ["t-A1", "t-B2", "t-C3", "t-D4", "t-E5", "t-F6"];
+  for (const sb of [0, 15]) {
+    const s = new Script([proj(P1, ids.map(id => item(id, { title: `${long} ${id}` })))]);
+    await withPage(s, async page => {
+      if (sb) await page.addStyleTag({ content: `::-webkit-scrollbar { width: ${sb}px; height: ${sb}px; } ::-webkit-scrollbar-thumb { background: #888; }` });
+      await answerFirst(page, "t-A1");
+      await okToasts(page).first().waitFor({ timeout: 3000 });
+      await answerFirst(page, "t-B2");
+      await waitFor(async () => (await acard(page, "t-A1").count()) === 1 && (await acard(page, "t-B2").count()) === 1, 3000, "回答済みに出る");
+      for (const w of [481, 560, 640, 641, 700, 1280]) {
+        const at = `sb ${sb} 幅 ${w}`;
+        await page.setViewportSize({ width: w, height: 800 });
+        // 成功のトーストを 2 つ出し直す (表示時間で消えないうちに測る。前の知らせは answeredToast が閉じる)
+        await page.evaluate(([p, t]) => { for (const id of ["t-A1", "t-B2"]) answeredToast({ project: p, id, title: `${t} ${id}` }, "案A"); }, [P1, long]);
+        await waitFor(async () => (await page.locator("#toasts .toast").count()) === 2 && (await okToasts(page).count()) === 2, 3000, `${at}: 成功のトーストが 2 つ`);
+        await waitFor(async () => (await page.locator(".leaving, .anim").count()) === 0, 3000, `${at}: 動きが終わる`);
+        const cw = await page.evaluate(() => document.documentElement.clientWidth);
+        assert.equal(w - cw, sb, `${at}: スクロールバーの幅が台本と違う (このテストの前提)`);
+        const kinds = await page.locator("section.card .row button").evaluateAll(bs => bs.map(b => b.className));
+        assert.ok(kinds.includes("primary") && kinds.includes("ghost"), `${at}: 「回答する」と「取り消して判断待ちに戻す」の両方が無い ${kinds}`);
+        if (w > 640) {                                                         // 右下に出し、横に重ならない (スクロールの位置によらない)
+          const box = await page.locator("#toasts").boundingBox();
+          assert.ok(Math.abs(box.x + box.width - (cw - 16)) <= 1 && Math.abs(box.y + box.height - (800 - 16)) <= 1, `${at}: 右下に無い ${JSON.stringify(box)}`);
+          for (const b of await page.locator("section.card .row button").all()) {      // 接するだけでなく 8px は空ける
+            const r = await b.boundingBox();
+            assert.ok(r.x + r.width + 8 <= box.x, `${at}: ボタン (${r.x}〜${r.x + r.width}) とトーストの横幅 (${box.x}〜) の間が 8px ない`);
+          }
+        } else {                                                               // 下に全幅で出し、ページの最後までスクロールすれば重ならない
+          await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+          const box = await page.locator("#toasts").boundingBox();
+          assert.ok(Math.abs(box.x - 8) <= 1 && Math.abs(box.x + box.width - (cw - 8)) <= 1, `${at}: 全幅でない ${JSON.stringify(box)}`);
+          const last = await acard(page, "t-B2").locator(".row button").boundingBox();
+          assert.ok(last.y >= 0 && last.y + last.height <= 800, `${at}: 最後のカードの「取り消して判断待ちに戻す」が画面に入っていない ${JSON.stringify(last)}`);
+          for (const b of await page.locator("section.card .row button").all()) {
+            const r = await b.boundingBox();
+            if (r.y + r.height > 0 && r.y < 800) assert.ok(!overlaps(r, box), `${at}: ボタン ${JSON.stringify(r)} がトースト ${JSON.stringify(box)} と重なる`);
+          }
+        }
+      }
+    }, {}, null, sb ? sbBrowser : browser);
+  }
+});
+
+test("問い直された後に、前の答えの成功のトーストの「取り消す」が 400 gone になっても、新しい問いに書きかけた下書きは消えない", async () => {
+  const s = new Script([proj(P1, [item("t-A1"), item("t-B2")])]);
+  s.undoResult = body => {                                                    // サーバーと同じく、回答済みに無ければ gone
+    const p = s.project(body.project);
+    if (!p.answered.some(i => i.id === body.id)) return { status: 400, body: { error: "反映待ちに無い", code: "gone", op: "undo" } };
+    s.moveToHuman(body);
+    return { status: 200, body: { ok: true } };
+  };
+  await withPage(s, async page => {
+    await answerFirst(page, "t-A1");
+    await okToasts(page).first().waitFor({ timeout: 3000 });
+    const p = s.project(P1);                                                  // エージェントが問い直した
+    p.answered = p.answered.filter(i => i.id !== "t-A1");
+    p.human.push(changedQ(item("t-A1")));
+    await page.evaluate(() => load());
+    await single(page, "t-A1");
+    await typeInto(page, "t-A1", "new memo");
+    await undoInToast(page).first().click();
+    await page.locator("#toasts .toast:not(.ok)").first().waitFor({ timeout: 3000 });
+    assert.equal(s.undos.length, 1);
+    await page.reload();
+    await ready(page);
+    assert.equal(await qcard(page, "t-A1").locator("textarea").inputValue(), "new memo", "取り消しの gone で、新しい問いの下書きが消えた");
+  });
+});
+
+test("問い直された後に、前の答えの成功のトーストの「取り消す」が 500 で失敗しても、新しい問いに書きかけた下書きは消えない", async () => {
+  const s = new Script([proj(P1, [item("t-A1"), item("t-B2")])]);
+  s.undoResult = () => ({ status: 500, body: { error: "boom", op: "undo" } });
+  await withPage(s, async page => {
+    await answerFirst(page, "t-A1");
+    await okToasts(page).first().waitFor({ timeout: 3000 });
+    const p = s.project(P1);                                                  // エージェントが問い直した
+    p.answered = p.answered.filter(i => i.id !== "t-A1");
+    p.human.push(changedQ(item("t-A1")));
+    await page.evaluate(() => load());
+    await single(page, "t-A1");
+    await typeInto(page, "t-A1", "new memo");
+    await undoInToast(page).first().click();
+    await page.locator("#toasts .toast:not(.ok)").first().waitFor({ timeout: 3000 });
+    assert.equal(s.undos.length, 1);
+    await page.reload();
+    await ready(page);
+    assert.equal(await qcard(page, "t-A1").locator("textarea").inputValue(), "new memo", "取り消しの失敗で、新しい問いの下書きが消えた");
+  });
+});
+
+test("前の答えの知らせを閉じるのは同じ id のチケットだけ (t-A1 で答えても、t-A10 の成功のトーストは残る)", async () => {
+  const s = new Script([proj(P1, [item("t-A10"), item("t-A1")])]);
+  await withPage(s, async page => {
+    await answerFirst(page, "t-A10");
+    await okToasts(page).first().waitFor({ timeout: 3000 });
+    await answerFirst(page, "t-A1");
+    await waitFor(async () => (await okToasts(page).locator(".toast-msg").allInnerTexts()).includes("「title t-A1」に回答しました: 案A"), 3000, "t-A1 の成功のトースト");
+    await page.waitForTimeout(400);
+    assert.deepEqual((await okToasts(page).locator(".toast-msg").allInnerTexts()).sort(),
+      ["「title t-A10」に回答しました: 案A", "「title t-A1」に回答しました: 案A"].sort(), "id の頭が同じ別のチケットの知らせを閉じた");
+  });
+});
+
+test("トーストは同時に 3 つまで。4 つ目を出すと、いちばん古いものが閉じ、その「取り消す」は走らない", async () => {
+  const s = new Script([proj(P1, [item("t-A1")])]);
+  await withPage(s, async page => {
+    await page.evaluate(() => {
+      window.__runs = 0;
+      for (const n of [1, 2, 3, 4]) toast(`知らせ ${n}`, { kind: "ok", key: `limit-${n}`, action: { label: "取り消す", run: () => { window.__runs++; } } });
+    });
+    const live = () => page.locator("#toasts .toast:not(.out) .toast-msg").allInnerTexts();
+    assert.deepEqual(await live(), ["知らせ 2", "知らせ 3", "知らせ 4"], "4 つ目を出しても、いちばん古いトーストが閉じない");
+    await waitFor(async () => (await page.locator("#toasts .toast").count()) === 3, 3000, "閉じたトーストが外れる");
+    assert.equal(await page.evaluate(() => window.__runs), 0, "上限で閉じたトーストの action が走った");
+    await page.evaluate(() => toast("失敗の知らせ"));                         // 失敗の知らせも同じ上限で数える
+    assert.deepEqual(await live(), ["知らせ 3", "知らせ 4", "失敗の知らせ"], "失敗の知らせを出しても、いちばん古いトーストが閉じない");
+  });
+});
+
+test("幅 641・高さ 500・スクロールバー 15px で最長の知らせを 4 つ出しても、残ったトーストのボタンはすべて画面の中にある", async () => {
+  const longErr = "bd の書き込みに失敗しました: " + "とても長いエラーの文。".repeat(15) + "\n2 行目の詳しい情報\n3 行目";
+  const longTitle = "とても長い題".repeat(5), longLabel = "とても長い選択肢の名前".repeat(5);
+  const ids = ["t-A1", "t-B2", "t-C3", "t-D4", "t-E5", "t-F6"];
+  const s = new Script([proj(P1, ids.map(id => item(id)))]);
+  s.answerResult = () => ({ status: 500, body: { error: longErr, op: "answer" } });
+  await withPage(s, async page => {
+    await page.addStyleTag({ content: "::-webkit-scrollbar { width: 15px; height: 15px; } ::-webkit-scrollbar-thumb { background: #888; }" });
+    await answerFirst(page, "t-A1");                                          // 最長の失敗の知らせ (いちばん古い)
+    await page.locator("#toasts .toast:not(.ok)").first().waitFor({ timeout: 3000 });
+    await page.evaluate(() => Object.defineProperty(document, "hidden", { configurable: true, get: () => true }));   // 表示時間で消さない
+    await page.evaluate(([p, t, l]) => { for (const id of ["t-B2", "t-C3", "t-X9"]) answeredToast({ project: p, id, title: `${t} ${id}` }, l); },
+      [P1, longTitle, longLabel]);
+    await page.waitForTimeout(100);
+    await waitFor(async () => (await page.locator("#toasts .toast.out").count()) === 0, 3000, "閉じたトーストが外れる");
+    const cw = await page.evaluate(() => document.documentElement.clientWidth);
+    assert.equal(641 - cw, 15, "スクロールバーの幅が台本と違う (このテストの前提)");
+    const btns = await page.locator("#toasts .toast button").all();
+    assert.ok(btns.length >= 6, `残ったトーストのボタンが足りない (${btns.length})`);
+    for (const b of btns) {                                                   // 上限が無いと、いちばん古いトーストのボタンが画面の上に出る
+      const r = await b.boundingBox();
+      assert.ok(r.x >= 0 && r.y >= 0 && r.x + r.width <= cw && r.y + r.height <= 500, `トーストのボタン ${JSON.stringify(r)} が画面の外にある`);
+    }
+    assert.equal(await page.locator("#toasts .toast").count(), 3, "残ったトーストが 3 つでない");
+    assert.equal(await okToasts(page).count(), 3, "残ったのが新しい成功の知らせ 3 つでない");
+  }, { viewport: { width: 641, height: 500 } }, null, sbBrowser);
 });
