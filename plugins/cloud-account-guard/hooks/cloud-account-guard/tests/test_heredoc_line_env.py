@@ -86,6 +86,17 @@ SHELL_TABLE = [
     # 中身に区切りがある wrapper では、中身の段は全部が先頭の段 (前置きの値で走る)
     "AWS_PROFILE=prod npx -c 'true && aws s3 rm s3://b/ni' <<EOF ; aws s3 rm s3://b/no\nx\nEOF",
     "KUBECONFIG=~/k.yaml npx -c 'true | kubectl delete po ni' <<EOF && kubectl delete po no\nx\nEOF",
+    # 後ろの段自身の代入の `~` も外のシェルが HOME に展開する (v0.30.4。0.30.3 は wrapper の中身と読み展開しなかった)
+    "watch 'cat' <<EOF && KUBECONFIG=~/k2.yaml kubectl get po wt\nx\nEOF",
+    "npx -c 'cat' <<EOF ; KUBECONFIG=~/k2.yaml kubectl get po nt\nx\nEOF",
+    "watch cat <<'EOF' | KUBECONFIG=~/k2.yaml kubectl apply -f -\nkind: x\nEOF",
+    "AWS_PROFILE=prod watch 'true' <<EOF && KUBECONFIG=~/k2.yaml aws s3 rm s3://b/wk\nx\nEOF",
+    "watch 'cat' <<EOF && time KUBECONFIG=~/k2.yaml kubectl get po wtt\nx\nEOF",
+    # 予約語の `time` の後ろの代入もシェル自身が行う (v0.30.4)
+    "time KUBECONFIG=~/k2.yaml kubectl get po t1",
+    "{ time KUBECONFIG=~/k2.yaml kubectl get po t2; }",
+    "cat <<EOF && time KUBECONFIG=~/k2.yaml kubectl get po t3\nx\nEOF",
+    "true && time AWS_PROFILE=prod KUBECONFIG=~/k2.yaml aws s3 rm s3://b/t4",
     # コマンド語の無い代入の後ろにリダイレクトを挟む形 (`;` / `&&` が続けば全段、`|` / `&` が続けば
     # サブシェルなのでどの段にも効かない)
     "AWS_PROFILE=prod 2>/dev/null <<EOF ; aws s3 rm s3://b/nwr\nx\nEOF",
