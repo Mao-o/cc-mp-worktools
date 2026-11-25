@@ -9,6 +9,7 @@ usage: python3 humanq.py --state-dir DIR [--port 8765]
 - DIR/server.json に pid・port・version を書く (hook が版の古いサーバーを止めるため。新しい版は止めない)
 - DIR/token (0600) に書き込みのトークンを保存し、再起動 (版の入れ替え) しても同じ値を使う
 規約 (問いの書き方・回答の形・拾い方) は plugin の README.md。依存は標準ライブラリと PATH 上の bd だけ。
+bd と話すコード (argv・出力の形・metadata の置き場・コメントの並び) は backend.py にだけ置き、ここは CLI に依らない形の値を読む。
 """
 from __future__ import annotations
 
@@ -19,7 +20,6 @@ import json
 import os
 import re
 import secrets
-import subprocess
 import sys
 import tempfile
 import threading
@@ -30,14 +30,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import backend  # noqa: E402
 import registry  # noqa: E402
+from backend import BdError  # noqa: E402,F401  humanq.BdError として使われる (HTTP 502 の応答・テスト)
 
 MARK = "[humanq]"
 UNDO_HEAD = f"{MARK} 取り消し"
-ACTOR = "user/humanq"
-# 回答済み (answered) として拾う status。`bd human list` の既定 (closed などの終わったものを除く) に揃える。
-# 担当中 (in_progress) のチケットに human を付けて問うのは普通で、open だけにすると回答した途端にどの一覧からも消える
-ANSWERED_STATUSES = "open,in_progress,blocked,deferred"
 MAX_BODY = 64 * 1024
 # bd (埋め込み Dolt) は同時に開くと直列化して遅くなり、そのプロジェクトのセッションの書き込みとも競る。
 # プロジェクトごとに読みを 1 本にまとめ、CACHE_SEC の間は同じ結果を返す。書いたら捨てる
@@ -45,10 +43,6 @@ CACHE_SEC = 8.0
 # 同じ回答の送り直しとみなす間隔。これより前の同じ本文のコメントは、前の問いへの回答かもしれないので数えない
 RESEND_SEC = 600
 TOKEN_FILE = "token"
-
-
-class BdError(RuntimeError):
-    pass
 
 
 class WriteError(BdError):
@@ -72,35 +66,30 @@ class Stale(ValueError):
     """取り消そうとした回答が、今の最後の [humanq] コメントと違う (ほかで取り消して答え直された)。書き込みは何も起きていない。"""
 
 
-def bd(repo: str, *args: str) -> str:
-    try:
-        p = subprocess.run(["bd", "-C", repo, *args], capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        raise BdError(f"bd を起動できない: {e}") from e
-    if p.returncode != 0:
-        raise BdError((p.stderr or p.stdout).strip()[:800] or f"bd exit {p.returncode}")
-    return p.stdout
+# ---- 差し替え口 (中身は backend.py) ----
+# bd を 1 回打つ関数。テストは humanq.bd = ... で失敗を作り、呼び出しを数える。
+# BdBackend は呼ぶたびにこのモジュールの bd を引くので、差し替えはすべての読み書きに届く
+bd = backend.run_bd
+_BD = backend.BdBackend(run=lambda repo, *args: bd(repo, *args))
 
 
 def bd_json(repo: str, *args: str) -> list:
-    out = bd(repo, *args, "--json").strip()
-    if not out:
-        return []
-    try:
-        v = json.loads(out)
-    except json.JSONDecodeError:
-        if re.fullmatch(r"No [^\n]*", out):  # 該当 0 件のとき案内文 1 行だけを返す版がある
-            return []
-        raise BdError(f"bd の出力が JSON ではない: {out[:200]}") from None
-    if v is None:
-        return []  # 0 件の list は null を返す
-    if not isinstance(v, list):
-        raise BdError(f"bd の出力が list ではない ({type(v).__name__}): {out[:200]}")
-    return v
+    """bd の --json の出力を list に読む (読み方は backend.parse_bd_list)。"""
+    return _BD.json(repo, *args)
+
+
+def backend_for(repo: str) -> backend.BdBackend:
+    """repo の beads の CLI と話す backend。この段では常に bd。"""
+    return _BD
 
 
 def question(meta) -> dict | None:
-    q = meta.get("humanq") if isinstance(meta, dict) else None
+    """bd のチケットの metadata (dict) から問いを読む。問いの生の値の取り出しは backend、読みは question_from_raw。"""
+    return question_from_raw(backend.BdBackend.question_raw(meta))
+
+
+def question_from_raw(q) -> dict | None:
+    """問いの生の値 (Row の question_raw: dict か JSON の文字列か None) を、画面に出す問いにする。読めなければ None。"""
     if isinstance(q, str):
         try:
             q = json.loads(q)
@@ -128,23 +117,24 @@ def qsig(q: dict | None) -> str:
     return hashlib.sha256(json.dumps(core, ensure_ascii=False).encode()).hexdigest()[:16]
 
 
-def shape(i: dict) -> dict:
-    q = question(i.get("metadata"))
+def shape(r: dict) -> dict:
+    """backend の Row を、画面に出すチケットにする。"""
+    q = question_from_raw(r["question_raw"])
     return {
-        "id": i.get("id"),
-        "title": i.get("title") or "",
-        "priority": i.get("priority"),
-        "labels": i.get("labels") or [],
-        "created_at": (i.get("created_at") or "")[:10],
-        "description": i.get("description") or "",
-        "notes": i.get("notes") or "",
+        "id": r["id"],
+        "title": r["title"] or "",
+        "priority": r["priority"],
+        "labels": r["labels"] or [],
+        "created_at": (r["created_at"] or "")[:10],
+        "description": r["description"] or "",
+        "notes": r["notes"] or "",
         "q": q,
         "qsig": qsig(q),
     }
 
 
 def marked(cs: list) -> list[dict]:
-    """[humanq] のコメント (回答と取り消し) を、bd が返した順 (古い順) に。本文が文字列でないコメントは数えない
+    """[humanq] のコメント (回答と取り消し) を、backend が返した順 (古い順) に。本文が文字列でないコメントは数えない
     (回答の書き込みは全部のコメントを数えるので、想定外の形の 1 件で回答を止めない)。"""
     return [c for c in cs if isinstance(c, dict) and isinstance(c.get("text"), str) and c["text"].startswith(MARK)]
 
@@ -167,16 +157,12 @@ def last_of(cs: list) -> tuple[str, str]:
     return (ms[-1]["text"], asig(len(ms), ms[-1]["text"])) if ms else ("", asig(0, None))
 
 
-def list_answered(repo: str) -> list:
-    return bd_json(repo, "list", "--status", ANSWERED_STATUSES, "--label", "answered", "--flat", "-n", "0")
-
-
 def last_answer(repo: str, iid: str) -> tuple[str, str]:
     """回答済みのカードに出す、最後の [humanq] コメントの本文と署名。
     コメントを読めなければ ("", "")。空の署名はどの回答の署名とも合わないので、そのカードからの取り消しは照合で断られる
     (None にすると、署名を送らない古い画面と同じに読まれて照合を素通りする)。"""
     try:
-        cs = bd_json(repo, "comments", iid)
+        cs = backend_for(repo).comments(repo, iid)
     except BdError:
         return "", ""
     return last_of(cs)
@@ -187,10 +173,11 @@ def _prio(x: dict):
 
 
 def load_project(repo: str) -> dict:
-    human = sorted((shape(i) for i in bd_json(repo, "human", "list")), key=_prio)
+    be = backend_for(repo)
+    human = sorted((shape(r) for r in be.list_human(repo)), key=_prio)
     answered = []
-    for i in list_answered(repo):
-        s = shape(i)
+    for r in be.list_answered(repo):
+        s = shape(r)
         s["answer"], s["asig"] = last_answer(repo, s["id"])
         answered.append(s)
     answered.sort(key=_prio)
@@ -269,7 +256,7 @@ class Store:
         iid, key = body.get("id"), body.get("option") or ""
         text = str(body.get("text") or "").strip()
         with self._lock(self._wlocks, repo):
-            cur = {x["id"]: x for x in (shape(i) for i in bd_json(repo, "human", "list"))}
+            cur = {x["id"]: x for x in (shape(r) for r in backend_for(repo).list_human(repo))}
             if iid not in cur:
                 raise Gone("このチケットは判断待ちに無い (画面を更新してください)")
             seen = body.get("qsig")        # 画面が見ていた問いの署名。送らない古い画面は検査しない
@@ -292,7 +279,7 @@ class Store:
         iid = body.get("id")
         seen = body.get("asig")            # 取り消す回答の署名。送らない古い画面は検査しない
         with self._lock(self._wlocks, repo):
-            cur = {i.get("id") for i in list_answered(repo)}
+            cur = {r["id"] for r in backend_for(repo).list_answered(repo)}
             if iid not in cur:
                 raise Gone("反映待ちに無い (もう反映されたか、取り消し済み)")
             _record(repo, iid, UNDO_HEAD + "\n", expect=seen)
@@ -317,7 +304,7 @@ def _record(repo: str, iid: str, text: str, expect: str | None = None) -> str:
     照合は送り直しの判定と同じ読みで行う (bd の呼び出しを増やさない)。
     返り値は、書いたコメント (送り直しなら残っているもの) の署名。回答済みの一覧の署名 (last_of) と同じ値になる。"""
     try:
-        cs = bd_json(repo, "comments", iid)
+        cs = backend_for(repo).comments(repo, iid)
         if expect is not None and expect != last_of(cs)[1]:
             raise Stale("この回答はもう最新ではない (ほかで答え直されている。画面を更新してください)")
         last = cs[-1] if cs and isinstance(cs[-1], dict) else None
@@ -331,10 +318,11 @@ def _record(repo: str, iid: str, text: str, expect: str | None = None) -> str:
 
 def _swap(repo: str, iid: str, add: str, remove: str) -> None:
     """ラベルを付け替える (add を付けてから remove を外す)。各段階は 1 回だけ再試行する。"""
+    be = backend_for(repo)
     for op, name in (("add", add), ("remove", remove)):
         for attempt in (1, 2):
             try:
-                bd(repo, "--actor", ACTOR, "label", op, iid, name)
+                be.label(repo, op, iid, name)
                 break
             except BdError as e:
                 if attempt == 2:
@@ -346,7 +334,7 @@ def _comment(repo: str, iid: str, text: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        bd(repo, "--actor", ACTOR, "comments", "add", iid, "-f", path)
+        backend_for(repo).add_comment(repo, iid, path)
     finally:
         os.unlink(path)
 
