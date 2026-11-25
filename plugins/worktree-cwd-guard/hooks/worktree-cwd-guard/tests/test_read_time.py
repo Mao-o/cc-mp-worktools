@@ -213,7 +213,8 @@ class DeepStackTest(test_state_limit.BoundedBase):
     def test_time_grows_linearly_with_the_depth(self):
         # 8 倍の深さで、線形なら約 8 倍、2 乗なら約 64 倍。小さい側も大きい側も、状態が上限ちょうどの同じ経路を通る
         k = test_state_limit._limit_exponent()
-        small, large = 500, 4000
+        readings = len(command._drive_readings())  # Windows は読みが倍なので、読む量を `_shapes` とそろえる
+        small, large = 500 // readings, 4000 // readings
         for n in (small, large):
             self.assertEqual(self.verdict(or_cd(k) + pushd_abs(n) + f'cd "{MAIN}"; {GIT}'), "deny")
             self.assertEqual((self.peak, self.collapses), (command._STATE_LIMIT, 0))
