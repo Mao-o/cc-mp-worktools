@@ -1,7 +1,7 @@
 """引用符で包まないコマンド置換 (`$(...)`) の中の heredoc の本文の読みを固定する (v0.30.2)。
 
 hook は置換の閉じを探すとき、中の heredoc の本文を読み分けない (`core/command_parser.py` の
-`_command_substitution_end`)。本文の `'`・対にならない `"` や backtick・対応しない `(` を引用符や括弧の
+`_command_substitution_end`)。本文の対にならない `'`・`"`・backtick や対応しない `(` を引用符や括弧の
 始まりと読むので、置換の閉じを見失い、後ろの CLI が候補にならない。zsh ではこの形が走る
 (bash 3.2 は `$(` の中の heredoc の本文にこれらの文字があると構文エラーにする)。
 
@@ -29,6 +29,7 @@ IN_SCOPE_FORMS = [
     "gh pr create --body \"$(cat <<'EOF'\nit's (x)\nEOF\n)\" && {a}",  # zsh
     "X=$(cat <<'EOF'\nhello\nEOF\n) && {a}",  # bash / zsh (本文に引用符・括弧が無い)
     "X=$(cat <<'EOF'\na # b\nEOF\n) && {a}",  # bash / zsh
+    "X=$(cat <<'EOF'\nsay 'x'\nEOF\n) && {a}",  # bash / zsh (本文の ' が対になる)
 ]
 
 # 守らない範囲: zsh では走るが、置換の閉じを見失って候補にならない形。

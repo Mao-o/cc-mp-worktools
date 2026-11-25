@@ -1525,7 +1525,7 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   `"` がある形 (`--body "$(cat <<'EOF'` + 改行 + `3" screens` + 改行 + `EOF` + 改行 + `)" && aws ...`)。
   中の引用符が対になる普段の形は守る範囲 (`gh pr create --title "$(git log -1 --format="%h %s")" && aws ...`、
   heredoc の本文に `'` があるだけの `git commit -m "$(cat <<'EOF'` … `)" && gh pr create`)
-- 引用符で包まないコマンド置換 (`$(...)`) の中の heredoc の本文に、`'`・対にならない `"` や backtick・
+- 引用符で包まないコマンド置換 (`$(...)`) の中の heredoc の本文に、対にならない `'`・`"`・backtick や
   対応しない `(` がある形の後ろのクラウド CLI (`X=$(cat <<'EOF'` + 改行 + `don't` + 改行 + `EOF` + 改行 +
   `) && aws ...` / `gh pr create --body $(cat <<'EOF'` … `) && aws ...`)。hook は置換の中の heredoc の本文を
   読み分けず、本文の引用符と括弧で置換の閉じを見失うので、候補にならず検証されない。zsh ではこの形が走る
