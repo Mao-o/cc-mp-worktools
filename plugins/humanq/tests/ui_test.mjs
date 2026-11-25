@@ -1462,3 +1462,132 @@ test("幅 375・高さ 812 で、10 行の背景のカードの最初の選択�
     assert.ok(b.y >= 0 && b.y + b.height <= 812, `最初の選択肢が画面の外: y=${b.y} h=${b.height}`);
   }, { viewport: { width: 375, height: 812 } });
 });
+
+// ---- 推奨の目立たせ方と、対処の深さのチップ ----------------------------------------------------
+
+const depthOpts = [
+  { key: "a", label: "【根本】原因を直す", desc: "" },
+  { key: "b", label: "【応急】`設定` で止める", desc: "" },
+  { key: "c", label: "【調査】まず再現する", desc: "" },
+  { key: "d", label: "【見送り】今はしない", desc: "" },
+  { key: "e", label: "【注意】未知の括弧", desc: "" },
+  { key: "f", label: "案F 【根本】は途中", desc: "" },
+];
+const withDepth = (id, recommended = "b") =>
+  ({ ...item(id), q: { ...item(id).q, recommended, options: depthOpts } });
+const opt = (page, id, key) => qcard(page, id).locator(".opt").nth(depthOpts.findIndex(o => o.key === key));
+
+test("推奨の選択肢にだけ .opt.rec が付き、最初は選ばれておらず、「推奨」は label の前にある", async () => {
+  const s = new Script([proj(P1, [withDepth("t-A1")])]);
+  await withPage(s, async page => {
+    const recs = await qcard(page, "t-A1").locator(".opt.rec").count();
+    assert.equal(recs, 1);
+    assert.equal(await opt(page, "t-A1", "b").evaluate(e => e.classList.contains("rec")), true);
+    assert.equal(await qcard(page, "t-A1").locator(".opt.sel").count(), 0, "最初から選んだ状態になっている");
+    const order = await opt(page, "t-A1", "b").evaluate(e => [...e.children].map(c => c.className.split(" ")[0]));
+    assert.deepEqual(order.slice(0, 2), ["badge", "l"]);
+    assert.equal(await opt(page, "t-A1", "b").locator(".badge").textContent(), "推奨");
+    const bl = await opt(page, "t-A1", "b").evaluate(e => getComputedStyle(e).borderLeftWidth);
+    assert.equal(bl, "4px");
+    assert.notEqual(await opt(page, "t-A1", "a").evaluate(e => getComputedStyle(e).borderLeftWidth), "4px");
+    assert.equal(await qcard(page, "t-A1").locator(".badge").count(), 1);
+  });
+});
+
+test("推奨が無い問いでは .opt.rec も「推奨」も出ない", async () => {
+  const it = withDepth("t-A1", null);
+  const s = new Script([proj(P1, [it])]);
+  await withPage(s, async page => {
+    assert.equal(await qcard(page, "t-A1").locator(".opt.rec").count(), 0);
+    assert.equal(await qcard(page, "t-A1").locator(".badge").count(), 0);
+  });
+});
+
+test("先頭が README の 4 語の【…】の label は、チップ (文字は語だけ) と残りの文字に分かれ、title がある", async () => {
+  const s = new Script([proj(P1, [withDepth("t-A1")])]);
+  await withPage(s, async page => {
+    const want = { a: ["根本", "原因を直す"], b: ["応急", "設定 で止める"], c: ["調査", "まず再現する"], d: ["見送り", "今はしない"] };
+    for (const [key, [word, rest]] of Object.entries(want)) {
+      const chips = opt(page, "t-A1", key).locator(".l > .depth");
+      assert.equal(await chips.count(), 1, `${key}: チップが 1 つ`);
+      assert.equal(await chips.textContent(), word);
+      assert.equal(await chips.evaluate(e => e.classList.contains("depth-" + e.textContent)), true);
+      assert.ok((await chips.getAttribute("title") || "").length > 4, `${key}: title が無い`);
+      assert.equal(await opt(page, "t-A1", key).locator(".l").textContent(), word + rest, `${key}: 残りの文字`);
+    }
+    // 残りは md() で描く (` ` はコード表記のまま)
+    assert.equal(await opt(page, "t-A1", "b").locator(".l code").textContent(), "設定");
+  });
+});
+
+test("【】の無い label、README に無い【…】、先頭でない【根本】には .depth が出ず、文字のまま", async () => {
+  const s = new Script([proj(P1, [withDepth("t-A1"), item("t-B2")])]);
+  await withPage(s, async page => {
+    assert.equal(await qcard(page, "t-B2").locator(".depth").count(), 0);
+    assert.equal(await qcard(page, "t-B2").locator(".opt .l").first().textContent(), "案A");
+    assert.equal(await opt(page, "t-A1", "e").locator(".depth").count(), 0);
+    assert.equal(await opt(page, "t-A1", "e").locator(".l").textContent(), "【注意】未知の括弧");
+    assert.equal(await opt(page, "t-A1", "f").locator(".depth").count(), 0);
+    assert.equal(await opt(page, "t-A1", "f").locator(".l").textContent(), "案F 【根本】は途中");
+  });
+});
+
+test("チップを持つ選択肢を選んで送ると、/api/answer の option は元の key のまま", async () => {
+  const s = new Script([proj(P1, [withDepth("t-A1")])]);
+  await withPage(s, async page => {
+    await opt(page, "t-A1", "b").locator(".depth").click();      // チップを押しても選択肢が選ばれる
+    assert.equal(await qcard(page, "t-A1").locator(".opt.sel").count(), 1);
+    await qcard(page, "t-A1").locator("button.primary").click();
+    await waitFor(() => s.answers.length === 1, 3000, "POST");
+    assert.deepEqual(s.answers[0], { project: P1, id: "t-A1", option: "b", text: "", qsig: "sig-1" });
+  });
+});
+
+// 計算済みの色 (rgb / rgba) から WCAG のコントラスト比を出す
+const RATIO_FN = () => {
+  const parse = c => { const m = /rgba?\(([^)]+)\)/.exec(c); if (!m) throw new Error("色が読めない: " + c); return m[1].split(/[ ,/]+/).filter(Boolean).slice(0, 3).map(Number); };
+  const lum = ([r, g, b]) => [r, g, b].map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }).reduce((a, v, i) => a + v * [0.2126, 0.7152, 0.0722][i], 0);
+  return (x, y) => { const a = lum(parse(x)), b = lum(parse(y)); return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05); };
+};
+
+for (const scheme of ["light", "dark"]) {
+  test(`${scheme}: 4 種のチップは、枠が選択肢の背景に対して 3:1 以上、チップの中の文字が 4.5:1 以上。4 種の枠色は互いに違い、推奨の緑と混ざらない`, async () => {
+    const s = new Script([proj(P1, [withDepth("t-A1")])]);
+    await withPage(s, async page => {
+      await page.emulateMedia({ colorScheme: scheme });
+      const rows = await page.evaluate(() => {
+        const out = [];
+        const card = document.querySelector("section.card:has(textarea)");
+        const rec = getComputedStyle(document.documentElement).getPropertyValue("--rec").trim();
+        const recColor = (() => { const t = document.createElement("i"); t.style.color = rec; document.body.append(t); const c = getComputedStyle(t).color; t.remove(); return c; })();
+        for (const word of ["根本", "応急", "調査", "見送り"]) {
+          const chip = card.querySelector(".depth-" + word);
+          const cs = getComputedStyle(chip);
+          const optBg = getComputedStyle(chip.closest(".opt")).backgroundColor;
+          out.push({ word, fg: cs.color, bg: cs.backgroundColor, bd: cs.borderTopColor, optBg, recColor });
+        }
+        // 選択中の背景 (.sel) でも枠が埋もれない
+        const sel = card.querySelector(".opt.sel") || card.querySelector(".opt");
+        sel.classList.add("sel");
+        const selBg = getComputedStyle(sel).backgroundColor;
+        sel.classList.remove("sel");
+        return { out, selBg };
+      });
+      assert.equal(rows.out.length, 4);
+      const bds = new Set();
+      for (const r of rows.out) {
+        const calc = await page.evaluate(([fnSrc, r, selBg]) => {
+          const ratio = eval(`(${fnSrc})()`);
+          return { bd: ratio(r.bd, r.optBg), bdSel: ratio(r.bd, selBg), text: ratio(r.fg, r.bg) };
+        }, [RATIO_FN.toString(), r, rows.selBg]);
+        assert.ok(calc.bd >= 3, `${scheme} ${r.word}: 枠 / 選択肢の背景 ${calc.bd.toFixed(2)}`);
+        assert.ok(calc.bdSel >= 3, `${scheme} ${r.word}: 枠 / 選択中の背景 ${calc.bdSel.toFixed(2)}`);
+        assert.ok(calc.text >= 4.5, `${scheme} ${r.word}: 文字 / チップの背景 ${calc.text.toFixed(2)}`);
+        assert.notEqual(r.bd, r.recColor, `${scheme} ${r.word}: 枠が推奨の緑と同じ`);
+        assert.notEqual(r.bg, rows.out[0].recColor);
+        bds.add(r.bd + "|" + r.bg);
+      }
+      assert.equal(bds.size, 4, "4 種のチップが見分けられない");
+    });
+  });
+}
