@@ -2,9 +2,12 @@
 
     python3 -m unittest discover -s tests
 
-bd が PATH に無ければ skip する。bd が要るテストは、一時ディレクトリに git init + bd init した使い捨てのプロジェクトで行う
-(本物の bd の DB には書かない)。HTTP の確認は 8770〜8779 の空いているポートで行う。
-HUMANQ_SERVER_DIR で別の server/ を試せる。
+bd を通す読み書きのシナリオ (BdScenarios) は 2 通りで回す:
+- WithFakeBd: 偽の bd (tests/fake_beads.py) で回す。本物の bd が無い環境 (CI) でも skip しない。
+  サーバーが打つ bd の argv の列も、ここで固定する (test_golden_argv)
+- WithBd: 本物の bd で回す。bd が PATH に無ければ skip する。一時ディレクトリに git init + bd init した
+  使い捨てのプロジェクトで行う (本物の bd の DB には書かない)
+HTTP の確認は 8770〜8779 の空いているポートで行う。HUMANQ_SERVER_DIR で別の server/ を試せる。
 """
 from __future__ import annotations
 
@@ -26,6 +29,7 @@ import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 SERVER_DIR = Path(os.environ.get("HUMANQ_SERVER_DIR") or HERE.parent / "server")
@@ -91,6 +95,28 @@ def bdc(repo: str, *args: str) -> str:
     p = subprocess.run(["bd", "-C", repo, *args], capture_output=True, text=True, timeout=60)
     assert p.returncode == 0, f"bd {args}: {p.stderr or p.stdout}"
     return p.stdout
+
+
+FAKE_BEADS = HERE / "fake_beads.py"
+FAKE_BIN_DIRS: set[str] = set()        # 偽の bd を置いた dir (realpath)。WithBd がそこの bd を拾っていないことを確かめる
+
+
+def install_fake(bin_dir: str, prog: str = "bd") -> str:
+    """tests/fake_beads.py を bin_dir に prog の名前で置く。偽物は argv[0] の basename で振る舞いを決めるので、
+    名前を変えた写しにし、shebang を今の python に替えて実行権限を付ける (元のファイルの mode に頼らない)。"""
+    _, _, body = FAKE_BEADS.read_text(encoding="utf-8").partition("\n")
+    shebang = "#!/usr/bin/env python3" if re.search(r"\s", sys.executable) else "#!" + sys.executable
+    dst = os.path.join(bin_dir, prog)
+    Path(dst).write_text(shebang + "\n" + body, encoding="utf-8")
+    os.chmod(dst, 0o755)
+    FAKE_BIN_DIRS.add(os.path.realpath(bin_dir))
+    return dst
+
+
+def argv_has(words: list[str], args) -> bool:
+    """words が args にこの順で現れるか (間に別の語を挟んでよい)。偽の bd の FAKE_BEADS_FAIL と同じ規則。"""
+    it = iter(args)
+    return all(any(a == w for a in it) for w in words)
 
 
 class ServerTokenAndHeaders(unittest.TestCase):
@@ -249,21 +275,17 @@ class HookEnsureServer(unittest.TestCase):
         self.assertEqual(self.ping()["pid"], pid)
 
 
-@unittest.skipUnless(HAVE_BD, "bd が無い")
-class WithBd(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.tmp = tempfile.mkdtemp(prefix="humanq-bd-")
-        cls.repo = os.path.join(cls.tmp, "proj")
-        os.makedirs(cls.repo)
-        subprocess.run(["git", "init", "-q", cls.repo], check=True)
-        subprocess.run(["bd", "init", "--non-interactive", "--quiet", "--skip-agents", "--skip-hooks", "-p", "hq"],
-                       cwd=cls.repo, check=True, capture_output=True, timeout=120)
-        cls.n = 0
+class BdScenarios:
+    """bd を通す読み書きのシナリオ。本物の bd (WithBd) と偽の bd (WithFakeBd) の両方で回す。
 
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
+    サブクラスは self.repo と self.tmp (bd init 済みの使い捨てのプロジェクトと、その置き場) と、次の 2 つを用意する:
+      failing(rule, times=None): bd の呼び出しのうち、argv に rule の語がこの順で現れるものを失敗させる
+                                  (times を付けると最初の times 回だけ)。返り値を呼ぶと元に戻す
+      calls(rule): setUp から後に、argv に rule の語がこの順で現れた bd の呼び出しの数"""
+
+    repo: str
+    tmp: str
+    n = 0
 
     def new_question(self, labels=("human",)) -> str:
         type(self).n += 1
@@ -297,15 +319,7 @@ class WithBd(unittest.TestCase):
     def test_resend_after_partial_write_keeps_one_comment(self):
         iid = self.new_question()
         store = self.store()
-        real = humanq.bd
-        fail = {"on": True}
-
-        def flaky(repo, *args):
-            if fail["on"] and "remove" in args and "human" in args:
-                raise humanq.BdError("label remove boom")
-            return real(repo, *args)
-
-        humanq.bd = flaky
+        restore = self.failing("label remove human")
         try:
             with self.assertRaises(humanq.BdError) as cm:
                 store.answer(self.repo, {"id": iid, "option": "a", "text": "補足"})
@@ -313,30 +327,28 @@ class WithBd(unittest.TestCase):
             self.assertIs(getattr(cm.exception, "written", None), True)
             self.assertEqual(len([c for c in self.comments(iid) if c.startswith("[humanq]")]), 1)
             self.assertEqual(self.labels(iid) & {"human", "answered"}, {"human", "answered"})
-            fail["on"] = False
-            store.answer(self.repo, {"id": iid, "option": "a", "text": "補足"})      # 送り直し
         finally:
-            humanq.bd = real
+            restore()
+        try:
+            store.answer(self.repo, {"id": iid, "option": "a", "text": "補足"})  # 送り直し
+        except humanq.BdError as e:
+            self.fail(f"失敗を外した後の送り直しが失敗した: {e}")
         self.assertEqual(len([c for c in self.comments(iid) if c.startswith("[humanq]")]), 1, "送り直しでコメントが二重になった")
         self.assertEqual(self.labels(iid) & {"human", "answered"}, {"answered"})
 
     def test_resend_with_a_different_answer_adds_a_comment(self):
         iid = self.new_question()
         store = self.store()
-        real = humanq.bd
-
-        def flaky(repo, *args):
-            if "remove" in args and "human" in args:
-                raise humanq.BdError("label remove boom")
-            return real(repo, *args)
-
-        humanq.bd = flaky
+        restore = self.failing("label remove human")
         try:
             with self.assertRaises(humanq.BdError):
                 store.answer(self.repo, {"id": iid, "option": "a", "text": ""})
         finally:
-            humanq.bd = real
-        store.answer(self.repo, {"id": iid, "option": "b", "text": ""})
+            restore()
+        try:
+            store.answer(self.repo, {"id": iid, "option": "b", "text": ""})
+        except humanq.BdError as e:
+            self.fail(f"失敗を外した後の回答が失敗した: {e}")
         marks = [c for c in self.comments(iid) if c.startswith("[humanq]")]
         self.assertEqual(len(marks), 2)
         self.assertIn("案B", marks[-1])
@@ -344,22 +356,14 @@ class WithBd(unittest.TestCase):
     def test_label_step_is_retried_once(self):
         iid = self.new_question()
         store = self.store()
-        real = humanq.bd
-        calls = {"n": 0}
-
-        def once(repo, *args):
-            if "remove" in args and "human" in args:
-                calls["n"] += 1
-                if calls["n"] == 1:
-                    raise humanq.BdError("transient")
-            return real(repo, *args)
-
-        humanq.bd = once
+        restore = self.failing("label remove human", times=1)
         try:
             store.answer(self.repo, {"id": iid, "option": "a", "text": ""})
+        except humanq.BdError as e:
+            self.fail(f"1 回だけの失敗が再試行で通らなかった: {e}")
         finally:
-            humanq.bd = real
-        self.assertEqual(calls["n"], 2)
+            restore()
+        self.assertEqual(self.calls("label remove human"), 2)
         self.assertEqual(self.labels(iid) & {"human", "answered"}, {"answered"})
 
     def serve(self, store: humanq.Store):
@@ -378,18 +382,11 @@ class WithBd(unittest.TestCase):
         iid = self.new_question()
         store = self.store()
         port = self.serve(store)
-        real = humanq.bd
-
-        def flaky(repo, *args):
-            if "add" in args and "answered" in args:
-                raise humanq.BdError("label add boom")
-            return real(repo, *args)
-
-        humanq.bd = flaky
+        restore = self.failing("label add answered")
         try:
             code, _, body = self.post(port, "/api/answer", {"project": self.repo, "id": iid, "option": "a"})
         finally:
-            humanq.bd = real
+            restore()
         j = json.loads(body)
         self.assertEqual((code, j.get("stage"), j.get("written")), (502, "label", True), j)
         gone_code, _, gone_body = self.post(port, "/api/answer", {"project": self.repo, "id": "hq-nothing", "option": "a"})
@@ -454,18 +451,6 @@ class WithBd(unittest.TestCase):
         Path(f).write_text(text)
         bdc(self.repo, "comments", "add", iid, "-f", f)
 
-    def failing(self, *needles: str):
-        """needles を全部含む引数の bd 呼び出しを失敗させる。返り値を呼ぶと元に戻す。"""
-        real = humanq.bd
-
-        def flaky(repo, *args):
-            if all(n in args for n in needles):
-                raise humanq.BdError("boom")
-            return real(repo, *args)
-
-        humanq.bd = flaky
-        return lambda: setattr(humanq, "bd", real)
-
     def item(self, iid: str, key: str = "human") -> dict:
         return next(i for i in humanq.load_project(self.repo)[key] if i["id"] == iid)
 
@@ -520,7 +505,7 @@ class WithBd(unittest.TestCase):
         iid = self.new_question()
         store = self.store()
         port = self.serve(store)
-        restore = self.failing("add", "answered")
+        restore = self.failing("label add answered")
         try:
             _, _, body = self.post(port, "/api/answer", {"project": self.repo, "id": iid, "option": "a"})
         finally:
@@ -528,8 +513,11 @@ class WithBd(unittest.TestCase):
         self.assertEqual(json.loads(body).get("op"), "answer")
         self.assertEqual(json.loads(body).get("stage"), "label")
         iid2 = self.new_question()
-        store.answer(self.repo, {"id": iid2, "option": "a"})
-        restore = self.failing("add", "human")
+        try:
+            store.answer(self.repo, {"id": iid2, "option": "a"})
+        except humanq.BdError as e:
+            self.fail(f"失敗を外した後の回答が失敗した: {e}")
+        restore = self.failing("label add human")
         try:
             code, _, body = self.post(port, "/api/undo", {"project": self.repo, "id": iid2})
         finally:
@@ -541,7 +529,7 @@ class WithBd(unittest.TestCase):
         iid = self.new_question()
         store = self.store()
         store.answer(self.repo, {"id": iid, "option": "a"})
-        restore = self.failing("remove", "answered")
+        restore = self.failing("label remove answered")
         try:
             with self.assertRaises(humanq.WriteError) as cm:
                 store.undo(self.repo, {"id": iid})
@@ -556,7 +544,7 @@ class WithBd(unittest.TestCase):
     def test_both_labels_after_a_partial_answer_stay_answered(self):
         iid = self.new_question()
         store = self.store()
-        restore = self.failing("remove", "human")
+        restore = self.failing("label remove human")
         try:
             with self.assertRaises(humanq.WriteError):
                 store.answer(self.repo, {"id": iid, "option": "a"})
@@ -606,6 +594,245 @@ class WithBd(unittest.TestCase):
         iid = self.new_question(labels=("answered",))
         bdc(self.repo, "close", iid)
         self.assertNotIn(iid, [i["id"] for i in humanq.load_project(self.repo)["answered"]])
+
+
+@unittest.skipUnless(HAVE_BD, "bd が無い")
+class WithBd(BdScenarios, unittest.TestCase):
+    """本物の bd で回す (bd が PATH にある手元だけ)。失敗は humanq.bd を差し替えて作る。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="humanq-bd-")
+        cls.repo = os.path.join(cls.tmp, "proj")
+        os.makedirs(cls.repo)
+        subprocess.run(["git", "init", "-q", cls.repo], check=True)
+        subprocess.run(["bd", "init", "--non-interactive", "--quiet", "--skip-agents", "--skip-hooks", "-p", "hq"],
+                       cwd=cls.repo, check=True, capture_output=True, timeout=120)
+        cls.n = 0
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def setUp(self):
+        found = shutil.which("bd")
+        self.assertIsNotNone(found)
+        self.assertNotIn(os.path.realpath(os.path.dirname(found)), FAKE_BIN_DIRS, "WithBd が偽の bd を拾っている (PATH が戻っていない)")
+        real = humanq.bd
+        self._rules: list[list] = []          # [語の列, 残りの回数 (None は何回でも)]
+        self._calls: list[tuple] = []
+
+        def recorded(repo, *args):
+            self._calls.append(args)
+            for r in self._rules:
+                if argv_has(r[0], args) and (r[1] is None or r[1] > 0):
+                    if r[1] is not None:
+                        r[1] -= 1
+                    raise humanq.BdError("boom")
+            return real(repo, *args)
+
+        humanq.bd = recorded
+        self.addCleanup(setattr, humanq, "bd", real)
+
+    def failing(self, rule: str, times: int | None = None):
+        r = [rule.split(), times]
+        self._rules.append(r)
+
+        def restore():
+            if r in self._rules:
+                self._rules.remove(r)
+        return restore
+
+    def calls(self, rule: str) -> int:
+        return sum(1 for a in self._calls if argv_has(rule.split(), a))
+
+
+class WithFakeBd(BdScenarios, unittest.TestCase):
+    """偽の bd (tests/fake_beads.py) で回す。本物の bd が無い環境 (CI) でも skip しない。
+
+    偽物を置いた dir を PATH の先頭に入れるのは、テストごとの setUp で行い addCleanup で戻す (HAVE_BD はモジュールの
+    読み込み時に決まるので、偽物を PATH に残したままにしない)。プロジェクトはテストごとに作り直す (偽物の init は速い)。
+    失敗は env の FAKE_BEADS_FAIL で偽物に作らせ、呼び出しは FAKE_BEADS_LOG の記録で数える。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bin_tmp = tempfile.mkdtemp(prefix="humanq-fakebin-")
+        cls.bin = os.path.join(cls.bin_tmp, "bin")
+        os.makedirs(cls.bin)
+        install_fake(cls.bin)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.bin_tmp, ignore_errors=True)
+
+    def setUp(self):
+        leaked = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d and os.path.realpath(d) in FAKE_BIN_DIRS]
+        self.assertEqual(leaked, [], "前のテストの偽の bd が PATH に残っている")
+        self.tmp = tempfile.mkdtemp(prefix="humanq-fakebd-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.log = os.path.join(self.tmp, "calls.jsonl")
+        env = mock.patch.dict(os.environ, {"PATH": self.bin + os.pathsep + os.environ.get("PATH", ""), "FAKE_BEADS_LOG": self.log})
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("FAKE_BEADS_FAIL", None)
+        self.assertEqual(os.path.realpath(shutil.which("bd") or ""), os.path.realpath(os.path.join(self.bin, "bd")))
+        self.repo = os.path.join(self.tmp, "proj")
+        os.makedirs(self.repo)
+        bdc(self.repo, "init", "--non-interactive", "--quiet", "--skip-agents", "--skip-hooks", "-p", "hq")
+
+    def failing(self, rule: str, times: int | None = None):
+        prev = os.environ.get("FAKE_BEADS_FAIL")
+        spec = rule if times is None else f"{rule}:{times}"
+        os.environ["FAKE_BEADS_FAIL"] = f"{prev};{spec}" if prev else spec
+
+        def restore():
+            if prev is None:
+                os.environ.pop("FAKE_BEADS_FAIL", None)
+            else:
+                os.environ["FAKE_BEADS_FAIL"] = prev
+        return restore
+
+    def log_entries(self) -> list[dict]:
+        try:
+            lines = Path(self.log).read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            return []
+        return [json.loads(x) for x in lines if x.strip()]
+
+    def calls(self, rule: str) -> int:
+        return sum(1 for e in self.log_entries() if argv_has(rule.split(), e["argv"]))
+
+    # 今のサーバーが打つ bd の argv の 6 形を、読み → 回答 → 読み → 取り消しの順に並べたもの。
+    # bd を利用している人の挙動を、後で呼び出しを作り直しても変えないための固定 (<repo> <id> <tmp> は置き換えて比べる)
+    HUMAN_LIST = ["-C", "<repo>", "human", "list", "--json"]
+    ANSWERED_LIST = ["-C", "<repo>", "list", "--status", "open,in_progress,blocked,deferred", "--label", "answered",
+                     "--flat", "-n", "0", "--json"]
+    COMMENTS = ["-C", "<repo>", "comments", "<id>", "--json"]
+    COMMENT_ADD = ["-C", "<repo>", "--actor", "user/humanq", "comments", "add", "<id>", "-f", "<tmp>"]
+    ADD_ANSWERED = ["-C", "<repo>", "--actor", "user/humanq", "label", "add", "<id>", "answered"]
+    REMOVE_HUMAN = ["-C", "<repo>", "--actor", "user/humanq", "label", "remove", "<id>", "human"]
+    ADD_HUMAN = ["-C", "<repo>", "--actor", "user/humanq", "label", "add", "<id>", "human"]
+    REMOVE_ANSWERED = ["-C", "<repo>", "--actor", "user/humanq", "label", "remove", "<id>", "answered"]
+    GOLDEN = [
+        HUMAN_LIST, ANSWERED_LIST,                                              # 読み (回答済みは 0 件)
+        HUMAN_LIST, COMMENTS, COMMENT_ADD, ADD_ANSWERED, REMOVE_HUMAN,          # 回答
+        HUMAN_LIST, ANSWERED_LIST, COMMENTS,                                    # 読み (回答済みの本文を読む)
+        ANSWERED_LIST, COMMENTS, COMMENT_ADD, ADD_HUMAN, REMOVE_ANSWERED,       # 取り消し
+    ]
+
+    def test_golden_argv(self):
+        iid = self.new_question()
+        port = self.serve(self.store())
+        start = len(self.log_entries())
+        items = f"http://127.0.0.1:{port}/api/items"
+
+        def project():
+            code, _, body = fetch(items)
+            self.assertEqual(code, 200, body)
+            ps = json.loads(body)["projects"]
+            self.assertEqual(len(ps), 1, ps)
+            self.assertTrue(ps[0]["ok"], ps[0])
+            return ps[0]
+
+        p = project()
+        self.assertEqual([i["id"] for i in p["human"]], [iid])
+        code, _, body = self.post(port, "/api/answer", {"project": self.repo, "id": iid, "option": "a", "qsig": p["human"][0]["qsig"]})
+        self.assertEqual(code, 200, body)
+        p = project()
+        self.assertEqual(([i["id"] for i in p["human"]], [i["id"] for i in p["answered"]]), ([], [iid]))
+        self.assertTrue(p["answered"][0]["answer"].startswith("[humanq] 回答: 案A (a)"), p["answered"][0])
+        code, _, body = self.post(port, "/api/undo", {"project": self.repo, "id": iid})
+        self.assertEqual(code, 200, body)
+
+        entries = self.log_entries()[start:]
+        self.assertEqual({e["prog"] for e in entries}, {"bd"})
+        got = []
+        for e in entries:
+            argv = ["<repo>" if a == self.repo else "<id>" if a == iid else a for a in e["argv"]]
+            if "-f" in argv:
+                k = argv.index("-f")
+                self.assertLess(k + 1, len(argv), argv)
+                self.assertRegex(os.path.basename(argv[k + 1]), r"^humanq-.*\.md$")
+                argv[k + 1] = "<tmp>"
+            got.append(argv)
+        self.assertEqual(got, self.GOLDEN)
+
+    def test_fake_has_the_quirks_of_bd_1_3_4(self):
+        def run(*args):
+            p = subprocess.run(["bd", "-C", self.repo, *args], capture_output=True, text=True, timeout=30)
+            return p.returncode, p.stdout, p.stderr
+
+        def as_json(out: str, what: str):
+            try:
+                return json.loads(out)
+            except ValueError:
+                self.fail(f"{what}: JSON でない: {out!r}")
+
+        self.assertEqual(run("human", "list", "--json")[:2], (0, "null\n"), "human list は 0 件で null")
+        rc, out, _ = run("list", "--status", "open", "--json")
+        self.assertEqual((rc, as_json(out, "list")), (0, []), "list は 0 件で []")
+        rc, _, err = run("human", "list", "--label", "x", "--json")
+        self.assertEqual(rc, 1)
+        self.assertIn("unknown flag: --label", err)
+
+        created = as_json(bdc(self.repo, "create", "plain", "-p", "2", "--json"), "create")
+        self.assertIn("id", created)
+        iid = created["id"]
+        bdc(self.repo, "label", "add", iid, "human")
+        rc, out, _ = run("human", "list", "--json")
+        items = as_json(out, "human list")
+        self.assertIsInstance(items, list)
+        self.assertEqual(len(items), 1, items)
+        self.assertNotIn("metadata", items[0], "metadata が無いチケットは key を出さない")
+        self.assertEqual(items[0].get("labels"), ["human"])
+
+        f = os.path.join(self.tmp, "c.md")
+        Path(f).write_text("first\n")
+        bdc(self.repo, "--actor", "user/humanq", "comments", "add", iid, "-f", f)
+        Path(f).write_text("second\n")
+        bdc(self.repo, "comments", "add", iid, "-f", f)
+        cs = as_json(bdc(self.repo, "comments", iid, "--json"), "comments")
+        self.assertIsInstance(cs, list)
+        self.assertEqual(len(cs), 2, cs)
+        self.assertEqual([c.get("text") for c in cs], ["first\n", "second\n"], "古い順")
+        self.assertEqual(set(cs[0]), {"id", "issue_id", "author", "text", "created_at"})
+        self.assertEqual((cs[0]["author"], cs[0]["issue_id"]), ("user/humanq", iid))
+        self.assertNotEqual(cs[1]["author"], "user/humanq")
+        self.assertRegex(cs[0]["id"], r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+        rc, out, _ = run("comments", "hq-nothing", "--json")
+        self.assertEqual(rc, 1)
+        self.assertIn("no issue found", str(as_json(out, "comments の error").get("error")))
+
+        p = subprocess.run(["bd", "-C", self.tmp, "human", "list", "--json"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 1, ".beads/ の無い dir")
+        self.assertIn("no beads project found", p.stderr)
+
+        Path(self.repo, ".beads", "metadata.json").write_text(json.dumps({"database": "beads.db", "jsonl_export": "issues.jsonl"}))
+        rc, _, err = run("human", "list", "--json")
+        self.assertEqual(rc, 1)
+        self.assertTrue(err.startswith("Error: historical SQLite workspace detected;"), err)
+
+    def test_failure_rule_counts_per_project(self):
+        iid = self.new_question()
+        restore = self.failing("label remove human", times=1)
+        try:
+            for args in (["label", "remove", iid, "answered"], ["human", "list"], ["label", "add", iid, "human"]):
+                p = subprocess.run(["bd", "-C", self.repo, *args], capture_output=True, text=True, timeout=30)
+                self.assertEqual(p.returncode, 0, f"語の列に当たらない呼び出しを失敗させた: {args}")
+            p = subprocess.run(["bd", "-C", self.repo, "--actor", "x", "label", "remove", iid, "human"], capture_output=True, text=True, timeout=30)
+            self.assertEqual(p.returncode, 1, "1 回目は失敗する")
+            p = subprocess.run(["bd", "-C", self.repo, "label", "remove", iid, "human"], capture_output=True, text=True, timeout=30)
+            self.assertEqual(p.returncode, 0, "2 回目は通る")
+        finally:
+            restore()
+        self.assertEqual(self.calls("label remove human"), 2)
+        always = self.failing("label add answered")
+        p = subprocess.run(["bd", "-C", self.repo, "label", "add", iid, "answered"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 1, "回数を付けない規則は毎回失敗させる")
+        always()
+        p = subprocess.run(["bd", "-C", self.repo, "label", "add", iid, "answered"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 0, "元に戻した後も失敗する")
 
 
 if __name__ == "__main__":

@@ -84,12 +84,23 @@ details pre { white-space: pre-wrap; word-break: break-word; font: 13px/1.6 ui-m
 .incoming { opacity: 0; transform: translateY(-8px); margin-bottom: 0; padding-top: 0; padding-bottom: 0; border-width: 0; }
 .card.flash { animation: flash 1.8s ease-out; }
 @keyframes flash { 0%, 45% { box-shadow: 0 0 0 2px var(--warn); } 100% { box-shadow: 0 0 0 0 transparent; } }
-#toasts { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); display: grid; gap: 8px; z-index: 5; width: min(calc(100vw - 32px), 560px); pointer-events: none; }
+/* トーストは右下に出す。幅は、カードの左にある「回答する」(main の左端から 35〜131px ほど) に横から掛からない幅にする
+   (幅 481px の画面で 321px)。幅 480px 以下は下に全幅で出す (下の @media) */
+#toasts { position: fixed; right: 16px; bottom: 16px; display: grid; gap: 8px; z-index: 5; width: min(400px, calc(100vw - 160px)); pointer-events: none; }
 .toast { display: flex; gap: 10px; align-items: flex-start; pointer-events: auto; overflow-wrap: anywhere;
   background: var(--toast-bg); color: var(--ink); border: 1px solid var(--toast-line); border-left: 4px solid var(--warn); border-radius: 8px;
   padding: 10px 8px 10px 14px; box-shadow: 0 6px 20px var(--toast-shadow); font-size: 14px; animation: toast-in .25s ease-out; }
+.toast.ok { border-left-color: var(--rec); }
 .toast .toast-msg { flex: 1; min-width: 0; }
+.toast .toast-act { flex: none; align-self: center; background: none; color: var(--accent); border: 1px solid var(--toast-line); border-radius: 6px;
+  font: inherit; font-size: 13px; font-weight: 700; padding: 2px 10px; cursor: pointer; }
 .toast .toast-x { flex: none; background: none; border: 0; color: var(--muted); font: inherit; font-size: 18px; line-height: 1; padding: 0 6px; cursor: pointer; }
+/* 幅の狭い画面では、トーストの重なりを横に避けられない。下に全幅で出し、ページの下にトーストの高さ (--toast-space。JS が測る) の
+   余白を足す: 最後のカードの「回答する」も、スクロールすればトーストの上に出せる */
+@media (max-width: 480px) {
+  #toasts { left: 8px; right: 8px; bottom: 8px; width: auto; }
+  main { padding-bottom: calc(64px + var(--toast-space, 0px)); }
+}
 .toast.out { animation: toast-out .3s ease forwards; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
 @keyframes toast-out { to { opacity: 0; transform: translateY(8px); } }
@@ -210,11 +221,16 @@ function whileVisible(ms, fn) {
   return () => clearInterval(iv);
 }
 
-function toast(msg) {
+// 知らせのトースト。opts.kind が "ok" なら成功の知らせ (.toast.ok)。opts.action ({label, run}) で、閉じるの前にボタンを置く
+// (押すとトーストを閉じてから run を呼ぶ)。同じ key (既定は文そのもの) のトーストが出ている間は重ねない
+function toast(msg, opts = {}) {
   const box = document.getElementById("toasts");
-  if ([...box.children].some(t => t.dataset.msg === msg && !t.classList.contains("out"))) return;
+  const key = opts.key || msg;
+  if ([...box.children].some(t => t.dataset.key === key && !t.classList.contains("out"))) return;
   const close = el("button", { class: "toast-x", type: "button", "aria-label": "閉じる" }, "×");
-  const t = el("div", { class: "toast", role: "status", "data-msg": msg }, el("span", { class: "toast-msg" }, msg), close);
+  const act = opts.action ? el("button", { class: "toast-act", type: "button" }, opts.action.label) : null;
+  const t = el("div", { class: opts.kind ? "toast " + opts.kind : "toast", role: "status", "data-msg": msg, "data-key": key },
+    el("span", { class: "toast-msg" }, msg), act, close);
   let gone = false, cancel = () => {};
   const dismiss = () => {
     if (gone) return;
@@ -225,8 +241,18 @@ function toast(msg) {
     setTimeout(() => t.remove(), 600);
   };
   close.addEventListener("click", dismiss);
+  if (act) act.addEventListener("click", () => { dismiss(); opts.action.run(); });
   box.append(t);
   cancel = whileVisible(6000, dismiss);
+}
+
+// 回答が成功した知らせ。回答済みのカードはページの下にあり、次の読み込みまで作られないので、押し間違えたときに
+// スクロールしなくても取り消せるよう「取り消す」を付ける。フォーカスはここへ移さない: 回答の後は次のカードそのものへ移す
+// (moveFocusAway)。「回答する」を押した Enter のリピートや押し直しで、取り消しが押されないため。
+// key に project と id を入れる: 題の頭 24 字と選択肢が同じ別のチケットの知らせ (取り消す先が違う) を重ね抑止で消さない
+function answeredToast(it, label) {
+  const msg = `「${summarize(it.title, 24)}」に回答しました: ${summarize(label, 40)}`;
+  toast(msg, { kind: "ok", key: ["ok", it.project, it.id, msg].join("\n"), action: { label: "取り消す", run: () => undoAnswer(it) } });
 }
 
 // 消えない案内 (サーバーが入れ替わった、など)
@@ -419,9 +445,11 @@ function buildQuestion(it) {
     if (!(d.option || d.text.trim()) || pending.has(key)) return;
     // 入力中で作り直しを後回しにしている間に問いが変わっていたら、送らずに作り直して見直してもらう
     if (questionChanged(it)) { reviewChanged(key, it); return; }
-    // 下書きは成功するまで残す (失敗して戻ったカードに選択と補足がそのまま出る)。qsig は見ていた問いの署名
+    // 下書きは成功するまで残す (失敗して戻ったカードに選択と補足がそのまま出る)。qsig は見ていた問いの署名。
+    // 成功の知らせには、送った時点の選択を出す (成功すると下書きは消える)
+    const chosen = d.option && q ? q.options.find(o => o.key === d.option) : null;
     submit(key, it, "/api/answer", { project: it.project, id: it.id, option: d.option, text: d.text, qsig: it.qsig },
-      () => dropDraft(it));
+      () => { dropDraft(it); answeredToast(it, chosen ? chosen.label : "(自由記述)"); });
   });
   refresh();
   return el("section", { class: "card", "data-id": it.id, tabindex: "-1" },
@@ -433,13 +461,20 @@ function buildQuestion(it) {
     opts, area, el("div", { class: "row" }, send), el("div", { class: "errbox" }), body(it));
 }
 
-function buildAnswered(it) {
+// 回答を取り消して判断待ちに戻す (回答済みのカードのボタンと、回答の成功のトーストの「取り消す」)。
+// 送り先は project と id だけで決まるので、回答済みのカードがまだ作られていなくても送れる。失敗と 400 gone は、
+// カードの有無に関係なく failed() がトーストで知らせる。成功したら読み直して、カードは判断待ちに戻る。
+// 戻ったカードに下書きは戻さない (空のまま): 回答の成功で下書きは消してあり、押し間違えた選択をそのまま戻すと
+// 同じ答えを押し直しやすい。送った回答の本文は bd のコメントに残っている
+function undoAnswer(it) {
   const key = aKey(it.project, it.id);
+  if (pending.has(key)) return;             // もう一方の取り消しで送信中
+  submit(key, it, "/api/undo", { project: it.project, id: it.id });
+}
+
+function buildAnswered(it) {
   const b = el("button", { class: "ghost", type: "button" }, "取り消して判断待ちに戻す");
-  b.addEventListener("click", () => {
-    if (pending.has(key)) return;
-    submit(key, it, "/api/undo", { project: it.project, id: it.id });
-  });
+  b.addEventListener("click", () => undoAnswer(it));
   return el("section", { class: "card", "data-id": it.id, tabindex: "-1" }, head(it), el("p", { class: "title" }, it.title),
     el("p", { class: "ans" }, (it.answer || "(回答のコメントが見つからない)").replace(/^\[humanq\] /, "")),
     el("div", { class: "row" }, b), el("div", { class: "errbox" }));
@@ -776,6 +811,11 @@ document.addEventListener("focusout", e => {
   if (pointerDown) { renderAfterPointer = true; return; }
   setTimeout(render, 0);
 });
+// トーストの高さ (と下の隙間) を CSS の --toast-space に渡す。幅の狭い画面では、その分だけページの下に余白を足す (CSS の @media)
+const toastBox = document.getElementById("toasts");
+if ("ResizeObserver" in window)
+  new ResizeObserver(() => document.documentElement.style.setProperty("--toast-space", toastBox.offsetHeight ? toastBox.offsetHeight + 8 + "px" : "0px"))
+    .observe(toastBox);
 const nb = document.getElementById("notify");
 if (!("Notification" in window) || Notification.permission === "granted") nb.hidden = true;
 nb.addEventListener("click", async () => { if (await Notification.requestPermission() === "granted") nb.hidden = true; });
