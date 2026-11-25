@@ -81,7 +81,9 @@ const item = (id, o = {}) => ({
 // エージェントが問いを書き直した (key a の意味が変わる)
 const changedQ = it => ({ ...it, qsig: "sig-2", q: { ...it.q, ask: "NEW ASK",
   options: [{ key: "a", label: "まったく別の案", desc: "" }, { key: "b", label: "案B", desc: "" }] } });
-const answeredItem = (id, answer = "[humanq] 回答: 案A (a)\n") => ({ ...item(id), answer });
+// asig はサーバーが付ける回答の署名。取り消しはこれを付けて送り、今の回答と違えば 409 stale になる
+const answeredItem = (id, answer = "[humanq] 回答: 案A (a)\n", asig = `asig-${id}`) => ({ ...item(id), answer, asig });
+const STALE_MSG = "取り消しませんでした。この回答はもう最新ではありません (ほかで答え直されています)";
 const proj = (p, human = [], ans = [], ok = true) =>
   ({ path: p, name: p.split("/").pop(), ok, ...(ok ? {} : { error: "bd down" }), human, answered: ans });
 
@@ -94,21 +96,33 @@ class Script {
     this.queue = [];                 // 次の /api/items に返す固定のデータ (先頭から使う)
     this.gates = {};
     this.releases = [];
-    // 既定の回答の応答は、サーバーと同じく、見ていた問いの署名 (qsig) が今の問いと違えば 409 changed にする
+    this.answerN = 0;
+    // 既定の回答の応答は、サーバーと同じく、見ていた問いの署名 (qsig) が今の問いと違えば 409 changed にする。
+    // 成功には回答の署名 (asig) を入れる
     this.answerResult = body => {
       const cur = (this.project(body.project) || { human: [] }).human.find(i => i.id === body.id);
       if (cur && body.qsig !== undefined && body.qsig !== cur.qsig)
         return { status: 409, body: { error: "問いが書き換わっている", code: "changed", op: "answer" } };
-      this.moveToAnswered(body);
+      return { status: 200, body: { ok: true, asig: this.moveToAnswered(body) } };
+    };
+    // 既定の取り消しの応答も、サーバーと同じく、取り消す回答の署名 (asig) が今の回答と違えば 409 stale にする
+    // (送らない古い画面は検査しない)
+    this.undoResult = body => {
+      const cur = (this.project(body.project) || { answered: [] }).answered.find(i => i.id === body.id);
+      if (cur && body.asig !== undefined && body.asig !== cur.asig)
+        return { status: 409, body: { error: "この回答はもう最新ではない", code: "stale", op: "undo" } };
+      this.moveToHuman(body);
       return { status: 200, body: { ok: true } };
     };
-    this.undoResult = body => { this.moveToHuman(body); return { status: 200, body: { ok: true } }; };
   }
   project(p) { return this.projects.find(x => x.path === p); }
+  // 回答済みに移し、回答の署名を返す (サーバーと同じく、回答のたびに別の値)
   moveToAnswered({ project, id }) {
     const p = this.project(project);
     p.human = p.human.filter(i => i.id !== id);
-    p.answered.push(answeredItem(id));
+    const asig = `asig-${id}-${++this.answerN}`;
+    p.answered.push(answeredItem(id, undefined, asig));
+    return asig;
   }
   moveToHuman({ project, id }) {
     const p = this.project(project);
@@ -163,7 +177,13 @@ async function withPage(script, fn, ctxOptions = {}, setup = null, b = browser) 
     if (setup) await setup(page);
     await page.goto(baseUrl);
     await ready(page);
-    await fn(page, ctx);
+    try {
+      await fn(page, ctx);
+    } catch (e) {
+      // ページで例外が出ていたら、その後の待ちの時間切れではなく、ページの例外を失敗として出す (原因が見える)
+      assert.deepEqual(errors, [], `ページで例外が出た (テストは「${String(e && e.message).split("\n")[0]}」で止まった)`);
+      throw e;
+    }
     assert.deepEqual(errors, [], "ページで例外が出た");
   } finally {
     script.releaseAll();
@@ -513,7 +533,7 @@ test("取り消しは判断待ちに戻す", async () => {
   await withPage(s, async page => {
     await acard(page, "t-A1").getByRole("button", { name: "取り消して判断待ちに戻す" }).click();
     await waitFor(() => s.undos.length === 1, 3000, "POST");
-    assert.deepEqual(s.undos[0], { project: P1, id: "t-A1" });
+    assert.deepEqual(s.undos[0], { project: P1, id: "t-A1", asig: "asig-t-A1" });   // カードが出している回答の署名
     await waitFor(async () => (await qcard(page, "t-A1").count()) === 1, 3000, "判断待ちに出る");
     await waitFor(async () => (await acard(page, "t-A1").count()) === 0, 3000, "回答済みから消える");
   });
@@ -898,7 +918,7 @@ test("回答が成功すると、成功のトースト (.toast.ok) に題と選�
   });
 });
 
-test("トーストの「取り消す」は、回答済みのカードが作られる前でも /api/undo を {project,id} で送り、カードは空で判断待ちに戻る", async () => {
+test("トーストの「取り消す」は、回答済みのカードが作られる前でも /api/undo を {project,id,asig} で送り、カードは空で判断待ちに戻る", async () => {
   const s = new Script([proj(P1, [item("t-A1"), item("t-B2")])]);
   await withPage(s, async page => {
     await qcard(page, "t-A1").locator(".opt").nth(1).click();
@@ -909,7 +929,7 @@ test("トーストの「取り消す」は、回答済みのカードが作ら�
     assert.equal(await acard(page, "t-A1").count(), 0, "回答済みのカードがもう作られている");
     await undoInToast(page).click({ timeout: 3000 });
     await waitFor(() => s.undos.length === 1, 3000, "取り消しの POST");
-    assert.deepEqual(s.undos[0], { project: P1, id: "t-A1" });
+    assert.deepEqual(s.undos[0], { project: P1, id: "t-A1", asig: "asig-t-A1-1" });   // 回答の成功の応答が返した署名
     releaseItems();
     await waitFor(async () => (await qcard(page, "t-A1").count()) >= 1, 3000, "判断待ちに戻る");
     await single(page, "t-A1");
@@ -928,7 +948,7 @@ test("回答済みのカードが出た後でも、トーストの「取り消�
     await waitFor(async () => (await acard(page, "t-A1").count()) === 1, 3000, "回答済みに出る");
     await undoInToast(page).click({ timeout: 3000 });
     await waitFor(() => s.undos.length === 1, 3000, "取り消しの POST");
-    assert.deepEqual(s.undos[0], { project: P1, id: "t-A1" });
+    assert.deepEqual(s.undos[0], { project: P1, id: "t-A1", asig: "asig-t-A1-1" });
     await waitFor(async () => (await qcard(page, "t-A1").count()) === 1, 3000, "判断待ちに戻る");
     await waitFor(async () => (await acard(page, "t-A1").count()) === 0, 3000, "回答済みから消える");
   });
@@ -1305,6 +1325,81 @@ test("幅 641・高さ 500・スクロールバー 15px で最長の知らせを
     assert.equal(await page.locator("#toasts .toast").count(), 3, "残ったトーストが 3 つでない");
     assert.equal(await okToasts(page).count(), 3, "残ったのが新しい成功の知らせ 3 つでない");
   }, { viewport: { width: 641, height: 500 } }, null, sbBrowser);
+});
+
+// ---- 0.7.0: 取り消しの照合 (回答の署名 asig) ------------------------------------------------------------
+// 台本はサーバーと同じく、取り消しの asig が今の回答の asig と違えば 409 stale を返し、送らなければ検査しない (古い画面)
+
+const failToast = page => page.locator("#toasts .toast:not(.ok):not(.out)");
+const undoOnCard = (page, id) => acard(page, id).getByRole("button", { name: "取り消して判断待ちに戻す" });
+
+test("別のタブで取り消して答え直した後に、前の回答のトーストの「取り消す」を押しても、今の回答は取り消されない (409 stale)", async () => {
+  const s = new Script([proj(P1, [item("t-A1"), item("t-B2")])]);
+  await withPage(s, async page => {
+    await answerFirst(page, "t-A1");                                          // 案A で答える
+    await okToasts(page).first().waitFor({ timeout: 3000 });
+    await waitFor(async () => (await acard(page, "t-A1").count()) === 1, 3000, "回答済みに出る");
+    // 別のタブで取り消して、案B で答え直した (このタブはまだ読み直していない)
+    const p = s.project(P1);
+    p.answered = p.answered.filter(i => i.id !== "t-A1");
+    p.answered.push(answeredItem("t-A1", "[humanq] 回答: 案B (b)\n", "asig-other-tab"));
+    await undoInToast(page).click({ timeout: 3000 });
+    await waitFor(() => s.undos.length === 1, 3000, "取り消しの POST");
+    assert.equal(s.undos[0].asig, "asig-t-A1-1", "トーストの「取り消す」が、その回答の署名を送らない");
+    assert.deepEqual(s.project(P1).answered.map(i => i.asig), ["asig-other-tab"], "今の回答 (案B) が取り消された");
+    await failToast(page).first().waitFor({ timeout: 3000 });
+    assert.equal(await failToast(page).first().locator(".toast-msg").innerText(), `「title t-A1」(t-A1): ${STALE_MSG}`);
+    // 読み直した回答済みのカードは今の回答 (案B) を出し、判断待ちには戻さず、失敗の枠も付けない
+    await waitFor(async () => (await acard(page, "t-A1").count()) === 1 && /案B/.test(await acard(page, "t-A1").locator(".ans").innerText()),
+      3000, "読み直した回答済みのカードが今の回答を出す");
+    assert.equal(await qcard(page, "t-A1").count(), 0, "判断待ちに戻した");
+    assert.equal(await page.locator("section.card.failed").count(), 0, "失敗の枠でカードを戻した");
+  });
+});
+
+test("回答済みのカードの取り消しも照合を通る: 読み直す前にほかで答え直されていたら取り消さず、読み直したカードからは今の回答を取り消せる", async () => {
+  const s = new Script([proj(P1, [item("t-B2")], [answeredItem("t-A1")])]);
+  await withPage(s, async page => {
+    s.project(P1).answered = [answeredItem("t-A1", "[humanq] 回答: 案B (b)\n", "asig-again")];   // ほかで取り消して案B で答え直した
+    await undoOnCard(page, "t-A1").click();
+    await waitFor(() => s.undos.length === 1, 3000, "カードの取り消しの POST");
+    assert.equal(s.undos[0].asig, "asig-t-A1", "カードが出している回答の署名を送らない");
+    await failToast(page).first().waitFor({ timeout: 3000 });
+    assert.equal(await failToast(page).first().locator(".toast-msg").innerText(), `「title t-A1」(t-A1): ${STALE_MSG}`);
+    assert.deepEqual(s.project(P1).answered.map(i => i.asig), ["asig-again"], "今の回答が取り消された");
+    await waitFor(async () => (await acard(page, "t-A1").count()) === 1 && /案B/.test(await acard(page, "t-A1").locator(".ans").innerText()),
+      3000, "回答済みのカードが今の回答で出直す");
+    await undoOnCard(page, "t-A1").click();
+    await waitFor(() => s.undos.length === 2, 3000, "2 回目の取り消しの POST");
+    assert.equal(s.undos[1].asig, "asig-again", "出直したカードが今の回答の署名を送らない");
+    await waitFor(async () => (await qcard(page, "t-A1").count()) === 1, 3000, "判断待ちに戻る");
+  });
+});
+
+test("回答の本文が同じでも署名が変われば、読み直しで回答済みのカードは作り直され、取り消しは今の署名を送る", async () => {
+  const s = new Script([proj(P1, [item("t-B2")], [answeredItem("t-A1")])]);
+  await withPage(s, async page => {
+    s.project(P1).answered = [answeredItem("t-A1", undefined, "asig-again")];   // ほかで取り消して、同じ案A で答え直した
+    await page.evaluate(() => load());
+    await undoOnCard(page, "t-A1").click();
+    await waitFor(() => s.undos.length === 1, 3000, "取り消しの POST");
+    assert.equal(s.undos[0].asig, "asig-again", "読み直したのに、前の回答の署名で取り消した");
+    await waitFor(async () => (await qcard(page, "t-A1").count()) === 1, 3000, "判断待ちに戻る");
+  });
+});
+
+test("回答の成功の応答に署名が無ければ、トーストの「取り消す」は空の署名を送る (照合を素通りさせない)", async () => {
+  const s = new Script([proj(P1, [item("t-A1"), item("t-B2")])]);
+  s.answerResult = body => { s.moveToAnswered(body); return { status: 200, body: { ok: true } }; };
+  await withPage(s, async page => {
+    await answerFirst(page, "t-A1");
+    await undoInToast(page).click({ timeout: 3000 });
+    await waitFor(() => s.undos.length === 1, 3000, "取り消しの POST");
+    assert.ok(Object.hasOwn(s.undos[0], "asig"), `署名を付けずに送った (古い画面と同じに読まれ、照合されない): ${JSON.stringify(s.undos[0])}`);
+    assert.equal(s.undos[0].asig, "");
+    await failToast(page).first().waitFor({ timeout: 3000 });
+    assert.equal(s.project(P1).answered.length, 1, "署名の無い取り消しが通った");
+  });
 });
 
 // ---- 文言の小さな直し (placeholder・題の二重表示・回答済みの key・ラベル・経過日数) ---------------------------
