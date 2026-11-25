@@ -17,7 +17,8 @@
   一致することを確かめた (`tests/test_heredoc_line_env.py` も全段の env を両方のシェルで固定する)
 - 先頭の段がシェル経由の wrapper でも、区切りが wrapper の引用符の外にある行
   (`AWS_PROFILE=prod watch 'cat' <<EOF && aws ...` / `npx -c 'cat' <<EOF ; gh ...`) の後ろの段は外のシェルで走るので、
-  同じく起動時の env で照合する
+  同じく起動時の env で照合する。wrapper の中身に区切りがあれば (`npx -c 'true && aws ...' <<EOF ; aws ...`)、中身の
+  段は全部が先頭の段で、前置きの env で照合する
 - 次は従来どおり全段に継ぐ: シェル経由の wrapper の中身 (`AWS_PROFILE=prod watch 'true && aws ...'` /
   `npx -c '...'`。区切りが引用符の中にあり、wrapper が起動するシェルに渡る)、前置きの代入の後ろにコマンド語が無く
   `;` / `&&` / `||` が続く行 (`AWS_PROFILE=prod <<EOF ; aws ...`。export 済みの変数なら後ろに効く)。`|` / `&` が

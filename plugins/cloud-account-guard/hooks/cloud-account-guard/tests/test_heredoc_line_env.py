@@ -83,6 +83,9 @@ SHELL_TABLE = [
     "AWS_PROFILE=prod watch 'true' <<EOF && aws s3 rm s3://b/f3a\nx\nEOF",
     "AWS_PROFILE=prod npx -c 'true' <<EOF ; aws s3 rm s3://b/f3b\nx\nEOF",
     "KUBECONFIG=~/k.yaml watch 'true' <<EOF && kubectl delete po f3c\nx\nEOF",
+    # 中身に区切りがある wrapper では、中身の段は全部が先頭の段 (前置きの値で走る)
+    "AWS_PROFILE=prod npx -c 'true && aws s3 rm s3://b/ni' <<EOF ; aws s3 rm s3://b/no\nx\nEOF",
+    "KUBECONFIG=~/k.yaml npx -c 'true | kubectl delete po ni' <<EOF && kubectl delete po no\nx\nEOF",
     # コマンド語の無い代入の後ろにリダイレクトを挟む形 (`;` / `&&` が続けば全段、`|` / `&` が続けば
     # サブシェルなのでどの段にも効かない)
     "AWS_PROFILE=prod 2>/dev/null <<EOF ; aws s3 rm s3://b/nwr\nx\nEOF",

@@ -2447,12 +2447,16 @@ def _segment_candidates(
         # zsh -f で実測)。0.30.2 までは後ろの段にも継いでいた。シェル経由 wrapper の中身
         # (`AWS_PROFILE=prod watch 'true && aws ...'`) は wrapper が起動するシェルに渡るので全段に効く。
         # 区切りが wrapper の引用符の外にある行 (`AWS_PROFILE=prod watch 'true' <<EOF && aws ...`) の
-        # 後ろの段は外のシェルで走るので、wrapper の有無によらず先頭の段だけ (heredoc の本文を落とした
-        # 行に引用符の外の区切りがあるかで分ける)。
+        # 後ろの段は外のシェルで走るので、wrapper の有無によらず先頭の段 (シェル経由 wrapper の中身の段を
+        # 含む) だけ (heredoc の本文を落とした行に引用符の外の区切りがあるかで分ける)。`parts` は wrapper の
+        # 中身の段と外の段を平らに並べるので、外の段の数を引いた頭の `head_parts` 個が先頭の段にあたる
+        # (`AWS_PROFILE=prod npx -c 'true && aws ...' <<EOF ; aws ...` の中の aws は前置きの値で走る)。
         # 前置きの代入を剥がした残りが `;` / `&&` / `||` で始まるとき (代入の後ろにコマンド語が無い) は、
         # その代入が export 済みの変数なら後ろのコマンドに効くので、0.30.2 までと同じく全段に継ぐ。
         # `|` / `&` で始まるときは、後ろの段がサブシェルで走るのでどの段にも継がない。
-        line_stages = heredoc and len(split_with_separators(_strip_heredoc_bodies(seg))) > 1
+        outer_stages = len(split_with_separators(_strip_heredoc_bodies(seg))) if heredoc else 1
+        line_stages = outer_stages > 1
+        head_parts = max(1, len(parts) - (outer_stages - 1))
         no_word_here = normalized.startswith((";", "&&", "||"))
         no_word_sub = not no_word_here and normalized[:1] in "|&"
         first_only = line_stages and not no_word_here
@@ -2465,7 +2469,7 @@ def _segment_candidates(
                 # wrapper の中身 (外側の `reread`) と、段自身がシェル経由 wrapper の形 (`inner_reread`) は
                 # Bash のシェルの語と扱わない (`shell_string_candidates`)。heredoc の本文を落とした
                 # 宣言行と、前置きの代入を剥がした残りは、Bash のシェルが読む語 (`cat <<EOF && kubectl --kubeconfig ~/a ...` の `~` は展開される)
-                inherits = not first_only or (k == 0 and not no_word_sub)
+                inherits = not first_only or (k < head_parts and not no_word_sub)
                 outer_env = env if inherits else {}
                 outer_unread = unread if inherits else frozenset()
                 found.append((
