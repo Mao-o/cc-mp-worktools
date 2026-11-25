@@ -2,8 +2,9 @@
 
 相対パスの `cd a;` を続けると、行き先のパスが深くなる。相対パスの解決 (`command._resolve`) は 0.9.3 と同じく移動のたびに
 realpath でパスの全要素を辿り直すので、深さの 2 乗の時間になる (`cd a;` 2,000 回で約 6 秒、`x || cd d<i>;` 6 回の後に
-`cd a;` 400 回で約 17 秒)。hook が時間切れになるとコマンドはそのまま走るので、こうした遅い形 (状態の数 × スタックの深さなども)
-は読み取りの期限で閉じる (期限を過ぎたら、それまでの判定に注意を足して返す)。
+`cd a;` 400 回で約 17 秒)。hook が時間切れになるとコマンドはそのまま走るので、こうした遅い形は読み取りの期限で閉じる
+(期限を過ぎたら、それまでの判定に注意を足して返す)。pushd のスタックを深く重ねる形は、0.10.4 からスタックの深さに比例しない
+時間で 1 回の移動を読む (`DeepStackTest`)。
 """
 from __future__ import annotations
 
@@ -27,6 +28,11 @@ from test_state_limit import GIT, MAIN, RESET, B, or_cd
 def cd_a(n: int) -> str:
     """`cd a;` (相対パス)。移動のたびに行き先が 1 段深くなる。"""
     return "cd a; " * n
+
+
+def pushd_abs(n: int) -> str:
+    """`pushd /t/p<i>;` (絶対パス)。移動のたびにスタックが 1 段深くなる。"""
+    return "".join(f"pushd /t/p{i}; " for i in range(n))
 
 
 def heredocs(n: int) -> str:
@@ -172,6 +178,94 @@ class DeepRelativePathTest(test_state_limit.BoundedBase):
         # 期限 (3 秒) の手前で読み終える深さは、0.9.3 と同じく後ろの git まで読む (注意は出さない)
         out = self.findings(f'{cd_a(200)}cd "{MAIN}"; {GIT}')
         self.assertEqual([(f.blocked, f.root) for f in out], [(True, family.norm(MAIN))])
+
+
+class DeepStackTest(test_state_limit.BoundedBase):
+    """pushd のスタックを深く重ねる形は、1 回の移動をスタックの深さに比例しない時間で読む。
+
+    0.10.3 までは push のたびにスタック (tuple) を複製し、状態のハッシュもスタックの深さに比例したので、状態の数 × 深さの 2 乗の
+    時間になった (`x || cd d<i>;` 6 回の後に `pushd /t/p<i>;` 3,500 回で約 6 秒)。0.10.0 からは期限 (3 秒) で注意になり、
+    期限より後ろにある停止を落としていた (0.10.0 の CHANGELOG の「判定が変わる形」)。
+    """
+
+    def _shapes(self) -> tuple[tuple[str, str], ...]:
+        # 読みの数は Windows で倍になる (`_drive_readings`) ので、スタックの深さを読みの数で割り、読む量をそろえる
+        readings = len(command._drive_readings())
+        k = test_state_limit._limit_exponent()
+        return (
+            # 最後の移動は bash だけが移動する `command cd <main>` (zsh の読みが前半を読み終えた後、bash の読みで止める)
+            ("or_cd 6 + pushd 3500 + command cd", or_cd(k) + pushd_abs(3500 // readings) + f'command cd "{MAIN}"; {GIT}'),
+            # 終わらない here-document 7 個の後ろの git は、安全網の 7 回目の読み直しだけが読む (重い前半を 9 回読む)
+            ("or_cd 6 + pushd 600 + heredoc 7", or_cd(k) + pushd_abs(600 // readings) + heredocs(7) + f'\ngit -C "{MAIN}" {RESET}'),
+        )
+
+    def test_deep_stacks_stop_before_the_deadline(self):
+        # 0.9.3 と同じく、期限 (3 秒) の手前で読み終えて止める (期限の注意は出さない)
+        for name, cmd in self._shapes():
+            with self.subTest(name=name):
+                out = self.findings(cmd)
+                self.assertEqual([(f.blocked, f.root) for f in out], [(True, family.norm(MAIN))])
+                # 状態は上限ちょうどのまま、スタックだけが深くなる (まとめるのは、重ねた後の `cat` / zsh の `command cd` の成否で
+                # 状態が倍になったところ)
+                self.assertEqual(self.peak, command._STATE_LIMIT)
+
+    @mock.patch.object(command, "_READ_SECONDS", None)  # 読み切る時間を測る (期限で打ち切ると伸び方を測れない)
+    def test_time_grows_linearly_with_the_depth(self):
+        # 8 倍の深さで、線形なら約 8 倍、2 乗なら約 64 倍。小さい側も大きい側も、状態が上限ちょうどの同じ経路を通る
+        k = test_state_limit._limit_exponent()
+        small, large = 500, 4000
+        for n in (small, large):
+            self.assertEqual(self.verdict(or_cd(k) + pushd_abs(n) + f'cd "{MAIN}"; {GIT}'), "deny")
+            self.assertEqual((self.peak, self.collapses), (command._STATE_LIMIT, 0))
+        best = {small: float("inf"), large: float("inf")}
+        for runs, n in ((3, small), (2, large)):
+            cmd = or_cd(k) + pushd_abs(n) + f'cd "{MAIN}"; {GIT}'
+            for _ in range(runs):
+                t = time.perf_counter()
+                self.findings(cmd)
+                best[n] = min(best[n], time.perf_counter() - t)
+        times = (best[small], best[large])
+        self.assertLess(times[1], 5.0, times)
+        self.assertLess(times[1] / times[0], 16.0, times)
+        self.assertGreater(times[1] / times[0], 3.0, times)
+
+    def test_state_independent_work_is_done_once(self):
+        # 1 つの移動を状態ごとに読むところで、状態に関係しない処理を状態の数だけ繰り返さない (64 状態なら 64 倍の時間になり、
+        # 上の形が期限の手前に収まらない)。絶対パスの行き先の正規化は 1 つの読みの中で語ごとに 1 回、option と語の読みはコマンドごとに 1 回
+        k = test_state_limit._limit_exponent()
+        n = 50
+        dirs = [os.path.join(test_state_limit._BASE, f"p{i}") for i in range(n)]  # ドライブ付きの絶対パス (repo の外)
+        cmd = or_cd(k) + "".join(f'pushd "{d}"; ' for d in dirs) + GIT
+        norms: list[str] = []
+        forms: list[str] = []
+        norm, chdir_form = command.norm, command._chdir_form
+
+        def counted_norm(path):
+            norms.append(path)
+            return norm(path)
+
+        def counted_form(cmd_, *args):
+            forms.append(cmd_)
+            return chdir_form(cmd_, *args)
+
+        with mock.patch.object(command, "norm", counted_norm), mock.patch.object(command, "_chdir_form", counted_form):
+            self.assertIsNone(self.verdict(cmd))
+        self.assertEqual((self.peak, self.collapses), (command._STATE_LIMIT, 0))
+        readings = 3 * len(command._drive_readings())  # zsh の読みと bash の 2 つの読み × パスの綴りの読み
+        targets = set(dirs)
+        self.assertEqual(sum(p in targets for p in norms), n * readings)
+        # `cd d<i>` (k 個) と `pushd <dir>` (n 個) のコマンドごとに 1 回
+        self.assertEqual(len(forms), (k + n) * readings)
+
+    def test_popd_after_a_deep_stack(self):
+        # 深いスタックの各段を popd で戻る読みは、積んだ順の逆に戻る (深さによらない)。main を積んだ段まで戻ると止める
+        n = 2000
+        cmd = f'cd "{MAIN}"; pushd /t/top; ' + pushd_abs(n)
+        self.assertIsNone(self.verdict(cmd + "popd; " * n + GIT))  # /t/top にいる
+        self.assertEqual(self.verdict(cmd + "popd; " * (n + 1) + GIT), "deny")  # main に戻る
+        # main より下まで戻ると、スタックが空に見える popd は「失敗してその場に残る」と「行き先の分からない場所」の両方
+        out = self.findings(cmd + "popd; " * (n + 2) + GIT)
+        self.assertEqual([(f.blocked, f.root) for f in out if f.blocked], [(True, family.norm(MAIN))])
 
 
 class _FakeClock:
@@ -333,9 +427,9 @@ class DeadlineTest(test_state_limit.BoundedBase):
                     self.assertEqual(self.verdict(cmd), "deny")
 
     def test_slow_shape_ends_with_a_note_at_the_deadline(self):
-        # 状態の数 × スタックの深さで遅くなる形も、期限で注意にする
+        # 状態を上限まで割ってからスタックを重ねる形も、期限を過ぎたら注意にする (期限は移動の種類によらない)
         k = test_state_limit._limit_exponent()
-        cmd = or_cd(k) + "".join(f"pushd /t/p{i}; " for i in range(200)) + f'cd "{MAIN}"; {GIT}'
+        cmd = or_cd(k) + pushd_abs(200) + f'cd "{MAIN}"; {GIT}'
         out = self.findings(cmd)
         self.assertEqual([f.blocked for f in out], [False])
         self.assertEqual(len(self._note(out)), 1)
@@ -403,10 +497,10 @@ class ReadTimeHookTest(test_guard.GuardBase):
                     self.assertIn(f"期限 ({command._READ_SECONDS:g} 秒)", out["hookSpecificOutput"]["additionalContext"])
 
     def test_shape_past_the_deadline_returns_a_note(self):
-        # 期限が無ければ hook の timeout を大きく超える形 (状態の数 × スタックの深さ。期限なしで 30 秒ほど)
+        # 期限が無ければ hook の timeout を大きく超える形 (状態の数 × 相対パスの深さの 2 乗。期限なしで 30 秒ほど)
         timeout = self._timeout()
         k = test_state_limit._limit_exponent()
-        cmd = or_cd(k) + "".join(f"pushd /t/p{i}; " for i in range(8000)) + GIT
+        cmd = or_cd(k) + cd_a(400) + GIT
         elapsed, out = self._run_hook(cmd)
         self.assertEqual(test_guard.decision(out), "context")
         self.assertIn(f"期限 ({command._READ_SECONDS:g} 秒)", out["hookSpecificOutput"]["additionalContext"])
