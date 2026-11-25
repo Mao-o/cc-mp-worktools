@@ -20,7 +20,7 @@ import os
 import sys
 
 import command
-from family import Family, detect, norm, owner
+from family import Family, detect_readings, drive_spellings, norm, owner
 
 MODE_ENV = "WORKTREE_CWD_GUARD_MODE"
 ALLOW_ENV = "WORKTREE_CWD_GUARD_ALLOW"
@@ -34,10 +34,10 @@ def _mode() -> str:
 
 
 def _allowed_roots() -> set[str]:
-    # Windows では `/c/x` を Git Bash の読み (`C:\x`) でも読む。Bash の行き先を読むのと同じ和 (command.drive_spellings) で、
+    # Windows では `/c/x` を Git Bash の読み (`C:\x`) でも読む。Bash の行き先を読むのと同じ和 (family.drive_spellings) で、
     # deny の行き先と同じ綴りで書いた root が一致しないことを防ぐ
     raw = os.environ.get(ALLOW_ENV, "")
-    return {norm(s) for p in raw.split(os.pathsep) if p.strip() for s in command.drive_spellings(p)}
+    return {norm(s) for p in raw.split(os.pathsep) if p.strip() for s in drive_spellings(p)}
 
 
 def _out(decision: str | None, text: str) -> dict:
@@ -54,7 +54,7 @@ def _file_findings(path: str, cwd: str, fam: Family) -> list[command.Finding]:
     # Claude Code は Write / Edit のパスを hook の前に絶対パスへ展開して渡す (Windows では `\` 区切りの `C:\...`)。
     # `/c/x` の綴りのまま届いたときは、Bash の行き先と同じく Windows の読みと Git Bash の読みの和で判定する
     # 綴りの違う 2 つの読みが同じ行き先になることがある (`/c/../c/proj` など)。同じ理由を 2 回並べないよう、行き先でまとめる
-    targets = (norm(s if os.path.isabs(s) else os.path.join(cwd, s)) for s in command.drive_spellings(path))
+    targets = (norm(s if os.path.isabs(s) else os.path.join(cwd, s)) for s in drive_spellings(path))
     findings = []
     for target in dict.fromkeys(targets):
         o = owner(target, fam)
@@ -75,15 +75,18 @@ def evaluate(data: dict) -> dict | None:
     if tool == "Bash" and "git" not in str(tool_input.get("command") or ""):
         return None  # git を含まない Bash は対象外 (git を起動せずに返す)
 
-    fam = detect(cwd)
-    if fam is None:
+    # cwd が Git Bash の綴り (`/c/...`) で届いたときは、Windows の読みと Git Bash の読みの両方で linked worktree かを見る。
+    # 読みごとに、その読みの cwd と Family で判定し、どちらかで別の checkout なら止める (Bash の行き先と同じ和)
+    readings = detect_readings(cwd)
+    if not readings:
         return None
 
     if tool == "Bash":
-        findings = command.analyze(str(tool_input.get("command") or ""), cwd, fam)
+        findings = command.analyze_readings(str(tool_input.get("command") or ""), readings)
     else:
         path = tool_input.get(_PATH_KEYS[tool])
-        findings = _file_findings(path, cwd, fam) if isinstance(path, str) and path else []
+        found = (f for here, fam in readings for f in _file_findings(path, here, fam)) if isinstance(path, str) and path else ()
+        findings = list(dict.fromkeys(found))  # 2 つの読みが同じ行き先を指したら、同じ理由を 2 回並べない
 
     allowed = _allowed_roots()
     findings = [f for f in findings if not (f.blocked and f.root in allowed)]
@@ -92,7 +95,7 @@ def evaluate(data: dict) -> dict | None:
 
     blocked = [f.message for f in findings if f.blocked]
     notes = [f.message for f in findings if not f.blocked]
-    header = f"この session の worktree: {fam.home}"
+    header = f"この session の worktree: {' / '.join(dict.fromkeys(fam.home for _, fam in readings))}"
     if blocked and mode == "enforce":
         lines = [f"{_TAG} 別の checkout を書き換える操作を止めた。", header, *(f"- {m}" for m in blocked)]
         lines.append(

@@ -19,7 +19,7 @@ import time
 import unicodedata
 from dataclasses import dataclass
 
-from family import Family, norm, owner
+from family import Family, _drive_readings, _msys_drive, norm, owner
 
 _PUNCT = "();<>|&\n"
 _WRAPPERS = {"env", "command", "exec", "time", "nohup", "sudo"}
@@ -280,36 +280,6 @@ def _expand_home(path: str) -> str:
     if named and not os.path.isdir(os.path.expanduser(named.group())):
         return path
     return os.path.expanduser(path)
-
-
-# Git Bash (MSYS) のドライブの綴り。`/c/x` と `/c` は、Git Bash では `C:\x` と `C:\` (pwd もこの形を返す)。
-# Windows の Python は今のドライブの `\c\x` と読む
-_MSYS_DRIVE = re.compile(r"/([A-Za-z])(?=/|\Z)")
-
-
-def _msys_drive(path: str) -> str:
-    """`/c/x` を `c:/x` に、`/c` を `c:/` に読み替える。ドライブの綴りでない語はそのまま返す。"""
-    m = _MSYS_DRIVE.match(path)
-    return f"{m.group(1)}:/{path[3:]}" if m else path
-
-
-def _drive_readings() -> tuple[bool, ...]:
-    """`/c/x` の綴りの読み (False = その OS の読み、True = Git Bash の読み) のうち、判定に使うもの。
-
-    Windows の Bash tool は Git Bash で動き、`cd /c/x` も `git -C /c/x` も `C:\\x` に届く。Windows の読みも残して和で判定する
-    (`MSYS_NO_PATHCONV=1` などで変換を止めると、git は `\\c\\x` を読む。和にすれば、これまで止めていた形は止まったまま)。
-    POSIX の `/c/x` はそのままのパスなので、Git Bash の読みはしない。
-    """
-    return (False, True) if os.name == "nt" else (False,)
-
-
-def drive_spellings(path: str) -> tuple[str, ...]:
-    """path の綴りを、読み (`_drive_readings`) ごとに並べる (同じ綴りは 1 つにまとめる)。
-
-    Bash の行き先と同じ読みの和を、Write / Edit のパスと `WORKTREE_CWD_GUARD_ALLOW` にも当てるための入り口 (__main__)。
-    Windows では `/c/x` に `c:/x` を足す。POSIX と、ドライブの綴りでない語はそのまま 1 つ。
-    """
-    return tuple(dict.fromkeys(_msys_drive(path) if msys else path for msys in _drive_readings()))
 
 
 def _resolve(base: str | None, path: str, msys: bool = False) -> str | None:
@@ -826,10 +796,24 @@ def _read(normalized: str, cwd: str, fam: Family, deadline: _Deadline | None = N
 
 
 def analyze(command: str, cwd: str, fam: Family) -> list[Finding]:
+    return analyze_readings(command, ((cwd, fam),))
+
+
+def analyze_readings(command: str, readings: tuple[tuple[str, Family], ...]) -> list[Finding]:
+    """作業ディレクトリの読み (`family.detect_readings` の (cwd, Family)) ごとに判定し、どれかで見つかったものを返す (読みの和)。
+
+    期限は全体で 1 つ (読みが 2 つになっても、hook の時間の上限までの余裕を減らさない)。読みが 1 つなら `analyze` と同じ。
+    """
     if "git" not in command:
         return []
     deadline = _Deadline(_READ_SECONDS)
-    findings = _analyze(command, cwd, fam, deadline)
+    findings: list[Finding] = []
+    seen: set[str] = set()
+    for cwd, fam in readings:
+        for f in _analyze(command, cwd, fam, deadline):
+            if f.message not in seen:
+                seen.add(f.message)
+                findings.append(f)
     if deadline.passed:
         findings.append(deadline.finding())
     return findings

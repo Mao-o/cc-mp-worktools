@@ -1,6 +1,7 @@
 """worktree-cwd-guard の判定テスト (使い捨ての main checkout + linked worktree 上で実行する)。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import ntpath
 import os
@@ -46,11 +47,69 @@ def decision(out: dict | None) -> str | None:
     return None if out is None else out["hookSpecificOutput"].get("permissionDecision", "context")
 
 
+def tree_state(base: Path) -> dict[str, tuple]:
+    """base の下の全エントリの形 (symlink は辿らない)。ファイルは中身の hash、symlink は行き先、ディレクトリは種類だけ。
+
+    GuardBase の SHARE_REPO の検査 (共有の repo とその周りに書かない) が、テストの前後で比べる。
+    mtime は比べない: 中身の変わらない書き直し (git の index の refresh など) は他のテストに漏れないので、検査の対象にしない。
+    """
+    state: dict[str, tuple] = {}
+    stack = [str(base)]
+    while stack:
+        with os.scandir(stack.pop()) as entries:
+            for entry in entries:
+                rel = os.path.relpath(entry.path, base)
+                if entry.is_symlink():
+                    state[rel] = ("link", os.readlink(entry.path))
+                elif entry.is_dir(follow_symlinks=False):
+                    state[rel] = ("dir",)
+                    stack.append(entry.path)
+                elif entry.is_file(follow_symlinks=False):
+                    with open(entry.path, "rb") as f:
+                        state[rel] = ("file", hashlib.sha256(f.read()).hexdigest())
+                else:
+                    state[rel] = ("other", entry.stat(follow_symlinks=False).st_mode)
+    return state
+
+
+def _git_marker(path: Path) -> tuple:
+    """`.git` の形: symlink の行き先 (symlink でなければ None)、種類 (dir / file / missing)、ファイルなら中身。"""
+    link = os.readlink(path) if os.path.islink(path) else None
+    if path.is_dir():
+        return (link, "dir", None)
+    if path.is_file():
+        return (link, "file", path.read_bytes())
+    return (link, "missing", None)
+
+
+def family_fingerprint(cwd: str, found: tuple) -> tuple:
+    """detect の結果を決めるファイルの形。GuardBase の detect の覚えが古くなっていないかを、覚えた値に当てるたびに比べる。
+
+    - cwd とその上の `.git` (最初に見つかるまで): linked worktree の中か、どの worktree か
+    - 各 Family の `<common>/worktrees` の一覧と各 `gitdir` の中身: `git worktree list` の並び (add / remove / move / repair)
+    - 各 checkout の `.git` (symlink の行き先・種類・中身): Family.gitdirs
+    """
+    start = Path(cwd)
+    chain: list[tuple] = []
+    for d in (start, *start.parents):
+        chain.append(_git_marker(d / ".git"))
+        if chain[-1][1] != "missing":
+            break
+    parts: list[tuple] = [(start.is_dir(), tuple(chain))]
+    for _, fam in found:
+        admin = Path(fam.common_dir) / "worktrees"
+        names = sorted(os.listdir(admin)) if admin.is_dir() else []
+        parts.append(tuple((n, _git_marker(admin / n / "gitdir")) for n in names))
+        parts.append(tuple(_git_marker(Path(root) / ".git") for root in fam.roots))
+    return tuple(parts)
+
+
 class GuardBase(HermeticGitTestCase):
     """使い捨ての main checkout + linked worktree 2 つを用意する (他の test module も継承する)。"""
 
     # True にしたクラスは、クラスの全テストで 1 つの repo と detect の覚えを共有する。
-    # repo とその周り (一時 dir) に何も書かないクラスだけに付ける (書くと、同じクラスの他のテストに漏れる)
+    # repo とその周り (一時 dir) に何も書かないクラスだけに付ける (書くと、同じクラスの他のテストに漏れる)。
+    # 書いたテストは、テストの後に一時 dir の中を比べて FAIL にする (tree_state)
     SHARE_REPO = False
 
     @classmethod
@@ -59,7 +118,8 @@ class GuardBase(HermeticGitTestCase):
         if cls.SHARE_REPO:
             tmp = tempfile.TemporaryDirectory()
             cls.addClassCleanup(tmp.cleanup)
-            cls._shared_repo = make_repo(Path(tmp.name))
+            cls._shared_base = Path(tmp.name)
+            cls._shared_repo = make_repo(cls._shared_base)
             cls._shared_families = {}
 
     def setUp(self):
@@ -68,6 +128,7 @@ class GuardBase(HermeticGitTestCase):
             self._tmp = None
             self.main, self.a, self.b = self._shared_repo
             self._families = self._shared_families
+            self.addCleanup(self._assert_shared_tree_kept, tree_state(self._shared_base))
         else:
             self._tmp = tempfile.TemporaryDirectory()
             self.main, self.a, self.b = make_repo(Path(self._tmp.name))
@@ -79,17 +140,35 @@ class GuardBase(HermeticGitTestCase):
         # evaluate は呼ぶたびに detect で git を 2 回起動する。テストの間は repo の形が変わらないので、cwd ごとに 1 回だけ
         # 本物の detect を走らせて覚える (entry の global を差し替えるので、evaluate だけに効く。family.detect を直接呼ぶテストと、
         # hook を subprocess で起動するテストは本物の detect を通る)。テストの途中で worktree を足す・消す・`.git` ファイルを
-        # 書き換えた後に、同じ cwd で evaluate を呼ぶなら self.forget_family() を呼ぶ
-        real = _ENTRY.detect
+        # 書き換えた後に、同じ cwd で evaluate を呼ぶなら self.forget_family() を呼ぶ。
+        # 呼び忘れは、覚えた値に当てるたびに detect の結果を決めるファイルの形 (family_fingerprint) を比べて FAIL にする
+        real = _ENTRY.detect_readings
 
         def remembered(cwd):
             if cwd not in self._families:
-                self._families[cwd] = real(cwd)
-            return self._families[cwd]
+                found = real(cwd)
+                self._families[cwd] = (found, family_fingerprint(cwd, found))
+                return found
+            found, fingerprint = self._families[cwd]
+            if family_fingerprint(cwd, found) != fingerprint:
+                raise self.failureException(
+                    f"detect の覚えが古い ({cwd}): 覚えた後に worktree の一覧か `.git` が変わった。"
+                    "worktree を変えたら forget_family() を呼ぶ"
+                )
+            return found
 
-        patcher = mock.patch.object(_ENTRY, "detect", remembered)
+        patcher = mock.patch.object(_ENTRY, "detect_readings", remembered)
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    def _assert_shared_tree_kept(self, before: dict[str, tuple]) -> None:
+        after = tree_state(self._shared_base)
+        changed = sorted(k for k in before.keys() | after.keys() if before.get(k) != after.get(k))
+        if changed:
+            self.fail(
+                "SHARE_REPO のクラスのテストが、共有の repo とその周りを書き換えた "
+                f"(書くテストは SHARE_REPO を外したクラスに置く): {changed[:10]}"
+            )
 
     def forget_family(self):
         self._families.clear()
@@ -552,7 +631,7 @@ class NtpathEmulationTest(unittest.TestCase):
         # detect は git を起動するので、固定の family を返す。外側の env の MODE / ALLOW は外す
         with (
             mock.patch.dict(os.environ),
-            mock.patch.object(_ENTRY, "detect", lambda cwd: fam or self.fam),
+            mock.patch.object(_ENTRY, "detect_readings", lambda cwd: ((cwd, fam or self.fam),)),
             mock.patch.object(ntpath, "isdir", lambda p: False),
             mock.patch.object(os, "pathsep", ";"),
         ):
@@ -662,6 +741,161 @@ class NtpathEmulationTest(unittest.TestCase):
         self.assertIsNone(self._evaluate(self._file("Write", "C:\\c\\proj\\x.py"), fam, allow="/c/proj"))
         self.assertIsNone(self._evaluate(bash("git -C /c/proj reset --hard", self.A), fam, allow="/c/proj"))
 
+    # --- hook の入力の cwd が Git Bash の綴りで届く (family.detect_readings) ----------
+
+    GIT_BASH_A = "/c/Users/other/repo/.claude/worktrees/a"
+
+    def _shadow_family(self) -> family.Family:
+        # `/c/Users/other/repo/...` の Windows の読み (今のドライブの `\c\Users\...`) の側にも linked worktree がある世界
+        n = family.norm
+        shadow_main = "C:\\c\\Users\\other\\repo"
+        return family.Family(
+            home=n(shadow_main + "\\.claude\\worktrees\\a"), roots=(n(shadow_main), n(shadow_main + "\\.claude\\worktrees\\a")),
+            common_dir=n(shadow_main + "\\.git"),
+        )
+
+    def _linked(self, *families: family.Family):
+        """families の worktree の中 (root か、その下) の cwd だけを linked worktree と読む、1 つの読みの detect (git は起動しない)。
+
+        cwd は今の OS の読み (ここでは今のドライブを C: とした Windows の読み) で読む。読みの和を取るのは detect_readings の側
+        """
+        def detect_one(cwd):
+            here = family.norm(cwd)
+            for fam in families:
+                if here == fam.home or here.startswith(fam.home + "\\"):
+                    return fam
+            return None
+
+        return mock.patch.object(family, "_detect_one", detect_one)
+
+    def _evaluate_at(self, data: dict, families: tuple[family.Family, ...], allow: str | None = None) -> dict | None:
+        # _evaluate と同じ env と差し替えで、detect だけを本物の detect_readings (読みの和) にする
+        with (
+            self._linked(*families),
+            mock.patch.dict(os.environ),
+            mock.patch.object(ntpath, "isdir", lambda p: False),
+            mock.patch.object(os, "pathsep", ";"),
+        ):
+            os.environ.pop("WORKTREE_CWD_GUARD_MODE", None)
+            os.environ.pop("WORKTREE_CWD_GUARD_ALLOW", None)
+            if allow is not None:
+                os.environ["WORKTREE_CWD_GUARD_ALLOW"] = allow
+            return evaluate(data)
+
+    def _payloads(self, cwd: str) -> list[tuple[dict, str | None]]:
+        # (入力, 期待する判定)。相対パスは cwd から解決する
+        def file(tool: str, path: str) -> dict:
+            return {**self._file(tool, path), "cwd": cwd}
+
+        return [
+            (file("Write", "C:\\Users\\other\\repo\\x.py"), "deny"),
+            (file("Edit", "/c/Users/other/wt-b/x.py"), "deny"),
+            (file("Write", "../../../x.py"), "deny"),
+            (file("NotebookEdit", "..\\..\\..\\..\\wt-b\\x.ipynb"), "deny"),
+            (file("Write", "x.py"), None),
+            (file("Write", "C:\\Users\\other\\repo\\.claude\\worktrees\\a\\x.py"), None),
+            (bash("git -C C:/Users/other/repo reset --hard", cwd), "deny"),
+            (bash("git -C /c/Users/other/wt-b commit -m x", cwd), "deny"),
+            (bash("cd ../../.. && git reset --hard", cwd), "deny"),
+            (bash("git -C ../../.. stash", cwd), "deny"),
+            (bash("git reset --hard", cwd), None),
+            (bash("cd ../../.. && git log", cwd), None),
+        ]
+
+    def test_git_bash_spelling_of_cwd_is_a_linked_worktree(self):
+        # hook の入力の cwd が `/c/Users/...` で届いても、Git Bash の読み (`C:\Users\...`) で linked worktree と分かる。
+        # Windows の読み (今のドライブの `\c\Users\...`) だけで読むと None になり、guard 全体が素通しになっていた
+        with self._linked(self.fam):
+            for cwd in (self.GIT_BASH_A, "/C/Users/other/repo/.claude/worktrees/a", self.GIT_BASH_A + "/src", self.A, "C:/Users/other/repo/.claude/worktrees/a"):
+                with self.subTest(cwd=cwd):
+                    self.assertEqual(family.detect(cwd), self.fam)
+            for cwd in (
+                "/cc/Users/other/repo/.claude/worktrees/a",  # ドライブの綴りではない
+                "/d/Users/other/repo/.claude/worktrees/a",  # 別のドライブ
+                "/c/Users/other/repo",  # main checkout
+                "\\c\\Users\\other\\repo\\.claude\\worktrees\\a",  # Windows の読みでは今のドライブの `\c\...`
+            ):
+                with self.subTest(cwd=cwd):
+                    self.assertIsNone(family.detect(cwd))
+                    self.assertEqual(family.detect_readings(cwd), ())
+
+    def test_git_bash_spelling_of_cwd_guards_like_the_windows_spelling(self):
+        # `/c/...` の cwd でも別の checkout への書き込みを止め、相対パスはその読みの cwd (`C:\Users\...`) から解決する。
+        # 判定と文面は `C:\...` の cwd と同じ (docs の形の cwd は 0.10.2 と同じ)
+        payloads, windows = self._payloads(self.GIT_BASH_A), self._payloads(self.A)
+        self.assertEqual(len(payloads), len(windows))
+        for (data, expected), (same, _) in zip(payloads, windows):
+            with self.subTest(data=data["tool_input"]):
+                out = self._evaluate_at(data, (self.fam,))
+                self.assertEqual(decision(out), expected)
+                self.assertEqual(out, self._evaluate_at(same, (self.fam,)))
+        # 自分の worktree の下の subdirectory を `/c/...` で書いた cwd も同じ
+        sub = self.GIT_BASH_A + "/src"
+        self.assertEqual(decision(self._evaluate_at(self._file("Write", "../../../../x.py") | {"cwd": sub}, (self.fam,))), "deny")
+        self.assertIsNone(self._evaluate_at(self._file("Write", "../x.py") | {"cwd": sub}, (self.fam,)))
+        self.assertEqual(decision(self._evaluate_at(bash("cd ../../../.. && git reset --hard", sub), (self.fam,))), "deny")
+        self.assertIsNone(self._evaluate_at(bash("cd .. && git reset --hard", sub), (self.fam,)))
+
+    def test_both_readings_of_cwd_in_different_worktrees(self):
+        # cwd の 2 つの読みが別々の linked worktree に当たるときは、両方の読みで判定し、どちらかで別の checkout なら止める
+        shadow = self._shadow_family()
+        both = (shadow, self.fam)
+        cwd = self.GIT_BASH_A
+        with self._linked(*both):
+            self.assertEqual(family.detect_readings(cwd), ((cwd, shadow), ("c:/Users/other/repo/.claude/worktrees/a", self.fam)))
+            self.assertEqual(family.detect(cwd), shadow)  # 読みの順 (Windows の読みが先) の最初
+        for path in ("C:\\Users\\other\\repo\\x.py", "C:\\c\\Users\\other\\repo\\x.py"):
+            with self.subTest(path=path):
+                self.assertEqual(decision(self._evaluate_at({**self._file("Write", path), "cwd": cwd}, both)), "deny")
+        self.assertIsNone(self._evaluate_at({**self._file("Write", "x.py"), "cwd": cwd}, both))
+        self.assertIsNone(self._evaluate_at(bash("git reset --hard", cwd), both))
+        for data, targets in (
+            ({**self._file("Write", "../../../x.py"), "cwd": cwd}, ("c:\\c\\users\\other\\repo\\x.py", "c:\\users\\other\\repo\\x.py")),
+            (bash("cd ../../.. && git reset --hard", cwd), ("c:\\c\\users\\other\\repo", "c:\\users\\other\\repo")),
+        ):
+            with self.subTest(data=data["tool_input"]):
+                out = self._evaluate_at(data, both)
+                self.assertEqual(decision(out), "deny")
+                reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+                self.assertIn(f"この session の worktree: {shadow.home} / {self.fam.home}\n", reason)
+                self.assertEqual(reason.count("\n- "), 2, reason)
+                for target in targets:
+                    self.assertIn(f"({target})", reason)
+                # 片方の読みの行き先を許しても、もう片方の読みで止める
+                out = self._evaluate_at(data, both, allow="C:\\Users\\other\\repo")
+                self.assertEqual(decision(out), "deny")
+                reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+                self.assertEqual(reason.count("\n- "), 1, reason)
+                self.assertIn(f"({targets[0]})", reason)
+                self.assertIsNone(self._evaluate_at(data, both, allow="C:\\Users\\other\\repo;C:\\c\\Users\\other\\repo"))
+
+    def test_readings_of_cwd_in_the_same_worktree_name_each_target_once(self):
+        # cwd の 2 つの読みが同じ worktree に当たる形 (ドライブの root より上に出る `..`) で、同じ理由を 2 回並べない
+        cwd = "/c/../Users/other/repo/.claude/worktrees/a"
+        with self._linked(self.fam):
+            self.assertEqual([f for _, f in family.detect_readings(cwd)], [self.fam, self.fam])
+        for data in ({**self._file("Write", "C:\\Users\\other\\repo\\x.py"), "cwd": cwd}, bash("git -C C:/Users/other/repo reset --hard", cwd)):
+            with self.subTest(data=data["tool_input"]):
+                out = self._evaluate_at(data, (self.fam,))
+                self.assertEqual(decision(out), "deny")
+                reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+                self.assertEqual(reason.count("\n- "), 1, reason)
+                self.assertIn(f"この session の worktree: {self.fam.home}\n", reason)
+
+    def test_one_read_deadline_for_all_readings_of_cwd(self):
+        # 読み取りの期限は、cwd の読みが 2 つになっても 1 つ (hook の時間の上限までの余裕を、読みの数で割らない)
+        made = []
+
+        class CountingDeadline(command._Deadline):
+            def __init__(self, seconds):
+                made.append(seconds)
+                super().__init__(seconds)
+
+        with mock.patch.object(command, "_Deadline", CountingDeadline):
+            out = self._evaluate_at(bash("cd ../../.. && git reset --hard", self.GIT_BASH_A), (self._shadow_family(), self.fam))
+        self.assertEqual(decision(out), "deny")
+        self.assertEqual(made, [command._READ_SECONDS])
+
 
 @unittest.skipIf(os.name == "nt", "POSIX のパスの読み")
 class PosixDrivePathTest(unittest.TestCase):
@@ -683,9 +917,9 @@ class PosixDrivePathTest(unittest.TestCase):
         main = "/c/Users/other/repo"
         a = main + "/.claude/worktrees/a"
         fam = family.Family(home=n(a), roots=(n(main), n(a)), common_dir=n(main + "/.git"))
-        self.assertEqual(command.drive_spellings(main), (main,))
+        self.assertEqual(family.drive_spellings(main), (main,))
         self.assertEqual(_ENTRY._file_findings("/c/x.py", main, fam), [])
-        with mock.patch.dict(os.environ), mock.patch.object(_ENTRY, "detect", lambda cwd: fam):
+        with mock.patch.dict(os.environ), mock.patch.object(_ENTRY, "detect_readings", lambda cwd: ((cwd, fam),)):
             os.environ.pop("WORKTREE_CWD_GUARD_MODE", None)
             os.environ.pop("WORKTREE_CWD_GUARD_ALLOW", None)
             self.assertEqual(decision(evaluate(write(main + "/x.py", a))), "deny")

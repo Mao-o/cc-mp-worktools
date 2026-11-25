@@ -308,7 +308,7 @@ class RealGitTest(unittest.TestCase):
 class GitBashDrivePathTest(unittest.TestCase):
     """Git Bash が `/c/x` を `C:\\x` と読む前提を、本物の Git Bash と git で固定する。
 
-    Windows で Bash の行き先を Git Bash の読み (command.py の `_msys_drive`) でも判定するのは、この前提に依る。guard の判定は
+    Windows で Bash の行き先を Git Bash の読み (family.py の `_msys_drive`) でも判定するのは、この前提に依る。guard の判定は
     通さない。このクラスが落ちたら前提が外れているので、Git Bash の読みを見直す (和で判定しているので、外れていても見逃しは増えず、
     止めすぎになる)。
     """
