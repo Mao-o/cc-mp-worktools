@@ -7,11 +7,42 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 _GIT_TIMEOUT = 5
+
+# Git Bash (MSYS) のドライブの綴り。`/c/x` と `/c` は、Git Bash では `C:\x` と `C:\` (pwd もこの形を返す)。
+# Windows の Python は今のドライブの `\c\x` と読む
+_MSYS_DRIVE = re.compile(r"/([A-Za-z])(?=/|\Z)")
+
+
+def _msys_drive(path: str) -> str:
+    """`/c/x` を `c:/x` に、`/c` を `c:/` に読み替える。ドライブの綴りでない語はそのまま返す。"""
+    m = _MSYS_DRIVE.match(path)
+    return f"{m.group(1)}:/{path[3:]}" if m else path
+
+
+def _drive_readings() -> tuple[bool, ...]:
+    """`/c/x` の綴りの読み (False = その OS の読み、True = Git Bash の読み) のうち、判定に使うもの。
+
+    Windows の Bash tool は Git Bash で動き、`cd /c/x` も `git -C /c/x` も `C:\\x` に届く。Windows の読みも残して和で判定する
+    (`MSYS_NO_PATHCONV=1` などで変換を止めると、git は `\\c\\x` を読む。和にすれば、これまで止めていた形は止まったまま)。
+    POSIX の `/c/x` はそのままのパスなので、Git Bash の読みはしない。
+    """
+    return (False, True) if os.name == "nt" else (False,)
+
+
+def drive_spellings(path: str) -> tuple[str, ...]:
+    """path の綴りを、読み (`_drive_readings`) ごとに並べる (同じ綴りは 1 つにまとめる)。
+
+    Bash の行き先 (command) と同じ読みの和を、hook の入力の cwd (`detect_readings`)、Write / Edit のパスと
+    `WORKTREE_CWD_GUARD_ALLOW` (__main__) にも当てるための入り口。
+    Windows では `/c/x` に `c:/x` を足す。POSIX と、ドライブの綴りでない語はそのまま 1 つ。
+    """
+    return tuple(dict.fromkeys(_msys_drive(path) if msys else path for msys in _drive_readings()))
 
 
 @dataclass(frozen=True)
@@ -65,7 +96,50 @@ def _git(args: list[str], cwd: Path) -> str | None:
 
 
 def detect(cwd: str) -> Family | None:
-    """cwd が linked worktree の中なら Family を返す。それ以外 (main checkout / repo 外) は None。"""
+    """cwd が linked worktree の中なら Family を返す。それ以外 (main checkout / repo 外) は None。
+
+    Windows で Git Bash の綴り (`/c/...`) の cwd は、読み (`detect_readings`) の最初に linked worktree と分かったものを返す。
+    hook の判定は、すべての読みを使う `detect_readings` を通る。detect を確かめられなかった読み (例外) は飛ばす。
+    """
+    for _, fam in detect_readings(cwd):
+        if isinstance(fam, Family):
+            return fam
+    return None
+
+
+def detect_readings(cwd: str) -> tuple[tuple[str, Family | Exception], ...]:
+    """cwd の綴りの読み (`drive_spellings`) ごとに detect し、linked worktree と分かった読みの (その読みの cwd, Family) を並べる。
+
+    hook の入力の cwd が Git Bash の綴り (`/c/Users/...`) で届くと、Windows の Python は今のドライブの `\\c\\Users\\...` と読む。
+    その読みだけでは linked worktree と分からず、guard 全体が素通しになる。Bash の行き先・Write / Edit のパス・許可リストと
+    同じく、Windows の読みと Git Bash の読みの和で読む。どの読みでも linked worktree と分からなければ空。
+    2 つの読みが別々の Family になったら両方を返し、呼び出し側は両方で判定する (どちらかで止めるなら止める)。
+    相対パスの行き先は、その Family を見つけた読みの cwd から解決する (別の読みの cwd から解決すると、自分の worktree の外を指す)。
+
+    1 つの読みの detect が例外を投げたら、その読みは (その読みの cwd, 例外) として並べ、ほかの読みで判定を続ける
+    (1 つの読みの失敗で、ほかの読みの判定を消さない。呼び出し側は例外の読みを注意として出す)。
+    すべての読みで例外のときだけ、最初の例外を投げ直す (読みが 1 つの POSIX と `C:\\...` の cwd は、これまでと同じく
+    呼び出し側の「内部エラー」の注意になる)。
+    """
+    spellings = drive_spellings(cwd)
+    out: list[tuple[str, Family | Exception]] = []
+    errors: list[Exception] = []
+    for spelling in spellings:
+        try:
+            fam = _detect_one(spelling)
+        except Exception as e:  # noqa: BLE001 - 1 つの読みの失敗で、ほかの読みの判定を消さない
+            errors.append(e)
+            out.append((spelling, e))
+            continue
+        if fam is not None:
+            out.append((spelling, fam))
+    if len(errors) == len(spellings):
+        raise errors[0]
+    return tuple(out)
+
+
+def _detect_one(cwd: str) -> Family | None:
+    """cwd を今の OS の読みだけで読んで detect する。"""
     start = Path(cwd)
     if not start.is_dir() or not _linked_marker(start):
         return None

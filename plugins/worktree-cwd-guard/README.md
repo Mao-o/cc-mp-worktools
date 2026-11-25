@@ -56,13 +56,21 @@
   - Windows の Git Bash の綴りのうち `/c/x` / `/c` 以外の形。区切りに `\` を混ぜた `/c\x`、`/cygdrive/c/x`、
     ドライブの root より上に出る `..` (`/c/../c/x`)、Git Bash の root の下のパス (`/tmp` / `/usr` など) は
     Git Bash の読みにせず、Windows の読みだけで判定します (Bash の行き先、Write / Edit のパス、
-    `WORKTREE_CWD_GUARD_ALLOW` のどれも同じです)。`MSYS_NO_PATHCONV=1` などで変換を止めた git の `/c/x` も
+    `WORKTREE_CWD_GUARD_ALLOW`、hook の入力の作業ディレクトリのどれも同じです)。`MSYS_NO_PATHCONV=1` などで変換を止めた git の `/c/x` も
     Git Bash の読みで判定するので、止めすぎることがあります
+  - Windows で、Git Bash の root (`/`) を通る相対パス。`/c/Users/<u>/...` の作業ディレクトリからドライブの root より上に出る
+    `cd ../../../../../../../c/Users/<u>/repo && git ...` や、`cd / && cd c/Users/<u>/repo && git ...` は、Git Bash では
+    `C:\Users\<u>\repo` に届きますが、guard は `..` と `/` をドライブの root (`C:\`) で読み、`C:\c\Users\<u>\repo` を指すとみなして止めません
 - Write / Edit のパスは、Claude Code が hook に渡した値で判定します。Claude Code は hook の前にパスを絶対パスへ展開し、
   Windows では `\` 区切りの `C:\...` の形で渡します (公式 docs)。書き込む先と hook に渡す値は同じものとして扱い、
   Claude Code が `/c/x` を `C:\x` と今のドライブの `\c\x` のどちらに展開するかは確かめていません (Windows の実機で
   測っていません)。`/c/...` の綴りのまま届いたときは、Bash の行き先と同じく Git Bash の読みと Windows の読みの
   両方で判定し、どちらかで別の checkout なら止めます
+- hook の入力の作業ディレクトリ (`cwd`) が Windows で `/c/...` の綴りで届いたときも、Git Bash の読み (`C:\...`) と
+  Windows の読み (今のドライブの `\c\...`) の両方で linked worktree の中かを確かめ、linked worktree と分かった読みの
+  作業ディレクトリから相対パスを解決して判定します (2 つの読みが別々の linked worktree に当たれば両方で判定し、どちらかで
+  別の checkout なら止めます)。Claude Code が Windows で `cwd` をどの形で渡すかは公式 docs に書かれておらず、
+  Windows の実機でも確かめていません。`C:\...` の形で届くなら、この読みは判定を変えません
 - `&&` / `||` の分岐ごとに行き先やディレクトリスタックが割れる形を何度も続け、追っている状態 (作業ディレクトリ・スタック・
   直前の成否の組) が 64 を超えると、そこから先の行き先を決めず、後ろの git は注意だけにします (`x || cd d1; x || cd d2; ...` を
   7 回以上続けた形など。状態は分岐のたびに倍になり、hook が時間切れになるとコマンドはそのまま走るためです)。zsh で `&` の
