@@ -1319,7 +1319,9 @@ def _inner_path_command(word: str) -> bool:
     return opener >= 0 and ")" not in head[opener + 2:]
 
 
-def _parse_leading_env(cmd: str, home: str | None = None) -> tuple[str, dict[str, str]]:
+def _parse_leading_env(
+    cmd: str, home: str | None = None, unread: set[str] | None = None
+) -> tuple[str, dict[str, str]]:
     """先頭の `KEY=VALUE` 群を剥がし (残りコマンド, 収集 env dict) を返す。
 
     剥がし条件:
@@ -1337,11 +1339,20 @@ def _parse_leading_env(cmd: str, home: str | None = None) -> tuple[str, dict[str
     `home` を渡すと、値の `~` をシェルの代入と同じ規則で展開する (`_expand_assignment_tilde`)。
     シェル自身が行う代入 (wrapper の後ろではない) にだけ渡す。
     `_LEGACY_VALUE_READING` の間は 0.29.9 までと同じく読む。
+
+    `unread` (集合) を渡すと、剥がした代入のうち値を静的に読めなかったもの (収集 env に入れなかった
+    代入: `$(` / backtick / `$VAR` / 配列 / 追記 / 要素の代入) のキーを足す (v0.30.3)。後ろに同じキーへの
+    静的な代入があれば、そちらが勝つので外す (`AWS_PROFILE=$(z) AWS_PROFILE=dev aws ...` は dev)。
+    前の静的な代入の値が収集 env に残るとき (`AWS_PROFILE=dev AWS_PROFILE=$(z) aws ...`) もキーを足す
+    (実際の値は後ろの読めない値)。最初に値を飛ばした代入から後ろを返すとき (代入だけのセグメント) は、
+    その代入より前の状態に戻す。値で照合するのではなく、上書きされたことだけを伝える印
+    (`unread_env_candidates`)。
     """
     global _LEGACY_VALUE_SEEN, _GH_UNREAD_SEEN
     collected: dict[str, str] = {}
     # 最初に値を飛ばした (0.29.9 が剥がすのをやめた) 代入から後ろの文字列と、その前までに集めた env
     first_dynamic = None
+    unread_at_first_dynamic: set[str] = set()
     while True:
         m = _ASSIGNMENT_HEAD.match(cmd)
         if not m:
@@ -1368,6 +1379,8 @@ def _parse_leading_env(cmd: str, home: str | None = None) -> tuple[str, dict[str
                 dynamic = legacy_end is None
                 if dynamic and first_dynamic is None:
                     first_dynamic = (cmd, dict(collected))
+                    if unread is not None:
+                        unread_at_first_dynamic = set(unread)
                 if dynamic:
                     if _inner_path_command(cmd.split(None, 1)[0]):
                         _LEGACY_VALUE_SEEN = True
@@ -1383,6 +1396,9 @@ def _parse_leading_env(cmd: str, home: str | None = None) -> tuple[str, dict[str
             # AWS_PROFILE は export 済みなら後ろの aws に効く。`X=1` だけを返すと、`core/workdir.py` の
             # `_env_names_changed` が AWS_PROFILE を変えたと読まず、hook の env の AWS_PROFILE を
             # ディレクトリ単位の固定として通してしまう。
+            if unread is not None:
+                unread.clear()
+                unread.update(unread_at_first_dynamic)
             return first_dynamic
         if not rest or rest[0] not in " \t":
             return cmd, collected
@@ -1402,6 +1418,10 @@ def _parse_leading_env(cmd: str, home: str | None = None) -> tuple[str, dict[str
             # `AWS_PROFILE=dev AWS_PROFILE=prod aws ...` は prod で実行されるため、
             # setdefault (最初優先) だと実行時と異なる profile で検証が通りうる。
             collected[key] = value
+            if unread is not None:
+                unread.discard(key)
+        elif unread is not None:
+            unread.add(key)
         cmd = rest.lstrip()
 
 
@@ -1978,6 +1998,12 @@ def _strip_command_path(cmd: str) -> str:
     tok = m.group(1)
     if "'" in tok or '"' in tok:
         return cmd
+    # リダイレクトの語 (`2>/dev/null` / `</dev/null`) はコマンド名ではない。前置きの代入の後ろに置いた
+    # リダイレクト (`AWS_PROFILE=prod 2>/dev/null aws ...`) は、同じラウンドで `_strip_leading_syntax` より
+    # 先にここに来るので、basename に揃えると `null aws ...` になり、後ろの CLI が候補にならない (v0.30.3)。
+    # 次のラウンドの `_strip_leading_syntax` が剥がす。
+    if _LEADING_REDIRECT_RE.match(tok):
+        return cmd
     # `NAME=値` の代入だけのセグメント (後ろにコマンド語が無い。後ろにあれば `_parse_leading_env` が
     # 先に剥がしている) は、コマンドの呼び出しではない。値が `/…/firebase-tools` で終わるだけで
     # basename に揃えると、firebase のコマンドとして検出され誤 deny になる。代入の値は
@@ -2097,15 +2123,22 @@ def external_chdir_candidates(command: str) -> frozenset[str]:
 
 def _normalize_segment(cmd: str, max_iter: int = 8) -> tuple[str, dict[str, str]]:
     """wrapper と先頭 env を剥がし (正規化コマンド, 収集 env) を返す。"""
-    normalized, env, _chdir, _external, _reread = _normalize_segment_chdir(cmd, max_iter)
+    normalized, env, *_rest = _normalize_segment_chdir(cmd, max_iter)
     return normalized, env
 
 
 def _normalize_segment_chdir(
     cmd: str, max_iter: int = 8, home: str | None = None
-) -> tuple[str, dict[str, str], bool, bool, bool]:
+) -> tuple[str, dict[str, str], bool, bool, bool, frozenset[str], bool]:
     """wrapper と先頭 env を剥がし (正規化コマンド, 収集 env, 作業ディレクトリを変えたか,
-    外部プログラムを剥がしたか, シェル経由 wrapper の中身を取り出したか) を返す。
+    外部プログラムを剥がしたか, シェル経由 wrapper の中身を取り出したか, 値を読めなかった代入の
+    キー, heredoc の本文を落としたか) を返す。
+
+    6 つ目は、剥がした代入のうち値を静的に読めず収集 env に入れなかったもののキー (v0.30.3。
+    `_parse_leading_env` の `unread`)。内側 (後に出現) の静的な代入が同じキーにあれば外し、
+    収集 env と同じく sudo の env scrub で捨てる。7 つ目は、heredoc の本文と宣言を落としたか
+    (`_strip_heredoc_bodies` で文字列が変わったか。v0.30.3)。落とした行は区切りを含んだまま返る
+    (`cat <<EOF && kubectl ...`) ので、呼び出し側 (`_segment_candidates`) が分割し直す。
 
     5 つ目は、シェル経由で実行する wrapper (`_WRAPPER_SHELL_EXEC`。`watch '...'` / `sudo -i` /
     `npx -c '...'`) の中身を取り出したか (v0.29.6)。引用符で包んだ中身は wrapper が起動するシェルが
@@ -2142,12 +2175,15 @@ def _normalize_segment_chdir(
     pre-wrapper env を素通しするため従来どおり伝播する。
     """
     collected: dict[str, str] = {}
+    unread: set[str] = set()
     chdir = False
     external = False
     reread = False
     # heredoc 本文はデータであってコマンドラインではない。先に落としておかないと
     # 後段の option 走査が本文の行を引数として読む (`_strip_heredoc_bodies` 参照)。
+    raw = cmd
     cmd = _strip_heredoc_bodies(cmd)
+    heredoc = cmd != raw
     for _ in range(max_iter):
         before = cmd
         # 構文プレフィックス → 先頭 env → コマンド名のパス正規化 の順。
@@ -2155,8 +2191,11 @@ def _normalize_segment_chdir(
         # env の後ろにパス付きコマンドが来る形 (`FOO=bar /usr/bin/gh ...`) の
         # 両方を 1 ラウンドで畳めるようにしてある。
         cmd = _strip_leading_syntax(cmd)
-        cmd, env = _parse_leading_env(cmd, home)
+        round_unread: set[str] = set()
+        cmd, env = _parse_leading_env(cmd, home, round_unread)
         collected.update(env)  # 内側 (後段) が外側を上書きする
+        unread.difference_update(env)
+        unread.update(round_unread)
         pathed = cmd
         cmd = _strip_command_path(cmd)
         if cmd != pathed and "/" in pathed.split(None, 1)[0]:
@@ -2169,6 +2208,7 @@ def _normalize_segment_chdir(
             rest_after_sudo = _drop_tokens(cmd, 1)
             if not _sudo_preserves_env(rest_after_sudo):
                 collected.clear()
+                unread.clear()
             if _has_flag(rest_after_sudo, "sudo", _SUDO_CHDIR_FLAGS):
                 chdir = True
         stripped, via_shell = _strip_one_wrapper_kind(cmd)
@@ -2188,7 +2228,9 @@ def _normalize_segment_chdir(
         # その結果に対してもう一度 wrapper 判定をやり直す。
         if cmd == before:
             break
-    return _strip_trailing_syntax(cmd), collected, chdir, external, reread
+    return (
+        _strip_trailing_syntax(cmd), collected, chdir, external, reread, frozenset(unread), heredoc
+    )
 
 
 def strip_transparent_wrappers(cmd: str, max_iter: int = 6) -> str:
@@ -2368,18 +2410,20 @@ def extract_candidates_with_separators(
         if _GH_UNREAD_SEEN and any(cand.split(None, 1)[:1] == ["gh"] for cand, *_rest in found):
             with _legacy_value_reading(None):
                 found = _segment_candidates(seg, sep, home)
-        for cand, env, cand_sep, chdir, external, reread in found:
-            _note_chdir(cand, chdir, external, reread=reread)
+        for cand, env, cand_sep, chdir, external, reread, unread in found:
+            _note_chdir(cand, chdir, external, reread=reread, unread=unread)
             out.append((cand, env, cand_sep))
     return out
 
 
 def _segment_candidates(
     seg: str, sep: str, home: str | None
-) -> list[tuple[str, dict[str, str], str, bool, bool, bool]]:
-    """1 つのセグメントの候補 (候補, env, 区切り, chdir, external, reread) の列
-    (`extract_candidates_with_separators` の 1 セグメント分。最後の 3 つは `_note_chdir` に渡す)。"""
-    normalized, env, chdir, external, reread = _normalize_segment_chdir(seg, home=home)
+) -> list[tuple[str, dict[str, str], str, bool, bool, bool, frozenset[str]]]:
+    """1 つのセグメントの候補 (候補, env, 区切り, chdir, external, reread, 値を読めなかった代入のキー)
+    の列 (`extract_candidates_with_separators` の 1 セグメント分。最後の 4 つは `_note_chdir` に渡す)。"""
+    normalized, env, chdir, external, reread, unread, heredoc = _normalize_segment_chdir(
+        seg, home=home
+    )
     if not normalized:
         return []
     # シェル経由 wrapper のクォートを剥がすと、中身が複合コマンドのことがある
@@ -2397,30 +2441,87 @@ def _segment_candidates(
         # 代入は、wrapper が起動するシェルが読み直すので展開しない (option の値の `~` と同じ条件)。
         # 段の中の wrapper の後ろの代入は `_normalize_segment_chdir` が展開しない。
         part_home = None if reread else home
+        # 外側の前置きの代入 (env と、値を読めなかった代入のキー) が効く段も、段を取り出した経路で
+        # 決まる (v0.30.3)。heredoc の本文を落とした行の前置きの代入は、行の先頭のコマンドにだけ効く
+        # (`AWS_PROFILE=prod cat <<EOF | aws ...` の aws は起動時の AWS_PROFILE で走る。bash 3.2 /
+        # zsh -f で実測)。0.30.2 までは後ろの段にも継いでいた。シェル経由 wrapper の中身
+        # (`AWS_PROFILE=prod watch 'true && aws ...'`) は wrapper が起動するシェルに渡るので全段に効く。
+        # 区切りが wrapper の引用符の外にある行 (`AWS_PROFILE=prod watch 'true' <<EOF && aws ...`) の
+        # 後ろの段は外のシェルで走るので、wrapper の有無によらず先頭の段 (シェル経由 wrapper の中身の段を
+        # 含む) だけ (heredoc の本文を落とした行に引用符の外の区切りがあるかで分ける)。`parts` は wrapper の
+        # 中身の段と外の段を平らに並べるので、外の段の数を引いた頭の `head_parts` 個が先頭の段にあたる
+        # (`AWS_PROFILE=prod npx -c 'true && aws ...' <<EOF ; aws ...` の中の aws は前置きの値で走る)。
+        # 前置きの代入を剥がした残りが `;` / `&&` / `||` で始まるとき (代入の後ろにコマンド語が無い) は、
+        # その代入が export 済みの変数なら後ろのコマンドに効くので、0.30.2 までと同じく全段に継ぐ。
+        # `|` / `&` で始まるときは、後ろの段がサブシェルで走るのでどの段にも継がない。
+        outer_stages = len(split_with_separators(_strip_heredoc_bodies(seg))) if heredoc else 1
+        line_stages = outer_stages > 1
+        head_parts = max(1, len(parts) - (outer_stages - 1))
+        no_word_here = normalized.startswith((";", "&&", "||"))
+        no_word_sub = not no_word_here and normalized[:1] in "|&"
+        first_only = line_stages and not no_word_here
         for k, (part, inner_sep) in enumerate(parts):
-            inner, inner_env, inner_chdir, inner_external, inner_reread = _normalize_segment_chdir(
-                part, home=part_home
-            )
+            (
+                inner, inner_env, inner_chdir, inner_external, inner_reread, inner_unread, _heredoc
+            ) = _normalize_segment_chdir(part, home=part_home)
             if inner:
                 # 分割し直した段の語を Bash のシェルが読むかは、段を取り出した経路で決まる。シェル経由
                 # wrapper の中身 (外側の `reread`) と、段自身がシェル経由 wrapper の形 (`inner_reread`) は
                 # Bash のシェルの語と扱わない (`shell_string_candidates`)。heredoc の本文を落とした
                 # 宣言行と、前置きの代入を剥がした残りは、Bash のシェルが読む語 (`cat <<EOF && kubectl --kubeconfig ~/a ...` の `~` は展開される)
+                inherits = not first_only or (k < head_parts and not no_word_sub)
+                outer_env = env if inherits else {}
+                outer_unread = unread if inherits else frozenset()
                 found.append((
                     inner,
-                    {**env, **inner_env},
+                    {**outer_env, **inner_env},
                     sep if k == last else inner_sep,
                     chdir or inner_chdir,
                     external or inner_external,
                     reread or inner_reread,
+                    frozenset(outer_unread.difference(inner_env)) | inner_unread,
                 ))
         return found
-    return [(normalized, env, sep, chdir, external, reread)]
+    return [(normalized, env, sep, chdir, external, reread, unread)]
 
 
-def _note_chdir(candidate: str, chdir: bool, external: bool, reread: bool = False) -> None:
-    """`wrapper_chdir_candidates` / `external_chdir_candidates` / `shell_string_candidates` の
-    分解中なら候補を記録する。"""
+# `unread_env_candidates` が分解の間だけ立てる記録先 (候補の文字列 → キーの集合)。None なら記録しない。
+_UNREAD_ENV_SEEN: dict[str, set[str]] | None = None
+
+
+def unread_env_candidates(command: str) -> dict[str, frozenset[str]]:
+    """候補 → その候補の前置きの代入のうち、値を静的に読めなかったもののキー (v0.30.3)。
+
+    `AWS_PROFILE=$(echo prod) aws ...` / `AWS_PROFILE=$P aws ...` の aws に {"AWS_PROFILE"} を返す。
+    この代入は値を検証の env に入れない (hook の env で照合する。0.29.10) が、実際の CLI は代入した値で
+    動くので、hook の env の値をディレクトリ単位の固定とみなせない (`core/dispatcher.py` の `_pinned`)。
+    後ろに同じキーへの静的な代入があれば外す (`AWS_PROFILE=$(z) env AWS_PROFILE=dev aws ...`)。
+    キーは identity env に絞らない (呼び出し側が service ごとに絞る)。値が読めた代入・代入の無い候補は
+    含めない。同じ文字列の候補が別の前置きで現れるときはキーの和を返す (呼び出し側は上書きされた側に
+    倒す)。読みは `extract_candidate_readings` と同じ。
+    """
+    global _UNREAD_ENV_SEEN
+    saved = _UNREAD_ENV_SEEN
+    seen: dict[str, set[str]] = {}
+    _UNREAD_ENV_SEEN = seen
+    try:
+        extract_candidate_readings(command)
+    finally:
+        _UNREAD_ENV_SEEN = saved
+    return {cand: frozenset(keys) for cand, keys in seen.items()}
+
+
+def _note_chdir(
+    candidate: str,
+    chdir: bool,
+    external: bool,
+    reread: bool = False,
+    unread: frozenset[str] = frozenset(),
+) -> None:
+    """`wrapper_chdir_candidates` / `external_chdir_candidates` / `shell_string_candidates` /
+    `unread_env_candidates` の分解中なら候補を記録する。"""
+    if unread and _UNREAD_ENV_SEEN is not None:
+        _UNREAD_ENV_SEEN.setdefault(candidate, set()).update(unread)
     if reread and _SHELL_STRING_SEEN is not None:
         _SHELL_STRING_SEEN.add(candidate)
     if chdir and _WRAPPER_CHDIR_SEEN is not None:

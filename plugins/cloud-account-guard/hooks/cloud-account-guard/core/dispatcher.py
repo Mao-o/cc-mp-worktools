@@ -342,6 +342,7 @@ def _analyze_command(
     tier_map: dict = {}
     switching: list = []
     segments: list[tuple] = []
+    unread_memo: list[dict] = []
     readings = extract_candidate_readings(command)
     default_count = len(readings[0])
     # option の値の `~` をシェルと同じく HOME に展開する (v0.29.6)。HOME を変えうるコマンドでは
@@ -376,7 +377,14 @@ def _analyze_command(
         # `aws --profile a s3 rm && aws --profile b s3 rm` が 1 エントリに畳まれ、
         # 後段 (b) が検証されないまま誤 allow される。
         ctx = _context_override(cand, svc, None if cand in reread else tilde)
-        key = (svc, tuple(sorted(inline_env.items())), tuple(sorted(ctx.items())))
+        # 値を読めなかった前置きの代入のキー (v0.30.3) も grouping key に含める。値を読めない代入は
+        # inline env に入らないので、含めないと印の付いた候補 (`AWS_PROFILE=$(cmd) aws s3 ls`) と
+        # 印の無い候補 (`&& aws s3 rm ...`) が 1 エントリに畳まれ、固定の判定 (`_pinned`) が印の和を
+        # 上書きに数えて、固定で走る後者まで未登録の判定に戻す。
+        if not unread_memo:
+            unread_memo.append(command_parser.unread_env_candidates(command))
+        unread_keys = tuple(sorted(unread_memo[0].get(cand, ())))
+        key = (svc, tuple(sorted(inline_env.items())), tuple(sorted(ctx.items())), unread_keys)
         if key not in cand_map:
             cand_map[key] = []
             tier_map[key] = tier
@@ -389,7 +397,7 @@ def _analyze_command(
         cand_map[key].append((cand, forms[-1]))
     targets: list = []
     for key in order:
-        svc, env_items, ctx_items = key
+        svc, env_items, ctx_items, _unread = key
         targets.append(
             (svc, cand_map[key], dict(env_items), dict(ctx_items), tier_map[key])
         )
@@ -797,7 +805,7 @@ def _wrapper_moves(cands, wrapper_chdir) -> bool:
 
 def _pinned(
     svc, inline_env: dict, cands, env_changes: dict, directories, trace: dict | None,
-    context=None,
+    context=None, unread_env: dict | None = None,
 ) -> bool:
     """期待値の代わりに、公式のディレクトリ単位の固定で決まっているか (v0.19.0)。
 
@@ -822,6 +830,12 @@ def _pinned(
     context は target の context option (解決前。相対パスは書かれたまま)。`PIN_USES_CONTEXT` を
     宣言した service (firebase) にだけ `is_pinned(env, d, context=...)` で渡す (v0.29.4。firebase は
     `--config` のファイルのあるディレクトリの記録で固定を判定する)。
+
+    unread_env (`command_parser.unread_env_candidates` の結果) は、候補の前置きの代入のうち値を
+    静的に読めなかったもの (`AWS_PROFILE=$(echo prod) aws ...` / `AWS_PROFILE=$P aws ...`) のキーで、
+    値が読めないだけで上書きしたことは確かなので、行頭のインライン env の上書きと同じく数える
+    (v0.30.3。0.30.2 までは inline_env に入らないこの代入を上書きと見ず、hook の env の値を固定として
+    通していた。実際の aws は代入した値で動く)。
     """
     fn = getattr(svc, "is_pinned", None)
     if fn is None:
@@ -832,6 +846,8 @@ def _pinned(
     overridden = {
         k for k, v in (inline_env or {}).items() if os.environ.get(k) != v
     }
+    for orig, _norm in cands:
+        overridden |= (unread_env or {}).get(orig, frozenset())
     by_dir = bool(getattr(svc, "PIN_DEPENDS_ON_DIR", False))
     if _touches_identity(svc, changed | overridden):
         pinned = False
@@ -909,6 +925,15 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
     # 候補 (v0.29.3)。剥がした後の候補は seg_dirs のディレクトリでは走らないので、相対パスの
     # context の解決と、ディレクトリ単位の固定の判定では「決められない」とする。
     wrapper_chdir = command_parser.wrapper_chdir_candidates(command)
+    # 前置きの代入で値を読めなかったキー (v0.30.3。`_pinned` の上書きに数える)。固定の判定に
+    # 来たときだけ分解する (期待値を登録した service では使わない)。
+    unread_memo: list[dict] = []
+
+    def unread_env() -> dict:
+        if not unread_memo:
+            unread_memo.append(command_parser.unread_env_candidates(command))
+        return unread_memo[0]
+
     # ディレクトリ単位の固定を確かめるディレクトリ (v0.29.3)。`cd` が確実に順に走る形なら
     # seg_dirs と同じ。そうでなければ、確実に走って後続に効く `cd` (`workdir.sure_chdirs`) 以外は
     # 走らなかった可能性を残した和で確かめる (`(cd sub && true); firebase deploy` は起動側でも
@@ -978,7 +1003,8 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
                 outside_problems.append(_outside_error(launch_root, stops=stops_t))
                 continue
             if _pinned(
-                svc, inline_env, cands, env_changes, pin_dirs(cands), trace, context=ctx
+                svc, inline_env, cands, env_changes, pin_dirs(cands), trace, context=ctx,
+                unread_env=unread_env(),
             ) or _all_pin_actions(cands, svc):
                 continue
             remaining.append(t)
@@ -1137,7 +1163,8 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
             # 期待値が未登録でも、公式のディレクトリ単位の固定 (env / firebase use) が
             # 効いていれば止めない (v0.19.0)。gh / kubectl は固定の仕組みが無いので登録を促す。
             if _pinned(
-                svc, inline_env, cands, env_changes, pin_dirs(cands), trace, context=ctx
+                svc, inline_env, cands, env_changes, pin_dirs(cands), trace, context=ctx,
+                unread_env=unread_env(),
             ) or _all_pin_actions(cands, svc):
                 continue
             problems.append(_unregistered_error(svc, shell_word.escape_controls(accounts_path), stops=stops))

@@ -1,5 +1,87 @@
 # Changelog
 
+## 0.30.3
+
+### Fixed: heredoc を置いた行で、先頭のコマンドの前置きの代入を後ろの段の照合にも使っていた
+
+- `KUBECONFIG=~/k.yaml kubectl apply -f - <<EOF && kubectl delete po x` / `AWS_PROFILE=prod cat <<EOF | aws s3 cp - ...`
+  (+ 改行 + 本文 + `EOF`) の後ろの kubectl / aws を、先頭のコマンドの前置きの代入 (`~/k.yaml` / `prod`) で照合して
+  いた (0.9.0 からの挙動。正規化した結果を分割し直す段に、外側の代入を由来によらず継いでいた)。シェルでは前置きの
+  代入はそのコマンドにだけ効くので、
+  後ろの段は起動時の値で走る。0.30.3 は後ろの段を起動時の env (と、その段自身の前置きの代入) で照合する。heredoc の
+  無い同じ形 (`KUBECONFIG=~/k.yaml kubectl apply -f x && kubectl delete po x`) と同じ判定になる。aws / gh / gcloud の
+  同じ形 (`AWS_PROFILE` / `GH_CONFIG_DIR` / `CLOUDSDK_CONFIG` など) も同じ。区切り (`&&` / `;` / `|` / `||` / `&`)・
+  区切り語の形 (`<<EOF` / `<<'EOF'` / `<<"EOF"` / `<<\EOF` / `<<-EOF` / `<<'END MSG'` / `<<'2EOF'`)・行の前置き
+  (`cd sub &&` / `( ... )` / `{ ...; }` / `!` / `if ...; then` / `time`)・先頭の段の wrapper (`nohup` / `env` /
+  `command`) を変えた形で、bash 3.2 と zsh -f が行の全段の CLI をどの env で走らせるかを実際に取り、照合の env と
+  一致することを確かめた (`tests/test_heredoc_line_env.py` も全段の env を両方のシェルで固定する)
+- 先頭の段がシェル経由の wrapper でも、区切りが wrapper の引用符の外にある行
+  (`AWS_PROFILE=prod watch 'cat' <<EOF && aws ...` / `npx -c 'cat' <<EOF ; gh ...`) の後ろの段は外のシェルで走るので、
+  同じく起動時の env で照合する。wrapper の中身に区切りがあれば (`npx -c 'true && aws ...' <<EOF ; aws ...`)、中身の
+  段は全部が先頭の段で、前置きの env で照合する
+- 次は従来どおり全段に継ぐ: シェル経由の wrapper の中身 (`AWS_PROFILE=prod watch 'true && aws ...'` /
+  `npx -c '...'`。区切りが引用符の中にあり、wrapper が起動するシェルに渡る)、前置きの代入の後ろにコマンド語が無く
+  `;` / `&&` / `||` が続く行 (`AWS_PROFILE=prod <<EOF ; aws ...`。export 済みの変数なら後ろに効く)。`|` / `&` が
+  続く行 (`AWS_PROFILE=prod <<EOF | aws ...`) は後ろの段がサブシェルで走るので、どの段にも継がない (0.30.2 は継いで
+  いた)。作業ディレクトリを変える wrapper の印 (`sudo -D /x cat <<EOF && kubectl ...`) と外部プログラムの `cd` の印も
+  従来どおり全段に継ぐ (どちらも決められない側に倒れる印で、外すと止める形が減る)
+
+### Fixed: 前置きの代入の後ろにパスを含むリダイレクトを置くと、後ろの CLI を検証していなかった
+
+- `AWS_PROFILE=prod 2>/dev/null aws s3 rm ...` / `KUBECONFIG=~/k.yaml </dev/null kubectl delete ...` /
+  `GH_CONFIG_DIR=/g </dev/null gh pr create` の候補が `null aws s3 rm ...` などになり、どの service にも一致せず
+  通していた。代入の後ろのリダイレクトの語を、パス付きのコマンド名として basename に揃えていた (リダイレクトを
+  剥がす前に)。0.30.3 はリダイレクトの語をコマンド名として読まず、後ろの CLI を前置きの代入の値で照合する
+  (`2> /dev/null` (空白あり) や `2>log` (`/` なし) は従来から照合していた)。コマンド語の無い heredoc の行
+  (`AWS_PROFILE=prod 2>/dev/null <<EOF ; aws ...`) も、同じくコマンド語の無い行として後ろの段に代入を継ぐ
+
+### Fixed: 値を静的に読めない前置きの代入で identity env を上書きしても、ディレクトリ単位の固定とみなしていた
+
+- 期待値が未登録の aws / gcloud / firebase で、hook の env の `AWS_PROFILE` などで固定しているとき、
+  `AWS_PROFILE=$(echo prod) aws s3 rm ...` / `AWS_PROFILE=$P aws s3 rm ...` / ``AWS_PROFILE=`cmd` aws ...`` /
+  `AWS_PROFILE+=x aws ...` / `CLOUDSDK_CORE_ACCOUNT=$(cmd) gcloud ...` / `XDG_CONFIG_HOME=$(cmd) firebase deploy` を
+  固定として通していた (`$P` の形は 0.19.0 から。`$(...)` の形は 0.29.10 で後ろの CLI を候補にしてから)。値を読めない
+  代入は照合の env に入れない (0.29.10) ので、上書きとして数えていなかった。実際の CLI は代入した値で動く。0.30.3 は
+  静的な上書き (`AWS_PROFILE=prod aws ...`。0.19.0 から固定とみなさない) と同じく固定とみなさず、通常の未登録の判定に
+  戻す (書き込みは deny、リモート read だけなら警告)。同じキーへの後ろの静的な代入が勝つ形
+  (`AWS_PROFILE=$(cmd) AWS_PROFILE=dev aws ...` / `AWS_PROFILE=$(cmd) env AWS_PROFILE=dev aws ...`) と、identity env で
+  ない代入 (`X=$(cmd) aws ...`) は従来どおり固定で通す
+- 「解析で決められない形は deny しない」(README「守る範囲と守らない範囲」) との関係: 止めるのは代入の値が読めない
+  からではない。上書きしたことはコマンドの字面で確定していて、確定しているのは「hook の env の値では動かない」こと
+  なので、固定 (hook の env の値が期待値の代わりになる) の前提が成り立たない。止める理由は未登録の判定
+  (期待値が無いと照合できない) で、静的な上書きと同じ。値が起動時の値と同じかもしれない形
+  (`AWS_PROFILE=$AWS_PROFILE aws ...`) も、値を読まない以上は上書きとして数える (固定で通すには値を読む読みを足す
+  ことになる。docs/DEVELOPMENT.md の実装の規則)
+- 期待値を登録した service の照合は変えていない (値を読めない代入は hook の env で照合する。0.29.10)
+
+### 比較
+
+- 生成した 4,106 形 (heredoc の行 × 区切り × 区切り語 × 行の前置き × 先頭の段の代入と wrapper、シェル経由の wrapper、
+  候補自身の読めない代入) を bash 3.2 と zsh -f で走らせ、CLI ごとの env を取った。照合の env (前置きの代入、無ければ
+  起動時の値。読めない代入の印が付いたキーは除く) がシェルの値と食い違う CLI の起動は 0.30.2 の 7,372 件から 130 件に
+  減った。残る 130 件は 0.30.2 と同じ形で、`time` の後ろの代入の `~` を展開しない形 (128 件) と、値を読めない
+  代入だけのセグメントの後ろ (`AWS_PROFILE=$(cmd) X=1; aws ...`。0.30.2 と同じ。置換の中に空白がある値
+  (`$(echo prod)`) や、前に静的な代入が並ぶ形は前段の env の変更としても数えておらず、固定のある世界では aws を
+  固定で通す。別途。2 件)。
+  0.30.3 で新たに食い違う起動は 0 件。候補の文字列の集合は全形で 0.30.2 と同じ
+- 判定の比較 (verify を env で答える偽物にして 4 つの世界で dispatch): 起動時の値が期待外で前置きの値が期待どおりの
+  世界で allow → deny / 警告が 249 形 (どれも heredoc の行の後ろの段)、deny → allow は 0 形。逆の世界 (起動時の値が
+  期待どおり) では deny / 警告 → allow が 515 形で、どれも heredoc の行の後ろの段。374 形はシェルが起動時の値で
+  走らせる (15 形は `!` で始まる `&&` の後ろで、シェルでは走らない)。141 形は後ろの段自身に値を読めない代入がある形
+  (`AWS_PROFILE=prod cat <<EOF && AWS_PROFILE=$(cmd) aws s3 ls`) で、シェルはその代入の値で走らせる。期待値を登録した
+  service は値を読めない代入を hook の env で照合する (0.29.10) ので、heredoc の無い同じ形と同じ判定になった
+  (0.30.2 が照合していた先頭の段の値も、シェルが使う値ではない)。固定のある世界と期待値ファイルの無い世界の
+  deny → 非deny (固定のある世界 154 形・ファイルの無い世界 100 形) も同じ heredoc の行の後ろの段だけで、非deny → deny
+  (固定のある世界 220 形・ファイルの無い世界 189 形) はどれも値を読めない代入の印による固定の取り消し。
+  印の付いたリモート read と印の無い書き込みは別の target に分けるので (`AWS_PROFILE=$(cmd) aws s3 ls && aws s3 rm ...`
+  の `aws s3 rm` は固定で走る)、静的な上書き (`AWS_PROFILE=prod aws s3 ls && aws s3 rm ...`) と同じく警告に留まる
+  (この形は 0.30.2 では allow。各 11 形)。期待値を登録した service では、印の有無で target が分かれるので、deny 文と
+  verify が target ごとになる (判定は変わらない)
+- コマンド語の無い heredoc の行と代入の後ろのリダイレクトを組み合わせて生成した 2,592 形 (代入 × リダイレクト × 語 ×
+  位置 × 区切り) では、上の 4 つの世界の判定の差は、代入の後ろのパス付きリダイレクトを読むようになった形
+  (`AWS_PROFILE=prod 2>/dev/null <<EOF ; aws ...`。各世界 102 形。後ろの aws を前置きの値で照合する) と、`|` / `&` が
+  続くコマンド語の無い行 (`AWS_PROFILE=prod <<EOF | aws ...`。各世界 54 形。後ろの aws を起動時の値で照合する) だけ
+
 ## 0.30.2
 
 ### Fixed: heredoc を置いた行の後ろの段の行頭の代入の `~` を展開していなかった
