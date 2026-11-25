@@ -131,12 +131,19 @@ def session_start(inp: dict) -> None:
     if not root:
         return
     sd = registry.state_dir()
-    registry.register(sd, root)
+    raw = os.environ.get(registry.CLI_ENV)
+    cli, valid = registry.cli_setting(raw)
+    warn = [] if valid else [f"humanq: {registry.CLI_ENV}={raw!r} は bd / br / auto のどれでもないので auto として扱う。"]
+    registry.register(sd, root, cli)
     state = ensure_server(sd)
     s = summary(root, 8.0, fresh=True) if state in ("running", "started") else None
     if s is None:
-        _out("SessionStart", f"humanq: 判断待ちの画面 ({URL}) を使えない (サーバー: {state})。"
-                             f"原因は {os.path.join(sd, 'server.log')} にある")
+        _out("SessionStart", "\n".join([f"humanq: 判断待ちの画面 ({URL}) を使えない (サーバー: {state})。"
+                                        f"原因は {os.path.join(sd, 'server.log')} にある", *warn]))
+        return
+    if s.get("ok") is False:
+        # 読めなかったときの human は 0 でも「0 件」ではない。件数を言わずに読めないと伝える
+        _out("SessionStart", "\n".join([f"humanq: このプロジェクトの判断待ちを読めない: {s.get('error')}", *warn]))
         return
     answered = s.get("answered") or []
     _remember(sd, inp.get("session_id") or "unknown", answered)
@@ -153,7 +160,7 @@ def session_start(inp: dict) -> None:
                      "`bd label remove <id> answered` で外す。")
     msg = (f"humanq: 判断待ち {s.get('human', 0)} 件 / 回答済み {len(answered)} 件 → {URL}"
            if s.get("human") or answered else None)
-    _out("SessionStart", "\n".join(lines), msg)
+    _out("SessionStart", "\n".join([*lines, *warn]), msg)
 
 
 def prompt_submit(inp: dict) -> None:
@@ -161,7 +168,7 @@ def prompt_submit(inp: dict) -> None:
     if not root:
         return
     s = summary(root, 1.5)
-    if not s:
+    if not s or s.get("ok") is False:     # 読めなかったときの answered は [] でも「無い」ではない。覚えた集合を消さない
         return
     new = _remember(registry.state_dir(), inp.get("session_id") or "unknown", s.get("answered") or [])
     if new:

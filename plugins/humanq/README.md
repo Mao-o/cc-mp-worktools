@@ -32,6 +32,9 @@ bd を使っているプロジェクト (cwd から上に `.beads/` がある) �
 - 状態は `${CLAUDE_PLUGIN_DATA}` に置く: `projects.json` (登録したプロジェクト)・`server.json`・`server.log`・`token` (書き込みのトークン、0600)・`sessions/` (セッションごとに伝えた回答)
 - 待ち受けは 127.0.0.1 だけ。書き込みは画面に埋め込んだトークンと Host の検査を通ったものだけ受け付ける。ほかのサイトの iframe には入れられない
 - ポートは `HUMANQ_PORT` で変えられる (hook の env)
+- プロジェクトごとに、`.beads/` の中のファイルの印で bd か br かを決める (CLI は打たない)。br の印は `.beads/.gitignore` の `.br_history` か `fsqlite` を含む行・`.br_history/`・`*-fsqlite-ns-*`・`.br-db-*.lock`、bd の印は `metadata.json` の `database` か `backend` が `dolt`・`embeddeddolt/`。br の印だけなら br、bd の印だけなら bd、印が無ければ bd。両方ある・どちらの印も無く SQLite の形 (`metadata.json` の `database` が `.db` で終わる) のときは決められないので、どの CLI も打たず、画面に理由を出す
+- hook の env `HUMANQ_BEADS_CLI` (`bd` / `br` / `auto`、未設定は `auto`) で決め方を指定できる。`HUMANQ_PORT` と同じくプロジェクトの settings の `env` でプロジェクトごとに決められる。指定に反する印があれば決められない扱い。`bd` / `br` / `auto` 以外の値は `auto` として扱い、SessionStart で 1 行だけ警告する
+- br のプロジェクトにはまだ対応していない (どの CLI も起動せず、画面に「まだ対応していません」と出す。回答の書き込みは `readonly` で断る)。br を bd の `.beads/` に向けて打つと、エラーを出さずに空の一覧を返して `.beads/` に dolt のファイルを作るので、br と確定した dir にしか打たない
 - サーバーはセッションが終わっても動き続ける。止めるときは `server.json` の pid を kill する
 
 ## 問いの書き方 (`human` を付けるときは必ず書く)
