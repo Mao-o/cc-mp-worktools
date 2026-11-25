@@ -145,6 +145,8 @@ TIME_KEPT = [
     "time -- KUBECONFIG=~/a kubectl apply",
     "time time KUBECONFIG=~/a kubectl apply",
     "X=1 time KUBECONFIG=~/a kubectl apply",
+    "X=$(date) time KUBECONFIG=~/a kubectl apply",
+    "a=(1 2) time KUBECONFIG=~/a kubectl apply",
     "\\time KUBECONFIG=~/a kubectl apply",
     "nohup time KUBECONFIG=~/a kubectl apply",
     "command time KUBECONFIG=~/a kubectl apply",
@@ -532,13 +534,17 @@ class ReservedTimeAndWrapperHeredocShellTests(unittest.TestCase):
                 self.assertEqual(self._values(command), {"bash": "/H/a", "zsh": "/H/a"})
 
     def test_zsh_only_reserved_positions(self):
-        """zsh だけが予約語と読む位置: zsh は HOME に展開して走らせ、bash 3.2 では CLI が走らない。"""
+        """zsh だけが予約語と読む位置: zsh は HOME に展開して走らせ、bash 3.2 では CLI が走らない。
+        bash 4 以降は `! time` / `if time` / `while time` も予約語と読み HOME に展開して走らせるので、bash は
+        「走らない」か HOME のどちらか (HOME 以外の値で走る形は無い)。"""
         for command in TIME_ZSH_ONLY:
             with self.subTest(command=command):
-                self.assertEqual(self._values(command), {"bash": "", "zsh": "/H/a"})
+                values = self._values(command)
+                self.assertEqual(values["zsh"], "/H/a", values)
+                self.assertIn(values["bash"], ("", "/H/a"), values)
 
     def test_kept_forms_are_not_home_in_zsh(self):
-        """展開しない形は、両方のシェルが HOME に展開して走らせる形ではなく、zsh (Bash tool のシェル) でも
+        """展開しない形は、両方のシェルが HOME に展開して走らせる形ではなく、zsh でも
         HOME の展開で走らない (CLI が走らないか、生の `~/a` を受け取る)。"""
         for command in TIME_KEPT + WRAPPER_HEREDOC_SPLIT:
             with self.subTest(command=command):

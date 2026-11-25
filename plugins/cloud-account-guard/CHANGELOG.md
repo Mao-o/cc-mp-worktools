@@ -14,7 +14,7 @@
   `| time` / `2>/dev/null time` は zsh だけが予約語と読み (bash 3.2 は外部の time を起動し、代入の形の語をコマンド名
   として起動しようとして失敗するので CLI は走らない)、zsh では HOME に展開して走るので、同じく展開する
 - 予約語として読まれない `time` (`X=1 time ...` / `\time ...` / `/usr/bin/time ...` / `nohup time ...` /
-  `time time ...` の 2 つ目) は外部の time で、どちらのシェルでも後ろの CLI は走らないので、従来どおり展開しない。
+  `time time ...` の 2 つ目) は外部の time で、bash 3.2 と zsh -f のどちらでも後ろの CLI は走らないので、従来どおり展開しない。
   option 付きの `time -p ...` (zsh は `-p` をコマンド名として起動する) と、`time` の後ろの wrapper の後ろの代入
   (`time env KUBECONFIG=~/x ...`。bash だけが展開する) も従来どおり
 - heredoc を置いた行の先頭の段がシェル経由の wrapper で、区切りが wrapper の引用符の外にある行
