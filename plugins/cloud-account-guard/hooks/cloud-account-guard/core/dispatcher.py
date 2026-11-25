@@ -797,7 +797,7 @@ def _wrapper_moves(cands, wrapper_chdir) -> bool:
 
 def _pinned(
     svc, inline_env: dict, cands, env_changes: dict, directories, trace: dict | None,
-    context=None,
+    context=None, unread_env: dict | None = None,
 ) -> bool:
     """期待値の代わりに、公式のディレクトリ単位の固定で決まっているか (v0.19.0)。
 
@@ -822,6 +822,12 @@ def _pinned(
     context は target の context option (解決前。相対パスは書かれたまま)。`PIN_USES_CONTEXT` を
     宣言した service (firebase) にだけ `is_pinned(env, d, context=...)` で渡す (v0.29.4。firebase は
     `--config` のファイルのあるディレクトリの記録で固定を判定する)。
+
+    unread_env (`command_parser.unread_env_candidates` の結果) は、候補の前置きの代入のうち値を
+    静的に読めなかったもの (`AWS_PROFILE=$(echo prod) aws ...` / `AWS_PROFILE=$P aws ...`) のキーで、
+    値が読めないだけで上書きしたことは確かなので、行頭のインライン env の上書きと同じく数える
+    (v0.30.3。0.30.2 までは inline_env に入らないこの代入を上書きと見ず、hook の env の値を固定として
+    通していた。実際の aws は代入した値で動く)。
     """
     fn = getattr(svc, "is_pinned", None)
     if fn is None:
@@ -832,6 +838,8 @@ def _pinned(
     overridden = {
         k for k, v in (inline_env or {}).items() if os.environ.get(k) != v
     }
+    for orig, _norm in cands:
+        overridden |= (unread_env or {}).get(orig, frozenset())
     by_dir = bool(getattr(svc, "PIN_DEPENDS_ON_DIR", False))
     if _touches_identity(svc, changed | overridden):
         pinned = False
@@ -909,6 +917,15 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
     # 候補 (v0.29.3)。剥がした後の候補は seg_dirs のディレクトリでは走らないので、相対パスの
     # context の解決と、ディレクトリ単位の固定の判定では「決められない」とする。
     wrapper_chdir = command_parser.wrapper_chdir_candidates(command)
+    # 前置きの代入で値を読めなかったキー (v0.30.3。`_pinned` の上書きに数える)。固定の判定に
+    # 来たときだけ分解する (期待値を登録した service では使わない)。
+    unread_memo: list[dict] = []
+
+    def unread_env() -> dict:
+        if not unread_memo:
+            unread_memo.append(command_parser.unread_env_candidates(command))
+        return unread_memo[0]
+
     # ディレクトリ単位の固定を確かめるディレクトリ (v0.29.3)。`cd` が確実に順に走る形なら
     # seg_dirs と同じ。そうでなければ、確実に走って後続に効く `cd` (`workdir.sure_chdirs`) 以外は
     # 走らなかった可能性を残した和で確かめる (`(cd sub && true); firebase deploy` は起動側でも
@@ -978,7 +995,8 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
                 outside_problems.append(_outside_error(launch_root, stops=stops_t))
                 continue
             if _pinned(
-                svc, inline_env, cands, env_changes, pin_dirs(cands), trace, context=ctx
+                svc, inline_env, cands, env_changes, pin_dirs(cands), trace, context=ctx,
+                unread_env=unread_env(),
             ) or _all_pin_actions(cands, svc):
                 continue
             remaining.append(t)
@@ -1137,7 +1155,8 @@ def _dispatch_impl(command: str, cwd: str, trace: dict | None) -> dict | None:
             # 期待値が未登録でも、公式のディレクトリ単位の固定 (env / firebase use) が
             # 効いていれば止めない (v0.19.0)。gh / kubectl は固定の仕組みが無いので登録を促す。
             if _pinned(
-                svc, inline_env, cands, env_changes, pin_dirs(cands), trace, context=ctx
+                svc, inline_env, cands, env_changes, pin_dirs(cands), trace, context=ctx,
+                unread_env=unread_env(),
             ) or _all_pin_actions(cands, svc):
                 continue
             problems.append(_unregistered_error(svc, shell_word.escape_controls(accounts_path), stops=stops))
