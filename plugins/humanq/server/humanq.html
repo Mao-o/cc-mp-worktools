@@ -48,6 +48,11 @@ h3 .path { font-size: 12px; color: var(--muted); font-weight: 400; font-family: 
 .title { font-size: 13px; color: var(--muted); margin: 6px 0 0; }
 .ask { font-size: 17px; font-weight: 700; margin: 10px 0 6px; }
 .ctx { margin: 0 0 12px; white-space: pre-wrap; }
+.ctxbox { margin: 0 0 12px; }
+.ctxbox .ctx { margin: 0; }
+.ctxbox .ctx.clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 5; line-clamp: 5; overflow: hidden; }
+button.ctxmore { background: none; border: 0; color: var(--accent); font: inherit; font-size: 13px; padding: 2px 0; cursor: pointer; }
+button.ctxmore[hidden] { display: none; }
 .opts { display: grid; gap: 8px; margin: 10px 0; }
 .opt { text-align: left; background: var(--panel); color: var(--ink); border: 1.5px solid var(--line);
   border-radius: 8px; padding: 10px 12px; cursor: pointer; font: inherit; }
@@ -129,6 +134,7 @@ const REDUCED = !!(window.matchMedia && matchMedia("(prefers-reduced-motion: red
 const DRAFT_KEY = "humanq-drafts";
 const drafts = new Map();          // project + id -> {option, text}。sessionStorage にも置く (再読み込みで消えない)
 const openBodies = new Set();      // 開いている「チケット本文」(project + id)
+const openCtx = new Set();         // 全文を開いている「背景 (context)」(project + id)
 // 押したカードの送信の状態 (key -> {state, path, seq})。画面から隠している間だけ持つ。
 //   inflight: 送信中。データに居ても居なくても隠したまま (外すのは成功・失敗の処理だけ)
 //   done:     成功した。seq は成功した時点で始まっていた最後の読み込みの番号。それより後に始めた読み込みの
@@ -411,18 +417,31 @@ function md(tag, cls, text) {
 
 const qKey = (path, id) => "q\n" + path + "\n" + id;
 const aKey = (path, id) => "a\n" + path + "\n" + id;
-const shownLabels = it => (Array.isArray(it.labels) ? it.labels : []).filter(l => typeof l === "string" && (l.startsWith("plugin:") || l.startsWith("lane:")));
+// head に出すラベル: humanq 自身のもの (human / answered) を除いた全部。接頭辞では選ばない
+const shownLabels = it => (Array.isArray(it.labels) ? it.labels : []).filter(l => typeof l === "string" && l !== "human" && l !== "answered");
+const MAX_LABELS = 4;
+// 作成日からの経過日数の表示 (暦の日数。当日は「今日」)。日付が読めない・未来のときは出さない
+function ageText(created) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(created || ""));
+  if (!m) return "";
+  const now = new Date();
+  const n = Math.round((Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()) - Date.UTC(+m[1], +m[2] - 1, +m[3])) / 86400000);
+  return n < 0 ? "" : n === 0 ? "今日" : `作成から ${n} 日`;
+}
 // カードの表示に使う値の署名。変わったカードだけ作り直す (受け取ったときに 1 度だけ作る)
-const sigQ = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, shownLabels(it), it.q, it.description, it.notes]);
-const sigA = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, shownLabels(it), it.answer]);
+const sigQ = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, ageText(it.created_at), shownLabels(it), it.q, it.description, it.notes]);
+const sigA = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, ageText(it.created_at), shownLabels(it), it.answer]);
 
 function head(it) {
   const p = typeof it.priority === "number" ? it.priority : 9;
+  const labels = shownLabels(it);
+  const age = ageText(it.created_at);
   return el("div", { class: "head" },
     el("span", { class: `prio p${p}` }, `P${p}`),
     el("span", { class: "id", title: "クリックで ID をコピー", onclick: () => navigator.clipboard && navigator.clipboard.writeText(it.id) }, it.id),
-    el("span", {}, it.created_at),
-    ...shownLabels(it).map(l => el("span", {}, l.split(":")[1])));
+    el("span", {}, age ? `${it.created_at} (${age})` : it.created_at),
+    ...labels.slice(0, MAX_LABELS).map(l => el("span", {}, l)),
+    labels.length > MAX_LABELS ? el("span", { title: labels.join("\n") }, `+${labels.length - MAX_LABELS}`) : null);
 }
 
 function body(it) {
@@ -431,6 +450,27 @@ function body(it) {
   const d = el("details", { open: openBodies.has(key) }, el("summary", {}, "チケット本文"), el("pre", {}, t || "(本文なし)"));
   d.addEventListener("toggle", () => { d.open ? openBodies.add(key) : openBodies.delete(key); });
   return d;
+}
+
+// 背景は 5 行で畳み、実際に溢れているときだけ「続きを読む」を出す。開いたかどうかは key で覚える (カードが作り直されても保つ)。
+// 溢れの判定は DOM に載ってからでないと測れないので、ResizeObserver で測る (幅が変わって行数が変わっても追う)
+function context(it, text) {
+  const key = it.project + "\n" + it.id;
+  const p = md("p", "ctx", text);
+  const btn = el("button", { class: "ctxmore", type: "button", hidden: "" });
+  const sync = () => {
+    const open = openCtx.has(key);
+    p.classList.toggle("clamp", !open);
+    btn.setAttribute("aria-expanded", String(open));
+    btn.textContent = open ? "閉じる" : "続きを読む";
+    btn.hidden = !open && !(p.scrollHeight > p.clientHeight + 1);
+  };
+  btn.addEventListener("click", () => { openCtx.has(key) ? openCtx.delete(key) : openCtx.add(key); sync(); });
+  p.classList.add("clamp");
+  sync();
+  const box = el("div", { class: "ctxbox" }, p, btn);
+  if (window.ResizeObserver) new ResizeObserver(sync).observe(p);
+  return box;
 }
 
 const dkOf = it => it.project + "\n" + it.id;           // 下書きの key
@@ -444,7 +484,8 @@ function buildQuestion(it) {
   if (d.option && !(q && q.options.some(o => o.key === d.option))) d.option = "";   // 問いが変わって無くなった選択肢
   drafts.set(dk, d);
   const send = el("button", { class: "primary", type: "button" }, "回答する");
-  const area = el("textarea", { placeholder: q ? "補足 (任意)。選択肢に無い答えはここに書く" : "回答を書く" });
+  const area = el("textarea", { placeholder: q && q.options.length ? "補足 (任意)。選択肢に無い答えはここに書く"
+    : q && q.kind === "task" ? "結果を書く" : "回答を書く" });
   area.value = d.text;
   const refresh = () => { send.disabled = !(d.option || d.text.trim()); };
   area.addEventListener("input", () => { d.text = area.value; refresh(); saveDrafts(); });
@@ -474,9 +515,9 @@ function buildQuestion(it) {
   refresh();
   return el("section", { class: "card", "data-id": it.id, tabindex: "-1" },
     head(it),
-    el("p", { class: "title" }, it.title),
+    q ? el("p", { class: "title" }, it.title) : null,      // 問いが無いときは、ask の位置にタイトルを出すので重ねない
     md("p", "ask", q ? q.ask : it.title),
-    q && q.context ? md("p", "ctx", q.context) : null,
+    q && q.context ? context(it, q.context) : null,
     !q ? el("p", { class: "ctx" }, "問いがまだ整理されていません。本文を読んで自由に答えてください。") : null,
     opts, area, el("div", { class: "row" }, send), el("div", { class: "errbox" }), body(it));
 }
@@ -493,11 +534,22 @@ function undoAnswer(it) {
   submit(key, it, "/api/undo", { project: it.project, id: it.id });
 }
 
+// 回答済みの本文。1 行目の末尾の " (<key>)" は、その key が問いの選択肢のどれかと一致するときだけ外す
+// (label 自体が括弧で終わるもの、自由記述、問いの無いチケットはそのまま)
+function answerText(it) {
+  const t = (it.answer || "(回答のコメントが見つからない)").replace(/^\[humanq\] /, "");
+  if (!it.q || !Array.isArray(it.q.options)) return t;
+  const nl = t.indexOf("\n");
+  const first = nl < 0 ? t : t.slice(0, nl);
+  const m = /^(.* )\((.+)\)$/.exec(first);
+  return m && it.q.options.some(o => o.key === m[2]) ? m[1].replace(/ $/, "") + (nl < 0 ? "" : t.slice(nl)) : t;
+}
+
 function buildAnswered(it) {
   const b = el("button", { class: "ghost", type: "button" }, "取り消して判断待ちに戻す");
   b.addEventListener("click", () => undoAnswer(it));
   return el("section", { class: "card", "data-id": it.id, tabindex: "-1" }, head(it), el("p", { class: "title" }, it.title),
-    el("p", { class: "ans" }, (it.answer || "(回答のコメントが見つからない)").replace(/^\[humanq\] /, "")),
+    el("p", { class: "ans" }, answerText(it)),
     el("div", { class: "row" }, b), el("div", { class: "errbox" }));
 }
 

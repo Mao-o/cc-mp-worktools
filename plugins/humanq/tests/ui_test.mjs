@@ -1306,3 +1306,159 @@ test("幅 641・高さ 500・スクロールバー 15px で最長の知らせを
     assert.equal(await okToasts(page).count(), 3, "残ったのが新しい成功の知らせ 3 つでない");
   }, { viewport: { width: 641, height: 500 } }, null, sbBrowser);
 });
+
+// ---- 文言の小さな直し (placeholder・題の二重表示・回答済みの key・ラベル・経過日数) ---------------------------
+
+test("選択肢の無い task の補足欄は「結果を書く」、選択肢の無い decision と問いの無いカードは「回答を書く」、選択肢があれば補足の案内", async () => {
+  const base = item("t-A1");
+  const s = new Script([proj(P1, [
+    { ...base, q: { ...base.q, kind: "task", options: [], recommended: null } },
+    { ...item("t-B2"), q: { ...base.q, kind: "decision", options: [], recommended: null } },
+    { ...item("t-C3"), q: null },
+    { ...item("t-D4"), q: { ...base.q, kind: "task" } },
+  ])]);
+  await withPage(s, async page => {
+    const ph = id => qcard(page, id).locator("textarea").getAttribute("placeholder");
+    assert.equal(await ph("t-A1"), "結果を書く", "選択肢の無い task");
+    assert.equal(await ph("t-B2"), "回答を書く", "選択肢の無い decision");
+    assert.equal(await ph("t-C3"), "回答を書く", "問いの無いカード");
+    assert.equal(await ph("t-D4"), "補足 (任意)。選択肢に無い答えはここに書く", "選択肢のある task");
+  });
+});
+
+test("問いの無いカードでは、題の文字列がカードの中に 1 回だけ出る。問いのあるカードは題と問いの両方が出る", async () => {
+  const s = new Script([proj(P1, [{ ...item("t-A1", { title: "ユニークな題 XYZ" }), q: null }, item("t-B2")])]);
+  await withPage(s, async page => {
+    const text = await qcard(page, "t-A1").innerText();
+    assert.equal(text.split("ユニークな題 XYZ").length - 1, 1, `題が重なっている: ${text}`);
+    assert.equal(await qcard(page, "t-A1").locator("p.title").count(), 0, "問いの無いカードに小さい題の行が出ている");
+    assert.equal(await qcard(page, "t-A1").locator("p.ask").innerText(), "ユニークな題 XYZ", "ask の位置の題は残す");
+    assert.equal(await qcard(page, "t-B2").locator("p.title").innerText(), "title t-B2");
+    assert.equal(await qcard(page, "t-B2").locator("p.ask").innerText(), "ask t-B2");
+  });
+});
+
+test("回答済みの本文の末尾の (key) は、問いの選択肢の key と一致するときだけ外す", async () => {
+  const mk = (id, answer, q) => ({ ...item(id), answer, ...(q === undefined ? {} : { q }) });
+  const base = item("x").q;
+  const s = new Script([proj(P1, [], [
+    mk("t-A1", "[humanq] 回答: 【応急】止める (a)\n"),
+    mk("t-B2", "[humanq] 回答: (自由記述)\n補足の本文 (a)\n"),
+    mk("t-C3", "[humanq] 回答: B 案 (暫定)\n", { ...base, options: [{ key: "a", label: "B 案 (暫定)", desc: "" }] }),
+    mk("t-D4", "[humanq] 回答: 案A (a)\n\n補足 (b)\n2 行目"),
+    mk("t-E5", "[humanq] 回答: 案A (a)\n", null),
+    mk("t-F6", "[humanq] 回答: 案A (zz)\n"),
+  ])]);
+  await withPage(s, async page => {
+    const ans = async id => (await acard(page, id).locator(".ans").innerText()).replace(/\n+$/, "");
+    assert.equal(await ans("t-A1"), "回答: 【応急】止める");
+    assert.equal(await ans("t-B2"), "回答: (自由記述)\n補足の本文 (a)", "自由記述と補足の中の括弧はそのまま");
+    assert.equal(await ans("t-C3"), "回答: B 案 (暫定)", "key でない括弧は残る");
+    assert.equal(await ans("t-D4"), "回答: 案A\n\n補足 (b)\n2 行目", "1 行目の key だけ外す");
+    assert.equal(await ans("t-E5"), "回答: 案A (a)", "q が無ければ何も外さない");
+    assert.equal(await ans("t-F6"), "回答: 案A (zz)", "選択肢に無い key は外さない");
+  });
+});
+
+test("head には human / answered 以外のラベルが全文で出る。多いときは先頭 4 つと +N (title に全部)", async () => {
+  const many = ["human", "plugin:x", "area:ui", "kind:bug", "model:sonnet", "lane:l1", "plain"];
+  const s = new Script([proj(P1, [item("t-A1", { labels: ["human", "plugin:x", "area:ui"] }), item("t-B2", { labels: many })],
+    [item("t-C3", { labels: ["answered", "plugin:y"] })])]);
+  await withPage(s, async page => {
+    const spans = card => card.locator(".head > span:not(.prio):not(.id)").allInnerTexts();
+    const a = await spans(qcard(page, "t-A1"));
+    assert.deepEqual(a.slice(1), ["plugin:x", "area:ui"], "全文で、human は出ない");
+    const b = await spans(qcard(page, "t-B2"));
+    assert.deepEqual(b.slice(1), ["plugin:x", "area:ui", "kind:bug", "model:sonnet", "+2"]);
+    assert.equal(await qcard(page, "t-B2").locator('.head > span:text-is("+2")').getAttribute("title"),
+      "plugin:x\narea:ui\nkind:bug\nmodel:sonnet\nlane:l1\nplain");
+    const c = await spans(acard(page, "t-C3"));
+    assert.deepEqual(c.slice(1), ["plugin:y"], "回答済みでも answered は出ない");
+  });
+});
+
+test("作成日の横に「作成から N 日」が出る。当日は「今日」で、未来の日付や読めない日付には出さない", async () => {
+  const s = new Script([proj(P1, [item("t-A1", { created_at: "2026-11-24" }), item("t-B2", { created_at: "2026-11-27" }),
+    item("t-C3", { created_at: "2026-11-30" }), item("t-D4", { created_at: "" })], [item("t-E5", { created_at: "2026-11-20" })])]);
+  await withPage(s, async page => {
+    const date = card => card.locator(".head > span:not(.prio):not(.id)").first().innerText();
+    assert.equal(await date(qcard(page, "t-A1")), "2026-11-24 (作成から 3 日)");
+    assert.equal(await date(qcard(page, "t-B2")), "2026-11-27 (今日)");
+    assert.equal(await date(qcard(page, "t-C3")), "2026-11-30", "未来の日付に日数は出さない");
+    assert.equal(await date(qcard(page, "t-D4")), "", "日付が無ければ何も出さない");
+    assert.equal(await date(acard(page, "t-E5")), "2026-11-20 (作成から 7 日)");
+  }, {}, page => page.clock.install({ time: new Date(2026, 10, 27, 12, 0, 0) }));
+});
+
+// ---- 0.5.0: 長い背景 (context) は 5 行で畳む ------------------------------------------------------------
+
+const lines = n => Array.from({ length: n }, (_, i) => `ctx line ${i + 1}`).join("\n");
+const withCtx = (id, n) => { const it = item(id); return { ...it, q: { ...it.q, context: lines(n) } }; };
+const ctxMore = (page, id) => qcard(page, id).locator("button.ctxmore");
+const ctxMetrics = (page, id) => qcard(page, id).locator("p.ctx").evaluate(e => ({
+  h: e.getBoundingClientRect().height, lh: parseFloat(getComputedStyle(e).lineHeight), sh: e.scrollHeight }));
+
+test("10 行の背景は 5 行分以下に畳まれ、「続きを読む」で全文が見え、「閉じる」で戻る", async () => {
+  const s = new Script([proj(P1, [withCtx("t-A1", 10)])]);
+  await withPage(s, async page => {
+    await waitFor(async () => await ctxMore(page, "t-A1").isVisible(), 3000, "続きを読むが出る");
+    assert.equal(await ctxMore(page, "t-A1").textContent(), "続きを読む");
+    assert.equal(await ctxMore(page, "t-A1").getAttribute("aria-expanded"), "false");
+    assert.equal(await ctxMore(page, "t-A1").getAttribute("type"), "button");
+    const m = await ctxMetrics(page, "t-A1");
+    assert.ok(m.h <= m.lh * 5 + 1, `畳んだ高さが 5 行を超える: ${m.h} / ${m.lh}`);
+    assert.ok(m.sh > m.h + 1, "全文が畳まれていない");
+    await ctxMore(page, "t-A1").click();
+    const o = await ctxMetrics(page, "t-A1");
+    assert.ok(o.h >= o.lh * 10 - 1, `開いても全文が見えない: ${o.h} / ${o.lh}`);
+    assert.equal(await ctxMore(page, "t-A1").textContent(), "閉じる");
+    assert.equal(await ctxMore(page, "t-A1").getAttribute("aria-expanded"), "true");
+    await ctxMore(page, "t-A1").click();
+    const c = await ctxMetrics(page, "t-A1");
+    assert.ok(c.h <= c.lh * 5 + 1, "閉じても畳まれない");
+    assert.equal(await ctxMore(page, "t-A1").textContent(), "続きを読む");
+  });
+});
+
+test("3 行の背景と、ちょうど 5 行の背景では「続きを読む」が出ない。問いの無いカードにも出ない", async () => {
+  const none = { ...item("t-C3"), q: null };
+  const s = new Script([proj(P1, [withCtx("t-A1", 3), withCtx("t-B2", 5), none])]);
+  await withPage(s, async page => {
+    assert.equal(await ctxMore(page, "t-A1").count(), 1);
+    assert.equal(await ctxMore(page, "t-A1").isVisible(), false);
+    assert.equal(await ctxMore(page, "t-B2").isVisible(), false);
+    assert.equal(await ctxMore(page, "t-C3").count(), 0);
+    assert.match(await qcard(page, "t-C3").textContent(), /問いがまだ整理されていません/);
+    const m = await ctxMetrics(page, "t-A1");
+    assert.ok(m.h < m.lh * 3 + 1 && m.h >= m.lh * 3 - 1, "3 行の背景が 3 行で出ていない");
+  });
+});
+
+test("開いた背景は、データが変わっても開いたまま。ほかのカードは畳んだまま", async () => {
+  const s = new Script([proj(P1, [withCtx("t-A1", 10), withCtx("t-B2", 10)])]);
+  await withPage(s, async page => {
+    await waitFor(async () => await ctxMore(page, "t-A1").isVisible(), 3000, "続きを読む");
+    await ctxMore(page, "t-A1").click();
+    await page.locator("h1").click();            // フォーカスをカードの外へ (フォーカスのあるカードは作り直しを後回しにするため)
+    assert.equal(await page.evaluate(() => document.activeElement === document.body), true);
+    await qcard(page, "t-A1").evaluate(e => { e.dataset.mark = "old"; });
+    s.projects[0].human[0].title = "changed title";
+    await page.evaluate(() => load());
+    await waitFor(async () => /changed title/.test(await qcard(page, "t-A1").textContent()), 3000, "A の題が変わる");
+    await waitFor(async () => (await qcard(page, "t-A1").count()) === 1, 3000, "A が 1 枚");
+    assert.equal(await qcard(page, "t-A1").evaluate(e => e.dataset.mark || ""), "", "A が作り直されていない (旧い要素のまま)");
+    const o = await ctxMetrics(page, "t-A1");
+    assert.ok(o.h >= o.lh * 10 - 1, "データの更新で畳まれた");
+    assert.equal(await ctxMore(page, "t-A1").textContent(), "閉じる");
+    assert.equal(await ctxMore(page, "t-B2").textContent(), "続きを読む");
+  });
+});
+
+test("幅 375・高さ 812 で、10 行の背景のカードの最初の選択肢が最初の画面に入る", async () => {
+  const s = new Script([proj(P1, [withCtx("t-A1", 10)])]);
+  await withPage(s, async page => {
+    await waitFor(async () => await ctxMore(page, "t-A1").isVisible(), 3000, "続きを読む");
+    const b = await qcard(page, "t-A1").locator(".opt").first().boundingBox();
+    assert.ok(b.y >= 0 && b.y + b.height <= 812, `最初の選択肢が画面の外: y=${b.y} h=${b.height}`);
+  }, { viewport: { width: 375, height: 812 } });
+});
