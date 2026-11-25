@@ -209,6 +209,17 @@ class RememberedFamilyCheckTest(ProbeCase):
 
         self.assert_fails(self._changed(lambda t: (t.a / "sub").rmdir(), cwd=setup), REMEMBERED)
 
+    def test_worktree_added_at_cwd_without_forget(self):
+        # 覚えた結果が空 (linked worktree の外) の cwd でも、そこに worktree を足したら止める
+        def body(t):
+            c = Path(t._tmp.name) / "c"
+            c.mkdir()
+            self.assertIsNone(evaluate(bash(f'git -C "{t.main}" reset --hard', c)))  # 覚える (linked worktree の外)
+            sh(t.main, "worktree", "add", "-q", "-b", "lane-c", str(c))
+            evaluate(bash(f'git -C "{t.main}" reset --hard', c))
+
+        self.assert_fails(_probe(body, share=False), REMEMBERED)
+
     def test_forget_after_add_passes(self):
         def body(t):
             c = Path(t._tmp.name) / "c"

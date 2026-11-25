@@ -78,10 +78,20 @@ def evaluate(data: dict) -> dict | None:
     # cwd が Git Bash の綴り (`/c/...`) で届いたときは、Windows の読みと Git Bash の読みの両方で linked worktree かを見る。
     # 読みごとに、その読みの cwd と Family で判定し、どちらかで別の checkout なら止める (Bash の行き先と同じ和)
     readings = detect_readings(cwd)
-    if not readings:
+    # detect が例外を投げた読みは、その読みだけ判定をスキップしたことを注意に書く (ほかの読みの判定は残す。
+    # すべての読みで例外のときは detect_readings が投げ直し、main() の「内部エラー」の注意になる)
+    skipped = [
+        f"作業ディレクトリの読み ({here}) は内部エラーのため判定をスキップした: {type(e).__name__}: {e}"
+        for here, e in readings
+        if isinstance(e, Exception)
+    ]
+    readings = tuple((here, fam) for here, fam in readings if isinstance(fam, Family))
+    if not readings and not skipped:
         return None
 
-    if tool == "Bash":
+    if not readings:
+        findings = []
+    elif tool == "Bash":
         findings = command.analyze_readings(str(tool_input.get("command") or ""), readings)
     else:
         path = tool_input.get(_PATH_KEYS[tool])
@@ -90,22 +100,23 @@ def evaluate(data: dict) -> dict | None:
 
     allowed = _allowed_roots()
     findings = [f for f in findings if not (f.blocked and f.root in allowed)]
-    if not findings:
+    if not findings and not skipped:
         return None
 
     blocked = [f.message for f in findings if f.blocked]
     notes = [f.message for f in findings if not f.blocked]
-    header = f"この session の worktree: {' / '.join(dict.fromkeys(fam.home for _, fam in readings))}"
+    # linked worktree と分かった読みが無い (例外の読みだけ) ときは、見出しの worktree が無い
+    header = [f"この session の worktree: {' / '.join(dict.fromkeys(fam.home for _, fam in readings))}"] if readings else []
     if blocked and mode == "enforce":
-        lines = [f"{_TAG} 別の checkout を書き換える操作を止めた。", header, *(f"- {m}" for m in blocked)]
+        lines = [f"{_TAG} 別の checkout を書き換える操作を止めた。", *header, *(f"- {m}" for m in blocked + skipped)]
         lines.append(
             "自分の worktree の中で作業する。意図した操作なら、対象の checkout を "
             f"{ALLOW_ENV} に加えるか {MODE_ENV}=warn で実行する。"
         )
         return _out("deny", "\n".join(lines))
-    msgs = blocked + notes
+    msgs = blocked + notes + skipped
     prefix = f"{_TAG} 別の checkout を書き換える可能性がある ({MODE_ENV}=warn のため止めていない)" if blocked else f"{_TAG} 対象を確認できなかった操作がある (止めていない)"
-    return _out(None, "\n".join([prefix, header, *(f"- {m}" for m in msgs)]))
+    return _out(None, "\n".join([prefix, *header, *(f"- {m}" for m in msgs)]))
 
 
 def main() -> None:

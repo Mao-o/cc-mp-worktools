@@ -58,6 +58,9 @@
     Git Bash の読みにせず、Windows の読みだけで判定します (Bash の行き先、Write / Edit のパス、
     `WORKTREE_CWD_GUARD_ALLOW`、hook の入力の作業ディレクトリのどれも同じです)。`MSYS_NO_PATHCONV=1` などで変換を止めた git の `/c/x` も
     Git Bash の読みで判定するので、止めすぎることがあります
+  - Windows で、Git Bash の root (`/`) を通る相対パス。`/c/Users/<u>/...` の作業ディレクトリからドライブの root より上に出る
+    `cd ../../../../../../../c/Users/<u>/repo && git ...` や、`cd / && cd c/Users/<u>/repo && git ...` は、Git Bash では
+    `C:\Users\<u>\repo` に届きますが、guard は `..` と `/` をドライブの root (`C:\`) で読み、`C:\c\Users\<u>\repo` を指すとみなして止めません
 - Write / Edit のパスは、Claude Code が hook に渡した値で判定します。Claude Code は hook の前にパスを絶対パスへ展開し、
   Windows では `\` 区切りの `C:\...` の形で渡します (公式 docs)。書き込む先と hook に渡す値は同じものとして扱い、
   Claude Code が `/c/x` を `C:\x` と今のドライブの `\c\x` のどちらに展開するかは確かめていません (Windows の実機で

@@ -22,6 +22,14 @@
   (`/c/x` と `/c` だけ)。読み替えの関数 (`drive_spellings` ほか) は、family.py から使うため command.py から family.py に移した (中身は同じ)
 - Claude Code の挙動: 公式 docs の hooks の入力の節には cwd の形の記述が無く、Windows の実機でも確かめていない。`C:\...` の形で届くなら、
   この修正は判定を変えない。README の「目的と限界」に書いた
+- cwd の 1 つの読みの detect が例外を投げても (3.11〜3.13 の `Path.is_dir()` がアクセス拒否などの `OSError` を投げる経路)、
+  ほかの読みの判定は残す。例外の読みは「作業ディレクトリの読み (<その読みの cwd>) は内部エラーのため判定をスキップした: ...」の
+  1 行にして、deny の理由にも注意にも並べる (ほかの読みで止めるなら止めたまま行が 1 行増え、ほかの読みで何も出ないときもこの注意を出す)。
+  すべての読みで例外のときだけ、これまでどおり hook 全体の「内部エラー」の注意にする (読みが 1 つの POSIX と `C:\...` の cwd は変わらない)。
+  マージ前レビューで、Git Bash の読みの detect だけが例外になると、0.10.2 が Windows の読みで止めていた入力まで「内部エラー」の注意
+  (止めない) になることが見つかった
+- README の限界に、Windows で Git Bash の root (`/`) を通る相対パス (`cd ../../../../../../../c/Users/<u>/repo && git ...`・
+  `cd / && cd c/Users/<u>/repo && git ...`) は止めないことを書いた (0.9.2 からの読みで、判定は変えていない)
 
 ### 比較
 
@@ -40,6 +48,9 @@ detect は「checkout の一覧を固定した 1 つの読みの detect」にし
   同じ場所を `C:\...` で書いた cwd の 0.10.2 の出力と全件一致した
 - `C:\c\Users\...` にも linked worktree がある世界では、`/c/...` の cwd の判定が「Windows の読み (0.10.2 の判定) と Git Bash の読みの和」に
   なることを全件で確かめた。文面だけが変わったものは、見出しに両方の worktree を並べ、両方の読みの理由を並べたもの
+- 片方の読みの detect に例外を注入した世界 (cwd 24 形 × 入力 63 形 × 許可リスト 5 × MODE 2 = 15,120 件ずつ) でも、0.10.2 より
+  弱くなる入力 (停止 → 非停止・注意 → なし) は 0。例外の読みのある出力はすべて、例外を出さなかった読みだけの判定に
+  例外の読みの行を 1 行足したものだった
 
 ### テスト整理 (挙動の変更なし): harness の前提を、破ったテストを FAIL にする検査にする
 
@@ -56,7 +67,8 @@ detect は「checkout の一覧を固定した 1 つの読みの detect」にし
 - `tests/test_harness.py`: 前提を破るテストを `GuardBase` の子クラスとして実際に走らせ、ERROR ではなく FAIL になることを固定する。
   共有の側は、repo に書く・同じ大きさで書き直す・消す・git で branch を作る・repo の兄弟にファイル / ディレクトリ / symlink を作る。
   覚えの側は、worktree の add / remove / move、`gitdir` の書き換え、`.git` ファイルの書き換え・symlink への置き換え、main の `.git` が
-  symlink の配置での add、cwd の上に repo を作る、cwd を消す。前提を守るテスト (読むだけ・中身の同じ書き直し・`forget_family()` を
+  symlink の配置での add、cwd の上に repo を作る、cwd を消す、linked worktree の外だった cwd に worktree を足す (覚えた detect の結果が
+  空の cwd も、cwd の上の `.git` で変化を捕まえる)。前提を守るテスト (読むだけ・中身の同じ書き直し・`forget_family()` を
   呼んだ add・worktree の中の書き込み / commit / branch の切り替え / `worktree lock`) は通ることも固定する
 - 検査の費用: suite 全体 (`test_harness.py` を除く 260 件) で、共有の側の比較が 192 回・計 0.33 秒 (1 回 1.7 ms)、覚えの側の比較が
   1,648 回・計 0.30 秒 (1 回 0.18 ms。`evaluate` を 258 回呼ぶテストで約 46 ms)。suite の実行時間は 0.10.2 の 42〜48 秒に対し 45〜49 秒
@@ -68,9 +80,16 @@ detect は「checkout の一覧を固定した 1 つの読みの detect」にし
   同じ判定と文面で止めること (相対パスを含む)、cwd の 2 つの読みが別々の linked worktree に当たるときは両方で判定すること
   (片方の行き先を許可リストで許しても、もう片方で止める)、同じ worktree に当たるときは同じ理由を 2 回並べないこと、
   読み取りの期限が 1 つであること
+- `NtpathEmulationTest`: cwd の 1 つの読みの detect が例外 (`PermissionError` と `ValueError`) を投げても、ほかの読みが「別の checkout」なら
+  deny のまま例外の読みの行が 1 行増え、「linked worktree の外」「自分の worktree」なら例外の読みの注意だけを出すこと (出力の全行を固定)。
+  読みの順が逆でも同じこと、すべての読みで例外なら最初の読みの例外を投げ直すこと
+- `GuardTest.test_git_bash_spelling_of_cwd_on_windows`: Windows の実機で、`/c/...` の cwd を本物の detect (git を起動する) で linked worktree と
+  読み、別の checkout への Bash の git と Write を止めること。Windows 以外では skip する。push の後の Windows の CI で初めて走る
+  (ローカルでは、skip を外した形でドライブ文字の無いパスが skip になり、前提が外れたときは ERROR ではなく FAIL になることだけを確かめた)
 
-テスト件数: 255 → 280 (追加 25・削除 0・統合 0)。既存のテストの assert は変えていない (`GuardBase` などが差し替える関数の名前を
-`detect` から `detect_readings` に変え、`command.drive_spellings` の参照を `family.drive_spellings` にした)。
+テスト件数: 255 → 285 (追加 30・削除 0・統合 0)。既存のテストの assert は変えていない (`GuardBase` などが差し替える関数の名前を
+`detect` から `detect_readings` に変え、`command.drive_spellings` の参照を `family.drive_spellings` にした。`NtpathEmulationTest` の
+detect の差し替えに、例外を投げる場所の引数を足した)。
 
 ## 0.10.2
 

@@ -479,6 +479,26 @@ class GuardTest(GuardBase):
         self.assertEqual(decision(evaluate(bash(f'cd "{git_bash(self.b)}"; git reset --hard', self.a))), "deny")
         self.assertIsNone(evaluate(bash(f'git -C "{git_bash(self.a)}" reset --hard', self.a)))
 
+    @unittest.skipUnless(os.name == "nt", "Windows の Git Bash の綴り")
+    def test_git_bash_spelling_of_cwd_on_windows(self):
+        # hook の入力の cwd が `/c/...` で届いても、本物の detect (git を起動する) が Git Bash の読み (`C:\...`) で linked worktree と分かる。
+        # NtpathEmulationTest は detect を差し替えるので、ここだけが Windows の CI で本物の detect を通す
+        drive, rest = os.path.splitdrive(str(self.a))
+        if not drive.endswith(":"):
+            self.skipTest(f"ドライブ文字の無いパス ({self.a})")
+        here = "/" + drive[0].lower() + rest.replace("\\", "/")
+
+        def run(data: dict) -> dict | None:
+            try:
+                return evaluate(data)
+            except Exception as e:  # noqa: BLE001 - main() は例外を「内部エラー」の注意 (止めない) にする。ERROR ではなく FAIL で数える
+                self.fail(f"`/c/...` の cwd ({here}) で evaluate が例外を投げた: {e!r}")
+
+        self.assertEqual(decision(run(bash(f'git -C "{self.main}" reset --hard', here))), "deny")
+        self.assertEqual(decision(run(bash("cd ../../.. && git reset --hard", here))), "deny")
+        self.assertEqual(decision(run(write(self.b / "x.py", here))), "deny")
+        self.assertIsNone(run(bash("git reset --hard", here)))
+
     def test_drive_like_path_off_windows_is_a_plain_path(self):
         # Windows でなければ `/c/x` はそのままのパスで、Git Bash の読み (`C:\x`) はしない
         # (POSIX で `c:/x` と読むと今の場所の下の相対パスになり、main の下として止めてしまう)
@@ -754,13 +774,17 @@ class NtpathEmulationTest(unittest.TestCase):
             common_dir=n(shadow_main + "\\.git"),
         )
 
-    def _linked(self, *families: family.Family):
+    def _linked(self, *families: family.Family, failing: tuple[tuple[str, Exception], ...] = ()):
         """families の worktree の中 (root か、その下) の cwd だけを linked worktree と読む、1 つの読みの detect (git は起動しない)。
 
-        cwd は今の OS の読み (ここでは今のドライブを C: とした Windows の読み) で読む。読みの和を取るのは detect_readings の側
+        cwd は今の OS の読み (ここでは今のドライブを C: とした Windows の読み) で読む。読みの和を取るのは detect_readings の側。
+        failing の (正規化した dir, 例外) の中の cwd では、その例外を投げる
         """
         def detect_one(cwd):
             here = family.norm(cwd)
+            for top, error in failing:
+                if here == top or here.startswith(top + "\\"):
+                    raise error
             for fam in families:
                 if here == fam.home or here.startswith(fam.home + "\\"):
                     return fam
@@ -768,10 +792,13 @@ class NtpathEmulationTest(unittest.TestCase):
 
         return mock.patch.object(family, "_detect_one", detect_one)
 
-    def _evaluate_at(self, data: dict, families: tuple[family.Family, ...], allow: str | None = None) -> dict | None:
+    def _evaluate_at(
+        self, data: dict, families: tuple[family.Family, ...], allow: str | None = None,
+        failing: tuple[tuple[str, Exception], ...] = (),
+    ) -> dict | None:
         # _evaluate と同じ env と差し替えで、detect だけを本物の detect_readings (読みの和) にする
         with (
-            self._linked(*families),
+            self._linked(*families, failing=failing),
             mock.patch.dict(os.environ),
             mock.patch.object(ntpath, "isdir", lambda p: False),
             mock.patch.object(os, "pathsep", ";"),
@@ -895,6 +922,93 @@ class NtpathEmulationTest(unittest.TestCase):
             out = self._evaluate_at(bash("cd ../../.. && git reset --hard", self.GIT_BASH_A), (self._shadow_family(), self.fam))
         self.assertEqual(decision(out), "deny")
         self.assertEqual(made, [command._READ_SECONDS])
+
+    # --- cwd の 1 つの読みの detect が例外を投げる -----------------------------
+
+    GIT_BASH_READING_A = "c:/Users/other/repo/.claude/worktrees/a"  # GIT_BASH_A の Git Bash の読み
+
+    def _no_raise(self, fn, *args, **kwargs):
+        # main() は evaluate の例外を「内部エラー」の注意 (止めない) にする。ERROR ではなく FAIL で数える
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:  # noqa: BLE001
+            self.fail(f"1 つの読みの例外で、ほかの読みの判定が消えた: {e!r}")
+
+    @staticmethod
+    def _skipped(here: str, error: Exception) -> str:
+        return f"- 作業ディレクトリの読み ({here}) は内部エラーのため判定をスキップした: {type(error).__name__}: {error}"
+
+    @staticmethod
+    def _text(out: dict | None) -> list[str]:
+        body = (out or {}).get("hookSpecificOutput", {})
+        return (body.get("permissionDecisionReason") or body.get("additionalContext") or "").split("\n")
+
+    def test_exception_in_one_reading_keeps_the_other_readings_verdict(self):
+        # `/c/...` の Windows の読み (`C:\c\Users\...`) が linked worktree で、Git Bash の読み (`C:\Users\...`) の detect が例外を投げる。
+        # 例外の読みは注意 1 行にし、ほかの読みで判定する (0.10.2 は Windows の読みだけで読んで止めていた。例外で evaluate ごと
+        # 落とすと、main() の「内部エラー」の注意になって止めない)
+        shadow = self._shadow_family()
+        cwd, here = self.GIT_BASH_A, self.GIT_BASH_READING_A
+        tag = "[worktree-cwd-guard] 対象を確認できなかった操作がある (止めていない)"
+        for error in (PermissionError(13, "Access is denied", here), ValueError("embedded null byte")):
+            failing = ((self.fam.home, error),)
+            line = self._skipped(here, error)
+            with self.subTest(error=error):
+                with self._linked(shadow, failing=failing):
+                    self.assertEqual(self._no_raise(family.detect_readings, cwd), ((cwd, shadow), (here, error)))
+                    self.assertEqual(self._no_raise(family.detect, cwd), shadow)
+            # ほかの読みで別の checkout: 判定は deny のまま、例外の読みの行が 1 行増える (例外を投げない世界の出力と比べる)
+            for data in (bash("cd ../../.. && git reset --hard", cwd), {**self._file("Write", "../../../x.py"), "cwd": cwd}):
+                with self.subTest(error=error, case="別の checkout", data=data["tool_input"]):
+                    out = self._no_raise(self._evaluate_at, data, (shadow,), failing=failing)
+                    self.assertEqual(decision(out), "deny")
+                    base = self._text(self._evaluate_at(data, (shadow,)))
+                    self.assertEqual(len(base), 4, base)  # 見出し・worktree・理由 1 行・案内
+                    self.assertEqual(self._text(out), [*base[:3], line, base[3]])
+            # ほかの読みで linked worktree の外: 何も出さないのではなく、例外の読みの注意を出す (見出しの worktree は無い)
+            for data in (bash("cd ../../.. && git reset --hard", cwd), {**self._file("Write", "../../../x.py"), "cwd": cwd}):
+                with self.subTest(error=error, case="linked worktree の外", data=data["tool_input"]):
+                    self.assertIsNone(self._evaluate_at(data, ()))
+                    out = self._no_raise(self._evaluate_at, data, (), failing=failing)
+                    self.assertEqual(decision(out), "context")
+                    self.assertEqual(self._text(out), [tag, line])
+            # ほかの読みで自分の worktree: 止めずに、例外の読みの注意を出す
+            for data in (bash("git reset --hard", cwd), {**self._file("Write", "x.py"), "cwd": cwd}):
+                with self.subTest(error=error, case="自分の worktree", data=data["tool_input"]):
+                    self.assertIsNone(self._evaluate_at(data, (shadow,)))
+                    out = self._no_raise(self._evaluate_at, data, (shadow,), failing=failing)
+                    self.assertEqual(decision(out), "context")
+                    self.assertEqual(self._text(out), [tag, f"この session の worktree: {shadow.home}", line])
+
+    def test_exception_in_the_windows_reading_keeps_the_git_bash_reading(self):
+        # 読みの順が逆 (先の Windows の読みが例外、後の Git Bash の読みが linked worktree) でも、Git Bash の読みで判定する
+        shadow = self._shadow_family()
+        cwd = self.GIT_BASH_A
+        error = PermissionError(13, "Access is denied", cwd)
+        failing = ((shadow.home, error),)
+        with self._linked(self.fam, failing=failing):
+            self.assertEqual(self._no_raise(family.detect_readings, cwd), ((cwd, error), (self.GIT_BASH_READING_A, self.fam)))
+            self.assertEqual(self._no_raise(family.detect, cwd), self.fam)
+        out = self._no_raise(self._evaluate_at, bash("cd ../../.. && git reset --hard", cwd), (self.fam,), failing=failing)
+        self.assertEqual(decision(out), "deny")
+        text = self._text(out)
+        self.assertEqual(len(text), 5, text)
+        self.assertEqual(text[1], f"この session の worktree: {self.fam.home}")
+        self.assertIn("(c:\\users\\other\\repo)", text[2])
+        self.assertEqual(text[3], self._skipped(cwd, error))
+
+    def test_exception_in_every_reading_is_raised(self):
+        # どの読みでも detect を確かめられなければ、最初の読みの例外を投げ直す (main() が「内部エラー」の注意にする。0.10.2 と同じ)
+        shadow = self._shadow_family()
+        first, second = PermissionError(13, "first"), PermissionError(13, "second")
+        data = bash("cd ../../.. && git reset --hard", self.GIT_BASH_A)
+        with self.assertRaises(PermissionError) as raised:
+            self._evaluate_at(data, (), failing=((shadow.home, first), (self.fam.home, second)))
+        self.assertIs(raised.exception, first)
+        # 読みが 1 つの cwd (`C:\...`) も同じ
+        with self.assertRaises(PermissionError) as raised:
+            self._evaluate_at(bash("cd ../../.. && git reset --hard", self.A), (), failing=((self.fam.home, second),))
+        self.assertIs(raised.exception, second)
 
 
 @unittest.skipIf(os.name == "nt", "POSIX のパスの読み")
