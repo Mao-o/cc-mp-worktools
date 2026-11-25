@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.30.4
+
+### Added (開発者向け): 照合の組を比べる道具 (`tests/oracle/`)
+
+- 判定は変えない (hook の挙動の変更なし)。照合に使う env や context を変える変更 (前段の export を照合に重ねる、
+  など) を評価するための、数え方の道具とコーパスを足した。使い方は `docs/DEVELOPMENT.md` の「照合の組の比較」
+- oracle (`shellside.py`): コマンド 1 行を bash 3.2 と zsh -f で走らせ、偽の CLI (aws / gcloud / kubectl /
+  firebase / gh。受け取った env と argv を書くだけ) ごとに「照合を決める組」(CLI が読む環境変数 + context option。
+  パスは走るディレクトリで解決した実体のパス) を出す。名前の一覧は各 service の宣言 (`IDENTITY_ENV_VARS` /
+  `IDENTITY_ENV_PREFIXES` / `CONTEXT_OPTIONS`) から引く
+- hook 側 (`hookside.py`): 同じ行を 1 つの版の dispatch に流し、verify に渡った組を出す (CLI は起動しない)
+- 比較器 (`compare.py`): 2 つの版 (dir か git の ref) に同じコーパスを流し、「旧が止め、新が通し、シェルの CLI
+  の組が新の verify の組と違う」行を、違う名前・シェル・形ごとの内訳つきで数える。旧が通し新が止める行、
+  誤 deny の解消、その版だけで見た素通しの大きさも数える
+- コーパスの生成器 (`corpus.py`): 名前 × 値の書き方 × 区切り × 順序 × 起動時の env の格子、前段の export を
+  照合に重ねる実装案 (採用していない) のゲートの両側とマージ前レビューの指摘の形、bash 3.2 / zsh -f が実際に
+  持つ変数の列挙 × 代入の書き方 (zsh の整数型の特殊な変数への代入は値を算術式として評価し、照合用の名前を
+  書き換える)、値の決まらない context option × CLI
+- suite には道具が空でないことを確かめるテストを 1 つだけ足した (`tests/test_oracle.py`。bash と zsh が
+  無ければ skip)
+
 ## 0.30.3
 
 ### Fixed: heredoc を置いた行で、先頭のコマンドの前置きの代入を後ろの段の照合にも使っていた

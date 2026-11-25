@@ -89,6 +89,7 @@ cloud-account-guard/
         │   ├── pin_env.py          プロジェクトごとの固定の提案 (builder の pin-env。読み取り専用)
         │   └── templates/          プロジェクト側 signpost のテンプレート
         └── tests/                  unittest (標準ライブラリのみ)
+            └── oracle/             照合の組の比較の道具 (suite ではない。「照合の組の比較」)
 ```
 
 ### 実行フロー
@@ -663,6 +664,72 @@ claude --plugin-dir plugins/cloud-account-guard
 
 実セッションで `gh pr list` / `firebase use` / `kubectl get pod` 等を叩き、
 accounts.local.json の有無・一致/不一致・チェーン・ラッパで挙動を確認する。
+
+### 照合の組の比較 (`tests/oracle/`)
+
+照合に使う env や context を変える変更 (前段の export を照合に重ねる、など) は、旧版が止めていた形を
+通す方向に動く。通した形で、シェルの CLI が照合と別の組で走っていないかを、毎回同じ数え方で測る道具。
+suite ではない (`tests/test_oracle.py` は、道具が空でないことだけを確かめる)。
+
+**組 (照合を決める組)**: CLI が読む環境変数 (services の `IDENTITY_ENV_VARS` に当たる名前と
+`IDENTITY_ENV_PREFIXES` で始まる名前) + context option (`CONTEXT_OPTIONS`)。名前の一覧は宣言から引き、
+道具は二重に持たない。パスの値は、その CLI が走るディレクトリで解決した実体のパスで比べる。値がパスか
+どうかだけは宣言に区別が無いので `tests/oracle/decl.py` の `PATH_VALUED` が持つ (相対パスの値を持つ名前を
+宣言に足したら、ここにも足す)。
+
+| ファイル | 役割 |
+|---|---|
+| `decl.py` | 組の定義 (宣言の読み出し・値の解決・argv から context option を拾う近似) |
+| `world.py` | 比較の世界 (設定ファイルを置いたディレクトリ) と、偽の verify が一致を決める規則 |
+| `shellside.py` | oracle: 1 行を bash 3.2 と `zsh -f` で走らせ、偽の CLI (env と argv を書くだけ) が受け取った組を出す |
+| `hookside.py` | 1 つの版の dispatch に流し、判定と verify に渡った組を出す (CLI は起動しない) |
+| `compare.py` | 比較器: 2 つの版に同じコーパスを流して数える |
+| `corpus.py` / `boundary.jsonl` | コーパスの生成器 (下) |
+
+```bash
+cd hooks/cloud-account-guard
+python3 tests/oracle/compare.py --old <旧の版> --new <新の版> --work <記録の dir> \
+  [--corpus boundary ctxopt shellvars lattice] [--json <要約.json>]
+```
+
+版は git の ref (`git archive` で `--work` の下に取り出す) か、hook パッケージ / plugin の dir。偽の CLI
+だけを起動する (コマンド語を絶対パスで書いた CLI も偽物に置き換える) が、本物の CLI が PATH にある環境では、
+偽の CLI を PATH の先頭に置いた sandbox の中で流す。記録は `--work` の下に、コーパス・記録を作るファイル・
+宣言・版の中身の hash を鍵に残り、同じ組み合わせは使い回す。
+
+数えるもの (行ごと。run は bash か zsh で実際に起動した偽の CLI 1 回):
+
+- **DOD**: 旧が止め (deny / ask)、新が止めず、run の組が新の verify に渡った同じ CLI の組のどれとも違う行。
+  1 件でもあれば exit 1。「うち期待外」は、組の違う run が world の規則で期待外の照合先になる行 (組は違っても
+  同じアカウントに当たる行、たとえば KUBECONFIG があるときの HOME の違いを除いた数)
+- **NEW_ABS / OLD_ABS**: その版が止めず、組が違う行 (旧新を問わない。その版の守らない範囲の大きさ)
+- **FIXED**: 旧が止め新が止めず、どの run の組も新の verify の組と一致する行 (誤 deny の解消)
+- **TIGHTEN** (旧が止めず新が止める)、**UNVERIFIED** (旧が止め、新が照合しないまま CLI が走った)、CLI ごとの遷移
+
+コーパス (どれも機械的に作る。手で選んだ形は `boundary.jsonl` の記録だけ):
+
+- `lattice`: 照合用の名前 2 つ × 値を決める書き方 7 種 × 7 種 × 区切り 3 × 書いた順序 2 × 起動時の env 2
+- `boundary`: 前段の export を照合に重ねる実装案 (採用していない) のゲートの両側と、その案へのマージ前
+  レビューの指摘の形 (記録の写し。tag の末尾が由来: `gate` / `dotenv` / `dotenv2` / `inline-dyn` /
+  `inline-same` / `review` / `switch` / `everyday`)
+- `shellvars`: bash 3.2 と `zsh -f` が実際に持つ変数を列挙し (`declare -p` の属性、`${(k)parameters}` の型)、
+  全変数 × 代入の書き方 (`export X=NAME=v`・行頭の `X=NAME=v`・`typeset` / `read` / `printf -v` など)。
+  照合用の名前の側の書き方 (`${NAME::=v}`・`$((NAME=v))` など) と、対照 (起動時は良い値で、コマンドが
+  静的に悪い値を書く形) も入れる。zsh の整数型の特殊な変数は代入の値を算術式として評価するので、
+  `export SECONDS=KUBECONFIG=0` が KUBECONFIG を書き換える。手で選んだ一覧ではこの種の変数を取りこぼした
+- `ctxopt`: 宣言の context option × 値の決まらない書き方 (`$X`・`${X:-d}`・`$(...)`・backtick など) ×
+  前置き (なし / 前段の export / 行頭の代入)。対照に値の決まる option も入れる
+
+所要時間は、4 コーパス (約 1 万行) を記録なしから 3 並列で流して 3 分ほど。ほとんどはシェル側で、版を
+変えて流し直すときはシェル側の記録を使い回すので数十秒。
+
+限界:
+
+- argv から context option を拾うのは CLI の解析の近似 (`--opt v` / `--opt=v` / 1 文字の option の結合形。
+  `--` より後ろは見ない。同じ option は最後が有効)
+- world の規則は、旧新の判定を作るためだけにある (実物の CLI の照合を模したものではない)。組の比較は
+  world に依らない
+- 宣言に無い名前・option (`CONTEXT_OPTIONS` に無い `--token` など) は組に入らない
 
 ## 設計判断の履歴
 
