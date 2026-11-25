@@ -9,8 +9,11 @@
   足したら) ここから外す。外し忘れは、services の PATTERNS に一致する名前として契約テストが検出する
 - 候補は dispatcher の分解 (`_analyze_command` が返すセグメントの列) をそのまま使う。読みは足さない
   (wrapper を剥がす規則・`$(...)` の中を見ない、などは検証の候補と同じ)
-- 同じセッション (hook input の `session_id`) では、CLI ごとに 1 回だけ知らせる。記録は成功 cache と
-  同じ dir (`cache.state_dir`) に CLI ごとのファイルで置く。`session_id` が無い・記録の dir を使えない・
+- 同じセッション (hook input の `session_id`) の同じエージェントでは、CLI ごとに 1 回だけ知らせる。
+  エージェントは hook input の `agent_id` で分ける (サブエージェントの中で発火したときだけ付く。メインは
+  無い)。サブエージェントは同じ `session_id` を持ち、`additionalContext` はツールを呼んだエージェントにだけ
+  届くので、メインとサブエージェントは互いの記録で黙らない。記録は成功 cache と同じ dir
+  (`cache.state_dir`) に CLI ごとのファイルで置く。`session_id` が無い・記録の dir を使えない・
   記録を作れないときは 1 回に絞れないので毎回知らせる (deprecation の案内と同じ倒し方)
 - 知らせるかどうか・記録するかどうかは dispatcher が決める (deny のときは知らせず、記録もしない)
 """
@@ -52,16 +55,18 @@ def detect(candidates) -> list[str]:
     return found
 
 
-def _flag_path(base: Path, session_id: str, name: str) -> Path:
-    # session_id はファイル名に直接入れない (hook input の値で、パスの区切りを含みうる)。
-    material = json.dumps([session_id, name], ensure_ascii=True)
+def _flag_path(base: Path, session_id: str, agent: str, name: str) -> Path:
+    # session_id / agent_id はファイル名に直接入れない (hook input の値で、パスの区切りを含みうる)。
+    material = json.dumps([session_id, agent, name], ensure_ascii=True)
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
     return base / f"{_FLAG_PREFIX}{digest}.flag"
 
 
-def claim(names, session_id) -> list[str]:
-    """このセッションでまだ知らせていない名前を返し、知らせたことを記録する。
+def claim(names, session_id, agent_id=None) -> list[str]:
+    """このセッションのこのエージェントでまだ知らせていない名前を返し、知らせたことを記録する。
 
+    記録の単位は「セッション × エージェント × CLI」。`agent_id` は hook input の値で、サブエージェントの
+    中で発火したときだけ付く。文字列でない・無いときはメイン (`""`) として数える。
     記録は `O_CREAT | O_EXCL` で作る (並行する hook のどちらか 1 つだけが知らせる)。既にあれば知らせない。
     session_id が文字列でない・空、記録の dir を使えない (`cache.state_dir` が None)、記録を作れない
     (既にある以外の OSError) ときは、1 回に絞れないので知らせる側に倒す。
@@ -72,11 +77,14 @@ def claim(names, session_id) -> list[str]:
     base = cache.state_dir()
     if base is None:
         return names
+    agent = agent_id if isinstance(agent_id, str) else ""
     fresh: list[str] = []
     for name in names:
         try:
             fd = os.open(
-                _flag_path(base, session_id, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+                _flag_path(base, session_id, agent, name),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
             )
         except FileExistsError:
             continue
@@ -95,5 +103,5 @@ def notice(names) -> str:
         f"[cloud-account-guard] {shown} は検証の対象外の CLI です。cloud-account-guard はこの CLI の"
         "アカウントを照合しておらず、期待外のアカウントで実行されても止めません。"
         "使い続ける場合は、検証の追加を検討する価値があります "
-        "(この知らせは同じセッションでは CLI ごとに 1 回だけ出ます)。"
+        "(この知らせは同じセッションの同じエージェントでは CLI ごとに 1 回だけ出ます)。"
     )

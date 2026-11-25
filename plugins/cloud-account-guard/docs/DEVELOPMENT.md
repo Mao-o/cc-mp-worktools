@@ -108,8 +108,9 @@ cloud-account-guard/
 7. `core.output.deny()` / `warn()` で整形して stdout に返す
    (`warn` モードでは deny 相当の本文を `warn()` 側に回す)
 8. 分解したセグメントに検証の対象外のクラウド CLI (`core.unverified.UNVERIFIED_CLIS`) があり、
-   結果が deny でなければ、`additionalContext` に知らせを足す (同じセッションで CLI ごとに 1 回。
-   hook input の `session_id` で絞る。判定は変えない。v0.31.0)
+   結果が deny でなければ、`additionalContext` に知らせを足す (同じセッションの同じエージェントで
+   CLI ごとに 1 回。hook input の `session_id` と `agent_id` (サブエージェントの中だけで付く) で絞る。
+   判定は変えない。v0.31.0)
 
 **起動コマンド**: `python3 "${CLAUDE_PLUGIN_ROOT}/hooks/cloud-account-guard"`
 (ディレクトリを渡すと `__main__.py` が実行される)

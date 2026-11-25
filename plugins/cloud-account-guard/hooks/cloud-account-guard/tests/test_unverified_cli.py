@@ -1,8 +1,9 @@
 """検証の対象外のクラウド CLI の知らせ (v0.31.0。`core/unverified.py`)。
 
 対象外の CLI (wrangler など) が Bash のコマンドの位置に現れたら、allow のまま `additionalContext` で
-1 回だけ知らせる。判定 (allow / deny) は変えない。同じセッションでは CLI ごとに 1 回。deny には足さず、
-知らせたことも記録しない。
+1 回だけ知らせる。判定 (allow / deny) は変えない。同じセッションの同じエージェント (メインは hook input の
+`agent_id` 無し、サブエージェントは `agent_id` ごと) では CLI ごとに 1 回。deny には足さず、知らせたことも
+記録しない。
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ from unittest import mock
 
 import _testutil  # noqa: F401
 
-from core import cache, dispatcher, unverified  # noqa: E402
+from core import cache, dispatcher, mode, unverified  # noqa: E402
 from core.dispatcher import dispatch  # noqa: E402
 
 _PKG_DIR = Path(__file__).resolve().parent.parent
@@ -65,10 +66,10 @@ class _Base(unittest.TestCase):
         path = self.project / ".claude" / "cloud-account-guard" / "accounts.local.json"
         path.write_text(json.dumps(data), encoding="utf-8")
 
-    def _dispatch(self, command: str, session="s1"):
+    def _dispatch(self, command: str, session="s1", agent=None):
         # 知らせの処理から例外が漏れる変異も、ERROR ではなく assertion の失敗に数える。
         try:
-            return dispatch(command, str(self.project), session_id=session)
+            return dispatch(command, str(self.project), session_id=session, agent_id=agent)
         except Exception as e:  # noqa: BLE001
             self.fail(f"dispatch が例外を投げた: {type(e).__name__}: {e}")
 
@@ -123,6 +124,31 @@ class TestOncePerSession(_Base):
         )
         self.assertIsNone(self._dispatch("cf push app"))
 
+    def test_main_and_subagents_do_not_silence_each_other(self):
+        """1 回の単位は「セッション × エージェント × CLI」。
+
+        サブエージェントは同じ session_id を持ち、知らせはツールを呼んだエージェントにだけ届く。先に
+        サブエージェントが使っても、メイン (agent_id 無し) にはメインの 1 回が出る。同じエージェントの
+        2 回目は出ない。
+        """
+        self.assert_notice(self._dispatch("wrangler deploy", agent="agent-a1"), ["wrangler"])
+        self.assert_notice(self._dispatch("wrangler deploy"), ["wrangler"])
+        self.assert_notice(self._dispatch("wrangler deploy", agent="agent-b2"), ["wrangler"])
+        self.assertIsNone(self._dispatch("wrangler deploy"))
+        self.assertIsNone(self._dispatch("wrangler deploy", agent="agent-a1"))
+        self.assertIsNone(self._dispatch("npx wrangler deploy", agent="agent-b2"))
+        # 別のセッションでは、同じ agent_id でも改めて出す。
+        self.assert_notice(
+            self._dispatch("wrangler deploy", session="s2", agent="agent-a1"), ["wrangler"]
+        )
+
+    def test_agent_id_that_is_not_a_string_counts_as_the_main(self):
+        """agent_id は文字列のときだけ使う (無い・空・文字列でないものはメインとして数える)。"""
+        self.assert_notice(self._dispatch("wrangler deploy"), ["wrangler"])
+        for agent in ("", 123, ["x"]):
+            with self.subTest(agent=agent):
+                self.assertIsNone(self._dispatch("wrangler deploy", agent=agent))
+
     def test_cli_only_in_an_alternative_reading_is_notified(self):
         """既定の読みでは引用符の中だが、ANSI-C の読み (bash / zsh が実際に走らせる) でだけ候補になる形。"""
         self.assert_notice(self._dispatch("echo $'\\'' ; wrangler deploy"), ["wrangler"])
@@ -146,7 +172,7 @@ class TestDetection(unittest.TestCase):
             text.startswith("[cloud-account-guard] wrangler / cf は検証の対象外の CLI です。"), text
         )
         self.assertIn("アカウントを照合しておらず", text)
-        self.assertIn("同じセッションでは CLI ごとに 1 回だけ", text)
+        self.assertIn("同じセッションの同じエージェントでは CLI ごとに 1 回だけ", text)
 
     def test_names_in_first_appearance_order_without_duplicates(self):
         self.assertEqual(
@@ -249,6 +275,39 @@ class TestVerdictIsKept(_Base):
                 with mock.patch.object(unverified, "claim", side_effect=RuntimeError("boom")):
                     self.assertEqual(self._dispatch(command), expected)
 
+    def test_failure_in_the_detection_keeps_the_verdict(self):
+        """検出 (`unverified.detect`) の例外も握り、判定 (deny を含む) をそのまま返す。
+
+        検出は検証より前に、対象外の CLI を含まないコマンドでも走る。ここで例外が抜けると、__main__ の
+        最終防波堤が deny を「内部エラーのため検証をスキップ」に置き換える (fail-open)。デバッグトレースの
+        経路 (検出の結果を trace にも写す) でも同じ。
+        """
+        cases = (
+            ("gh pr create", "deny"),
+            ("wrangler deploy && gh pr create", "deny"),
+            ("gh pr list && wrangler deploy", None),
+        )
+        for debug in ("0", "1"):
+            for command, decision in cases:
+                stderr = io.StringIO()
+                with self.subTest(command=command, debug=debug), mock.patch.dict(
+                    os.environ, {"CLOUD_ACCOUNT_GUARD_DEBUG": debug}
+                ), contextlib.redirect_stderr(stderr):
+                    expected = self._verdict_without_notice(command)
+                    self.assertIsInstance(expected, dict)
+                    self.assertIn("hookSpecificOutput", expected)
+                    self.assertEqual(
+                        expected["hookSpecificOutput"].get("permissionDecision"), decision
+                    )
+                    stderr.seek(0)
+                    stderr.truncate()
+                    with mock.patch.object(unverified, "detect", side_effect=RuntimeError("boom")):
+                        self.assertEqual(self._dispatch(command), expected)
+                    if debug == "1":
+                        lines = [ln for ln in stderr.getvalue().splitlines() if ln.strip()]
+                        self.assertEqual(len(lines), 1, lines)
+                        self.assertEqual(json.loads(lines[0]).get("unverified"), [])
+
 
 class TestFallbacks(_Base):
     def test_without_session_id_notifies_every_time(self):
@@ -269,6 +328,43 @@ class TestFallbacks(_Base):
         with mock.patch.object(unverified, "_flag_path", return_value=missing):
             for _ in range(2):
                 self.assert_notice(self._dispatch("wrangler deploy"), ["wrangler"])
+
+    def test_notice_does_not_depend_on_the_mode(self):
+        """検証モード (env の `CLOUD_ACCOUNT_GUARD_MODE` / accounts.local.json の `"$mode"`) によらず知らせる。
+
+        `off` は検証を行わないが、知らせは出す。deny 相当を警告で伝える `warn` では、警告の後ろに足す。
+        """
+        command = "wrangler deploy && gh pr create"
+        accounts = self.project / ".claude" / "cloud-account-guard" / "accounts.local.json"
+        notice = unverified.notice(["wrangler"])
+        worlds = (
+            ("env-off", {mode.ENV_VAR: mode.OFF}, None),
+            ("env-warn", {mode.ENV_VAR: mode.WARN}, None),
+            ("file-off", {}, mode.OFF),
+            ("file-warn", {}, mode.WARN),
+        )
+        for label, env, file_mode in worlds:
+            with self.subTest(mode=label), mock.patch.dict(os.environ, env):
+                if file_mode is None:
+                    accounts.unlink(missing_ok=True)
+                else:
+                    self._write_accounts({"$mode": file_mode})
+                expected = self._verdict_without_notice(command)
+                context = self.assert_notice(
+                    self._dispatch(command, session=f"mode-{label}"), ["wrangler"]
+                )
+                if label.endswith("-off"):
+                    # off が効いている (検証を行わず allow) ことを確かめてから、知らせだけが出ることを見る。
+                    self.assertIsNone(expected)
+                    self.assertEqual(context, notice)
+                else:
+                    self.assertIsInstance(expected, dict)
+                    self.assertIn("hookSpecificOutput", expected)
+                    original = expected["hookSpecificOutput"]
+                    self.assertNotIn("permissionDecision", original)
+                    self.assertIn("additionalContext", original)
+                    self.assertTrue(original["additionalContext"].startswith(mode.WARN_HEADER))
+                    self.assertEqual(context, original["additionalContext"] + "\n\n" + notice)
 
 
 class TestDebugTrace(_Base):
@@ -303,7 +399,7 @@ class TestMainEntry(unittest.TestCase):
             }
         )
 
-    def _run(self, session_id: str) -> subprocess.CompletedProcess:
+    def _run(self, session_id: str, agent_id: str | None = None) -> subprocess.CompletedProcess:
         payload = {
             "session_id": session_id,
             "hook_event_name": "PreToolUse",
@@ -311,6 +407,10 @@ class TestMainEntry(unittest.TestCase):
             "tool_input": {"command": "npx wrangler deploy"},
             "cwd": str(self.project),
         }
+        if agent_id is not None:
+            # サブエージェントの中で発火した hook input の形 (公式の hooks reference の共通フィールド)。
+            payload["agent_id"] = agent_id
+            payload["agent_type"] = "Explore"
         return subprocess.run(
             [sys.executable, str(_PKG_DIR)],
             input=json.dumps(payload),
@@ -332,6 +432,30 @@ class TestMainEntry(unittest.TestCase):
         other = self._run("sess-other")
         self.assertEqual(other.returncode, 0, other.stderr)
         self.assertTrue(other.stdout.strip(), "別のセッションで知らせが出ていない")
+
+    def _assert_notified(self, proc: subprocess.CompletedProcess, why: str) -> None:
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(proc.stdout.strip(), why)
+        out = json.loads(proc.stdout)
+        self.assertIn("hookSpecificOutput", out)
+        self.assertNotIn("permissionDecision", out["hookSpecificOutput"])
+        self.assertIn(_MARK, out["hookSpecificOutput"].get("additionalContext", ""))
+
+    def test_main_is_notified_after_a_subagent_was(self):
+        """先にサブエージェント (hook input に agent_id がある) が使っても、メインには出る。
+
+        サブエージェントは同じ session_id を持ち、知らせはツールを呼んだエージェントにだけ届く。
+        同じ型 (agent_type) のサブエージェントどうしも agent_id で分ける。同じエージェントの 2 回目は出ない。
+        """
+        self._assert_notified(self._run("sess-sub", "agent-a1"), "サブエージェントの 1 回目に出ていない")
+        self._assert_notified(self._run("sess-sub"), "サブエージェントの記録で、メインに出なかった")
+        self._assert_notified(
+            self._run("sess-sub", "agent-b2"), "同じ型の別のサブエージェントに出なかった"
+        )
+        for agent_id in (None, "agent-a1", "agent-b2"):
+            with self.subTest(agent_id=agent_id):
+                again = self._run("sess-sub", agent_id)
+                self.assertEqual((again.returncode, again.stdout), (0, ""), again.stderr)
 
 
 if __name__ == "__main__":

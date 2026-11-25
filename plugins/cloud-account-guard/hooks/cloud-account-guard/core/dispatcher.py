@@ -909,9 +909,15 @@ def _dispatch_impl(
 
     targets, switching, segments = _analyze_command(command, trace)
     if found is not None:
-        found["unverified"] = unverified.detect(
-            seg[2] for seg in segments if seg is not _READING_BREAK
-        )
+        # 知らせのための検出は、検証より前に、対象外の CLI を含まないコマンドでも走る。ここで例外が
+        # 抜けると __main__ の最終防波堤が判定 (deny を含む) を「内部エラーのため検証をスキップ」に
+        # 置き換えるので、握って「対象外の CLI なし」にし、下の検証を続ける。
+        try:
+            found["unverified"] = unverified.detect(
+                seg[2] for seg in segments if seg is not _READING_BREAK
+            )
+        except Exception:  # noqa: BLE001
+            found["unverified"] = []
         if trace is not None:
             trace["unverified"] = list(found["unverified"])
     # 各セグメントが走るディレクトリ (Bash の cwd + コマンド中の cd) と起動リポジトリ。
@@ -1429,7 +1435,9 @@ def _trace_decision(result: dict | None) -> str:
     return "unknown"
 
 
-def dispatch(command: str, cwd: str, session_id: str | None = None) -> dict | None:
+def dispatch(
+    command: str, cwd: str, session_id: str | None = None, agent_id: str | None = None
+) -> dict | None:
     """PreToolUse エントリポイント。
 
     `CLOUD_ACCOUNT_GUARD_DEBUG=1` のときのみ、分解結果 (segments / matched
@@ -1443,14 +1451,17 @@ def dispatch(command: str, cwd: str, session_id: str | None = None) -> dict | No
     hook timeout の制約が無い経路 (builder) に締切が残り、既定の subprocess
     timeout が黙って縮む。
 
-    `session_id` は hook input の値。検証の対象外の CLI の知らせ (`_with_unverified_notice`) を
-    セッションごとに 1 回に絞るのに使う (v0.31.0)。判定には使わない。
+    `session_id` と `agent_id` は hook input の値。検証の対象外の CLI の知らせ
+    (`_with_unverified_notice`) を、セッション × エージェント (メインは `agent_id` 無し) ごとに 1 回に
+    絞るのに使う (v0.31.0)。判定には使わない。
     """
     budget.start()
     try:
         found: dict = {}
         result = _dispatch_with_trace(command, cwd, found)
-        return _with_unverified_notice(result, found.get("unverified"), session_id)
+        return _with_unverified_notice(
+            result, found.get("unverified"), session_id, agent_id=agent_id
+        )
     finally:
         budget.clear()
 
@@ -1462,7 +1473,9 @@ def _is_deny(result: dict | None) -> bool:
     return isinstance(hook_output, dict) and hook_output.get("permissionDecision") == "deny"
 
 
-def _with_unverified_notice(result: dict | None, names, session_id) -> dict | None:
+def _with_unverified_notice(
+    result: dict | None, names, session_id, agent_id=None
+) -> dict | None:
     """検証の対象外の CLI (`core/unverified.py`) が候補にあれば、判定の結果に知らせを足す (v0.31.0)。
 
     判定は変えない: allow (None) は知らせだけの `additionalContext` に、警告 (`additionalContext`) は
@@ -1471,12 +1484,16 @@ def _with_unverified_notice(result: dict | None, names, session_id) -> dict | No
     次に通ったコマンドで知らせる。
 
     知らせの処理で何が起きても、判定の結果をそのまま返す (例外を dispatch() の外に出すと、__main__ の
-    最終防波堤が判定を「内部エラーのため検証をスキップ」に置き換える)。
+    最終防波堤が判定を「内部エラーのため検証をスキップ」に置き換える)。検証より前に走る検出
+    (`_dispatch_impl` の `unverified.detect`) の例外も、同じ理由でその場で握る。
+
+    1 回に絞る単位は「セッション × エージェント × CLI」(`unverified.claim`)。`agent_id` はサブエージェントの
+    中で発火したときだけ hook input に付く (メインは無い)。
     """
     if not names or _is_deny(result):
         return result
     try:
-        fresh = unverified.claim(names, session_id)
+        fresh = unverified.claim(names, session_id, agent_id)
         if not fresh:
             return result
         text = unverified.notice(fresh)

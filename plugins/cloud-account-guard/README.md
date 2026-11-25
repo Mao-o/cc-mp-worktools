@@ -134,7 +134,7 @@ deny を一時的に止める手段 (escape hatch)。従来は `/plugin disable`
 |---|---|
 | `enforce` (既定) | 不一致・キー未記載 (ディレクトリ単位の固定が無いとき)・未設定・パス競合・起動リポジトリの外での実行を deny (リモート read だけの QUERY tier は警告して通す。[検証の 3 tier](#検証の-3-tier--v0140)) |
 | `warn` | 検証は走らせ、deny 相当の内容を `additionalContext` (Claude への通知) で伝えるだけ |
-| `off` | 検証そのものを行わない (CLI も起動しない) |
+| `off` | 検証そのものを行わない (CLI も起動しない。検証の対象外のクラウド CLI の知らせ (v0.31.0) だけは出る) |
 
 **判定表 (何を問題とみなすか) は mode で変わらない**。変わるのは「止めるか /
 伝えるだけか / 見ないか」だけ。
@@ -1371,8 +1371,10 @@ PreToolUse は Bash の度に発火するため、`gh pr list && gh pr view && g
   などでは共有の `/tmp` に置かれ、別のユーザーが先に同じ名前の dir を作れるため。作るときは
   0700。条件を満たさない dir は直さずに使わず、cache を読まず書かずに毎回検証する (umask 002
   の環境で以前の版が作った dir もこれに当たる。消せば次の実行で 0700 で作り直される)。
-  [自動切替の記録](#自動切替-auto-switch--v0160)と、旧パスの移行案内を 1 日 1 回に絞る記録も
-  同じ dir に置くので、使えなければ記録しない (移行案内は毎回出る)
+  [自動切替の記録](#自動切替-auto-switch--v0160)と、旧パスの移行案内を 1 日 1 回に絞る記録、
+  検証の対象外のクラウド CLI の知らせをセッション × エージェントごとに 1 回に絞る記録
+  (`unverified-cli-<sha256>.flag`。v0.31.0) も同じ dir に置くので、使えなければ記録しない
+  (移行案内と対象外の CLI の知らせは毎回出る)
 - 無効化: TTL 経過 / `accounts.local.json` の mtime 変化 / ファイル破損 (読めない
   entry や、値が期待した型でない entry も使わない。timestamp が数値でない・未来の時刻の
   ものなど。v0.19.1) / **アカウント状態を変えうるコマンドの検出** (v0.8.0、下記) /
@@ -1583,8 +1585,12 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 足す (読みや追跡は増やさない)。
 
 検証の対象外のクラウド CLI (`wrangler` / `cf`) は照合せずに通し、コマンドの位置に現れたら対象外であることを
-`additionalContext` で知らせる (v0.31.0。同じセッションでは CLI ごとに 1 回。deny はせず、deny したコマンドには
-足さない。一覧は `hooks/cloud-account-guard/core/unverified.py`)。
+`additionalContext` で知らせる (v0.31.0。同じセッションの同じエージェント (メインと各サブエージェント) では
+CLI ごとに 1 回。deny はせず、deny したコマンドには足さない。検証モードにはよらない。一覧は
+`hooks/cloud-account-guard/core/unverified.py`)。メインとサブエージェントは互いの記録で黙らない
+(サブエージェントは同じ `session_id` を持ち、知らせはツールを呼んだエージェントにだけ届くため、hook input の
+`agent_id` で分ける)。検証と同じ分解で見つけるので、検証が読まない起動の形 (`pnpm wrangler` / `yarn wrangler` /
+`bunx wrangler` など) では知らせも出ない。
 
 ## 既知の制限
 
@@ -1774,7 +1780,8 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
    通っているかを確認
 5. `CLOUD_ACCOUNT_GUARD_MODE=off` / `accounts.local.json` の `"$mode": "off"` に
    なっていないかを確認 ([検証モード](#検証モード-enforce--warn--off--v0130))。
-   `off` では検証そのものを行わないため、deny も warn も出ない
+   `off` では検証そのものを行わないため、deny も warn も出ない (検証の対象外のクラウド CLI の
+   知らせ (v0.31.0) だけは出る)
 
 hook の出力を確認するには `claude --verbose` でセッションを起動する
 (hook の stdout/stderr がターミナルに表示される)。
@@ -1798,6 +1805,8 @@ hook 実行時に環境変数 `CLOUD_ACCOUNT_GUARD_DEBUG=1` を立てると、�
 - `auto_switch`: [自動切替](#自動切替-auto-switch--v0160) を試みた service ごとの結果
   (`resolved` = 切替後の再検証が一致した / `switched` = 切り替えた
   `[host, 切替前, 切替後]` / `note` = 切り替えなかった・失敗した理由)
+- `unverified`: 分解で見つけた検証の対象外のクラウド CLI の名前 (v0.31.0)。知らせを出したかどうか
+  (同じセッションの同じエージェントで既に出した・deny した) には依らない
 - `decision`: 最終的な判定 (`allow` / `deny` / `warn`)
 
 判定表 (allow/deny/warn) 自体には一切影響しない観測専用の出力。

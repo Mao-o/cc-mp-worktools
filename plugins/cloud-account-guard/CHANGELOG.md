@@ -9,13 +9,19 @@
   気づけるようにするため。判定 (allow / deny) は変えない
 - 候補は検証と同じ分解 (wrapper を剥がした形。`npx wrangler deploy` / `npx wrangler@3 deploy` / `cd app && wrangler ...`
   など) から取り、新しい読みは足さない。引数の位置 (`npm install -D wrangler`) や `$(...)` の中は数えない。
-  検証の分解でも剥がさない wrapper (`bunx` / `pnpm wrangler` / `yarn wrangler`) の後ろも数えない
-- 同じセッション (hook input の `session_id`) では CLI ごとに 1 回だけ出す。記録は成功 cache と同じ dir に置く。
+  検証と同じ分解で見つけるので、検証が読まない起動の形 (`pnpm wrangler` / `yarn wrangler` / `bunx wrangler`
+  など) では知らせも出ない
+- 同じセッション (hook input の `session_id`) の同じエージェント (メインと各サブエージェント) では、CLI ごとに
+  1 回だけ出す。エージェントは hook input の `agent_id` (サブエージェントの中で発火したときだけ付く) で分ける。
+  サブエージェントはメインと同じ `session_id` を持ち、知らせはツールを呼んだエージェントにだけ届くので、
+  メインとサブエージェントは互いの記録で黙らない。記録は成功 cache と同じ dir に置く。
   `session_id` が無い・記録の dir を使えない・記録を作れないときは、1 回に絞れないので毎回出す
   (deprecation の案内と同じ倒し方)
 - deny になるコマンドには足さず、知らせたことも記録しない (deny の本文は deny の理由だけにする)。次に通った
   コマンドで知らせる。警告 (リモート read の不一致など) の `additionalContext` には後ろに足す。検証モードには
-  よらない
+  よらない (`off` / `warn` でも出す)
+- 知らせのための処理 (検出・記録・本文の結合) で例外が起きても、判定の結果をそのまま返す (検出は検証より前に
+  走るので、ここで例外が抜けると deny が内部エラーの fail-open に化けるため)
 - 対象外の CLI の一覧は `core/unverified.py` の 1 か所。検証に対応したら外す (外し忘れは、services の PATTERNS と
   重なる名前として契約テストが検出する)
 
