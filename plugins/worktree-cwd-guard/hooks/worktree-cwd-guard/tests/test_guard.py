@@ -97,6 +97,8 @@ def family_fingerprint(cwd: str, found: tuple) -> tuple:
             break
     parts: list[tuple] = [(start.is_dir(), tuple(chain))]
     for _, fam in found:
+        if not isinstance(fam, family.Family):
+            continue  # detect を確かめられなかった読み (例外) には、比べる checkout が無い
         admin = Path(fam.common_dir) / "worktrees"
         names = sorted(os.listdir(admin)) if admin.is_dir() else []
         parts.append(tuple((n, _git_marker(admin / n / "gitdir")) for n in names))
@@ -950,7 +952,7 @@ class NtpathEmulationTest(unittest.TestCase):
         shadow = self._shadow_family()
         cwd, here = self.GIT_BASH_A, self.GIT_BASH_READING_A
         tag = "[worktree-cwd-guard] 対象を確認できなかった操作がある (止めていない)"
-        for error in (PermissionError(13, "Access is denied", here), ValueError("embedded null byte")):
+        for error in (PermissionError(13, "Access is denied", here), ValueError("embedded null byte"), RuntimeError("injected")):
             failing = ((self.fam.home, error),)
             line = self._skipped(here, error)
             with self.subTest(error=error):
