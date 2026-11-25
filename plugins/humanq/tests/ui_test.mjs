@@ -1785,3 +1785,282 @@ for (const scheme of ["light", "dark"]) {
     });
   });
 }
+
+// ---- 0.9.0: プロジェクトの目次の帯と、止まるプロジェクトの見出し -----------------------------------------------------
+// 帯 (#toc) はヘッダーの下に置き、sticky にはしない。プロジェクトの見出し (h3) は sticky のヘッダーの下に止まる
+
+const tocChips = page => page.locator("#toc .tocchip");
+const chipOf = (page, p) => page.locator(`#toc .tocchip[data-path="${p}"]`);
+const h3Of = (page, p) => page.locator(`h3:has(.path:text-is("${p}"))`);
+const headBottom = page => page.evaluate(() => document.querySelector("header").getBoundingClientRect().bottom);
+// 待っても満たされなければ assertion の失敗にする (時間切れを、テストが走っていない例外と分ける)
+const until = (fn, ms, what) => waitFor(fn, ms, what).catch(e => assert.fail(e.message));
+// 帯のチップの中身 (プロジェクトの順)。P0 の印は表示されているものだけ数える
+const chipRows = page => page.$$eval("#toc .tocchip", cs => cs.map(c => {
+  const mark = c.querySelector(".tocp0");
+  return { path: c.dataset.path, name: (c.querySelector(".tocname") || {}).textContent, n: (c.querySelector(".tocn") || {}).textContent,
+    p0: !!mark && getComputedStyle(mark).display !== "none" };
+}));
+const many = (pfx, n) => Array.from({ length: n }, (_, i) => item(`t-${pfx}${i + 1}`));
+// 描画を 2 回進める。ResizeObserver (ヘッダーの高さ → --head-h) は次の描画の手前で届くので、幅を変えた直後の測りはこれを挟む
+const frames = page => page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+// path の見出しの位置と、その中心 (名前の上) が他の要素に隠れず見えているか。見出しが無ければ null
+const h3Shown = (page, p) => page.evaluate(p => {
+  const h = [...document.querySelectorAll("h3")].find(e => (e.querySelector(".path") || {}).textContent === p);
+  if (!h) return null;
+  const r = h.getBoundingClientRect();
+  const hit = r.top + r.height / 2 >= 0 && r.top + r.height / 2 < innerHeight ? document.elementFromPoint(r.left + 12, r.top + r.height / 2) : null;
+  return { top: r.top, bottom: r.bottom, height: r.height, head: document.querySelector("header").getBoundingClientRect().bottom, vh: innerHeight,
+    visible: !!hit && h.contains(hit), text: h.textContent };
+}, p);
+// カード (id) の上端を、ヘッダーの下 off px に置く
+const scrollCardTo = (page, id, off) => page.evaluate(([id, off]) => {
+  const c = [...document.querySelectorAll("section.card")].find(e => e.querySelector(".id").textContent === id);
+  scrollTo(0, c.getBoundingClientRect().top + scrollY - document.querySelector("header").getBoundingClientRect().bottom - off);
+}, [id, off]);
+
+test("目次の帯: 判断待ちか回答済みがあるプロジェクトごとに、プロジェクトの順でチップが出る。中身は名前と判断待ちの件数で、判断待ちに P0 があるものにだけ P0 の色の印が付く", async () => {
+  const P3 = "/work/gamma", P4 = "/work/delta", P5 = "/work/epsilon";
+  const task = { ...item("t-A2"), q: { ...item("t-A2").q, kind: "task" } };
+  const s = new Script([
+    proj(P1, [item("t-A1"), task]),                                                  // 作業・確認も判断待ちに数える
+    proj(P2, [item("t-B1", { priority: 0 }), item("t-B2", { priority: 2 })], [answeredItem("t-B9")]),
+    proj(P3),                                                                          // 判断待ちも回答済みも無い
+    proj(P4, [], [{ ...answeredItem("t-D1"), priority: 0 }]),                          // 回答済みだけ (回答済みの P0 は印にしない)
+    proj(P5, [], [], false),                                                           // 一度も読めていない (バナーだけの入れ物。チップは出さない)
+  ]);
+  await withPage(s, async page => {
+    assert.deepEqual(await chipRows(page), [
+      { path: P1, name: "alpha", n: "2", p0: false },
+      { path: P2, name: "beta", n: "2", p0: true },
+      { path: P4, name: "delta", n: "0", p0: false },
+    ]);
+    assert.equal(await h3Of(page, P5).count(), 1, "前提: 読めなかったプロジェクトの見出しが出ていない");
+    // 読み上げの名前は「名前: 判断待ち N 件」(P0 があれば「、P0 あり」)
+    assert.equal(await page.getByRole("button", { name: "beta: 判断待ち 2 件、P0 あり", exact: true }).count(), 1);
+    assert.equal(await page.getByRole("button", { name: "alpha: 判断待ち 2 件", exact: true }).count(), 1);
+    // 帯はヘッダーのすぐ下 (案内が出ていないとき) で、最初のプロジェクトの見出しより上
+    const pos = await page.evaluate(() => ({ head: document.querySelector("header").getBoundingClientRect().bottom,
+      toc: document.getElementById("toc").getBoundingClientRect().toJSON(), h3: document.querySelector("h3").getBoundingClientRect().top }));
+    assert.ok(Math.abs(pos.toc.top - pos.head) <= 1 && pos.toc.height > 10 && pos.toc.bottom <= pos.h3, `帯の位置 ${JSON.stringify(pos)}`);
+    // P0 の印の色は --p0
+    const colors = await page.evaluate(() => {
+      const m = [...document.querySelectorAll("#toc .tocp0")].find(e => getComputedStyle(e).display !== "none");
+      if (!m) return null;
+      const t = document.createElement("i"); t.style.color = "var(--p0)"; document.body.append(t);
+      const c = getComputedStyle(t).color; t.remove();
+      return { mark: getComputedStyle(m).color, p0: c, text: m.textContent };
+    });
+    assert.ok(colors, "P0 の印が無い");
+    assert.equal(colors.mark, colors.p0);
+    assert.equal(colors.text, "P0");
+    assert.equal(await chipOf(page, P2).getAttribute("title"), P2, "チップの title にパスが無い (同じ名前のプロジェクトを見分けられない)");
+    // チップは読み込みで作り直さない: フォーカスしたチップは、件数が変わる読み込みの後もフォーカスを持つ
+    await chipOf(page, P1).focus();
+    s.projects[0].human.push(item("t-A3"));
+    await page.evaluate(() => load());
+    const after = await chipRows(page);
+    assert.equal(after.length, 3);
+    assert.equal(after[0].n, "3");
+    assert.ok(await chipOf(page, P1).evaluate(e => e === document.activeElement), "読み込みでチップが作り直され、フォーカスが外れた");
+  });
+});
+
+test("目次の帯: 押した直後にチップの件数と P0 の印が変わり (送信中を除く)、プロジェクトが空になればチップが消え、全部なくなれば帯も隠れる", async () => {
+  const s = new Script([proj(P1, [item("t-A1")]), proj(P2, [item("t-B1", { priority: 0 }), item("t-B2")])]);
+  await withPage(s, async page => {
+    s.hold("answer");                                                                 // POST はずっと返らない (送信中のまま)
+    const rows = async () => (await chipRows(page)).map(r => [r.name, r.n, r.p0]);
+    assert.deepEqual(await rows(), [["alpha", "1", false], ["beta", "2", true]]);
+    assert.equal(await page.locator("#toc").isVisible(), true);
+    await answerFirst(page, "t-B1");                                                  // 押した処理の中で描き直す (待たずに測る)
+    assert.deepEqual(await rows(), [["alpha", "1", false], ["beta", "1", false]], "押した直後に件数と P0 の印が変わらない");
+    await answerFirst(page, "t-A1");
+    assert.deepEqual(await rows(), [["beta", "1", false]], "空になったプロジェクトのチップが残っている");
+    await answerFirst(page, "t-B2");
+    assert.deepEqual(await rows(), []);
+    assert.equal(await page.locator("#toc").isHidden(), true, "チップが無いのに帯が出ている");
+  });
+});
+
+test("目次の帯: データから消えたプロジェクトのチップは消え、戻れば同じ位置に出直す", async () => {
+  const s = new Script([proj(P1, [item("t-A1")]), proj(P2, [item("t-B1")])]);
+  await withPage(s, async page => {
+    const [a, b] = s.projects;
+    s.projects = [b];
+    await page.evaluate(() => load());
+    assert.deepEqual((await chipRows(page)).map(r => r.name), ["beta"]);
+    s.projects = [a, b];
+    await page.evaluate(() => load());
+    assert.deepEqual((await chipRows(page)).map(r => r.name), ["alpha", "beta"]);
+  });
+});
+
+test("目次のチップを押すと、そのプロジェクトの見出しがヘッダーのすぐ下に来て、フォーカスが見出しへ移る。動きを減らす設定では、押したその場で移る (滑らかにしない)", async () => {
+  const s = new Script([proj(P1, many("A", 5)), proj(P2, many("B", 5))]);
+  await withPage(s, async page => {
+    assert.equal(await tocChips(page).count(), 2);
+    assert.equal(await page.locator("#toc").isVisible(), true, "帯が見えていない");
+    const before = await h3Shown(page, P2);
+    assert.ok(before && before.top > before.vh, `前提: beta の見出しが最初の画面の外にない ${JSON.stringify(before)}`);
+    // 押したのと同じ処理の中で測る。見出しの下の節の見出し (h2) も、止まった見出しに隠れず見えている
+    const r = await page.evaluate(p => {
+      document.querySelector(`#toc .tocchip[data-path="${p}"]`).click();
+      const h = [...document.querySelectorAll("h3")].find(e => e.querySelector(".path").textContent === p);
+      const h2 = h.parentElement.querySelector("h2");
+      return { top: h.getBoundingClientRect().top, bottom: h.getBoundingClientRect().bottom, vh: innerHeight,
+        h2: h2 ? h2.getBoundingClientRect().top : null,
+        head: document.querySelector("header").getBoundingClientRect().bottom, focused: document.activeElement === h };
+    }, P2);
+    assert.ok(Math.abs(r.top - r.head) <= 1 && r.bottom <= r.vh, `押したその場で beta の見出しがヘッダーのすぐ下に来ない ${JSON.stringify(r)}`);
+    assert.ok(r.h2 !== null && r.h2 >= r.bottom, `飛んだ先で、見出しの下の「判断 (N)」が止まった見出しの下に隠れる ${JSON.stringify(r)}`);
+    assert.ok(r.focused, "フォーカスが見出しに移らない");
+    const shown = await h3Shown(page, P2);
+    assert.ok(shown && shown.visible && shown.text.startsWith("beta"), `beta の見出しが見えていない ${JSON.stringify(shown)}`);
+    // 上のプロジェクトへも戻れる (帯はスクロールで流れている。Playwright が帯まで戻してから押す)
+    await chipOf(page, P1).click();
+    const a = await h3Shown(page, P1);
+    assert.ok(a && Math.abs(a.top - a.head) <= 1 && a.visible, `alpha の見出しがヘッダーのすぐ下に来ない ${JSON.stringify(a)}`);
+  }, { reducedMotion: "reduce" });
+});
+
+test("動きを減らす設定でなければ、チップを押すと滑らかにスクロールして、見出しがヘッダーのすぐ下に止まる", async () => {
+  const s = new Script([proj(P1, many("A", 5)), proj(P2, many("B", 5))]);
+  await withPage(s, async page => {
+    assert.equal(await tocChips(page).count(), 2);
+    assert.equal(await page.locator("#toc").isVisible(), true, "帯が見えていない");
+    const r0 = await page.evaluate(p => {
+      document.querySelector(`#toc .tocchip[data-path="${p}"]`).click();
+      return [...document.querySelectorAll("h3")].find(e => e.querySelector(".path").textContent === p).getBoundingClientRect().top;
+    }, P2);
+    const hb = await headBottom(page);
+    assert.ok(r0 - hb > 100, `押したその場で移った (滑らかでない): ${r0} / ヘッダーの下 ${hb}`);
+    await until(async () => { const b = await h3Shown(page, P2); return Math.abs(b.top - b.head) <= 1; }, 4000, "beta の見出しがヘッダーのすぐ下に止まる");
+  });
+});
+
+test("長いページをスクロールしても、今いるプロジェクトの見出し (名前) がヘッダーのすぐ下に見えている。下まで行けば最後のプロジェクトの見出しになる", async () => {
+  const s = new Script([proj(P1, many("A", 4)), proj(P2, many("B", 4))]);
+  await withPage(s, async page => {
+    for (const [w, h] of [[1280, 720], [375, 700]]) {
+      await page.setViewportSize({ width: w, height: h });
+      await frames(page);
+      await scrollCardTo(page, "t-A3", 200);                                           // alpha のカードの途中
+      const a = await h3Shown(page, P1), b = await h3Shown(page, P2);
+      assert.ok(a && b, `幅 ${w}: 見出しが無い`);
+      assert.ok(Math.abs(a.top - a.head) <= 1 && a.visible && a.text.startsWith("alpha"), `幅 ${w}: alpha の途中で alpha の見出しが見えない ${JSON.stringify(a)}`);
+      assert.ok(b.top > a.bottom + 100, `幅 ${w}: beta の見出しが上に来ている ${JSON.stringify(b)}`);
+      // 止まった見出しは、下を流れるカードが透けない背景を持ち、動いている (transform の付いた) カードより上に描かれる
+      const bg = await page.evaluate(() => [getComputedStyle(document.querySelector("h3")).backgroundColor, getComputedStyle(document.body).backgroundColor]);
+      assert.equal(bg[0], bg[1], `幅 ${w}: 見出しの背景がページの背景でない`);
+      await page.evaluate(() => { for (const c of document.querySelectorAll("section.card")) c.style.transform = "translateX(0px)"; });
+      const moving = await h3Shown(page, P1);
+      assert.ok(moving && moving.visible, `幅 ${w}: 動いているカードが止まった見出しの上に描かれる`);
+      await page.evaluate(() => { for (const c of document.querySelectorAll("section.card")) c.style.transform = ""; });
+      await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));   // いちばん下 (beta の最後のカード)
+      const a2 = await h3Shown(page, P1), b2 = await h3Shown(page, P2);
+      assert.ok(a2 && b2, `幅 ${w}: 下までスクロールしたら見出しが無い`);
+      assert.ok(Math.abs(b2.top - b2.head) <= 1 && b2.visible && b2.text.startsWith("beta"), `幅 ${w}: 下まで行くと beta の見出しが見えない ${JSON.stringify(b2)}`);
+      assert.ok(!a2.visible && a2.bottom <= a2.head + 1, `幅 ${w}: beta の中で alpha の見出しが残っている ${JSON.stringify(a2)}`);
+    }
+  });
+});
+
+test("ヘッダーの高さが変わると (幅が狭くなって「(古いデータ)」などで折り返す)、見出しが止まる位置もヘッダーのすぐ下に合わせて動く", async () => {
+  const s = new Script([proj(P1, many("A", 5))]);
+  await withPage(s, async page => {
+    const h0 = await headBottom(page);
+    await failLoad(page, s);
+    await failLoad(page, s);                                                           // 更新時刻に「(古いデータ)」が付く
+    s.itemsFail = false;
+    await page.setViewportSize({ width: 320, height: 700 });
+    const h1 = await headBottom(page);
+    assert.ok(h1 > h0 + 10, `前提: ヘッダーが折り返していない (${h0} → ${h1})`);
+    await scrollCardTo(page, "t-A3", 200);
+    await until(async () => { const a = await h3Shown(page, P1); return Math.abs(a.top - a.head) <= 1 && a.visible; }, 2000, "見出しが新しいヘッダーのすぐ下に止まる");
+  });
+});
+
+test("止まった見出しの下に隠れたカードにフォーカスが移ると、カードの上端は止まった見出しの下に出る (scroll-margin-top)", async () => {
+  const s = new Script([proj(P1, many("A", 5))]);
+  await withPage(s, async page => {
+    await scrollCardTo(page, "t-A3", 12);                                              // カードの上端がヘッダーの 12px 下 (止まった見出しの下)
+    const r = await page.evaluate(() => {
+      const c = [...document.querySelectorAll("section.card")].find(e => e.querySelector(".id").textContent === "t-A3");
+      const h3 = document.querySelector("h3");
+      const before = c.getBoundingClientRect().top, h3Bottom = h3.getBoundingClientRect().bottom;
+      c.focus();
+      return { before, h3Bottom, after: c.getBoundingClientRect().top, h3After: h3.getBoundingClientRect().bottom, focused: document.activeElement === c };
+    });
+    assert.ok(r.focused && r.before < r.h3Bottom, `前提: カードの上端が止まった見出しに隠れていない ${JSON.stringify(r)}`);
+    assert.ok(r.after >= r.h3After, `フォーカスが移ったカードの上端が、止まった見出しの下に隠れる ${JSON.stringify(r)}`);
+  });
+});
+
+test("キーボードでチップを押すと、フォーカスは見出しへ移り、次の Tab はそのプロジェクトの最初のカードへ進む (帯へ戻ってページが上に戻らない)", async () => {
+  const s = new Script([proj(P1, many("A", 4)), proj(P2, many("B", 4))]);
+  await withPage(s, async page => {
+    assert.equal(await tocChips(page).count(), 2);
+    assert.equal(await page.locator("#toc").isVisible(), true, "帯が見えていない");
+    await chipOf(page, P2).focus();
+    await page.keyboard.press("Enter");
+    assert.ok(await h3Of(page, P2).evaluate(e => e === document.activeElement), "フォーカスが beta の見出しに無い");
+    // キーボードで移ったときは、フォーカスの目印 (アクセントの実線の枠) が見出しに出る
+    assert.deepEqual(await h3Of(page, P2).evaluate(e => [e.matches(":focus-visible"), getComputedStyle(e).outlineStyle]), [true, "solid"]);
+    const y0 = await page.evaluate(() => scrollY);
+    await page.keyboard.press("Tab");
+    const r = await page.evaluate(() => {
+      const c = document.activeElement.closest("section.card");
+      return { id: c ? c.querySelector(".id").textContent : null, y: scrollY };
+    });
+    assert.equal(r.id, "t-B1", "Tab の行き先が beta の最初のカードでない");
+    assert.ok(r.y >= y0 - 1, `Tab でページが上に戻った (${y0} → ${r.y})`);
+  }, { reducedMotion: "reduce" });
+});
+
+test("幅 375 では、プロジェクトが多く名前とパスが長くても、ページは横にスクロールしない。帯は 1 行で帯の中だけ横にスクロールし、見出しは 1 行に収まって短い名前は切れない", async () => {
+  const longName = "とても長いプロジェクトの名前".repeat(8);
+  const paths = Array.from({ length: 8 }, (_, i) =>
+    `/Users/someone/dev/some-long-directory-name/${"nested-folder/".repeat(3)}${i === 0 ? longName : `project-${i}`}`);
+  const s = new Script(paths.map((p, i) => proj(p, [item(`t-${i}`)])));
+  const measure = page => page.evaluate(() => {
+    const inner = document.getElementById("tocin");
+    const chips = inner ? [...inner.children] : [];
+    return { sw: document.scrollingElement.scrollWidth, iw: innerWidth, n: chips.length,
+      rows: new Set(chips.map(c => Math.round(c.getBoundingClientRect().top))).size,
+      chipH: Math.max(0, ...chips.map(c => c.getBoundingClientRect().height)),
+      chipW: Math.max(0, ...chips.map(c => c.getBoundingClientRect().width)), bandW: inner ? inner.clientWidth : 0,
+      nameInside: chips.every(c => { const n = c.querySelector(".tocname"); return !!n && n.getBoundingClientRect().right <= c.getBoundingClientRect().right + 0.5; }),
+      scrollable: !!inner && inner.scrollWidth > inner.clientWidth,
+      h3s: [...document.querySelectorAll("h3")].map(h => {
+        const name = h.querySelector(".pname");
+        return { h: h.getBoundingClientRect().height, cut: !!name && name.scrollWidth > name.clientWidth + 1, long: h.textContent.includes("とても長い") };
+      }) };
+  });
+  await withPage(s, async page => {
+    const m = await measure(page);
+    assert.equal(m.n, 8, "チップが 8 つない");
+    assert.ok(m.sw <= m.iw, `幅 375 でページが横にスクロールする (${m.sw} > ${m.iw})`);
+    assert.equal(m.rows, 1, "帯が 1 行でない");
+    assert.ok(m.chipH > 0 && m.chipH <= 32, `チップが 1 行でない (高さ ${m.chipH}px。長い名前は … で切る)`);
+    assert.ok(m.chipW <= m.bandW, `長い名前のチップが帯の幅より広い (${m.chipW} > ${m.bandW})`);
+    assert.ok(m.nameInside, "チップの名前がチップの枠からはみ出す");
+    assert.ok(m.scrollable, "帯の中が横にスクロールしない (チップが収まっている: 台本の前提)");
+    assert.equal(m.h3s.length, 8);
+    for (const h of m.h3s) {
+      assert.ok(h.h <= 40, `見出しが 1 行に収まらない (${h.h}px)`);
+      if (!h.long) assert.equal(h.cut, false, "短い名前が切れている (パスを先に縮めていない)");
+    }
+    // 帯の中を横にスクロールした先の最後のチップも押せて、そのプロジェクトの見出しがヘッダーの下・画面の中に来る
+    await chipOf(page, paths[7]).click();
+    const last = await h3Shown(page, paths[7]);
+    assert.ok(last && last.top >= last.head - 1 && last.bottom <= last.vh && last.visible, `最後のプロジェクトへ飛べない ${JSON.stringify(last)}`);
+    // 幅の広い画面では帯は折り返し、長い名前のチップも帯の幅に収まる (ページが横にスクロールしない)
+    await page.setViewportSize({ width: 1280, height: 720 });
+    const w = await measure(page);
+    assert.ok(w.sw <= w.iw, `幅 1280 でページが横にスクロールする (${w.sw} > ${w.iw})`);
+    assert.ok(w.rows >= 2, "幅 1280 で帯が折り返していない");
+    assert.ok(w.chipH > 0 && w.chipH <= 32, `幅 1280 でチップが 1 行でない (高さ ${w.chipH}px)`);
+    assert.ok(w.chipW <= w.bandW && w.nameInside, `幅 1280 で長い名前のチップが帯からはみ出す (${w.chipW} > ${w.bandW})`);
+  }, { viewport: { width: 375, height: 700 }, reducedMotion: "reduce" });
+});

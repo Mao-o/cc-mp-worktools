@@ -40,17 +40,43 @@ header { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bot
 #notice { background: var(--panel); border-bottom: 2px solid var(--warn); }
 #notice .inner { max-width: 860px; margin: 0 auto; padding: 10px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; color: var(--warn); font-weight: 600; }
 #notice button { font-size: 13px; }
+/* プロジェクトの目次の帯 (ヘッダーの下。sticky にはしない)。チップは「名前 + 判断待ちの件数」で、判断待ちに P0 があれば P0 の印を付ける。
+   幅 640px 以下は 1 行にして帯の中だけ横にスクロールさせる (ページ全体は横にスクロールさせない) */
+#toc .inner { max-width: 860px; margin: 0 auto; padding: 10px 16px 2px; display: flex; flex-wrap: wrap; gap: 6px 8px; }
+.tocchip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; background: var(--panel); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 999px; padding: 2px 12px; font: inherit; font-size: 13px; line-height: 1.6; cursor: pointer; }
+.tocchip:hover { border-color: var(--accent); }
+.tocname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tocn { flex: none; font-weight: 700; color: var(--accent); }
+.tocp0 { flex: none; font-size: 11px; font-weight: 700; color: var(--p0); border: 1px solid currentColor; border-radius: 999px; padding: 0 6px; line-height: 1.5; }
+/* チップは縮まない (overflow が visible の flex item の min-width は中身の幅。max-width: 100% で帯の幅までに抑え、長い名前は … で切る) */
+@media (max-width: 640px) {
+  #toc .inner { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 6px; }
+}
 main { max-width: 860px; margin: 0 auto; padding: 8px 16px 64px; }
 h2 { font-size: 14px; color: var(--muted); font-weight: 600; margin: 28px 0 10px; letter-spacing: .02em; }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; margin-bottom: 14px; scroll-margin-top: 72px; }
+/* カードの scroll-margin-top: sticky のヘッダー (--head-h。JS が測る) と、止まったプロジェクトの見出し (h3。1 行で約 36px) の下に 10px 空ける。
+   フォーカスが移ったカード (moveFocusAway) の上端が、止まった見出しの下に隠れないように */
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; margin-bottom: 14px; scroll-margin-top: calc(var(--head-h, 64px) + 46px); }
 .card.failed { border-color: var(--warn); }
 /* カード自身は tabindex="-1" で、畳んだカードの次にフォーカスを受ける (中のボタンには渡さない)。目印は枠だけにする */
 .card:focus { outline: none; }
 .card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
 .prio { font-weight: 700; padding: 1px 7px; border-radius: 999px; border: 1px solid currentColor; }
-h3 { font-size: 16px; margin: 30px 0 4px; display: flex; gap: 10px; align-items: baseline; }
-h3 .path { font-size: 12px; color: var(--muted); font-weight: 400; font-family: ui-monospace, Menlo, monospace; }
+/* プロジェクトの見出しは、スクロールしても sticky のヘッダーの下 (--head-h) に止まる (今見ているカードのプロジェクトが分かる)。
+   止まったときに下のカードを隠しすぎないよう 1 行 (約 36px) に収め、名前とパスは溢れたら … で切る (パスを先に縮める。
+   overflow: hidden の flex item は min-width が 0 に決まるので、min-width は書かない)。
+   z-index は、動いている (transform・opacity の付いた) カードより上に描くため */
+h3 { font-size: 16px; line-height: 26px; margin: 26px 0 0; padding: 4px 0; display: flex; gap: 10px; align-items: baseline;
+  position: sticky; top: var(--head-h, 0px); z-index: 1; background: var(--bg); }
+h3:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+h3 .pname { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+h3 .path { flex: 1 1 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; color: var(--muted); font-weight: 400; font-family: ui-monospace, Menlo, monospace; }
+/* 目次のチップで飛ぶ先は .proj (見出しの入れ物) で、その上端をヘッダーの下に合わせる。余白が無いと入れ物の上端が画面の上端に来て、
+   見出しは止まってヘッダーの下に出るが、その下の節の見出しと最初のカードの上がヘッダーと見出しの下に隠れる */
+.proj { scroll-margin-top: var(--head-h, 0px); }
 .prio.p0 { color: var(--p0); } .prio.p1 { color: var(--p1); } .prio.p2 { color: var(--p2); } .prio.p3, .prio.p4 { color: var(--p3); }
 .id { font-family: ui-monospace, Menlo, monospace; cursor: pointer; }
 .title { font-size: 13px; color: var(--muted); margin: 6px 0 0; }
@@ -140,6 +166,7 @@ details pre { white-space: pre-wrap; word-break: break-word; font: 13px/1.6 ui-m
   <button class="ghost" id="notify" type="button">通知をオン</button>
 </div></header>
 <div id="notice" role="alert" hidden></div>
+<nav id="toc" aria-label="プロジェクトの目次" hidden><div class="inner" id="tocin"></div></nav>
 <main id="main"></main>
 <div id="toasts" aria-live="polite"></div>
 <script>
@@ -624,9 +651,35 @@ function syncError(c, key) {
 // 署名が変わったカードだけ作り直す。データから消えた (送信中のものも含む) カードは畳む。
 
 const cards = new Map();           // key -> {el, sig}
-const projs = new Map();           // path -> {el, h3, banner, groups: Map(kind -> {el, h2})}
+const projs = new Map();           // path -> {el, h3, banner, chip, groups: Map(kind -> {el, h2})}
 const TITLES = { dec: "判断", task: "作業・確認", ans: "回答済み・反映待ち" };
 let emptyNote = null, idleNote = null;
+
+// 目次の帯のチップ (プロジェクトごとに 1 つ。作り直さず中身だけ合わせる: 押した・フォーカスしたチップが読み込みで消えない)。
+// q は送信中を除いた判断待ち (見出しの件数と同じ数)。P0 の印も送信中を除いて決める
+function syncChip(pr, p, q) {
+  if (!pr.chip) {
+    const name = el("span", { class: "tocname" }), n = el("span", { class: "tocn" }), mark = el("span", { class: "tocp0", hidden: "" }, "P0");
+    const b = el("button", { class: "tocchip", type: "button", title: p.path, "data-path": p.path }, name, n, mark);
+    b.addEventListener("click", () => jumpTo(p.path));
+    pr.chip = { el: b, name, n, mark };
+  }
+  const c = pr.chip, p0 = q.some(i => i.priority === 0);
+  c.name.textContent = p.name;
+  c.n.textContent = String(q.length);
+  c.mark.hidden = !p0;
+  c.el.setAttribute("aria-label", `${p.name}: 判断待ち ${q.length} 件${p0 ? "、P0 あり" : ""}`);
+  return c.el;
+}
+
+// チップから、そのプロジェクトの見出しへページ内で飛ぶ。動きを減らす設定では滑らかにしない。
+// フォーカスは見出し (tabindex="-1") へ移す: 帯はスクロールで流れるので、チップに残すと次の Tab で帯へ戻り、ページが上へ戻る
+function jumpTo(path) {
+  const pr = projs.get(path);
+  if (!pr) return;                   // チップは同じ描き直しで見出しと一緒に外れるので、普通は届かない
+  pr.h3.focus({ preventScroll: true });
+  pr.el.scrollIntoView({ block: "start", behavior: REDUCED ? "auto" : "smooth" });
+}
 
 // 入れ物を畳み終えたら (または空なら) 外す。onGone は外れたあとの片付け
 function retire(e, onGone) {
@@ -642,6 +695,7 @@ function render() {
   const seenKeys = new Set();
   const entering = [];
   const projEls = [];
+  const chips = [];                  // 目次の帯に並べるチップ (プロジェクトの順)
   const busyPaths = new Set();
   let total = 0, idle = 0, stale = 0;
 
@@ -676,9 +730,13 @@ function render() {
     let pr = projs.get(p.path);
     if (pr) { if (pr.el._leave) unleave(pr.el); }
     else {
-      pr = { el: el("div", { class: "proj" }), h3: el("h3", {}, p.name, el("span", { class: "path" }, p.path)), banner: null, groups: new Map() };
+      pr = { el: el("div", { class: "proj" }),
+        h3: el("h3", { tabindex: "-1" }, el("span", { class: "pname" }, p.name), el("span", { class: "path", title: p.path }, p.path)),
+        banner: null, chip: null, groups: new Map() };
       projs.set(p.path, pr);
     }
+    // チップは判断待ちか回答済みがあるプロジェクトだけ (読めなかったプロジェクトのバナーだけの入れ物には出さない)
+    if (q.length || a.length) chips.push(syncChip(pr, p, q));
     pr.banner = p.ok ? null : (pr.banner || el("div", { class: "banner" }));
     if (pr.banner) pr.banner.textContent = `読めませんでした (${p.okAt ? `最後に読めたのは ${hhmm(p.okAt)}。` : ""}自動で読み直します): ${p.error}`;
     const lists = {
@@ -722,6 +780,9 @@ function render() {
   emptyNote.textContent = `判断待ちはありません (登録 ${lastData.projects.length} プロジェクト)`;
   idleNote.textContent = `ほか ${idle} プロジェクトは判断待ちなし`;
   place(main, [busyPaths.size ? null : emptyNote, ...projEls, busyPaths.size && idle ? idleNote : null]);
+  // 目次の帯: 判断待ち・回答済みが無くなった (送信中を除いて)・データから消えたプロジェクトのチップは、見出しを畳み終わるのを待たずに外す
+  place(document.getElementById("tocin"), chips);
+  document.getElementById("toc").hidden = !chips.length;
 
   // 新しく現れたカード (追加・失敗からの戻り・取り消し) だけ入場させる。最初の描画では動かさない
   for (const e of entering) enter(e);
@@ -955,6 +1016,12 @@ const toastBox = document.getElementById("toasts");
 if ("ResizeObserver" in window)
   new ResizeObserver(() => document.documentElement.style.setProperty("--toast-space", toastBox.offsetHeight ? toastBox.offsetHeight + 8 + "px" : "0px"))
     .observe(toastBox);
+// sticky のヘッダーの高さを CSS の --head-h に渡す (プロジェクトの見出しが止まる位置と、飛ぶ先・カードの scroll-margin-top)。
+// 高さは固定でない: 幅が狭いと「(古いデータ)」などでヘッダーの行が折り返す
+const headerBox = document.querySelector("header");
+const syncHead = () => document.documentElement.style.setProperty("--head-h", headerBox.getBoundingClientRect().height + "px");
+syncHead();                        // ResizeObserver の無いブラウザでも最初の高さは渡す (ある場合は observe も最初に 1 回呼ぶ)
+if ("ResizeObserver" in window) new ResizeObserver(syncHead).observe(headerBox);
 const nb = document.getElementById("notify");
 if (!("Notification" in window) || Notification.permission === "granted") nb.hidden = true;
 nb.addEventListener("click", async () => { if (await Notification.requestPermission() === "granted") nb.hidden = true; });
