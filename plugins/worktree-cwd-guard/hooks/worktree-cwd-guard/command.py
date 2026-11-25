@@ -17,6 +17,7 @@ import shlex
 import string
 import time
 import unicodedata
+from array import array
 from dataclasses import dataclass
 
 from family import Family, _drive_readings, _msys_drive, norm, owner
@@ -282,15 +283,27 @@ def _expand_home(path: str) -> str:
     return os.path.expanduser(path)
 
 
-def _resolve(base: str | None, path: str, msys: bool = False) -> str | None:
-    """base から見た path の正規化済み絶対パス。解決できなければ None。msys は Git Bash の読み (`_drive_readings`)。"""
+def _resolve(base: str | None, path: str, msys: bool = False, memo: dict[str, str] | None = None) -> str | None:
+    """base から見た path の正規化済み絶対パス。解決できなければ None。msys は Git Bash の読み (`_drive_readings`)。
+
+    memo は、絶対パスになる語 (`~` の展開と Git Bash の読みの後で) を正規化した値の覚えで、語をそのまま key にする
+    (1 つの読みの中で、同じ msys で使う)。絶対パスの行き先は base に関係なく同じ値になるので、状態ごとに同じ realpath を
+    繰り返さない。値は覚えないときと同じ (1 つの読みの間にファイルシステムと home は変わらない)。相対パスは基点ごとに値が
+    違うので覚えない。
+    """
+    if memo is not None and path in memo:
+        return memo[path]
     if _dynamic(path):
         return None
+    word = path
     path = _expand_home(path)
     if msys:
         path = _msys_drive(path)
     if os.path.isabs(path):
-        return norm(path)
+        resolved = norm(path)
+        if memo is not None:
+            memo[word] = resolved
+        return resolved
     if base is None:
         return None
     return norm(os.path.join(base, path))
@@ -854,9 +867,70 @@ def _analyze(command: str, cwd: str, fam: Family, deadline: _Deadline) -> list[F
 
 
 # 1 つの「実行時にありうる状態」: (作業ディレクトリ, pushd のスタック, 直前のコマンドの成否)。
-# 作業ディレクトリが静的に決まらなければ None。成否は "ok" / "fail"
+# 作業ディレクトリが静的に決まらなければ None。スタックは `_Stacks` の節の番号。成否は "ok" / "fail"
 _Alt = tuple
 _OPS = re.compile(r"&&|\|\||\|&|;;|[|&;()\n]")
+# 空のスタックの節の番号
+_EMPTY = 0
+
+
+class _Stacks:
+    """pushd のスタックの表。スタックは節の番号で持ち、節は (親の節の番号, 先頭の要素) の組を 1 つの番号に intern したもの。
+
+    同じ中身のスタックは同じ番号になるので、状態の比較とハッシュは番号で済み、push / pop はスタックの深さに関係なく定数時間で済む。
+    スタックを tuple で持つと、push のたびにスタックを複製し、状態のハッシュもスタックの深さに比例するので、`x || cd d<i>;` を
+    6 回続けた後に `pushd <dir>;` を数千回続けた形で、読みの時間が状態の数 × 深さの 2 乗に伸びていた。表は 1 つの読み (`_Analyzer`) ごとに持つ。
+    要素は行き先 (正規化済みの絶対パス) か、行き先の分からない None。
+
+    深く重ねた形では節が「状態の数 × 深さ」個できる (底で割れた 64 本のスタックは、上の段を共有できない) ので、1 つの節を小さく
+    持つ。節の情報は array に持ち、各節の最初の子 (最初に積んだ要素の番号とその節) も array に持つ。dict は、同じ節に 2 つ目以降の
+    違う要素を積んだときだけ使う (key は (親の節の番号, 要素の番号) を 1 つの int にしたもの)。積み続ける形の節は、どれも子が 1 つ。
+    """
+
+    def __init__(self) -> None:
+        # 空のスタックから外した残りは空のスタック (`popd +N` は空のスタックでも空のまま)
+        self.parent = array("q", [_EMPTY])
+        self.depth = array("q", [0])
+        self.top: list[str | None] = [None]
+        self._first_item = array("q", [-1])  # 節ごとの、最初の子の要素の番号 (-1 は子なし)
+        self._first_node = array("q", [_EMPTY])  # 節ごとの、最初の子の節
+        self._items: dict[str | None, int] = {}  # 要素ごとの番号
+        self._others: dict[int, int] = {}  # 2 つ目以降の子
+        self._unknown = [_EMPTY]  # 深さごとの、要素がすべて None のスタック
+
+    def push(self, stack: int, item: str | None) -> int:
+        code = self._items.get(item)
+        if code is None:
+            code = self._items[item] = len(self._items)
+        first = self._first_item[stack]
+        if first == code:
+            return self._first_node[stack]
+        key = None
+        if first != -1:
+            # 要素の番号は節の数より小さく、節は 2**32 個に届かない (1 つの節は数十バイトなので、メモリが先に尽きる)
+            key = stack << 32 | code
+            node = self._others.get(key)
+            if node is not None:
+                return node
+        node = len(self.top)
+        self.parent.append(stack)
+        self.depth.append(self.depth[stack] + 1)
+        self.top.append(item)
+        self._first_item.append(-1)
+        self._first_node.append(_EMPTY)
+        if key is None:
+            self._first_item[stack] = code
+            self._first_node[stack] = node
+        else:
+            self._others[key] = node
+        return node
+
+    def unknown(self, depth: int) -> int:
+        """要素がすべて行き先の分からないもの (None) の、深さ depth のスタック。"""
+        while len(self._unknown) <= depth:
+            self._unknown.append(self.push(self._unknown[-1], None))
+        return self._unknown[depth]
+
 
 # 状態の集合 (今の状態・移動が失敗した経路・`&` で戻す時点) の大きさの上限。普段の形は数個で収まる (git を含む実コマンド
 # 12,725 件で最大 6、この suite の入力で最大 4)。分岐ごとに行き先が割れる形は状態が倍々に増え、6 回の分岐で 64 に届く。
@@ -865,9 +939,9 @@ _OPS = re.compile(r"&&|\|\||\|&|;;|[|&;()\n]")
 _STATE_LIMIT = 64
 
 
-def _cap(alts: set[_Alt]) -> set[_Alt]:
+def _cap(alts: set[_Alt], stacks: _Stacks) -> set[_Alt]:
     """状態が上限を超えたら、成否ごとに 1 つの状態にまとめる。成否ごとに、その成否の全状態で同じでない作業ディレクトリとスタックは、
-    決まらないものにする。
+    決まらないものにする。stacks は状態のスタックの番号を引く表。
 
     `x || cd d1; x || cd d2; ...` (相対パス) や `x || pushd /d1; ...` は、分岐ごとに行き先かスタックが割れて、状態が倍々に増える。
     hook が時間切れになると Claude Code はコマンドをそのまま走らせるので、形ごとではなく数で閉じる。まとめた後の git は、
@@ -883,9 +957,9 @@ def _cap(alts: set[_Alt]) -> set[_Alt]:
     for st in {a[2] for a in alts}:
         # 成否ごとに決める。成功の側だけが積んだ形 (`x && pushd <dir> && ...`) で、失敗の側の浅いスタックを成功の側に持たせない
         heres = {h for h, _, s in alts if s == st}
-        stacks = {k for _, k, s in alts if s == st}
+        kept = {k for _, k, s in alts if s == st}
         here = next(iter(heres)) if len(heres) == 1 else None
-        stack = next(iter(stacks)) if len(stacks) == 1 else (None,) * min(len(k) for k in stacks)
+        stack = next(iter(kept)) if len(kept) == 1 else stacks.unknown(min(stacks.depth[k] for k in kept))
         out.add((here, stack, st))
     return out
 
@@ -912,7 +986,9 @@ class _Analyzer:
         self.fam = fam
         self.findings: list[Finding] = []
         self._seen: set[str] = set()
-        self.alts: set[_Alt] = {(norm(cwd), (), "ok")}
+        self.stacks = _Stacks()  # 状態のスタックの番号を引く表
+        self._absolute: dict[str, str] = {}  # 移動の行き先の絶対パスを正規化した値 (`_resolve` の memo)
+        self.alts: set[_Alt] = {(norm(cwd), _EMPTY, "ok")}
         self.env: dict[str, str] = {}  # export 済みの GIT_DIR / GIT_WORK_TREE
         self.shvars: dict[str, str] = {}  # 代入したが export していないもの
         self.op: str | None = None  # 次のコマンドの前にある && / ||
@@ -986,11 +1062,11 @@ class _Analyzer:
 
     def _bound(self) -> None:
         """状態の集合を上限 (`_STATE_LIMIT`) に収める。1 つのコマンドと演算子で増えるのは高々数倍なので、ここで毎回まとめれば足りる。"""
-        self.alts = _cap(self.alts)
-        self.failed_moves = _cap(self.failed_moves)
+        self.alts = _cap(self.alts, self.stacks)
+        self.failed_moves = _cap(self.failed_moves, self.stacks)
         start, env, shvars = self.list_start
         if len(start) > _STATE_LIMIT:
-            self.list_start = (frozenset(_cap(set(start))), env, shvars)
+            self.list_start = (frozenset(_cap(set(start), self.stacks)), env, shvars)
 
     def _operator(self, op: str) -> None:
         if op in ("&&", "||"):
@@ -1144,11 +1220,14 @@ class _Analyzer:
             return ok
         # 今の shell で動かない移動は後ろに残らない (一般のコマンドと同じ。成否は外部コマンド次第)
         if cmd in _MOVERS and in_shell:
+            args = seg[1:]
+            # option と語の読みは状態に関係しないので、状態ごとに読み直さない
+            form = None if cmd == "popd" else _chdir_form(cmd, args, self.braces > 0)
             out: set[_Alt] = set()
             for h, s, _ in alts:
                 if self.deadline is not None and self.deadline.check():
                     break  # 状態ごとにも期限を見る (相対パスの解決は全要素を辿り直すので、深い場所や長い語で重い)
-                out |= self._chdir(cmd, seg[1:], h, s)
+                out |= self._chdir(cmd, args, h, s, form)
             return out
         if _is_git(cmd):
             env = {} if clear else dict(self.env)
@@ -1164,10 +1243,16 @@ class _Analyzer:
             self._check_git(seg[1:], heres, env)
         return self._both(alts)
 
-    def _chdir(self, cmd: str, args: list[str], here: str | None, stack: tuple) -> set[_Alt]:
-        """今の shell で動く移動の組み込みを、1 つの状態から実行した後の状態。"""
+    def _chdir(
+        self, cmd: str, args: list[str], here: str | None, stack: int, form: tuple[frozenset[str], list[str]] | None = None
+    ) -> set[_Alt]:
+        """今の shell で動く移動の組み込みを、1 つの状態から実行した後の状態。stack はスタックの節の番号 (`_Stacks`)。
+
+        form は `_chdir_form(cmd, args, ...)` の値 (状態ごとに読み直さないよう、呼び出し側が 1 回だけ読んで渡す)。None なら読む。
+        """
         if cmd == "popd":
             return self._popd(args, here, stack)
+        push = self.stacks.push
         failed = {(here, stack, "fail")}  # option や語の数を受け付けない shell は失敗して動かない
         if cmd == "pushd" and args[:1] == ["-n"]:
             # bash は移動せずにスタックへ積み (次の popd がそこへ移動する)、zsh は bad option で失敗する
@@ -1175,30 +1260,31 @@ class _Analyzer:
                 return failed
             words = _before_redirect(args[2:] if args[1:2] == ["--"] else args[1:])
             if words and not words[0].startswith(("+", "-")):
-                return {(here, stack + (_resolve(here, words[0], self.msys),), "ok")}
-            return {(here, stack + (None,), "ok")}  # 語なしと `+1` はスタックを回す。次の popd の行き先は分からない
-        shells, words = _chdir_form(cmd, args, self.braces > 0)
+                return {(here, push(stack, _resolve(here, words[0], self.msys, self._absolute)), "ok")}
+            return {(here, push(stack, None), "ok")}  # 語なしと `+1` はスタックを回す。次の popd の行き先は分からない
+        shells, words = _chdir_form(cmd, args, self.braces > 0) if form is None else form
         if self.shell not in shells:
             return failed
         if cmd == "pushd" and not words:
             # 語の無い pushd はスタックの先頭と入れ替える (`pushd >x` / `pushd -q` も同じ)
-            return {(None, stack + (here,), "ok")}
+            return {(None, push(stack, here), "ok")}
         dest = _cd_target(words)
-        new = _resolve(here, dest, self.msys) if dest is not None else None
-        return {(new, stack + (here,) if cmd == "pushd" else stack, "ok")}
+        new = _resolve(here, dest, self.msys, self._absolute) if dest is not None else None
+        return {(new, push(stack, here) if cmd == "pushd" else stack, "ok")}
 
-    def _popd(self, args: list[str], here: str | None, stack: tuple) -> set[_Alt]:
+    def _popd(self, args: list[str], here: str | None, stack: int) -> set[_Alt]:
+        stacks = self.stacks
         words = _words(args, self.braces > 0)
         if words[:1] == ["-q"]:  # zsh だけ受け付ける (bash は失敗して動かない)
             if self.shell != "zsh":
                 return {(here, stack, "fail")}
             words = words[1:]
         if words:
-            return {(None, stack[:-1], "ok")}  # `popd +N` は分からない
-        if stack:
-            return {(stack[-1], stack[:-1], "ok")}
+            return {(None, stacks.parent[stack], "ok")}  # `popd +N` は分からない
+        if stack != _EMPTY:
+            return {(stacks.top[stack], stacks.parent[stack], "ok")}
         # スタックが空に見える。呼び出し前のスタックは分からないが、新しい shell では失敗してその場に残る
-        return {(None, (), "ok"), (here, (), "fail")}
+        return {(None, _EMPTY, "ok"), (here, _EMPTY, "fail")}
 
     def _add(self, finding: Finding) -> None:
         if finding.message not in self._seen:

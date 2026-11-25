@@ -92,8 +92,8 @@ class BoundedBase(unittest.TestCase):
                 raise test.failureException(f"状態の集合が上限 ({command._STATE_LIMIT}) を超えた: {sizes}")
             return flush(analyzer, seg, next_is_pipe)
 
-        def counted_cap(alts):
-            out = cap(alts)
+        def counted_cap(alts, stacks):
+            out = cap(alts, stacks)
             if out is not alts:
                 test.collapses += 1
             return out
@@ -106,7 +106,10 @@ class BoundedBase(unittest.TestCase):
     def findings(self, cmd: str) -> list[command.Finding]:
         self.peak = 0
         self.collapses = 0
-        return command.analyze(cmd, family.norm(A), self.fam)
+        try:
+            return command.analyze(cmd, family.norm(A), self.fam)
+        except Exception as e:  # noqa: BLE001 - 読みの例外も読みの誤りとして数える (ERROR ではなく FAIL)
+            self.fail(f"読みが例外を投げた: {e!r}")
 
     def verdict(self, cmd: str) -> str | None:
         out = self.findings(cmd)
@@ -189,6 +192,17 @@ class StateLimitTest(BoundedBase):
         self.assertEqual(self.verdict(f'cd "{MAIN}"; {or_cd(k)}cd n || x || {GIT}'), "note")
         self.assertGreater(self.collapses, 0)
 
+    def test_failed_moves_with_split_stacks_are_bounded(self):
+        # 移動の失敗の経路 (`cd <dir> ||` の右) を上限でまとめるときも、スタックの割れた状態をまとめる。`cd /t/h<i>; x || pushd /t/same;`
+        # は、作業ディレクトリを揃えたままスタックだけを割る (積むのは手前の場所)。全状態で同じ作業ディレクトリ (main) は残すので、
+        # `|| popd` が失敗した経路の git は main で動く
+        k = _limit_exponent()
+        split = "pushd /t/x; " + "".join(f"cd /t/h{i}; x || pushd /t/same; " for i in range(k)) + f'cd "{MAIN}"; '
+        self.assertEqual(self.verdict(f"{split}cd /t/n || x || popd || {GIT}"), "deny")
+        self.assertGreater(self.collapses, 0)
+        # 対照: まとめる前 (状態が上限ちょうど) も同じ
+        self.assertEqual(self.verdict(f"{split}cd /t/n || popd || {GIT}"), "deny")
+
     def test_collapse_keeps_shared_place_and_stack(self):
         k = _limit_exponent()
         for n in (k + 1, 18):
@@ -225,6 +239,17 @@ class StateLimitTest(BoundedBase):
         # 作業ディレクトリも成否ごとに決める。成功の側はどれも main にいるので、`&&` の後ろの git は main で動く (失敗の側の
         # 割れた作業ディレクトリに引かれて決まらないものにしない)
         self.assertEqual(self.verdict(f'{or_cd(k - 1)}x && pushd "{MAIN}" && x && {GIT}'), "deny")
+        self.assertGreater(self.collapses, 0)
+
+    def test_collapse_keeps_every_shared_depth(self):
+        # どの状態でも 2 段積まれていれば、まとめた後も 2 段残す (2 回目の popd も失敗しない。行き先は分からないので注意)。
+        # 1 段しか残さないと、2 回目の popd が「失敗して main に残る」読みになり止めすぎる
+        k = _limit_exponent()
+        two = f"pushd /t/x; pushd /t/y; {or_pushd_abs(k + 1)}"
+        self.assertEqual(self.verdict(f'{two}popd; cd "{MAIN}"; popd; {GIT}'), "note")
+        self.assertGreater(self.collapses, 0)
+        # 3 回目の popd は、どの状態でも積まれているとは言えない段を外す (`x` がずっと成功すればスタックは 2 段で、空の popd は main に残る)
+        self.assertEqual(self.verdict(f'{two}popd; popd; cd "{MAIN}"; popd; {GIT}'), "deny")
         self.assertGreater(self.collapses, 0)
 
     def test_collapse_keeps_exported_git_dir(self):
@@ -335,6 +360,41 @@ class StateLimitTest(BoundedBase):
                 # 4 倍の入力で、線形なら約 4 倍、2 乗なら約 16 倍
                 self.assertLess(times[1] / times[0], 8.0, times)
                 self.assertGreater(times[1] / times[0], 1.5, times)
+
+
+class StackIdentityTest(BoundedBase):
+    """スタックは中身で比べる (同じ中身のスタックは同じ状態、違う中身は違う状態)。"""
+
+    def test_same_stack_from_both_outcomes_is_one_state(self):
+        # `x;` で成否の割れた 2 つの状態が同じ pushd を読むと、同じ中身のスタックになって 1 つの状態に戻る (倍々に増えない)
+        n = 2 * _limit_exponent()
+        cmd = f'cd "{MAIN}"; ' + "".join(f"x; pushd /t/a{i}; " for i in range(n)) + "popd; " * n + GIT
+        self.assertEqual(self.verdict(cmd), "deny")
+        self.assertEqual((self.peak, self.collapses), (2, 0))
+
+    def test_same_second_item_from_both_outcomes_is_one_state(self):
+        # 同じスタックに、前に積んだのとは違う場所を積む形 (`pushd /t/a; popd` で 1 つ目を積んでから、別の場所から積み直す) でも、
+        # 成否の割れた 2 つの状態は同じ中身のスタックになって 1 つの状態に戻る
+        n = 2 * _limit_exponent()
+        unit = "pushd /t/a; popd; cd /t/c{i}; x; pushd /t/b{i}; "
+        cmd = f'cd "{MAIN}"; pushd /t/start; ' + "".join(unit.format(i=i) for i in range(n)) + "popd; " * (n + 1) + GIT
+        self.assertEqual(self.verdict(cmd), "deny")  # 積んだ順の逆に戻り、最後の popd で main に戻る
+        self.assertEqual((self.peak, self.collapses), (2, 0))
+
+    def test_same_item_on_different_stacks(self):
+        # 同じ場所 (main) を、中身の違う 2 つのスタック (自分の worktree を積んだもの / 空のもの) に積む。2 つ目は空のスタックに
+        # 積んだので、popd 2 回目は空のスタックの popd (失敗して main に残る) になる
+        cmd = f'pushd "{MAIN}"; pushd /t/q; popd; popd; cd "{MAIN}"; pushd /t/r; popd; popd; {GIT}'
+        self.assertEqual(self.verdict(cmd), "deny")
+        # 対照: 同じ中身のスタックに積み直せば、同じスタックになる (popd 2 回目は自分の worktree に戻る)
+        cmd = f'pushd "{MAIN}"; pushd /t/q; popd; pushd /t/r; popd; popd; {GIT}'
+        self.assertIsNone(self.verdict(cmd))
+
+    def test_popd_plus_n_on_an_empty_stack_keeps_it_empty(self):
+        # 空に見えるスタックの `popd +N` の後も、スタックは空のまま。次の popd は失敗してその場 (main) に残る
+        self.assertEqual(self.verdict(f'popd +1; cd "{MAIN}"; popd; {GIT}'), "deny")
+        # 対照: 1 段積んだスタックの `popd +1` も外す (残りは空)
+        self.assertEqual(self.verdict(f'pushd /t/x; popd +1; cd "{MAIN}"; popd; {GIT}'), "deny")
 
 
 class HookTimeTest(test_guard.GuardBase):
