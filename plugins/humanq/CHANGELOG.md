@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.1
+
+### テスト
+
+- 製品コードは変えていない (テストの土台だけ)
+- 偽の beads CLI (`tests/fake_beads.py`) に、`br` (beads_rust 0.7.6) の名前で呼ばれたときの振る舞いを足し、実測した癖を 1 件ずつテストで押さえた (`tests/test_fake_beads.py`)。`-C`・`human` サブコマンド・`list --flat`・`list -n`・`update --metadata` / `--set-metadata` は usage エラー、`.beads` は cwd から上へ探す、`list -s` のカンマ区切りは JSON の error で非 0 (繰り返しは通る)、`list --json` は envelope (0 件も同じ形・既定は無制限)、`show` は配列で id が 1 つでも無ければ全体が exit 3、コメントの並びは決まっていない (偽物は新しいものを先頭で返す)、`label add` / `remove` の戻りの status、`update --agent-context` の縮小は `--force` が無いと断る、database が dolt の dir で打つとエラーにせずファイルを作って空の結果を返す、など。humanq の製品コードは今は br を呼ばない。後の bd と br の判定・読み書きのテストが、CI で br の差を確かめるための土台
+
 ## 0.5.0
 
 ### 画面
@@ -11,10 +18,6 @@
 ### 変えていないもの
 
 - サーバー・API・hook・回答コメントの形は変えていない (表示だけの変更)
-
-### テスト
-
-- 偽の beads CLI (`tests/fake_beads.py`) に、`br` (beads_rust 0.7.6) の名前で呼ばれたときの振る舞いを足し、実測した癖を 1 件ずつテストで押さえた (`tests/test_fake_beads.py`)。`-C`・`human` サブコマンド・`list --flat`・`list -n`・`update --metadata` / `--set-metadata` は usage エラー、`.beads` は cwd から上へ探す、`list -s` のカンマ区切りは JSON の error で非 0 (繰り返しは通る)、`list --json` は envelope (0 件も同じ形・既定は無制限)、`show` は配列で id が 1 つでも無ければ全体が exit 3、コメントの並びは決まっていない (偽物は新しいものを先頭で返す)、`label add` / `remove` の戻りの status、`update --agent-context` の縮小は `--force` が無いと断る、database が dolt の dir で打つとエラーにせずファイルを作って空の結果を返す、など。humanq の製品コードは今は br を呼ばない。後の bd と br の判定・読み書きのテストが、CI で br の差を確かめるための土台
 
 ## 0.4.0
 
