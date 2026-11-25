@@ -1019,6 +1019,27 @@ test("成功のトーストにも、同じ知らせの重ね抑止と、見え�
   }, {}, page => page.clock.install({ time: 0 }));
 });
 
+test("トーストの「取り消す」を、閉じる動きの間にもう一度押しても、取り消しは 1 回しか呼ばれない", async () => {
+  const s = new Script([proj(P1, [item("t-A1")])]);
+  await withPage(s, async page => {
+    // run の回数を直接数える (回答の取り消しは送信中の止めがあるので、POST の数では 2 度目の run を見分けられない)
+    const r = await page.evaluate(() => {
+      window.__runs = 0;
+      toast("押し直しの確認", { kind: "ok", key: "double", action: { label: "取り消す", run: () => { window.__runs++; } } });
+      const t = [...document.querySelectorAll("#toasts .toast")].find(e => e.dataset.key === "double");
+      const act = t.querySelector(".toast-act");
+      act.click();
+      const closing = t.classList.contains("out") && t.isConnected;           // 閉じる動き (300ms) の途中
+      act.click();
+      return { closing, runs: window.__runs };
+    });
+    assert.ok(r.closing, "1 回目の click の後、トーストが閉じる動きに入っていない (このテストの前提)");
+    assert.equal(r.runs, 1, "閉じる動きの間の 2 回目の click で、もう一度 run が呼ばれた");
+    await waitFor(async () => (await page.locator("#toasts .toast").count()) === 0, 3000, "トーストが外れる");
+    assert.equal(await page.evaluate(() => window.__runs), 1);
+  });
+});
+
 test("reduced-motion では、成功のトーストも動かさず、閉じたらすぐ外す", async () => {
   const s = new Script([proj(P1, [item("t-A1")])]);
   await withPage(s, async page => {

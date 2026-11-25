@@ -234,16 +234,39 @@ def bd_init(root: str, args: list[str]) -> None:
     p.save()
 
 
+def read_metadata(raw: str) -> dict | None:
+    """--metadata の値 (JSON か @file) を読む。create と update で同じ。"""
+    if raw.startswith("@"):
+        try:
+            with open(raw[1:], encoding="utf-8") as f:
+                raw = f.read()
+        except OSError as e:
+            raise Fail(f"Error: reading metadata file: {e}") from None
+    try:
+        meta = json.loads(raw)
+    except ValueError:
+        raise Fail("Error: invalid metadata JSON") from None
+    if not isinstance(meta, dict):
+        raise Fail("Error: metadata must be a JSON object")
+    return meta or None
+
+
 def bd_create(p: Project, args: list[str], as_json: bool, actor: str) -> None:
-    opts, pos = take(args, {"-p": True, "--priority": True, "-t": True, "--type": True, "-d": True, "--description": True})
+    opts, pos = take(args, {"-p": True, "--priority": True, "-t": True, "--type": True, "-d": True, "--description": True,
+                            "-l": True, "--labels": True, "--metadata": True})
     want(pos, 1, "create <title> [flags]")
+    labels: list[str] = []
+    for name in str(opts.get("-l") or opts.get("--labels") or "").split(","):   # 本物と同じく , で区切る
+        if name.strip() and name.strip() not in labels:
+            labels.append(name.strip())
+    meta = read_metadata(str(opts["--metadata"])) if "--metadata" in opts else None
     iid = f"{p.state['prefix']}-{p.state['next']}"
     p.state["next"] += 1
     t = now()
     i = {"id": iid, "title": pos[0], "status": "open", "priority": int(opts.get("-p") or opts.get("--priority") or 2),
          "issue_type": str(opts.get("-t") or opts.get("--type") or "task"), "created_at": t, "created_by": actor,
          "updated_at": t, "description": str(opts.get("-d") or opts.get("--description") or ""), "notes": "",
-         "metadata": None, "labels": [], "comments": []}
+         "metadata": meta, "labels": labels, "comments": []}
     p.state["issues"][iid] = i
     p.save()
     if as_json:
@@ -257,20 +280,7 @@ def bd_update(p: Project, args: list[str]) -> None:
     want(pos, 1, "update <id> [flags]")
     i = p.issue(pos[0], "resolving")
     if "--metadata" in opts:
-        raw = str(opts["--metadata"])
-        if raw.startswith("@"):
-            try:
-                with open(raw[1:], encoding="utf-8") as f:
-                    raw = f.read()
-            except OSError as e:
-                raise Fail(f"Error: reading metadata file: {e}") from None
-        try:
-            meta = json.loads(raw)
-        except ValueError:
-            raise Fail("Error: invalid metadata JSON") from None
-        if not isinstance(meta, dict):
-            raise Fail("Error: metadata must be a JSON object")
-        i["metadata"] = meta or None
+        i["metadata"] = read_metadata(str(opts["--metadata"]))
     status = opts.get("--status") or opts.get("-s")
     if status is not None:
         if status not in STATUSES:

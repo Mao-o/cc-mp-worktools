@@ -120,6 +120,6 @@ python3 -m unittest discover tests        # サーバー (bd の読み書きは�
 PLAYWRIGHT_PATH=<playwright の index.mjs> node tests/ui_test.mjs   # 画面 (Playwright と chromium が要る)
 ```
 
-`tests/test_server.py` の bd を通すシナリオ (送り直し・ラベルの再試行・両ラベルの向きなど) は、`tests/fake_beads.py` (偽の bd) を一時の bin dir に置いて回すので、本物の bd が無い環境でも skip されない。偽物は bd 1.3.4 で実測した癖 (0 件の `human list --json` は `null` など) を持ち、失敗は env (`FAKE_BEADS_FAIL`) で注入する。サーバーが打つ bd の argv の列 (読み・回答・取り消し) も、このテストで固定している。
+`tests/test_server.py` の bd を通すシナリオ (送り直し・ラベルの再試行・両ラベルの向きなど) は、`tests/fake_beads.py` (偽の bd) を一時の bin dir に置いて回すので、本物の bd が無い環境でも skip されない。偽物は bd 1.3.4 で実測した癖 (0 件の `human list --json` は `null` など) を持ち、失敗は env (`FAKE_BEADS_FAIL`) で注入する。サーバーが打つ bd の argv の列 (読み・回答・取り消し) も、このテストで固定している。discover で流すと、このシナリオは別のプロセスで並列に回る (`HUMANQ_TEST_JOBS`、既定 3。`HUMANQ_TEST_JOBS=1` で直列。テストを名前で指したときも直列)。
 
 `tests/ui_test.mjs` はサーバーを一時ポートと一時 state dir で起動し、API の応答を台本どおりに返して画面の動き (押したカードの即時の非表示・失敗時の戻し・入力中の保護など) を確かめる。bd には触れない。

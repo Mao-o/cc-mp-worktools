@@ -241,7 +241,8 @@ function toast(msg, opts = {}) {
     setTimeout(() => t.remove(), 600);
   };
   close.addEventListener("click", dismiss);
-  if (act) act.addEventListener("click", () => { dismiss(); opts.action.run(); });
+  // 閉じる動き (300ms) の間はまだ押せるので、閉じ始めた後の click では run を呼ばない
+  if (act) act.addEventListener("click", () => { if (gone) return; dismiss(); opts.action.run(); });
   box.append(t);
   cancel = whileVisible(6000, dismiss);
 }
