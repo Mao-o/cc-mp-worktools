@@ -2,8 +2,8 @@
 """テスト用の偽の beads CLI。本物の bd が無い環境 (CI) でも、humanq のサーバーの読み書きを端から端まで回すため。
 
 テストは一時の bin dir に、このファイルを `bd` の名前で置き (実行権限付き)、その dir を PATH の先頭に入れる
-(tests/test_server.py の install_fake)。振る舞いは argv[0] の basename で分ける。今は bd だけで、
-ほかの名前は exit 2 にする (別の CLI の偽物を足すときは PROGS に足す)。
+(tests/test_server.py の install_fake)。振る舞いは argv[0] の basename で分ける。bd と br があり、
+ほかの名前は exit 2 にする (別の CLI の偽物を足すときは PROGS に足す)。br の癖は下の一覧の後ろにある。humanq の製品コードは今は br を呼ばない。
 
 - 状態: <project>/.beads/fake-state.json (issues・labels・comments・status・metadata)。
   呼び出しは .beads/fake-state.lock の flock で 1 本ずつにする (サーバーは読みと書きを別のスレッドで並べて打つ)
@@ -22,6 +22,16 @@
   - `.beads/metadata.json` の database が beads.db で embeddeddolt/ が無いと、
     `Error: historical SQLite workspace detected; ...` で exit 1 (embeddeddolt/ があれば本物も database の値を見ない)
   - `-C <dir>` に .beads/ が無ければ `Error: cannot use -C directory "<dir>": no beads project found` で exit 1
+- br 0.7.6 で実測した癖を持つ (名前が br のとき。詳しくは tests/test_fake_beads.py が 1 件ずつ押さえる):
+  - -C・human サブコマンド・list --flat・list -n・update --metadata/--set-metadata は usage エラーで exit 2。
+    起動した cwd から上へ .beads を探す
+  - list -s のカンマ区切りは stdout の JSON error (VALIDATION_FAILED) で非 0、繰り返しは通る。
+    list --json は {"issues","total","limit","offset","has_more"} の envelope (0 件も同じ形)。既定は closed だけを除く
+  - show --json は配列 (comments と agent_context を含み metadata は無い)。id が 1 つでも無ければ ISSUE_NOT_FOUND で exit 3
+  - comments の並びは決まっていない (偽物は新しいものを先頭で返す)。id は int
+  - label add / remove の戻りは [{"status": added|removed|exists|not_found, ...}] で、どれも exit 0
+  - update --agent-context は丸ごと置き換え。半分未満・空にする書き換えは --force が無いと非 0
+  - database が dolt の dir で打つと、エラーにせず .beads/dolt・dolt-wal・dolt-shm を作って空の結果を返す
 依存は標準ライブラリだけ (fcntl を使うので macOS / Linux)。
 """
 from __future__ import annotations
@@ -445,7 +455,359 @@ def run_bd(argv: list[str]) -> None:
             raise Fail(f'Error: unknown command "{cmd}" for "bd"')
 
 
-PROGS = {"bd": run_bd}
+# ---- br (beads_rust 0.7.6) -----------------------------------------------------------------
+# 実測した癖は先頭の docstring の一覧にある。bd と状態の形 (fake-state.json) は共有するが、
+# コメントの id は int、返す並びは古い順ではない (本物は決まっていないので、偽物はわざと新しいものを先頭にする)。
+
+class Usage(Fail):
+    """clap の usage エラー。exit 2 で stderr に出す。"""
+
+    def __init__(self, msg: str):
+        super().__init__(msg, code=2)
+
+
+def br_usage_unexpected(name: str) -> Usage:
+    return Usage(f"error: unexpected argument '{name}' found\n\nUsage: br [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.")
+
+
+def br_json_error(code: str, message: str, exit_code: int) -> Fail:
+    """本物は JSON の error を stdout に出して非 0 で終わる。"""
+    return Fail(json.dumps({"error": {"code": code, "message": message}}, ensure_ascii=False), code=exit_code, stdout=True)
+
+
+def br_split_globals(argv: list[str]) -> tuple[str | None, bool, list[str]]:
+    """--actor <name>・--json はどこに書いてもよい。-C は無い (usage エラー)。残りを返す。"""
+    actor = None
+    as_json = False
+    rest: list[str] = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "-C" or a.startswith("-C="):
+            raise br_usage_unexpected("-C")
+        if a == "--actor":
+            if i + 1 >= len(argv):
+                raise Usage("error: a value is required for '--actor <ACTOR>' but none was supplied")
+            actor = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--actor="):
+            actor = a.split("=", 1)[1]
+        elif a == "--json":
+            as_json = True
+        else:
+            rest.append(a)
+        i += 1
+    return actor, as_json, rest
+
+
+def br_take(args: list[str], spec: dict[str, bool]) -> tuple[dict, list[str]]:
+    """spec の flag (値を取るなら True) を抜き出す。値を取る flag は繰り返せる (値は順に溜まる)。
+    知らない flag は clap と同じ usage エラー。"""
+    opts: dict = {}
+    pos: list[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a.startswith("-") and a != "-":
+            name, eq, val = a.partition("=")
+            if name not in spec:
+                raise br_usage_unexpected(name)
+            if spec[name]:
+                if not eq:
+                    if i + 1 >= len(args):
+                        raise Usage(f"error: a value is required for '{name} <VALUE>' but none was supplied")
+                    val = args[i + 1]
+                    i += 1
+                opts.setdefault(name, []).append(val)
+            else:
+                opts[name] = True
+        else:
+            pos.append(a)
+        i += 1
+    return opts, pos
+
+
+def br_one(opts: dict, *names: str) -> str | None:
+    for n in names:
+        if opts.get(n):
+            return opts[n][-1]
+    return None
+
+
+def br_find_root(start: str) -> str | None:
+    """cwd から上へ .beads を探す (br に -C は無い)。"""
+    cur = os.path.abspath(start)
+    while True:
+        if os.path.isdir(os.path.join(cur, ".beads")):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
+
+
+def br_time(micro: bool = False) -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ" if micro else "%Y-%m-%dT%H:%M:%SZ")
+
+
+def br_issue(p: Project, iid: str) -> dict:
+    i = p.state["issues"].get(iid)
+    if i is None:
+        raise br_json_error("ISSUE_NOT_FOUND", f"Issue not found: {iid}", 3)
+    return i
+
+
+def br_comments_of(i: dict) -> list[dict]:
+    """並びは決まっていない。偽物は新しいものを先頭にする (古い順を前提にした読み方を落とすため)。"""
+    return [{"id": c["id"], "issue_id": i["id"], "author": c["author"], "text": c["text"], "created_at": c["created_at"]}
+            for c in reversed(i["comments"])]
+
+
+def br_row(i: dict) -> dict:
+    """metadata と owner の key は無い。agent_context は値のある issue にだけ文字列で出る。"""
+    out = {"id": i["id"], "title": i["title"], "status": i["status"], "priority": i["priority"],
+           "issue_type": i["issue_type"], "labels": sorted(i["labels"]), "created_at": i["created_at"],
+           "updated_at": i["updated_at"]}
+    if i.get("agent_context"):
+        out["agent_context"] = i["agent_context"]
+    return out
+
+
+def br_init(root: str, args: list[str]) -> None:
+    opts, pos = br_take(args, {"--prefix": True, "--force": False})
+    if pos:
+        raise br_usage_unexpected(pos[0])
+    beads = os.path.join(root, ".beads")
+    os.makedirs(beads, exist_ok=True)
+    write_json(os.path.join(beads, "metadata.json"), {"database": "beads.db", "jsonl_export": "issues.jsonl"})
+    p = Project(root)
+    p.state = {"prefix": br_one(opts, "--prefix") or "bd", "next": 1, "next_comment": 1, "issues": {}}
+    p.save()
+
+
+def br_create(p: Project, args: list[str], as_json: bool, actor: str) -> None:
+    opts, pos = br_take(args, {"-p": True, "--priority": True, "-t": True, "--type": True, "-d": True,
+                               "--description": True, "-l": True, "--labels": True})
+    if len(pos) != 1:
+        raise Usage("error: expected exactly one <TITLE>")
+    labels: list[str] = []
+    for raw in opts.get("-l", []) + opts.get("--labels", []):
+        for name in raw.split(","):
+            if name.strip() and name.strip() not in labels:
+                labels.append(name.strip())
+    iid = f"{p.state['prefix']}-{p.state['next']}"
+    p.state["next"] += 1
+    t = br_time(True)
+    i = {"id": iid, "title": pos[0], "status": "open", "priority": int(br_one(opts, "-p", "--priority") or 2),
+         "issue_type": br_one(opts, "-t", "--type") or "task", "created_at": t, "created_by": actor, "updated_at": t,
+         "description": br_one(opts, "-d", "--description") or "", "labels": labels, "comments": [], "agent_context": ""}
+    p.state["issues"][iid] = i
+    p.save()
+    if as_json:
+        emit(br_row(i))
+    else:
+        print(f"Created {iid}: {i['title']}")
+
+
+def br_update(p: Project, args: list[str], as_json: bool) -> None:
+    opts, pos = br_take(args, {"--agent-context": True, "--force": False, "--status": True, "--title": True})
+    if len(pos) != 1:
+        raise Usage("error: expected exactly one <ID>")
+    i = br_issue(p, pos[0])
+    if "--agent-context" in opts:
+        raw = br_one(opts, "--agent-context") or ""
+        if raw.startswith("@"):
+            try:
+                with open(raw[1:], encoding="utf-8") as f:
+                    raw = f.read()
+            except OSError as e:
+                raise Fail(f"Error: reading agent-context file: {e}") from None
+        old = i.get("agent_context") or ""
+        if old and len(raw) * 2 < len(old) and not opts.get("--force"):      # 今の値の半分未満・空にする書き換えは断る
+            raise Fail(f"Error: refusing to overwrite non-empty 'agent_context' ({len(old)} chars) with a shorter value "
+                       f"({len(raw)} chars) without --force")
+        i["agent_context"] = raw
+    status = br_one(opts, "--status")
+    if status is not None:
+        if status not in STATUSES:
+            raise Fail(f"Error: invalid status: {status}")
+        i["status"] = status
+    if "--title" in opts:
+        i["title"] = br_one(opts, "--title") or ""
+    i["updated_at"] = br_time(True)
+    p.save()
+    if as_json:
+        emit(br_row(i))
+    else:
+        print(f"Updated {i['id']}")
+
+
+def br_close(p: Project, args: list[str]) -> None:
+    _, pos = br_take(args, {"--reason": True, "-r": True})
+    if len(pos) != 1:
+        raise Usage("error: expected exactly one <ID>")
+    i = br_issue(p, pos[0])
+    i["status"] = "closed"
+    i["updated_at"] = br_time(True)
+    p.save()
+    print(f"Closed {i['id']}")
+
+
+def br_list(p: Project, args: list[str], as_json: bool) -> None:
+    opts, pos = br_take(args, {"-s": True, "--status": True, "-l": True, "--label": True, "--limit": True, "--all": False})
+    if pos:
+        raise br_usage_unexpected(pos[0])
+    given = opts.get("-s", []) + opts.get("--status", [])
+    for s in given:                                                     # カンマ区切りは受け付けない (繰り返しは受け付ける)
+        if s not in STATUSES:
+            raise br_json_error("VALIDATION_FAILED", f"Validation failed: status: unknown status '{s}'. "
+                                f"Valid statuses: {', '.join(STATUSES)}", 2)
+    labels = opts.get("-l", []) + opts.get("--label", [])
+    if given:
+        allowed = set(given)
+    elif opts.get("--all"):
+        allowed = set(STATUSES)
+    else:
+        allowed = set(STATUSES) - {"closed"}                            # 既定は closed だけを除く (deferred を含む)
+    items = [i for i in p.state["issues"].values() if i["status"] in allowed and all(x in i["labels"] for x in labels)]
+    total = len(items)
+    limit = int(br_one(opts, "--limit") or 0)                           # 0 は無制限 (既定も無制限)
+    if limit > 0:
+        items = items[:limit]
+    if as_json:
+        emit({"issues": [br_row(i) for i in items], "total": total, "limit": limit, "offset": 0,
+              "has_more": limit > 0 and total > limit})
+    else:
+        print("\n".join(f"{i['id']} {i['title']}" for i in items))
+
+
+def br_show(p: Project, args: list[str], as_json: bool) -> None:
+    _, pos = br_take(args, {})
+    if not pos:
+        raise Usage("error: the following required arguments were not provided:\n  <IDS>...")
+    found = [br_issue(p, iid) for iid in pos]                           # 1 つでも無ければ全体が exit 3
+    if as_json:
+        emit([{**br_row(i), "description": i.get("description") or "", "comments": br_comments_of(i)} for i in found])
+    else:
+        print("\n".join(f"{i['id']} · {i['title']}   [{i['status']}]" for i in found))
+
+
+def br_label(p: Project, args: list[str], as_json: bool) -> None:
+    if not args or args[0] not in ("add", "remove"):
+        raise Usage(f"error: unrecognized subcommand '{args[0] if args else ''}'")
+    op = args[0]
+    _, pos = br_take(args[1:], {})
+    if len(pos) != 2:
+        raise Usage(f"error: expected <ID> <LABEL> for 'label {op}'")
+    i = br_issue(p, pos[0])
+    name = pos[1]
+    if op == "add":
+        status = "exists" if name in i["labels"] else "added"
+        if status == "added":
+            i["labels"].append(name)
+    else:
+        status = "removed" if name in i["labels"] else "not_found"
+        i["labels"] = [x for x in i["labels"] if x != name]
+    i["updated_at"] = br_time(True)
+    p.save()
+    if as_json:
+        emit([{"status": status, "issue_id": i["id"], "label": name}])
+    else:
+        print(f"{status}: {name} {i['id']}")
+
+
+def br_comments(p: Project, args: list[str], as_json: bool, actor: str) -> None:
+    if args and args[0] == "add":
+        opts, pos = br_take(args[1:], {"-f": True, "--file": True})
+        f = br_one(opts, "-f", "--file")
+        if f:
+            if len(pos) != 1:
+                raise Usage("error: expected exactly one <ID> with --file")
+            try:
+                with open(f, encoding="utf-8", newline="") as fh:       # 本文末尾の改行は保つ
+                    text = fh.read()
+            except OSError as e:
+                raise Fail(f"Error: reading comment file: {e}") from None
+        else:
+            if len(pos) != 2:
+                raise Usage("error: expected <ID> <TEXT>")
+            text = pos[1]
+        i = br_issue(p, pos[0])
+        cid = p.state.get("next_comment", 1)
+        p.state["next_comment"] = cid + 1                               # int で単調に増える
+        i["comments"].append({"id": cid, "author": actor, "text": text, "created_at": br_time()})
+        i["updated_at"] = br_time(True)
+        p.save()
+        if as_json:
+            emit({"id": cid, "issue_id": i["id"], "author": actor, "text": text, "created_at": i["comments"][-1]["created_at"]})
+        else:
+            print(f"Comment added to {i['id']}")
+        return
+    _, pos = br_take(args, {})
+    if len(pos) != 1:
+        raise Usage("error: expected exactly one <ID>")
+    cs = br_comments_of(br_issue(p, pos[0]))
+    if as_json:
+        emit(cs)
+    else:
+        for c in cs:
+            print(f"[{c['author']}] {c['text']}")
+
+
+def br_dolt_accident(beads: str, cmd: str, as_json: bool) -> None:
+    """database が dolt の dir で打たれたとき。本物はエラーにせず sqlite 用のファイルを作って空の結果を返す
+    (実機で起きた事故の再現)。後の案は、この 3 つが作られないことを確かめる。"""
+    for name in ("dolt", "dolt-wal", "dolt-shm"):
+        with open(os.path.join(beads, name), "a"):
+            pass
+    if cmd == "list" and as_json:
+        emit({"issues": [], "total": 0, "limit": 0, "offset": 0, "has_more": False})
+
+
+BR_COMMANDS = ("init", "create", "update", "close", "list", "show", "label", "comments")
+
+
+def run_br(argv: list[str]) -> None:
+    actor, as_json, rest = br_split_globals(argv)
+    if not rest:
+        raise Usage("error: a subcommand is required")
+    cmd, args = rest[0], rest[1:]
+    if cmd not in BR_COMMANDS:
+        raise Usage(f"error: unrecognized subcommand '{cmd}'")            # human を含む
+    if cmd == "init":
+        br_init(os.getcwd(), args)
+        return
+    root = br_find_root(os.getcwd())
+    if root is None:
+        raise Fail("Error: no .beads directory found (run `br init`)")
+    beads = os.path.join(root, ".beads")
+    meta = read_json(os.path.join(beads, "metadata.json"), {})
+    if isinstance(meta, dict) and meta.get("database") == "dolt":
+        br_dolt_accident(beads, cmd, as_json)
+        return
+    who = actor or os.environ.get("USER") or "fake"
+    with open(os.path.join(beads, "fake-state.lock"), "a+") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        inject_failure(beads, argv)
+        p = Project(root)
+        if cmd == "create":
+            br_create(p, args, as_json, who)
+        elif cmd == "update":
+            br_update(p, args, as_json)
+        elif cmd == "close":
+            br_close(p, args)
+        elif cmd == "list":
+            br_list(p, args, as_json)
+        elif cmd == "show":
+            br_show(p, args, as_json)
+        elif cmd == "label":
+            br_label(p, args, as_json)
+        else:
+            br_comments(p, args, as_json, who)
+
+
+PROGS = {"bd": run_bd, "br": run_br}
 
 
 def main() -> int:
