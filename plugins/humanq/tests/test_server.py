@@ -798,6 +798,11 @@ class WithFakeBd(BdScenarios, unittest.TestCase):
         self.assertEqual(len(items), 1, items)
         self.assertNotIn("metadata", items[0], "metadata が無いチケットは key を出さない")
         self.assertEqual(items[0].get("labels"), ["human"])
+        bdc(self.repo, "label", "add", iid, "answered")
+        rc, out, _ = run("human", "list", "--json")
+        listed = as_json(out, "human list")
+        self.assertEqual(len(listed), 1, listed)
+        self.assertEqual(listed[0].get("labels"), ["answered", "human"], "labels は名前の順 (付けた順ではない)")
 
         f = os.path.join(self.tmp, "c.md")
         Path(f).write_text("first\n")
@@ -923,9 +928,39 @@ if os.environ.get(POOL_DUMMY_ENV) == "1":
     class PoolDummyBrokenClass(unittest.TestCase):
         @classmethod
         def setUpClass(cls):
+            mark = os.environ.get("HUMANQ_TEST_POOL_MARK")
+            if mark:                                 # setUpClass が落ちたときも class cleanup が回ることを親が見る
+                cls.addClassCleanup(lambda: Path(mark, f"broken-cleanup-{os.getpid()}").write_text(""))
             raise RuntimeError("setUpClass をわざと落とす")
 
         def test_never(self):
+            pass
+
+    class PoolDummySkippedClass(unittest.TestCase):
+        @classmethod
+        def setUpClass(cls):
+            mark = os.environ.get("HUMANQ_TEST_POOL_MARK")
+            if mark:                                 # setUpClass で skip したときも class cleanup が回ることを親が見る
+                cls.addClassCleanup(lambda: Path(mark, f"skip-cleanup-{os.getpid()}").write_text(""))
+            raise unittest.SkipTest("setUpClass でわざと skip")
+
+        def test_never(self):
+            pass
+
+    class PoolDummyBrokenTeardown(unittest.TestCase):
+        @classmethod
+        def tearDownClass(cls):
+            raise RuntimeError("tearDownClass をわざと落とす")
+
+        def test_ok(self):
+            pass
+
+    class PoolDummyBrokenCleanup(unittest.TestCase):
+        @classmethod
+        def setUpClass(cls):
+            cls.addClassCleanup(lambda: 1 / 0)
+
+        def test_ok(self):
             pass
 
 
@@ -971,12 +1006,17 @@ class ParallelRunner(unittest.TestCase):
 
     def test_each_status_is_reported_as_it_was(self):
         names = ["PoolDummy.test_ok", "PoolDummy.test_fail", "PoolDummy.test_error", "PoolDummy.test_skip",
-                 "PoolDummy.test_subtest_fail", "PoolDummyBrokenClass.test_never", "PoolDummy.test_nothing", "Nowhere.test_x"]
+                 "PoolDummy.test_subtest_fail", "PoolDummyBrokenClass.test_never", "PoolDummySkippedClass.test_never",
+                 "PoolDummy.test_nothing", "Nowhere.test_x"]
         r = self.run_remote(names)
         self.assertEqual(self.names_of(r.failures), ["PoolDummy.test_fail", "PoolDummy.test_subtest_fail"])
         self.assertEqual(self.names_of(r.errors), ["Nowhere.test_x", "PoolDummy.test_error", "PoolDummy.test_nothing",
                                                   "PoolDummyBrokenClass.test_never"])
-        self.assertEqual([(t.name, why) for t, why in r.skipped], [("PoolDummy.test_skip", "わざと skip")])
+        # setUpClass の SkipTest は直列と同じく skip (ERROR にしない)
+        self.assertEqual(sorted((t.name, why) for t, why in r.skipped),
+                         [("PoolDummy.test_skip", "わざと skip"), ("PoolDummySkippedClass.test_never", "setUpClass でわざと skip")])
+        marks = sorted(n.split("-")[0] for n in os.listdir(self.tmp) if "-cleanup-" in n)
+        self.assertEqual(marks, ["broken", "skip"], "setUpClass が落ちた・skip したクラスの class cleanup が回っていない")
         texts = {t.name: text for t, text in r.failures + r.errors}
         self.assertIn("わざと落とす", texts["PoolDummy.test_fail"], "worker の traceback が親に届かない")
         self.assertIn("RemoteFailure", texts["PoolDummy.test_fail"])
@@ -996,11 +1036,42 @@ class ParallelRunner(unittest.TestCase):
     def test_a_worker_that_dies_does_not_pass_its_tests(self):
         r = self.run_remote(["PoolDummy.test_exit", "PoolDummy.test_ok"], jobs=1)   # worker が落ちた後の 1 件は誰も走らせない
         self.assertEqual(r.failures, [])
-        self.assertEqual(self.names_of(r.errors), ["PoolDummy.test_exit", "PoolDummy.test_ok"])
+        remote = [(t, x) for t, x in r.errors if isinstance(t, bd_parallel.RemoteTest)]
+        self.assertEqual(self.names_of(remote), ["PoolDummy.test_exit", "PoolDummy.test_ok"])
+        extra = [x for t, x in r.errors if not isinstance(t, bd_parallel.RemoteTest)]
+        self.assertEqual(len(extra), 1, "異常終了した worker の rc が ERROR にならない")
+        self.assertIn("rc=[3]", extra[0])
         self.assertEqual(r.skipped, [])
-        texts = {t.name: text for t, text in r.errors}
+        texts = {t.name: text for t, text in remote}
         self.assertIn("結果を返さずに終わった", texts["PoolDummy.test_exit"])
         self.assertIn("どの worker もこのテストを走らせなかった", texts["PoolDummy.test_ok"])
+
+    def test_a_failing_class_teardown_in_a_worker_is_an_error(self):
+        # 直列 (HUMANQ_TEST_JOBS=1・クラス名指定) では tearDownClass と class cleanup の失敗は ERROR になる。並列でも同じにする
+        for name in ("PoolDummyBrokenTeardown.test_ok", "PoolDummyBrokenCleanup.test_ok"):
+            with self.subTest(name=name):
+                r = self.run_remote([name], jobs=1)
+                self.assertEqual(r.failures, [])
+                self.assertEqual(len(r.errors), 1, "worker の tearDownClass / class cleanup の失敗が親に届かない")
+                self.assertIn("tearDownClass", str(r.errors[0][0]))
+                self.assertIn("rc=[1]", r.errors[0][1])
+                self.assertFalse(r.wasSuccessful())
+
+    def test_the_worker_runs_in_the_parents_cwd(self):
+        # 相対パスの env (HUMANQ_SERVER_DIR=server など) が、親と worker で同じものを指すように
+        body = ("import json\nn = rd.readline().strip()\nok = os.getcwd() == %r\n"
+                "wr.write(json.dumps({'name': n, 'status': 'ok' if ok else 'fail', 'text': 'worker の cwd: ' + os.getcwd()}) + '\\n')\n"
+                "wr.flush()\n" % os.getcwd())
+        r = self.run_remote(["PoolDummy.test_ok"], jobs=1, script=self.fake_worker(body))
+        self.assertEqual(r.failures, [], "worker の cwd が親と違う")
+        self.assertEqual((r.errors, r.skipped), ([], []))
+
+    def test_a_result_that_never_comes_is_an_error(self):
+        body = "import time\nrd.readline()\ntime.sleep(3)\n"           # 名前を受け取ったまま答えない
+        with mock.patch.object(bd_parallel, "RESULT_WAIT", 0.5):
+            r = self.run_remote(["PoolDummy.test_ok"], jobs=1, script=self.fake_worker(body))
+        self.assertEqual((self.names_of(r.errors), r.failures, r.skipped), (["PoolDummy.test_ok"], [], []))
+        self.assertIn("待っても結果が来ない", r.errors[0][1])
 
     def test_a_worker_that_answers_wrongly_does_not_pass(self):
         cases = {

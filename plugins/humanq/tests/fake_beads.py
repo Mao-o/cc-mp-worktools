@@ -16,6 +16,7 @@
   - `human list --json` は 0 件で null を返す。`list --json` は 0 件で [] を返す
   - 知らない flag は `Error: unknown flag: <flag>` で exit 1 (`human list --label x` もこれ)
   - metadata は object で返し、値が無ければ key を出さない (labels・description・notes も同じ)
+  - labels は名前の順で返す (付けた順ではない)
   - `comments --json` は古い順。要素は {id, issue_id, author, text, created_at}。id は UUID 文字列。
     `--actor X` が author に入る
   - `.beads/metadata.json` の database が beads.db で embeddeddolt/ が無いと、
@@ -206,7 +207,7 @@ def view(i: dict, counts: bool = False) -> dict:
     if i.get("metadata"):
         out["metadata"] = i["metadata"]
     if i.get("labels"):
-        out["labels"] = list(i["labels"])
+        out["labels"] = sorted(i["labels"])                       # 本物は名前の順で返す (付けた順ではない)
     if counts:
         out.update({"dependency_count": 0, "dependent_count": 0, "comment_count": len(i.get("comments") or [])})
     return out

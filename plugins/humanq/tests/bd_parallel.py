@@ -4,6 +4,8 @@
 直列だと suite が 90 秒を超えるので、test_server は bd のシナリオを、テストのファイル自身を --bd-worker で起動した
 worker に 1 件ずつ配る。テストの中身・assert・件数は直列のときと同じで、worker はそれぞれ自分の setUpClass を持ち、
 worker の間で状態を分け合わない。親は worker の結果 (成功・FAIL・ERROR・skip) を、元のテストの id でそのまま報告する。
+テストの外の失敗 (tearDownClass・class cleanup の失敗、worker の異常終了) は worker の rc に出し、親はそれを
+ERROR 1 件として足す (直列の unittest が tearDownClass の失敗を ERROR にするのと同じく、成功にしない)。
 
 worker への名前 ("<クラス名>.<メソッド名>") と worker からの結果 (1 行の JSON) は専用の pipe で受け渡す
 (テストの中の bd やサーバーが stdin / stdout に触れても、やり取りに混ざらない)。
@@ -79,9 +81,9 @@ class Pool:
         for _ in range(self.jobs):
             to_w_r, to_w_w = os.pipe()
             from_w_r, from_w_w = os.pipe()
+            # cwd は親のまま (相対パスの env が親と同じものを指す)。script は絶対パスなので sys.path[0] は script の dir
             p = subprocess.Popen([sys.executable, self.script, "--bd-worker", str(to_w_r), str(from_w_w)],
-                                 stdin=subprocess.DEVNULL, pass_fds=(to_w_r, from_w_w), env=self.env,
-                                 cwd=os.path.dirname(self.script))
+                                 stdin=subprocess.DEVNULL, pass_fds=(to_w_r, from_w_w), env=self.env)
             os.close(to_w_r)
             os.close(from_w_w)
             self.procs.append(p)
@@ -134,7 +136,8 @@ class Pool:
             return {"status": "error", "text": f"{RESULT_WAIT} 秒待っても結果が来ない"}
         return self.results[name]
 
-    def close(self) -> None:
+    def close(self) -> list[int]:
+        """worker を回収し、0 以外で終わった worker の rc を返す (tearDownClass・class cleanup の失敗、異常終了、時間切れの kill)。"""
         while True:                                  # まだ配っていないものは配らない (failfast などで途中で止まったとき)
             try:
                 self.todo.get_nowait()
@@ -148,6 +151,7 @@ class Pool:
             except subprocess.TimeoutExpired:
                 p.kill()
                 p.wait()
+        return [p.returncode for p in self.procs if p.returncode != 0]
 
 
 class RemoteTest(unittest.TestCase):
@@ -205,7 +209,11 @@ class ParallelSuite(unittest.TestSuite):
         try:
             return super().run(result, debug)
         finally:
-            self.pool.close()
+            bad = self.pool.close()
+            if bad:                                  # 直列なら tearDownClass の失敗は ERROR になる。並列でも黙って通さない
+                result.addError(unittest.suite._ErrorHolder("tearDownClass (bd_parallel の worker)"),
+                                _exc_info(RemoteError, f"worker が 0 以外で終わった (rc={bad})。tearDownClass・class cleanup の失敗か、"
+                                                       "worker の異常終了 (traceback は worker の stderr)"))
 
 
 def flatten(suite):
@@ -232,18 +240,32 @@ def parallel_suite(tests, script: str, jobs: int, wanted, env_extra: dict | None
     return ParallelSuite(local + [RemoteTest(t, pool, n) for t, n in zip(remote, names)], pool)
 
 
+def _class_cleanups(cls) -> bool:
+    """cls の class cleanup を回す。直列の unittest と同じく、失敗は例外にせず tearDown_exceptions に溜まるので、
+    それを stderr に出し、1 件でもあれば False を返す。"""
+    cls.doClassCleanups()
+    excs = getattr(cls, "tearDown_exceptions", [])
+    for exc in excs:
+        traceback.print_exception(*exc)
+    return not excs
+
+
 def worker_main(mod, in_fd: int, out_fd: int) -> int:
     """--bd-worker: 名前を 1 行ずつ受け取り、mod のそのテストを走らせて結果を 1 行の JSON で返す。
-    setUpClass はクラスごとに最初の 1 件の前に 1 回、tearDownClass は最後にまとめて呼ぶ (直列のときと同じ)。"""
+    setUpClass はクラスごとに最初の 1 件の前に 1 回、tearDownClass は最後にまとめて呼ぶ (直列のときと同じ)。
+    setUpClass の SkipTest はそのクラスの全テストを skip にし、setUpClass が落ちたときも class cleanup は回す。
+    tearDownClass か class cleanup が落ちたら rc 1 で終わる (親が ERROR にする)。"""
     rd = os.fdopen(in_fd, "r", encoding="utf-8")
     wr = os.fdopen(out_fd, "w", encoding="utf-8")
     ready: list[type] = []
     broken: dict[type, str] = {}
+    skipped: dict[type, str] = {}
+    torn = True
     try:
         while True:
             line = rd.readline()
             if not line:
-                return 0
+                break
             name = line.strip()
             elapsed = 0.0
             cls_name, _, meth = name.partition(".")
@@ -251,13 +273,19 @@ def worker_main(mod, in_fd: int, out_fd: int) -> int:
             if not (isinstance(cls, type) and issubclass(cls, unittest.TestCase)) or not meth:
                 status, text = "error", f"テストが見つからない: {name}"
             else:
-                if cls not in ready and cls not in broken:
+                if cls not in ready and cls not in broken and cls not in skipped:
                     try:
                         cls.setUpClass()
                         ready.append(cls)
+                    except unittest.SkipTest as e:   # 直列と同じく skip (ERROR にしない)
+                        skipped[cls] = str(e)
+                        torn = _class_cleanups(cls) and torn
                     except Exception:
                         broken[cls] = "setUpClass が失敗した:\n" + traceback.format_exc()
-                if cls in broken:
+                        torn = _class_cleanups(cls) and torn
+                if cls in skipped:
+                    status, text = "skip", skipped[cls]
+                elif cls in broken:
                     status, text = "error", broken[cls]
                 else:
                     r = unittest.TestResult()
@@ -271,11 +299,14 @@ def worker_main(mod, in_fd: int, out_fd: int) -> int:
             wr.write(json.dumps({"name": name, "status": status, "text": text, "elapsed": elapsed}) + "\n")
             wr.flush()
     finally:
+        # 直列のときと同じく、tearDownClass が落ちても class cleanup は回す
         for cls in reversed(ready):
             try:
                 cls.tearDownClass()
-                cls.doClassCleanups()
             except Exception:
+                torn = False
                 traceback.print_exc()
+            torn = _class_cleanups(cls) and torn
         rd.close()
         wr.close()
+    return 0 if torn else 1                          # finally の中の return は 3.14 で SyntaxWarning になるので外に置く
