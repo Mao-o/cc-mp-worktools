@@ -159,6 +159,9 @@ const errors = new Map();          // カードの key -> {summary, full} (送�
 let seen = null;                   // 前回までに見た判断待ち (通知用)
 let lastData = null;               // 最後に受け取ったデータ (正規化済み。書き換えない)
 let loadSeq = 0;                   // load の通し番号
+let failStreak = 0;                // 読み込みが続けて失敗した回数 (成功で 0)
+let lastOkAt = null;               // 最後に読み込めた時刻 (ms)。まだ読めていなければ null
+const STALE_MARK = " (古いデータ)";
 let rendered = false;              // 最初の描画が済んだ (それまでは入場の動きを付けない)
 let staleCount = 0;               // フォーカスがあって作り直しを後回しにしているカードの数
 
@@ -300,13 +303,27 @@ function dropAnsweredToasts(it) {
 }
 
 // 消えない案内 (サーバーが入れ替わった、など)
-function showNotice(msg, label, action) {
+// 1 枠を種類 (kind) で共有する。token の案内 (再読み込みを求める) は、ほかの種類に上書きされず、成功でも消えない
+let noticeKind = null;
+function showNotice(msg, label, action, kind) {
+  if (noticeKind === "token" && kind !== "token") return;
   const box = document.getElementById("notice");
   const btn = el("button", { class: "primary", type: "button" }, label);
   btn.addEventListener("click", action);
   box.replaceChildren(el("div", { class: "inner" }, el("span", {}, msg), btn));
   box.hidden = false;
+  noticeKind = kind;
 }
+// kind の案内を出しているときだけ隠す (別の種類の案内は残す)
+function hideNotice(kind) {
+  if (noticeKind !== kind) return;
+  const box = document.getElementById("notice");
+  box.replaceChildren();
+  box.hidden = true;
+  noticeKind = null;
+}
+// 時刻 (hh:mm) の表示
+function hhmm(ms) { return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
 
 // ---- 動き (高さ・フォーカス) -------------------------------------------------------------
 
@@ -663,7 +680,7 @@ function render() {
       projs.set(p.path, pr);
     }
     pr.banner = p.ok ? null : (pr.banner || el("div", { class: "banner" }));
-    if (pr.banner) pr.banner.textContent = `bd を読めない: ${p.error}`;
+    if (pr.banner) pr.banner.textContent = `読めませんでした (${p.okAt ? `最後に読めたのは ${hhmm(p.okAt)}。` : ""}自動で読み直します): ${p.error}`;
     const lists = {
       dec: q.filter(i => !i.q || i.q.kind !== "task"),
       task: q.filter(i => i.q && i.q.kind === "task"),
@@ -787,7 +804,7 @@ async function failed(key, it, e) {
   const label = `「${summarize(it.title, 24)}」(${it.id})`;
   if (e.status === 403 && e.message === "token") {      // サーバーが入れ替わった (書き込みは何も起きていない)。下書きは再読み込みの後も使う
     restore(key, info);
-    showNotice("画面のサーバーが入れ替わりました。ページを再読み込みしてください (入力した内容は残ります)", "再読み込み", () => location.reload());
+    showNotice("画面のサーバーが入れ替わりました。ページを再読み込みしてください (入力した内容は残ります)", "再読み込み", () => location.reload(), "token");
     return;
   }
   // gone: ほかで回答・反映済み。stale: 取り消そうとした回答は、ほかで取り消して答え直されていた (409。何も書いていない)。
@@ -848,6 +865,7 @@ function normalize(raw, prev) {
     };
     const keep = !p.ok && old;
     return { path: p.path, name: p.name || p.path.split("/").pop(), ok: !!p.ok, error: p.error,
+      okAt: p.ok ? Date.now() : (old && old.okAt) || null,         // このプロジェクトを最後に読めた時刻 (一度も読めていなければ null)
       human: keep ? old.human : p.human.map(conv(sigQ)), answered: keep ? old.answered : p.answered.map(conv(sigA)) };
   });
   return { projects };
@@ -870,8 +888,18 @@ async function runLoad() {
     data = normalize(await api("/api/items"), lastData);
   } catch (e) {
     toast(`読み込めませんでした: ${summarize(e.message)}`);
+    // 2 回続けて読めなかったら、データが古いことを知らせる (1 回だけなら、トーストだけ)
+    if (++failStreak >= 2) {
+      if (!meta.textContent.endsWith(STALE_MARK)) meta.textContent += STALE_MARK;
+      if (noticeKind !== "offline")
+        showNotice(`画面のサーバーに届きません。${lastOkAt ? `最後に読めたのは ${hhmm(lastOkAt)} です。` : ""}自動で読み直しています`,
+          "今すぐ読み直す", () => { load(); }, "offline");
+    }
     return false;
   }
+  failStreak = 0;
+  lastOkAt = Date.now();
+  hideNotice("offline");
   lastData = data;
   settlePending(data, seq);
   notifyNew(data.projects.flatMap(p => p.human.map(i => p.path + "\n" + i.id)));

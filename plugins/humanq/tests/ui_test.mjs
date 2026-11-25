@@ -91,6 +91,7 @@ class Script {
   constructor(projects) {
     this.projects = projects;
     this.itemsCount = 0;
+    this.itemsFail = false;          // true の間、/api/items は 500 を返す
     this.answers = [];
     this.undos = [];
     this.queue = [];                 // 次の /api/items に返す固定のデータ (先頭から使う)
@@ -157,6 +158,7 @@ async function withPage(script, fn, ctxOptions = {}, setup = null, b = browser) 
   const reply = (route, r) => r.abort ? route.abort("failed") : json(route, r.status, r.body, r.raw);
   await page.route("**/api/items", async route => {
     script.itemsCount++;
+    if (script.itemsFail) return json(route, 500, { error: "down" });    // サーバーに届かない・応答が壊れた状態
     const snap = script.queue.length ? script.queue.shift() : script.snapshot();   // 要求を受けた時点のデータ
     if (script.gates.items) await script.gates.items;
     await json(route, 200, snap);
@@ -513,6 +515,103 @@ test("403 token で再読み込みの案内が出て、下書きが再読み込�
   });
 });
 
+// ---- サーバーに届かないとき・読めないプロジェクト -------------------------------------------------------
+
+const noticeBox = page => page.locator("#notice");
+const failLoad = async (page, s) => { s.itemsFail = true; await page.evaluate(() => load()); };
+
+test("読み込みが 2 回続けて失敗すると、最後に読めた時刻つきの案内と (古いデータ) が出る。1 回では出ない。成功で消える", async () => {
+  const s = new Script([proj(P1, [item("t-A1")])]);
+  await withPage(s, async page => {
+    await page.clock.setFixedTime(new Date("2026-11-26T09:05:00"));
+    await page.evaluate(() => load());                                  // この時刻が「最後に読めた」時刻
+    await page.clock.setFixedTime(new Date("2026-11-26T10:20:00"));
+    const meta = page.locator("#meta");
+    await failLoad(page, s);
+    assert.equal(await noticeBox(page).isHidden(), true, "1 回の失敗では案内を出さない");
+    assert.ok(!/古いデータ/.test(await meta.textContent()), "1 回の失敗では目印を付けない");
+    await failLoad(page, s);
+    await noticeBox(page).waitFor({ state: "visible", timeout: 3000 });
+    const text = await noticeBox(page).textContent();
+    assert.match(text, /画面のサーバーに届きません/);
+    assert.match(text, /最後に読めたのは 09:05/, "読めた時刻 (失敗した時刻ではない)");
+    assert.ok(!/10:20/.test(text), "失敗した時刻を出さない");
+    assert.match(text, /自動で読み直しています/);
+    assert.ok(/古いデータ/.test(await meta.textContent()), "#meta の目印");
+    assert.equal(await noticeBox(page).getByRole("button", { name: "今すぐ読み直す" }).count(), 1);
+    s.itemsFail = false;
+    await page.evaluate(() => load());
+    await noticeBox(page).waitFor({ state: "hidden", timeout: 3000 });
+    assert.ok(!/古いデータ/.test(await meta.textContent()), "成功で目印が外れる");
+    assert.match(await meta.textContent(), /更新/);
+    // 成功で失敗の数え直し: 1 回失敗しただけでは、また出ない
+    await failLoad(page, s);
+    assert.equal(await noticeBox(page).isHidden(), true, "成功のあとの 1 回の失敗では出ない");
+  });
+});
+
+test("案内の「今すぐ読み直す」は読み込みを呼び、読めれば案内が消える", async () => {
+  const s = new Script([proj(P1, [item("t-A1")])]);
+  await withPage(s, async page => {
+    await failLoad(page, s);
+    await failLoad(page, s);
+    await noticeBox(page).waitFor({ state: "visible", timeout: 3000 });
+    const n = s.itemsCount;
+    s.itemsFail = false;
+    await noticeBox(page).getByRole("button", { name: "今すぐ読み直す" }).click();
+    await waitFor(() => s.itemsCount > n, 3000, "読み込みが呼ばれる");
+    await noticeBox(page).waitFor({ state: "hidden", timeout: 3000 });
+  });
+});
+
+test("token の案内が出ている間に失敗 → 成功しても、token の案内は上書きされず、消えない", async () => {
+  const s = new Script([proj(P1, [item("t-A1")])]);
+  s.answerResult = () => ({ status: 403, body: { error: "token" } });
+  await withPage(s, async page => {
+    await answerFirst(page, "t-A1");
+    await page.getByRole("button", { name: /再読み込み/ }).waitFor({ timeout: 3000 });
+    const before = await noticeBox(page).textContent();
+    assert.match(before, /入れ替わりました/);
+    await failLoad(page, s);
+    await failLoad(page, s);
+    assert.equal(await noticeBox(page).textContent(), before, "失敗が続いても文言は token のまま");
+    assert.ok(/古いデータ/.test(await page.locator("#meta").textContent()), "目印は付く");
+    s.itemsFail = false;
+    await page.evaluate(() => load());
+    await waitFor(async () => !/古いデータ/.test(await page.locator("#meta").textContent()), 3000, "目印が外れる");
+    assert.equal(await noticeBox(page).isVisible(), true, "成功しても token の案内は消えない");
+    assert.equal(await noticeBox(page).textContent(), before);
+  });
+});
+
+test("読めなかったプロジェクトのバナーに、前に読めた時刻と「自動で読み直します」が出る。一度も読めていなければ時刻は出ない", async () => {
+  const s = new Script([proj(P1, [item("t-A1")]), proj(P2, [item("t-B1")])]);
+  await withPage(s, async page => {
+    await page.clock.setFixedTime(new Date("2026-11-26T09:05:00"));
+    await page.evaluate(() => load());                                  // 両方が 09:05 に読めた
+    await page.clock.setFixedTime(new Date("2026-11-26T10:20:00"));
+    s.queue.push({ projects: [proj(P1, [], [], false), proj(P2, [item("t-B1")])] });
+    await page.evaluate(() => load());
+    const banner = page.locator(".banner");
+    await banner.first().waitFor({ timeout: 3000 });
+    assert.equal(await banner.count(), 1, "読めなかった P1 だけ");
+    const text = await banner.textContent();
+    assert.match(text, /^読めませんでした \(最後に読めたのは 09:05[^。]*。自動で読み直します\): bd down$/);   // 時刻の書式 (AM など) は環境による
+    assert.ok(!/10:20/.test(text));
+    // 失敗が続いても、最後に読めた時刻は 09:05 のまま
+    s.queue.push({ projects: [proj(P1, [], [], false), proj(P2, [item("t-B1")])] });
+    await page.clock.setFixedTime(new Date("2026-11-26T11:30:00"));
+    await page.evaluate(() => load());
+    assert.match(await banner.textContent(), /最後に読めたのは 09:05/);
+  });
+  // 一度も読めていないプロジェクト (最初から ok:false)
+  const s2 = new Script([proj(P1, [], [], false)]);
+  await withPage(s2, async page => {
+    const text = await page.locator(".banner").textContent();
+    assert.match(text, /^読めませんでした \(自動で読み直します\): bd down$/);
+  });
+});
+
 // ---- 既存の動き (壊れていないこと) ------------------------------------------------------------------
 
 test("回答は選択肢と補足を送り、カードは消えて回答済みに出る", async () => {
@@ -659,10 +758,10 @@ test("読めなかったプロジェクト (ok:false) では、カードを入�
     const handle = await qcard(page, "t-A1").elementHandle();
     s.queue.push({ projects: [proj(P1, [], [], false)] });
     await page.evaluate(() => load());
-    await waitFor(async () => /bd を読めない/.test(await page.locator("main").textContent()), 3000, "バナー");
+    await waitFor(async () => /読めませんでした/.test(await page.locator("main").textContent()), 3000, "バナー");
     assert.ok(await handle.evaluate(e => e.isConnected && !e.classList.contains("leaving")), "ok:false でカードが消えた");
     await page.evaluate(() => load());
-    await waitFor(async () => !/bd を読めない/.test(await page.locator("main").textContent()), 3000, "バナーが消える");
+    await waitFor(async () => !/読めませんでした/.test(await page.locator("main").textContent()), 3000, "バナーが消える");
     assert.ok(await handle.evaluate(e => e.isConnected && !e.classList.contains("anim")), "同じカードが残る");
   });
 });
