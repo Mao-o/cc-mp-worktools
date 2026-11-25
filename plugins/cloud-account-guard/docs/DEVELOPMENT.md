@@ -82,7 +82,8 @@ cloud-account-guard/
         │   ├── output.py           deny / warn の hookSpecificOutput JSON ビルダー
         │   ├── paths.py            accounts.local.json の配置パス解決 (3-tier + 親遡及 + グローバル既定)
         │   ├── shell_word.py       案内するコマンドに値を 1 語として埋め込む (許容形 + quote。v0.17.1)
-        │   └── tiers.py            セグメントの tier 分類 (READONLY / QUERY / WRITE + DISCLOSING)
+        │   ├── tiers.py            セグメントの tier 分類 (READONLY / QUERY / WRITE + DISCLOSING)
+        │   └── unverified.py       検証の対象外のクラウド CLI の一覧と、使ったことの知らせ (v0.31.0)
         ├── services/               サービスごとの CLI 呼び出しと照合
         ├── scripts/
         │   ├── accounts_builder.py accounts.local.json 専用 writer (init/show/set/remove/migrate)
@@ -106,6 +107,10 @@ cloud-account-guard/
    有効なら、`core.auto_switch.attempt()` が切り替えて再検証する
 7. `core.output.deny()` / `warn()` で整形して stdout に返す
    (`warn` モードでは deny 相当の本文を `warn()` 側に回す)
+8. 分解したセグメントに検証の対象外のクラウド CLI (`core.unverified.UNVERIFIED_CLIS`) があり、
+   結果が deny でなければ、`additionalContext` に知らせを足す (同じセッションの同じエージェントで
+   CLI ごとに 1 回。hook input の `session_id` と `agent_id` (サブエージェントの中だけで付く) で絞る。
+   判定は変えない。v0.31.0)
 
 **起動コマンド**: `python3 "${CLAUDE_PLUGIN_ROOT}/hooks/cloud-account-guard"`
 (ディレクトリを渡すと `__main__.py` が実行される)
@@ -607,6 +612,9 @@ opt-in (`CLOUD_ACCOUNT_GUARD_AUTO_SWITCH` → `"$auto_switch"` → 無効) で�
    変化を見落とす。CLI にプロジェクトごとの公式の固定方法があれば、自動切替ではなく
    その方法を README の「プロジェクトごとにアカウントを固定する」節と `pin-env` で
    案内する (D31)
+7. その CLI が `core/unverified.py` の `UNVERIFIED_CLIS` (検証の対象外の CLI の一覧) に
+   あれば外す。外し忘れは `tests/test_unverified_cli.py` の
+   `test_unverified_names_are_not_service_commands` が検出する
 
 動的ディスカバリではなく**明示 import** にしているのは、IDE 補完・型チェッカが
 効き、import エラーが沈黙せず surface し、`ALL` への登録漏れがレビューで見えるため。
