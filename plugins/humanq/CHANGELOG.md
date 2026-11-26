@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.12.1
+
+### テスト (挙動の変更なし)
+
+- bd・br の CLI の癖を、偽の bd・偽の br・本物の bd・本物の br の 4 通りに同じ assertion で当てる契約テスト `tests/test_cli_contract.py` を足した。偽物の 2 通りは CI で走り、本物は PATH (または env `HUMANQ_TEST_BD` / `HUMANQ_TEST_BR`) に無ければ skip する。本物は一時 dir の使い捨てのプロジェクトでだけ打ち、`BEADS_*` / `BD_*` / `BR_*` の env は外す。失敗の文に、どの CLI のどの版のどの癖が食い違ったかを出す
+  - bd: `human list` が 0 件で `null`・`list` が 0 件で `[]`・`human list --label` の拒否・labels が名前の順・metadata が object (値が無ければ key が無い)・`-C`・回答済みの一覧の argv (カンマ区切りの status・`--flat`・`-n`)・comments が古い順 (id は文字列)・`--actor` が author に入る・同じ秒に 2 件と時刻をずらした 1 件を書いて backend の `comments()` が書いた順で返す
+  - br: `-C`・`human`・`list --flat`・`list -n`・`update --metadata` / `--set-metadata` が usage エラー (exit 2)・`list --json` が 0 件でも envelope・カンマ区切りの status の拒否と繰り返しの受理・既定が closed だけを除き deferred を含む・`show <ids> --json` が配列で comments と agent_context を含み無い id で exit 3 (1 つでも無ければ全体が失敗)・comments の id が int で単調に増え `(created_at, id)` で書いた順に戻せる・`label add` / `remove` の `exists` / `not_found` が exit 0・agent_context の半分未満への書き換えは `--force` が要る・`list --json` の agent_context は持つチケットにだけ出る文字列
+  - コメントの並びは CLI の生の並びを assert しない (本物の br は並びが決まっていない)。br の backend の comments() の確認は、br の読みを足す案の後に足す
+- 通った版: 本物の bd 1.3.4 / br 0.7.6 (どちらも手元の使い捨てプロジェクトで全件 green)
+- 偽物の癖を 1 つずつ消す変異 33 件 (bd 12・br 21) を流し、全件が契約テストの assertion の失敗で落ちることを確かめた
+- 製品コードは変えていない
+
 ## 0.12.0
 
 ### 画面 (絞り込みと検索)
