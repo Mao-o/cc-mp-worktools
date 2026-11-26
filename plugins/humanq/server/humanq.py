@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """humanq: この端末の beads (bd / br) のプロジェクトの判断待ち (human ラベル) を 1 つの localhost の画面に集め、
-回答を各プロジェクトの bd / br に書き戻す。
+回答 (と保留) を各プロジェクトの bd / br に書き戻す。
 
 usage: python3 humanq.py --state-dir DIR [--port 8765]
 
@@ -26,7 +26,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -37,6 +37,17 @@ from backend import BdError  # noqa: E402,F401  humanq.BdError として使わ�
 
 MARK = "[humanq]"
 UNDO_HEAD = f"{MARK} 取り消し"
+# 保留 (README の「回答の形」): 1 行目が `[humanq] 保留: <YYYY-MM-DD> まで` か `[humanq] 保留: 期限なし`。解除は `[humanq] 保留の解除`。
+# 正本はコメントで、ラベル (SNOOZE_LABEL) はコメントを読むチケットを絞る印。status は変えない
+SNOOZE_HEAD = f"{MARK} 保留: "
+SNOOZE_NO_DATE = "期限なし"
+UNSNOOZE_HEAD = f"{MARK} 保留の解除"
+SNOOZE_LABEL = backend.SNOOZE_LABEL
+_SNOOZE_LINE = re.compile(re.escape(SNOOZE_HEAD) + r"(?:([0-9]{4}-[0-9]{2}-[0-9]{2}) まで|" + SNOOZE_NO_DATE + ")")
+# 判断待ちの側で書く [humanq] コメント (取り消し・保留・保留の解除)。両方のラベルのチケットの最後の [humanq] コメントが
+# これなら判断待ちに出す (回答かコメント無しなら回答済み)
+PENDING_SIDE = (UNDO_HEAD, SNOOZE_HEAD, UNSNOOZE_HEAD)
+_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 MAX_BODY = 64 * 1024
 # bd (埋め込み Dolt) は同時に開くと直列化して遅くなり、そのプロジェクトのセッションの書き込みとも競る。
 # プロジェクトごとに読みを 1 本にまとめ、CACHE_SEC の間は同じ結果を返す。書いたら捨てる
@@ -146,7 +157,7 @@ def shape(r: dict) -> dict:
 
 
 def marked(cs: list) -> list[dict]:
-    """[humanq] のコメント (回答と取り消し) を、backend が返した順 (古い順) に。本文が文字列でないコメントは数えない
+    """[humanq] のコメント (回答・取り消し・保留・保留の解除) を、backend が返した順 (古い順) に。本文が文字列でないコメントは数えない
     (回答の書き込みは全部のコメントを数えるので、想定外の形の 1 件で回答を止めない)。"""
     return [c for c in cs if isinstance(c, dict) and isinstance(c.get("text"), str) and c["text"].startswith(MARK)]
 
@@ -176,14 +187,56 @@ def last_answer(thread: list | None) -> tuple[str, str]:
     return ("", "") if thread is None else last_of(thread)
 
 
+def today() -> date:
+    """保留の期日と比べる今日 (サーバーのローカルの日付。画面と同じ端末で動くので、ユーザーのローカルの日付)。
+    テストは humanq.today を差し替える。"""
+    return date.today()
+
+
+def snooze_of(thread) -> dict | None:
+    """thread (古い順の Comment) の最後の [humanq] コメントが保留なら {until, note}。until は期日 (YYYY-MM-DD) か
+    None (期限なし)、note は補足 (空行の後の本文。無ければ "")。最後の [humanq] コメントが保留でない (回答・取り消し・
+    保留の解除)・保留の 1 行目の形が崩れている・日付として読めない・thread を読めない (None) ときは None
+    (保留と確かめられないものは、判断待ちに出す側に倒す)。"""
+    if not isinstance(thread, list):
+        return None
+    ms = marked(thread)
+    if not ms:
+        return None
+    first, _, rest = ms[-1]["text"].partition("\n")
+    m = _SNOOZE_LINE.fullmatch(first.rstrip())
+    if m is None:
+        return None
+    until = m.group(1)
+    if until is not None:
+        try:
+            until = date.fromisoformat(until).isoformat()
+        except ValueError:
+            return None
+    return {"until": until, "note": rest.strip()}
+
+
+def _expired(sn: dict) -> bool:
+    """保留の期日を過ぎたか。期日はローカルの日付の終わりまで (期日の当日はまだ保留)。期限なしは過ぎない。"""
+    return sn["until"] is not None and date.fromisoformat(sn["until"]) < today()
+
+
 def _prio(x: dict):
     return (x["priority"] if isinstance(x["priority"], int) else 9, x["created_at"])
 
 
+def _snooze_order(x: dict):
+    """保留中の並び: 期日の早いもの (期限なしは最後) → 優先度 → 作成日。"""
+    u = x["snooze"]["until"]
+    return (u is None, u or "", *_prio(x))
+
+
 def load_project(repo: str, be=None) -> dict:
-    """be は読む backend (省略は bd)。"""
+    """be は読む backend (省略は bd)。判断待ち (human)・回答済み (answered)・保留中 (snoozed) を返す。
+    判断待ちと保留中の各チケットには snooze が付く: 判断待ちは None か、保留の期日を過ぎて戻ったもの ({until, note,
+    expired: true})。保留中は {until, note, expired: false}。"""
     human_rows, answered_rows = (be or _BD).load(repo)
-    human = sorted((shape(r) for r in human_rows), key=_prio)
+    human = sorted(((shape(r), r) for r in human_rows), key=lambda x: _prio(x[0]))
     answered = []
     for r in answered_rows:
         s = shape(r)
@@ -191,13 +244,30 @@ def load_project(repo: str, be=None) -> dict:
         answered.append(s)
     answered.sort(key=_prio)
     # 両方のラベルが付いたチケットは、書き込みの途中か、ラベルの付け替えに失敗したもの。画面が二重に出さないよう、
-    # 出どころで片側にする。向きは最後の [humanq] コメントで決める: 取り消しなら判断待ち、回答 (またはコメント無し) なら回答済み。
+    # 出どころで片側にする。向きは最後の [humanq] コメントで決める: 取り消し (と、判断待ちの側でだけ書く保留・保留の解除)
+    # なら判断待ち、回答 (またはコメント無し) なら回答済み。
     # 両方付いたものにだけ効く (answered の側は回答の本文を表示のためにもう読んでいるので、追加の読みは無い)
-    both = {s["id"] for s in human} & {s["id"] for s in answered}
-    undone = {s["id"] for s in answered if s["id"] in both and s["answer"].startswith(UNDO_HEAD)}
+    both = {s["id"] for s, _ in human} & {s["id"] for s in answered}
+    undone = {s["id"] for s in answered if s["id"] in both and s["answer"].startswith(PENDING_SIDE)}
     answered = [s for s in answered if s["id"] not in undone]
-    human = [s for s in human if s["id"] not in both or s["id"] in undone]
-    return {"human": human, "answered": answered}
+    # 保留: ラベルが付いていて、最後の [humanq] コメントが保留で、期日を過ぎていないものだけを判断待ちから外す。
+    # 期日を過ぎたものは判断待ちに戻して出す (ラベルは次の回答で外す)
+    waiting, snoozed = [], []
+    for s, r in human:
+        if s["id"] in both and s["id"] not in undone:
+            continue
+        sn = snooze_of(r.get("thread")) if backend.labeled(r, SNOOZE_LABEL) else None
+        if sn is not None and not _expired(sn):
+            snoozed.append({**s, "snooze": {**sn, "expired": False}})
+        else:
+            waiting.append({**s, "snooze": None if sn is None else {**sn, "expired": True}})
+    snoozed.sort(key=_snooze_order)
+    return {"human": waiting, "answered": answered, "snoozed": snoozed}
+
+
+def empty() -> dict:
+    """読めなかったプロジェクトの一覧 (どれも空の list。呼ぶたびに新しい list)。"""
+    return {"human": [], "answered": [], "snoozed": []}
 
 
 def unreadable(reason: str) -> dict:
@@ -252,16 +322,16 @@ class Store:
                 return hit[1]
             be = BACKENDS.get(kind)
             if be is None:
-                data = {**unreadable(reason), "human": [], "answered": []}
+                data = {**unreadable(reason), **empty()}
                 self._cache[repo] = (time.monotonic(), data, route)
                 return data
             # bd・br として読むプロジェクトは、読みに失敗しても writable:true (書き込みは読み直してから行う)
             try:
                 data = {"ok": True, **load_project(repo, be)}
             except BdError as e:
-                data = {"ok": False, "error": str(e), "human": [], "answered": []}
+                data = {"ok": False, "error": str(e), **empty()}
             except Exception as e:  # noqa: BLE001  想定外の形の出力でも、そのプロジェクトだけを読めないことにする
-                data = {"ok": False, "error": f"{type(e).__name__}: {e}", "human": [], "answered": []}
+                data = {"ok": False, "error": f"{type(e).__name__}: {e}", **empty()}
             data.update(cli=kind, writable=True)
             self._cache[repo] = (time.monotonic(), data, route)
             return data
@@ -296,7 +366,7 @@ class Store:
         return [{"path": r, "name": Path(r).name, **d} for r, d in zip(repos, datas)]
 
     def writer(self, repo: str):
-        """回答・取り消しを書き込む backend。bd と br のどちらで書くか決められないプロジェクトは、CLI を打たずに ReadOnly。"""
+        """回答・取り消し・保留・保留の解除を書き込む backend。bd と br のどちらで書くか決められないプロジェクトは、CLI を打たずに ReadOnly。"""
         kind, reason = self.route(repo)
         be = BACKENDS.get(kind)
         if be is None:
@@ -327,9 +397,13 @@ class Store:
             head = f"{MARK} 回答: {opt['label']} ({key})" if opt else f"{MARK} 回答: (自由記述)"
             # 送り直しても壊れない: 同じ本文のコメントが最後に残っていれば書かず、ラベルだけを直す。
             # pending が問いと一緒にコメントを読んでいれば (br)、それで判定する (読み直さない)
-            thread = next((r.get("thread") for r in rows if r["id"] == iid), None)
-            sig = _record(be, repo, iid, head + ("\n\n" + text if text else "") + "\n", cs=thread)
+            row = next(r for r in rows if r["id"] == iid)
+            sig = _record(be, repo, iid, head + ("\n\n" + text if text else "") + "\n", cs=row.get("thread"))
             _swap(be, repo, iid, add="answered", remove="human")
+            # 保留の期日を過ぎて戻ったチケット (ラベルが残っている) に答えたら、保留のラベルも外す (回答のコメントが
+            # 最後の [humanq] コメントになるので、外し損ねても保留とは読まない)
+            if backend.labeled(row, SNOOZE_LABEL):
+                _label(be, repo, iid, "remove", SNOOZE_LABEL)
             return sig
 
     def undo(self, repo: str, body: dict) -> None:
@@ -343,6 +417,86 @@ class Store:
                 raise Gone("反映待ちに無い (もう反映されたか、取り消し済み)")
             _record(be, repo, iid, UNDO_HEAD + "\n", expect=seen)
             _swap(be, repo, iid, add="human", remove="answered")
+
+    def _pending_row(self, be, repo: str, iid: str) -> tuple[dict, dict, list]:
+        """保留・保留の解除が書く前の読み直し: (判断待ちの Row, その問いの shape, コメント (古い順))。判断待ちに無ければ Gone。
+        コメントは pending が読んでいればそれ (br)、無ければ comments で読む (読めなければ comment の段階の WriteError)。"""
+        rows = be.pending(repo, iid)
+        row = next((r for r in rows if r["id"] == iid), None)
+        if row is None:
+            raise Gone("このチケットは判断待ちに無い (画面を更新してください)")
+        cs = row.get("thread")
+        if cs is None:
+            try:
+                cs = be.comments(repo, iid)
+            except BdError as e:
+                raise WriteError(str(e), "comment", False) from e
+        return row, shape(row), cs
+
+    def snooze(self, repo: str, body: dict) -> None:
+        """判断待ちを保留する: `[humanq] 保留: <期日> まで` (期限なしは `[humanq] 保留: 期限なし`) のコメントと保留のラベル。
+        status と担当は変えない。body の until は期日 (YYYY-MM-DD。今日以降) か null (期限なし)、note は補足 (任意)、
+        qsig は画面が見ていた問いの署名 (違えば Changed)。回答済み (answered。両ラベルで最後が取り消しのものを除く) は Gone。
+        同じ本文のコメントが最後にあれば書かない (送り直し・2 回押し)。"""
+        iid = _body_id(body)
+        until = _body_until(body)
+        note = body.get("note", "")
+        if not isinstance(note, str):
+            raise ValueError("note (補足) は文字列で送ってください")
+        note = note.strip()
+        repo = self.resolve(repo) or repo
+        with self._write_lock(repo):
+            be = self.writer(repo)
+            row, cur, cs = self._pending_row(be, repo, iid)
+            seen = body.get("qsig")
+            if seen is not None and seen != cur["qsig"]:
+                raise Changed("問いが書き換わっている (画面を更新して、見直してから送ってください)")
+            # 回答済み (answered のラベル) は保留しない。両方のラベルで最後の [humanq] コメントが判断待ちの側のもの (取り消しなど)
+            # なら、画面には判断待ちに出ている (load_project と同じ向き)
+            if backend.labeled(row, "answered") and not last_of(cs)[0].startswith(PENDING_SIDE):
+                raise Gone("回答済みのチケットは保留できない (画面を更新してください)")
+            head = SNOOZE_HEAD + (f"{until} まで" if until else SNOOZE_NO_DATE)
+            _record(be, repo, iid, head + ("\n\n" + note if note else "") + "\n", cs=cs)
+            _label(be, repo, iid, "add", SNOOZE_LABEL)
+
+    def unsnooze(self, repo: str, body: dict) -> None:
+        """保留を解除する: 最後の [humanq] コメントが保留 (期日を過ぎたものを含む) なら `[humanq] 保留の解除` を書き、
+        保留のラベルが付いていれば外す。どちらでもなければ何も書かない (送り直し・ほかで解除済み)。
+        判断待ち (human のラベル) に無ければ Gone。"""
+        iid = _body_id(body)
+        repo = self.resolve(repo) or repo
+        with self._write_lock(repo):
+            be = self.writer(repo)
+            row, _, cs = self._pending_row(be, repo, iid)
+            if snooze_of(cs) is not None:
+                _record(be, repo, iid, UNSNOOZE_HEAD + "\n", cs=cs)
+            if backend.labeled(row, SNOOZE_LABEL):
+                _label(be, repo, iid, "remove", SNOOZE_LABEL)
+
+
+def _body_id(body: dict) -> str:
+    iid = body.get("id")
+    if not isinstance(iid, str) or not iid:
+        raise ValueError("id (チケットの ID) を文字列で送ってください")
+    return iid
+
+
+def _body_until(body: dict) -> str | None:
+    """保留の期日。key until が必須で、値は YYYY-MM-DD (今日以降) か null (期限なし)。"""
+    if "until" not in body:
+        raise ValueError("until (保留の期日。期限なしは null) がない")
+    u = body["until"]
+    if u is None:
+        return None
+    if not isinstance(u, str) or not _DATE.fullmatch(u):
+        raise ValueError("until は YYYY-MM-DD か null で送ってください")
+    try:
+        d = date.fromisoformat(u)
+    except ValueError:
+        raise ValueError(f"until が日付として読めない: {u}") from None
+    if d < today():
+        raise ValueError(f"過去の日付 ({u}) までは保留できない")
+    return d.isoformat()
 
 
 def _recent(comment: dict) -> bool:
@@ -369,7 +523,8 @@ def _record(be, repo: str, iid: str, text: str, expect: str | None = None, cs: l
         if expect is not None and expect != last_of(cs)[1]:
             raise Stale("この回答はもう最新ではない (ほかで答え直されている。画面を更新してください)")
         last = cs[-1] if cs and isinstance(cs[-1], dict) else None
-        if last and (last.get("text") or "").strip() == text.strip() and _recent(last):
+        lt = last.get("text") if last else None             # 本文が文字列でないコメントは、同じ本文とみなさない
+        if isinstance(lt, str) and lt.strip() == text.strip() and _recent(last):
             return last_of(cs)[1]
         _comment(be, repo, iid, text)
         return asig(len(marked(cs)) + 1, text)
@@ -377,16 +532,22 @@ def _record(be, repo: str, iid: str, text: str, expect: str | None = None, cs: l
         raise WriteError(str(e), "comment", False) from e
 
 
+def _label(be, repo: str, iid: str, op: str, name: str) -> None:
+    """ラベルを 1 つ付ける (op は add) か外す (remove)。1 回だけ再試行し、2 回とも失敗したら label の段階の WriteError
+    (コメントは書き込み済み)。"""
+    for attempt in (1, 2):
+        try:
+            be.label(repo, op, iid, name)
+            return
+        except BdError as e:
+            if attempt == 2:
+                raise WriteError(str(e), "label", True) from e
+
+
 def _swap(be, repo: str, iid: str, add: str, remove: str) -> None:
     """ラベルを付け替える (add を付けてから remove を外す)。各段階は 1 回だけ再試行する。"""
     for op, name in (("add", add), ("remove", remove)):
-        for attempt in (1, 2):
-            try:
-                be.label(repo, op, iid, name)
-                break
-            except BdError as e:
-                if attempt == 2:
-                    raise WriteError(str(e), "label", True) from e
+        _label(be, repo, iid, op, name)
 
 
 def _comment(be, repo: str, iid: str, text: str) -> None:
@@ -397,6 +558,10 @@ def _comment(be, repo: str, iid: str, text: str) -> None:
         be.add_comment(repo, iid, path)
     finally:
         os.unlink(path)
+
+
+# 書き込みの API のパスと、それを書く Store のメソッドの名前 (失敗の応答の op にも入れる)
+WRITE_OPS = {"/api/answer": "answer", "/api/undo": "undo", "/api/snooze": "snooze", "/api/unsnooze": "unsnooze"}
 
 
 def make_handler(store: Store, port: int, token: str, page: str, version: str):
@@ -450,8 +615,11 @@ def make_handler(store: Store, port: int, token: str, page: str, version: str):
                 if d is None:
                     return self._json(200, {"pending": True})
                 # ok:false (読めないプロジェクト) の human は 0 でも「0 件」ではない。hook はこれを見て「読めない」と伝える。
-                # cli は hook が案内の文を選ぶため (br のプロジェクトには bd のコマンドを案内しない)
+                # cli は hook が案内の文を選ぶため (br のプロジェクトには bd のコマンドを案内しない)。
+                # human は保留中を数えない。snoozed は保留中の件数、returned は保留の期日を過ぎて判断待ちに戻った件数 (human に入っている)
                 self._json(200, {"human": len(d["human"]), "answered": [x["id"] for x in d["answered"]],
+                                 "snoozed": len(d.get("snoozed") or []),
+                                 "returned": sum(1 for x in d["human"] if (x.get("snooze") or {}).get("expired")),
                                  "ok": d.get("ok", True), "error": d.get("error"),
                                  "cli": d.get("cli"), "writable": d.get("writable")})
             else:
@@ -470,7 +638,7 @@ def make_handler(store: Store, port: int, token: str, page: str, version: str):
                 n = 0
             if n <= 0 or n > MAX_BODY:
                 return self._json(413, {"error": "size"})
-            op = {"/api/answer": "answer", "/api/undo": "undo"}.get(self.path)   # 失敗の応答に入れる (画面の文言が分かれる)
+            op = WRITE_OPS.get(self.path)        # 失敗の応答に入れる (画面の文言が分かれる)
             try:
                 body = json.loads(self.rfile.read(n))
                 if not isinstance(body, dict):
@@ -479,7 +647,7 @@ def make_handler(store: Store, port: int, token: str, page: str, version: str):
                 repo = store.resolve(body.get("project"))
                 if repo is None:
                     raise ValueError("未登録のプロジェクト")
-                fn = {"/api/answer": store.answer, "/api/undo": store.undo}.get(self.path)
+                fn = getattr(store, op) if op else None
                 if fn is None:
                     return self._json(404, {"error": "not found"})
                 # 決められないプロジェクトは、Store.writer が CLI を打つ前に ReadOnly で断る (下の readonly の応答)
@@ -487,7 +655,7 @@ def make_handler(store: Store, port: int, token: str, page: str, version: str):
                     sig = fn(repo, body)
                 finally:
                     store.invalidate(repo)
-                # 回答の成功には回答の署名 (asig) を入れる。取り消しの成功は {ok: true} だけ
+                # 回答の成功には回答の署名 (asig) を入れる。取り消し・保留・保留の解除の成功は {ok: true} だけ
                 self._json(200, {"ok": True} if sig is None else {"ok": True, "asig": sig})
             except ReadOnly as e:
                 self._json(400, {"error": str(e), "code": "readonly", "op": op})
@@ -497,8 +665,8 @@ def make_handler(store: Store, port: int, token: str, page: str, version: str):
                 self._json(409, {"error": str(e), "code": "changed", "op": op})
             except Stale as e:
                 self._json(409, {"error": str(e), "code": "stale", "op": op})
-            except (ValueError, json.JSONDecodeError) as e:
-                self._json(400, {"error": str(e), "op": op})
+            except (ValueError, json.JSONDecodeError, RecursionError) as e:    # RecursionError は body の深い入れ子
+                self._json(400, {"error": str(e) or type(e).__name__, "op": op})
             except BdError as e:
                 self._json(502, {"error": str(e), "op": op, "stage": getattr(e, "stage", None),
                                  "written": getattr(e, "written", False)})

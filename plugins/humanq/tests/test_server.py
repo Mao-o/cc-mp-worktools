@@ -41,6 +41,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import warnings
+from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -376,7 +377,7 @@ class HookInstructionsByCli(unittest.TestCase):
         self.hook = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.hook)
 
-    def run_hook(self, fn: str, summary: dict, session: str = "s1") -> str:
+    def run_raw(self, fn: str, summary: dict, session: str = "s1") -> dict:
         import contextlib
         import io
         buf = io.StringIO()
@@ -386,7 +387,10 @@ class HookInstructionsByCli(unittest.TestCase):
             getattr(self.hook, fn)({"cwd": self.root, "session_id": session})
         out = buf.getvalue()
         self.assertTrue(out.strip(), "hook の出力が無い")
-        return json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        return json.loads(out)
+
+    def run_hook(self, fn: str, summary: dict, session: str = "s1") -> str:
+        return self.run_raw(fn, summary, session)["hookSpecificOutput"]["additionalContext"]
 
     def assertOnly(self, ctx: str, want: tuple[str, ...], other: tuple[str, ...]):
         self.assertEqual(len(want), 3)
@@ -426,6 +430,42 @@ class HookInstructionsByCli(unittest.TestCase):
         self.assertIn(registry.CLI_ENV, ctx)
         for w in self.BD_CMDS + self.BR_CMDS + ("agent_context", "metadata"):
             self.assertNotIn(w, ctx)
+
+    SNOOZED = "ユーザーが保留にした判断待ち {} 件 (判断待ちの件数に入れていない。回答待ちのままなので、問いを取り下げたり、答えを推測して進めたりしない)"
+    RETURNED = "保留の期日を過ぎて判断待ちに戻ったもの {} 件 (判断待ちの件数に入っている)"
+
+    def snooze_lines(self, ctx: str) -> list[str]:
+        return [ln for ln in ctx.splitlines() if "保留" in ln]
+
+    def test_session_start_adds_one_snooze_line_on_both_clis(self):
+        for cli in ("bd", "br"):
+            base = {"ok": True, "cli": cli, "writable": True, "human": 2, "answered": []}
+            cases = {
+                "保留と戻ったもの": ({"snoozed": 3, "returned": 1},
+                                     f"humanq: {self.SNOOZED.format(3)}。{self.RETURNED.format(1)}。"),
+                "保留だけ": ({"snoozed": 1, "returned": 0}, f"humanq: {self.SNOOZED.format(1)}。"),
+                "戻ったものだけ": ({"snoozed": 0, "returned": 2}, f"humanq: {self.RETURNED.format(2)}。"),
+            }
+            for what, (extra, line) in cases.items():
+                with self.subTest(cli=cli, what=what):
+                    ctx = self.run_hook("session_start", {**base, **extra})
+                    self.assertEqual(self.snooze_lines(ctx), [line])
+                    self.assertIn("判断待ち 2 件", ctx, "判断待ちの件数は summary の human のまま (保留はサーバーが除いてある)")
+
+    def test_no_snooze_line_without_snoozes_or_from_an_old_server(self):
+        base = {"ok": True, "cli": "bd", "writable": True, "human": 1, "answered": []}
+        for what, extra in {"0 件": {"snoozed": 0, "returned": 0}, "古いサーバー (key が無い)": {},
+                            "数でない値": {"snoozed": "3", "returned": None}, "真偽値": {"snoozed": True, "returned": True},
+                            "負の数": {"snoozed": -1, "returned": -2}, "小数": {"snoozed": 2.0, "returned": 1.5},
+                            "入れ子": {"snoozed": [3], "returned": {"n": 1}}}.items():
+            with self.subTest(what):
+                self.assertEqual(self.snooze_lines(self.run_hook("session_start", {**base, **extra})), [])
+
+    def test_the_user_message_does_not_count_snoozes(self):
+        o = self.run_raw("session_start", {"ok": True, "cli": "bd", "writable": True, "human": 0, "answered": [], "snoozed": 4})
+        self.assertNotIn("systemMessage", o, "保留だけのときにユーザーへ判断待ちを知らせた")
+        o = self.run_raw("session_start", {"ok": True, "cli": "bd", "writable": True, "human": 1, "answered": [], "snoozed": 4}, "s2")
+        self.assertEqual(o.get("systemMessage"), f"humanq: 判断待ち 1 件 / 回答済み 0 件 → {self.hook.URL}")
 
     def test_prompt_submit_follows_the_cli(self):
         ctx = self.run_hook("prompt_submit", {"ok": True, "cli": "br", "writable": True, "human": 0, "answered": ["x-2"]})
@@ -480,9 +520,10 @@ class BdScenarios:
         """load_project に渡す backend (None は bd)。"""
         return None
 
-    def comments_unreadable_once(self):
-        """次の 1 回のコメントの読み (画面の一覧を作るときの読み) を、読めない状態にする。返り値を呼ぶと元に戻す。"""
-        return self.failing("comments", times=1)
+    def comments_unreadable_once(self, iid: str | None = None):
+        """次の 1 回のコメントの読み (画面の一覧を作るときの読み) を、読めない状態にする。iid を渡すと、そのチケットの読みだけ
+        (共有のプロジェクトの WithBd では、前のテストの回答済みのコメントが先に読まれる)。返り値を呼ぶと元に戻す。"""
+        return self.failing("comments" + (f" {iid}" if iid else ""), times=1)
 
     def store(self) -> humanq.Store:
         sd = os.path.join(self.tmp, "state")
@@ -971,6 +1012,275 @@ class BdScenarios:
         self.assertEqual(code, 200, j)
         self.assertEqual(self.labels(iid) & {"human", "answered"}, {"human"})
 
+    # ---- 保留 (snooze): コメント 1 件 + snoozed のラベル。status と担当は変えない ----
+
+    def set_assignee(self, iid: str, who: str) -> None:
+        bdc(self.repo, "update", iid, "--assignee", who)
+
+    def state(self, iid: str) -> tuple:
+        """チケットの (status, 担当)。保留が変えないことを確かめる。"""
+        shown = json.loads(bdc(self.repo, "show", iid, "--json"))
+        self.assertIsInstance(shown, list, shown)
+        self.assertEqual(len(shown), 1, shown)
+        return shown[0].get("status"), shown[0].get("assignee")
+
+    @staticmethod
+    def day(n: int) -> str:
+        return (humanq.today() + timedelta(days=n)).isoformat()
+
+    def marks(self, iid: str) -> list[str]:
+        """[humanq] のコメントの本文 (古い順。末尾の空白は落とす: 本物の CLI が末尾の改行を保つかに依らない)。"""
+        return [c.rstrip() for c in self.comments(iid) if c.startswith("[humanq]")]
+
+    def ids(self, data: dict, key: str, mine=None) -> list:
+        """data[key] の id (並びのまま)。mine を渡すと、その id だけ (共有のプロジェクトの WithBd では、前のテストのチケットが残る)。"""
+        return [i["id"] for i in data[key] if mine is None or i["id"] in mine]
+
+    def pick(self, data: dict, key: str, iid: str) -> dict:
+        found = [i for i in data[key] if i["id"] == iid]
+        self.assertEqual(len(found), 1, f"{iid} が {key} に 1 件ない: {[i['id'] for i in data[key]]}")
+        return found[0]
+
+    def http_project(self, port: int) -> dict:
+        code, _, raw = fetch(f"http://127.0.0.1:{port}/api/items")
+        self.assertEqual(code, 200, raw)
+        ps = json.loads(raw)["projects"]
+        self.assertEqual(len(ps), 1, ps)
+        self.assertTrue(ps[0]["ok"], ps[0])
+        return ps[0]
+
+    def test_snooze_until_a_date_moves_the_question_out_of_the_pending_list(self):
+        iid, other = self.new_question(), self.new_question()
+        self.set_status(iid, "in_progress")                  # エージェントが担当中の問い (status を変えると担当が崩れる)
+        self.set_assignee(iid, "agent-x")
+        before = self.state(iid)
+        self.assertEqual(before, ("in_progress", "agent-x"))
+        store = self.store()
+        self.write(store.snooze, {"id": iid, "until": self.day(3), "note": " 仕様の確認待ち \n", "qsig": self.item(iid)["qsig"]})
+        self.assertEqual(self.state(iid), before, "保留で status か担当が変わった")
+        self.assertEqual(self.labels(iid) & {"human", "answered", "snoozed"}, {"human", "snoozed"})
+        self.assertEqual(self.marks(iid), [f"[humanq] 保留: {self.day(3)} まで\n\n仕様の確認待ち"])
+        data = self.load()
+        mine = (iid, other)
+        self.assertEqual((self.ids(data, "human", mine), self.ids(data, "snoozed", mine)), ([other], [iid]),
+                         "保留した問いが判断待ちに残った")
+        self.assertEqual(self.pick(data, "snoozed", iid)["snooze"], {"until": self.day(3), "note": "仕様の確認待ち", "expired": False})
+        self.assertIsNone(self.pick(data, "human", other)["snooze"])
+        self.assertIsNotNone(self.pick(data, "snoozed", iid)["q"], "保留中のチケットも問いを持つ")
+
+    def test_snooze_without_a_date_and_unsnooze(self):
+        iid = self.new_question()
+        self.set_assignee(iid, "agent-y")
+        before = self.state(iid)
+        store = self.store()
+        self.write(store.snooze, {"id": iid, "until": None})
+        self.assertEqual(self.marks(iid), ["[humanq] 保留: 期限なし"])
+        data = self.load()
+        self.assertEqual(self.ids(data, "human", (iid,)), [])
+        self.assertEqual(self.pick(data, "snoozed", iid)["snooze"], {"until": None, "note": "", "expired": False})
+        with mock.patch.object(humanq, "today", lambda: date(9999, 12, 30)):       # 期限なしは何年経っても戻らない
+            self.assertEqual(self.ids(self.load(), "snoozed", (iid,)), [iid])
+        self.write(store.unsnooze, {"id": iid})
+        self.assertEqual(self.marks(iid), ["[humanq] 保留: 期限なし", "[humanq] 保留の解除"])
+        self.assertEqual(self.labels(iid) & {"human", "snoozed"}, {"human"}, "解除で snoozed が外れていない")
+        data = self.load()
+        self.assertEqual((self.ids(data, "human", (iid,)), self.ids(data, "snoozed", (iid,))), ([iid], []))
+        self.assertEqual(self.state(iid), before, "保留と解除で status か担当が変わった")
+
+    def test_a_snooze_returns_to_the_pending_list_after_its_date(self):
+        iid = self.new_question()
+        store = self.store()
+        until = self.day(0)                                  # 今日まで: 今日の終わりまで保留
+        self.write(store.snooze, {"id": iid, "until": until, "note": "明日見る"})
+        self.assertEqual(self.ids(self.load(), "snoozed", (iid,)), [iid], "期日の当日に保留から外れた")
+        tomorrow = humanq.today() + timedelta(days=1)
+        with mock.patch.object(humanq, "today", lambda: tomorrow):
+            data = self.load()
+            self.assertEqual((self.ids(data, "human", (iid,)), self.ids(data, "snoozed", (iid,))), ([iid], []),
+                             "期日を過ぎても判断待ちに戻らない")
+            self.assertEqual(self.pick(data, "human", iid)["snooze"], {"until": until, "note": "明日見る", "expired": True})
+            self.assertIn("snoozed", self.labels(iid), "読むだけでラベルを外した (ラベルは次の回答で外す)")
+            self.write(store.answer, {"id": iid, "option": "a"})       # 戻った問いに答えると、保留のラベルも外れる
+        self.assertEqual(self.labels(iid) & {"human", "answered", "snoozed"}, {"answered"})
+        data = self.load()
+        self.assertEqual([self.ids(data, k, (iid,)) for k in ("answered", "human", "snoozed")], [[iid], [], []])
+
+    def test_pressing_snooze_twice_writes_one_comment(self):
+        iid = self.new_question()
+        store = self.store()
+        body = {"id": iid, "until": self.day(7), "note": "2 回押した"}
+        self.write(store.snooze, body)
+        adds = self.calls("comments add")
+        self.write(store.snooze, dict(body))
+        self.assertEqual(self.calls("comments add"), adds, "2 回目の保留がコメントを書いた")
+        self.assertEqual(len(self.marks(iid)), 1)
+        self.write(store.unsnooze, {"id": iid})
+        self.write(store.unsnooze, {"id": iid})                         # 解除の 2 回押しも、解除のコメントは 1 件
+        self.assertEqual(self.marks(iid)[1:], ["[humanq] 保留の解除"])
+
+    def test_a_snooze_whose_label_step_failed_is_resent_without_a_second_comment(self):
+        iid = self.new_question()
+        store = self.store()
+        body = {"id": iid, "until": self.day(2)}
+        restore = self.failing("label add snoozed")
+        try:
+            e = self.write(store.snooze, body, raises=humanq.WriteError)
+        finally:
+            restore()
+        self.assertEqual((e.stage, e.written), ("label", True))
+        self.assertEqual(self.calls("label add snoozed"), 2, "ラベルの段階を 1 回だけ再試行していない")
+        self.assertNotIn("snoozed", self.labels(iid))
+        self.assertEqual(self.ids(self.load(), "human", (iid,)), [iid], "ラベルの無い保留を保留中に出した (ラベルが読む印)")
+        self.write(store.snooze, body)                                  # 送り直し
+        self.assertEqual(len(self.marks(iid)), 1, "送り直しで保留のコメントが二重になった")
+        self.assertEqual(self.ids(self.load(), "snoozed", (iid,)), [iid])
+        restore = self.failing("label remove snoozed")
+        try:
+            e = self.write(store.unsnooze, {"id": iid}, raises=humanq.WriteError)
+        finally:
+            restore()
+        self.assertEqual((e.stage, e.written), ("label", True))
+        self.assertEqual(self.ids(self.load(), "human", (iid,)), [iid], "解除のコメントの後は、ラベルが残っていても判断待ち")
+        self.write(store.unsnooze, {"id": iid})
+        self.assertEqual(self.marks(iid)[1:], ["[humanq] 保留の解除"], "解除の送り直しでコメントが二重になった")
+        self.assertNotIn("snoozed", self.labels(iid))
+
+    def test_answered_tickets_cannot_be_snoozed(self):
+        store = self.store()
+        port = self.serve(store)
+        answered = self.new_question(labels=("answered",))
+        both = self.new_question(labels=("human", "answered"))         # 画面には回答済みとして出る
+        for iid in (answered, both):
+            with self.subTest(iid=iid):
+                code, j = self.post_json(port, "/api/snooze", {"project": self.repo, "id": iid, "until": None})
+                self.assertEqual((code, j.get("code"), j.get("op")), (400, "gone", "snooze"), j)
+                self.assertEqual(self.comments(iid), [], "回答済みのチケットに保留を書いた")
+                self.assertNotIn("snoozed", self.labels(iid))
+        # 取り消しのラベルの付け替えに失敗した両ラベルのチケット (最後が取り消し) は、判断待ちに出ているので保留できる
+        iid = self.new_question()
+        self.write(store.answer, {"id": iid, "option": "a"})
+        restore = self.failing("label remove answered")
+        try:
+            self.write(store.undo, {"id": iid}, raises=humanq.WriteError)
+        finally:
+            restore()
+        self.assertEqual(self.labels(iid) & {"human", "answered"}, {"human", "answered"})
+        self.write(store.snooze, {"id": iid, "until": None})
+        data = self.load()
+        mine = (iid, answered, both)
+        self.assertEqual((self.ids(data, "snoozed", mine), sorted(self.ids(data, "answered", mine))), ([iid], sorted([answered, both])),
+                         "保留のコメントの後の両ラベルのチケットを回答済みに出した")
+        self.write(store.unsnooze, {"id": iid})
+        data = self.load()
+        self.assertEqual((self.ids(data, "human", mine), sorted(self.ids(data, "answered", mine))), ([iid], sorted([answered, both])),
+                         "保留の解除のコメントの後の両ラベルのチケットを回答済みに出した")
+
+    # 壊れた body: どれも 400 で、CLI に何も書かない
+    BAD_SNOOZE = {
+        "until が無い": {}, "until が数": {"until": 5}, "until が真偽値": {"until": True}, "until が list": {"until": []},
+        "until が object": {"until": {}}, "until が深い入れ子": {"until": [[[[[[[[["x"]]]]]]]]]},
+        "月が 13": {"until": "2099-13-01"}, "2 月 30 日": {"until": "2099-02-30"}, "桁が足りない": {"until": "2099-1-1"},
+        "区切りなし": {"until": "20991201"}, "全角の数字": {"until": "２０９９-１２-０１"}, "アラビア・インドの数字": {"until": "٢٠٩٩-١٢-٠١"},
+        "NUL": {"until": "2099-12-01\x00"}, "後ろの空白": {"until": "2099-12-01 "}, "時刻つき": {"until": "2099-12-01T00:00"},
+        "年が 0": {"until": "0000-01-01"}, "過去": {"until": "2000-01-01"},
+        "note が数": {"until": None, "note": 5}, "note が list": {"until": None, "note": ["x"]}, "note が object": {"until": None, "note": {"a": 1}},
+        "id が無い": {"id": None, "until": None}, "id が数": {"id": 5, "until": None}, "id が空": {"id": "", "until": None},
+        "id が list": {"id": ["x"], "until": None},
+    }
+
+    def test_snooze_rejects_a_broken_body_without_writing(self):
+        iid = self.new_question()
+        store = self.store()
+        port = self.serve(store)
+        writes = (self.calls("comments add"), self.calls("label"))
+        for name, extra in self.BAD_SNOOZE.items():
+            with self.subTest(body=name):
+                body = {"project": self.repo, "id": iid, **extra}
+                code, j = self.post_json(port, "/api/snooze", body)
+                self.assertEqual((code, j.get("op")), (400, "snooze"), j)
+                self.assertNotIn("code", j, f"形の誤りを gone などと取り違えた: {j}")
+                if "id" in extra:
+                    code, j = self.post_json(port, "/api/unsnooze", body)
+                    self.assertEqual((code, j.get("op")), (400, "unsnooze"), j)
+        # 形の誤り (YYYY-MM-DD でない) と、形は合うが日付として読めない・過去の日付は、別の文で断る
+        for until, head in (("2099-02-30", "until が日付として読めない"), ("2099-12-01 ", "until は YYYY-MM-DD か null"),
+                            ("٢٠٩٩-١٢-٠١", "until は YYYY-MM-DD か null"), ("2000-01-01", "過去の日付")):
+            with self.subTest(until=until):
+                code, j = self.post_json(port, "/api/snooze", {"project": self.repo, "id": iid, "until": until})
+                self.assertEqual(code, 400, j)
+                self.assertTrue(str(j.get("error")).startswith(head), j)
+        # body そのものが深い入れ子 (json の parser の限界) でも 400 で返す
+        raw_body = ("[" * 30000 + "]" * 30000).encode()
+        code, _, raw = fetch(f"http://127.0.0.1:{port}/api/snooze", raw_body,
+                             {"Content-Type": "application/json", "X-Humanq-Token": "tok", "Host": f"127.0.0.1:{port}"})
+        self.assertEqual(code, 400, raw)
+        self.assertEqual((self.calls("comments add"), self.calls("label")), writes, "壊れた body で書き込んだ")
+        self.assertEqual(self.comments(iid), [])
+
+    def test_snooze_for_a_changed_question_is_not_recorded(self):
+        iid = self.new_question()
+        port = self.serve(self.store())
+        seen = self.item(iid)["qsig"]
+        self.set_question(iid, ask="書き直した問い")
+        code, j = self.post_json(port, "/api/snooze", {"project": self.repo, "id": iid, "until": None, "qsig": seen})
+        self.assertEqual((code, j.get("code"), j.get("op")), (409, "changed", "snooze"), j)
+        self.assertEqual(self.comments(iid), [])
+        self.assertNotIn("snoozed", self.labels(iid))
+        code, j = self.post_json(port, "/api/snooze", {"project": self.repo, "id": iid, "until": None, "qsig": self.item(iid)["qsig"]})
+        self.assertEqual(code, 200, j)
+
+    def counts(self, port: int) -> tuple:
+        s = self.summary(port, fresh=True)
+        return s.get("human"), s.get("snoozed"), s.get("returned")
+
+    def test_snooze_over_http_and_the_counts_leave_out_snoozed(self):
+        port = self.serve(self.store())
+        h0, s0, r0 = self.counts(port)                       # 共有のプロジェクト (WithBd) では前のテストのチケットが残る
+        a, b, c = self.new_question(), self.new_question(), self.new_question()
+        for iid, until in ((a, self.day(3)), (b, self.day(0))):
+            code, j = self.post_json(port, "/api/snooze", {"project": self.repo, "id": iid, "until": until, "note": "n"})
+            self.assertEqual((code, j), (200, {"ok": True}))
+        self.assertEqual(self.counts(port), (h0 + 1, s0 + 2, r0))
+        p = self.http_project(port)
+        self.assertEqual((self.ids(p, "human", (a, b, c)), self.ids(p, "snoozed", (a, b, c))), ([c], [b, a]), "保留中は期日の早い順")
+        tomorrow = humanq.today() + timedelta(days=1)
+        with mock.patch.object(humanq, "today", lambda: tomorrow):
+            h1, s1, r1 = self.counts(port)
+        self.assertEqual((h1 - h0, r1 - r0), (2, 1), "期日を過ぎた b が判断待ちと「戻った」に数えられていない")
+        self.assertLessEqual(s1, s0 + 1)
+        code, j = self.post_json(port, "/api/unsnooze", {"project": self.repo, "id": a})
+        self.assertEqual((code, j), (200, {"ok": True}))
+        self.assertEqual(self.counts(port)[:2], (h0 + 2, s0 + 1))
+        code, j = self.post_json(port, "/api/unsnooze", {"project": self.repo, "id": "hq-nothing"})
+        self.assertEqual((code, j.get("code"), j.get("op")), (400, "gone", "unsnooze"), j)
+        restore = self.failing("label add snoozed")
+        try:
+            code, j = self.post_json(port, "/api/snooze", {"project": self.repo, "id": c, "until": None})
+        finally:
+            restore()
+        self.assertEqual((code, j.get("op"), j.get("stage"), j.get("written")), (502, "snooze", "label", True), j)
+
+    def test_snoozed_tickets_come_in_the_order_of_their_dates_and_no_date_last(self):
+        x, y, z = self.new_question(), self.new_question(), self.new_question()
+        store = self.store()
+        for iid, until in ((x, None), (y, self.day(5)), (z, self.day(1))):
+            self.write(store.snooze, {"id": iid, "until": until})
+        self.assertEqual(self.ids(self.load(), "snoozed", (x, y, z)), [z, y, x], "期日の早い順・期限なしは最後でない")
+
+    def test_a_snoozed_ticket_whose_comments_cannot_be_read_is_shown_as_pending(self):
+        iid = self.new_question()
+        store = self.store()
+        self.write(store.snooze, {"id": iid, "until": self.day(5)})
+        restore = self.comments_unreadable_once(iid)
+        try:
+            data = self.load()
+        finally:
+            restore()
+        self.assertEqual((self.ids(data, "human", (iid,)), self.ids(data, "snoozed", (iid,))), ([iid], []),
+                         "期日を読めない保留を判断待ちから隠した")
+        self.assertIsNone(self.pick(data, "human", iid)["snooze"])
+        self.assertEqual(self.ids(self.load(), "snoozed", (iid,)), [iid], "読めるようになったら保留中に戻る")
+
 
 class BdOnly:
     """bd のプロジェクトだけのシナリオ (WithBd と WithFakeBd。br には bd の --json の形が無い)。"""
@@ -1171,6 +1481,29 @@ class WithFakeBd(FakeLog, BdScenarios, BdOnly, unittest.TestCase):
         self.assertEqual(code, 200, j)
 
         self.assertEqual(self.normalized_argv(self.log_entries()[start:], iid), self.GOLDEN)
+
+    ADD_SNOOZED = ["-C", "<repo>", "--actor", "user/humanq", "label", "add", "<id>", "snoozed"]
+    REMOVE_SNOOZED = ["-C", "<repo>", "--actor", "user/humanq", "label", "remove", "<id>", "snoozed"]
+    # 保留 → 読み (保留のラベルの付いた判断待ちのコメントを読む) → 解除 → 読み (ラベルが無いのでコメントは読まない)。
+    # status を変える呼び出し (update・defer) は無い
+    GOLDEN_SNOOZE = [
+        HUMAN_LIST, COMMENTS, COMMENT_ADD, ADD_SNOOZED,
+        HUMAN_LIST, ANSWERED_LIST, COMMENTS,
+        HUMAN_LIST, COMMENTS, COMMENT_ADD, REMOVE_SNOOZED,
+        HUMAN_LIST, ANSWERED_LIST,
+    ]
+
+    def test_golden_argv_of_snooze(self):
+        iid = self.new_question()
+        port = self.serve(self.store())
+        start = len(self.log_entries())
+        code, j = self.post_json(port, "/api/snooze", {"project": self.repo, "id": iid, "until": self.day(1), "note": "n"})
+        self.assertEqual(code, 200, j)
+        self.assertEqual([i["id"] for i in self.http_project(port)["snoozed"]], [iid])
+        code, j = self.post_json(port, "/api/unsnooze", {"project": self.repo, "id": iid})
+        self.assertEqual(code, 200, j)
+        self.assertEqual([i["id"] for i in self.http_project(port)["human"]], [iid])
+        self.assertEqual(self.normalized_argv(self.log_entries()[start:], iid), self.GOLDEN_SNOOZE)
 
     def normalized_argv(self, entries: list[dict], iid: str) -> list[list[str]]:
         self.assertEqual({e["prog"] for e in entries}, {"bd"})
@@ -1375,15 +1708,25 @@ class WithFakeBr(FakeLog, BdScenarios, unittest.TestCase):
     def set_status(self, iid: str, status: str) -> None:
         self.brc("update", iid, "--status", status)
 
+    def set_assignee(self, iid: str, who: str) -> None:
+        self.brc("update", iid, "--assignee", who)
+
+    def state(self, iid: str) -> tuple:
+        shown = json.loads(self.brc("show", iid, "--json"))
+        self.assertIsInstance(shown, list, shown)
+        self.assertEqual(len(shown), 1, shown)
+        return shown[0].get("status"), shown[0].get("assignee")
+
     def close(self, iid: str) -> None:
         self.brc("close", iid)
 
     def backend(self):
         return humanq._BR
 
-    def comments_unreadable_once(self):
+    def comments_unreadable_once(self, iid: str | None = None):
         """次の 1 回の show の comments を list でない値にする (br はコメントを show で読む。exit で失敗させると
-        プロジェクト全体が読めなくなるので、そのチケットだけ読めない形を作る)。返り値を呼ぶと元に戻す。"""
+        プロジェクト全体が読めなくなるので、そのチケットだけ読めない形を作る)。iid は使わない (プロジェクトはテストごと)。
+        返り値を呼ぶと元に戻す。"""
         real, left = humanq.br, [1]
 
         def odd(repo, *args):
@@ -1527,6 +1870,28 @@ class WithFakeBr(FakeLog, BdScenarios, unittest.TestCase):
         code, j = self.undo_http(port, iid, asig=j.get("asig"))
         self.assertEqual(code, 200, j)
         self.assertEqual(self.normalized_argv(self.log_entries()[start:], iid), self.GOLDEN)
+
+    ADD_SNOOZED = ["--actor", "user/humanq", "label", "add", "<id>", "snoozed"]
+    REMOVE_SNOOZED = ["--actor", "user/humanq", "label", "remove", "<id>", "snoozed"]
+    # 保留 → 読み → 解除 → 読み。保留の期日のコメントは、読みの show (1 回) から取る (プロセスは増えない)。status を変える呼び出しは無い
+    GOLDEN_SNOOZE = [
+        LIST_HUMAN, SHOW, COMMENT_ADD, ADD_SNOOZED,
+        LIST_HUMAN, LIST_ANSWERED, SHOW,
+        LIST_HUMAN, SHOW, COMMENT_ADD, REMOVE_SNOOZED,
+        LIST_HUMAN, LIST_ANSWERED, SHOW,
+    ]
+
+    def test_golden_argv_of_snooze(self):
+        iid = self.new_question()
+        port = self.serve(self.store())
+        start = len(self.log_entries())
+        code, j = self.post_json(port, "/api/snooze", {"project": self.repo, "id": iid, "until": self.day(1), "note": "n"})
+        self.assertEqual(code, 200, j)
+        self.assertEqual([i["id"] for i in self.http_project(port)["snoozed"]], [iid])
+        code, j = self.post_json(port, "/api/unsnooze", {"project": self.repo, "id": iid})
+        self.assertEqual(code, 200, j)
+        self.assertEqual([i["id"] for i in self.http_project(port)["human"]], [iid])
+        self.assertEqual(self.normalized_argv(self.log_entries()[start:], iid), self.GOLDEN_SNOOZE)
 
     def test_a_stale_undo_only_reads(self):
         # 署名の違う取り消しは、回答済みの一覧とそのチケットの show を読むだけで、br に何も書かない

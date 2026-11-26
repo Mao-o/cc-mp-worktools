@@ -106,6 +106,48 @@ class HumanqSwapPoint(unittest.TestCase):
             ("/r", "x", "--json"),
         ])
 
+    def test_snooze_and_unsnooze_go_through_humanq_bd(self):
+        # 読みでコメントを打つのは保留のラベルの付いた判断待ち (hq-3) だけ。保留は status と担当に触れない (update を打たない)
+        rec = Script(human=json.dumps([issue("hq-1"), issue("hq-3", labels=["human", "snoozed"])]),
+                     comments={"hq-3": json.dumps([{"text": "[humanq] 保留: 期限なし\n", "created_at": "2026-11-20T10:00:00Z"}])})
+        with mock.patch.object(humanq, "bd", rec):
+            try:
+                data = humanq.load_project("/r")
+                store = humanq.Store(self.tmp)
+                store.snooze("/r", {"id": "hq-1", "until": None, "note": "x"})
+                store.unsnooze("/r", {"id": "hq-3"})
+            except AssertionError:
+                raise
+            except Exception as e:  # noqa: BLE001  実装の変異で漏れた例外を、走っていない ERROR にしない
+                self.fail(f"想定外の例外: {type(e).__name__}: {e} (呼び出し: {rec.calls})")
+        self.assertEqual(([i["id"] for i in data["human"]], [i["id"] for i in data["snoozed"]]), (["hq-1"], ["hq-3"]))
+        w = ("/r", "--actor", "user/humanq")
+        self.assertEqual(rec.calls, [
+            ("/r", "human", "list", "--json"), ("/r", *ANSWERED_LIST), ("/r", "comments", "hq-3", "--json"),
+            ("/r", "human", "list", "--json"), ("/r", "comments", "hq-1", "--json"),
+            (*w, "comments", "add", "hq-1", "-f", "<tmp>"), (*w, "label", "add", "hq-1", "snoozed"),
+            ("/r", "human", "list", "--json"), ("/r", "comments", "hq-3", "--json"),
+            (*w, "comments", "add", "hq-3", "-f", "<tmp>"), (*w, "label", "remove", "hq-3", "snoozed"),
+        ])
+
+    def test_a_snooze_whose_comments_cannot_be_read_fails_as_the_comment_stage(self):
+        # bd の pending は thread を持たないので、保留の書き込みは comments で読む。読めなければ何も書かずに comment の段階
+        for fn, body in (("snooze", {"id": "hq-1", "until": None}), ("unsnooze", {"id": "hq-1"})):
+            with self.subTest(fn):
+                rec = Script(human=json.dumps([issue("hq-1", labels=["human", "snoozed"])]), comments={"hq-1": "oops"})
+                with mock.patch.object(humanq, "bd", rec):
+                    try:
+                        getattr(humanq.Store(self.tmp), fn)("/r", body)
+                        self.fail("WriteError が上がらなかった")
+                    except humanq.WriteError as e:
+                        self.assertEqual((e.stage, e.written), ("comment", False))
+                    except AssertionError:
+                        raise
+                    except Exception as e:  # noqa: BLE001
+                        self.fail(f"想定外の例外: {type(e).__name__}: {e}")
+                self.assertEqual(rec.calls, [("/r", "human", "list", "--json"), ("/r", "comments", "hq-1", "--json")],
+                                 "読めないコメントのまま書き込んだ")
+
     def test_errors_keep_their_types(self):
         self.assertIs(humanq.BdError, backend.BdError, "HTTP 502 の応答とテストが humanq.BdError で backend の失敗を捕まえる")
         self.assertTrue(issubclass(humanq.WriteError, backend.BdError))
@@ -194,6 +236,171 @@ class BackendParse(unittest.TestCase):
                 e = self.parse(out)
                 self.assertIsInstance(e, backend.BdError)
                 self.assertTrue(str(e).startswith(head), e)
+
+    def test_deep_nesting_is_a_bd_error(self):
+        # json の parser の限界 (RecursionError) を、サーバーの外へ漏らさずに読めない出力にする
+        for what, out in {"閉じない": "[" * 100000, "閉じる": "[" * 50000 + "]" * 50000, "object": '{"a":' * 100000}.items():
+            with self.subTest(what):
+                e = self.parse(out)
+                self.assertIsInstance(e, backend.BdError)
+                self.assertTrue(str(e).startswith("bd の出力が JSON ではない (入れ子が深すぎる)"), str(e)[:120])
+
+
+class BackendLabeled(unittest.TestCase):
+    """backend.labeled: ラベルは list の要素としてだけ読む (文字列の部分一致にしない)。Row でないものは付いていない。"""
+
+    def test_only_a_list_of_labels_is_read(self):
+        cases = (({"labels": ["human", "snoozed"]}, True), ({"labels": ["human"]}, False), ({"labels": []}, False),
+                 ({"labels": "snoozed"}, False), ({"labels": "human,snoozed"}, False), ({"labels": None}, False),
+                 ({"labels": {"snoozed": 1}}, False), ({"labels": [["snoozed"]]}, False), ({}, False),
+                 ("snoozed", False), (["snoozed"], False), (None, False))
+        for row, want in cases:
+            with self.subTest(row=row):
+                try:
+                    got = backend.labeled(row, "snoozed")
+                except Exception as e:  # noqa: BLE001
+                    self.fail(f"例外が漏れた: {type(e).__name__}: {e}")
+                self.assertIs(got, want)
+
+
+class BackendSnoozedThread(unittest.TestCase):
+    """BdBackend.load: 保留のラベルの付いた判断待ちにだけ thread を付ける (コメントの読みを増やすのはそのチケットだけ)。"""
+
+    def test_only_snoozed_rows_get_a_thread(self):
+        sn = [{"text": "[humanq] 保留: 期限なし\n", "created_at": "2026-11-20T10:00:00Z"}]
+        s = Script(human=json.dumps([issue("hq-1"), issue("hq-2", labels=["human", "snoozed"]),
+                                     issue("hq-3", labels="human snoozed"), issue("-x", labels=["human", "snoozed"]),
+                                     issue(5, labels=["human", "snoozed"]), issue("hq-4", labels=["snoozed", "human"])]),
+                   comments={"hq-2": json.dumps(sn), "hq-4": "oops"})
+        try:
+            human, answered = backend.BdBackend(run=s).load("/r")
+        except Exception as e:  # noqa: BLE001  実装の変異で漏れた例外を、走っていない ERROR にしない
+            self.fail(f"想定外の例外: {type(e).__name__}: {e} (呼び出し: {s.calls})")
+        self.assertEqual(answered, [])
+        by = {r["id"]: r for r in human}
+        self.assertEqual(len(by), 6, human)
+        self.assertEqual(by["hq-2"].get("thread"), sn)
+        for iid in ("hq-1", "hq-3"):
+            with self.subTest(iid=iid):
+                self.assertNotIn("thread", by[iid], "保留のラベルの無い判断待ちに thread を付けた")
+        for iid in ("-x", 5, "hq-4"):
+            with self.subTest(iid=iid):
+                self.assertIn("thread", by[iid])
+                self.assertIsNone(by[iid]["thread"], "渡せない id・読めないコメントは None (期日を読めない)")
+        self.assertEqual([c[1:] for c in s.calls if c[1] == "comments"],
+                         [("comments", "hq-2", "--json"), ("comments", "hq-4", "--json")], "渡せない id で bd を打った")
+
+
+class LoadProjectSnoozeGate(unittest.TestCase):
+    """humanq.load_project は、保留のラベルの付いた判断待ちの thread だけを保留として読む (backend が thread を付けすぎても、
+    ラベルの無いチケットを保留中に隠さない)。"""
+
+    def test_a_thread_without_the_label_is_not_a_snooze(self):
+        sn = [{"text": "[humanq] 保留: 期限なし\n", "created_at": "2026-11-20T10:00:00Z"}]
+
+        class Loose:
+            def load(self, repo):
+                return ([{**backend.BdBackend.row(issue("hq-1")), "thread": sn},
+                         {**backend.BdBackend.row(issue("hq-2", labels=["human", "snoozed"])), "thread": sn}], [])
+
+        try:
+            data = humanq.load_project("/r", Loose())
+        except Exception as e:  # noqa: BLE001
+            self.fail(f"想定外の例外: {type(e).__name__}: {e}")
+        self.assertEqual(([i["id"] for i in data["human"]], [i["id"] for i in data["snoozed"]]), (["hq-1"], ["hq-2"]))
+
+
+class UnreadableProjects(unittest.TestCase):
+    """読めないプロジェクトの data も、読めたときと同じ一覧の key (human・answered・snoozed) を持つ (画面と /api/summary が引く)。"""
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="humanq-unreadable-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.repo = os.path.join(self.tmp, "proj")
+        os.makedirs(os.path.join(self.repo, ".beads"))
+        p = mock.patch.object(backend.subprocess, "run", side_effect=no_subprocess)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def project(self, run) -> dict:
+        with mock.patch.object(humanq, "bd", run), mock.patch.object(humanq, "br", run):
+            try:
+                return humanq.Store(self.tmp).project(self.repo, fresh=True)
+            except Exception as e:  # noqa: BLE001
+                self.fail(f"想定外の例外: {type(e).__name__}: {e}")
+
+    def test_every_unreadable_path_has_the_three_lists(self):
+        def bd_down(repo, *args):
+            raise backend.BdError("down")
+
+        def odd(repo, *args):
+            raise KeyError("odd")
+
+        want = {"human": [], "answered": [], "snoozed": []}
+        for what, run in {"BdError": bd_down, "想定外の例外": odd}.items():
+            with self.subTest(what):
+                data = self.project(run)
+                self.assertEqual(data.get("ok"), False, data)
+                self.assertEqual({k: data.get(k) for k in want}, want)
+        Path(self.repo, ".beads", ".gitignore").write_text(".br_history/\n", encoding="utf-8")       # br の印と
+        os.makedirs(os.path.join(self.repo, ".beads", "embeddeddolt"))                               # bd の印 (conflict)
+        data = self.project(no_subprocess)
+        self.assertEqual(data.get("writable"), False, data)
+        self.assertEqual({k: data.get(k) for k in want}, want)
+
+
+class SnoozeOf(unittest.TestCase):
+    """保留の読み (humanq.snooze_of): 最後の [humanq] コメントの 1 行目が保留の形のときだけ {until, note}。
+    形の崩れた・日付として読めない・壊れた入力は保留と読まない (None。判断待ちに出す側)。"""
+
+    SN = {"text": "[humanq] 保留: 期限なし\n", "created_at": "2026-11-20T10:00:00Z"}
+
+    def of(self, thread):
+        try:
+            return humanq.snooze_of(thread)
+        except Exception as e:  # noqa: BLE001  例外が漏れる変異を、走っていない ERROR にしない
+            self.fail(f"例外が漏れた: {type(e).__name__}: {e} (thread: {thread!r:.200})")
+
+    def test_the_forms_that_are_snoozes(self):
+        cases = {
+            "期日": ("[humanq] 保留: 2026-12-01 まで\n", {"until": "2026-12-01", "note": ""}),
+            "期日と補足 (複数行)": ("[humanq] 保留: 2026-12-01 まで\n\n仕様の確認待ち\n2 行目\n",
+                                {"until": "2026-12-01", "note": "仕様の確認待ち\n2 行目"}),
+            "期限なし": ("[humanq] 保留: 期限なし\n", {"until": None, "note": ""}),
+            "期限なしと補足": ("[humanq] 保留: 期限なし\n\nあとで見る", {"until": None, "note": "あとで見る"}),
+            "1 行目の末尾の空白と CR": ("[humanq] 保留: 2026-12-01 まで \r\n", {"until": "2026-12-01", "note": ""}),
+            "閏日": ("[humanq] 保留: 2028-02-29 まで", {"until": "2028-02-29", "note": ""}),
+        }
+        for what, (text, want) in cases.items():
+            with self.subTest(what):
+                self.assertEqual(self.of([{"text": "エージェントの問い"}, {"text": text, "created_at": "x"}]), want)
+
+    def test_broken_or_other_texts_are_not_snoozes(self):
+        texts = {
+            "回答": ANS_A, "取り消し": humanq.UNDO_HEAD + "\n", "保留の解除": humanq.UNSNOOZE_HEAD + "\n",
+            "月が 13": "[humanq] 保留: 2026-13-01 まで\n", "2 月 30 日": "[humanq] 保留: 2026-02-30 まで\n",
+            "閏年でない 2 月 29 日": "[humanq] 保留: 2027-02-29 まで\n", "年が 0": "[humanq] 保留: 0000-01-01 まで\n",
+            "日付の後に文字": "[humanq] 保留: 2026-12-01 まで です\n", "まで が無い": "[humanq] 保留: 2026-12-01\n",
+            "短い日付": "[humanq] 保留: 2026-1-1 まで\n", "時刻つき": "[humanq] 保留: 2026-12-01T10:00 まで\n",
+            "全角数字": "[humanq] 保留: ２０２６-１２-０１ まで\n", "アラビア・インド数字": "[humanq] 保留: ٢٠٢٦-١٢-٠١ まで\n",
+            "NUL (期日)": "[humanq] 保留: 2026-12-01 まで\x00\n", "NUL (期限なし)": "[humanq] 保留: 期限なし\x00",
+            "期限なしの後に文字": "[humanq] 保留: 期限なしで\n", "空の期日": "[humanq] 保留:  まで\n",
+            "コロンの後の空白が無い": "[humanq] 保留:期限なし\n", "1 行目が空": "[humanq] \n保留: 期限なし",
+        }
+        for what, text in texts.items():
+            with self.subTest(what):
+                self.assertIsNone(self.of([self.SN, {"text": text, "created_at": "x"}]), "最後の [humanq] コメントで決めていない")
+
+    def test_threads_that_cannot_be_read_and_what_counts_as_the_last(self):
+        for thread in (None, "x", 5, self.SN, [], [{"text": "エージェントの問い"}], [{"text": 5}], [None], [[self.SN["text"]]],
+                       [{"text": " " + self.SN["text"]}]):
+            with self.subTest(thread=thread):
+                self.assertIsNone(self.of(thread))
+        # 最後の [humanq] コメントで決める: 後ろのエージェントのコメント・本文が文字列でない要素・dict でない要素は数えない
+        self.assertEqual(self.of([self.SN, {"text": "エージェントの追記"}, {"text": None}, {"text": ["[humanq] 回答: x"]}, "odd"]),
+                         {"until": None, "note": ""})
+        self.assertIsNone(self.of([self.SN, {"text": ANS_A}]))
+        self.assertIsNone(self.of([self.SN, {"text": humanq.UNSNOOZE_HEAD + "\n"}]))
 
 
 class BackendComments(unittest.TestCase):
@@ -530,6 +737,23 @@ class BrLoad(unittest.TestCase):
             self.assertEqual(set(r), ROW_KEYS | {"thread"})
         self.assertEqual(human[0]["question_raw"], Q, "agent_context の top-level の humanq を問いにする (他の key は無視)")
 
+    def test_snoozed_pending_rows_take_the_thread_from_the_same_show(self):
+        sz = ["human", "snoozed"]
+        cs = [bc(2, "[humanq] 保留: 期限なし\n", "2026-11-26T17:40:00Z", "user/humanq"), bc(1, "a")]      # 新しい順で返る
+        s = BrScript(human=[br_issue("p-1"), br_issue("p-2", labels=sz), br_issue("p-3", labels=sz), br_issue("p-4", labels=sz)],
+                     shows=[[br_shown("p-1", comments=[bc(1, "x")]), br_shown("p-2", comments=cs, labels=sz),
+                             br_shown("p-3", labels=sz), br_shown("p-4", comments={"text": "x"}, labels=sz)]])
+        human, answered = self.ok(s)
+        self.assertEqual(s.calls, [("/r", *BR_HUMAN), ("/r", *BR_ANSWERED), ("/r", "show", "p-1", "p-2", "p-3", "p-4", "--json")],
+                         "保留があっても show は 1 回")
+        self.assertEqual(answered, [])
+        by = {r["id"]: r for r in human}
+        self.assertEqual(len(by), 4, human)
+        self.assertEqual(set(by["p-1"]), ROW_KEYS, "保留のラベルの無い判断待ちに thread を付けた")
+        self.assertEqual([c["text"] for c in by["p-2"].get("thread") or []], ["a", "[humanq] 保留: 期限なし\n"], "thread は古い順")
+        self.assertEqual((by["p-3"].get("thread", "key が無い"), by["p-4"].get("thread", "key が無い")), ([], None),
+                         "comments の key が無い show は 0 件、list でなければ読めない (None)")
+
     def test_empty_lists_do_not_run_show(self):
         s = BrScript(shows=[AssertionError("show を打った")])
         self.assertEqual(self.ok(s), ([], []))
@@ -862,7 +1086,7 @@ class BrWrite(unittest.TestCase):
 
 
 class BrStore(unittest.TestCase):
-    """br と判定したプロジェクトの回答・取り消し (humanq.Store) が、humanq.br の差し替え口だけを通ること。bd は打たない。"""
+    """br と判定したプロジェクトの回答・取り消し・保留・保留の解除 (humanq.Store) が、humanq.br の差し替え口だけを通ること。bd は打たない。"""
 
     def setUp(self):
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="humanq-brstore-"))
@@ -896,6 +1120,47 @@ class BrStore(unittest.TestCase):
         self.assertIsNone(self.run_store(s, "undo", {"id": "p-2", "asig": humanq.asig(1, ANS_A)}))
         self.assertEqual(s.calls, [(r, *BR_ANSWERED), (r, "show", "p-2", "--json"), (*w, "comments", "add", "p-2", "-f", "<tmp>"),
                                    (*w, "label", "add", "p-2", "human"), (*w, "label", "remove", "p-2", "answered")])
+
+    def test_snooze_and_unsnooze_go_through_humanq_br(self):
+        r, w, sz = self.repo, (self.repo, "--actor", "user/humanq"), ["human", "snoozed"]
+        q = humanq.qsig(humanq.question({"humanq": Q}))
+        s = BrScript(human=[br_issue("p-1")], shows=[[br_shown("p-1", Q_OTHER, comments=[bc(1, "メモ")])]])
+        self.assertIsNone(self.run_store(s, "snooze", {"id": "p-1", "until": None, "note": "x", "qsig": q}))
+        self.assertEqual(s.calls, [(r, *BR_HUMAN), (r, "show", "p-1", "--json"), (*w, "comments", "add", "p-1", "-f", "<tmp>"),
+                                   (*w, "label", "add", "p-1", "snoozed")], "コメントは pending の show から読む。status は触らない")
+        sn = bc(2, "[humanq] 保留: 期限なし\n\nx\n", "2026-11-26T17:40:00Z", "user/humanq")
+        s = BrScript(human=[br_issue("p-1", labels=sz)], shows=[[br_shown("p-1", Q_OTHER, comments=[sn, bc(1, "メモ")], labels=sz)]])
+        self.assertIsNone(self.run_store(s, "unsnooze", {"id": "p-1"}))
+        self.assertEqual(s.calls, [(r, *BR_HUMAN), (r, "show", "p-1", "--json"), (*w, "comments", "add", "p-1", "-f", "<tmp>"),
+                                   (*w, "label", "remove", "p-1", "snoozed")])
+        s = BrScript(human=[br_issue("p-1")], shows=[[br_shown("p-1", Q_OTHER, comments=[bc(1, "メモ")])]])
+        self.assertIsNone(self.run_store(s, "unsnooze", {"id": "p-1"}))
+        self.assertEqual(s.calls, [(r, *BR_HUMAN), (r, "show", "p-1", "--json")], "保留でないチケットの解除で書いた")
+
+    def test_a_last_comment_whose_text_is_not_a_string_does_not_stop_the_write(self):
+        # 送り直しの判定は、本文が文字列でない最後のコメントを同じ本文とみなさず、書く (例外で書き込みを止めない)
+        recent = humanq.datetime.now(humanq.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for odd in (5, None, ["[humanq] 保留: 期限なし"], {"t": 1}):
+            for fn, body in (("snooze", {"id": "p-1", "until": None}), ("answer", {"id": "p-1", "option": "a"})):
+                with self.subTest(text=odd, fn=fn):
+                    cs = [bc(2, odd, recent, "user/humanq"), bc(1, "メモ", recent)]
+                    s = BrScript(human=[br_issue("p-1")], shows=[[br_shown("p-1", Q_OTHER, comments=cs)]])
+                    self.run_store(s, fn, body)
+                    self.assertIn(("--actor", "user/humanq", "comments"), [c[1:4] for c in s.calls], "コメントを書かなかった")
+
+    def test_a_snooze_whose_comments_cannot_be_read_fails_as_the_comment_stage(self):
+        s = BrScript(human=[br_issue("p-1")], shows=[[br_shown("p-1", Q_OTHER, comments={"text": "x"})]])
+        with mock.patch.object(humanq, "br", s):
+            try:
+                humanq.Store(self.tmp).snooze(self.repo, {"id": "p-1", "until": None})
+                self.fail("WriteError が上がらなかった")
+            except humanq.WriteError as e:
+                self.assertEqual((e.stage, e.written), ("comment", False))
+            except AssertionError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                self.fail(f"想定外の例外: {type(e).__name__}: {e}")
+        self.assertEqual([c[1] for c in s.calls], ["list", "show", "show"], "読めないコメントのまま書き込んだ")
 
     def test_a_resend_reuses_the_comments_of_the_pending_show(self):
         # 最後のコメントが同じ回答 (送り直し): コメントは書かずにラベルだけ直す。読みは一覧と show の 2 回だけ

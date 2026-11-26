@@ -1,6 +1,6 @@
 {
   "name": "humanq",
-  "version": "0.16.2",
+  "version": "0.17.0",
   "description": "beads (bd / br) の判断待ち (human ラベル) を、この端末の全プロジェクト分まとめて localhost の画面に出し、ユーザーがそこで答えた内容を bd / br に書き戻す。SessionStart で登録とサーバーの起動、UserPromptSubmit で新しい回答を Claude に伝える",
   "author": {
     "name": "Mao"

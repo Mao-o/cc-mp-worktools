@@ -7,9 +7,10 @@ humanq.py は、ここが返す CLI に依らない形の値だけを読む:
 - Comment: {text, created_at}。値は CLI が返したまま。dict でない要素は {text: None, created_at: None} にする
   (本文の無いコメントとして数えない)
 - comments() は**必ず古い順で返す**。送り直しの判定・両ラベルの向き・表示する回答の本文は、最後の要素を最新として読む
-- load(repo) は画面の読み 1 回分: (判断待ちの Row の list, 回答済みの Row の list)。回答済みの Row には thread
-  (そのチケットの Comment の list。古い順。読めなければ None) が付く
-- 書き込み (回答・取り消し) の読み直しは pending(repo, iid) (判断待ちの Row の list。iid の問いを照合に使う) と
+- load(repo) は画面の読み 1 回分: (判断待ちの Row の list, 回答済みの Row の list)。回答済みの Row と、判断待ちの Row のうち
+  保留のラベル (SNOOZE_LABEL) の付いたものには thread (そのチケットの Comment の list。古い順。読めなければ None) が付く
+  (保留の期日はコメントが正本で、ラベルはコメントを読むチケットを絞るための印。ラベルの無い判断待ちのコメントは読まない)
+- 書き込み (回答・取り消し・保留・保留の解除) の読み直しは pending(repo, iid) (判断待ちの Row の list。iid の問いを照合に使う) と
   list_answered(repo) と comments(repo, iid)。pending の Row に thread が付いていれば、送り直しの判定と署名の照合は
   その thread で行う (comments を打たない)。書き込みは add_comment と label (op は add | remove)
 
@@ -27,6 +28,10 @@ from typing import Callable
 
 # コメントとラベルの書き込みの作者 (README の「回答の形」)
 ACTOR = "user/humanq"
+# 保留のラベル (README の「回答の形」)。付いた判断待ちだけ、読みのときにコメントを読む
+SNOOZE_LABEL = "snoozed"
+
+
 class BdError(RuntimeError):
     """CLI を起動できない・失敗した・出力を読めない。"""
 
@@ -57,6 +62,8 @@ def parse_bd_list(out: str) -> list:
         return []
     try:
         v = json.loads(out)
+    except RecursionError:              # 深い入れ子 (json の parser の限界)。読めない出力として扱う (_loads と同じ)
+        raise BdError(f"bd の出力が JSON ではない (入れ子が深すぎる): {out[:200]}") from None
     except json.JSONDecodeError:
         if re.fullmatch(r"No [^\n]*", out):  # 該当 0 件のとき案内文 1 行だけを返す版がある
             return []
@@ -73,6 +80,12 @@ def comment_of(c) -> dict:
     if not isinstance(c, dict):
         return {"text": None, "created_at": None}
     return {"text": c.get("text"), "created_at": c.get("created_at")}
+
+
+def labeled(row, name: str) -> bool:
+    """Row (か CLI の要素) に name のラベルが付いているか。labels が list でなければ付いていない (文字列の部分一致にしない)。"""
+    labels = row.get("labels") if isinstance(row, dict) else None
+    return isinstance(labels, list) and name in labels
 
 
 class BdBackend:
@@ -123,8 +136,10 @@ class BdBackend:
         return [comment_of(c) for c in self.json(repo, "comments", iid)]
 
     def load(self, repo: str) -> tuple[list[dict], list[dict]]:
-        """判断待ちの一覧 → 回答済みの一覧 → 回答済みごとのコメント、の順に打つ (サーバーが打つ bd の argv の列の固定)。
-        コメントを読めないチケットの thread は None (そのチケットだけ、回答の本文と署名が空になる)。"""
+        """判断待ちの一覧 → 回答済みの一覧 → 回答済みごとのコメント → 保留のラベルの付いた判断待ちごとのコメント、の順に打つ
+        (サーバーが打つ bd の argv の列の固定。保留が無ければ今までと同じ列)。
+        コメントを読めないチケットの thread は None (回答済みはそのチケットだけ回答の本文と署名が空になり、保留は期日を
+        読めないので判断待ちに出す)。bd の引数に渡せない id (_passable) の保留は、打たずに None。"""
         human = self.list_human(repo)
         answered = []
         for r in self.list_answered(repo):
@@ -133,6 +148,13 @@ class BdBackend:
             except BdError:
                 thread = None
             answered.append({**r, "thread": thread})
+        for r in human:
+            if not labeled(r, SNOOZE_LABEL):
+                continue
+            try:
+                r["thread"] = self.comments(repo, r["id"]) if _passable(r["id"]) else None
+            except BdError:
+                r["thread"] = None
         return human, answered
 
     def add_comment(self, repo: str, iid: str, path: str) -> None:
@@ -254,11 +276,14 @@ class BrBackend:
 
     1 プロジェクトの読みは 3 プロセス: 判断待ちの list → 回答済みの list → 両方の id をまとめた show。問い
     (agent_context) とコメントは show から取る (br の schema の文書は agent_context を「list には出ない」としている)。
+    保留のラベルの付いた判断待ちの thread も、同じ show のコメントから作る (プロセスは増えない)。
     読みの flag は br の既定のまま (JSONL の方が新しければ DB へ取り込む auto-import も、利用者が打ったときと同じに効かせる)。
 
     回答は 5 プロセス: 判断待ちの list → そのチケットの show (問いと署名の照合・送り直しの判定のコメント) →
     comments add → label add answered → label remove human。取り消しは回答済みの list → show → comments add →
-    label add human → label remove answered。書き込みの形 (--actor の位置・comments add -f・label の位置引数) は bd と
+    label add human → label remove answered。保留は判断待ちの list → show → comments add → label add snoozed、保留の
+    解除は判断待ちの list → show → comments add (最後の [humanq] コメントが保留のときだけ) → label remove snoozed
+    (付いているときだけ)。書き込みの形 (--actor の位置・comments add -f・label の位置引数) は bd と
     同じで、label は付いている / 付いていないときも exit 0 (冪等。br 0.7.6 で実測)。"""
 
     def __init__(self, run: Callable[..., str] = run_br):
@@ -325,8 +350,13 @@ class BrBackend:
         lost = [i for i in ids if i not in by]
         if lost:
             raise BdError(f"br show の出力に {lost[0]} が無い")
-        return ([self.row(i, by[i["id"]]) for i in human],
-                [self.row(i, by[i["id"]], thread=True) for i in answered])
+        rows = []
+        for i in human:
+            r = self.row(i, by[i["id"]])
+            if labeled(r, SNOOZE_LABEL):        # 保留の期日はコメントにある (show はもう読んであるので、打ち足さない)
+                r["thread"] = br_thread(by[i["id"]].get("comments"))
+            rows.append(r)
+        return rows, [self.row(i, by[i["id"]], thread=True) for i in answered]
 
     # ---- 書き込みの読み直しと書き込み (humanq.Store が書き込みのロックの下で呼ぶ) ----
 

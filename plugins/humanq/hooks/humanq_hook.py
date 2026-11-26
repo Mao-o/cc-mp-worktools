@@ -3,7 +3,7 @@
 
     humanq_hook.py session-start   (SessionStart)
         プロジェクトを登録し、画面のサーバーが動いていなければ切り離して起動する (版が古ければ入れ替える。新しければそのまま使う)。
-        判断待ちと、画面で回答済みの件数を Claude に伝える
+        判断待ちと、画面で回答済みの件数を Claude に伝える (保留中は判断待ちに数えず、保留の件数を 1 行で添える)
     humanq_hook.py prompt-submit   (UserPromptSubmit)
         このセッションで前に伝えた後に画面で回答されたものがあれば、Claude に伝える。
         サーバーのキャッシュを見るだけで bd は読まない (応答を遅くしない)
@@ -111,6 +111,23 @@ BR_PICKUP = ("回答済みは、`br comments <id> --json` を (created_at, id) �
              "`br label remove <id> answered` で外す。生の並びの最後を読まない。")
 
 
+def _count(v) -> int:
+    """summary の件数。数でない値 (古いサーバーは key を返さない・真偽値・負の数) は 0。"""
+    return v if type(v) is int and v > 0 else 0
+
+
+def snooze_line(s: dict) -> str | None:
+    """保留の件数の 1 行。保留中 (判断待ちの件数に入れていない) と、期日を過ぎて判断待ちに戻ったもの (入っている)。どちらも 0 なら None。"""
+    n, m = _count(s.get("snoozed")), _count(s.get("returned"))
+    parts = []
+    if n:
+        parts.append(f"ユーザーが保留にした判断待ち {n} 件 (判断待ちの件数に入れていない。回答待ちのままなので、"
+                     "問いを取り下げたり、答えを推測して進めたりしない)")
+    if m:
+        parts.append(f"保留の期日を過ぎて判断待ちに戻ったもの {m} 件 (判断待ちの件数に入っている)")
+    return "humanq: " + "。".join(parts) + "。" if parts else None
+
+
 def _seen_path(sd: str, session_id: str) -> str:
     d = os.path.join(sd, "sessions")
     os.makedirs(d, exist_ok=True)
@@ -187,6 +204,9 @@ def session_start(inp: dict) -> None:
         if answered:
             lines.append("回答済みは、`bd comments <id>` の最後の `[humanq] 回答` (作者 user/humanq) を読んでチケットに反映し、"
                          "`bd label remove <id> answered` で外す。")
+    sn = snooze_line(s)
+    if sn:
+        lines.append(sn)
     msg = (f"humanq: 判断待ち {s.get('human', 0)} 件 / 回答済み {len(answered)} 件 → {URL}"
            if s.get("human") or answered else None)
     _out("SessionStart", "\n".join([*lines, *warn]), msg)
