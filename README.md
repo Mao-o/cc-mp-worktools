@@ -64,7 +64,7 @@ plugin 個々のバージョンは marketplace の ref とは別管理で、各 
 | `verify-plugin-release` | `gh pr create` / `gh pr ready` の前に plugin repo の完了条件 (version bump・CHANGELOG・テスト・validate・競合) を検査し、満たさなければ PR 作成を止める hook | PreToolUse (Bash) | [README](plugins/verify-plugin-release/README.md) |
 | `worktree-cwd-guard` | linked worktree で動く session が、同じ repo の別の checkout (main 側や他の worktree) を git の書き込み操作や Write/Edit で書き換えるのを止める hook | PreToolUse (Bash/Write/Edit/MultiEdit/NotebookEdit) | [README](plugins/worktree-cwd-guard/README.md) |
 | `codex-pr-review` | GitHub PR の Codex 自動レビューを待ち、指摘対応と `@codex review` での再レビューを回す手順とスクリプト | Skill (on-demand) | [README](plugins/codex-pr-review/README.md) |
-| `humanq` | beads (bd / br) の判断待ち (`human` ラベル) を端末の全プロジェクト分 localhost の画面に出し、そこでの回答を bd / br に書き戻す | SessionStart + UserPromptSubmit | [README](plugins/humanq/README.md) |
+| `humanq` | bd (beads) の判断待ち (`human` ラベル) を端末の全プロジェクト分 localhost の画面に出し、そこでの回答を bd に書き戻す | SessionStart + UserPromptSubmit | [README](plugins/humanq/README.md) |
 
 ## Privacy & data flow
 
@@ -84,7 +84,7 @@ plugin 個々のバージョンは marketplace の ref とは別管理で、各 
 | `verify-plugin-release` | **あり** (間接) | 起動する `git fetch` (origin) / `gh pr view` (GitHub API) / `claude plugin validate` 経由 | コマンドに渡すのは base branch 名・PR 番号などの固定引数のみ。リポジトリの内容は plugin 自身は送らない (`git fetch` は取得のみ) | `VERIFY_PLUGIN_RELEASE_MODE=off` (既定 `enforce`)。fetch だけ止めるなら repo の設定で `"fetch": false` |
 | `worktree-cwd-guard` | なし | — | ローカルの read-only な `git` 呼び出し (`rev-parse` / `worktree list`) のみ | 該当なし |
 | `codex-pr-review` | **あり** (GitHub API) | `gh` 経由で GitHub | 状態確認は読み取りのみ。`pr-codex-trigger.sh` は引数のサマリと `@codex review` を PR にコメントとして投稿する | Skill を呼ばなければ何もしない |
-| `humanq` | なし | — | 127.0.0.1 で待ち受ける画面のサーバーを常駐させ、登録したプロジェクトで、そのプロジェクトの CLI (`bd` か `br`) を起動して読み書きする (書き込みは画面で回答・取り消しを押したときだけ) | plugin を無効化し、サーバーは state dir の `server.json` の pid を kill する |
+| `humanq` | なし | — | 127.0.0.1 で待ち受ける画面のサーバーを常駐させ、登録したプロジェクトで `bd` を起動して読み書きする (書き込みは画面で回答・取り消しを押したときだけ) | plugin を無効化し、サーバーは state dir の `server.json` の pid を kill する |
 
 `external-ai-assist` には送信内容の除外規則 (`.env*` / `*.pem` / `*service-account*.json`
 など) がありますが、**これは plugin が渡す差分の範囲を絞るだけ**です。起動された外部 AI
