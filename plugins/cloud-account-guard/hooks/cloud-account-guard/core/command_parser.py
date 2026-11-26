@@ -10,7 +10,7 @@
 - strip_transparent_wrappers: 透過的 wrapper (`sudo`, `time`, `nohup`,
   `env`, `command`, `builtin`, `exec`, `npx`, `timeout`, `nice`, `stdbuf`,
   `setsid`, `caffeinate`, `watch`, `xargs`, `pnpm exec`, `pnpm dlx`, `pnpx`,
-  `yarn dlx`, `npm exec`, `mise exec [TOOL@VERSION...] --`, `mise x ... --`,
+  `yarn dlx`, `npm exec`, `yarn exec`, `mise exec [TOOL@VERSION...] --`, `mise x ... --`,
   `bun x`, `bunx`、CLI 名の前の `pnpm` / `yarn`) とその直後のフラグ
   (`sudo -u USER` 等) を剥がす
 - extract_candidates: 上記に加えてシェル構文プレフィックス (`(` / `{` /
@@ -38,15 +38,32 @@ _WRAPPERS_SINGLE = {
 }
 # 2 語・3 語の wrapper は語を落とすだけで、flag は読まない (option 付きは剥がさない。後ろが
 # `-` で始まる語になり、どの CLI にも一致しない)。v0.32.0 で `yarn dlx` / `npm exec` /
-# `npm exec --` を足した。起動の根拠 (docs / 実測) は docs/wrapper-env-audit.md の D16 表。
+# `npm exec --` を、v0.33.0 で `yarn exec` を足した。起動の根拠 (docs / 実測) は docs/wrapper-env-audit.md の D16 表。
 _WRAPPERS_TWO = {
-    ("pnpm", "exec"), ("pnpm", "dlx"), ("bun", "x"), ("yarn", "dlx"), ("npm", "exec"),
+    ("pnpm", "exec"), ("pnpm", "dlx"), ("bun", "x"), ("yarn", "dlx"), ("npm", "exec"), ("yarn", "exec"),
 }
 _WRAPPERS_THREE = {("npm", "exec", "--")}
 # `--` の無い `npm exec` は、後ろの `-` で始まる語を npm が自分の option として読み、CLI に渡さない
 # (npm 11: `npm exec firebase deploy --project p` の firebase は `deploy p` を受け取る)。CLI が受け取る
 # 引数を決められないので、後ろに `-` で始まる語があれば剥がさない (`--` の後ろは npm が読まない)。
-_WRAPPERS_TAKE_LATER_OPTIONS = {("npm", "exec")}
+# `yarn exec` (v0.33.0) も同じく剥がさない。yarn 1 は CLI 名の後ろの `-` で始まる語 (`--project p` は次の語も) を
+# 自分の option として読んで CLI に渡さず、`--` も落とす。yarn 2〜4 はどれもそのまま渡す (`yarn exec firebase deploy
+# --project p` の firebase は、yarn 1.22 で `deploy`、yarn 2.4 / 3.8 / 4.9 で `deploy --project p` を受け取る)。
+# `yarn exec -- <CLI>` もこの集合の判定で剥がさない。
+_WRAPPERS_TAKE_LATER_OPTIONS = {("npm", "exec"), ("yarn", "exec")}
+# 上の集合のうち、語の頭の引用符・`\`・`$` を外してから `-` を探す wrapper (v0.33.0)。シェルは `'-P'` /
+# `"--project"` / `\-P` / `$'-P'` を `-P` / `--project` にして渡すので、yarn 1 はこれも自分の option として読む
+# (yarn 1.22 で実測)。空白で分けた語で見るので、引用符の中の空白の後ろ (`"a -b"`) でも剥がさないが、`yarn exec`
+# は 0.32.1 まで剥がしていなかったので、検証から外れる形は増えない。`npm exec` は 0.32.0 の判定 (空白で分けた語の
+# 頭が `-`) のまま。
+_WRAPPERS_TAKE_LATER_QUOTED_OPTIONS = {("yarn", "exec")}
+_LEADING_QUOTING = "'\"\\$"
+# CLI 名の位置に `=` を含む語 (`AWS_PROFILE=prod`) があれば剥がさない wrapper (v0.33.0)。`yarn exec AWS_PROFILE=prod
+# aws ...` は、どの版も aws を起動しない (yarn 1 / 2 は `AWS_PROFILE=prod` という名前の CLI を探して止まり、yarn 3 / 4
+# は代入だけを実行して終わる。実測)。剥がすと hook は aws を代入の値で照合し、シェル経由の wrapper の中
+# (`watch 'yarn exec AWS_PROFILE=prod aws ... && aws ...'`) では後ろの段の aws にも代入の値を継いで、起動時の値で
+# 照合しなくなる。
+_WRAPPERS_NAME_WITHOUT_ASSIGNMENT = {("yarn", "exec")}
 # 1 語の別名 (v0.32.0)。`bunx` = `bun x`、`pnpx` = `pnpm dlx`。別名の元と同じく語を落とすだけ。
 _WRAPPERS_ALIAS = {"bunx", "pnpx"}
 # 後ろに使う tool の指定 (`node@20` / `aws-cli@2` / `python`。0 個以上) を並べてから `--` で
@@ -132,6 +149,9 @@ _WRAPPER_ENV_CLASS = {
     ("yarn", "dlx"): "passthrough",
     ("npm", "exec"): "passthrough",
     ("npm", "exec", "--"): "passthrough",
+    # v0.33.0。yarn 1.22 / 2.4 / 3.8 / 4.9 で前置きの env が後ろの CLI に届くことを実測した (yarn 4 は
+    # project の `.env.yarn` の値を上に重ねる。README の守らない範囲)
+    ("yarn", "exec"): "passthrough",
     "bunx": "passthrough",
     "pnpx": "passthrough",
     # `pnpm <CLI 名>` / `yarn <CLI 名>`
@@ -1781,9 +1801,12 @@ def _strip_one_wrapper_kind(cmd: str) -> tuple[str | None, bool]:
         return None, False
 
     if len(toks) >= 2 and (toks[0], toks[1]) in _WRAPPERS_TWO:
-        if (toks[0], toks[1]) in _WRAPPERS_TAKE_LATER_OPTIONS and any(
-            tok.startswith("-") for tok in toks[2:]
-        ):
+        pair = (toks[0], toks[1])
+        if pair in _WRAPPERS_TAKE_LATER_OPTIONS:
+            lead = _LEADING_QUOTING if pair in _WRAPPERS_TAKE_LATER_QUOTED_OPTIONS else ""
+            if any(tok.lstrip(lead).startswith("-") for tok in toks[2:]):
+                return None, False
+        if pair in _WRAPPERS_NAME_WITHOUT_ASSIGNMENT and len(toks) > 2 and "=" in toks[2]:
             return None, False
         return _drop_tokens(cmd, 2), False
 

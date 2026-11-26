@@ -46,6 +46,7 @@ D11 は「静的に解析した行頭インライン env = コマンド実行時
 | `pnpx` (v0.32.0) | 透過 (`pnpm dlx` の別名) | 収集 | 可 | 実機 (pnpm 11.25): `pnpx --help` が `pnpm dlx` の usage を出す。語を落とすだけ |
 | `yarn dlx` (v0.32.0) | 透過 (一時の環境に package を入れて bin を起動) | 収集 | 可 | [ref] yarn docs `yarn dlx`:「The binary will run within the current cwd」。開発機の yarn は 1.22 (dlx が無い) で実測できない |
 | `npm exec` / `npm exec --` (v0.32.0) | 透過 (local / global の bin か、取ってきた package の bin を起動。PATH は見ない) | 収集 | 可 | 実機 (npm 11): `AWS_PROFILE=x npm exec firebase ...` に届く。`--` の後ろはそのまま渡す。`--` が無いと CLI 名の後ろの `-` で始まる語を npm が自分の option として読む (`npm exec firebase deploy --project p` の firebase は `deploy p` を受け取る) ので、その形は剥がさない |
+| `yarn exec` (v0.33.0) | 透過 (PATH と依存の bin の CLI を、コマンドを打ったディレクトリで起動する) | 収集 | 可 | 実機 (yarn 1.22.22 / 2.4.3 / 3.8.7 / 4.9.2。下の「`yarn exec` の実測」): `AWS_PROFILE=x yarn exec ...` は後ろの CLI に届く (yarn 4 は project の `.env.yarn` の値を上に重ねる)。`-` で始まる語の無い引数はどの版もそのまま渡す。CLI 名の後ろに `-` で始まる語があると yarn 1 と yarn 2〜4 で CLI が受け取る引数が割れるので、その形 (引用符で包んだ `'-P'` も、`--` も、`yarn exec -- <CLI>` も) は剥がさない (`_WRAPPERS_TAKE_LATER_OPTIONS` / `_WRAPPERS_TAKE_LATER_QUOTED_OPTIONS`)。CLI 名の位置に `=` を含む語 (`yarn exec AWS_PROFILE=x aws ...`。どの版も aws を起動しない) も剥がさない (`_WRAPPERS_NAME_WITHOUT_ASSIGNMENT`) |
 | `pnpm <CLI 名>` / `yarn <CLI 名>` (v0.32.0) | 透過 (同名の script が無ければ CLI を起動。yarn は node_modules/.bin の bin だけを起動し、PATH の CLI は起動しない) | 収集 | 可 | 実機 (pnpm 11.25 / yarn 1.22): `AWS_PROFILE=x pnpm gh ...` / `yarn firebase ...` に届く。同名の script があればそちらが走る。yarn は package.json のあるディレクトリで起動する。yarn 1.22 の `yarn gh pr list` (依存に無い) は `Command "gh" not found` で止まる。yarn 1 は CLI 名の後ろに `--` があると、`--` より前の語を自分の option として読み、`--` を落として残りを渡す (1.22 で実測: `yarn firebase deploy -- --project p` は `deploy --project p`、`yarn firebase deploy --project p -- x` は `deploy x`) ので、後ろに `--` の語があれば剥がさない (`_BIN_RUNNERS_REWRITE_DOUBLE_DASH`)。pnpm (8〜11 で実測) は `--` も前の語もそのまま渡す。名前が `_BIN_RUNNER_NAMES` (services の CLI 名と検証の対象外の CLI 名) のときだけ剥がす |
 | `mise exec [TOOL@VERSION...] --` / `mise x [...] --` (v0.32.0) | 透過 (mise の env 注入に加えて継承 env も渡す) | 収集 | 可 | 実機 (mise 2026.9): `AWS_PROFILE=x mise exec node@20 -- gh ...` / `mise x -- gh ...` に届く。解決できない tool の名前があっても警告して後ろを起動する。`--` が無いと起動しない (`[-- COMMAND]` が無いエラー)。`--` の前に option があれば剥がさない |
 | `env` (オプション無し: `env FOO=bar cmd`) | 継承 env + 指定 `KEY=VAL` を渡す | 剥がして collect (pre/post 両方) | 可 | POSIX env |
@@ -62,6 +63,45 @@ D11 は「静的に解析した行頭インライン env = コマンド実行時
 
 (実機 probe は darwin / bash / mise 2.x / node 25 で 2026-06 に確認。詳細は本監査の
 コミットメッセージ参照。)
+
+### `yarn exec` の実測 (v0.33.0)
+
+2026-11 に darwin / node 24 で、yarn 1.22.22 と yarn 2 以降 (2.4.3 / 3.8.7 / 4.9.2。corepack で取得) を流した。
+PATH の dir と依存の bin に、受け取った引数・作業ディレクトリ・`AWS_PROFILE` を記録する偽の CLI (`x`) を置き、
+package.json のある dir (`proj`) から打った。yarn 2 以降は空の `yarn.lock` を置いて `yarn install` した後に流した。
+`[a][b]` は CLI が受け取った引数の 1 つずつ。
+
+| 打った形 | yarn 1.22 | yarn 2.4 / 3.8 / 4.9 |
+|---|---|---|
+| `yarn exec x deploy --project p` | `[deploy]` | `[deploy][--project][p]` |
+| `yarn exec x deploy -- --project p` | `[deploy][--project][p]` | `[deploy][--][--project][p]` |
+| `yarn exec x deploy --project p -- x` | `[deploy][x]` | `[deploy][--project][p][--][x]` |
+| `yarn exec -- x deploy --project p` | `[deploy][--project][p]` | 同じ |
+| `yarn exec x -h` | 引数なし (`-h` を yarn が読む) | `[-h]` |
+| `yarn exec x --version` | x を起動しない (yarn の版を出す) | `[--version]` |
+| `yarn exec x deploy '-P' p` / `deploy --project=p` / `-- deploy` / `deploy --` | `-` で始まる語が消える (`'-P' p` は次の `p` も消え、4 つとも `[deploy]`) | そのまま |
+| `yarn exec x pr list` / `help` / `version` / `run exec add` | そのまま | そのまま |
+| `yarn exec x deploy 'a;b'` / `'$HOME'` / `'*'` / `''` / `"a -- b"` / `'~'` / `'{a,b}'` / `'2>&1'` / `'#x'` / `` '`echo hi`' `` / `-` | そのまま (展開・分割しない) | そのまま |
+| `yarn exec 'x' deploy` | `[deploy]` | 同じ |
+| `yarn exec 'x pr list'` / `yarn exec x\ a b` | 「Couldn't find the binary」で止まる | 2.4 は止まる。3.8 / 4.9 は CLI 名の語をシェルのコードとして読み、`x [pr][list]` / `x [a][b]` |
+| `yarn exec 'x one;x two' y` / `yarn exec x\;x y` | 止まる | 2.4 は止まる。3.8 / 4.9 は 2 回起動する (`x [one]` と `x [two][y]` / `x` と `x [y]`) |
+| `yarn exec 'AWS_PROFILE=zz x' deploy` | 止まる | 2.4 は止まる。3.8 / 4.9 は `AWS_PROFILE=zz` で x を起動する |
+| `yarn exec AWS_PROFILE=zz x deploy` | 止まる | 2.4 は止まる。3.8 / 4.9 は代入だけを実行して x を起動しない |
+| `AWS_PROFILE=zz yarn exec x deploy` | `AWS_PROFILE=zz` で起動 | 同じ。4.9 は project に `.env.yarn` (`AWS_PROFILE=fromfile`) があると、前置きの代入より `.env.yarn` の値が勝つ (`fromfile`)。2.4 / 3.8 は `.env.yarn` を読まない |
+| `proj/sub` で `yarn exec x deploy` | 作業ディレクトリは `proj/sub` | 同じ |
+| package.json の外で `yarn exec x deploy` | 打ったディレクトリで起動 | project が無いので止まる |
+| `yarn exec cd sub` | 子のプロセスで走る (打ったシェルは移動しない) | 同じ |
+
+hook の扱い: `-` で始まる語の無い形 (表の「そのまま」の行) だけを剥がす。版で CLI が受け取る引数が割れる形
+(`-` で始まる語を CLI 名の後ろに置いた形。語の頭の引用符・`\`・`$` を外して探す) は剥がさない。CLI 名の語に
+空白やシェルの記号を含む形 (yarn 3 / 4 だけが実行する) は、hook がその語を CLI 名と読まないので候補にならない。
+CLI 名の位置に `=` を含む語を置いた形 (`yarn exec AWS_PROFILE=zz x ...`) は、どの版も x を起動しないので剥がさない
+(`_WRAPPERS_NAME_WITHOUT_ASSIGNMENT`。剥がすと `npx AWS_PROFILE=zz x ...` と同じく x を代入の値で照合し、シェル経由の
+wrapper の中では後ろの段の CLI にも代入の値を継ぐ)。yarn 4 の `.env.yarn` は読まない (README の守らない範囲)。
+
+参考: `yarn <CLI 名>` (依存の bin) も同じ方法で測ると、作業ディレクトリは yarn 1.22 が package.json のある
+ディレクトリ (`proj/sub` から打っても `proj`)、yarn 2.4 / 3.8 / 4.9 は打ったディレクトリ (`proj/sub`) だった。
+4.9 は `.env.yarn` の値を `yarn <CLI 名>` の CLI にも渡す (前置きの代入より優先)。
 
 ### v0.9.0 追加分の根拠と未確認事項
 
@@ -90,7 +130,7 @@ option 表を取り違えた場合の劣化方向は**片側だけ**である点
 
 `time` / `nohup` / `command` / `builtin` / `exec` / `npx` / `pnpm exec` /
 `pnpm dlx` / `mise exec --` / `bun x` (v0.32.0 から `bunx` / `pnpx` / `yarn dlx` / `npm exec` /
-`mise x` / tool の指定つきの `mise exec` / CLI 名の前の `pnpm` と `yarn` も) は継承 env を素通すため、pre-wrapper の
+`mise x` / tool の指定つきの `mise exec` / CLI 名の前の `pnpm` と `yarn` も、v0.33.0 から `yarn exec` も) は継承 env を素通すため、pre-wrapper の
 インライン env を収集して検証 subprocess に渡す (D11 本来の意図どおり)。
 `_WRAPPER_ENV_CLASS` で `"passthrough"` と宣言する。
 

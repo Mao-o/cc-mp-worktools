@@ -23,6 +23,17 @@ CLI 名の前の `pnpm` / `yarn` (`pnpm firebase deploy`) を透過 wrapper と�
   `mise exec node -- gh ...` は後ろの gh を起動する (tool の解決に失敗した名前があっても警告して起動する)。
   `--` の無い `mise exec node@20 gh ...` は「[-- COMMAND] が無い」エラーで起動しない
 - どの形も、前置きの `AWS_PROFILE=...` は後ろの CLI に届く
+
+`yarn exec` (v0.33.0。2026-11 に yarn 1.22.22 / 2.4.3 / 3.8.7 / 4.9.2 で実測。docs/wrapper-env-audit.md の D16 表):
+
+- `yarn exec <CLI> <引数>` は PATH (と依存の bin) の CLI を、コマンドを打ったディレクトリで起動する。
+  `-` で始まる語の無い引数は、どの版でもそのまま渡す (`'a;b'` / `'$HOME'` / `'*'` / `''` / `"a -- b"` も)。
+  前置きの `AWS_PROFILE=...` は後ろの CLI に届く (yarn 4 は project の `.env.yarn` の値を上に重ねる)
+- CLI 名の後ろに `-` で始まる語があると、yarn 1 はその語 (`--project p` は次の語も) を自分の option として読んで
+  CLI に渡さず、`--` も落とす。yarn 2〜4 はそのまま渡す。版で CLI が受け取る引数が割れるので、この形は剥がさない
+- yarn 3 / 4 は CLI 名の語をシェルのコードとして読む (`yarn exec 'gh pr create'` は gh を起動し、
+  `yarn exec gh\\;aws ...` は gh と aws を起動する)。yarn 1 / 2 はその名前の CLI を探して止まる
+- CLI 名の位置の代入 (`yarn exec AWS_PROFILE=prod aws ...`) は、どの版も aws を起動しないので剥がさない
 """
 from __future__ import annotations
 
@@ -74,10 +85,14 @@ NEW_FORMS = {
     "mise exec node --": "mise exec --",
     "pnpm": "npx",
     "yarn": "npx",
+    "yarn exec": "npx",
 }
 
-# 検証の対象の CLI ごとの本体 (`-` で始まる語を含まない。`--` の無い `npm exec` は、後ろに option が
-# あると剥がさない)
+# CLI 名の後ろに `-` で始まる語があると剥がさない形 (`_WRAPPERS_TAKE_LATER_OPTIONS`)
+TAKE_LATER_OPTIONS = ("npm exec", "yarn exec")
+
+# 検証の対象の CLI ごとの本体 (`-` で始まる語を含まない。`--` の無い `npm exec` と `yarn exec` は、後ろに
+# option があると剥がさない)
 BODIES = {
     "github": "gh pr create",
     "firebase": "firebase deploy",
@@ -165,6 +180,16 @@ class TestStripForms(unittest.TestCase):
         ("pnpm firebase deploy '--' --project p", "firebase deploy '--' --project p"),
         # 引用符の中の `--` は 1 語の一部で、yarn は CLI にそのまま渡す (yarn 1.22 で実測)
         ('yarn firebase deploy -m "a -- b" --project p', 'firebase deploy -m "a -- b" --project p'),
+        # `yarn exec` (v0.33.0)。`-` で始まる語の無い引数は、yarn 1.22 / 2.4 / 3.8 / 4.9 のどれもそのまま渡す
+        ("yarn exec gh pr create", "gh pr create"),
+        ("yarn exec firebase deploy", "firebase deploy"),
+        ("yarn exec gcloud run deploy svc 'a;b' x=1 '$HOME'", "gcloud run deploy svc 'a;b' x=1 '$HOME'"),
+        ('yarn exec kubectl apply "a b" \'c  d\' 2>&1', 'kubectl apply "a b" \'c  d\' 2>&1'),
+        ("yarn exec ./node_modules/.bin/firebase deploy", "firebase deploy"),
+        ("yarn  exec  gh pr create", "gh pr create"),
+        ("sudo yarn exec gh pr create", "gh pr create"),
+        ("yarn exec npx gh pr create", "gh pr create"),
+        ("yarn exec yarn exec aws s3 rm s3://b/k", "aws s3 rm s3://b/k"),
     )
     # 剥がさない形 (option 付き・`--` の無い mise・CLI 名でない名前・`--` の無い npm exec の後ろの option)
     KEPT = (
@@ -230,6 +255,168 @@ class TestStripForms(unittest.TestCase):
         self.assertEqual(targets[0][3], {"project": "p"})
 
 
+class TestYarnExec(unittest.TestCase):
+    """`yarn exec` (v0.33.0)。実測した形を 1 つずつ固定する (yarn 1.22.22 / 2.4.3 / 3.8.7 / 4.9.2)。
+
+    剥がさない形は、剥がした結果が元のままであることと、候補・知らせが空であることを見る。どの形にも
+    `-` を消した対照を並べ、対照は候補になる (空どうしの一致で通っていない) ことを見る。
+    """
+
+    # (形, `-` で始まる語を消した対照, 対照の候補, 実測: yarn 1.22 の CLI が受け取る引数 / yarn 2.4〜4.9 の引数)
+    MEASURED_OPTION_FORMS = (
+        ("yarn exec firebase deploy --project p", "yarn exec firebase deploy p", "firebase deploy p",
+         "deploy / deploy --project p"),
+        ("yarn exec firebase deploy -- --project p", "yarn exec firebase deploy p", "firebase deploy p",
+         "deploy --project p / deploy -- --project p"),
+        ("yarn exec firebase deploy --project p -- x", "yarn exec firebase deploy p x", "firebase deploy p x",
+         "deploy x / deploy --project p -- x"),
+        ("yarn exec -- firebase deploy --project p", "yarn exec firebase deploy p", "firebase deploy p",
+         "deploy --project p / deploy --project p"),
+        ("yarn exec gh -h", "yarn exec gh pr create", "gh pr create",
+         "(引数なし) / -h"),
+    )
+
+    # 語の頭の引用符・`\`・`$` を外すと `-` で始まる語 (`_WRAPPERS_TAKE_LATER_QUOTED_OPTIONS`)。シェルが
+    # 外して渡すので、yarn 1 は option として読む (`yarn exec x deploy '-P' p` の x は yarn 1.22 で `deploy` を
+    # 受け取る)
+    QUOTED_OPTION_FORMS = (
+        ("yarn exec firebase deploy '-P' p", "yarn exec firebase deploy 'P' p"),
+        ('yarn exec firebase deploy "--project" p', 'yarn exec firebase deploy "project" p'),
+        ("yarn exec firebase deploy \\-P p", "yarn exec firebase deploy \\P p"),
+        ("yarn exec firebase deploy $'-P' p", "yarn exec firebase deploy $'P' p"),
+        ("yarn exec firebase deploy ''-P p", "yarn exec firebase deploy ''P p"),
+        ("yarn exec '--' firebase deploy", "yarn exec firebase deploy"),
+        ('yarn exec "-" firebase deploy', "yarn exec firebase deploy"),
+    )
+
+    def _assert_kept(self, command):
+        self.assertEqual(strip_transparent_wrappers(command), command)
+        self.assertEqual(_targets(command), [])
+        self.assertEqual(unverified.detect(c for c, _e in extract_candidates(command)), [])
+
+    def _assert_candidate(self, command, cand):
+        targets = _targets(command)
+        self.assertEqual(len(targets), 1, targets)
+        self.assertEqual(targets[0][1], [cand])
+
+    def test_measured_option_forms_are_not_candidates(self):
+        for command, control, cand, _measured in self.MEASURED_OPTION_FORMS:
+            with self.subTest(command=command):
+                self._assert_kept(command)
+            with self.subTest(control=control):
+                self._assert_candidate(control, cand)
+
+    def test_quoted_option_words_are_not_candidates(self):
+        for command, control in self.QUOTED_OPTION_FORMS:
+            with self.subTest(command=command):
+                self._assert_kept(command)
+            with self.subTest(control=control):
+                self.assertEqual(len(_targets(control)), 1, _targets(control))
+
+    def test_npm_exec_keeps_the_unquoted_check(self):
+        """語の頭の引用符を外して探すのは `yarn exec` だけ。`npm exec` は 0.32.0 の判定 (空白で分けた語の頭が `-`)
+        のままで、引用符で包んだ `'-R'` は剥がして照合する (0.32.1 と同じ。変えると照合していた形が検証から外れる)。"""
+        command = "npm exec gh pr create '-R' o/r"
+        self.assertEqual(strip_transparent_wrappers(command), "gh pr create '-R' o/r")
+        self.assertEqual(strip_transparent_wrappers("yarn exec gh pr create '-R' o/r"), "yarn exec gh pr create '-R' o/r")
+
+    def test_dash_inside_quotes_after_a_space_is_kept(self):
+        """引用符の中の空白の後ろの `-` (`"a -b"` / `"a -- b"`) でも剥がさない (空白で分けた語の頭で探すため。
+        yarn はこの語を 1 つの引数としてそのまま渡す (実測) ので照合はできるが、検証が新しく外れる形は無い:
+        0.32.1 までは `yarn exec` を剥がしていなかった)。"""
+        for command in (
+            'yarn exec gcloud run deploy svc "a -b"',
+            "yarn exec gcloud run deploy svc 'x --y'",
+            'yarn exec kubectl apply "a -- b"',
+        ):
+            with self.subTest(command=command):
+                self._assert_kept(command)
+
+    def test_wrangler_with_option_is_not_notified(self):
+        """検証の対象外の CLI の知らせも同じ分解を使う。option 付きは剥がさないので知らせない。"""
+        self.assertEqual(unverified.detect(c for c, _e in extract_candidates("yarn exec wrangler deploy")), ["wrangler"])
+        for command in ("yarn exec wrangler deploy --env production", "yarn exec wrangler deploy '-e' x"):
+            with self.subTest(command=command):
+                self._assert_kept(command)
+
+    def test_cli_name_read_as_shell_code_is_not_a_candidate(self):
+        """yarn 3 / 4 は CLI 名の語をシェルのコードとして読み、yarn 1 / 2 はその名前の CLI を探して止まる (実測)。
+        版で起動するものが割れる形は候補にしない (README の守らない範囲)。"""
+        for command in (
+            "yarn exec 'gh pr create && aws s3 rm s3://b/k'",
+            "yarn exec gh\\;aws s3 rm s3://b/k",
+            "yarn exec 'AWS_PROFILE=prod aws' s3 rm s3://b/k",
+            "yarn exec aws\\ s3 rm s3://b/k",
+            "yarn exec 'aws s3 rm' s3://b/k",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(_targets(command), [])
+
+    def test_assignment_in_the_cli_name_position_is_not_stripped(self):
+        """CLI 名の位置の代入 (`yarn exec AWS_PROFILE=prod aws ...`) は、どの版でも aws を起動しない (yarn 1 / 2 は
+        `AWS_PROFILE=prod` という CLI を探して止まり、yarn 3 / 4 は代入だけを実行して終わる。実測) ので剥がさない。
+        剥がすと、シェル経由の wrapper の中で後ろの段の aws を代入の値 (prod) で照合する (実際は起動時の値で走る)。"""
+        for command in (
+            "yarn exec AWS_PROFILE=prod aws s3 rm s3://b/k",
+            "yarn exec A=1 gh pr create",
+            "yarn exec a[1]=x aws s3 rm s3://b/k",
+        ):
+            with self.subTest(command=command):
+                self._assert_kept(command)
+        # 外側の `yarn exec` は剥がし、内側で止まる
+        command = "yarn exec yarn exec AWS_PROFILE=prod aws s3 rm s3://b/k"
+        self.assertEqual(strip_transparent_wrappers(command), "yarn exec AWS_PROFILE=prod aws s3 rm s3://b/k")
+        self.assertEqual(_targets(command), [])
+        command = "watch 'yarn exec AWS_PROFILE=prod aws s3 rm s3://b/k && aws s3 rm s3://b/k'"
+        targets = _targets(command)
+        self.assertEqual(len(targets), 1, targets)
+        self.assertEqual(targets[0][:3], ("aws", ["aws s3 rm s3://b/k"], {}))
+        # `env` の後ろの代入は env が子に渡す (剥がして照合する)
+        targets = _targets("yarn exec env AWS_PROFILE=prod aws s3 rm s3://b/k")
+        self.assertEqual(len(targets), 1, targets)
+        self.assertEqual(targets[0][:3], ("aws", ["aws s3 rm s3://b/k"], {"AWS_PROFILE": "prod"}))
+
+
+class TestYarnExecDispatch(unittest.TestCase):
+    """`yarn exec` の判定は、剥がした形を直接打ったときと同じ。option 付きの形は検証しない (止めない)。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.project = self.tmp / "project"
+        cfg = self.project / ".claude" / "cloud-account-guard"
+        cfg.mkdir(parents=True)
+        (cfg / "accounts.local.json").write_text('{"firebase": "proj", "aws": "123456789012"}', encoding="utf-8")
+        (self.tmp / "cache").mkdir()
+        patcher = mock.patch.dict(
+            os.environ, {"CLAUDE_PROJECT_DIR": str(self.project), "TMPDIR": str(self.tmp / "cache")}
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _decision(self, command: str) -> str:
+        try:
+            with mock.patch("services.firebase.verify", return_value="不一致"), mock.patch(
+                "services.aws.verify", return_value="不一致"
+            ), mock.patch("subprocess.run", side_effect=AssertionError("CLI を呼ばない")):
+                out = dispatch(command, str(self.project))
+        except Exception as e:  # noqa: BLE001
+            self.fail(f"dispatch が例外を投げた: {type(e).__name__}: {e}")
+        if out is None:
+            return "allow"
+        self.assertIsInstance(out, dict)
+        return out.get("hookSpecificOutput", {}).get("permissionDecision", "context")
+
+    def test_mismatch(self):
+        for body in ("firebase deploy", "aws s3 rm s3://b/k"):
+            with self.subTest(body=body):
+                self.assertEqual(self._decision(body), "deny")
+                self.assertEqual(self._decision(f"yarn exec {body}"), "deny")
+        for command, *_rest in TestYarnExec.MEASURED_OPTION_FORMS[:4]:
+            with self.subTest(command=command):
+                self.assertEqual(self._decision(command), "allow")
+
+
 class TestEveryServiceBecomesACandidate(unittest.TestCase):
     def test_new_form_times_service(self):
         """足した形ごと × service ごとに、後ろの CLI が write の候補になる (0.31.1 は候補が空)。"""
@@ -266,9 +453,11 @@ class TestEveryServiceBecomesACandidate(unittest.TestCase):
     def test_context_option_after_the_cli(self):
         """CLI 名の後ろの option は CLI にそのまま渡る (実測) ので、context の option を照合に使う。
 
-        `--` の無い `npm exec` だけは npm が option を読むので剥がさない (TestStripForms.KEPT)。
+        `--` の無い `npm exec` と `yarn exec` は npm / yarn 1 が option を読むので剥がさない (TestStripForms.KEPT /
+        TestYarnExec)。
         """
-        forms = [f for f in NEW_FORMS if f != "npm exec"] + ["pnpm exec", "pnpm dlx", "bun x", "npx"]
+        forms = [f for f in NEW_FORMS if f not in TAKE_LATER_OPTIONS] + ["pnpm exec", "pnpm dlx", "bun x", "npx"]
+        self.assertNotIn("yarn exec", forms)
         for form in forms:
             command = f"{form} firebase deploy --project p"
             with self.subTest(command=command):
@@ -325,7 +514,8 @@ class TestSameReadingAsExistingWrapper(unittest.TestCase):
 
     def test_external_cd_does_not_move_the_shell(self):
         """wrapper の後ろの `cd` は外部プロセスで走り、シェルを移動させない (`npx cd sub` と同じ)。"""
-        for form in ("bunx", "pnpx", "yarn dlx", "npm exec", "npm exec --", "mise x --", "mise exec node@20 --"):
+        for form in ("bunx", "pnpx", "yarn dlx", "npm exec", "npm exec --", "mise x --", "mise exec node@20 --",
+                     "yarn exec"):
             command = f"{form} cd sub"
             with self.subTest(command=command):
                 self.assertEqual(command_parser.external_chdir_candidates(command), frozenset({"cd sub"}))

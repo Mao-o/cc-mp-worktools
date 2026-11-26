@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.33.0
+
+### Added: `yarn exec` で起動したクラウド CLI も検証する
+
+- `yarn exec <CLI> <引数>` を透過 wrapper として剥がし、後ろのクラウド CLI を検証の候補にする。0.32.1 までは
+  剥がさず、`yarn exec gh pr create` などは候補にならずに通っていた (README の守らない範囲にも載っていなかった)。
+  `yarn <CLI 名>` は依存の bin だけを起動するが、`yarn exec` は PATH の CLI も起動する
+- 起動の形を yarn 1.22.22 / 2.4.3 / 3.8.7 / 4.9.2 で実測した (docs/wrapper-env-audit.md の「`yarn exec` の実測」)。
+  どの版も CLI を打ったディレクトリで起動し、前置きの env は後ろの CLI に届き、`-` で始まる語の無い引数はそのまま
+  渡す (`'a;b'` / `'$HOME'` / `'*'` / `"a -- b"` も)
+- CLI 名の後ろに `-` で始まる語がある形は剥がさない。yarn 1 はその語 (`--project p` は次の語も) を自分の option
+  として読んで CLI に渡さず、`--` も落とす。yarn 2 以降はそのまま渡すので、CLI が受け取る引数を決められない
+  (`yarn exec firebase deploy --project p` の firebase は、yarn 1 で `deploy`、yarn 2 以降で `deploy --project p`)。
+  `yarn exec -- <CLI>` と、引用符や `\` で包んだ語 (`'-P'` / `"--project"` / `\-P` / `$'-P'`。シェルが外して渡すので
+  yarn 1 は option と読む) も同じ。`npm exec` の判定 (空白で分けた語の頭が `-`) は変えていない
+- CLI 名の位置に `=` を含む語を置いた形 (`yarn exec AWS_PROFILE=prod aws ...`) は剥がさない。どの版も aws を
+  起動しない (yarn 1 / 2 はその名前の CLI を探して止まり、yarn 3 / 4 は代入だけを実行する)。剥がすと、シェル経由の
+  wrapper の中 (`watch 'yarn exec AWS_PROFILE=prod aws ... && aws ...'`) で後ろの段の aws を代入の値で照合する
+- README の守らない範囲に足した: 上の option 付きの形、yarn 3 以降が CLI 名の語をシェルのコードとして実行する形
+  (`yarn exec 'gh pr create && aws ...'` / `yarn exec gh\;aws ...`。yarn 1 / 2 は止まる。hook はその語を CLI 名と
+  読まないので候補にならない)、yarn 4 の project の `.env.yarn` の env (yarn 4 は `yarn exec` / `yarn <CLI 名>` の
+  CLI にその値を渡し、前置きの代入より優先する。hook は読まない)
+- 検証の対象外の CLI の知らせ (0.31.0) も同じ分解を使うので、`yarn exec wrangler` も知らせる
+- 判定が変わるのは `yarn exec` を含むコマンドだけで、剥がした形の読みは `npx` で起動したときと同じ。0.32.1 で
+  止めていたコマンドを通すのは次の 2 種類だけで、どちらも `npx` で起動したときと同じ読み:
+  - gh の token の env に値を読めない代入をしたセグメント (README の守らない範囲) の中で、gh を `yarn exec` で
+    起動したとき (`GH_TOKEN=$(cmd) watch 'yarn exec gh pr create && aws s3 rm ...'` /
+    `GH_TOKEN=$(cmd) yarn exec gh pr create <<EOF && X=$(cmd) aws s3 rm ...` + 改行 + 本文 + `EOF`)。セグメントごと
+    0.29.9 と同じく読むので、同じセグメントの aws などが候補にならない (直接の `gh` / `npx gh` と同じ。0.32.0 に
+    書いた種類)
+  - シェル経由の wrapper の中の最初の段で、`yarn exec` の後ろに既存の wrapper と代入を置いたとき
+    (`watch 'yarn exec env AWS_PROFILE=prod true && aws s3 rm ...'`)。後ろの段の aws を代入の値で照合する
+    (README の守らない範囲の「最初の段の前置きの代入を中の全段に効くと読む」と同じ読み)
+- 比べた入力: 足した形と既存の wrapper の前置き・本体 (option・`--` の前後・引用符で包んだ `-` の語を含む)・文脈
+  (前置きの代入・gh の token の印・シェル経由の wrapper・heredoc の行) を組んだ 57,904 件。0.32.1 から読みが
+  変わった入力は、すべて `yarn exec` を `npx` に置き換えた入力と同じ読みになり、`-` で始まる語を CLI 名の後ろに
+  置いた形の読みは 1 件も変わっていない。照合の世界 (全 service 不一致・固定あり・sub だけの `firebase use`・
+  起動 repo の外・自動切替) で止めていたのに通すのは 1 つ目の種類だけ (全 service 不一致・sub だけの記録・自動切替の
+  世界で各 156 件。固定あり・起動 repo の外は 0 件)。aws の照合が代入の値で変わる世界では、1 つ目の種類 222 件と
+  2 つ目の種類 15 件
+- テストを追加: `test_package_runner_wrappers.py` (`TestYarnExec` / `TestYarnExecDispatch` と、既存の表に
+  `yarn exec` の行)、`test_command_parser.py` (env の伝播の表)
+
 ## 0.32.1
 
 ### Changed: deny 文面に値を示すかの判定を、禁止リストから許可リストに変える (表示だけ。判定は変更なし)

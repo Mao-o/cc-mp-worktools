@@ -543,6 +543,8 @@ class TestWrapperEnvPropagationContract(unittest.TestCase):
         ("AWS_PROFILE=prod mise x -- aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
         ("AWS_PROFILE=prod pnpm aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
         ("AWS_PROFILE=prod yarn aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        # v0.33.0 (yarn 1.22 / 2.4 / 3.8 / 4.9 で実測)
+        ("AWS_PROFILE=prod yarn exec aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
         # v0.9.0 追加の実行ラッパ。いずれも継承 env をそのまま子へ渡す。
         ("AWS_PROFILE=prod timeout 30 aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
         ("AWS_PROFILE=prod nice -n 5 aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
