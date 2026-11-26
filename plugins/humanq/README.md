@@ -1,6 +1,6 @@
 # humanq — 判断待ちの画面
 
-bd (beads) のチケットのうち、ユーザーの判断が要るもの (`human` ラベル) を、この端末の全プロジェクト分まとめて `http://127.0.0.1:8765/` の画面に出す。ユーザーは手が空いたときに画面を開いて答えるだけでよく、エージェントは問いを bd に書いておくだけで、会話を止めずに先へ進める。
+beads (bd / br) のチケットのうち、ユーザーの判断が要るもの (`human` ラベル) を、この端末の全プロジェクト分まとめて `http://127.0.0.1:8765/` の画面に出す。ユーザーは手が空いたときに画面を開いて答えるだけでよく、エージェントは問いをチケットに書いておくだけで、会話を止めずに先へ進める。
 
 ## 目的と限界
 
@@ -16,7 +16,7 @@ bd (beads) のチケットのうち、ユーザーの判断が要るもの (`hum
 /plugin install humanq@mao-worktools
 ```
 
-bd を使っているプロジェクト (cwd から上に `.beads/` がある) で Claude Code を起動すると、画面のサーバーが立ち上がる。ブラウザで `http://127.0.0.1:8765/` を開いておく。
+beads (bd / br) を使っているプロジェクト (cwd から上に `.beads/` がある) で Claude Code を起動すると、画面のサーバーが立ち上がる。ブラウザで `http://127.0.0.1:8765/` を開いておく。
 
 ## 動き
 
@@ -34,7 +34,7 @@ bd を使っているプロジェクト (cwd から上に `.beads/` がある) �
 - ポートは `HUMANQ_PORT` で変えられる (hook の env)
 - プロジェクトごとに、`.beads/` の中のファイルの印で bd か br かを決める (CLI は打たない)。br の印は `.beads/.gitignore` の `.br_history` か `fsqlite` を含む行・`.br_history/`・`*-fsqlite-ns-*`・`.br-db-*.lock`、bd の印は `metadata.json` の `database` か `backend` が `dolt`・`embeddeddolt/`。br の印だけなら br、bd の印だけなら bd、印が無ければ bd。両方ある・どちらの印も無く SQLite の形 (`metadata.json` の `database` が `.db` で終わる) のときは決められないので、どの CLI も打たず、画面に理由を出す
 - hook の env `HUMANQ_BEADS_CLI` (`bd` / `br` / `auto`、未設定は `auto`) で決め方を指定できる。`HUMANQ_PORT` と同じくプロジェクトの settings の `env` でプロジェクトごとに決められる。指定に反する印があれば決められない扱い。`bd` / `br` / `auto` 以外の値は `auto` として扱い、SessionStart で 1 行だけ警告する
-- br のプロジェクトも、bd と同じに画面で回答・取り消しができる (書き込みの形・失敗の段階・送り直し・署名の照合は下の「回答の形」のとおりで、bd と同じ)。hook は件数だけを伝え、bd のコマンドを含む案内は出さない
+- br のプロジェクトも、bd と同じに画面で回答・取り消しができる (書き込みの形・失敗の段階・送り直し・署名の照合は下の「回答の形」のとおりで、bd と同じ)。hook は件数に加えて、問いの置き方と回答の拾い方を br のコマンドで案内し、bd のコマンドは出さない。どちらか決められないプロジェクト (unknown・conflict) では、件数は出さず、読めない理由と設定の案内だけを出す
   - 読みは 1 プロジェクトあたり 3 プロセス: `br list -l human` と `br list -l answered` (どちらも `--limit 0 --json`) と、両方の ID をまとめた `br show <id...> --json`。0 件なら `show` は打たない。`show` は ID が 1 つでも無いと全体が失敗する (exit 3) ので、そのときは一覧から 1 回だけ読み直す
   - 回答は 5 プロセス: `br list -l human` → そのチケットの `br show <id> --json` (問いの署名の照合と、送り直しの判定のコメントを 1 回で読む) → `br --actor user/humanq comments add <id> -f <file>` → `br --actor user/humanq label add <id> answered` → `br --actor user/humanq label remove <id> human`。取り消しは `br list -l answered` → `br show <id> --json` → `comments add` → `label add <id> human` → `label remove <id> answered`。br の `label` は、付いている (`exists`) か付いていない (`not_found`) ときも exit 0 で終わるので、成功とみなす
   - 一覧は status で絞らない (`-s` を付けない)。br の `list` の既定は `closed` と `tombstone` (`br delete` したもの) だけを除くので、利用者が `br list -l human` で見る判断待ちと同じものが画面と hook の件数に出る: `deferred`・`draft`・`pinned` と、br が宣言なしで受け付ける独自の status (`review` など) のチケットも出る。回答済み (`answered`) の側も同じ。bd の回答済みの読みは今までどおり 4 つの status で絞る (「回答を拾う」の節)
@@ -46,7 +46,7 @@ bd を使っているプロジェクト (cwd から上に `.beads/` がある) �
 
 ## 問いの書き方 (`human` を付けるときは必ず書く)
 
-metadata の `humanq` に置く。画面はこれを読んで、問い・背景・選択肢のボタンを出す。無いチケットは「問いが未整理」として本文だけが出て、自由記述でしか答えられない。
+bd ではチケットの metadata の `humanq`、br では `agent_context` の top-level key `humanq` に置く (JSON の形は共通)。画面はこれを読んで、問い・背景・選択肢のボタンを出す。無いチケットは「問いが未整理」として本文だけが出て、自由記述でしか答えられない。
 
 ```json
 {"humanq": {
@@ -67,7 +67,9 @@ metadata の `humanq` に置く。画面はこれを読んで、問い・背景�
 - `recommended` は推奨の key。推奨が無ければ書かない
 - `label` は 15 字程度。下の深さのラベルを付けるときは、ラベルも字数に含める (`【見送り】` だけで 5 字使う)
 - 文中の `` `...` `` はコード表記になる
-- 入れ方: JSON をファイルに書いて `bd update <id> --metadata @<file>`。`--metadata` は metadata 全体を置き換えるので、ほかのキーがあれば一緒に書く。`--set-metadata` は値を文字列として入れてしまうので使わない
+- 入れ方 (bd): JSON をファイルに書いて `bd update <id> --metadata @<file>`。`--metadata` は metadata 全体を置き換えるので、ほかのキーがあれば一緒に書く。`--set-metadata` は値を文字列として入れてしまうので使わない
+- 入れ方 (br): `br show <id> --json` で今の `agent_context` を読み、ほかの key を残したまま `humanq` を足した JSON をファイルに書いて `br update <id> --agent-context @<file>`。`--agent-context` も値を丸ごと置き換える。今の値の半分未満に短くなる・空になる書き換えは `--force` が要る (残すべき key を落としていないか確かめてから付ける)
+- br で `.beads/config.yaml` の `inherited_context.enabled` を有効にしていると、`agent_context` は子のチケットの `show` / claim にも出るので、問いが子の作業に混ざる (既定の config にこの key は無く、無効)
 
 ### 選択肢の深さのラベル
 
@@ -101,11 +103,17 @@ metadata の `humanq` に置く。画面はこれを読んで、問い・背景�
 
 ## 回答を拾う
 
-`bd list --status open,in_progress,blocked,deferred --label answered --flat -n 0` の各チケットについて (`--status` を `open` だけにしない: 担当中 (`in_progress`) のチケットに問うのは普通で、`open` だけにすると回答したチケットが拾えない。画面も同じ条件で読む):
+手順は bd と br で共通で、コマンドだけが違う。`answered` ラベルの付いた、終わっていない (`open`・`in_progress`・`blocked`・`deferred`) チケットの各件について (status を `open` だけにしない: 担当中 (`in_progress`) のチケットに問うのは普通で、`open` だけにすると回答したチケットが拾えない。画面も同じ条件で読む):
 
-1. `bd comments <id>` の最後の `[humanq] 回答` を読む (その後に `[humanq] 取り消し` があれば飛ばす)
+| | bd | br |
+|---|---|---|
+| 一覧 | `bd list --status open,in_progress,blocked,deferred --label answered --flat -n 0` | `br list -l answered -s open -s in_progress -s blocked -s deferred --json` (`-s` は繰り返す。カンマ区切りは通らない。結果の `issues` の各件) |
+| コメントを読む | `bd comments <id>` | `br comments <id> --json` |
+| ラベルを外す | `bd label remove <id> answered` | `br label remove <id> answered` |
+
+1. コメントの最後の `[humanq] 回答` を読む (その後に `[humanq] 取り消し` があれば飛ばす)。**br ではコメントの並びが決まっていない** (JSONL から取り込み直すと古いコメントが後ろに来ることがある) ので、`br comments <id> --json` の件を `(created_at, id)` の昇順に並べ直してから、最後の `[humanq]` コメント (作者 `user/humanq`) を読む。生の並びの最後を読むと、古い回答を拾う
 2. 回答に従ってチケットを直す (DoD・優先度・担当の書き換え / close など)
-3. `bd label remove <id> answered` (`human` も付いていたら、それも外す)
+3. `answered` を外す (`human` も付いていたら、それも外す)
 4. 回答が読めない・決めきれないときは、問いを書き直して `answered` を `human` に戻す (問い直しも画面に出る)。**問い直すときは、何を変えたかをコメントに書く** (コメントが無いと、最後のコメントが前の回答のままなので、同じ選択肢を 10 分以内に押された新しい回答が「送り直し」とみなされて記録されない)
 
 作業を選ぶ一覧からは `answered` も除くこと。反映する前に作業に入らないため。

@@ -288,7 +288,8 @@ class BrRead(unittest.TestCase):
         self.forget(hook, "s-br", [a2])
         o = self.hook_out(self.run_hook(hook, "prompt_submit", root, "s-br"))
         ctx = o["hookSpecificOutput"]["additionalContext"]
-        self.assertEqual(ctx, f"humanq: 前に伝えた後で、answered ラベルの付いたチケットが 1 件増えた: {a3}。")
+        self.assertTrue(ctx.startswith(f"humanq: 前に伝えた後で、answered ラベルの付いたチケットが 1 件増えた: {a3}。"), ctx)
+        self.assertIn("(created_at, id) の昇順に並べ直し", ctx)
         self.assertEqual(self.run_hook(hook, "prompt_submit", root, "s-br"), "", "増えたものが無いのに知らせた")
         self.assertEqual({c["prog"] for c in self.calls() if c["cwd"] == root or root in c["argv"]}, {"br"})
 

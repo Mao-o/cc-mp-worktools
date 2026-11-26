@@ -160,7 +160,7 @@
       "name": "humanq",
       "displayName": "humanq (Decision Queue)",
       "source": "./plugins/humanq",
-      "description": "bd (beads) の判断待ち (human ラベル) を、この端末の全プロジェクト分まとめて localhost の画面に出し、ユーザーがそこで答えた内容を bd に書き戻す。SessionStart で登録とサーバーの起動、UserPromptSubmit で新しい回答を Claude に伝える",
+      "description": "beads (bd / br) の判断待ち (human ラベル) を、この端末の全プロジェクト分まとめて localhost の画面に出し、ユーザーがそこで答えた内容を bd / br に書き戻す。SessionStart で登録とサーバーの起動、UserPromptSubmit で新しい回答を Claude に伝える",
       "category": "workflow",
       "keywords": [
         "beads",
