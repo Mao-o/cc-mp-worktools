@@ -265,6 +265,30 @@ class TestOnlyWhereItWouldStop(AutoSwitchBase):
         self.assertIn("連結", reason)
         self.assertEqual(self.gh.switches(), [])
 
+    def test_chain_deny_names_expected_file_when_value_is_hidden(self):
+        """期待値を表示できない (空白・絵文字入り) ときは、見るべきファイルを言う。
+        表示できる値のときは、その文を足さない。"""
+        cases = {
+            "space": ("my work", True),
+            "emoji": ("work\U0001F600", True),
+            "dict hidden": ({"host": "github.com", "user": "my work"}, True),
+            "shown": ("Mao-o", False),
+            "dict shown": ({"github.com": "Mao-o"}, False),
+        }
+        for name, (entry, hidden) in cases.items():
+            with self.subTest(name):
+                self._write_accounts({"github": entry})
+                with self._enabled():
+                    reason = self._deny_reason(
+                        self._dispatch("gh auth switch --user other && gh pr create")
+                    )
+                self.assertIn("切替と書込を同一コマンドに連結しています", reason)
+                self.assertEqual("手で確認してください" in reason, hidden, reason)
+                if hidden:
+                    self.assertIn("accounts.local.json", reason)
+                    self.assertIn('"github"', reason)
+                    self.assertIn("(表示しない値)", reason)
+
 
 class TestCannotSwitch(AutoSwitchBase):
     def test_expected_account_not_logged_in(self):

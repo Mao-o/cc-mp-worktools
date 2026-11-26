@@ -587,15 +587,34 @@ def _expected_display(entry) -> str:
     return ""
 
 
+def _expected_has_hidden(entry) -> bool:
+    """`_expected_display` が `(表示しない値)` に置き換える値を含むか。"""
+    if isinstance(entry, str):
+        return not shell_word.can_show(entry)
+    if isinstance(entry, dict):
+        return any(
+            isinstance(v, str) and v and not shell_word.can_show(v)
+            for v in entry.values()
+        )
+    return False
+
+
 def _switch_then_write_error(
     account_key: str, entry, switch_form: str, write_form: str
 ) -> str:
     expected = _expected_display(entry)
+    check_by_hand = (
+        f'(期待値は{shell_word.UNSAFE}。accounts.local.json の "{account_key}" を'
+        "手で確認してください)\n"
+        if _expected_has_hidden(entry)
+        else ""
+    )
     target = f"期待値 ({expected}) へ" if expected else "期待値へ"
     return (
         f'"{account_key}" の切替と書込を同一コマンドに連結しています。'
         "切替後の状態で write が実行されるため、"
         f"{target}切り替える操作を単独で実行してから再度お試しください。\n"
+        f"{check_by_hand}"
         "(hook はコマンド実行前に 1 回だけ動くため、連結された write は切替前の"
         "状態で検証され、切替後のアカウントは検証できません。切替を単独で実行すれば"
         "成功キャッシュが破棄され、次の write が切替後の状態で検証されます)\n"
