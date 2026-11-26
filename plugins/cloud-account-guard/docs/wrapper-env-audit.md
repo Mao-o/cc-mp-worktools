@@ -42,6 +42,12 @@ D11 は「静的に解析した行頭インライン env = コマンド実行時
 | `pnpm exec` / `pnpm dlx` | 透過 (対象を env 継承で起動) | 収集 | 可 | node ランチャ semantics (env filter なし) |
 | `mise exec --` | 透過 (mise の env 注入 **に加えて** 継承 env も渡す) | 収集 | 可 | 実機: `PROBE=x mise exec -- env` に PROBE 出る |
 | `bun x` | 透過 (対象を env 継承で起動) | 収集 | 可 | bun ランチャ semantics |
+| `bunx` (v0.32.0) | 透過 (`bun x` の別名。PATH と node_modules/.bin の CLI を引数そのままで起動) | 収集 | 可 | 実機 (bun 1.3.13): `AWS_PROFILE=x bunx gh ...` / `bunx firebase ...` に届く。option は `--bun` / `-p, --package` / `--no-install` / `--verbose` / `--silent` (`bunx --help`)。語を落とすだけで option は読まない |
+| `pnpx` (v0.32.0) | 透過 (`pnpm dlx` の別名) | 収集 | 可 | 実機 (pnpm 11.25): `pnpx --help` が `pnpm dlx` の usage を出す。語を落とすだけ |
+| `yarn dlx` (v0.32.0) | 透過 (一時の環境に package を入れて bin を起動) | 収集 | 可 | [ref] yarn docs `yarn dlx`:「The binary will run within the current cwd」。開発機の yarn は 1.22 (dlx が無い) で実測できない |
+| `npm exec` / `npm exec --` (v0.32.0) | 透過 (local / global の bin か、取ってきた package の bin を起動。PATH は見ない) | 収集 | 可 | 実機 (npm 11): `AWS_PROFILE=x npm exec firebase ...` に届く。`--` の後ろはそのまま渡す。`--` が無いと CLI 名の後ろの `-` で始まる語を npm が自分の option として読む (`npm exec firebase deploy --project p` の firebase は `deploy p` を受け取る) ので、その形は剥がさない |
+| `pnpm <CLI 名>` / `yarn <CLI 名>` (v0.32.0) | 透過 (同名の script が無ければ CLI を起動) | 収集 | 可 | 実機 (pnpm 11.25 / yarn 1.22): `AWS_PROFILE=x pnpm gh ...` / `yarn firebase ...` に届く。同名の script があればそちらが走る。yarn は package.json のあるディレクトリで起動する。名前が `_BIN_RUNNER_NAMES` (services の CLI 名と検証の対象外の CLI 名) のときだけ剥がす |
+| `mise exec [TOOL@VERSION...] --` / `mise x [...] --` (v0.32.0) | 透過 (mise の env 注入に加えて継承 env も渡す) | 収集 | 可 | 実機 (mise 2026.9): `AWS_PROFILE=x mise exec node@20 -- gh ...` / `mise x -- gh ...` に届く。解決できない tool の名前があっても警告して後ろを起動する。`--` が無いと起動しない (`[-- COMMAND]` が無いエラー)。`--` の前に option があれば剥がさない |
 | `env` (オプション無し: `env FOO=bar cmd`) | 継承 env + 指定 `KEY=VAL` を渡す | 剥がして collect (pre/post 両方) | 可 | POSIX env |
 | `env -i [...]` | 環境を **空にリセット**してから起動 | **剥がさない** (opaque) | 不可 → スキップ | 実機: `PROBE=x env -i env` に PROBE 出ない |
 | `env -u NAME [...]` | NAME のみ **unset** | **剥がさない** (opaque) | 不可 → スキップ | POSIX env |
@@ -83,7 +89,8 @@ option 表を取り違えた場合の劣化方向は**片側だけ**である点
 ### 1. passthrough wrapper — 伝播してよい
 
 `time` / `nohup` / `command` / `builtin` / `exec` / `npx` / `pnpm exec` /
-`pnpm dlx` / `mise exec --` / `bun x` は継承 env を素通すため、pre-wrapper の
+`pnpm dlx` / `mise exec --` / `bun x` (v0.32.0 から `bunx` / `pnpx` / `yarn dlx` / `npm exec` /
+`mise x` / tool の指定つきの `mise exec` / CLI 名の前の `pnpm` と `yarn` も) は継承 env を素通すため、pre-wrapper の
 インライン env を収集して検証 subprocess に渡す (D11 本来の意図どおり)。
 `_WRAPPER_ENV_CLASS` で `"passthrough"` と宣言する。
 

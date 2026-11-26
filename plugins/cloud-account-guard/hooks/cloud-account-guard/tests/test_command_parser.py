@@ -391,6 +391,11 @@ class TestWrapperEnvClassificationGuard(unittest.TestCase):
         keys = set(command_parser._WRAPPERS_SINGLE)
         keys |= set(command_parser._WRAPPERS_TWO)
         keys |= set(command_parser._WRAPPERS_THREE)
+        # v0.32.0: 1 語の別名 (`bunx` / `pnpx`)・tool の指定を取る `mise exec` / `mise x`・CLI 名の前の
+        # `pnpm` / `yarn`
+        keys |= set(command_parser._WRAPPERS_ALIAS)
+        keys |= set(command_parser._WRAPPERS_TOOL_ARGS)
+        keys |= set(command_parser._BIN_RUNNERS)
         return keys
 
     def test_every_wrapper_is_classified(self):
@@ -529,6 +534,15 @@ class TestWrapperEnvPropagationContract(unittest.TestCase):
             {"AWS_PROFILE": "prod"},
         ),
         ("AWS_PROFILE=prod bun x aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        # v0.32.0 追加分 (前置きの env が後ろの CLI に届くことを実測した。docs/wrapper-env-audit.md)。
+        ("AWS_PROFILE=prod bunx aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        ("AWS_PROFILE=prod pnpx aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        ("AWS_PROFILE=prod yarn dlx aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        ("AWS_PROFILE=prod npm exec aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        ("AWS_PROFILE=prod npm exec -- aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        ("AWS_PROFILE=prod mise x -- aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        ("AWS_PROFILE=prod pnpm aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
+        ("AWS_PROFILE=prod yarn aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
         # v0.9.0 追加の実行ラッパ。いずれも継承 env をそのまま子へ渡す。
         ("AWS_PROFILE=prod timeout 30 aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),
         ("AWS_PROFILE=prod nice -n 5 aws s3 ls", "aws s3 ls", {"AWS_PROFILE": "prod"}),

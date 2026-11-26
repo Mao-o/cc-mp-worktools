@@ -716,7 +716,11 @@ QUERY の不一致も止めたい場合は `accounts.local.json` に書く:
   `stdbuf` / `setsid` / `caffeinate` / `watch` / `xargs`。
   `timeout 30 gh pr create` や `... | xargs -I{} gh pr close {}` の後段も検証する
 - **ランタイム / パッケージマネージャ**: `npx` / `pnpm exec` / `pnpm dlx` /
-  `mise exec --` / `bun x`
+  `mise exec --` / `bun x`。v0.32.0 から `bunx` / `pnpx` / `yarn dlx` / `npm exec` / `npm exec --` /
+  `mise exec <tool>@<版> --` / `mise x [<tool>@<版>] --` (tool の指定は 0 個以上) と、CLI 名の前の
+  `pnpm` / `yarn` (`pnpm firebase deploy` / `yarn kubectl apply ...`。名前が gh / firebase / aws / gcloud /
+  kubectl と、検証の対象外の wrangler / cf のときだけ) も剥がす。`npx` 以外は語を落とすだけで option は
+  読まない (option 付きの形は[守る範囲と守らない範囲](#守る範囲と守らない範囲)を参照)
 - 行頭インライン env の伝播は wrapper の実行時 env 挙動に従う
   (`sudo` は preserve 無しだと env を scrub。詳細は
   [`docs/wrapper-env-audit.md`](docs/wrapper-env-audit.md))
@@ -1513,7 +1517,8 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 - `cd dir && <CLI>`、`;` / `&&` / `||` / `|` による連結
 - 前置きの環境変数の代入 (`AWS_PROFILE=x aws ...`。値にコマンド置換を含む `X=$(cmd) aws ...` も。
   値は読まずに、後ろの CLI を照合する)
-- よく使う透過 wrapper の素の形 (`sudo` / `env` / `npx` / `mise exec` など)
+- よく使う透過 wrapper の素の形 (`sudo` / `env` / `npx` / `bunx` / `pnpm dlx` / `yarn dlx` / `npm exec` /
+  `mise exec` など) と、CLI 名の前の `pnpm` / `yarn` (`pnpm firebase deploy`)
 - コンテキストを指定する option の正式な綴り (`--profile` / `--project` / `--context` /
   `--kubeconfig` / `--config` など)
 
@@ -1524,6 +1529,16 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 - option 付きの `env` (`env -C dir` / `env -u X`) と、option 付きの `mise exec` / `pnpm exec`
   (`mise exec -C dir -- gcloud ...` / `pnpm exec -C dir aws ...`) の後ろのクラウド CLI。
   option 付きは剥がさないので、候補にならず検証されない
+- option 付きの `bunx` / `bun x` / `pnpx` / `pnpm dlx` / `yarn dlx` / `npm exec` / `mise x`
+  (`bunx --bun firebase ...` / `npm exec --yes -- firebase ...` / `npm exec -c '...'`) と、`--` の無い
+  `npm exec` で CLI 名の後ろに `-` で始まる語を置いた形 (`npm exec firebase deploy --project p`) の後ろの
+  クラウド CLI。後者は npm がその語を自分の option として読んで CLI に渡さない (npm 11 で実測) ので、CLI が
+  受け取る引数を決められない。どれも候補にならず検証されない (`npm exec -- firebase deploy --project p` は守る範囲)
+- `pnpm` / `yarn` と CLI 名の間に option やサブコマンドを挟んだ形 (`pnpm -C app firebase ...` /
+  `pnpm run firebase ...` / `yarn run firebase ...` / `yarn workspace app firebase ...`) と、別名の `npm x`
+  (`npm exec` の別名) / `pn` / `pnx` (pnpm 11 の別名) の後ろのクラウド CLI
+- `yarn <CLI 名>` の作業ディレクトリ。yarn は package.json のあるディレクトリで CLI を起動する (yarn 1.22 で
+  実測) が、hook はコマンドを打ったディレクトリの文脈で照合する
 - 配列の閉じの直後に語の断片が続く代入 (`a=(1 2)y aws ...`) の後ろのクラウド CLI
 - 期待値を登録した service で、identity env に値を読めない代入をした形 (`AWS_PROFILE=$(cmd) aws ...`)。
   代入した値ではなく起動時の値で照合する (起動時の値が期待どおりなら通る)。期待値が未登録でディレクトリ単位の
@@ -1589,11 +1604,16 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 CLI ごとに 1 回。deny はせず、deny したコマンドには足さない。検証モードにはよらない。一覧は
 `hooks/cloud-account-guard/core/unverified.py`)。メインとサブエージェントは互いの記録で黙らない
 (サブエージェントは同じ `session_id` を持ち、知らせはツールを呼んだエージェントにだけ届くため、hook input の
-`agent_id` で分ける)。検証と同じ分解で見つけるので、検証が読まない起動の形 (`pnpm wrangler` / `yarn wrangler` /
-`bunx wrangler` など) では知らせも出ない。
+`agent_id` で分ける)。検証と同じ分解で見つけるので、検証が読まない起動の形 (`bunx --bun wrangler` /
+`pnpm -C app wrangler` など) では知らせも出ない (`bunx wrangler` / `pnpm wrangler` / `yarn wrangler` は v0.32.0 から知らせる)。
 
 ## 既知の制限
 
+- **`pnpm <CLI 名>` / `yarn <CLI 名>` は、同じ名前の package.json の script でも CLI として照合する** (v0.32.0)。
+  pnpm / yarn は同名の script があればそちらを走らせる (pnpm 11 / yarn 1.22 で実測) が、hook は package.json を
+  読まない。止まる条件は直接 `firebase deploy` と打ったときと同じで、期待値との不一致が確定したときに加えて、
+  期待値が未登録で固定も無いときや相対パスの context を決められないときなど、今の版が止める側に倒す形でも
+  止まる。script を走らせるつもりなら `pnpm run <名前>` / `yarn run <名前>` と書く (検証しない)
 - **QUERY tier の「読むだけ」はコマンド形で判定している** (v0.14.0)。`aws \S+
   (describe|list|get)-*` をまとめて QUERY にしているため、表に無い「リモートの
   機密を返す read」があれば期待外アカウントでも警告のみになる。既知の形は

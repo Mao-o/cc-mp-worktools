@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.32.0
+
+### Added: `bunx` / `npm exec` / `pnpm` / `yarn` / `mise x` 経由で起動したクラウド CLI も検証する
+
+- 次の起動の形を透過 wrapper として剥がし、後ろのクラウド CLI を検証の候補にする。0.31.0 までは
+  `npx` / `bun x` / `pnpm exec` / `pnpm dlx` / `mise exec --` だけを剥がし、これらの形は候補にならずに
+  通っていた (README の守らない範囲にも載っていなかった)
+  - `bunx` (`bun x` の別名)・`pnpx` (`pnpm dlx` の別名)・`yarn dlx`
+  - `npm exec` と `npm exec --`。`--` の無い `npm exec` は、CLI 名の後ろに `-` で始まる語があれば剥がさない
+    (npm がその語を自分の option として読み、CLI に渡さないため。`npm exec firebase deploy --project p` の
+    firebase は `deploy p` を受け取る)
+  - `mise exec <tool>@<版> --` / `mise x [<tool>@<版>] --` (tool の指定は 0 個以上。0.31.0 は tool の指定の
+    無い `mise exec --` だけ)。`--` の前に option があるとき・`--` が無いときは剥がさない
+  - CLI 名の前の `pnpm` / `yarn` (`pnpm firebase deploy` / `yarn kubectl apply ...`)。名前が gh / firebase /
+    aws / gcloud / kubectl と、検証の対象外の wrangler / cf のときだけ
+- どの形も語を落とすだけで option は読まない (`bunx --bun firebase ...` / `pnpm -C app firebase ...` は
+  0.31.0 と同じく候補にしない。README の守らない範囲に足した)。前置きの env は後ろの CLI に届くことを実測した
+  (bun 1.3 / npm 11 / pnpm 11 / yarn 1.22 / mise 2026.9。根拠は docs/wrapper-env-audit.md の D16 表)
+- 検証の対象外の CLI の知らせ (0.31.0) も同じ分解を使うので、`bunx wrangler` / `pnpm wrangler` /
+  `yarn wrangler` も知らせる
+- 既知の制限: `pnpm <CLI 名>` / `yarn <CLI 名>` は、同じ名前の package.json の script でも CLI として照合する
+  (pnpm / yarn は script を優先して走らせる)。止まる条件は直接 CLI を打ったときと同じ
+- 判定が変わるのは足した形を含むコマンドだけ。0.31.0 で止めていたコマンドを通す変更は無い
+
 ## 0.31.0
 
 ### Added: 検証の対象外のクラウド CLI を使ったことを知らせる
