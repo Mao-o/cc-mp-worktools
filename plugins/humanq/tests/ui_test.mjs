@@ -178,7 +178,13 @@ async function withPage(script, fn, ctxOptions = {}, setup = null, b = browser) 
   try {
     if (setup) await setup(page);
     await page.goto(baseUrl);
-    await ready(page);
+    try {
+      await ready(page);
+    } catch (e) {
+      // 最初の読み込みを待てなかったのがページの例外のせいなら、待ちの時間切れではなくその例外を失敗として出す
+      assert.deepEqual(errors, [], "ページで例外が出た (最初の読み込みを待てなかった)");
+      throw e;
+    }
     try {
       await fn(page, ctx);
     } catch (e) {
@@ -2853,6 +2859,406 @@ for (const scheme of ["light", "dark"]) {
       const ratio = await page.evaluate(([fnSrc, m]) => eval(`(${fnSrc})()`)(m.fg, m.bg), [RATIO_FN.toString(), m]);
       assert.ok(m.size < m.sendSize, `${scheme}: ヒントの文字 ${m.size}px が「回答する」の ${m.sendSize}px より小さくない`);
       assert.ok(ratio >= 4.5, `${scheme}: ヒントの文字 / カードの背景 ${ratio.toFixed(2)}`);
+    });
+  });
+}
+
+// ---- 並び: プロジェクトごと / 全体を優先度順 ---------------------------------------------------------------
+// 目次の帯の切り替えで、判断待ち (判断と作業・確認) を全プロジェクト通して「優先度 → 作成日」の 1 列にし、回答済みはその下に 1 節。
+// 選んだほうは localStorage に覚える。カードは作り直さずに入れ物を移すだけ (入力・フォーカス・下書きを保つ)
+
+const viewBtn = (page, v) => page.locator(`#toc .viewbtn[data-view="${v}"]`);
+// 切り替えのボタンを押す。ボタンがちょうど 1 つあって見えていることを先に確かめる (無い・隠れたボタンを押す待ちの時間切れではなく、
+// assertion で落とす)
+async function setView(page, v) {
+  assert.equal(await viewBtn(page, v).count(), 1, `並びの切り替え (${v}) のボタンがちょうど 1 つでない`);
+  assert.equal(await viewBtn(page, v).isVisible(), true, `並びの切り替え (${v}) のボタンが見えていない (帯が隠れた)`);
+  await viewBtn(page, v).click();
+}
+// 判断待ちのカード (id) がちょうど 1 枚あることを確かめる (無いカードを押す待ちの時間切れを、assertion の失敗にする)
+const oneQ = async (page, id) => assert.equal(await qcard(page, id).count(), 1, `${id} の判断待ちのカードがちょうど 1 枚でない`);
+const answerOne = async (page, id) => { await oneQ(page, id); await answerFirst(page, id); };
+const viewPressed = page => page.$$eval("#toc .viewbtn", bs => bs.map(b => [b.dataset.view, b.getAttribute("aria-pressed")]));
+// main の中のカードの並び (畳んでいる最中のものは除く): [ID, head に見えているプロジェクトの名前 (見えていなければ null)]
+const cardOrder = page => page.$$eval("#main section.card:not(.leaving)", cs => cs.map(c => {
+  const pj = c.querySelector(".head .pj");
+  return [c.querySelector(".id").textContent, pj && pj.getClientRects().length ? pj.textContent : null];
+}));
+const ids = rows => rows.map(r => r[0]);
+// 見出しの並び。プロジェクトの見出しは名前だけ
+const headings = page => page.$$eval("h1, h2, h3", es => es.map(e => {
+  const n = e.querySelector(".pname");
+  return `${e.tagName.toLowerCase()}:${n ? n.textContent : e.textContent}`;
+}));
+
+// alpha: 作業・確認の P1 (11-22) と P3 (11-24)。beta: P0・P1 (11-20)・作成日の無い P3・P3 (alpha の P3 と同じ日)・優先度なし (P9 として扱う)。
+// 回答済み: alpha の P1 と beta の P0。各プロジェクトの判断待ちはサーバーと同じく優先度 → 作成日 (無ければ空の文字列) の順で返す
+function orderScript() {
+  const task = { ...item("t-A2", { priority: 1, created_at: "2026-11-22" }), q: { ...item("t-A2").q, kind: "task" } };
+  return new Script([
+    proj(P1, [task, item("t-A1", { priority: 3 })], [answeredItem("t-A9")]),
+    proj(P2, [item("t-B1", { priority: 0 }), item("t-B2", { priority: 1, created_at: "2026-11-20" }), item("t-B5", { priority: 3, created_at: null }),
+      item("t-B4", { priority: 3 }), item("t-B3", { priority: null })], [{ ...answeredItem("t-B9"), priority: 0 }]),
+  ]);
+}
+// プロジェクトごと: alpha (判断 → 作業・確認 → 回答済み) → beta。head にプロジェクトの名前は出ない
+const PROJ_ORDER = [["t-A1", null], ["t-A2", null], ["t-A9", null], ["t-B1", null], ["t-B2", null], ["t-B5", null], ["t-B4", null], ["t-B3", null], ["t-B9", null]];
+// 全体: P0 → P1 (作成日の古い beta の 11-20 が先。プロジェクトの順と逆) → P3 (作成日の無いものが先 (サーバーと同じ)、同じ日はプロジェクトの順)
+// → 優先度なし → 回答済み
+const FLAT_ORDER = [["t-B1", "beta"], ["t-B2", "beta"], ["t-A2", "alpha"], ["t-B5", "beta"], ["t-A1", "alpha"], ["t-B4", "beta"], ["t-B3", "beta"],
+  ["t-B9", "beta"], ["t-A9", "alpha"]];
+
+test("並び: 「全体を優先度順」では判断待ち (判断と作業・確認) を全プロジェクト通して優先度 → 作成日の 1 列にし (alpha の P3 より beta の P0 が先)、head にプロジェクトの名前を出す。回答済みはその下に 1 節。既定はプロジェクトごとで、戻せば元の並び", async () => {
+  const s = orderScript();
+  await withPage(s, async page => {
+    assert.deepEqual(await viewPressed(page), [["proj", "true"], ["prio", "false"]], "既定がプロジェクトごとでない");
+    assert.equal(await page.getByRole("group", { name: "並び" }).count(), 1, "切り替えに名前の付いた group が無い");
+    assert.deepEqual(await cardOrder(page), PROJ_ORDER);
+    assert.deepEqual(await headings(page), ["h1:判断待ち", "h2:alpha", "h3:判断 (1)", "h3:作業・確認 (1)", "h3:回答済み・反映待ち (1)",
+      "h2:beta", "h3:判断 (5)", "h3:回答済み・反映待ち (1)"]);
+    // 帯は 2 行: チップが少なく切り替えの横に収まる幅でも、チップの行は切り替えの行の下から始まる
+    const rows = await page.evaluate(() => {
+      const v = document.querySelector("#toc .viewbtn:last-child").getBoundingClientRect(), c = [...document.querySelectorAll("#toc .tocchip")].map(e => e.getBoundingClientRect());
+      return { viewBottom: v.bottom, viewRight: v.right, chipTops: c.map(r => r.top), chipsW: c.reduce((n, r) => n + r.width + 8, 0), innerW: innerWidth };
+    });
+    assert.equal(rows.chipTops.length, 2);
+    assert.ok(rows.viewRight + 12 + rows.chipsW < Math.min(rows.innerW, 860) - 32, `前提: チップが切り替えの横に収まる幅でない ${JSON.stringify(rows)}`);
+    assert.ok(rows.chipTops.every(t => t >= rows.viewBottom), `チップの行が切り替えの行の下にない ${JSON.stringify(rows)}`);
+    await setView(page, "prio");
+    assert.deepEqual(await viewPressed(page), [["proj", "false"], ["prio", "true"]]);
+    assert.deepEqual(await cardOrder(page), FLAT_ORDER);
+    // 見出しは h1 → h2 (節)。プロジェクトの見出しと入れ物は出さない。節の見出しは h3 と同じ見た目で、止まらない
+    assert.deepEqual(await headings(page), ["h1:判断待ち", "h2:判断待ち (7)", "h2:回答済み・反映待ち (2)"]);
+    assert.equal(await page.locator(".proj").count(), 0, "プロジェクトの入れ物が残っている");
+    assert.deepEqual(await page.evaluate(() => { const c = getComputedStyle(document.querySelector("h2.sec")); return [c.fontSize, c.position]; }), ["14px", "static"]);
+    // 帯 (切り替え) は出したまま、チップは出さない (空のチップの行で縦に場所を取らない)。ヘッダーの件数は変わらない
+    assert.equal(await page.locator("#toc").isVisible(), true, "帯が隠れた (プロジェクトごとに戻せない)");
+    assert.equal(await tocChips(page).count(), 0, "全体の表示に目次のチップが出ている");
+    const band = await page.evaluate(() => [document.getElementById("toc").getBoundingClientRect().height, document.querySelector("#toc .view").getBoundingClientRect().height]);
+    assert.ok(Math.abs(band[0] - (band[1] + 12)) <= 1, `帯の高さが切り替えの行 + 上下の余白でない (空のチップの行が場所を取る) ${JSON.stringify(band)}`);
+    assert.equal(await page.locator("#count").innerText(), "7 件");
+    assert.equal(await qcard(page, "t-B1").locator(".head .pj").count(), 1, "head にプロジェクトの名前の要素がちょうど 1 つでない");
+    assert.equal(await qcard(page, "t-B1").locator(".head .pj").getAttribute("title"), P2, "プロジェクトの名前の title がパスでない");
+    await setView(page, "proj");
+    assert.deepEqual(await cardOrder(page), PROJ_ORDER, "プロジェクトごとに戻らない");
+    assert.deepEqual((await chipRows(page)).map(r => r.name), ["alpha", "beta"], "戻したのにチップが出ない");
+    assert.equal(await page.locator(".flat, h2.sec").count(), 0, "全体の表示の入れ物が残っている");
+  });
+});
+
+test("並び: 選んだ並びは再読み込みしても同じ (localStorage)。プロジェクトごとに戻せば、再読み込みでもプロジェクトごと", async () => {
+  const s = orderScript();
+  await withPage(s, async page => {
+    await setView(page, "prio");
+    assert.equal(await page.evaluate(() => localStorage.getItem("humanq-view")), "prio");
+    await page.reload();
+    await ready(page);
+    assert.deepEqual(await viewPressed(page), [["proj", "false"], ["prio", "true"]], "再読み込みで切り替えの状態が戻らない");
+    assert.deepEqual(await cardOrder(page), FLAT_ORDER, "再読み込みで全体の並びに戻らない");
+    await setView(page, "proj");
+    assert.equal(await page.evaluate(() => localStorage.getItem("humanq-view")), "proj");
+    await page.reload();
+    await ready(page);
+    assert.deepEqual(await viewPressed(page), [["proj", "true"], ["prio", "false"]]);
+    assert.deepEqual(await cardOrder(page), PROJ_ORDER);
+  });
+});
+
+test("並び: localStorage が使えなくても既定のプロジェクトごとで出て、切り替えは効く (読み書きが例外・書き込みだけが例外)", async () => {
+  // localStorage そのものに触れると例外 (保存を禁じた設定など)
+  const s = orderScript();
+  await withPage(s, async page => {
+    assert.ok(await page.evaluate(() => { try { void window.localStorage; return false; } catch { return true; } }), "前提: localStorage に触れても例外にならない");
+    assert.deepEqual(await cardOrder(page), PROJ_ORDER);
+    await setView(page, "prio");
+    assert.deepEqual(await cardOrder(page), FLAT_ORDER, "覚えられないと切り替わらない");
+    await setView(page, "proj");
+    assert.deepEqual(await cardOrder(page), PROJ_ORDER);
+  }, {}, page => page.addInitScript(() => {
+    Object.defineProperty(window, "localStorage", { configurable: true, get() { throw new DOMException("denied", "SecurityError"); } });
+  }));
+  // 読めるが書けない (容量切れなど): 覚えていた全体の表示で出て、プロジェクトごとへの切り替えも効く
+  const s2 = orderScript();
+  await withPage(s2, async page => {
+    assert.ok(await page.evaluate(() => { try { localStorage.setItem("x", "1"); return false; } catch { return true; } }), "前提: localStorage に書けてしまう");
+    assert.deepEqual(await cardOrder(page), FLAT_ORDER, "読めた値 (prio) で出ない");
+    await setView(page, "proj");
+    assert.deepEqual(await cardOrder(page), PROJ_ORDER, "書けないと切り替わらない");
+  }, {}, page => page.addInitScript(() => {
+    const set = Storage.prototype.setItem;
+    set.call(window.localStorage, "humanq-view", "prio");
+    Storage.prototype.setItem = function (k, v) {
+      if (this === window.localStorage) throw new DOMException("full", "QuotaExceededError");
+      return set.call(this, k, v);
+    };
+  }));
+});
+
+test("並び: 全体の表示で回答すると、カードが畳まれ (送信中は読み込みがあっても隠したまま)、フォーカスは全体の並びでの次のカードそのものへ移る。回答済みの節に出て、そこから取り消すと判断待ちの並びに戻る", async () => {
+  // 全体の並びは t-B1 (P0) → t-A1 (P1) → t-B2 (P2)。プロジェクトごとなら t-B1 の次は同じプロジェクトの t-B2
+  const s = new Script([proj(P1, [item("t-A1", { priority: 1 })]), proj(P2, [item("t-B1", { priority: 0 }), item("t-B2", { priority: 2 })])]);
+  await withPage(s, async page => {
+    await setView(page, "prio");
+    assert.deepEqual(ids(await cardOrder(page)), ["t-B1", "t-A1", "t-B2"]);
+    await page.evaluate(() => {
+      window.__left = [];
+      new MutationObserver(ms => { for (const m of ms) if (m.target.matches("section.card.leaving")) window.__left.push(m.target.querySelector(".id").textContent); })
+        .observe(document.getElementById("main"), { subtree: true, attributes: true, attributeFilter: ["class"] });
+    });
+    const release = s.hold("answer");
+    await answerOne(page, "t-B1");
+    await until(async () => (await focusedCard(page)) === "t-A1", 3000, "フォーカスが全体の並びでの次 (alpha の t-A1) のカードそのものへ移る");
+    assert.deepEqual(await page.evaluate(() => [...new Set(window.__left)]), ["t-B1"], "押したカードが畳む動き (.leaving) を通らない");
+    await until(async () => (await qcard(page, "t-B1").count()) === 0, 3000, "畳み終わって外れる");
+    assert.deepEqual(await page.locator("h2.sec").allInnerTexts(), ["判断待ち (2)"], "節の件数が送信中を除いていない");
+    await page.evaluate(() => load());                                    // まだ書き込まれていないデータ (t-B1 は判断待ちに居る)
+    await page.waitForTimeout(300);
+    assert.equal(await qcard(page, "t-B1").count(), 0, "送信中のカードが全体の表示に戻ってきた");
+    release();
+    await until(async () => (await acard(page, "t-B1").count()) === 1, 3000, "回答済みの節に出る");
+    assert.deepEqual(await cardOrder(page), [["t-A1", "alpha"], ["t-B2", "beta"], ["t-B1", "beta"]]);
+    assert.deepEqual(await page.locator("h2.sec").allInnerTexts(), ["判断待ち (2)", "回答済み・反映待ち (1)"]);
+    assert.equal(await undoOnCard(page, "t-B1").count(), 1, "回答済みのカードに取り消しのボタンが無い");
+    await undoOnCard(page, "t-B1").click();
+    await until(() => s.undos.length === 1, 3000, "取り消しの POST");
+    assert.deepEqual([s.undos[0].project, s.undos[0].id], [P2, "t-B1"]);
+    // 台本は取り消したチケットを P1 で戻す: t-A1 と同じ優先度・作成日なので、プロジェクトの順 (alpha が先)
+    await until(async () => (await qcard(page, "t-B1").count()) === 1, 3000, "判断待ちに戻る");
+    assert.deepEqual(await cardOrder(page), [["t-A1", "alpha"], ["t-B1", "beta"], ["t-B2", "beta"]]);
+    await until(async () => (await page.locator("h2.sec").count()) === 1, 3000, "空になった回答済みの節が畳み終わって外れる");
+    assert.deepEqual(await page.locator("h2.sec").allInnerTexts(), ["判断待ち (3)"]);
+  });
+});
+
+test("並び: 動きを減らす設定の全体の表示では、回答したカードはその場で外れ、切り替えにも動きを付けない", async () => {
+  const s = new Script([proj(P1, [item("t-A1", { priority: 1 })]), proj(P2, [item("t-B1", { priority: 0 })])]);
+  await withPage(s, async page => {
+    await setView(page, "prio");
+    assert.equal(await page.locator("#main .anim, #main .incoming, #main .leaving").count(), 0, "切り替えで動きが付いた");
+    s.hold("answer");
+    await answerOne(page, "t-B1");                                       // 押した処理の中で外れる (待たずに測る)
+    assert.equal(await page.locator("section.card").count(), 1, "動きを減らす設定で、回答したカードがその場で外れない");
+    assert.equal(await page.locator("#main .anim").count(), 0);
+    assert.equal(await focusedCard(page), "t-A1");
+  }, { reducedMotion: "reduce" });
+});
+
+test("並び: 全体の表示でも、入力中のカードはデータが変わっても作り直さず (ほかのカードは更新する)、離れたあとの読み込みで作り直す。優先度が変わって並びの位置が動いても、入力のフォーカスと値は保たれる", async () => {
+  const s = new Script([proj(P1, [item("t-A1", { priority: 2 })]), proj(P2, [item("t-B1", { priority: 0 }), item("t-B2", { priority: 3 })])]);
+  await withPage(s, async page => {
+    await setView(page, "prio");
+    assert.deepEqual(ids(await cardOrder(page)), ["t-B1", "t-A1", "t-B2"]);
+    await oneQ(page, "t-B2");
+    await qcard(page, "t-B2").locator(".opt").first().click();
+    const ta = qcard(page, "t-B2").locator("textarea");
+    await ta.click();
+    await ta.pressSequentially("abc");
+    const handle = await ta.elementHandle();
+    s.projects[0].human[0].title = "new title";                         // ほかのカード (alpha) の題
+    s.projects[1].human[1].description = "NEW BODY";                    // 入力中のカード自身の本文
+    s.projects[1].human[1].priority = 0;                                // 並びの位置も動く (t-B1 と同じ P0・同じ日なので t-B1 の次)
+    await page.evaluate(() => load());
+    await until(async () => /new title/.test(await qcard(page, "t-A1").textContent()), 3000, "ほかのカードの題が更新される");
+    assert.deepEqual(ids(await cardOrder(page)), ["t-B1", "t-B2", "t-A1"]);
+    assert.ok(!/NEW BODY/.test(await qcard(page, "t-B2").textContent()), "入力中のカードが作り直された");
+    assert.ok(await handle.evaluate(e => e.isConnected && e === document.activeElement && e.value === "abc"), "入力中の補足のフォーカスか値が失われた");
+    assert.match(await page.locator("#meta").innerText(), /入力中のカードの更新は保留/);
+    await page.locator("h1").click();                                    // フォーカスを外す
+    await page.evaluate(() => load());
+    await until(async () => /NEW BODY/.test(await qcard(page, "t-B2").textContent()), 3000, "離れたあとの読み込みで作り直される");
+    assert.equal(await qcard(page, "t-B2").locator("textarea").inputValue(), "abc");
+    assert.equal(await qcard(page, "t-B2").locator(".opt.sel").count(), 1, "選択が下書きから戻る");
+    assert.deepEqual(await cardOrder(page), [["t-B1", "beta"], ["t-B2", "beta"], ["t-A1", "alpha"]], "作り直したカードの head にプロジェクトの名前が無い");
+    assert.equal(await qcard(page, "t-B2").locator(".prio").innerText(), "P0");
+  });
+});
+
+test("並び: 切り替えてもカードは作り直さない: 入力中の補足と選んだ選択肢・開いた本文・下書き (sessionStorage)・フォーカスが残る。押した切り替えのボタンにはフォーカスが残る (キーボードでも)", async () => {
+  const s = orderScript();
+  await withPage(s, async page => {
+    await oneQ(page, "t-A1");
+    await qcard(page, "t-A1").locator("summary").click();                // 本文を開く
+    await qcard(page, "t-A1").locator(".opt").nth(1).click();
+    const ta = qcard(page, "t-A1").locator("textarea");
+    await ta.click();
+    await ta.pressSequentially("draft");
+    const handle = await ta.elementHandle();
+    const drafts0 = await page.evaluate(() => sessionStorage.getItem("humanq-drafts"));
+    assert.match(drafts0 || "", /draft/, "前提: 下書きが sessionStorage に無い");
+    for (const v of ["prio", "proj", "prio"]) {
+      // 入力中に切り替わる (ボタンの click() はフォーカスを動かさない)
+      assert.equal(await viewBtn(page, v).count(), 1, `並びの切り替え (${v}) のボタンがちょうど 1 つでない`);
+      await page.evaluate(v => document.querySelector(`#toc .viewbtn[data-view="${v}"]`).click(), v);
+      assert.deepEqual(ids(await cardOrder(page)), ids(v === "prio" ? FLAT_ORDER : PROJ_ORDER), `${v}: 並びが切り替わらない`);
+      assert.ok(await handle.evaluate(e => e.isConnected && e === document.activeElement && e.value === "draft"), `${v}: 入力中の補足のフォーカスか値が失われた (作り直された)`);
+      assert.deepEqual(await qcard(page, "t-A1").locator(".opt").evaluateAll(es => es.map(e => e.getAttribute("aria-pressed"))), ["false", "true"], `${v}: 選んだ選択肢が外れた`);
+      assert.equal(await qcard(page, "t-A1").locator("details").evaluate(e => e.open), true, `${v}: 開いた本文が閉じた`);
+      assert.equal(await page.evaluate(() => sessionStorage.getItem("humanq-drafts")), drafts0, `${v}: 下書きが変わった`);
+    }
+    await page.keyboard.type("+");                                       // そのまま打ち続けられる
+    assert.equal(await ta.inputValue(), "draft+");
+    await setView(page, "proj");
+    assert.ok(await viewBtn(page, "proj").evaluate(e => e === document.activeElement), "押した切り替えのボタンからフォーカスが外れた");
+    await viewBtn(page, "prio").focus();
+    await page.keyboard.press("Enter");
+    assert.deepEqual(await viewPressed(page), [["proj", "false"], ["prio", "true"]], "キーボードで切り替わらない");
+    assert.ok(await viewBtn(page, "prio").evaluate(e => e === document.activeElement), "キーボードで押した切り替えのボタンからフォーカスが外れた");
+    // キーボードのフォーカスの目印は、押した側の塗り (アクセント) の外に引くアクセントの実線
+    assert.deepEqual(await viewBtn(page, "prio").evaluate(e => [e.matches(":focus-visible"), getComputedStyle(e).outlineStyle, getComputedStyle(e).outlineOffset]),
+      [true, "solid", "2px"]);
+    await page.keyboard.press("Space");                                  // 押してある側をもう一度押しても何も変わらない
+    assert.deepEqual(await viewPressed(page), [["proj", "false"], ["prio", "true"]]);
+    assert.deepEqual(ids(await cardOrder(page)), ids(FLAT_ORDER));
+    assert.equal(await qcard(page, "t-A1").locator("textarea").inputValue(), "draft+");
+  });
+});
+
+test("並び: 全体の表示では、読めなかったプロジェクトのバナーを全体の先頭に名前つきで出し、前に読めたカードは並びに残す。読めればバナーは消える", async () => {
+  const s = new Script([proj(P1, [item("t-A1", { priority: 1 })]), proj(P2, [item("t-B1", { priority: 0 })])]);
+  await withPage(s, async page => {
+    await setView(page, "prio");
+    s.queue.push({ projects: [proj(P1, [item("t-A1", { priority: 1 })]), proj(P2, [], [], false)] });
+    await page.evaluate(() => load());
+    await until(async () => (await page.locator("#main .banner").count()) === 1, 3000, "バナーが出る");
+    assert.match(await page.locator("#main .banner").textContent(), /^beta: 読めませんでした \(最後に読めたのは [^。]+。自動で読み直します\): bd down$/);
+    assert.equal(await page.locator("#main .banner").getAttribute("title"), P2);
+    assert.deepEqual(await cardOrder(page), [["t-B1", "beta"], ["t-A1", "alpha"]], "読めなかったプロジェクトの前のカードが並びから消えた");
+    assert.ok(await page.evaluate(() => {
+      const b = document.querySelector("#main .banner"), h = document.querySelector("#main h2.sec");
+      return !!(b && h && b.compareDocumentPosition(h) & Node.DOCUMENT_POSITION_FOLLOWING);
+    }), "バナーが判断待ちの節より上にない");
+    await page.evaluate(() => load());
+    await until(async () => (await page.locator("#main .banner").count()) === 0, 3000, "読めればバナーが消える");
+    // 一度も読めていないプロジェクト (カードの無いバナーだけ) も出す
+    s.projects.push(proj("/work/gamma", [], [], false));
+    await page.evaluate(() => load());
+    assert.deepEqual(await page.locator("#main .banner").allTextContents(), ["gamma: 読めませんでした (自動で読み直します): bd down"]);
+  });
+});
+
+test("並び: 全体の表示にも絞り込みが効き (ほかの条件の件数も同じ)、全部隠れたら「絞り込みに合うものはありません」を出す", async () => {
+  const s = manyScript();
+  await withPage(s, async page => {
+    await setView(page, "prio");
+    assert.equal(await pcards(page).count(), 36);
+    // 全体の並びは優先度 → 作成日 (台本は全件が同じ日なので、同じ優先度ではプロジェクトの順 → サーバーの並び)
+    const want = [...FALL(s)].sort((x, y) => x.priority - y.priority).map(i => i.id);
+    assert.deepEqual(await pcards(page).locator(".id").allInnerTexts(), want);
+    await page.selectOption("#fprio", "0");
+    assert.deepEqual(await pcards(page).locator(".id").allInnerTexts(), want.filter(id => FALL(s).find(i => i.id === id).priority === 0));
+    assert.equal(await page.locator("#fcount").innerText(), "36 件中 9 件を表示");
+    await page.selectOption("#fproject", "/work/beta");
+    assert.deepEqual(await pcards(page).locator(".id").allInnerTexts(), FALL(s).filter(i => i.priority === 0 && i.project === "/work/beta").map(i => i.id));
+    assert.deepEqual(await page.locator("h2.sec").allInnerTexts(), ["判断待ち (3)"], "回答済み (優先度 1) が絞り込みで隠れていない");
+    await page.fill("#fq", "zzz-none");
+    assert.match((await page.locator("#main .empty").allInnerTexts()).join("\n"), /絞り込みに合う/);
+    assert.equal(await page.locator(".flat").count(), 0, "全部隠れたのに全体の入れ物が残っている");
+    await page.click("#fclear");
+    assert.equal(await pcards(page).count(), 36);
+    assert.deepEqual(await page.locator("h2.sec").allInnerTexts(), ["判断待ち (36)", "回答済み・反映待ち (3)"]);
+  });
+});
+
+test("並び: 幅 375 でも切り替えは帯の 1 行目に収まり、ページは横にスクロールしない。全体の表示の head のプロジェクトの名前も 1 行", async () => {
+  const longName = "とても長いプロジェクトの名前".repeat(6);
+  const s = new Script([proj(`/work/${longName}`, [item("t-A1")]), proj(P2, [item("t-B1", { priority: 0 })])]);
+  await withPage(s, async page => {
+    assert.equal(await page.locator("#toc .view").count(), 1, "並びの切り替えがちょうど 1 つでない");
+    // pj: 見えているプロジェクトの名前ごとに [高さ, 名前の上端と ID の上端の差] (長い名前は … で切り、優先度・ID と同じ行に収める)
+    const m = () => page.evaluate(() => {
+      const v = document.querySelector("#toc .view").getBoundingClientRect();
+      const pj = [...document.querySelectorAll("#main .head .pj")].filter(e => e.getClientRects().length).map(e =>
+        [e.getBoundingClientRect().height, Math.abs(e.getBoundingClientRect().top - e.parentElement.querySelector(".id").getBoundingClientRect().top)]);
+      return { sw: document.scrollingElement.scrollWidth, iw: innerWidth, left: v.left, right: v.right, h: v.height, pj };
+    });
+    const a = await m();
+    assert.ok(a.sw <= a.iw && a.left >= 0 && a.right <= a.iw && a.h <= 32, `プロジェクトごと: ${JSON.stringify(a)}`);
+    await setView(page, "prio");
+    const b = await m();
+    assert.ok(b.sw <= b.iw && b.left >= 0 && b.right <= b.iw && b.h <= 32, `全体: ${JSON.stringify(b)}`);
+    assert.equal(b.pj.length, 2, "head にプロジェクトの名前が出ていない");
+    assert.ok(b.pj.every(([h, dy]) => h <= 24 && dy <= 4), `head のプロジェクトの名前が 1 行でないか、ID と同じ行に無い ${JSON.stringify(b.pj)}`);
+  }, { viewport: { width: 375, height: 700 } });
+});
+
+test("並び: プロジェクトの名前が変わると、全体の表示の head の名前も変わる (判断待ち・回答済みとも)", async () => {
+  const s = new Script([proj(P1, [item("t-A1")], [answeredItem("t-A9")])]);
+  await withPage(s, async page => {
+    await setView(page, "prio");
+    assert.deepEqual(await cardOrder(page), [["t-A1", "alpha"], ["t-A9", "alpha"]]);
+    s.projects[0].name = "renamed";
+    await page.evaluate(() => load());
+    await until(async () => JSON.stringify(await cardOrder(page)) === JSON.stringify([["t-A1", "renamed"], ["t-A9", "renamed"]]), 3000,
+      "名前が変わったカードが作り直されて、head に新しい名前が出る");
+  });
+});
+
+test("並び: 全体の表示で、判断待ちも回答済みも無く読めなかったプロジェクトだけのときは、バナーを名前つきで出し、帯は出さない。プロジェクトごとでも帯は出さない", async () => {
+  for (const v of ["prio", "proj"]) {
+    const s = new Script([proj(P1, [], [], false)]);
+    await withPage(s, async page => {
+      assert.equal(await page.evaluate(() => localStorage.getItem("humanq-view")), v, "前提: 覚えた並びが入っていない");
+      assert.deepEqual(await page.locator("#main .banner").allTextContents(),
+        [`${v === "prio" ? "alpha: " : ""}読めませんでした (自動で読み直します): bd down`], `${v}: バナー`);
+      assert.equal(await page.locator("#main .empty").count(), 0, `${v}: バナーがあるのに「判断待ちはありません」が出た`);
+      assert.equal(await page.locator("#toc").isHidden(), true, `${v}: 出すカードが無いのに帯が出ている`);
+    }, {}, page => page.addInitScript(v => { localStorage.setItem("humanq-view", v); }, v));
+  }
+});
+
+test("並び: 全体の表示で最後の 1 枚を押すと、空になる節 (か入れ物) ごと畳まれ、送信が失敗すれば節と入れ物ごと元に戻る", async () => {
+  // 1 枚だけ: 全体の入れ物ごと畳まれる / 判断待ち 1 枚と回答済み 1 枚: 判断待ちの節だけが畳まれる
+  for (const [human, ans, heads, folds] of [[[item("t-A1")], [], ["判断待ち (1)"], ["flat"]],
+    [[item("t-A1")], [answeredItem("t-A9")], ["判断待ち (1)", "回答済み・反映待ち (1)"], ["wait"]]]) {
+    const s = new Script([proj(P1, human, ans)]);
+    s.answerResult = () => ({ status: 502, body: { error: "bd boom" } });
+    await withPage(s, async page => {
+      await setView(page, "prio");
+      // 畳む動き (.leaving) が付いた入れ物 (全体の入れ物は "flat"、節は data-kind) を記録する
+      await page.evaluate(() => {
+        window.__folded = [];
+        new MutationObserver(ms => { for (const m of ms) if (m.target.matches(".flat.leaving, .grp.leaving"))
+          window.__folded.push(m.target.matches(".flat") ? "flat" : m.target.dataset.kind); })
+          .observe(document.getElementById("main"), { subtree: true, attributes: true, attributeFilter: ["class"] });
+      });
+      const release = s.hold("answer");
+      await answerOne(page, "t-A1");
+      await until(async () => (await page.evaluate(() => window.__folded.length)) > 0, 3000, "空になる節か入れ物が畳まれる");
+      assert.deepEqual(await page.evaluate(() => [...new Set(window.__folded)]), folds, "畳まれた入れ物が違う");
+      release();
+      await until(async () => (await page.locator("section.card.failed").count()) === 1, 3000, "カードが戻る");
+      await page.waitForTimeout(500);
+      assert.deepEqual(await page.locator("h2.sec").allInnerTexts(), heads, "節の見出しが戻らない");
+      assert.equal(await page.locator(".flat").count(), 1);
+      assert.equal(await page.locator(".leaving, .anim").count(), 0, "畳みの状態が残っている");
+      assert.ok(await qcard(page, "t-A1").evaluate(e => e.offsetHeight > 100 && !e.inert), "戻ったカードが見えない・押せない");
+      assert.equal(await page.locator("#main .empty").count(), 0);
+    });
+  }
+});
+
+for (const scheme of ["light", "dark"]) {
+  test(`${scheme}: 並びの切り替えの枠は帯の背景に対して 3:1 以上、文字は自身の背景に対して 4.5:1 以上 (押した側・押していない側とも)`, async () => {
+    const s = new Script([proj(P1, [item("t-A1")])]);
+    await withPage(s, async page => {
+      await page.emulateMedia({ colorScheme: scheme });
+      const m = await page.evaluate(() => {
+        const cs = e => getComputedStyle(e);
+        return { band: cs(document.body).backgroundColor, btns: [...document.querySelectorAll("#toc .viewbtn")].map(b =>
+          ({ pressed: b.getAttribute("aria-pressed"), fg: cs(b).color, bg: cs(b).backgroundColor, bd: cs(b).borderTopColor })) };
+      });
+      assert.equal(m.btns.length, 2, "切り替えのボタンが 2 つでない");
+      // 押した側 (aria-pressed=true) は塗りで見分けられる
+      assert.deepEqual(m.btns.map(b => b.pressed), ["true", "false"]);
+      assert.notEqual(m.btns[0].bg, m.btns[1].bg, `${scheme}: 押した側と押していない側の背景が同じ`);
+      const r = await page.evaluate(([fnSrc, m]) => {
+        const ratio = eval(`(${fnSrc})()`);
+        return m.btns.map(b => ({ pressed: b.pressed, text: ratio(b.fg, b.bg), edge: ratio(b.bd, m.band) }));
+      }, [RATIO_FN.toString(), m]);
+      for (const x of r) {
+        assert.ok(x.text >= 4.5, `${scheme} aria-pressed=${x.pressed} の文字 ${x.text.toFixed(2)}`);
+        assert.ok(x.edge >= 3, `${scheme} aria-pressed=${x.pressed} の枠 / 帯の背景 ${x.edge.toFixed(2)}`);
+      }
     });
   });
 }
