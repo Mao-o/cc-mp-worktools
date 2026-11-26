@@ -450,19 +450,41 @@ _HOSTS_FILE = "hosts.yml"
 _ACTIVE_USER_KEY = "user"
 
 
-def _config_dir(env) -> Path | None:
-    """gh の設定ディレクトリ (`GH_CONFIG_DIR` → `$XDG_CONFIG_HOME/gh` → `~/.config/gh`)。"""
+def _config_dir(env, home: Path | None = None) -> Path | None:
+    """gh の設定ディレクトリ (`GH_CONFIG_DIR` → `$XDG_CONFIG_HOME/gh` → `~/.config/gh`)。
+
+    home: `~` に使う HOME。None なら hook プロセスの `Path.home()`。
+    """
     explicit = env.get(_CONFIG_DIR_ENV_VAR)
     if explicit:
         return Path(explicit)
     xdg = env.get(_XDG_CONFIG_HOME_ENV_VAR)
     if xdg:
         return Path(xdg) / "gh"
-    try:
-        home = Path.home()
-    except (RuntimeError, OSError):
-        return None
+    if home is None:
+        try:
+            home = Path.home()
+        except (RuntimeError, OSError):
+            return None
     return home / ".config" / "gh"
+
+
+def state_files(env=None, context=None) -> list[Path]:
+    """hook を通らない切替 (ターミナルでの `gh auth switch` など) で gh が書き換えるファイル (v0.35.0)。
+
+    gh は host ごとのアクティブアカウントを `hosts.yml` の `<host>.user` に書き、切替
+    (`gh auth switch`)・ログイン・ログアウトのたびに書き直す。トークンを keyring に置く構成でも、
+    keyring の中のトークンを入れ替えたうえで `user:` を書き換えて hosts.yml を書く (gh のソースの
+    `internal/config/config.go` の `activateUser`)。dispatcher はこのファイルの指紋
+    (`core/cache.state_fingerprint`) を成功 cache に記録し、変わっていれば照合し直す。
+
+    設定ディレクトリはローカル読取と同じ `_config_dir` で決める。HOME は実行される gh のもの
+    (行頭の `HOME=...` があればそれ。`cli_config.overriding_home`)。gh が Windows で使う
+    `%AppData%` 配下は見ない (README の既知の制限)。context は使わない。
+    """
+    e = os.environ if env is None else env
+    config_dir = _config_dir(e, cli_config.overriding_home(e))
+    return [] if config_dir is None else [config_dir / _HOSTS_FILE]
 
 
 def _local_active_accounts(env=None) -> dict[str, str] | None:

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.35.0
+
+### Changed: hook を通らない gh / gcloud の切替の後は、成功 cache を使わずに照合し直す
+
+- 成功 cache の entry に、CLI のアカウントの状態ファイルの指紋を記録し、読むときに今の指紋と違えば cache を
+  使わずに照合する。gh は `hosts.yml` (`GH_CONFIG_DIR` → `$XDG_CONFIG_HOME/gh` → `~/.config/gh`)、gcloud は
+  `active_config` と使う構成の `configurations/config_<name>`。場所は検証に渡すのと同じ env (行頭の inline env と
+  `HOME=...` を含む) で決める。指紋は中身ではなく stat (symlink は辿る) の device・inode・大きさ・mtime・ctime
+- 0.34.0 までは、成功 cache の破棄は hook が切替コマンドを見たとき、同じ cache dir を見るセッションの中でだけ
+  効いた。利用者がターミナルで `gh auth switch` を打つ・TMPDIR の違うセッションや cache dir を使えないセッションで
+  切り替えると、その前の成功 cache が最大 30 秒 (TTL) 効き、期待と違うアカウントの write が cache hit で通っていた
+  (マージ前レビューの指摘)。gh は切替のたびに hosts.yml の `<host>.user` を書き直す (トークンを keyring に置く構成
+  でも同じ。gh のソースの `activateUser`)
+- ファイルが無い・読めない・辿れない symlink のときも、その状態を指紋にする (無いままなら今までどおり hit する)。
+  ファイルが書かれてから 2 秒の間は cache を読まず書かない (1 秒単位の時刻のファイルシステムで、同じ 1 秒の中で
+  切り替えて戻した書き換えを区別できないため)。指紋のパスを決める処理が例外を投げたときは、その target は cache を
+  使わずに照合する
+- 判定が変わるのは、成功 cache が残っている間に hook の外でファイルが書き換わったときだけ (cache hit で通していた
+  コマンドを照合し直す向き)。切り替えていないときの cache hit と、照合そのものの判定は変えていない。Firebase /
+  AWS / Kubernetes は指紋を取らない (README の既知の制限に足した)。`state` の記録の無い 0.34.0 までの entry は、
+  gh / gcloud では 1 回だけ照合し直す
+
 ## 0.34.0
 
 ### Changed: 自動切替で、並行セッションのガードの記録を置く dir を使えないときは切り替えずに deny する

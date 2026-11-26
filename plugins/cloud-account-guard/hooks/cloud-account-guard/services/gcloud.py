@@ -233,16 +233,45 @@ _CORE_SECTION = "core"
 _CONFIG_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,63}$")
 
 
-def _config_dir(env) -> Path | None:
-    """gcloud の設定ディレクトリ (`CLOUDSDK_CONFIG` → `~/.config/gcloud`)。"""
+def _config_dir(env, home: Path | None = None) -> Path | None:
+    """gcloud の設定ディレクトリ (`CLOUDSDK_CONFIG` → `~/.config/gcloud`)。
+
+    home: `~` に使う HOME。None なら hook プロセスの `Path.home()`。
+    """
     explicit = env.get(_CONFIG_DIR_ENV_VAR)
     if explicit:
         return Path(explicit)
-    try:
-        home = Path.home()
-    except (RuntimeError, OSError):
-        return None
+    if home is None:
+        try:
+            home = Path.home()
+        except (RuntimeError, OSError):
+            return None
     return home / ".config" / "gcloud"
+
+
+def state_files(env=None, context=None) -> list[Path]:
+    """hook を通らない切替 (ターミナルでの `gcloud config set` など) で gcloud が書き換えるファイル (v0.35.0)。
+
+    gcloud はアクティブな configuration 名を `active_config` に、その project / account を
+    `configurations/config_<name>` に書く (ローカル読取 `_local_core_properties` が読むのと同じ
+    ファイル)。`gcloud config configurations activate` は前者を、`gcloud config set` と
+    `gcloud auth login` (account を設定する) は後者を書き換える。dispatcher はこれらの指紋
+    (`core/cache.state_fingerprint`) を成功 cache に記録し、変わっていれば照合し直す。
+
+    構成の名前はローカル読取と同じ順で決める (`--configuration` (context) → env の
+    `CLOUDSDK_ACTIVE_CONFIG_NAME` → `active_config` の中身 → `default`)。名前が gcloud の命名規則から
+    外れるときは `active_config` だけ。HOME は実行される gcloud のもの (`cli_config.overriding_home`)。
+    gcloud が Windows で使う `%APPDATA%` 配下は見ない (README の既知の制限)。
+    """
+    e = os.environ if env is None else env
+    config_dir = _config_dir(e, cli_config.overriding_home(e))
+    if config_dir is None:
+        return []
+    files = [config_dir / _ACTIVE_CONFIG_FILE]
+    name = _local_config_name(e, config_dir, (context or {}).get("configuration"))
+    if name is not None:
+        files.append(config_dir / _CONFIGURATIONS_DIR / f"{_CONFIG_FILE_PREFIX}{name}")
+    return files
 
 
 def _local_config_name(env, config_dir: Path, configuration=None) -> str | None:

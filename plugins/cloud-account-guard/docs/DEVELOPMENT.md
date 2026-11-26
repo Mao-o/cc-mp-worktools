@@ -418,7 +418,20 @@ PreToolUse は Bash のたびに発火するので、`gh pr list && gh pr view &
 - **成功のみ**: 失敗 (文字列返却) は常に再検証する。切り替え直後に使いたいため
 - **無効化**: TTL 超過 / `accounts.local.json` の mtime 変化 / 破損・欠損 (UTF-8 で
   ない・入れ子が深い entry を含む。v0.18.0) / 値が期待した型でない (v0.19.1。下の項) /
-  アカウント状態を変えうるコマンドの検出 / epoch 不一致
+  アカウント状態を変えうるコマンドの検出 / epoch 不一致 / CLI の状態ファイルの指紋の不一致
+  (v0.35.0。下の項)
+- **状態ファイルの指紋 (v0.35.0)**: hook を通らない切替 (ターミナルでの `gh auth switch`・TMPDIR の
+  違うセッションでの切替) は epoch を進めない。service が `state_files(env, context)` で宣言した
+  ファイル (github は hosts.yml、gcloud は active_config と使う構成のファイル) の stat
+  (`cache.state_fingerprint`。device・inode・大きさ・mtime_ns・ctime_ns、symlink は辿る、stat できない
+  ときは errno) を hash して entry の `state` に記録し、読むときに比べる。指紋は**検証の前に**取り、
+  書く側も同じ値を使う (後に取ると、その間の切替後の指紋で旧状態の成功を記録する)。mtime から 2 秒
+  (`_STATE_SETTLE_NS`) の間は指紋を作らず cache を読まず書かない (1 秒単位の時刻の FS で同じ 1 秒の
+  2 回の書き換えを区別できない)。`state_files` の例外は dispatcher (`_cache_state`) が握り、その
+  target は cache を使わない。宣言しない service は空文字で、`state` の無い 0.34.0 までの entry と
+  一致する (アップグレードで照合し直さない)。多すぎる分には再検証が増えるだけ、漏れると hook の外の
+  切替の後 TTL の間 cache で通る。CLI が普段のコマンドでも書き換えるファイルを入れると cache が
+  効かなくなる (firebase / aws / kubectl を入れていないのはこれを確かめられていないため)
 - **cache dir の JSON は `cache.read_state` で読む** (v0.19.1): 成功 cache の entry・epoch・
   自動切替の記録を同じ関数で読む (存在確認は `os.path.isfile`、読めないものは None)。値の型は
   呼び出し側が確かめる: entry の timestamp は float にできる有限の数で、書いてから TTL 以内

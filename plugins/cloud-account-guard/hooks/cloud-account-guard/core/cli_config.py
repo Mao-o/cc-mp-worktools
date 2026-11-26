@@ -68,6 +68,16 @@ def home_overridden(env) -> bool:
     return bool(value) and value != os.environ.get(HOME_ENV_VAR)
 
 
+def overriding_home(env) -> Path | None:
+    """コマンドの行頭の `HOME=...` が hook プロセスと違う (`home_overridden`) なら、その HOME。
+
+    違わなければ None (呼び出し側は hook プロセスの `Path.home()` を使う)。成功 cache の指紋を取る
+    状態ファイル (service の `state_files`) の場所を、実行される CLI と同じ HOME で決めるために使う
+    (v0.35.0)。ローカル読取は HOME が違えば CLI に委ねるので、これを使わない。
+    """
+    return Path(env[HOME_ENV_VAR]) if home_overridden(env) else None
+
+
 def read_bounded_text(path: Path, limit: int = MAX_FILE_BYTES) -> str:
     """limit (既定 `MAX_FILE_BYTES`) を超えない範囲で UTF-8 の文字列として読む (parse の前の大きさの確認)。
 

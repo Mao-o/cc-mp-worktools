@@ -108,6 +108,21 @@
                                     ため、漏れると値を変えた直後の TTL の間は
                                     前の値での成功で通る。迷ったら入れる側に
                                     倒す (余計に入っても再検証が増えるだけ)
+     - state_files(env, context) -> list[Path]
+                                    (任意、v0.35.0) hook を通らない切替 (ターミナル
+                                    での `gh auth switch` など) で CLI が書き換える
+                                    アカウントの状態ファイル。dispatcher は検証の前に
+                                    その stat の指紋 (`core/cache.state_fingerprint`)
+                                    を取って成功 cache の entry に記録し、違えば
+                                    照合し直す。env は検証に渡すのと同じ完全な env、
+                                    context は解決済みの context。例外は dispatcher が
+                                    握る (その target は cache を使わない)。多すぎる
+                                    分には再検証が増えるだけ、漏れると hook の外の
+                                    切替の後 TTL の間 cache で通る。指紋は中身ではなく
+                                    stat で取るので、CLI が普段のコマンドでも書き換える
+                                    ファイルは入れない (cache が効かなくなる)。
+                                    github (hosts.yml) と gcloud (active_config と
+                                    構成のファイル) が宣言する
      - ACCOUNT_KEY: str             accounts.local.json 上のキー名
      - SETUP_HINT: str              accounts.local.json 未設定時の案内文
      - ACCEPTS_DICT: bool           期待値に dict 形を許すか (全 service 必須)
