@@ -591,8 +591,8 @@ opt-in (`CLOUD_ACCOUNT_GUARD_AUTO_SWITCH` → `"$auto_switch"` → 無効) で�
   検証が旧状態の成功を書く窓が開く (`invalidate` の tombstone で、in-flight 窓の間は
   自分の検証成功も publish されない)
 - **記録の dir (`cache.state_dir`) を使えなければ切り替えない** (v0.34.0)。ガードは dir の記録に
-  頼るので、dir を使えないと記録を読めも書けもせず、ガードが黙って働かない (旧版が umask 002 で
-  作った 0775 の dir・別のユーザーの dir)。切り替えるとマシン全体に効く切替を止める保護が利用者に
+  頼るので、dir を使えないと記録を読めも書けもせず、ガードが黙って働かない (別のユーザーが先に作った dir・
+  group / other が書ける dir)。切り替えるとマシン全体に効く切替を止める保護が利用者に
   見えずに消えるので、`cache.invalidate` も `apply_switch` もせず注記 (dir のパスと直し方) を返し、
   従来の deny にする。注記のパスは cache と同じ式 (`cache.dir_path`) で実行時に作る。確かめるのは
   切り替える段 (`plan_switch` が steps を返した後) だけで、計画の時点で一致していた経路は変えない。

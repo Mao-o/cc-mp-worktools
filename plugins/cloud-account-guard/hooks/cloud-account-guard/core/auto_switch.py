@@ -93,14 +93,20 @@ def state_dir_unusable_note() -> str:
     """並行セッションのガードの記録を置く dir (`cache.state_dir`) を使えないときの注記。
 
     dir は cache と同じで、示すパスも cache と同じ式 (`cache.dir_path`) で実行時に作る。
-    別のユーザーが作った dir は消せないので、TMPDIR を変える直し方も添える。パスは TMPDIR
-    (env) から来るので、制御文字だけをエスケープして 1 行に収める。
+    別のユーザーが作った dir は消せないので、TMPDIR を変える直し方も添える (TMPDIR は
+    hook のプロセスの env が読まれるので、Claude Code を起動する環境で、全セッション共通に)。
+    パスは TMPDIR (env) から来て「消す」案内の対象なので、`_format_conflicts` と同じく
+    シェルの 1 語にする (制御文字を含むなら quote は改行を残すので、エスケープした表示だけ)。
     """
-    where = shell_word.escape_controls(str(cache.dir_path()))
+    text = str(cache.dir_path())
+    escaped = shell_word.escape_controls(text)
+    where = shlex.quote(text) if escaped == text else escaped
     return (
         _NOTE_HEAD + "並行セッションのガードが使えないためです (ガードの記録を置く dir "
         f"{where} を作れない、または自分の所有で group / other が書けない実ディレクトリで"
-        "ない)。この dir を消すか、TMPDIR を自分だけが書ける dir に向けると直ります。"
+        "ない)。この dir を消すか、TMPDIR を自分だけが書ける dir に向けると直ります (TMPDIR は "
+        "Claude Code を起動する環境で、すべてのセッションで同じ dir にします。コマンドの行頭の "
+        "`TMPDIR=…` では直らず、セッションごとに違うとセッションの間でガードが働きません)。"
     )
 
 
@@ -371,7 +377,7 @@ def attempt(
     svc_name = _service_name(service)
     if steps:
         # ガードは cache dir の記録に頼る。dir を使えないと記録を読めも書けもせず、ガードが
-        # 黙って働かない (旧版が umask 002 で作った 0775 の dir・別のユーザーの dir)。マシン全体に
+        # 黙って働かない (別のユーザーが先に作った dir・group / other が書ける dir)。マシン全体に
         # 効く切替を止める保護が利用者に見えずに消えるので、切り替えずに従来どおり deny する (v0.34.0)。
         if cache.state_dir() is None:
             return Outcome(note=state_dir_unusable_note())

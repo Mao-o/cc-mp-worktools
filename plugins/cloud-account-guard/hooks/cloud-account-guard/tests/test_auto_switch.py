@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import stat
 import tempfile
@@ -540,15 +541,16 @@ def unusable_dir_note(where: str) -> str:
         "※ 自動切替 (auto-switch) は行いませんでした: 並行セッションのガードが使えないためです "
         f"(ガードの記録を置く dir {where} を作れない、または自分の所有で group / other が"
         "書けない実ディレクトリでない)。この dir を消すか、TMPDIR を自分だけが書ける dir に"
-        "向けると直ります。"
+        "向けると直ります (TMPDIR は Claude Code を起動する環境で、すべてのセッションで同じ dir にします。"
+        "コマンドの行頭の `TMPDIR=…` では直らず、セッションごとに違うとセッションの間でガードが働きません)。"
     )
 
 
 class TestStateDirUnusable(_TmpCacheDir):
     """記録を置く dir (成功 cache と同じ) を使えないなら、切り替えずに従来どおり deny する (v0.34.0)。
 
-    0.33.0 までは記録が無いのと同じに扱って切り替えていた。旧版が umask 002 で作った 0775 の
-    dir や別のユーザーの dir があると、並行セッションのガード (マシン全体の gh の切り替え合いを
+    0.33.0 までは記録が無いのと同じに扱って切り替えていた。group / other が書ける dir や
+    別のユーザーが先に作った dir があると、並行セッションのガード (マシン全体の gh の切り替え合いを
     止める保護) が利用者に見えずに消えていた。
     """
 
@@ -577,7 +579,7 @@ class TestStateDirUnusable(_TmpCacheDir):
 
     @unittest.skipUnless(hasattr(os, "geteuid"), "所有者と mode は POSIX のもの")
     def test_dir_others_can_write_is_not_switched(self):
-        """旧版が umask 002 で作った 0775 の dir (group が書ける) など。dir は直さずに残す。"""
+        """group / other が書ける dir (0775 など)。dir は直さずに残す。"""
         self.base.mkdir()
         for mode in (0o775, 0o770, 0o757):
             with self.subTest(mode=oct(mode)):
@@ -655,6 +657,19 @@ class TestStateDirUnusable(_TmpCacheDir):
         self._assert_not_switched(
             svc, out, invalidate, str(self.tmp) + "/a\\nb/cc-mp-cloud-account-guard"
         )
+
+    @unittest.skipUnless(hasattr(os, "geteuid"), "所有者と mode は POSIX のもの")
+    def test_note_quotes_the_dir_as_one_shell_word(self):
+        """空白を含む TMPDIR でも、消す案内のパスはシェルの 1 語 (引用符つき) になる。"""
+        spaced = self.tmp / "my tmp"
+        (spaced / "cc-mp-cloud-account-guard").mkdir(parents=True)
+        os.chmod(spaced / "cc-mp-cloud-account-guard", 0o775)
+        os.environ["TMPDIR"] = str(spaced)
+        svc = _fake_service(verify=None)
+        out, invalidate = self._attempt(svc)
+        quoted = shlex.quote(str(spaced / "cc-mp-cloud-account-guard"))
+        self.assertTrue(quoted.startswith("'"), quoted)
+        self._assert_not_switched(svc, out, invalidate, quoted)
 
     @unittest.skipUnless(hasattr(os, "geteuid"), "所有者と mode は POSIX のもの")
     def test_already_matching_plan_is_unchanged_even_if_dir_is_unusable(self):

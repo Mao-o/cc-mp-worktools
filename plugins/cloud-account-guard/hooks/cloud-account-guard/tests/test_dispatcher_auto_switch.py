@@ -491,7 +491,7 @@ class TestUnusableStateDir(AutoSwitchBase):
         super().setUp()
         self.state = Path(os.environ["TMPDIR"]) / "cc-mp-cloud-account-guard"
         self.state.mkdir()
-        os.chmod(self.state, 0o775)  # 旧版が umask 002 で作った dir
+        os.chmod(self.state, 0o775)  # group が書ける dir
 
     def test_denies_like_auto_switch_off_and_says_how_to_fix(self):
         self._write_accounts({"github": "Mao-o"})
