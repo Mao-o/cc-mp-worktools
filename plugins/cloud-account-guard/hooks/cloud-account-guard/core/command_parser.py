@@ -50,7 +50,7 @@ _WRAPPERS_TAKE_LATER_OPTIONS = {("npm", "exec")}
 # 1 語の別名 (v0.32.0)。`bunx` = `bun x`、`pnpx` = `pnpm dlx`。別名の元と同じく語を落とすだけ。
 _WRAPPERS_ALIAS = {"bunx", "pnpx"}
 # 後ろに使う tool の指定 (`node@20` / `aws-cli@2` / `python`。0 個以上) を並べてから `--` で
-# コマンドを始める wrapper (v0.32.0。0.31.1 までは tool の指定の無い `mise exec --` だけ)。
+# コマンドを始める wrapper (v0.32.0。0.31.2 までは tool の指定の無い `mise exec --` だけ)。
 # `--` の前に `-` で始まる語 (option) があるか、`--` が無ければ剥がさない。
 _WRAPPERS_TOOL_ARGS = {("mise", "exec"), ("mise", "x")}
 # `pnpm <名前>` / `yarn <名前>` (v0.32.0)。名前が下の CLI 名と一致するときだけ剥がす。pnpm / yarn は
@@ -126,7 +126,7 @@ _WRAPPER_ENV_CLASS = {
     ("pnpm", "dlx"): "passthrough",
     ("bun", "x"): "passthrough",
     # v0.32.0 追加分。前置きの env が後ろの CLI に届くことを実測した (docs/wrapper-env-audit.md の D16 表)。
-    # `mise exec` は 0.31.1 までの `("mise", "exec", "--")` (tool の指定の無い形) を含む。
+    # `mise exec` は 0.31.2 までの `("mise", "exec", "--")` (tool の指定の無い形) を含む。
     ("mise", "exec"): "passthrough",
     ("mise", "x"): "passthrough",
     ("yarn", "dlx"): "passthrough",

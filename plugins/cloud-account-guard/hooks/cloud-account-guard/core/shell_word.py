@@ -21,11 +21,17 @@ quote は許容形を将来緩めたときの二重化。
 **値を文面に示すとき** (`現在=` / `期待=` / コマンド指定 / alias の行き先 / host など。
 コマンドの形で案内するのではなく、値そのものを見せる表示) は、出どころに関わらず
 `shown` / `shown_all` を通す (v0.21.0)。示すのは、許容形 (`WORD`) に `fullmatch` する値か、
-空白 (Unicode の空白を含む) も `=` も含まず、Unicode の制御文字 (Cc)・書式文字 (Cf)・行区切り
-(Zl)・段落区切り (Zp)・サロゲート (Cs)・私用領域 (Co)・未割り当て (Cn)、既定で無視される文字
-(Default_Ignorable_Code_Point。Hangul filler・異体字セレクタ・結合書記素接合子など)、空白に
-見える文字 (点字の空白など) も含まず、結合文字 (Mn / Me / Mc) で始まらない値 (`can_show`)。
-それ以外は `NOT_SHOWN` に置き換える。不可視の文字を空白の代わりに使えば、空白を含まない値でも
+空白 (Unicode の空白を含む) も `=` も含まず、どの文字も示す Unicode の一般カテゴリ (文字 L*・
+数字 N*・句読点 P*・数学記号 Sm・通貨記号 Sc・修飾記号 Sk・結合文字 M*) に入り、そのカテゴリの
+中の既定で無視される文字 (Default_Ignorable_Code_Point のうち Lo / Mn のもの。Hangul filler・
+異体字セレクタ・結合書記素接合子など) と空白に見える文字 (エジプト聖刻文字の空白など) を含まず、
+結合文字 (Mn / Me / Mc) で始まらない値 (`can_show`)。それ以外は `NOT_SHOWN` に置き換える。
+示す側を許可リストで持つ (v0.32.1。それまでは示さないカテゴリと文字を並べる禁止リストで、
+レビューのたびに「まだ示される空白に見える文字」が見つかった)。制御文字・書式文字・区切り・
+サロゲート・私用領域・未割り当てと、その他の記号 (So。点字の空白などを含む) はカテゴリで示さない
+ので、将来の Unicode で足される書式文字や空白に見える記号も示さない。閉じないのは、示す
+カテゴリの中に足される空白に見える文字だけ (`_INVISIBLE_RANGES` に足すまで示す)。
+不可視の文字を空白の代わりに使えば、空白を含まない値でも
 文面の上ではコマンドの形 (`xㅤkubectlㅤconfigㅤuse-contextㅤevil`) に見え、先頭の結合文字は
 前の固定文 (`期待=` の `=`) と合成されて別の記号 (`≠`) に見える。値の途中の結合文字は隠さない
 (NFD で書いた日本語の名前の濁点など、普通の名前に現れる)。
@@ -108,47 +114,54 @@ NOT_SHOWN = "(表示しない値)"
 
 # `shown` が示す形のうち、`WORD` より広い側 (空白と `=` を含まない)。
 _SHOWABLE = re.compile(r"[^\s=]+")
-# 示さない Unicode の一般カテゴリ (制御文字・書式文字・行区切り・段落区切り・サロゲート・
-# 私用領域・未割り当て)。私用領域と未割り当ては、端末やフォントによって何が見えるかが決まらない。
-_HIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Cs", "Co", "Cn"})
 
-# 示さない文字の範囲 (両端を含む)。標準ライブラリには Default_Ignorable_Code_Point の判定が
-# 無いので、範囲を定数で持つ。出典は Unicode の DerivedCoreProperties.txt の
-# Default_Ignorable_Code_Point (Unicode 14.0〜17.0 の DerivedCoreProperties.txt と一致)。
-# 既定で無視される文字は表示されないか幅を持たず、空白の代わりに置くと、空白を含まない値が
-# コマンドの形に見える。大半は Cf / Cn (カテゴリでも隠れる。範囲は出典どおりに持つ) だが、
-# Lo (Hangul filler) と Mn (U+034F / U+17B4-17B5 / U+180B-180D・U+180F / 異体字セレクタ) も含む。
-# 「空白に見える」と注記した行は Default_Ignorable ではないが空白に見える文字 (点字の空白
-# U+2800、契丹小字の filler U+16FE4、エジプト聖刻文字の空白 U+13441-13442、音符記号の
-# NULL NOTEHEAD U+1D159、OBJECT REPLACEMENT CHARACTER U+FFFC、IDEOGRAPHIC HALF FILL SPACE
-# U+303F)。隠しても deny / allow は変わらず、表示されないだけなので安全側。
-# 名前で拾うこの禁止リストは閉じない。新しい Unicode の版で空白に見える文字が増えうる
-# (U+13441 は Unicode 15.0 で足された。Python 3.11 以前では未割り当てなのでカテゴリでも隠れる)。
+# 示す文字の Unicode の一般カテゴリ (許可リスト、v0.32.1。それまでは示さないカテゴリと文字を
+# 並べる禁止リストだった)。文字 (L*)・数字 (N*)・句読点 (P*)・数学記号 (Sm)・通貨記号 (Sc)・
+# 修飾記号 (Sk) と、結合文字 (M*。値の先頭には置けない。`_COMBINING_CATEGORIES`)。
+# 入れないカテゴリ:
+# - 区切り (Z*。空白・行区切り・段落区切り) と、その他 (C*。制御文字・書式文字・サロゲート・
+#   私用領域・未割り当て)。私用領域と未割り当ては、端末やフォントによって何が見えるかが決まらない。
+#   許可リストなので、将来の Unicode で足される書式文字や、Python の版が古くて未割り当てに見える
+#   文字も、個別に足さなくても示さない
+# - その他の記号 (So)。絵文字・囲み文字・図形などで、普通の名前 (context 名・project ID・profile 名)
+#   にはほとんど現れない一方、空白に見える文字 (点字の空白 U+2800・IDEOGRAPHIC HALF FILL SPACE
+#   U+303F・OBJECT REPLACEMENT CHARACTER U+FFFC・音符記号の NULL NOTEHEAD U+1D159) を含む。
+#   カテゴリごと示さないので、So に足される空白に見える記号も示さない
+# ASCII の記号は `=` を除いてどれかに入る (`. _ - / : @ , + ~ ;` などは示す。`=` は `_SHOWABLE` で除く)。
+_SHOWN_CATEGORIES = frozenset({
+    "Lu", "Ll", "Lt", "Lm", "Lo",
+    "Nd", "Nl", "No",
+    "Pc", "Pd", "Ps", "Pe", "Pi", "Pf", "Po",
+    "Sm", "Sc", "Sk",
+    "Mn", "Mc", "Me",
+})
+
+# 許可するカテゴリの中にあって示さない文字の範囲 (両端を含む)。カテゴリでは閉じない残り:
+# - 既定で無視される文字 (Unicode の DerivedCoreProperties.txt の Default_Ignorable_Code_Point) の
+#   うち、Lo / Mn のもの (Hangul filler・結合書記素接合子・クメール文字の母音の継承記号・モンゴル文字と
+#   Unicode の異体字セレクタ)。表示されないか幅を持たず、空白の代わりに置くと、空白を含まない値が
+#   コマンドの形に見える。Default_Ignorable の残り (大半) は Cf / Cn で、カテゴリで示さない。
+#   標準ライブラリにはこの性質の判定が無いので範囲を定数で持つ (Unicode 14.0〜17.0 で一致)
+# - 空白に見える Lo / Mn (エジプト聖刻文字の FULL BLANK / HALF BLANK、契丹小字の FILLER)
+# 普通の名前に現れない block は block ごと除く (Variation Selectors、Egyptian Hieroglyph Format
+# Controls、Ideographic Symbols and Punctuation、タグ文字と Variation Selectors Supplement を含む
+# plane 14 の先頭 4096 文字)。同じ block に普通の文字があるものは文字ごとに除く (Hangul の filler は
+# NFD の韓国語・単独の字母・全角英数字と、結合書記素接合子はアクセント記号と、クメール文字と
+# モンゴル文字のものはそれぞれの文字と同じ block にある)。
+# この残りは名前で拾う列挙なので閉じない: 許可するカテゴリ (Lo / Mn など) に空白に見える文字が将来の
+# Unicode で足されると、ここに足すまで示す。隠しても deny / allow は変わらず、表示されないだけ。
 # bisect で引くので開始の昇順に並べる。
 _INVISIBLE_RANGES = (
-    (0x00AD, 0x00AD),  # SOFT HYPHEN
-    (0x034F, 0x034F),  # COMBINING GRAPHEME JOINER
-    (0x061C, 0x061C),  # ARABIC LETTER MARK
-    (0x115F, 0x1160),  # HANGUL CHOSEONG / JUNGSEONG FILLER
-    (0x17B4, 0x17B5),  # KHMER VOWEL INHERENT AQ / AA
-    (0x180B, 0x180F),  # MONGOLIAN FREE VARIATION SELECTOR 1-4 / VOWEL SEPARATOR
-    (0x200B, 0x200F),  # ZERO WIDTH SPACE .. RIGHT-TO-LEFT MARK
-    (0x202A, 0x202E),  # LEFT-TO-RIGHT EMBEDDING .. RIGHT-TO-LEFT OVERRIDE
-    (0x2060, 0x206F),  # WORD JOINER .. NOMINAL DIGIT SHAPES (未割り当てを含む)
-    (0x2800, 0x2800),  # BRAILLE PATTERN BLANK (空白に見える)
-    (0x303F, 0x303F),  # IDEOGRAPHIC HALF FILL SPACE (空白に見える)
-    (0x3164, 0x3164),  # HANGUL FILLER
-    (0xFE00, 0xFE0F),  # VARIATION SELECTOR 1-16
-    (0xFEFF, 0xFEFF),  # ZERO WIDTH NO-BREAK SPACE
-    (0xFFA0, 0xFFA0),  # HALFWIDTH HANGUL FILLER
-    (0xFFF0, 0xFFF8),  # 未割り当て (Default_Ignorable として予約)
-    (0xFFFC, 0xFFFC),  # OBJECT REPLACEMENT CHARACTER (空白に見える)
-    (0x13441, 0x13442),  # EGYPTIAN HIEROGLYPH FULL BLANK / HALF BLANK (空白に見える)
-    (0x16FE4, 0x16FE4),  # KHITAN SMALL SCRIPT FILLER (空白に見える)
-    (0x1BCA0, 0x1BCA3),  # SHORTHAND FORMAT LETTER OVERLAP .. UP STEP
-    (0x1D159, 0x1D159),  # MUSICAL SYMBOL NULL NOTEHEAD (空白に見える)
-    (0x1D173, 0x1D17A),  # MUSICAL SYMBOL BEGIN BEAM .. END PHRASE
-    (0xE0000, 0xE0FFF),  # タグ文字・VARIATION SELECTOR 17-256 と、その前後の予約
+    (0x034F, 0x034F),  # COMBINING GRAPHEME JOINER (Mn)
+    (0x115F, 0x1160),  # HANGUL CHOSEONG / JUNGSEONG FILLER (Lo)
+    (0x17B4, 0x17B5),  # KHMER VOWEL INHERENT AQ / AA (Mn)
+    (0x180B, 0x180F),  # MONGOLIAN FREE VARIATION SELECTOR 1-4 (Mn) / VOWEL SEPARATOR (Cf)
+    (0x3164, 0x3164),  # HANGUL FILLER (Lo)
+    (0xFE00, 0xFE0F),  # block: Variation Selectors (VARIATION SELECTOR 1-16。Mn)
+    (0xFFA0, 0xFFA0),  # HALFWIDTH HANGUL FILLER (Lo)
+    (0x13430, 0x1345F),  # block: Egyptian Hieroglyph Format Controls (FULL BLANK / HALF BLANK は Lo)
+    (0x16FE0, 0x16FFF),  # block: Ideographic Symbols and Punctuation (KHITAN SMALL SCRIPT FILLER は Mn)
+    (0xE0000, 0xE0FFF),  # タグ文字・VARIATION SELECTOR 17-256 (Mn) と、その前後の予約
 )
 _INVISIBLE_STARTS = tuple(lo for lo, _ in _INVISIBLE_RANGES)
 
@@ -168,9 +181,10 @@ def can_show(value) -> bool:
     `WORD` に合うか、次のどれも満たす文字列なら真。str 以外は偽。
 
     - 空白も `=` も含まない
-    - 制御文字・書式文字・行区切り・段落区切り・サロゲート・私用領域・未割り当てを含まない
-    - 既定で無視される文字 (Hangul filler・異体字セレクタなど) と、空白に見える文字
-      (点字の空白など) を含まない (`_INVISIBLE_RANGES`)
+    - どの文字も示すカテゴリ (`_SHOWN_CATEGORIES`。文字・数字・句読点・数学記号・通貨記号・
+      修飾記号・結合文字) に入る
+    - 示すカテゴリの中の、既定で無視される文字 (Hangul filler・異体字セレクタなど) と空白に
+      見える文字 (エジプト聖刻文字の空白など) を含まない (`_INVISIBLE_RANGES`)
     - 結合文字 (Mn / Me / Mc) で始まらない (途中の結合文字は NFD の濁点などなので示す)
     """
     if not isinstance(value, str):
@@ -181,8 +195,8 @@ def can_show(value) -> bool:
         return False
     if unicodedata.category(value[0]) in _COMBINING_CATEGORIES:
         return False
-    return not any(
-        unicodedata.category(ch) in _HIDDEN_CATEGORIES or _invisible(ord(ch)) for ch in value
+    return all(
+        unicodedata.category(ch) in _SHOWN_CATEGORIES and not _invisible(ord(ch)) for ch in value
     )
 
 

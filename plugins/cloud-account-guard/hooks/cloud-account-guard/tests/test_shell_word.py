@@ -211,6 +211,8 @@ class TestShown(unittest.TestCase):
             "\u0903b", "a\ud800b", "a\ue000b", "a\U000f0000b", "a\u0378b",
             # 空白として描かれる文字 (Default_Ignorable ではない)
             "a\U00013441b", "a\U00013442b", "a\U0001d159b", "a\ufffcb", "a\u303fb",
+            # 値の末尾 (文字ごとの判定が最後の文字まで見ること)
+            "ab\u3164", "ab\u200b", "ab\u2800",
         )
         for value in hidden:
             with self.subTest(value=value):
@@ -265,6 +267,97 @@ class TestShown(unittest.TestCase):
                       "cafe\u0301", unicodedata.normalize("NFD", "ポスト本番")):
             with self.subTest(value=value):
                 self.assertEqual(shell_word.shown(value), value)
+
+    # 示すカテゴリ (許可リスト、v0.32.1) ごとの代表。値の途中に置き、前後を `WORD` の外の文字
+    # (日本語) にして、許容形 (`WORD`) の側ではなく許可リストの側を通す。
+    _CATEGORY_SAMPLES = {
+        "Lu": "Ä", "Ll": "ä", "Lt": "ǅ", "Lm": "ー", "Lo": "本",
+        "Nd": "１", "Nl": "Ⅻ", "No": "①",
+        "Pc": "＿", "Pd": "〜", "Ps": "「", "Pe": "」", "Pi": "«", "Pf": "»", "Po": "・",
+        "Sm": "×", "Sc": "€", "Sk": "゛",
+        "Mn": "゙", "Mc": "ा", "Me": "⃝",
+    }
+
+    # 普通の名前に現れないので block ごと示さない範囲 (実装の定数とは独立に持つ)。
+    _HIDDEN_BLOCKS = {
+        "Variation Selectors": (0xFE00, 0xFE0F),
+        "Egyptian Hieroglyph Format Controls": (0x13430, 0x1345F),
+        "Ideographic Symbols and Punctuation": (0x16FE0, 0x16FFF),
+        "Tags / Variation Selectors Supplement": (0xE0000, 0xE0FFF),
+    }
+
+    def test_ordinary_names_are_shown(self):
+        """許可リスト (v0.32.1) でも普通の名前は示す: kubectl の `_local` / `a,b`、日本語と NFD の
+        日本語、ドメイン付きの project ID、ASCII の記号 (`.` `_` `-` `/` `:` `@` `,` `+` `~`)。"""
+        names = [
+            "_local", "a,b", "本番", "開発クラスタ", "サーバー・本番", "proj;x",
+            unicodedata.normalize("NFD", "がいど"), unicodedata.normalize("NFD", "ポスト本番"),
+            "example.com:my-project", "example.com:本番",
+        ]
+        for sym in ". _ - / : @ , + ~".split():
+            names += [sym + "x", "x" + sym, sym + "本番", "本" + sym + "番", "本番" + sym]
+        for value in names:
+            with self.subTest(value=value):
+                self.assertEqual(shell_word.shown(value), value)
+
+    def test_every_ascii_symbol_except_equals_is_shown(self):
+        """ASCII の印字できる記号は、`=` を除いて値の先頭でも途中でも示す (許可リストの側を通す)。"""
+        symbols = [chr(code) for code in range(0x21, 0x7F) if not chr(code).isalnum()]
+        self.assertEqual(len(symbols), 32)
+        for ch in symbols:
+            for value in (ch + "本", "本" + ch + "番"):
+                with self.subTest(value=value):
+                    self.assertEqual(shell_word.can_show(value), ch != "=")
+
+    def test_each_shown_category_is_shown_inside_a_name(self):
+        """示すカテゴリのどれも、値の途中の文字として示す (許可リストからカテゴリが抜けていない)。"""
+        self.assertEqual(len(self._CATEGORY_SAMPLES), 21)
+        for category, ch in self._CATEGORY_SAMPLES.items():
+            with self.subTest(category=category, code=f"U+{ord(ch):04X}"):
+                self.assertEqual(unicodedata.category(ch), category)
+                value = "本" + ch + "番"
+                self.assertEqual(shell_word.shown(value), value)
+
+    def test_other_symbols_are_not_shown(self):
+        """その他の記号 (So) は、値の先頭・途中・末尾のどこでも示さない (v0.32.1)。全コードポイントの生成。
+
+        So には絵文字・囲み文字のほか、空白に見える記号 (点字の空白 U+2800・U+303F・U+FFFC・
+        U+1D159) がある。カテゴリごと示さないので、So に足される空白に見える記号も示さない。
+        """
+        shown = []
+        symbols = 0
+        for code in range(sys.maxunicode + 1):
+            ch = chr(code)
+            if unicodedata.category(ch) != "So":
+                continue
+            symbols += 1
+            if (shell_word.can_show("本" + ch + "番") or shell_word.can_show(ch + "番")
+                    or shell_word.can_show("本" + ch)):
+                shown.append(f"U+{code:04X}")
+        self.assertEqual(shown, [])
+        self.assertGreater(symbols, 5000)
+        for value in ("a©b", "a★b", "a\U0001f600b", "a㈱b", "x⠀kubectl⠀config"):
+            with self.subTest(value=value):
+                self.assertEqual(shell_word.shown(value), shell_word.NOT_SHOWN)
+
+    def test_blocks_without_ordinary_names_are_not_shown(self):
+        """普通の名前に現れない block (異体字セレクタ・エジプト聖刻文字の書式制御など) は block ごと示さない。
+
+        空白に見える文字 (FULL BLANK / HALF BLANK、契丹小字の FILLER) だけでなく、同じ block の
+        ほかの文字も示さない (同じ block に将来足される filler も示さないように)。
+        """
+        assigned = 0
+        for block, (lo, hi) in self._HIDDEN_BLOCKS.items():
+            leaks = []
+            for code in range(lo, hi + 1):
+                if unicodedata.category(chr(code))[0] != "C":
+                    assigned += 1
+                if shell_word.can_show("本" + chr(code) + "番"):
+                    leaks.append(f"U+{code:04X}")
+            with self.subTest(block=block):
+                self.assertEqual(leaks, [])
+        # 空振りでないこと (異体字セレクタ 256 文字は Python の宣言下限の版でも割り当て済み)
+        self.assertGreaterEqual(assigned, 256)
 
     def test_shown_values_cannot_form_a_remediation_pattern(self):
         """示す値は、単独で REMEDIATION_PATTERNS の形にならない (どのパターンも空白を要する)。

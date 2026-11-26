@@ -2,7 +2,7 @@
 
 `bunx` / `pnpx` / `yarn dlx` / `npm exec` / `npm exec --` / `mise exec <tool>@<版> --` / `mise x ... --` と、
 CLI 名の前の `pnpm` / `yarn` (`pnpm firebase deploy`) を透過 wrapper として剥がし、後ろのクラウド CLI を
-検証の候補にする。0.31.1 までは `npx` / `bun x` / `pnpm exec` / `pnpm dlx` / `mise exec --` だけを剥がし、
+検証の候補にする。0.31.2 までは `npx` / `bun x` / `pnpm exec` / `pnpm dlx` / `mise exec --` だけを剥がし、
 これらの形のクラウド CLI は候補にならず検証されなかった。
 
 起動の根拠 (2026-11 に実測。docs/wrapper-env-audit.md の D16 表):
