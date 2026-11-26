@@ -42,9 +42,20 @@ header { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bot
 #notice { background: var(--panel); border-bottom: 2px solid var(--warn); }
 #notice .inner { max-width: 860px; margin: 0 auto; padding: 10px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; color: var(--warn); font-weight: 600; }
 #notice button { font-size: 13px; }
-/* プロジェクトの目次の帯 (ヘッダーの下。sticky にはしない)。チップは「名前 + 判断待ちの件数」で、判断待ちに P0 があれば P0 の印を付ける。
-   幅 640px 以下は 1 行にして帯の中だけ横にスクロールさせる (ページ全体は横にスクロールさせない) */
-#toc .inner { max-width: 860px; margin: 0 auto; padding: 10px 16px 2px; display: flex; flex-wrap: wrap; gap: 6px 8px; }
+/* プロジェクトの目次の帯 (ヘッダーの下。sticky にはしない)。1 行目に並びの切り替え (プロジェクトごと / 全体を優先度順)、その下にチップ。
+   チップは「名前 + 判断待ちの件数」で、判断待ちに P0 があれば P0 の印を付ける。全体の表示ではチップを出さない (飛ぶ先の見出しが無い)。
+   切り替えをチップの横に置くと、チップの行の幅が切り替えの幅だけ削られ (半端な px になり)、長い名前のチップの幅と合わなくなるので、行を分ける。
+   幅 640px 以下はチップを 1 行にして帯の中だけ横にスクロールさせる (ページ全体は横にスクロールさせない) */
+#toc .inner { max-width: 860px; margin: 0 auto; padding: 10px 16px 2px; display: flex; flex-direction: column; gap: 6px; }
+#tocin { min-width: 0; display: flex; flex-wrap: wrap; gap: 6px 8px; }
+#tocin:empty { display: none; }
+.view { display: flex; }
+.viewbtn { font: inherit; font-size: 13px; line-height: 1.6; padding: 2px 12px; background: var(--panel); color: var(--ink);
+  border: 1px solid var(--control-line); cursor: pointer; }
+.viewbtn:first-child { border-radius: 999px 0 0 999px; }
+.viewbtn:last-child { border-radius: 0 999px 999px 0; border-left: 0; }
+.viewbtn[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 700; }
+.viewbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .tocchip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; background: var(--panel); color: var(--ink);
   border: 1px solid var(--line); border-radius: 999px; padding: 2px 12px; font: inherit; font-size: 13px; line-height: 1.6; cursor: pointer; }
 .tocchip:hover { border-color: var(--accent); }
@@ -53,7 +64,7 @@ header { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bot
 .tocp0 { flex: none; font-size: 11px; font-weight: 700; color: var(--p0); border: 1px solid currentColor; border-radius: 999px; padding: 0 6px; line-height: 1.5; }
 /* チップは縮まない (overflow が visible の flex item の min-width は中身の幅。max-width: 100% で帯の幅までに抑え、長い名前は … で切る) */
 @media (max-width: 640px) {
-  #toc .inner { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 6px; }
+  #tocin { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 6px; }
 }
 /* 絞り込みと検索の帯 (目次の帯の下。sticky にはしない)。操作部品は選べる値が 2 つ以上あるときだけ出す */
 #filters .inner { max-width: 860px; margin: 0 auto; padding: 10px 16px 2px; display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end; }
@@ -67,7 +78,9 @@ header { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bot
 #fclear[hidden] { display: none; }
 @media (max-width: 640px) { .fld.fsearch { flex: 1 1 100%; } .fld.fsearch input { width: 100%; } }
 main { max-width: 860px; margin: 0 auto; padding: 8px 16px 64px; }
-h3 { font-size: 14px; color: var(--muted); font-weight: 600; margin: 28px 0 10px; letter-spacing: .02em; }
+h3, h2.sec { font-size: 14px; color: var(--muted); font-weight: 600; margin: 28px 0 10px; letter-spacing: .02em; }
+/* 全体を優先度順の表示の節の見出し (判断待ち / 回答済み・反映待ち)。プロジェクトの見出しが無いので h2 にし、見た目は節の見出し (h3) と同じ。止めない */
+h2.sec { display: block; position: static; padding: 0; line-height: inherit; background: none; z-index: auto; }
 /* カードの scroll-margin-top: sticky のヘッダー (--head-h。JS が測る) と、止まったプロジェクトの見出し (h2。1 行で約 36px) の下に 10px 空ける。
    フォーカスが移ったカード (moveFocusAway) の上端が、止まった見出しの下に隠れないように */
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; margin-bottom: 14px; scroll-margin-top: calc(var(--head-h, 64px) + 46px); }
@@ -91,6 +104,9 @@ h2 .path { flex: 1 1 0; overflow: hidden; text-overflow: ellipsis; white-space: 
    見出しは止まってヘッダーの下に出るが、その下の節の見出しと最初のカードの上がヘッダーと見出しの下に隠れる */
 .proj { scroll-margin-top: var(--head-h, 0px); }
 .prio.p0 { color: var(--p0); } .prio.p1 { color: var(--p1); } .prio.p2 { color: var(--p2); } .prio.p3, .prio.p4 { color: var(--p3); }
+/* カードの head のプロジェクト名。全体の表示の入れ物 (.flat) の中のカードにだけ出す (プロジェクトごとの表示では見出しに出ている) */
+.head .pj { display: none; font-weight: 700; color: var(--ink); max-width: 16em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flat .head .pj { display: block; }
 button.id { font-family: ui-monospace, Menlo, monospace; font-size: inherit; color: inherit; background: none; border: 0; padding: 0; margin: 0; cursor: pointer; }
 .copied { color: var(--rec); font-weight: 600; }
 .copied:empty { display: none; }
@@ -189,7 +205,10 @@ details pre { white-space: pre-wrap; word-break: break-word; font: 13px/1.6 ui-m
   <button class="ghost" id="notify" type="button">通知をオン</button>
 </div></header>
 <div id="notice" role="alert" hidden></div>
-<nav id="toc" aria-label="プロジェクトの目次" hidden><div class="inner" id="tocin"></div></nav>
+<nav id="toc" aria-label="プロジェクトの目次" hidden><div class="inner">
+  <div class="view" role="group" aria-label="並び"><button class="viewbtn" type="button" data-view="proj" aria-pressed="true">プロジェクトごと</button><button class="viewbtn" type="button" data-view="prio" aria-pressed="false">全体を優先度順</button></div>
+  <div id="tocin"></div>
+</div></nav>
 <form id="filters" role="search" aria-label="絞り込みと検索" hidden><div class="inner">
   <label class="fld fsearch"><span>検索</span><input id="fq" type="search" placeholder="題・問い・背景・選択肢・ID" autocomplete="off"></label>
   <label class="fld" hidden><span>プロジェクト</span><select id="fproject"></select></label>
@@ -536,9 +555,10 @@ function ageText(created) {
 // カードの表示に使う値の署名。変わったカードだけ作り直す (受け取ったときに 1 度だけ作る)。
 // 回答済みのカードには回答の署名 (asig) も入れる: 同じ本文で答え直された回答 (案 A → 取り消し → 案 A) でも作り直し、
 // 「取り消して判断待ちに戻す」が今の回答の署名を送るようにする
-// 書き込めるか (writable) と CLI の名前も入れる: 書き込めないプロジェクトのカードは回答の部品を出さないので、変わったら作り直す
-const sigQ = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, ageText(it.created_at), shownLabels(it), it.q, it.description, it.notes, it.writable, it.cli]);
-const sigA = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, ageText(it.created_at), shownLabels(it), it.answer, it.asig, it.writable, it.cli]);
+// 書き込めるか (writable) と CLI の名前も入れる: 書き込めないプロジェクトのカードは回答の部品を出さないので、変わったら作り直す。
+// プロジェクトの名前 (pname) も入れる: 全体の表示で head に出す
+const sigQ = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, ageText(it.created_at), shownLabels(it), it.q, it.description, it.notes, it.writable, it.cli, it.pname]);
+const sigA = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, ageText(it.created_at), shownLabels(it), it.answer, it.asig, it.writable, it.cli, it.pname]);
 // 書き込めないプロジェクト (writable:false。br を読みだけで返す 0.13〜0.14 のサーバー) のカードに、回答の部品の代わりに出す 1 行
 const readonlyNote = it => el("p", { class: "ro" }, `このプロジェクト${it.cli ? ` (${it.cli}) ` : ""}は画面からはまだ回答できません`);
 
@@ -559,6 +579,8 @@ function head(it) {
   const copied = el("output", { class: "copied" });     // コピーの結果の知らせ (output は暗黙の role=status。.head > span には数えない)
   return el("div", { class: "head" },
     el("span", { class: `prio p${p}` }, `P${p}`),
+    // プロジェクトの名前 (CSS で全体の表示の中のカードにだけ出す。表示を切り替えてもカードは作り直さない)。.head > span には数えない
+    el("b", { class: "pj", title: it.project }, it.pname),
     el("button", { class: "id", type: "button", title: "押すと ID をコピー", onclick: () => copyId(it.id, copied) }, it.id),
     copied,
     el("span", {}, age ? `${it.created_at} (${age})` : it.created_at),
@@ -751,11 +773,36 @@ function syncError(c, key) {
 // ---- 描き直し (key ごとの突き合わせ) --------------------------------------------------------------
 // main の中身は作り直さない。プロジェクト → 節 (判断 / 作業・確認 / 回答済み) → カードの入れ物を key ごとに持ち、
 // 署名が変わったカードだけ作り直す。データから消えた (送信中のものも含む) カードは畳む。
+// 全体を優先度順の表示 (view が "prio") では、プロジェクトの入れ物の代わりに 1 つの入れ物 (flatBox) に、
+// 読めなかったプロジェクトのバナー → 判断待ち (全プロジェクトを優先度 → 作成日の順) → 回答済み (同じ順) を並べる。
+// カードの key と要素は両方の表示で共通で、表示を切り替えても作り直さずに入れ物を移すだけ (入力・フォーカス・開いた本文を保つ)
 
 const cards = new Map();           // key -> {el, sig}
 const projs = new Map();           // path -> {el, h2, banner, chip, groups: Map(kind -> {el, h3})}
 const TITLES = { dec: "判断", task: "作業・確認", ans: "回答済み・反映待ち" };
+const FLAT_TITLES = { wait: "判断待ち", ans: "回答済み・反映待ち" };
+let flatBox = null;                // 全体の表示の入れ物 {el, groups: Map(kind -> {el, h3}), banners: Map(path -> el)}
 let emptyNote = null, idleNote = null;
+
+// 並び: "proj" (プロジェクトごと。既定) / "prio" (全体を優先度順)。選んだほうは localStorage に覚える
+// (読み書きできなくても既定の表示で動き、切り替えも効く)
+const VIEW_KEY = "humanq-view";
+let view = "proj";
+try { if (localStorage.getItem(VIEW_KEY) === "prio") view = "prio"; } catch { /* 読めなければ既定の表示 */ }
+const viewBtns = [...document.querySelectorAll("#toc .viewbtn")];
+const syncViewBtns = () => { for (const b of viewBtns) b.setAttribute("aria-pressed", String(b.dataset.view === view)); };
+syncViewBtns();
+for (const b of viewBtns) b.addEventListener("click", () => {
+  if (b.dataset.view === view) return;
+  view = b.dataset.view;
+  try { localStorage.setItem(VIEW_KEY, view); } catch { /* 覚えられなくても切り替えは効く */ }
+  syncViewBtns();
+  // カードは今ある要素を新しい入れ物へ移すだけで、新しく入るカードは無い (畳む・入る動きは付かない)
+  try { render(); } catch (e) { console.error(e); }
+});
+// 全体の表示の並び: 優先度 (数でなければ 9) → 作成日。同じなら元の並び (プロジェクトの順 → サーバーの並び) のまま
+const createdOf = it => String(it.created_at || "");
+const byPrio = (x, y) => prioOf(x) - prioOf(y) || (createdOf(x) < createdOf(y) ? -1 : createdOf(x) > createdOf(y) ? 1 : 0);
 
 // 目次の帯のチップ (プロジェクトごとに 1 つ。作り直さず中身だけ合わせる: 押した・フォーカスしたチップが読み込みで消えない)。
 // q は送信中を除いた判断待ち (見出しの件数と同じ数)。P0 の印も送信中を除いて決める
@@ -878,17 +925,22 @@ document.getElementById("fclear").addEventListener("click", () => {
 });
 filterBox.addEventListener("submit", e => e.preventDefault());   // 検索欄で Enter を押しても、ページを読み直さない
 
+// 読めなかったプロジェクトのバナーの文 (全体の表示では、頭にプロジェクトの名前を付ける)
+const bannerText = p => `読めませんでした (${p.okAt ? `最後に読めたのは ${hhmm(p.okAt)}。` : ""}自動で読み直します): ${p.error}`;
+
 function render() {
   if (!lastData) return false;
   const main = document.getElementById("main");
   const active = document.activeElement;
+  const flat = view === "prio";
   const seenKeys = new Set();
   const entering = [];
   const projEls = [];
-  const chips = [];                  // 目次の帯に並べるチップ (プロジェクトの順)
+  const chips = [];                  // 目次の帯に並べるチップ (プロジェクトの順。全体の表示では出さない)
   const busyPaths = new Set();
   const hiddenKeys = new Set();      // 絞り込みで隠しているカード (畳まずに外す。失敗の表示は残す)
-  let total = 0, visible = 0, idle = 0, stale = 0, anyItems = false;
+  const flatQ = [], flatA = [], flatBad = [];   // 全体の表示: 判断待ち・回答済み (プロジェクトの順) と、バナーを出すプロジェクト
+  let total = 0, visible = 0, idle = 0, stale = 0, anyItems = false, shownProjects = 0;
 
   const ensureCard = (it, kind) => {
     const key = (kind === "ans" ? aKey : qKey)(it.project, it.id);
@@ -924,6 +976,13 @@ function render() {
     visible += q.length;
     // 絞り込みで中身が無くなったプロジェクトは出さない。読めなかったプロジェクトのバナーは、別のプロジェクトを選んでいるときだけ隠す
     if (!q.length && !a.length && (p.ok || (flt.project !== "" && flt.project !== p.path))) continue;
+    if (q.length || a.length) shownProjects++;
+    if (flat) {                        // カードは下で全体の並びにする。プロジェクトの入れ物は作らない
+      flatQ.push(...q);
+      flatA.push(...a);
+      if (!p.ok) flatBad.push(p);
+      continue;
+    }
     busyPaths.add(p.path);
     let pr = projs.get(p.path);
     if (pr) { if (pr.el._leave) unleave(pr.el); }
@@ -936,7 +995,7 @@ function render() {
     // チップは判断待ちか回答済みがあるプロジェクトだけ (読めなかったプロジェクトのバナーだけの入れ物には出さない)
     if (q.length || a.length) chips.push(syncChip(pr, p, q));
     pr.banner = p.ok ? null : (pr.banner || el("div", { class: "banner" }));
-    if (pr.banner) pr.banner.textContent = `読めませんでした (${p.okAt ? `最後に読めたのは ${hhmm(p.okAt)}。` : ""}自動で読み直します): ${p.error}`;
+    if (pr.banner) pr.banner.textContent = bannerText(p);
     const lists = {
       dec: q.filter(i => !i.q || i.q.kind !== "task"),
       task: q.filter(i => i.q && i.q.kind === "task"),
@@ -952,6 +1011,30 @@ function render() {
       groups.push({ kind, g, els: [g.h3, ...lists[kind].map(i => ensureCard(i, kind))] });
     }
     plan.push({ pr, groups });
+  }
+  // 全体の表示: 判断待ち (判断と作業・確認) と回答済みを、それぞれ全プロジェクトを通して優先度 → 作成日の順に 1 列にする
+  let flatPlan = null;
+  if (flat && (flatQ.length || flatA.length || flatBad.length)) {
+    const fb = flatBox || (flatBox = { el: el("div", { class: "flat" }), groups: new Map(), banners: new Map() });
+    if (fb.el._leave) unleave(fb.el);
+    const lists = { wait: flatQ.sort(byPrio), ans: flatA.sort(byPrio) };
+    const groups = [];
+    for (const kind of ["wait", "ans"]) {
+      if (!lists[kind].length) continue;
+      let g = fb.groups.get(kind);
+      if (g) { if (g.el._leave) unleave(g.el); }
+      else { g = { el: el("div", { class: "grp", "data-kind": kind }), h3: el("h2", { class: "sec" }) }; fb.groups.set(kind, g); }
+      g.h3.textContent = `${FLAT_TITLES[kind]} (${lists[kind].length})`;
+      groups.push({ kind, g, els: [g.h3, ...lists[kind].map(i => ensureCard(i, kind))] });
+    }
+    const banners = flatBad.map(p => {
+      let b = fb.banners.get(p.path);
+      if (!b) { b = el("div", { class: "banner", title: p.path }); fb.banners.set(p.path, b); }
+      b.textContent = `${p.name}: ${bannerText(p)}`;
+      return b;
+    });
+    for (const path of [...fb.banners.keys()]) if (!flatBad.some(p => p.path === path)) fb.banners.delete(path);
+    flatPlan = { fb, groups, banners };
   }
 
   // 2. データに無い (送信中・サーバー側の理由で消えた) カードは畳む。畳んでいるカードには触らない。
@@ -971,19 +1054,31 @@ function render() {
     place(pr.el, [pr.h2, pr.banner, ...groups.map(x => x.g.el)]);
     projEls.push(pr.el);
   }
+  if (flatPlan) {
+    const { fb, groups, banners } = flatPlan;
+    for (const { g, els } of groups) place(g.el, els);
+    const live = new Set(groups.map(x => x.kind));
+    for (const [kind, g] of fb.groups) if (!live.has(kind)) retire(g.el, () => { if (fb.groups.get(kind) === g) fb.groups.delete(kind); });
+    place(fb.el, [...banners, ...groups.map(x => x.g.el)]);
+    projEls.push(fb.el);
+  }
+  // 出さない入れ物を外す (表示を切り替えた直後は、カードはもう新しい入れ物へ移っている)
   for (const [path, pr] of projs) {
     if (!busyPaths.has(path)) retire(pr.el, () => { if (projs.get(path) === pr) projs.delete(path); });
   }
+  if (flatBox && !flatPlan) { const fb = flatBox; retire(fb.el, () => { if (flatBox === fb) flatBox = null; }); }
 
   emptyNote = emptyNote || el("p", { class: "empty" });
   idleNote = idleNote || el("p", { class: "empty" });
   emptyNote.textContent = filterActive() && anyItems ? "絞り込みに合うものはありません (解除すると全件に戻ります)" : `判断待ちはありません (登録 ${lastData.projects.length} プロジェクト)`;
   idleNote.textContent = `ほか ${idle} プロジェクトは判断待ちなし`;
-  place(main, [busyPaths.size ? null : emptyNote, ...projEls, busyPaths.size && idle && !filterActive() ? idleNote : null]);
+  const busy = projEls.length > 0;
+  place(main, [busy ? null : emptyNote, ...projEls, busy && idle && !filterActive() ? idleNote : null]);
   syncFilterBar(total, visible);
-  // 目次の帯: 判断待ち・回答済みが無くなった (送信中を除いて)・データから消えたプロジェクトのチップは、見出しを畳み終わるのを待たずに外す
+  // 目次の帯: 判断待ち・回答済みが無くなった (送信中を除いて)・データから消えたプロジェクトのチップは、見出しを畳み終わるのを待たずに外す。
+  // 帯 (並びの切り替え) は、判断待ちか回答済みを出しているプロジェクトがあれば、どちらの表示でも出す
   place(document.getElementById("tocin"), chips);
-  document.getElementById("toc").hidden = !chips.length;
+  document.getElementById("toc").hidden = !shownProjects;
 
   // 新しく現れたカード (追加・失敗からの戻り・取り消し) だけ入場させる。最初の描画では動かさない
   if (!instantRender) for (const e of entering) enter(e);
@@ -1121,14 +1216,15 @@ function normalize(raw, prev) {
     const old = prev && prev.projects.find(x => x.path === p.path);
     // writable を返さない (古い) サーバーは、どのプロジェクトにも書き込める
     const writable = p.writable !== false, cli = typeof p.cli === "string" ? p.cli : null;
+    const name = p.name || p.path.split("/").pop();
     const conv = sig => i => {
       if (!i || typeof i.id !== "string" || (i.q != null && (typeof i.q !== "object" || !Array.isArray(i.q.options)))) throw new Error("想定外のデータ (チケットの形)");
-      const x = { ...i, project: p.path, writable, cli };
+      const x = { ...i, project: p.path, pname: name, writable, cli };
       x._sig = sig(x);
       return x;
     };
     const keep = !p.ok && old;
-    return { path: p.path, name: p.name || p.path.split("/").pop(), ok: !!p.ok, error: p.error,
+    return { path: p.path, name, ok: !!p.ok, error: p.error,
       okAt: p.ok ? Date.now() : (old && old.okAt) || null,         // このプロジェクトを最後に読めた時刻 (一度も読めていなければ null)
       human: keep ? old.human : p.human.map(conv(sigQ)), answered: keep ? old.answered : p.answered.map(conv(sigA)) };
   });
