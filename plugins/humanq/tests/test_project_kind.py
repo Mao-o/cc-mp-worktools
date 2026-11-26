@@ -114,6 +114,11 @@ class ProjectKindTable(unittest.TestCase):
         self.assertKind("bd", self.kind())
         self.assertKind("bd", self.kind({"metadata.json": "{not json"}))
         self.assertKind("bd", self.kind({"metadata.json": "[1]"}))
+        try:                                    # 深い入れ子 (json の parser が RecursionError を上げる) も壊れたファイル
+            kind = self.kind({"metadata.json": "[" * 200000 + "]" * 200000})
+        except RecursionError:
+            self.fail("深く入れ子の metadata.json で RecursionError")
+        self.assertKind("bd", kind)
         self.assertKind("bd", self.kind({"metadata.json": {"database": 3}}))
 
     def test_issues_jsonl_is_not_a_mark(self):

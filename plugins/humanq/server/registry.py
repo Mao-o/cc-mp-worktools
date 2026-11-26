@@ -91,7 +91,7 @@ def _metadata(beads: str) -> dict:
     try:
         with open(os.path.join(beads, "metadata.json"), encoding="utf-8") as f:
             v = json.load(f)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):   # RecursionError は深い入れ子 (json の parser の限界)。壊れたファイルとして扱う
         return {}
     return v if isinstance(v, dict) else {}
 
@@ -154,7 +154,7 @@ def _read(path: str) -> dict:
         with open(path, encoding="utf-8") as f:
             v = json.load(f)
         return v if isinstance(v, dict) else {}
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):   # 深い入れ子の projects.json も壊れたファイルと同じに読む
         return {}
 
 

@@ -33,6 +33,7 @@ humanq = ts.humanq
 
 BR_GITIGNORE = ".br_history/\n*-fsqlite-ns-gate\n"          # br init が .beads/.gitignore に書く印 (humanq が br と読む)
 BR_META = {"database": "beads.db", "jsonl_export": "issues.jsonl"}
+DEEP = "[" * 200000 + "]" * 200000                        # json の parser の再帰の限界を超える入れ子
 BD_META = {"database": "dolt", "backend": "dolt", "dolt_mode": "embedded"}
 WAIT = 1.5                       # 待ち合わせの時間切れ (秒)。1 本ずつ書くとき、先の 1 本はこれだけ待ってから書く
 
@@ -402,11 +403,14 @@ class RegistrationFile(Base):
         self.assertEqual(sorted(x["root"] for x in g), sorted([main, other]), g)
         for x in g:
             self.assertIsNone(x["cli"], x)
-        for bad in ("[]", "null", '{"projects": []}', '{"projects": "x"}', "{"):
-            with self.subTest(file=bad):
+        for bad in ("[]", "null", '{"projects": []}', '{"projects": "x"}', "{", DEEP):
+            with self.subTest(file=bad[:20]):
                 Path(self.sd, "projects.json").write_text(bad, encoding="utf-8")
-                self.assertEqual(self.groups(), [])
-                self.assertIsNone(registry.resolve_project(self.sd, main))
+                try:
+                    self.assertEqual(self.groups(), [])
+                    self.assertIsNone(registry.resolve_project(self.sd, main))
+                except RecursionError:
+                    self.fail("深い入れ子の projects.json で RecursionError")
 
     def test_register_keeps_the_entry_format(self):
         main = br_beads(main_repo(self.p("main")), "beads.db")
@@ -808,11 +812,20 @@ class OddFilesApi(FakeCli):
                 unreadable(os.path.join(odd[-1], target))
             odd.append(wt("commondir-unreadable"))
             unreadable(os.path.join(adm("commondir-unreadable"), "commondir"))
+        # 深く入れ子の metadata.json (json の parser が RecursionError を上げる)。worktree (組の判定) と、単独の登録 (種別の判定) の両方
+        odd.append(wt("meta-deep-wt"))
+        write(os.path.join(odd[-1], ".beads", "metadata.json"), DEEP)
+        odd.append(br_beads(self.p("meta-deep-alone")))
+        write(os.path.join(odd[-1], ".beads", "metadata.json"), DEEP)
         for r in odd:
             registry.register(self.sd, r)
         for bad in (self.p("nul\0path"), "/" + "a" * 5000):    # 登録のパスそのもの
             registry.register(self.sd, bad)
-        self.assertIn(main, [g["root"] for g in self.groups()])
+        try:
+            roots = [g["root"] for g in self.groups()]
+        except Exception as e:  # noqa: BLE001  例外は ERROR ではなく FAIL に数える
+            self.fail(f"組の判定が例外: {type(e).__name__}")
+        self.assertIn(main, roots)
 
         port = ts.free_port()
         srv = ts.start_server(self.sd, port)
