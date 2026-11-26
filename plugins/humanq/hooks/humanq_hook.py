@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""humanq の hook。bd を使うプロジェクト (cwd から上に .beads/ がある) でだけ動き、それ以外は何もしない。
+"""humanq の hook。beads (bd / br) を使うプロジェクト (cwd から上に .beads/ がある) でだけ動き、それ以外は何もしない。
 
     humanq_hook.py session-start   (SessionStart)
         プロジェクトを登録し、画面のサーバーが動いていなければ切り離して起動する (版が古ければ入れ替える。新しければそのまま使う)。
@@ -99,6 +99,11 @@ def summary(root: str, timeout: float, fresh: bool = False) -> dict | None:
     return None if not s or s.get("pending") else s
 
 
+def _is_br(s: dict) -> bool:
+    """summary がサーバーの br として読んだプロジェクトか。cli を返さない古いサーバーは br を読まないので bd。"""
+    return s.get("cli") == registry.BR
+
+
 def _seen_path(sd: str, session_id: str) -> str:
     d = os.path.join(sd, "sessions")
     os.makedirs(d, exist_ok=True)
@@ -147,17 +152,22 @@ def session_start(inp: dict) -> None:
         return
     answered = s.get("answered") or []
     _remember(sd, inp.get("session_id") or "unknown", answered)
-    lines = [
-        f"humanq: このプロジェクト (bd) の判断待ちは {URL} の画面にまとまっていて、ユーザーは手が空いたときにそこで答える。"
-        f"今は判断待ち {s.get('human', 0)} 件・画面で回答済みで未反映 {len(answered)} 件"
-        + (f" ({', '.join(answered)})" if answered else "") + "。",
-        "ユーザーが同席していない作業 (自律ループ・長い作業の途中) で方針判断が要るときは、bd のチケットに human ラベルと "
-        "metadata の humanq (問い・背景・選択肢・推奨) を書いておけば画面に出る。書き方と回答の拾い方は "
-        f"{README} にある。同席している会話では、今までどおりその場で聞く。",
-    ]
-    if answered:
-        lines.append("回答済みは、`bd comments <id>` の最後の `[humanq] 回答` (作者 user/humanq) を読んでチケットに反映し、"
-                     "`bd label remove <id> answered` で外す。")
+    ids = f" ({', '.join(answered)})" if answered else ""
+    if _is_br(s):
+        # br のプロジェクトは画面からはまだ回答できない (読みだけ)。件数だけを伝え、bd のコマンドを含む案内は出さない
+        lines = [f"humanq: このプロジェクト (br) の判断待ちは {URL} の画面に出る (br のプロジェクトは今は読み取りだけで、"
+                 f"画面からは回答できない)。今は判断待ち {s.get('human', 0)} 件・answered ラベルの付いたもの {len(answered)} 件{ids}。"]
+    else:
+        lines = [
+            f"humanq: このプロジェクト (bd) の判断待ちは {URL} の画面にまとまっていて、ユーザーは手が空いたときにそこで答える。"
+            f"今は判断待ち {s.get('human', 0)} 件・画面で回答済みで未反映 {len(answered)} 件{ids}。",
+            "ユーザーが同席していない作業 (自律ループ・長い作業の途中) で方針判断が要るときは、bd のチケットに human ラベルと "
+            "metadata の humanq (問い・背景・選択肢・推奨) を書いておけば画面に出る。書き方と回答の拾い方は "
+            f"{README} にある。同席している会話では、今までどおりその場で聞く。",
+        ]
+        if answered:
+            lines.append("回答済みは、`bd comments <id>` の最後の `[humanq] 回答` (作者 user/humanq) を読んでチケットに反映し、"
+                         "`bd label remove <id> answered` で外す。")
     msg = (f"humanq: 判断待ち {s.get('human', 0)} 件 / 回答済み {len(answered)} 件 → {URL}"
            if s.get("human") or answered else None)
     _out("SessionStart", "\n".join([*lines, *warn]), msg)
@@ -171,7 +181,9 @@ def prompt_submit(inp: dict) -> None:
     if not s or s.get("ok") is False:     # 読めなかったときの answered は [] でも「無い」ではない。覚えた集合を消さない
         return
     new = _remember(registry.state_dir(), inp.get("session_id") or "unknown", s.get("answered") or [])
-    if new:
+    if new and _is_br(s):
+        _out("UserPromptSubmit", f"humanq: 前に伝えた後で、answered ラベルの付いたチケットが {len(new)} 件増えた: {', '.join(new)}。")
+    elif new:
         _out("UserPromptSubmit",
              f"humanq: 前に伝えた後で、ユーザーが判断待ちの画面で {len(new)} 件に回答した: {', '.join(new)}。"
              f"`bd comments <id>` の最後の `[humanq] 回答` を読み、今の作業に関わるなら反映する (手順は {README})。")

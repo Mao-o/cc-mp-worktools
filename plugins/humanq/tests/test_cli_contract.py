@@ -18,7 +18,8 @@ humanq は CLI の出力の形に強く依る。偽物は実測した癖を写�
 - 失敗の文には、どの CLI のどの版でどの癖が食い違ったかを出す
 - コメントの並びは、CLI の生の並びを assert しない (本物の br は並びが決まっていない)。bd は backend の
   comments() が (created_at, id) に依らず書いた順で返すことを、br は CLI の値 (id・created_at) を
-  (created_at, id) で並べると書いた順になることを確かめる。br の backend は別の案が足す
+  (created_at, id) で並べると書いた順になることを確かめる。br の backend の並べ替え (backend.br_thread) は
+  tests/test_backend.py の BrThread と tests/test_br_read.py が偽の br で固定している
 """
 from __future__ import annotations
 
@@ -414,6 +415,65 @@ class BrQuirks:
         got = sorted(r["id"] for r in self.list_rows(q, "-l", "lf"))
         self.assertEqual(got, sorted([a, b]), self.m(q))
         self.assertNotIn(c, got, self.m(q))
+
+    def test_default_label_list_shows_every_unfinished_status(self):
+        """humanq の br の一覧は -s を付けずに読む。既定が「closed と tombstone だけを除く」ことに頼っている。"""
+        q = "list -l の既定が closed と tombstone だけを除き、draft・pinned・独自の status を含む"
+        shown = ("open", "deferred", "draft", "pinned", "review", "in-progress")
+        ids = {s: self.create(s, labels="unf") for s in (*shown, "closed", "tombstone")}
+        for s in shown[1:]:
+            self.ok(q, "update", ids[s], "--status", s)
+        self.ok(q, "close", ids["closed"])
+        self.ok(q, "delete", ids["tombstone"])
+        got = {r["id"]: r.get("status") for r in self.list_rows(q, "-l", "unf", "--limit", "0")}
+        self.assertEqual(sorted(got), sorted(ids[s] for s in shown), self.m(q))
+        self.assertEqual(sorted(got.values()), sorted(shown), self.m(q))
+        stored = {r["id"]: r.get("status") for r in self.list_rows(q, "-l", "unf", "-s", "tombstone")}
+        self.assertEqual(stored, {ids["tombstone"]: "tombstone"}, f"{self.m(q)}: delete が tombstone にしていない")
+
+    def test_update_takes_any_status_but_the_terminal_ones(self):
+        q = "update --status は任意の文字列を受け付け、closed と tombstone は断る (exit 4)"
+        iid = self.create("x")
+        type(self).n += 1
+        custom = f"custom-{type(self).n}"
+        self.ok(q, "update", iid, "--status", custom)
+        self.assertEqual(self.row_of(q, iid).get("status"), custom, self.m(q))
+        for terminal in ("closed", "tombstone"):
+            p = self.run_cli("update", iid, "--status", terminal, "--json")
+            self.assertEqual(p.returncode, 4, f"{self.m(q)}: {terminal}: rc={p.returncode} {p.stdout!r} {p.stderr!r}")
+            out = self.load(p.stdout, q)
+            self.assertIsInstance(out, dict, self.m(q))
+            self.assertIsInstance(out.get("error"), dict, self.m(q))
+            self.assertEqual(out["error"].get("code"), "VALIDATION_FAILED", self.m(q))
+            self.assertIn(f"refusing to {'close' if terminal == 'closed' else 'tombstone'} via", out["error"].get("message", ""),
+                          self.m(q))
+        self.assertEqual(self.row_of(q, iid).get("status"), custom, f"{self.m(q)}: 断った update で status が変わった")
+
+    def test_status_filter_takes_builtins_statuses_in_use_and_all(self):
+        q = "list -s は組み込み・使われている status・all を受け付け、ほかは VALIDATION_FAILED (exit 4)"
+        type(self).n += 1
+        custom = f"unused-{type(self).n}"
+        p = self.run_cli("list", "-s", custom, "--json")
+        self.assertEqual(p.returncode, 4, f"{self.m(q)}: rc={p.returncode} {p.stdout!r}")
+        out = self.load(p.stdout, q)
+        self.assertIsInstance(out, dict, self.m(q))
+        self.assertIsInstance(out.get("error"), dict, self.m(q))
+        self.assertEqual(out["error"].get("code"), "VALIDATION_FAILED", self.m(q))
+        self.assertIn(f"unknown status '{custom}'", out["error"].get("message", ""), self.m(q))
+        for builtin in ("draft", "pinned", "tombstone", "closed"):          # 組み込みは、どのチケットにも無くても通る
+            out = self.jok(q, "list", "-s", builtin, cwd=self.empty)        # 共有のプロジェクトは他のテストが status を使う
+            self.assertIsInstance(out, dict, f"{self.m(q)}: -s {builtin}")
+            self.assertEqual(out.get("issues"), [], f"{self.m(q)}: -s {builtin}")
+        a = self.create("a", labels="sf")
+        self.ok(q, "update", a, "--status", custom)
+        self.assertEqual([r["id"] for r in self.list_rows(q, "-s", custom)], [a], f"{self.m(q)}: 使われた status で絞れない")
+        b = self.create("b", labels="sf")
+        c = self.create("c", labels="sf")
+        self.ok(q, "close", b)
+        self.ok(q, "delete", c)
+        for flag in (("-s", "all"), ("--all",)):
+            got = sorted(r["id"] for r in self.list_rows(q, "-l", "sf", *flag))
+            self.assertEqual(got, sorted([a, b]), f"{self.m(q)}: {' '.join(flag)} は closed を含み tombstone を含まない")
 
     def test_show_is_an_array_with_comments_and_agent_context(self):
         q = "show <ids> --json が comments と agent_context を含む"

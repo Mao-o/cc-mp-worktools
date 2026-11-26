@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.13.0
+
+### br のプロジェクトを画面に出す (br は読み取りのみ)
+
+- br と判定したプロジェクトの判断待ちと回答済みを、画面に出すようにした。`/api/items` の各プロジェクトは `{ok: true, cli: "br", writable: false}` で `human` と `answered` を返す (今までは「br のプロジェクトにはまだ対応していません」の `ok:false` だった)。回答・取り消しは次の段で入れる。この段では `POST /api/answer`・`/api/undo` を今までどおり CLI を打つ前に `readonly` で断る
+- 読みは 1 プロジェクトあたり 3 プロセス: 判断待ち (`br list -l human`) → 回答済み (`br list -l answered`) → 両方の ID をまとめた `br show <id...> --json`。一覧はどちらも `--limit 0 --json` で、status では絞らない。どちらも 0 件なら `show` は打たない。bd の回答済みごとのコメントの読み (N+1) より少ない
+- 一覧を status で絞らないのは、利用者が `br list -l human` で見る判断待ちと同じものを画面と hook の件数に出すため。br 0.7.6 の `list` の既定は `closed` と `tombstone` (`br delete` したもの) だけを除き、`deferred`・`draft`・`pinned` と、`br update --status` が宣言なしで受け付ける独自の status (`review`・打ち間違いの `in-progress` など) を含む。bd の回答済みの読みと同じ 4 つの status (`-s open -s in_progress -s blocked -s deferred`) で絞ると、それ以外の status の判断待ち・回答済みが画面と hook の件数から黙って消える (マージ前レビューの指摘)。`--limit 0` と途中で切れた一覧 (`has_more`) の扱いは、絞らなくても変わらないことを本物で確かめた
+- `show` は ID が 1 つでも無いと全体が exit 3 で失敗する。一覧から `show` までの間にチケットが消えたときのために、exit 3 なら一覧から 1 回だけ読み直し、それでも失敗したらそのプロジェクトを読めないことにする (exit 3 以外の失敗は読み直さない)
+- 問いは `show` の `agent_context` (JSON の文字列) の top-level の key `humanq` から読む。形と正規化 (問いの署名 `qsig` の作り方を含む) は bd の metadata の `humanq` と同じ。`agent_context` が JSON の object でない・空・`humanq` が無い・`ask` が文字列でないときは「問いが未整理」(q=None)。一覧の `agent_context` は読まない (br の schema の文書が「list には出ない」としているため、文書の側に寄せた)
+- 親から継いだ agent_context は問いにしない。br は `.beads/config.yaml` の `inherited_context.enabled` で、親の `agent_context` を子の `show` の別の key `inherited_context` に出す (子の `agent_context` には入らない。br 0.7.6 で実測)。humanq は `agent_context` だけを読むので、子のカードに親の問いと署名は出ない
+- 問いの値 (`humanq`) が JSON の文字列で、入れ子が深くて json の parser が `RecursionError` を上げるときも「問いが未整理」にする。今までは例外がプロジェクトの読みまで抜けて、その 1 件でプロジェクトの全チケットが読めなくなっていた。bd の metadata の `humanq` が同じ形の文字列のときも同じ関数を通るので、bd のプロジェクトでもそうなる (マージ前レビューの指摘)
+- br はコメントの並びが決まっていない。`show` の `comments` を `created_at` の順 (同じ秒なら単調に増える ID の順) に並べてから、最後の `[humanq]` コメントを回答の本文・回答の署名 `asig`・両ラベルのチケットの向きに使う。時刻や ID の読めないコメントは古い側に置く。`comments` が無い (br はコメントの無いチケットで key を出さない) のは 0 件、list でないのは「読めない」(回答の署名が空)
+- 一覧が envelope (`{"issues": [...]}`) でない・JSON でない・途中で切れている (`has_more`)・ID が文字列でないか `-` で始まる (show の引数で flag に読まれる)、`show` の出力が list でない・頼んだ ID が欠けている、はどれもそのプロジェクトを読めないことにする (ほかのプロジェクトは読める)
+- br はプロジェクトの dir を cwd にして起動する (br に `-C` は無い。プロジェクトごとに版を切り替える仕組みも、そのまま効く)。DB・`.beads`・JSONL の場所を指す env (`BEADS_DB`・`BD_DB`・`BD_DATABASE`・`BEADS_DIR`・`BEADS_JSONL`) は br に渡さない。br 0.7.6 で、`BEADS_DB` と `BEADS_DIR` が cwd より優先され、別のプロジェクトの DB を黙って読むことを確かめた
+- br を起動できないときは「br を起動できない (PATH を確認): …」、時間内に終わらないときは「br が 60 秒で終わらない」を、そのプロジェクトのエラーにする
+- 読みの flag は br の既定のまま (`--no-auto-import` は付けない)。br は読みでも JSONL の方が新しいと DB へ取り込む。利用者が `br list` を打ったときと同じで、付けると `git pull` の後の変更が画面に出ない
+
+### 画面
+
+- 書き込めないプロジェクト (`writable:false`。今は br) のカードには、選択肢のボタン・補足欄・「回答する」・「取り消して判断待ちに戻す」を出さず、「このプロジェクト (br) は画面からはまだ回答できません」の 1 行を出す。問い・背景・選択肢 (押せない一覧。推奨の印と深さのラベルのチップ付き) はそのまま見せる。下書きも作らない
+- カードの署名に `writable` と `cli` を入れた。書き込めるかが変わったら、カードを作り直す。`writable` を返さない (古い) サーバーのプロジェクトは、今までどおり書き込めるものとして出す
+- 書き込めるプロジェクトのカード・セレクタ (`.opt` / `button.primary` / `section.card:has(textarea)` / `.ans`) は変えていない
+
+### hook
+
+- `/api/summary` に `cli` と `writable` を足した (既存の key は残す)
+- br のプロジェクトでは、SessionStart は「このプロジェクト (br) の判断待ちは画面に出る (今は読み取りだけで、画面からは回答できない)」と件数・`answered` の付いたチケットの ID だけを伝える。UserPromptSubmit は `answered` の付いたチケットが増えたことだけを伝える。bd のコマンドを含む案内 (metadata の書き方・`bd comments`・`bd label remove`) は出さない。bd のプロジェクトの案内は変えていない
+
+### 変えていないもの
+
+- bd のプロジェクトの読み書き・bd の argv・CSP は変えていない (サーバーが打つ bd の argv の列の固定 `test_golden_argv` は、テストを変えずに通る)。bd の回答済みごとのコメントの読みは backend の `load` に移したが、打つ順は同じ。例外は上の深い入れ子の問い (プロジェクトを読めない → そのチケットだけ問いが未整理)
+
+### テスト
+
+- `tests/test_backend.py` に br の層のテストを足した: br を打つ関数 (cwd・DB の場所の env を渡さないこと・起動の失敗と時間切れと非 0 の exit)、3 プロセスの argv と 0 件のときに `show` を打たないこと、一覧と `show` の出力の形ごとの失敗、`show` の exit 3 を 1 回だけ読み直すこと (2 回目も失敗・exit 3 以外は読み直さない)、問いを `show` の `agent_context` だけから読むこと、`agent_context` の形の表 (他の key・JSON でない・空・配列・深い入れ子など)、コメントの並べ替え (時刻 → ID・時刻の形の違い・読めない時刻と ID)、崩れた順のコメントからの回答と両ラベルの向き、親から継いだ `inherited_context` を問いにしないこと、深い入れ子の問いの文字列 (bd の metadata と br の agent_context の両方。1 件でプロジェクト全体を読めなくしない)。humanq.py が br の argv の語 (`br` / `-l` / `--limit` / `show` / `agent_context`) を持たない検査も足した
+- `tests/test_br_read.py` を足した。偽の br で、問い・回答済み・両ラベル・closed・deferred のチケットを読み、`show` までの 3 回の argv・cwd・bd が 1 回も呼ばれないこと・dolt のファイルを作らないこと、0 件で 2 回、`show` の失敗がそのプロジェクトだけに留まること、`/api/items` と `/api/summary`、hook の案内 (br は件数だけ・bd は今までどおり。どちらも増えた回答済みが無ければ何も出さない) を固定した。終わっていない status (`in_progress`・`blocked`・`deferred`・`draft`・`pinned`・独自の `review`・打ち間違いの `in-progress`) の判断待ちと回答済みは全部出て、`closed` と `tombstone` は出ないことも固定した
+- `tests/test_project_kind.py` の br の行を、読みだけの挙動に合わせた (br の dir では br だけを、その dir を cwd にして打つ)。読めないプロジェクトの hook の確かめは、決められない (SQLite の形の) プロジェクトで行う
+- 偽の br に `update --notes` を足し、description と notes を値のあるチケットにだけ list と show に出すようにした (br 0.7.6 の実測に合わせた)
+- 偽の br の status を br 0.7.6 の実測に合わせた: 組み込みの status に `draft`・`pinned`・`tombstone` を足し、`update --status` は任意の文字列を受け付ける (`closed` と `tombstone` は VALIDATION_FAILED で断る)。`list` の既定は `closed` と `tombstone` だけを除き、`-s` は組み込み・どれかのチケットに付いている status・`all` (tombstone を含まない) を受け付ける。VALIDATION_FAILED の exit code は 4。`delete` (チケットを tombstone にする) を足した。今までの偽物は独自の status を断り、`draft`・`pinned` を知らなかったので、status で絞った一覧の抜けを隠していた
+- 契約テスト (`tests/test_cli_contract.py`) の br に 3 件足した: `list -l` の既定が `closed` と `tombstone` だけを除き `draft`・`pinned`・独自の status を含む、`update --status` が任意の文字列を受け付けて `closed`・`tombstone` を断る (exit 4)、`list -s` が組み込み・使われている status・`all` を受け付けてほかを断る (exit 4)。本物の br 0.7.6 で全件 green
+- 画面: 書き込めないプロジェクトの台本を 1 件足した (回答・取り消しの部品が無く案内の 1 行が出る・選択肢の一覧・問いの未整理・書き込めるプロジェクトのカードは変わらない・書き込めるかが変わったときの作り直し・`cli` の無いときの文言・何も送らない)
+
 ## 0.12.1
 
 ### テスト (挙動の変更なし)

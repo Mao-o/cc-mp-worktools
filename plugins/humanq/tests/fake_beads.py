@@ -3,7 +3,7 @@
 
 テストは一時の bin dir に、このファイルを `bd` の名前で置き (実行権限付き)、その dir を PATH の先頭に入れる
 (tests/test_server.py の install_fake)。振る舞いは argv[0] の basename で分ける。bd と br があり、
-ほかの名前は exit 2 にする (別の CLI の偽物を足すときは PROGS に足す)。br の癖は下の一覧の後ろにある。humanq の製品コードは今は br を呼ばない。
+ほかの名前は exit 2 にする (別の CLI の偽物を足すときは PROGS に足す)。br の癖は下の一覧の後ろにある。humanq の製品コードは br を読みだけに使う (list と show)。
 
 - 状態: <project>/.beads/fake-state.json (issues・labels・comments・status・metadata)。
   呼び出しは .beads/fake-state.lock の flock で 1 本ずつにする (サーバーは読みと書きを別のスレッドで並べて打つ)
@@ -25,9 +25,15 @@
 - br 0.7.6 で実測した癖を持つ (名前が br のとき。詳しくは tests/test_fake_beads.py が 1 件ずつ押さえる):
   - -C・human サブコマンド・list --flat・list -n・update --metadata/--set-metadata は usage エラーで exit 2。
     起動した cwd から上へ .beads を探す
-  - list -s のカンマ区切りは stdout の JSON error (VALIDATION_FAILED) で非 0、繰り返しは通る。
-    list --json は {"issues","total","limit","offset","has_more"} の envelope (0 件も同じ形)。既定は closed だけを除く
-  - show --json は配列 (comments と agent_context を含み metadata は無い)。id が 1 つでも無ければ ISSUE_NOT_FOUND で exit 3
+  - list -s のカンマ区切りは stdout の JSON error (VALIDATION_FAILED、exit 4) で非 0、繰り返しは通る。
+    list --json は {"issues","total","limit","offset","has_more"} の envelope (0 件も同じ形)。既定は closed と tombstone だけを除く
+    (draft・pinned・独自の status も出る)。-s に書けるのは組み込みの 8 つ・どれかのチケットに付いている status・all
+    (all は tombstone を含まない)。ほかは VALIDATION_FAILED
+  - update --status は組み込み以外の任意の文字列 (宣言は要らない) を受け付ける。closed と tombstone は断る (VALIDATION_FAILED、
+    exit 4。close / delete を使わせる)。delete はチケットを tombstone にする (show では読める)
+  - show --json は配列 (comments と agent_context を含み metadata は無い)。id が 1 つでも無ければ ISSUE_NOT_FOUND で exit 3。
+    偽物は comments の key を 0 件でも出す (本物の 0.7.6 は 0 件のとき key を出さない。読む側は両方を受ける)
+  - update --notes で notes を書ける。description・notes は値のある issue にだけ list と show に出る
   - comments の並びは決まっていない (偽物は新しいものを先頭で返す)。id は int
   - label add / remove の戻りは [{"status": added|removed|exists|not_found, ...}] で、どれも exit 0
   - update --agent-context は丸ごと置き換え。半分未満・空にする書き換えは --force が無いと非 0
@@ -49,6 +55,16 @@ HISTORICAL = ("Error: historical SQLite workspace detected; explicit migration i
               "or modify the workspace. Preserve .beads unchanged and follow docs/getting-started/upgrading.md#cross-era-upgrades")
 OPEN_STATUSES = ("open", "in_progress", "blocked", "deferred")
 STATUSES = OPEN_STATUSES + ("closed",)
+# br 0.7.6 の組み込みの status (`br list -s <知らない status>` の文が挙げる順)。br の status はこれ以外の任意の文字列にもできる
+BR_STATUSES = ("open", "in_progress", "blocked", "deferred", "draft", "closed", "tombstone", "pinned")
+# update --status で断る終わりの status と、本物の理由の文 (close / delete の専用のコマンドを使わせる)
+BR_TERMINAL = {
+    "closed": "refusing to close via `br update --status closed`: terminal-state transitions must go through `br close` "
+              "so close-policy (close-reason / AC / attribution) is enforced.",
+    "tombstone": "refusing to tombstone via `br update --status tombstone`: use `br delete <id>` instead so dependency "
+                 "rewiring and tombstone metadata are applied correctly.",
+}
+BR_VALIDATION_EXIT = 4       # VALIDATION_FAILED の exit code (br 0.7.6 の実測)
 
 
 class Fail(Exception):
@@ -475,6 +491,14 @@ def br_json_error(code: str, message: str, exit_code: int) -> Fail:
     return Fail(json.dumps({"error": {"code": code, "message": message}}, ensure_ascii=False), code=exit_code, stdout=True)
 
 
+def br_validation(reason: str, as_json: bool) -> Fail:
+    """VALIDATION_FAILED。--json なら stdout の JSON の error、無ければ stderr の 1 行 (どちらも exit 4)。"""
+    msg = f"Validation failed: status: {reason}"
+    if as_json:
+        return br_json_error("VALIDATION_FAILED", msg, BR_VALIDATION_EXIT)
+    return Fail(f"Error: {msg}", code=BR_VALIDATION_EXIT)
+
+
 def br_split_globals(argv: list[str]) -> tuple[str | None, bool, list[str]]:
     """--actor <name>・--json はどこに書いてもよい。-C は無い (usage エラー)。残りを返す。"""
     actor = None
@@ -565,12 +589,13 @@ def br_comments_of(i: dict) -> list[dict]:
 
 
 def br_row(i: dict) -> dict:
-    """metadata と owner の key は無い。agent_context は値のある issue にだけ文字列で出る。"""
+    """metadata と owner の key は無い。description・notes・agent_context は値のある issue にだけ出る (agent_context は文字列)。"""
     out = {"id": i["id"], "title": i["title"], "status": i["status"], "priority": i["priority"],
            "issue_type": i["issue_type"], "labels": sorted(i["labels"]), "created_at": i["created_at"],
            "updated_at": i["updated_at"]}
-    if i.get("agent_context"):
-        out["agent_context"] = i["agent_context"]
+    for k in ("description", "notes", "agent_context"):
+        if i.get(k):
+            out[k] = i[k]
     return out
 
 
@@ -611,10 +636,13 @@ def br_create(p: Project, args: list[str], as_json: bool, actor: str) -> None:
 
 
 def br_update(p: Project, args: list[str], as_json: bool) -> None:
-    opts, pos = br_take(args, {"--agent-context": True, "--force": False, "--status": True, "--title": True})
+    opts, pos = br_take(args, {"--agent-context": True, "--force": False, "--status": True, "--title": True, "--notes": True})
     if len(pos) != 1:
         raise Usage("error: expected exactly one <ID>")
     i = br_issue(p, pos[0])
+    status = br_one(opts, "--status")
+    if status in BR_TERMINAL:                                           # closed / tombstone は close / delete でだけ
+        raise br_validation(BR_TERMINAL[status], as_json)
     if "--agent-context" in opts:
         raw = br_one(opts, "--agent-context") or ""
         if raw.startswith("@"):
@@ -628,13 +656,12 @@ def br_update(p: Project, args: list[str], as_json: bool) -> None:
             raise Fail(f"Error: refusing to overwrite non-empty 'agent_context' ({len(old)} chars) with a shorter value "
                        f"({len(raw)} chars) without --force")
         i["agent_context"] = raw
-    status = br_one(opts, "--status")
     if status is not None:
-        if status not in STATUSES:
-            raise Fail(f"Error: invalid status: {status}")
-        i["status"] = status
+        i["status"] = status        # 組み込み以外の任意の文字列 (review・打ち間違いの in-progress など) も、宣言なしで受け付ける
     if "--title" in opts:
         i["title"] = br_one(opts, "--title") or ""
+    if "--notes" in opts:
+        i["notes"] = br_one(opts, "--notes") or ""
     i["updated_at"] = br_time(True)
     p.save()
     if as_json:
@@ -654,23 +681,45 @@ def br_close(p: Project, args: list[str]) -> None:
     print(f"Closed {i['id']}")
 
 
+def br_delete(p: Project, args: list[str], as_json: bool) -> None:
+    """チケットを tombstone にする (消さない。show では読める)。無い id が 1 つでもあれば ISSUE_NOT_FOUND (exit 3)。"""
+    _, pos = br_take(args, {"--force": False, "--reason": True})
+    if not pos:
+        raise Usage("error: expected at least one <ID>")
+    found = [br_issue(p, iid) for iid in pos]
+    for i in found:
+        i["status"] = "tombstone"
+        i["updated_at"] = br_time(True)
+    p.save()
+    if as_json:
+        emit({"deleted": [i["id"] for i in found], "deleted_count": len(found), "dependencies_removed": 0,
+              "labels_removed": 0, "events_removed": 0, "references_updated": 0, "orphaned_issues": []})
+    else:
+        print(f"Deleted {len(found)} issue(s):\n" + "\n".join(f"  - {i['id']}" for i in found))
+
+
 def br_list(p: Project, args: list[str], as_json: bool) -> None:
     opts, pos = br_take(args, {"-s": True, "--status": True, "-l": True, "--label": True, "--limit": True, "--all": False})
     if pos:
         raise br_usage_unexpected(pos[0])
     given = opts.get("-s", []) + opts.get("--status", [])
-    for s in given:                                                     # カンマ区切りは受け付けない (繰り返しは受け付ける)
-        if s not in STATUSES:
-            raise br_json_error("VALIDATION_FAILED", f"Validation failed: status: unknown status '{s}'. "
-                                f"Valid statuses: {', '.join(STATUSES)}", 2)
+    # -s に書けるのは組み込み・どれかのチケットに付いている status・all。カンマ区切りは 1 つの知らない status になる
+    known = set(BR_STATUSES) | {i["status"] for i in p.state["issues"].values()} | {"all"}
+    for s in given:
+        if s not in known:
+            raise br_validation(f"unknown status '{s}'. Built-in statuses: {', '.join(BR_STATUSES)}. Custom statuses must "
+                                "be declared in .beads/policy.yaml (workflow.statuses) or exist on at least one issue. "
+                                "Use --status all to include every status", True)
     labels = opts.get("-l", []) + opts.get("--label", [])
-    if given:
-        allowed = set(given)
-    elif opts.get("--all"):
-        allowed = set(STATUSES)
-    else:
-        allowed = set(STATUSES) - {"closed"}                            # 既定は closed だけを除く (deferred を含む)
-    items = [i for i in p.state["issues"].values() if i["status"] in allowed and all(x in i["labels"] for x in labels)]
+
+    def shown(st: str) -> bool:
+        if given:                                                       # all は tombstone を含まない (tombstone は名指しのときだけ)
+            return st in given or ("all" in given and st != "tombstone")
+        if opts.get("--all"):
+            return st != "tombstone"
+        return st not in ("closed", "tombstone")                        # 既定は closed と tombstone だけを除く (draft・pinned・独自の status も出る)
+
+    items = [i for i in p.state["issues"].values() if shown(i["status"]) and all(x in i["labels"] for x in labels)]
     total = len(items)
     limit = int(br_one(opts, "--limit") or 0)                           # 0 は無制限 (既定も無制限)
     if limit > 0:
@@ -688,7 +737,7 @@ def br_show(p: Project, args: list[str], as_json: bool) -> None:
         raise Usage("error: the following required arguments were not provided:\n  <IDS>...")
     found = [br_issue(p, iid) for iid in pos]                           # 1 つでも無ければ全体が exit 3
     if as_json:
-        emit([{**br_row(i), "description": i.get("description") or "", "comments": br_comments_of(i)} for i in found])
+        emit([{**br_row(i), "comments": br_comments_of(i)} for i in found])
     else:
         print("\n".join(f"{i['id']} · {i['title']}   [{i['status']}]" for i in found))
 
@@ -765,7 +814,7 @@ def br_dolt_accident(beads: str, cmd: str, as_json: bool) -> None:
         emit({"issues": [], "total": 0, "limit": 0, "offset": 0, "has_more": False})
 
 
-BR_COMMANDS = ("init", "create", "update", "close", "list", "show", "label", "comments")
+BR_COMMANDS = ("init", "create", "update", "close", "delete", "list", "show", "label", "comments")
 
 
 def run_br(argv: list[str]) -> None:
@@ -797,6 +846,8 @@ def run_br(argv: list[str]) -> None:
             br_update(p, args, as_json)
         elif cmd == "close":
             br_close(p, args)
+        elif cmd == "delete":
+            br_delete(p, args, as_json)
         elif cmd == "list":
             br_list(p, args, as_json)
         elif cmd == "show":
