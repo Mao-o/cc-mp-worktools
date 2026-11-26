@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """humanq: この端末の beads (bd / br) のプロジェクトの判断待ち (human ラベル) を 1 つの localhost の画面に集め、
-回答を各プロジェクトの bd に書き戻す (br のプロジェクトは、この段では読みだけ)。
+回答を各プロジェクトの bd / br に書き戻す。
 
 usage: python3 humanq.py --state-dir DIR [--port 8765]
 
@@ -66,25 +66,25 @@ class Stale(ValueError):
     """取り消そうとした回答が、今の最後の [humanq] コメントと違う (ほかで取り消して答え直された)。書き込みは何も起きていない。"""
 
 
+class ReadOnly(ValueError):
+    """bd と br のどちらで書くか決められないプロジェクトへの書き込み。CLI は打っていない。"""
+
+
 # ---- 差し替え口 (中身は backend.py) ----
 # bd を 1 回打つ関数。テストは humanq.bd = ... で失敗を作り、呼び出しを数える。
 # BdBackend は呼ぶたびにこのモジュールの bd を引くので、差し替えはすべての読み書きに届く
 bd = backend.run_bd
 _BD = backend.BdBackend(run=lambda repo, *args: bd(repo, *args))
-# br を 1 回打つ関数。humanq.br = ... で差し替えると、br のプロジェクトの読みすべてに届く
+# br を 1 回打つ関数。humanq.br = ... で差し替えると、br のプロジェクトの読み書きすべてに届く
 br = backend.run_br
 _BR = backend.BrBackend(run=lambda repo, *args: br(repo, *args))
+# プロジェクトの種別 (registry.project_kind) ごとの backend。ここに無い種別 (unknown / conflict) は読みも書きもしない
+BACKENDS = {registry.BD: _BD, registry.BR: _BR}
 
 
 def bd_json(repo: str, *args: str) -> list:
     """bd の --json の出力を list に読む (読み方は backend.parse_bd_list)。"""
     return _BD.json(repo, *args)
-
-
-def backend_for(repo: str) -> backend.BdBackend:
-    """回答・取り消しを書き込む backend。書き込めるのは bd のプロジェクトだけ (br と決められないプロジェクトは、
-    HTTP の層が CLI を打つ前に readonly で断る)。"""
-    return _BD
 
 
 def question(meta) -> dict | None:
@@ -230,20 +230,19 @@ class Store:
             # 設定 (HUMANQ_BEADS_CLI) や印が変わったら、キャッシュの時間内でも読み直す (ファイルを見るだけで安い)
             if hit and hit[2] == route and time.monotonic() - hit[0] < CACHE_SEC:
                 return hit[1]
-            if kind not in (registry.BD, registry.BR):
+            be = BACKENDS.get(kind)
+            if be is None:
                 data = {**unreadable(reason), "human": [], "answered": []}
                 self._cache[repo] = (time.monotonic(), data, route)
                 return data
-            # br は読みだけ (writable:false。画面は回答の部品を出さず、POST は CLI を打つ前に readonly で断る)。
-            # bd として読むプロジェクトは、読みに失敗しても writable:true
-            writable = kind == registry.BD
+            # bd・br として読むプロジェクトは、読みに失敗しても writable:true (書き込みは読み直してから行う)
             try:
-                data = {"ok": True, **(load_project(repo) if writable else load_project(repo, _BR))}
+                data = {"ok": True, **load_project(repo, be)}
             except BdError as e:
                 data = {"ok": False, "error": str(e), "human": [], "answered": []}
             except Exception as e:  # noqa: BLE001  想定外の形の出力でも、そのプロジェクトだけを読めないことにする
                 data = {"ok": False, "error": f"{type(e).__name__}: {e}", "human": [], "answered": []}
-            data.update(cli=kind, writable=writable)
+            data.update(cli=kind, writable=True)
             self._cache[repo] = (time.monotonic(), data, route)
             return data
 
@@ -274,12 +273,22 @@ class Store:
         datas = list(self._pool.map(self.project, repos))  # DB が別なので並べて読める
         return [{"path": r, "name": Path(r).name, **d} for r, d in zip(repos, datas)]
 
+    def writer(self, repo: str):
+        """回答・取り消しを書き込む backend。bd と br のどちらで書くか決められないプロジェクトは、CLI を打たずに ReadOnly。"""
+        kind, reason = self.route(repo)
+        be = BACKENDS.get(kind)
+        if be is None:
+            raise ReadOnly(f"このプロジェクトは書き込めない (bd と br のどちらで書くか決められない: {reason})")
+        return be
+
     def answer(self, repo: str, body: dict) -> str:
         """返り値は回答の署名 (asig)。成功の応答に入れ、画面はその回答の取り消しに付けて送る。"""
         iid, key = body.get("id"), body.get("option") or ""
         text = str(body.get("text") or "").strip()
         with self._lock(self._wlocks, repo):
-            cur = {x["id"]: x for x in (shape(r) for r in backend_for(repo).list_human(repo))}
+            be = self.writer(repo)
+            rows = be.pending(repo, iid)
+            cur = {x["id"]: x for x in (shape(r) for r in rows)}
             if iid not in cur:
                 raise Gone("このチケットは判断待ちに無い (画面を更新してください)")
             seen = body.get("qsig")        # 画面が見ていた問いの署名。送らない古い画面は検査しない
@@ -293,20 +302,23 @@ class Store:
             if opt is None and not text:
                 raise ValueError("選択肢を選ぶか、回答を書いてください")
             head = f"{MARK} 回答: {opt['label']} ({key})" if opt else f"{MARK} 回答: (自由記述)"
-            # 送り直しても壊れない: 同じ本文のコメントが最後に残っていれば書かず、ラベルだけを直す
-            sig = _record(repo, iid, head + ("\n\n" + text if text else "") + "\n")
-            _swap(repo, iid, add="answered", remove="human")
+            # 送り直しても壊れない: 同じ本文のコメントが最後に残っていれば書かず、ラベルだけを直す。
+            # pending が問いと一緒にコメントを読んでいれば (br)、それで判定する (読み直さない)
+            thread = next((r.get("thread") for r in rows if r["id"] == iid), None)
+            sig = _record(be, repo, iid, head + ("\n\n" + text if text else "") + "\n", cs=thread)
+            _swap(be, repo, iid, add="answered", remove="human")
             return sig
 
     def undo(self, repo: str, body: dict) -> None:
         iid = body.get("id")
         seen = body.get("asig")            # 取り消す回答の署名。送らない古い画面は検査しない
         with self._lock(self._wlocks, repo):
-            cur = {r["id"] for r in backend_for(repo).list_answered(repo)}
+            be = self.writer(repo)
+            cur = {r["id"] for r in be.list_answered(repo)}
             if iid not in cur:
                 raise Gone("反映待ちに無い (もう反映されたか、取り消し済み)")
-            _record(repo, iid, UNDO_HEAD + "\n", expect=seen)
-            _swap(repo, iid, add="human", remove="answered")
+            _record(be, repo, iid, UNDO_HEAD + "\n", expect=seen)
+            _swap(be, repo, iid, add="human", remove="answered")
 
 
 def _recent(comment: dict) -> bool:
@@ -319,29 +331,30 @@ def _recent(comment: dict) -> bool:
     return (datetime.now(timezone.utc) - t).total_seconds() <= RESEND_SEC
 
 
-def _record(repo: str, iid: str, text: str, expect: str | None = None) -> str:
+def _record(be, repo: str, iid: str, text: str, expect: str | None = None, cs: list | None = None) -> str:
     """[humanq] のコメントを 1 件書く。チケットの最後のコメント (全体) が同じ本文で新しければ (送り直し) 書かない。
     最後の [humanq] コメントではなく最後のコメントを見る: 間にエージェントの問い直しのコメントが挟まっていれば、
     それは新しい問いへの回答なので書く。
     expect (取り消す回答の署名) を渡すと、今の最後の [humanq] コメントの署名と違えば何も書かずに Stale を上げる。
-    照合は送り直しの判定と同じ読みで行う (bd の呼び出しを増やさない)。
+    照合は送り直しの判定と同じ読みで行う (CLI の呼び出しを増やさない)。
+    cs は書き込みのロックの下で読んだばかりのコメント (古い順)。None なら be.comments で読む。
     返り値は、書いたコメント (送り直しなら残っているもの) の署名。回答済みの一覧の署名 (last_of) と同じ値になる。"""
     try:
-        cs = backend_for(repo).comments(repo, iid)
+        if cs is None:
+            cs = be.comments(repo, iid)
         if expect is not None and expect != last_of(cs)[1]:
             raise Stale("この回答はもう最新ではない (ほかで答え直されている。画面を更新してください)")
         last = cs[-1] if cs and isinstance(cs[-1], dict) else None
         if last and (last.get("text") or "").strip() == text.strip() and _recent(last):
             return last_of(cs)[1]
-        _comment(repo, iid, text)
+        _comment(be, repo, iid, text)
         return asig(len(marked(cs)) + 1, text)
     except BdError as e:
         raise WriteError(str(e), "comment", False) from e
 
 
-def _swap(repo: str, iid: str, add: str, remove: str) -> None:
+def _swap(be, repo: str, iid: str, add: str, remove: str) -> None:
     """ラベルを付け替える (add を付けてから remove を外す)。各段階は 1 回だけ再試行する。"""
-    be = backend_for(repo)
     for op, name in (("add", add), ("remove", remove)):
         for attempt in (1, 2):
             try:
@@ -352,12 +365,12 @@ def _swap(repo: str, iid: str, add: str, remove: str) -> None:
                     raise WriteError(str(e), "label", True) from e
 
 
-def _comment(repo: str, iid: str, text: str) -> None:
+def _comment(be, repo: str, iid: str, text: str) -> None:
     fd, path = tempfile.mkstemp(prefix="humanq-", suffix=".md")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        backend_for(repo).add_comment(repo, iid, path)
+        be.add_comment(repo, iid, path)
     finally:
         os.unlink(path)
 
@@ -443,14 +456,15 @@ def make_handler(store: Store, port: int, token: str, page: str, version: str):
                 fn = {"/api/answer": store.answer, "/api/undo": store.undo}.get(self.path)
                 if fn is None:
                     return self._json(404, {"error": "not found"})
-                if store.route(repo)[0] != registry.BD:      # CLI を打つ前に断る (br・決められないプロジェクトには書かない)
-                    return self._json(400, {"error": "このプロジェクトは書き込めない", "code": "readonly", "op": op})
+                # 決められないプロジェクトは、Store.writer が CLI を打つ前に ReadOnly で断る (下の readonly の応答)
                 try:
                     sig = fn(repo, body)
                 finally:
                     store.invalidate(repo)
                 # 回答の成功には回答の署名 (asig) を入れる。取り消しの成功は {ok: true} だけ
                 self._json(200, {"ok": True} if sig is None else {"ok": True, "asig": sig})
+            except ReadOnly as e:
+                self._json(400, {"error": str(e), "code": "readonly", "op": op})
             except Gone as e:
                 self._json(400, {"error": str(e), "code": "gone", "op": op})
             except Changed as e:

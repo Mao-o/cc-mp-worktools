@@ -2513,7 +2513,7 @@ test("絞り込み: 判断待ちなしのプロジェクトの文は絞り込み
   });
 });
 
-// ---- 書き込めないプロジェクト (writable:false。今は br) ----------------------------------------------------------
+// ---- 書き込めないプロジェクト (writable:false。br を読みだけで返す 0.13〜0.14 のサーバー) ------------------------------
 
 test("書き込めないプロジェクト (br) のカードは、問いと選択肢を見せ、回答・取り消しの部品の代わりに 1 行の案内を出す。書き込めるかが変われば作り直す", async () => {
   const BR = "/work/rusty";
@@ -2797,6 +2797,45 @@ test("書き込めないプロジェクト (br) のカードでは、数字も C
     assert.deepEqual(s.answers, [], "書き込めないプロジェクトに回答を送った");
     assert.deepEqual(s.undos, []);
     assert.equal(await page.locator(".opt.sel").count(), 0, "書き込めるカードの選択肢が選ばれた");
+  });
+});
+
+test("書き込める br のプロジェクト (cli:br・writable:true) のカードは bd と同じに答えられる: 案内を出さず、数字と Cmd/Ctrl+Enter・補足欄・トーストと回答済みのカードの取り消しが、そのプロジェクトに送られる", async () => {
+  const BR = "/work/rusty";
+  const s = new Script([{ ...proj(BR, [item("r-1"), item("r-2"), item("r-3")], [answeredItem("r-9")]), cli: "br", writable: true }]);
+  await withPage(s, async page => {
+    assert.equal(await page.locator(".ro, .roopts").count(), 0, "書き込める br のカードに読み取りだけの案内が出た");
+    for (const id of ["r-1", "r-2", "r-3"]) {
+      assert.equal(await qcard(page, id).count(), 1, `${id} に回答の部品が無い`);
+      assert.equal(await qcard(page, id).locator(".opt").count(), 2);
+    }
+    assert.equal(await page.locator(".keyhint").count(), 3, "キーのヒントが判断待ちのカードごとに出ていない");
+    assert.equal(await acard(page, "r-9").locator("button.ghost").count(), 1, "回答済みのカードに取り消しのボタンが無い");
+    // 数字で選んで Control+Enter
+    await qcard(page, "r-1").focus();
+    await page.keyboard.press("2");
+    assert.deepEqual(await optStates(page, "r-1"), SECOND2, "数字で選択肢が選ばれない");
+    await page.keyboard.press("Control+Enter");
+    await until(() => s.answers.length === 1, 3000, "r-1 の回答の POST");
+    // フォーカスは次のカードそのものへ移る。補足欄から Meta+Enter
+    assert.equal(await focusedCard(page), "r-2");
+    await qcard(page, "r-2").locator(".opt").first().click();
+    await qcard(page, "r-2").locator("textarea").click();
+    await qcard(page, "r-2").locator("textarea").pressSequentially("補足");
+    await page.keyboard.press("Meta+Enter");
+    await until(() => s.answers.length === 2, 3000, "r-2 の回答の POST");
+    assert.equal(s.answers.length, 2);
+    assert.deepEqual(s.answers.map(a => [a.project, a.id, a.option, a.text, a.qsig]),
+      [[BR, "r-1", "b", "", "sig-1"], [BR, "r-2", "a", "補足", "sig-1"]]);
+    // トーストの「取り消す」は、最後の回答 (r-2) をそのプロジェクトに、応答の署名つきで送る
+    await waitFor(async () => (await undoInToast(page).count()) === 2, 3000, "回答のトーストが 2 つ");
+    await undoInToast(page).last().click();
+    await until(() => s.undos.length === 1, 3000, "トーストからの取り消しの POST");
+    assert.deepEqual([s.undos[0].project, s.undos[0].id, s.undos[0].asig], [BR, "r-2", "asig-r-2-2"]);
+    // 回答済みのカードの「取り消して判断待ちに戻す」
+    await undoOnCard(page, "r-9").click();
+    await until(() => s.undos.length === 2, 3000, "回答済みのカードからの取り消しの POST");
+    assert.deepEqual([s.undos[1].project, s.undos[1].id, s.undos[1].asig], [BR, "r-9", "asig-r-9"]);
   });
 });
 

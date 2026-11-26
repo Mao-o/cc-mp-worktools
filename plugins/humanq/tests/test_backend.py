@@ -345,7 +345,8 @@ def bc(cid, text, at="2026-11-26T17:39:33Z", author="agent") -> dict:
 
 class BrScript:
     """br を 1 回打つ関数の代わり。human / answered の一覧と show の応答を返し、呼び出しを記録する。
-    show は shows の先頭から順に使う (要素が例外なら投げる)。尽きたら最後の要素を使い続ける。"""
+    show は shows の先頭から順に使う (要素が例外なら投げる)。尽きたら最後の要素を使い続ける。
+    書き込み (--actor で始まる呼び出し) は空の出力で成功する (-f のファイルは <tmp> に置き換えて記録する)。"""
 
     def __init__(self, human=(), answered=(), shows=None):
         self.human, self.answered = envelope(list(human)), envelope(list(answered))
@@ -353,6 +354,12 @@ class BrScript:
         self.calls: list[tuple] = []
 
     def __call__(self, repo, *args):
+        if args[:1] == ("--actor",):
+            a = list(args)
+            if "-f" in a and a.index("-f") + 1 < len(a):
+                a[a.index("-f") + 1] = "<tmp>"
+            self.calls.append((repo, *a))
+            return ""
         self.calls.append((repo, *args))
         if args == BR_HUMAN:
             return self.human
@@ -687,6 +694,159 @@ class BrProject(unittest.TestCase):
         got = {i["id"]: i["q"] for i in d["human"]}
         self.assertEqual(got["p-0"], humanq.question({"humanq": Q}))
         self.assertEqual([got[f"p-{n}"] for n in (1, 2, 3, 4)], [None, None, None, None])
+
+
+class BrWrite(unittest.TestCase):
+    """BrBackend の書き込みの側 (pending・list_answered・comments・add_comment・label) の argv と出力の形。"""
+
+    def call(self, script: BrScript, method: str, *args):
+        try:
+            return getattr(backend.BrBackend(run=script), method)("/r", *args)
+        except backend.BdError as e:
+            return e
+        except Exception as e:  # noqa: BLE001  実装の変異で漏れた例外を、走っていない ERROR にしない
+            self.fail(f"BdError でない例外: {type(e).__name__}: {e} (呼び出し: {script.calls})")
+
+    def test_pending_shows_only_the_ticket_being_answered(self):
+        cs = [bc(3, "c", "2026-11-26T17:40:00Z"), bc(2, "b"), bc(1, "a")]            # 新しい順で返る
+        s = BrScript(human=[br_issue("p-1"), br_issue("p-2", title="一覧の題")],
+                     shows=[[br_shown("p-2", Q_OTHER, comments=cs, title="show の題")]])
+        rows = self.call(s, "pending", "p-2")
+        self.assertNotIsInstance(rows, Exception, rows)
+        self.assertEqual(s.calls, [("/r", *BR_HUMAN), ("/r", "show", "p-2", "--json")], "show は答えるチケットの 1 件だけ")
+        self.assertEqual(len(rows), 1, rows)
+        r = rows[0]
+        self.assertEqual(set(r), ROW_KEYS | {"thread"})
+        self.assertEqual((r["id"], r["title"], r["question_raw"]), ("p-2", "show の題", Q), "問いは show の agent_context")
+        self.assertEqual([c["text"] for c in r["thread"]], ["a", "b", "c"], "thread は古い順 (送り直しの判定がこれを読む)")
+
+    def test_pending_of_a_ticket_not_in_the_list_runs_no_show(self):
+        for what, human in {"一覧に無い": [br_issue("p-1")], "空の一覧": [],
+                            "dict でない要素と同じ文字列": ["p-9", br_issue("p-1")]}.items():
+            with self.subTest(what):
+                s = BrScript(human=human, shows=[AssertionError("show を打った")])
+                self.assertEqual(self.call(s, "pending", "p-9"), [])
+                self.assertEqual(s.calls, [("/r", *BR_HUMAN)])
+
+    def test_list_answered_reads_only_the_list(self):
+        s = BrScript(answered=[br_issue("p-1", labels=["answered"]), "odd", br_issue("p-2", labels=["answered"])],
+                     shows=[AssertionError("show を打った")])
+        rows = self.call(s, "list_answered")
+        self.assertNotIsInstance(rows, Exception, rows)
+        self.assertEqual([r["id"] for r in rows], ["p-1", "p-2"], "dict でない要素は数えない")
+        self.assertEqual(s.calls, [("/r", *BR_ANSWERED)])
+        for r in rows:
+            self.assertEqual(set(r), ROW_KEYS)
+
+    def test_comments_come_from_show_oldest_first(self):
+        cases = {"新しい順": ([bc(2, "b"), bc(1, "a")], ["a", "b"]), "key が無い": (None, []), "空": ([], [])}
+        for what, (raw, texts) in cases.items():
+            with self.subTest(what):
+                s = BrScript(shows=[[br_shown("p-1", comments=raw)]])
+                got = self.call(s, "comments", "p-1")
+                self.assertNotIsInstance(got, Exception, got)
+                self.assertEqual([c["text"] for c in got], texts)
+                self.assertEqual(s.calls, [("/r", "show", "p-1", "--json")])
+
+    def test_comments_that_are_not_a_list_are_a_bd_error(self):
+        for odd in ({"text": ANS_A}, "x", 5):
+            with self.subTest(odd=odd):
+                e = self.call(BrScript(shows=[[br_shown("p-1", comments=odd)]]), "comments", "p-1")
+                self.assertIsInstance(e, backend.BdError)
+                self.assertIn("comments を読めない", str(e))
+
+    def test_show_of_one_ticket_must_be_exactly_that_ticket(self):
+        cases = {"空": [], "2 件": [br_shown("p-1"), br_shown("p-2")], "別の id": [br_shown("p-2")],
+                 "dict でない": ["p-1"], "id が無い": [{"title": "x"}]}
+        for what, out in cases.items():
+            with self.subTest(what):
+                for method, args in (("comments", ("p-1",)), ("pending", ("p-1",))):
+                    s = BrScript(human=[br_issue("p-1")], shows=[out])
+                    e = self.call(s, method, *args)
+                    self.assertIsInstance(e, backend.BdError, (method, e))
+                    self.assertIn("の 1 件ではない", str(e))
+        e = self.call(BrScript(shows=[{"issues": []}]), "comments", "p-1")
+        self.assertIsInstance(e, backend.BdError)
+        self.assertTrue(str(e).startswith("br show の出力が list ではない"), e)
+
+    def test_ids_that_cannot_be_passed_to_br_are_not_shown(self):
+        for iid in ("--db=/other.db", "-x", "", 5, None):
+            with self.subTest(iid=iid):
+                s = BrScript(human=[{**br_issue("p-1"), "id": iid}], shows=[AssertionError("show を打った")])
+                for method in ("comments", "pending"):
+                    e = self.call(s, method, iid)
+                    self.assertIsInstance(e, backend.BdError, (method, e))
+                    self.assertIn("br show に渡せない id", str(e))
+                self.assertEqual([c for c in s.calls if "show" in c], [], "渡せない id で show を打った")
+
+    def test_writes_use_the_actor_and_the_same_form_as_bd(self):
+        s = BrScript()
+        for method, args in (("add_comment", ("p-1", "/tmp/c.md")), ("label", ("add", "p-1", "answered")),
+                             ("label", ("remove", "p-1", "human"))):
+            self.assertIsNone(self.call(s, method, *args))
+        w = ("/r", "--actor", "user/humanq")
+        self.assertEqual(s.calls, [(*w, "comments", "add", "p-1", "-f", "<tmp>"), (*w, "label", "add", "p-1", "answered"),
+                                   (*w, "label", "remove", "p-1", "human")])
+
+
+class BrStore(unittest.TestCase):
+    """br と判定したプロジェクトの回答・取り消し (humanq.Store) が、humanq.br の差し替え口だけを通ること。bd は打たない。"""
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="humanq-brstore-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.repo = os.path.join(self.tmp, "proj")
+        os.makedirs(os.path.join(self.repo, ".beads"))
+        Path(self.repo, ".beads", ".gitignore").write_text(".br_history/\n", encoding="utf-8")       # br の印
+        for p in (mock.patch.object(backend.subprocess, "run", side_effect=no_subprocess),
+                  mock.patch.object(humanq, "bd", no_subprocess)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def run_store(self, script: BrScript, fn: str, body: dict):
+        with mock.patch.object(humanq, "br", script):
+            try:
+                return getattr(humanq.Store(self.tmp), fn)(self.repo, body)
+            except AssertionError:
+                raise
+            except Exception as e:  # noqa: BLE001  実装の変異で漏れた例外を、走っていない ERROR にしない
+                self.fail(f"想定外の例外: {type(e).__name__}: {e} (呼び出し: {script.calls})")
+
+    def test_answer_and_undo_go_through_humanq_br(self):
+        r, w = self.repo, (self.repo, "--actor", "user/humanq")
+        s = BrScript(human=[br_issue("p-1")], shows=[[br_shown("p-1", Q_OTHER, comments=[bc(1, "メモ")])]])
+        sig = self.run_store(s, "answer", {"id": "p-1", "option": "a", "qsig": humanq.qsig(humanq.question({"humanq": Q}))})
+        self.assertEqual(sig, humanq.asig(1, ANS_A))
+        self.assertEqual(s.calls, [(r, *BR_HUMAN), (r, "show", "p-1", "--json"), (*w, "comments", "add", "p-1", "-f", "<tmp>"),
+                                   (*w, "label", "add", "p-1", "answered"), (*w, "label", "remove", "p-1", "human")])
+        s = BrScript(answered=[br_issue("p-2", labels=["answered"])],
+                     shows=[[br_shown("p-2", comments=[bc(1, ANS_A, author="user/humanq")])]])
+        self.assertIsNone(self.run_store(s, "undo", {"id": "p-2", "asig": humanq.asig(1, ANS_A)}))
+        self.assertEqual(s.calls, [(r, *BR_ANSWERED), (r, "show", "p-2", "--json"), (*w, "comments", "add", "p-2", "-f", "<tmp>"),
+                                   (*w, "label", "add", "p-2", "human"), (*w, "label", "remove", "p-2", "answered")])
+
+    def test_a_resend_reuses_the_comments_of_the_pending_show(self):
+        # 最後のコメントが同じ回答 (送り直し): コメントは書かずにラベルだけ直す。読みは一覧と show の 2 回だけ
+        recent = humanq.datetime.now(humanq.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cs = [bc(2, ANS_A, recent, "user/humanq"), bc(1, "メモ", recent)]                   # 新しい順。同じ秒は id で
+        s = BrScript(human=[br_issue("p-1")], shows=[[br_shown("p-1", Q_OTHER, comments=cs)]])
+        sig = self.run_store(s, "answer", {"id": "p-1", "option": "a"})
+        self.assertEqual(sig, humanq.asig(1, ANS_A))
+        self.assertEqual([c[1:3] for c in s.calls], [BR_HUMAN[:2], ("show", "p-1"), ("--actor", "user/humanq"),
+                                                    ("--actor", "user/humanq")])
+        self.assertEqual([c[3:4] for c in s.calls[2:]], [("label",), ("label",)], "送り直しでコメントを書いた")
+
+    def test_unreadable_comments_in_the_pending_show_are_read_again_and_fail_as_the_comment_stage(self):
+        s = BrScript(human=[br_issue("p-1")], shows=[[br_shown("p-1", Q_OTHER, comments={"text": "x"})]])
+        with mock.patch.object(humanq, "br", s):
+            try:
+                humanq.Store(self.tmp).answer(self.repo, {"id": "p-1", "option": "a"})
+                self.fail("WriteError が上がらなかった")
+            except humanq.WriteError as e:
+                self.assertEqual((e.stage, e.written), ("comment", False))
+            except Exception as e:  # noqa: BLE001
+                self.fail(f"想定外の例外: {type(e).__name__}: {e}")
+        self.assertEqual([c[1] for c in s.calls], ["list", "show", "show"], "読めないコメントのまま書き込んだ")
 
 
 if __name__ == "__main__":

@@ -1,8 +1,9 @@
-"""br のプロジェクトの読み (第 1 段: 読みだけ) を、偽の br・bd (tests/fake_beads.py) で端から端まで確かめる。
+"""br のプロジェクトの読みを、偽の br・bd (tests/fake_beads.py) で端から端まで確かめる。
+回答・取り消しの書き込みのシナリオは test_server.py の WithFakeBr (bd と同じシナリオを偽の br で回す) にある。
 
     python3 -m unittest discover tests
 
-- サーバーは br のプロジェクトを br の list 2 回と show 1 回で読み、{ok:true, cli:"br", writable:false} で返す
+- サーバーは br のプロジェクトを br の list 2 回と show 1 回で読み、{ok:true, cli:"br", writable:true} で返す
 - br はプロジェクトの dir を cwd にして打ち、bd は 1 回も打たない
 - 偽の br はコメントを新しい順で返す (本物の並びは決まっていない)。古い順を前提にした読みはここで落ちる
 - hook は br のプロジェクトでは件数だけを伝え、bd のコマンドを含む案内を出さない
@@ -145,7 +146,7 @@ class BrRead(unittest.TestCase):
         self.reset_log()
 
         p = self.read(root)
-        self.assertEqual((p["ok"], p["cli"], p["writable"]), (True, "br", False), p)
+        self.assertEqual((p["ok"], p["cli"], p["writable"]), (True, "br", True), p)
         self.assertEqual([i["id"] for i in p["human"]], [b3, q1, d5], "優先度の順。両方のラベルで最後が取り消しなら判断待ち")
         self.assertEqual([i["id"] for i in p["answered"]], [a2], "closed は読まない")
         h = {i["id"]: i for i in p["human"]}
@@ -187,7 +188,7 @@ class BrRead(unittest.TestCase):
         root = self.br_project()
         self.reset_log()
         p = self.read(root)
-        self.assertEqual((p["ok"], p["cli"], p["writable"], p["human"], p["answered"]), (True, "br", False, [], []), p)
+        self.assertEqual((p["ok"], p["cli"], p["writable"], p["human"], p["answered"]), (True, "br", True, [], []), p)
         self.assertEqual(self.assertBrOnly(root), [LIST_HUMAN, LIST_ANSWERED])
 
     def test_a_failing_br_makes_only_that_project_unreadable(self):
@@ -201,7 +202,7 @@ class BrRead(unittest.TestCase):
         os.environ["FAKE_BEADS_FAIL"] = "show"
         self.reset_log()
         p = self.read(br)
-        self.assertEqual((p["ok"], p["cli"], p["writable"], p["human"]), (False, "br", False, []), p)
+        self.assertEqual((p["ok"], p["cli"], p["writable"], p["human"]), (False, "br", True, []), p)
         self.assertIn("injected failure (show)", p["error"])
         self.assertEqual(len([c for c in self.calls() if c["prog"] == "br"]), 3, "exit 1 の show は再試行しない")
         other = [x for x in humanq.Store(self.sd).all() if x["path"] == bd]
@@ -250,7 +251,7 @@ class BrRead(unittest.TestCase):
         ps = json.loads(raw)["projects"]
         self.assertEqual(len(ps), 1, ps)
         p = ps[0]
-        self.assertEqual((p["ok"], p["cli"], p["writable"]), (True, "br", False), p)
+        self.assertEqual((p["ok"], p["cli"], p["writable"]), (True, "br", True), p)
         self.assertEqual(([i["id"] for i in p["human"]], [i["id"] for i in p["answered"]]), ([q1], [a2]))
         self.assertEqual(p["human"][0]["q"]["ask"], Q["ask"])
         self.assertEqual(p["answered"][0]["answer"], ANS_A)
@@ -259,7 +260,7 @@ class BrRead(unittest.TestCase):
         self.assertEqual(code, 200, raw)
         s = json.loads(raw)
         self.assertEqual({k: s.get(k) for k in ("ok", "cli", "writable", "human", "answered")},
-                         {"ok": True, "cli": "br", "writable": False, "human": 1, "answered": [a2]})
+                         {"ok": True, "cli": "br", "writable": True, "human": 1, "answered": [a2]})
         self.assertEqual({c["prog"] for c in self.calls() if c["cwd"] == root or root in c["argv"]}, {"br"})
 
     def forget(self, hook, session: str, ids: list[str]) -> None:
@@ -277,7 +278,8 @@ class BrRead(unittest.TestCase):
         o = self.hook_out(self.run_hook(hook, "session_start", root, "s-br"))
         ctx = o["hookSpecificOutput"]["additionalContext"]
         self.assertIn("このプロジェクト (br)", ctx)
-        self.assertIn("今は読み取りだけで、画面からは回答できない", ctx)
+        self.assertIn("ユーザーは手が空いたときにそこで答える", ctx, "br のプロジェクトも画面から回答できる (0.15.0)")
+        self.assertNotIn("回答できない", ctx)
         self.assertIn(f"判断待ち 1 件・answered ラベルの付いたもの 2 件 ({a2}, {a3})", ctx)
         for word in BD_WORDS:
             self.assertNotIn(word, ctx, f"br のプロジェクトに bd の案内 ({word}) を出した")
@@ -289,6 +291,22 @@ class BrRead(unittest.TestCase):
         self.assertEqual(ctx, f"humanq: 前に伝えた後で、answered ラベルの付いたチケットが 1 件増えた: {a3}。")
         self.assertEqual(self.run_hook(hook, "prompt_submit", root, "s-br"), "", "増えたものが無いのに知らせた")
         self.assertEqual({c["prog"] for c in self.calls() if c["cwd"] == root or root in c["argv"]}, {"br"})
+
+    def test_hook_with_an_old_read_only_server_says_it_cannot_answer(self):
+        # br を読みだけで返す古いサーバー (writable:false) が動いているときは、回答できないと伝える (bd の案内は出さない)
+        root = self.br_project()
+        hook = self.load_hook(ts.free_port())
+        old = {"human": 1, "answered": ["pq-2"], "ok": True, "error": None, "cli": "br", "writable": False}
+        with mock.patch.object(hook, "ensure_server", lambda sd: "running"), \
+                mock.patch.object(hook, "summary", lambda *a, **kw: dict(old)):
+            o = self.hook_out(self.run_hook(hook, "session_start", root, "s-old"))
+        ctx = o["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("このプロジェクト (br)", ctx)
+        self.assertIn("画面からは回答できない", ctx)
+        self.assertNotIn("そこで答える", ctx)
+        self.assertIn("判断待ち 1 件・answered ラベルの付いたもの 1 件 (pq-2)", ctx)
+        for word in BD_WORDS:
+            self.assertNotIn(word, ctx, f"br のプロジェクトに bd の案内 ({word}) を出した")
 
     def test_hook_still_tells_bd_projects_the_bd_commands(self):
         # 対照: bd のプロジェクトの案内は変えていない (br の分岐が bd を巻き込まない)

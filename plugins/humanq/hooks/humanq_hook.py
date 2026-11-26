@@ -153,10 +153,15 @@ def session_start(inp: dict) -> None:
     answered = s.get("answered") or []
     _remember(sd, inp.get("session_id") or "unknown", answered)
     ids = f" ({', '.join(answered)})" if answered else ""
-    if _is_br(s):
-        # br のプロジェクトは画面からはまだ回答できない (読みだけ)。件数だけを伝え、bd のコマンドを含む案内は出さない
-        lines = [f"humanq: このプロジェクト (br) の判断待ちは {URL} の画面に出る (br のプロジェクトは今は読み取りだけで、"
-                 f"画面からは回答できない)。今は判断待ち {s.get('human', 0)} 件・answered ラベルの付いたもの {len(answered)} 件{ids}。"]
+    if _is_br(s) and s.get("writable"):
+        # br のプロジェクト。件数だけを伝え、bd のコマンドを含む案内は出さない
+        lines = [f"humanq: このプロジェクト (br) の判断待ちは {URL} の画面にまとまっていて、ユーザーは手が空いたときにそこで答える。"
+                 f"今は判断待ち {s.get('human', 0)} 件・answered ラベルの付いたもの {len(answered)} 件{ids}。"]
+    elif _is_br(s):
+        # br を読みだけで返す古いサーバー (writable:false) が動いている。件数だけを伝える
+        lines = [f"humanq: このプロジェクト (br) の判断待ちは {URL} の画面に出る (動いている画面のサーバーは br のプロジェクトを"
+                 f"読み取りだけで扱い、画面からは回答できない)。今は判断待ち {s.get('human', 0)} 件・answered ラベルの付いたもの "
+                 f"{len(answered)} 件{ids}。"]
     else:
         lines = [
             f"humanq: このプロジェクト (bd) の判断待ちは {URL} の画面にまとまっていて、ユーザーは手が空いたときにそこで答える。"
