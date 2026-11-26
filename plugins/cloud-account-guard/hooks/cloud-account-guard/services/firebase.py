@@ -909,6 +909,15 @@ def _alias_lines(
     return lines, skipped, unreachable
 
 
+# dict 期待値で、許容形を理由に案内行を 1 つも作れなかったときの文。`期待=` に示すのは project ID
+# (`#` の後ろなので一般の許容形 WORD で見る。`:` を許す) なので、firebase の許容形 (NAME_RULE) は
+# alias にだけ掛ける (`期待=example.com:right-project のいずれか` の `:` を理由に読ませない)。
+_CHECK_BY_HAND_DICT = (
+    f'alias か project ID が{shell_word.UNSAFE} (alias に{shell_word.NAME_RULE})。'
+    f'accounts.local.json の "{ACCOUNT_KEY}" を手で確認してください'
+)
+
+
 def _no_line_by_hand(skipped: bool, unreachable: bool) -> str:
     """dict 期待値で案内できる行が 1 つも無いときの、手で確認させる文。
 
@@ -916,8 +925,8 @@ def _no_line_by_hand(skipped: bool, unreachable: bool) -> str:
     両方の文を連結する (片方だけだと、もう一方の理由が文面から消える)。
     """
     if skipped and unreachable:
-        return f"{_CHECK_BY_HAND}。{_UNREACHABLE_BY_HAND}"
-    return _UNREACHABLE_BY_HAND if unreachable else _CHECK_BY_HAND
+        return f"{_CHECK_BY_HAND_DICT}。{_UNREACHABLE_BY_HAND}"
+    return _UNREACHABLE_BY_HAND if unreachable else _CHECK_BY_HAND_DICT
 
 
 def _login_then(unreachable: bool) -> str:

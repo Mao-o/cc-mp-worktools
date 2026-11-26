@@ -648,6 +648,21 @@ class TestFirebaseGuidance(unittest.TestCase):
                 self.assertGreater(tail.index(CHECK_BY_HAND), tail.index(shell_word.NAME_RULE))
                 self.assertNotIn("firebase use", reason)
 
+    def test_dict_by_hand_sentence_puts_the_firebase_rule_on_the_alias(self):
+        """dict の `期待=` に示すのは project ID で、`#` の後ろなので WORD で見る (`:` を許す)。
+        firebase の許容形 (NAME_RULE) は alias にだけ掛ける: 「期待値は … . _ - だけ」と置くと、
+        `期待=example.com:right-project のいずれか` の `:` が理由に読める (外れたのは alias)。"""
+        reasons = self._reasons({"prod east": "example.com:right-project"})
+        self.assertEqual(sorted(reasons), ["--project", "mismatch", "unresolved"])
+        for case, reason in reasons.items():
+            with self.subTest(case=case):
+                self.assertIn("期待=example.com:right-project のいずれか", reason)
+                self.assertIn(
+                    f"alias か project ID が{shell_word.UNSAFE} (alias に{shell_word.NAME_RULE})", reason
+                )
+                self.assertNotIn(f"期待値は{shell_word.UNSAFE}", reason)
+                self.assertIn(CHECK_BY_HAND, reason)
+
     def test_domain_scoped_project_is_guided_after_the_comment_mark(self):
         """`#` の後ろの project はコメントなので WORD で見る。ドメイン付きの project ID でも
         alias の案内行を出す (NAME で見ていたときは案内を一切出さなかった。マージ前

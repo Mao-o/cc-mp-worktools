@@ -1603,7 +1603,7 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   手元の gh では組み込みでない名前の alias / extension (gh 2.105 より古い gh で、後の版で組み込みになった
   名前を alias にしている形など)。組み込みのヘルプとみなして読み取りにするので、alias の中身は照合されない
 - リポジトリにコミットされた期待値ファイル (tracked の旧パス `.claude/accounts.json` など) を細工して、
-  許容形 (WORD / NAME) を通る値 (gh の host など) で別の行き先 (攻撃者の host への
+  [案内に使える形](#期待値へ向かう切替コマンドは許可-self-remediation) を通る値 (gh の host など) で別の行き先 (攻撃者の host への
   `gh auth login --hostname <host>` など) へ案内を誘導する形。期待値ファイルの内容は repo の管理者が決めた
   ものとみなし、案内の材料に使い続ける。値はコマンド構文の注入を防ぐために許容形で検証・クォートして
   いるが、意味の上での誘導は防がない
