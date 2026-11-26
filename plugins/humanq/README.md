@@ -103,11 +103,11 @@ bd ではチケットの metadata の `humanq`、br では `agent_context` の t
 
 ## 回答を拾う
 
-手順は bd と br で共通で、コマンドだけが違う。`answered` ラベルの付いた、終わっていない (`open`・`in_progress`・`blocked`・`deferred`) チケットの各件について (status を `open` だけにしない: 担当中 (`in_progress`) のチケットに問うのは普通で、`open` だけにすると回答したチケットが拾えない。画面も同じ条件で読む):
+手順は bd と br で共通で、コマンドだけが違う。`answered` ラベルの付いたチケットの各件について (一覧は status で絞らない。`open` だけにすると、担当中 (`in_progress`) のチケットに問うのは普通なので、回答したチケットが拾えない。bd・br とも CLI の既定が `closed` などの終わったものだけを除き、画面と同じ範囲を出す):
 
 | | bd | br |
 |---|---|---|
-| 一覧 | `bd list --label answered --flat -n 0` (`--status` を付けない。既定は `bd human list` と同じ status を出し、`hooked` や独自の status のチケットも拾える。`closed` は出ない) | `br list -l answered -s open -s in_progress -s blocked -s deferred --json` (`-s` は繰り返す。カンマ区切りは通らない。結果の `issues` の各件) |
+| 一覧 | `bd list --label answered --flat -n 0` (`--status` を付けない。既定は `bd human list` と同じ status を出し、`hooked` や独自の status のチケットも拾える。`closed` は出ない) | `br list -l answered --limit 0 --json` (`-s` を付けない。既定は `closed` と `tombstone` だけを除くので、`deferred`・`draft`・`pinned` と独自の status (`review` など) のチケットも拾える。`--limit 0` は件数の上限を外す。結果の `issues` の各件) |
 | コメントを読む | `bd comments <id>` | `br comments <id> --json` |
 | ラベルを外す | `bd label remove <id> answered` | `br label remove <id> answered` |
 
