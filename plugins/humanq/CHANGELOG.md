@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.15.3
+
+### 修正
+
+- README の「回答を拾う」表の br の一覧が `-s` で status を 4 つ (`open`・`in_progress`・`blocked`・`deferred`) に絞っていたため、エージェントがその手順で拾うと、画面には出て答えられる `draft`・`pinned` と独自の status (`review` など) の回答済みのチケットを拾い漏らしていた。`br list -l answered --limit 0 --json` (`-s` なし) に揃えた。br 0.7.6 の使い捨てのプロジェクトで、`answered` を付けた 9 つの status (`open`・`in_progress`・`blocked`・`deferred`・`draft`・`pinned`・独自の `review`・`closed`・`delete` した `tombstone`) を測ったところ、`-s` なしは `closed` と `tombstone` 以外の 7 つを出し、4 つに絞ると 4 つしか出なかった。サーバーの読み (`list -l answered --limit 0 --json`) と同じ範囲になる。節の導入の文も「終わっていない 4 つの status」の言い方をやめた。hook の br 向けの案内は一覧のコマンドを持たず (ID を渡す)、`-s` は無いので変更なし。コードの挙動の変更なし
+
+### テスト
+
+- `tests/test_br_read.py` に `ReadmePickupMatchesServer`: README の br の回答済みの一覧がちょうど 1 つで、引数がサーバーの読みと同じであること (`-s` を付けない・`--limit 0` を付ける) を固定
+
+## 0.15.2
+
+### 修正
+
+- `/api/summary?fresh=1` がキャッシュ (8 秒) を返していたのを、読み直すようにした。`Store.project` に `fresh` を足し、`fresh=1` のときはキャッシュが有効でも CLI で読み直す。コードのコメントどおりの動きで、SessionStart の hook が伝える件数が最大 8 秒古くなることがなくなる。`fresh` なしのポーリング (画面・UserPromptSubmit の hook) は今までどおりキャッシュを使い、CLI の起動回数は増えない
+- 問いの `options` が list でない (数・真偽値・文字列・object) と `TypeError` で、そのプロジェクトの判断待ちが全部読めなくなった (`ok: false`。bd・br の両方) のを直した。その 1 件だけを「問いが未整理」(`q: null`。本文と自由記述の回答は使える) にして、同じプロジェクトのほかの判断待ちは今までどおり出す。**挙動の変更**: 要素が object でない・`key` か `label` が文字列でない要素が 1 つでもある問いも、今までは壊れた要素だけを黙って落として残りを出していたが、問いの書き手が意図したものと違う選択肢を出さないよう、同じく問いが未整理にする。`options` が無い・`null`・`[]` は今までどおり選択肢なしの問い
+- bd の回答済みの読みが status を `open,in_progress,blocked,deferred` に絞っていたため、bd の組み込みの status `hooked` や、`status.custom` で宣言した独自の status のチケットに画面で答えると、回答済みにも判断待ちにも出なくなった (どの一覧からも消え、hook の「回答した」の通知も出なかった) のを直した。`--status` を付けずに `bd list --label answered --flat -n 0` で読む。bd 1.3.4 の使い捨てのプロジェクトで測ったところ、`bd list` の既定は `bd human list` と同じ status を出す (`closed`・`pinned`・category が `done` か `frozen` の独自の status は出ず、`hooked`・`deferred`・category が `wip` か未指定の独自の status は出る)。`bd human list` に出るチケットに答えれば、回答済みに出る。`closed` は今までどおり出ない。bd の argv のうち変わるのは回答済みの一覧の 1 形 (`--status <4 つ>` が無くなる) だけで、ほかは変わらない
+- br が exit 0 のまま stderr に出す警告 (JSONL の自動 export の失敗: `Warning: Mutation succeeded, but automatic JSONL export failed …`) を、サーバーの stderr (`server.log`) に `humanq: br: <警告の行>` として 1 行ずつ残すようにした (1 回の呼び出しで最大 5 行・1 行 300 文字まで)。回答は DB に入っていて JSONL には入っていない状態が、ログから分かる。画面には出さず、回答の成否・応答は変わらない
+
+### テスト
+
+- `tests/test_server.py`: `fresh=1` が増えた分を件数に出すこと、`fresh` なしのポーリングが CLI を打たず `fresh=1` だけが打つことを bd・br の各シナリオで固定。壊れた `options` を 11 通り (数・真偽値・偽・文字列・object・要素が数・要素が文字列・`key` の欠け・`label` の欠け・`key` が数・正しい要素の後に壊れた要素) で、その 1 件だけが `q: null` になり同じプロジェクトのほかの判断待ちが読めることを固定。`hooked` と独自の status (`waiting`、`tuning:wip`) のチケットに答えると回答済みに出ること。偽の br が exit 0 と警告を返したとき、回答が成功のままログに警告が残ること
+- `tests/test_backend.py`: `question_from_raw` の `options` の形の表 (壊れた 14 通りと、無い・`null`・`[]`・`desc` が数)、`run_br` の警告 (1 回・警告の行だけ・無いとき・行数と長さの上限・非 0 の exit は今までどおり失敗) を固定。回答済みの argv の期待を更新
+- `tests/test_cli_contract.py`: bd の契約に、`list` の既定が `human list` と同じ status を出すこと (`hooked`・独自の status が出て、`pinned`・`closed`・`done` と `frozen` の独自の status が出ない)、`list --status` に知らない status を書けないこと (exit 1) を足した (本物の bd 1.3.4 でも通ることを確かめた)
+- `tests/fake_beads.py`: 偽の bd を本物に合わせた。組み込みの status に `pinned`・`hooked` を足し、`config set / get`・`status.custom` (`名前` か `名前:category`) に対応。`list` の既定と `human list` は同じ status を出す。`FAKE_BEADS_WARN` で成功した呼び出しの stderr に警告を足せる
+
 ## 0.15.1
 
 ### br のプロジェクトへの案内 (hook と README)

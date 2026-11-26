@@ -21,16 +21,12 @@ import json
 import os
 import re
 import subprocess
+import sys
 from datetime import datetime, timezone
 from typing import Callable
 
 # コメントとラベルの書き込みの作者 (README の「回答の形」)
 ACTOR = "user/humanq"
-# 回答済み (answered) として拾う status。`bd human list` の既定 (closed などの終わったものを除く) に揃える。
-# 担当中 (in_progress) のチケットに human を付けて問うのは普通で、open だけにすると回答した途端にどの一覧からも消える
-ANSWERED_STATUSES = "open,in_progress,blocked,deferred"
-
-
 class BdError(RuntimeError):
     """CLI を起動できない・失敗した・出力を読めない。"""
 
@@ -117,8 +113,10 @@ class BdBackend:
         return self.list_human(repo)
 
     def list_answered(self, repo: str) -> list[dict]:
-        return [self.row(i) for i in self.json(repo, "list", "--status", ANSWERED_STATUSES, "--label", "answered",
-                                               "--flat", "-n", "0")]
+        # status では絞らない (--status を付けない): bd list の既定は bd human list と同じ status を出す (closed・pinned・
+        # 完了や凍結の独自の status を除く。hooked や独自の status は出る。bd 1.3.4 で実測)。回答した判断待ちは、
+        # 判断待ちに出ていた status のままここに出る。status を列挙すると、列挙に無い status のチケットはどの一覧からも消える
+        return [self.row(i) for i in self.json(repo, "list", "--label", "answered", "--flat", "-n", "0")]
 
     def comments(self, repo: str, iid: str) -> list[dict]:
         # bd はコメントを古い順で返す (bd 1.3.4 で実測。偽の bd も同じ)。並べ替えずにそのまま渡す
@@ -170,7 +168,17 @@ def run_br(repo: str, *args: str) -> str:
         raise BdError(f"br を起動できない (PATH を確認): {e}") from e
     if p.returncode != 0:
         raise CliExit((p.stderr or p.stdout).strip()[:800] or f"br exit {p.returncode}", p.returncode)
+    _log_warnings(p.stderr)
     return p.stdout
+
+
+def _log_warnings(stderr: str | None) -> None:
+    """br が exit 0 のまま stderr に出す警告 (例: 書き込みは DB に入ったが、JSONL の自動 export に失敗した) を、サーバーの
+    stderr (server.log) に 1 行ずつ残す。回答の成否も画面も変えない: 回答は DB に入っていて、JSONL には次に誰かが br で書くと入る。
+    残さないと、git で共有する JSONL に入っていないことが誰にも見えない。"""
+    lines = [ln.strip() for ln in (stderr or "").splitlines() if "Warning:" in ln]
+    for ln in lines[:5]:
+        print(f"humanq: br: {ln[:300]}", file=sys.stderr, flush=True)
 
 
 def _loads(out: str, what: str):

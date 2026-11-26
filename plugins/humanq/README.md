@@ -37,7 +37,7 @@ beads (bd / br) を使っているプロジェクト (cwd から上に `.beads/`
 - br のプロジェクトも、bd と同じに画面で回答・取り消しができる (書き込みの形・失敗の段階・送り直し・署名の照合は下の「回答の形」のとおりで、bd と同じ)。hook は件数に加えて、問いの置き方と回答の拾い方を br のコマンドで案内し、bd のコマンドは出さない。どちらか決められないプロジェクト (unknown・conflict) では、件数は出さず、読めない理由と設定の案内だけを出す
   - 読みは 1 プロジェクトあたり 3 プロセス: `br list -l human` と `br list -l answered` (どちらも `--limit 0 --json`) と、両方の ID をまとめた `br show <id...> --json`。0 件なら `show` は打たない。`show` は ID が 1 つでも無いと全体が失敗する (exit 3) ので、そのときは一覧から 1 回だけ読み直す
   - 回答は 5 プロセス: `br list -l human` → そのチケットの `br show <id> --json` (問いの署名の照合と、送り直しの判定のコメントを 1 回で読む) → `br --actor user/humanq comments add <id> -f <file>` → `br --actor user/humanq label add <id> answered` → `br --actor user/humanq label remove <id> human`。取り消しは `br list -l answered` → `br show <id> --json` → `comments add` → `label add <id> human` → `label remove <id> answered`。br の `label` は、付いている (`exists`) か付いていない (`not_found`) ときも exit 0 で終わるので、成功とみなす
-  - 一覧は status で絞らない (`-s` を付けない)。br の `list` の既定は `closed` と `tombstone` (`br delete` したもの) だけを除くので、利用者が `br list -l human` で見る判断待ちと同じものが画面と hook の件数に出る: `deferred`・`draft`・`pinned` と、br が宣言なしで受け付ける独自の status (`review` など) のチケットも出る。回答済み (`answered`) の側も同じ。bd の回答済みの読みは今までどおり 4 つの status で絞る (「回答を拾う」の節)
+  - 一覧は status で絞らない (`-s` を付けない)。br の `list` の既定は `closed` と `tombstone` (`br delete` したもの) だけを除くので、利用者が `br list -l human` で見る判断待ちと同じものが画面と hook の件数に出る: `deferred`・`draft`・`pinned` と、br が宣言なしで受け付ける独自の status (`review` など) のチケットも出る。回答済み (`answered`) の側も同じ。bd の回答済みの読みも status で絞らない (`bd list --label answered`。既定が `bd human list` と同じ status を出すので、`hooked` や独自の status のチケットも回答済みに出る)
   - 問いは `show` の `agent_context` (JSON の文字列) の top-level の key `humanq` から読む (形は bd の metadata の `humanq` と同じ)。`agent_context` が JSON の object でない・`humanq` が無い・`ask` が文字列でないときは「問いが未整理」として出す
   - コメントの並びは br では決まっていないので、`created_at` の順 (同じ秒なら ID の順) に並べてから、最後の `[humanq]` コメントを回答として読む (両ラベルのチケットの向き・送り直しの判定・取り消しの署名の照合も同じ並びで読む)
   - br はプロジェクトの dir を cwd にして起動する (br に `-C` は無い)。DB・`.beads`・JSONL の場所を指す env (`BEADS_DB`・`BD_DB`・`BD_DATABASE`・`BEADS_DIR`・`BEADS_JSONL`) は br に渡さない (残っていると、登録したプロジェクトではない DB を読むため)
@@ -103,11 +103,11 @@ bd ではチケットの metadata の `humanq`、br では `agent_context` の t
 
 ## 回答を拾う
 
-手順は bd と br で共通で、コマンドだけが違う。`answered` ラベルの付いた、終わっていない (`open`・`in_progress`・`blocked`・`deferred`) チケットの各件について (status を `open` だけにしない: 担当中 (`in_progress`) のチケットに問うのは普通で、`open` だけにすると回答したチケットが拾えない。画面も同じ条件で読む):
+手順は bd と br で共通で、コマンドだけが違う。`answered` ラベルの付いたチケットの各件について (一覧は status で絞らない。`open` だけにすると、担当中 (`in_progress`) のチケットに問うのは普通なので、回答したチケットが拾えない。bd・br とも CLI の既定が `closed` などの終わったものだけを除き、画面と同じ範囲を出す):
 
 | | bd | br |
 |---|---|---|
-| 一覧 | `bd list --status open,in_progress,blocked,deferred --label answered --flat -n 0` | `br list -l answered -s open -s in_progress -s blocked -s deferred --json` (`-s` は繰り返す。カンマ区切りは通らない。結果の `issues` の各件) |
+| 一覧 | `bd list --label answered --flat -n 0` (`--status` を付けない。既定は `bd human list` と同じ status を出し、`hooked` や独自の status のチケットも拾える。`closed` は出ない) | `br list -l answered --limit 0 --json` (`-s` を付けない。既定は `closed` と `tombstone` だけを除くので、`deferred`・`draft`・`pinned` と独自の status (`review` など) のチケットも拾える。`--limit 0` は件数の上限を外す。結果の `issues` の各件) |
 | コメントを読む | `bd comments <id>` | `br comments <id> --json` |
 | ラベルを外す | `bd label remove <id> answered` | `br label remove <id> answered` |
 

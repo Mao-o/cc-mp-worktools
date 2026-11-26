@@ -12,7 +12,12 @@
 - 失敗の注入: env の FAKE_BEADS_FAIL。規則は `;` で区切る。規則の語の列が、argv にこの順で現れる
   (間に別の語を挟んでよい) 呼び出しを exit 1 にする。`:n` を付けると、そのプロジェクトで最初の n 回だけ
   (数は .beads/fake-fail.json に残る)。例: `label remove human:1` は `--actor x label remove <id> human` の 1 回目だけ
+- 警告の注入: env の FAKE_BEADS_WARN があれば、成功 (exit 0) した呼び出しの stderr にその文を 1 行足す
 - bd 1.3.4 で実測した癖を持つ:
+  - status は組み込みの 7 つ (open・in_progress・blocked・deferred・closed・pinned・hooked) と、`config set status.custom
+    a,b:done` で宣言した独自のもの。`list` の既定と `human list` は同じ status を出す: closed・pinned・category が
+    done か frozen の独自の status は出ず、hooked・deferred・category が wip か未指定の独自の status は出る。
+    `list --status` には知らない status を書けない (`Error: invalid status "x" (valid: ...)`、exit 1)
   - `human list --json` は 0 件で null を返す。`list --json` は 0 件で [] を返す
   - 知らない flag は `Error: unknown flag: <flag>` で exit 1 (`human list --label x` もこれ)
   - metadata は object で返し、値が無ければ key を出さない (labels・description・notes も同じ)
@@ -53,8 +58,32 @@ from datetime import datetime, timezone
 
 HISTORICAL = ("Error: historical SQLite workspace detected; explicit migration is required before this bd version can open "
               "or modify the workspace. Preserve .beads unchanged and follow docs/getting-started/upgrading.md#cross-era-upgrades")
-OPEN_STATUSES = ("open", "in_progress", "blocked", "deferred")
-STATUSES = OPEN_STATUSES + ("closed",)
+# bd 1.3.4 の組み込みの status (`bd statuses` の順)。独自の status は `bd config set status.custom a,b:done` で足す
+# (`名前` か `名前:category`。category は wip・done・frozen。省略は unspecified)
+STATUSES = ("open", "in_progress", "blocked", "deferred", "closed", "pinned", "hooked")
+HIDDEN_BY_DEFAULT = ("closed", "pinned")           # list・human list の既定で出ない組み込み (hooked・deferred は出る)
+HIDDEN_CATEGORIES = ("done", "frozen")             # 独自の status のうち、既定で出ないもの
+
+
+def custom_statuses(state: dict) -> dict[str, str]:
+    """status.custom の宣言を {名前: category} にする。"""
+    out: dict[str, str] = {}
+    for part in str((state.get("config") or {}).get("status.custom") or "").split(","):
+        name, _, cat = part.strip().partition(":")
+        if name.strip():
+            out[name.strip()] = cat.strip() or "unspecified"
+    return out
+
+
+def valid_statuses(state: dict) -> tuple[str, ...]:
+    return STATUSES + tuple(custom_statuses(state))
+
+
+def shown_by_default(state: dict, status: str) -> bool:
+    """bd list の既定と bd human list が出す status。実測 (bd 1.3.4): closed・pinned・完了か凍結の独自の status は出ない。"""
+    if status in HIDDEN_BY_DEFAULT:
+        return False
+    return custom_statuses(state).get(status) not in HIDDEN_CATEGORIES
 # br 0.7.6 の組み込みの status (`br list -s <知らない status>` の文が挙げる順)。br の status はこれ以外の任意の文字列にもできる
 BR_STATUSES = ("open", "in_progress", "blocked", "deferred", "draft", "closed", "tombstone", "pinned")
 # update --status で断る終わりの status と、本物の理由の文 (close / delete の専用のコマンドを使わせる)
@@ -310,7 +339,7 @@ def bd_update(p: Project, args: list[str]) -> None:
         i["metadata"] = read_metadata(str(opts["--metadata"]))
     status = opts.get("--status") or opts.get("-s")
     if status is not None:
-        if status not in STATUSES:
+        if status not in valid_statuses(p.state):
             raise Fail(f"Error: invalid status: {status}")
         i["status"] = status
     if "--title" in opts:
@@ -402,11 +431,29 @@ def bd_human(p: Project, args: list[str], as_json: bool) -> None:
         raise Fail(f'Error: unknown command "{args[0] if args else ""}" for "bd human"')
     _, pos = take(args[1:], {})
     want(pos, 0, "human list")
-    items = [view(i) for i in p.state["issues"].values() if i["status"] in OPEN_STATUSES and "human" in i["labels"]]
+    items = [view(i) for i in p.state["issues"].values()
+             if shown_by_default(p.state, i["status"]) and "human" in i["labels"]]
     if as_json:
         emit(items or None)                                         # 0 件は null
     else:
         print("\n".join(f"{x['id']} {x['title']}" for x in items) or "No human-needed beads found.")
+
+
+def bd_config(p: Project, args: list[str]) -> None:
+    """config set / get。fake が読むのは status.custom だけ (ほかの key も値は保存して返す)。"""
+    if not args or args[0] not in ("set", "get"):
+        raise Fail(f'Error: unknown command "{args[0] if args else ""}" for "bd config"')
+    cfg = p.state.setdefault("config", {})
+    if args[0] == "set":
+        _, pos = take(args[1:], {})
+        want(pos, 2, "config set <key> <value>")
+        cfg[pos[0]] = pos[1]
+        p.save()
+        print(f"Set {pos[0]} = {pos[1]}")
+    else:
+        _, pos = take(args[1:], {})
+        want(pos, 1, "config get <key>")
+        print(cfg.get(pos[0], f"{pos[0]} (not set)"))
 
 
 def bd_list(p: Project, args: list[str], as_json: bool) -> None:
@@ -414,10 +461,16 @@ def bd_list(p: Project, args: list[str], as_json: bool) -> None:
                             "-n": True, "--limit": True, "--all": False})
     want(pos, 0, "list [flags]")
     status = opts.get("--status") or opts.get("-s")
-    allowed = set(str(status).split(",")) if status else (set(STATUSES) if opts.get("--all") else set(OPEN_STATUSES))
-    bad = allowed - set(STATUSES)
+    valid = valid_statuses(p.state)
+    if status:
+        allowed = set(str(status).split(","))
+    elif opts.get("--all"):
+        allowed = set(valid)
+    else:
+        allowed = {s for s in valid if shown_by_default(p.state, s)}
+    bad = allowed - set(valid)
     if bad:
-        raise Fail(f"Error: invalid status: {sorted(bad)[0]}")
+        raise Fail(f'Error: invalid status "{sorted(bad)[0]}" (valid: {", ".join(valid)})')
     label = opts.get("--label") or opts.get("-l")
     items = [i for i in p.state["issues"].values() if i["status"] in allowed and (not label or label in i["labels"])]
     limit = int(opts.get("-n") or opts.get("--limit") or 50)
@@ -463,6 +516,8 @@ def run_bd(argv: list[str]) -> None:
             bd_label(p, args)
         elif cmd == "comments":
             bd_comments(p, args, as_json, who)
+        elif cmd == "config":
+            bd_config(p, args)
         elif cmd == "human":
             bd_human(p, args, as_json)
         elif cmd == "list":
@@ -874,6 +929,9 @@ def main() -> int:
     except Fail as e:
         (sys.stdout if e.stdout else sys.stderr).write(str(e) + "\n")
         return e.code
+    warn = os.environ.get("FAKE_BEADS_WARN")
+    if warn:                                        # 成功 (exit 0) の呼び出しの stderr に警告を足す (本物の br の JSONL の export の失敗)
+        sys.stderr.write(warn + "\n")
     return 0
 
 

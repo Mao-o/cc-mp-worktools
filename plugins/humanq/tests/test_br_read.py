@@ -16,6 +16,8 @@ import importlib.util
 import io
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -330,6 +332,21 @@ class BrRead(unittest.TestCase):
         ctx = self.hook_out(self.run_hook(hook, "prompt_submit", bd, "s-bd"))["hookSpecificOutput"]["additionalContext"]
         self.assertIn(f"1 件に回答した: {ids[1]}。`bd comments <id>`", ctx)
         self.assertEqual(self.run_hook(hook, "prompt_submit", bd, "s-bd"), "", "増えたものが無いのに知らせた")
+
+
+class ReadmePickupMatchesServer(unittest.TestCase):
+    """README の「回答を拾う」表の br の一覧は、サーバーが画面に出す範囲 (LIST_ANSWERED = status で絞らない) と同じ引数で拾う。"""
+
+    README = (Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8")
+
+    def br_list_commands(self) -> list[str]:
+        return re.findall(r"`(br list -l answered[^`]*--json)`", self.README)
+
+    def test_pickup_list_has_no_status_filter(self):
+        cmds = self.br_list_commands()
+        self.assertEqual(len(cmds), 1, f"README の br の回答済みの一覧が 1 つでない: {cmds}")
+        self.assertEqual(shlex.split(cmds[0])[1:], LIST_ANSWERED, "README の拾い方がサーバーの読みと違う")
+        self.assertNotIn(" -s ", f" {cmds[0]} ", "status を絞ると pinned・draft・独自の status の回答済みを拾い漏らす")
 
 
 if __name__ == "__main__":

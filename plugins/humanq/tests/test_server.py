@@ -18,7 +18,9 @@ HUMANQ_SERVER_DIR で別の server/ を試せる。
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import queue
@@ -36,6 +38,7 @@ import traceback
 import types
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 import warnings
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -656,6 +659,66 @@ class BdScenarios:
         it = self.item(iid)
         self.assertEqual(it["qsig"], humanq.qsig(it["q"]))
 
+    # ---- /api/summary の fresh (キャッシュの有効期限の内でも読み直す) ----
+
+    def summary(self, port: int, fresh: bool = False) -> dict:
+        url = f"http://127.0.0.1:{port}/api/summary?project={urllib.parse.quote(self.repo, safe='')}" + ("&fresh=1" if fresh else "")
+        code, _, raw = fetch(url)
+        self.assertEqual(code, 200, raw)
+        out = json.loads(raw)
+        self.assertEqual(out.get("ok"), True, out)
+        return out
+
+    def test_fresh_summary_rereads_instead_of_returning_the_cache(self):
+        self.new_question()
+        port = self.serve(self.store())
+        before = self.summary(port, fresh=True)["human"]            # キャッシュを埋める
+        self.new_question()                                         # キャッシュの有効期限 (8 秒) の内に増やす
+        self.assertEqual(self.summary(port, fresh=True)["human"], before + 1, "fresh=1 なのにキャッシュを返した")
+
+    def test_plain_polling_stays_on_the_cache_and_only_fresh_starts_the_cli(self):
+        self.new_question()
+        port = self.serve(self.store())
+        self.summary(port, fresh=True)
+        filled = self.calls("list")
+        self.assertGreater(filled, 0, "fresh=1 が CLI を打っていない")
+        for _ in range(3):
+            code, _, raw = fetch(f"http://127.0.0.1:{port}/api/items")
+            self.assertEqual(code, 200, raw)
+            self.summary(port)
+        self.assertEqual(self.calls("list"), filled, "fresh でないポーリングが CLI を打った (キャッシュを使っていない)")
+        self.summary(port, fresh=True)
+        self.assertGreater(self.calls("list"), filled, "fresh=1 がキャッシュの内で読み直さなかった")
+
+    # ---- 問いの options の形が崩れていても、そのチケット 1 件だけが問いが未整理になる ----
+
+    BROKEN_OPTIONS = {"数": 5, "真偽値": True, "偽": False, "文字列": "案A", "object": {"key": "a", "label": "案A"},
+                      "要素が数": [1, 2], "要素が文字列": ["a"], "key の欠け": [{"label": "案A"}], "label の欠け": [{"key": "a"}],
+                      "key が数": [{"key": 1, "label": "案A"}], "正しい要素と壊れた要素": [{"key": "a", "label": "案A"}, 7]}
+
+    def test_a_malformed_options_makes_only_that_question_unstructured(self):
+        good = self.new_question()
+        for name, options in self.BROKEN_OPTIONS.items():
+            with self.subTest(options=name):
+                bad = self.new_question()
+                self.set_question(bad, options=options)
+                data = self.store().project(self.repo, fresh=True)
+                self.assertEqual(data.get("ok"), True, f"1 件の崩れた問いで、プロジェクトの全部が読めなくなった: {data.get('error')}")
+                by_id = {i["id"]: i for i in data["human"]}
+                self.assertIn(bad, by_id, "崩れた問いのチケットが判断待ちから消えた")
+                self.assertIsNone(by_id[bad]["q"], "崩れた options の問いを、問いとして出した")
+                self.assertIn(good, by_id, "同じプロジェクトのほかの判断待ちが消えた")
+                self.assertIsNotNone(by_id[good]["q"])
+                self.close(bad)                                     # 次の回の判断待ちに残さない
+
+    def test_answer_for_a_malformed_question_takes_free_text_only(self):
+        iid = self.new_question()
+        self.set_question(iid, options=5)
+        store = self.store()
+        self.write(store.answer, {"id": iid, "option": "a"}, raises=ValueError)        # 選択肢は無い
+        self.write(store.answer, {"id": iid, "text": "自由記述で答える"})
+        self.assertIn(iid, [i["id"] for i in self.load()["answered"]])
+
     def test_answer_for_a_changed_question_is_not_recorded(self):
         iid = self.new_question()
         store = self.store()
@@ -744,7 +807,7 @@ class BdScenarios:
 
     # 10. 担当中などの open 以外のチケット
     def test_answered_includes_tickets_that_are_not_open(self):
-        for status in ("in_progress", "blocked"):
+        for status in ("in_progress", "blocked", "hooked"):         # hooked は bd 1.3.4 の組み込み (bd human list に出る)
             with self.subTest(status=status):
                 iid = self.new_question()
                 self.set_status(iid, status)
@@ -914,6 +977,21 @@ class BdOnly:
 
     repo: str
 
+    def test_answered_includes_a_ticket_with_a_custom_status(self):
+        """status.custom で宣言した独自の status (category が wip か未指定) のチケットは bd human list に出る。回答した後も、
+        回答済みの一覧に出る (status を列挙して読むと、列挙に無い status はどの一覧からも消える)。"""
+        bdc(self.repo, "config", "set", "status.custom", "waiting,tuning:wip")
+        for status in ("waiting", "tuning"):
+            with self.subTest(status=status):
+                iid = self.new_question()
+                self.set_status(iid, status)
+                store = self.store()
+                self.assertIn(iid, [i["id"] for i in self.load()["human"]])
+                self.write(store.answer, {"id": iid, "option": "a"})
+                data = self.load()
+                self.assertIn(iid, [i["id"] for i in data["answered"]], "独自の status のチケットがどの一覧にも出ない")
+                self.assertNotIn(iid, [i["id"] for i in data["human"]])
+
     def test_bd_json_rejects_non_list(self):
         def listed(*args):
             try:
@@ -1052,8 +1130,7 @@ class WithFakeBd(FakeLog, BdScenarios, BdOnly, unittest.TestCase):
     # 今のサーバーが打つ bd の argv の 6 形を、読み → 回答 → 読み → 取り消しの順に並べたもの。
     # bd を利用している人の挙動を、後で呼び出しを作り直しても変えないための固定 (<repo> <id> <tmp> は置き換えて比べる)
     HUMAN_LIST = ["-C", "<repo>", "human", "list", "--json"]
-    ANSWERED_LIST = ["-C", "<repo>", "list", "--status", "open,in_progress,blocked,deferred", "--label", "answered",
-                     "--flat", "-n", "0", "--json"]
+    ANSWERED_LIST = ["-C", "<repo>", "list", "--label", "answered", "--flat", "-n", "0", "--json"]    # status では絞らない
     COMMENTS = ["-C", "<repo>", "comments", "<id>", "--json"]
     COMMENT_ADD = ["-C", "<repo>", "--actor", "user/humanq", "comments", "add", "<id>", "-f", "<tmp>"]
     ADD_ANSWERED = ["-C", "<repo>", "--actor", "user/humanq", "label", "add", "<id>", "answered"]
@@ -1344,6 +1421,21 @@ class WithFakeBr(FakeLog, BdScenarios, unittest.TestCase):
             self.fail(f"{fn.__name__} が想定外の例外を上げた: {type(e).__name__}: {e}")
 
     # ---- br だけのシナリオ ----
+    def test_a_warning_on_exit_zero_is_logged_and_the_answer_still_succeeds(self):
+        """br は JSONL の自動 export に失敗しても exit 0 で stderr に警告を出す。回答は DB に入っているので成功のまま、
+        警告は 1 回の書き込みの呼び出しごとにサーバーの stderr に残る (残さないと、JSONL に入っていないことが誰にも見えない)。"""
+        warn = "Warning: Mutation succeeded, but automatic JSONL export failed: disk full"
+        iid = self.new_question()
+        store = self.store()
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"FAKE_BEADS_WARN": warn}), contextlib.redirect_stderr(err):
+            self.write(store.answer, {"id": iid, "option": "a"})
+        logged = [ln for ln in err.getvalue().splitlines() if "humanq: br: " in ln]
+        self.assertGreaterEqual(len(logged), 2, err.getvalue())             # コメントとラベルの書き込みのたび
+        self.assertEqual(set(logged), {"humanq: br: " + warn})
+        self.assertEqual(self.labels(iid) & {"human", "answered"}, {"answered"}, "警告で回答の書き込みが途中で止まった")
+        self.assertTrue(self.comments(iid)[-1].startswith("[humanq] 回答: 案A (a)"))
+
     def test_comments_in_the_same_second_are_ordered_by_id(self):
         store = self.store()
         # (a) 回答より前のメモと同じ秒の回答: 送り直しても回答のコメントは 1 件のまま
