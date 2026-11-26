@@ -127,7 +127,8 @@ metadata の `humanq` に置く。画面はこれを読んで、問い・背景�
 
 ```
 cd plugins/humanq
-python3 -m unittest discover tests        # サーバー (bd の読み書きは偽の bd で回す。本物の bd が PATH にあれば、それでも回す)
+python3 -m unittest discover tests        # サーバー (bd の読み書きは偽の bd だけで回す。PATH に bd があっても本物は打たない)
+HUMANQ_TEST_BD=bd python3 -m unittest discover -s tests   # 本物の bd の脚も回す (bd を上げたら手元でこれを回す)
 PLAYWRIGHT_PATH=<playwright の index.mjs> node tests/ui_test.mjs   # 画面 (Playwright と chromium が要る)
 ```
 

@@ -5,8 +5,10 @@
 bd を通す読み書きのシナリオ (BdScenarios) は 2 通りで回す:
 - WithFakeBd: 偽の bd (tests/fake_beads.py) で回す。本物の bd が無い環境 (CI) でも skip しない。
   サーバーが打つ bd の argv の列も、ここで固定する (test_golden_argv)
-- WithBd: 本物の bd で回す。bd が PATH に無ければ skip する。一時ディレクトリに git init + bd init した
-  使い捨てのプロジェクトで行う (本物の bd の DB には書かない)
+- WithBd: 本物の bd で回す。env HUMANQ_TEST_BD を立てたときだけ走り、既定では skip する (本物は遅い。判定は
+  tests/real_cli.py、契約テストと共通)。bd を上げたら手元で env を立てて回す。一時ディレクトリに git init + bd init した
+  使い捨てのプロジェクトで行う (本物の bd の DB には書かない)。この脚は PATH の bd を打つので、env の値が起動コマンドの文字列でも、
+  打つのは PATH の bd (--version が通ることだけ確かめる)
 モジュールごと読み込んだとき (discover など) は、この 2 つのシナリオを HUMANQ_TEST_JOBS 個 (既定 3) のプロセスで
 並列に回す (下の「並列のプロセスで回す」。1 で直列)。
 サーバーのプロセスを起動する確認も、シナリオの中の HTTP も、OS が選んだポートで行う (同じマシンで suite を同時に回しても取り合わない)。
@@ -44,9 +46,10 @@ sys.path.insert(0, str(SERVER_DIR))
 sys.path.insert(0, str(HERE))                   # bd_parallel (`-m unittest tests.test_server` のように親から指したときも読む)
 import bd_parallel  # noqa: E402
 import humanq  # noqa: E402
+import real_cli  # noqa: E402
 import registry  # noqa: E402
 
-HAVE_BD = shutil.which("bd") is not None
+HAVE_BD = real_cli.real_command("bd") is not None     # env HUMANQ_TEST_BD を立てたときだけ (空なら bd を起動しない)
 QUESTION = {"humanq": {"v": 1, "kind": "decision", "ask": "Q?", "context": "c", "recommended": "a",
                        "options": [{"key": "a", "label": "案A", "desc": "d"}, {"key": "b", "label": "案B", "desc": "e"}]}}
 
@@ -826,7 +829,7 @@ class BdScenarios:
         self.assertEqual(self.labels(iid) & {"human", "answered"}, {"human"})
 
 
-@unittest.skipUnless(HAVE_BD, "bd が無い")
+@unittest.skipUnless(HAVE_BD, real_cli.skip_reason("bd"))
 class WithBd(BdScenarios, unittest.TestCase):
     """本物の bd で回す (bd が PATH にある手元だけ)。失敗は humanq.bd を差し替えて作る。"""
 

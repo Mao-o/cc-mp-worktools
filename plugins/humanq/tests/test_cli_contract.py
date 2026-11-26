@@ -45,14 +45,10 @@ SERVER_DIR = Path(os.environ.get("HUMANQ_SERVER_DIR") or HERE.parent / "server")
 sys.path.insert(0, str(SERVER_DIR))
 import backend  # noqa: E402
 
+sys.path.insert(0, str(HERE))                   # real_cli (`-m unittest tests.test_cli_contract` のように親から指したときも読む)
+from real_cli import clean_env, real_command, skip_reason  # noqa: E402
+
 SUBJECTS = ("fake-bd", "fake-br", "real-bd", "real-br")
-
-
-def clean_env() -> dict:
-    """手元の設定が別のプロジェクトを指さないように、beads 系の env と偽物の env を外す。"""
-    e = {k: v for k, v in os.environ.items() if not k.startswith(("FAKE_BEADS_", "BEADS_", "BD_", "BR_"))}
-    e["PYTHONDONTWRITEBYTECODE"] = "1"
-    return e
 
 
 def install_fake(bin_dir: str, prog: str) -> str:
@@ -63,21 +59,6 @@ def install_fake(bin_dir: str, prog: str) -> str:
     Path(dst).write_text(shebang + "\n" + body, encoding="utf-8")
     os.chmod(dst, 0o755)
     return dst
-
-
-def real_command(prog: str) -> list[str] | None:
-    """本物の起動コマンド (argv の前置き)。env が無い・見つからない・起動できなければ None (--version も打たない)。"""
-    spec = os.environ.get("HUMANQ_TEST_" + prog.upper(), "").strip()
-    if not spec:
-        return None
-    cmd = ([found] if (found := shutil.which(prog)) else None) if spec == "1" else shlex.split(spec)
-    if not cmd:
-        return None
-    try:
-        p = subprocess.run([*cmd, "--version"], capture_output=True, text=True, timeout=60, env=clean_env())
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return cmd if p.returncode == 0 else None
 
 
 class ContractBase(unittest.TestCase):
@@ -99,7 +80,7 @@ class ContractBase(unittest.TestCase):
         else:
             real = real_command(kind)
             if real is None:
-                raise unittest.SkipTest(f"本物の {kind} の脚は env HUMANQ_TEST_{kind.upper()} を立てたときだけ走る (立っていないか、起動できない)")
+                raise unittest.SkipTest(skip_reason(kind))
             cls.cmd = real
         if cls.SUBJECT.startswith("fake"):
             cls.version = "偽物 (tests/fake_beads.py)"
