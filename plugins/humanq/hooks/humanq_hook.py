@@ -104,6 +104,13 @@ def _is_br(s: dict) -> bool:
     return s.get("cli") == registry.BR
 
 
+# br の回答の拾い方。br comments の生の並びは決まっていない (JSONL から取り込み直すと古い回答が最後に来る) ので、
+# (created_at, id) の昇順に並べ直してから最後の [humanq] コメントを読む
+BR_PICKUP = ("回答済みは、`br comments <id> --json` を (created_at, id) の昇順に並べ直し、最後の `[humanq] 回答` "
+             "(作者 user/humanq。その後に `[humanq] 取り消し` があれば飛ばす) を読んでチケットに反映し、"
+             "`br label remove <id> answered` で外す。生の並びの最後を読まない。")
+
+
 def _seen_path(sd: str, session_id: str) -> str:
     d = os.path.join(sd, "sessions")
     os.makedirs(d, exist_ok=True)
@@ -154,9 +161,16 @@ def session_start(inp: dict) -> None:
     _remember(sd, inp.get("session_id") or "unknown", answered)
     ids = f" ({', '.join(answered)})" if answered else ""
     if _is_br(s) and s.get("writable"):
-        # br のプロジェクト。件数だけを伝え、bd のコマンドを含む案内は出さない
+        # br のプロジェクト。br のコマンドで案内する (bd のコマンドは出さない)
         lines = [f"humanq: このプロジェクト (br) の判断待ちは {URL} の画面にまとまっていて、ユーザーは手が空いたときにそこで答える。"
-                 f"今は判断待ち {s.get('human', 0)} 件・answered ラベルの付いたもの {len(answered)} 件{ids}。"]
+                 f"今は判断待ち {s.get('human', 0)} 件・answered ラベルの付いたもの {len(answered)} 件{ids}。",
+                 "ユーザーが同席していない作業 (自律ループ・長い作業の途中) で方針判断が要るときは、br のチケットに human ラベルと "
+                 "agent_context の top-level key humanq (問い・背景・選択肢・推奨) を書いておけば画面に出る。"
+                 "`br show <id> --json` で今の agent_context を読み、ほかの key を残したまま humanq を足した JSON をファイルに書き、"
+                 "`br update <id> --agent-context @<file>` で入れる (値を丸ごと置き換える。短くなる書き換えは --force が要る)。"
+                 f"書き方と回答の拾い方は {README} にある。同席している会話では、今までどおりその場で聞く。"]
+        if answered:
+            lines.append(BR_PICKUP)
     elif _is_br(s):
         # br を読みだけで返す古いサーバー (writable:false) が動いている。件数だけを伝える
         lines = [f"humanq: このプロジェクト (br) の判断待ちは {URL} の画面に出る (動いている画面のサーバーは br のプロジェクトを"
@@ -187,7 +201,8 @@ def prompt_submit(inp: dict) -> None:
         return
     new = _remember(registry.state_dir(), inp.get("session_id") or "unknown", s.get("answered") or [])
     if new and _is_br(s):
-        _out("UserPromptSubmit", f"humanq: 前に伝えた後で、answered ラベルの付いたチケットが {len(new)} 件増えた: {', '.join(new)}。")
+        _out("UserPromptSubmit", f"humanq: 前に伝えた後で、answered ラベルの付いたチケットが {len(new)} 件増えた: {', '.join(new)}。"
+                                 + BR_PICKUP)
     elif new:
         _out("UserPromptSubmit",
              f"humanq: 前に伝えた後で、ユーザーが判断待ちの画面で {len(new)} 件に回答した: {', '.join(new)}。"

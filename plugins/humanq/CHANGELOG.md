@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.15.1
+
+### br のプロジェクトへの案内 (hook と README)
+
+- br のプロジェクトの SessionStart の案内に、問いの置き方と回答の拾い方を br のコマンドで足した。問いは `agent_context` の top-level key `humanq` に置く (`br show <id> --json` で今の値を読み、ほかの key を残したまま足した JSON を `br update <id> --agent-context @<file>` で入れる。丸ごと置き換えるので、短くなる書き換えは `--force` が要る)。回答済み (`answered`) があるときは、回答の拾い方も出す。bd のコマンドと `metadata` は出さない
+- br の回答の拾い方: `br comments <id> --json` は並びが決まっていない (JSONL から取り込み直した後は古い回答が最後に来ることがある) ので、`(created_at, id)` の昇順に並べ直してから、最後の `[humanq] 回答` (作者 `user/humanq`、後ろに `[humanq] 取り消し` があれば飛ばす) を読んで反映し、`br label remove <id> answered` で外す。UserPromptSubmit の br の案内にも同じ手順を付けた
+- bd のプロジェクトの案内は変えていない。bd か br か決められないプロジェクト (unknown・conflict) は今までどおり、読めない理由と `HUMANQ_BEADS_CLI` の案内だけで、どの CLI のコマンドも出さない。hook はサーバーの `summary` の `cli` で出し分ける (`cli` を返さない古いサーバーは bd)
+- README: 「問いの書き方」の入れ方を bd と br の 2 行に分けた (br は `agent_context`。`.beads/config.yaml` の `inherited_context.enabled` を有効にしていると、問いが子のチケットの作業に混ざる注意を付けた)。「回答を拾う」は手順 1〜4 を共通にし、一覧・コメントの読み方・ラベルの外し方を bd / br の表で並べた (br の `-s` は繰り返す。カンマ区切りは通らない)。問い直すときにコメントを書く理由は変えていない
+- plugin.json と marketplace.json の description (と root README の humanq の 2 か所) を、bd / br の両方の言い方にした
+
+### テスト
+
+- `tests/test_server.py` に `HookInstructionsByCli` を足した。bd・br・`cli` を返さない古いサーバー・読めないプロジェクト (conflict / unknown) のそれぞれで、hook の出力に正しい CLI のコマンドだけが入る (br のとき `bd` のコマンドと `metadata` が無く、読めないときはどちらのコマンドも無い)。br では並べ直しの指示・`--agent-context` の置き方・回答済みが無いときに拾い方を出さないこと、UserPromptSubmit の出し分けも固定した
+
 ## 0.15.0
 
 ### br のプロジェクトで回答・取り消しを書き込む

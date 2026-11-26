@@ -352,6 +352,85 @@ class HookEnsureServer(unittest.TestCase):
         self.assertEqual(self.ping()["pid"], pid)
 
 
+class HookInstructionsByCli(unittest.TestCase):
+    """hook が Claude に出す指示文 (問いの置き方・回答の拾い方) に、プロジェクトの CLI (bd / br) のコマンドだけが入ること。
+    サーバーと CLI は打たず、summary (サーバーの応答) を差し替える。"""
+
+    BD_CMDS = ("`bd ", "bd comments", "bd label")
+    BR_CMDS = ("`br ", "br comments", "br label")
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="humanq-hookcli-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.sd = os.path.join(self.tmp, "state")
+        os.makedirs(self.sd)
+        self.root = os.path.join(self.tmp, "proj")
+        os.makedirs(os.path.join(self.root, ".beads"))
+        env = mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_DATA": self.sd})
+        env.start()
+        self.addCleanup(env.stop)
+        spec = importlib.util.spec_from_file_location("humanq_hook_cli_test", HOOK_PATH)
+        self.hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.hook)
+
+    def run_hook(self, fn: str, summary: dict, session: str = "s1") -> str:
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with mock.patch.object(self.hook, "ensure_server", lambda sd: "running"), \
+                mock.patch.object(self.hook, "summary", lambda *a, **kw: dict(summary)), \
+                contextlib.redirect_stdout(buf):
+            getattr(self.hook, fn)({"cwd": self.root, "session_id": session})
+        out = buf.getvalue()
+        self.assertTrue(out.strip(), "hook の出力が無い")
+        return json.loads(out)["hookSpecificOutput"]["additionalContext"]
+
+    def assertOnly(self, ctx: str, want: tuple[str, ...], other: tuple[str, ...]):
+        self.assertEqual(len(want), 3)
+        for w in want:
+            self.assertIn(w, ctx)
+        for o in other:
+            self.assertNotIn(o, ctx, f"別の CLI のコマンド ({o}) が入っている")
+
+    def test_bd_project_gets_bd_commands_only(self):
+        ctx = self.run_hook("session_start", {"ok": True, "cli": "bd", "writable": True, "human": 1, "answered": ["x-1"]})
+        self.assertOnly(ctx, ("metadata の humanq", "`bd comments <id>`", "`bd label remove <id> answered`"), self.BR_CMDS)
+        self.assertNotIn("agent_context", ctx)
+
+    def test_old_server_without_cli_is_read_as_bd(self):
+        ctx = self.run_hook("session_start", {"ok": True, "human": 0, "answered": ["x-1"]})
+        self.assertOnly(ctx, ("metadata の humanq", "`bd comments <id>`", "`bd label remove <id> answered`"), self.BR_CMDS)
+
+    def test_br_project_gets_br_commands_only(self):
+        ctx = self.run_hook("session_start", {"ok": True, "cli": "br", "writable": True, "human": 1, "answered": ["x-1"]})
+        self.assertOnly(ctx, ("`br update <id> --agent-context @<file>`", "`br comments <id> --json`",
+                              "`br label remove <id> answered`"), self.BD_CMDS)
+        self.assertIn("(created_at, id) の昇順", ctx, "br のコメントは並べ直してから最後を読む")
+        self.assertIn("`br show <id> --json`", ctx)
+        self.assertNotIn("metadata", ctx)
+
+    def test_br_project_without_answers_still_gets_the_asking_instructions(self):
+        ctx = self.run_hook("session_start", {"ok": True, "cli": "br", "writable": True, "human": 0, "answered": []})
+        self.assertIn("`br update <id> --agent-context @<file>`", ctx)
+        self.assertNotIn("br label remove", ctx, "回答済みが無いのに拾い方を出した")
+        for w in self.BD_CMDS:
+            self.assertNotIn(w, ctx)
+
+    def test_unreadable_project_gets_no_commands(self):
+        # conflict / unknown: サーバーは ok:false, cli:null で返す。件数と設定の案内だけで、どの CLI のコマンドも出さない
+        err = f"bd と br のどちらで読むか決められない (理由)。{registry.CLI_ENV} で指定してください"
+        ctx = self.run_hook("session_start", {"ok": False, "cli": None, "writable": False, "error": err, "human": 0, "answered": []})
+        self.assertIn(registry.CLI_ENV, ctx)
+        for w in self.BD_CMDS + self.BR_CMDS + ("agent_context", "metadata"):
+            self.assertNotIn(w, ctx)
+
+    def test_prompt_submit_follows_the_cli(self):
+        ctx = self.run_hook("prompt_submit", {"ok": True, "cli": "br", "writable": True, "human": 0, "answered": ["x-2"]})
+        self.assertOnly(ctx, ("x-2", "`br comments <id> --json`", "(created_at, id) の昇順"), self.BD_CMDS)
+        ctx = self.run_hook("prompt_submit", {"ok": True, "cli": "bd", "writable": True, "human": 0, "answered": ["x-3"]}, "s2")
+        self.assertOnly(ctx, ("x-3", "`bd comments <id>`", "[humanq] 回答"), self.BR_CMDS)
+
+
 class BdScenarios:
     """bd・br を通す読み書きのシナリオ。本物の bd (WithBd)・偽の bd (WithFakeBd)・偽の br (WithFakeBr) で回す。
 
