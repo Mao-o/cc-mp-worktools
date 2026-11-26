@@ -1553,14 +1553,17 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   `yarn exec -- firebase deploy` / `yarn exec --silent gh ...` の後ろのクラウド CLI。yarn 1 はその語 (`--project p` は
   次の語も) を自分の option として読んで CLI に渡さず、`--` も落とす。yarn 2 以降はそのまま渡す (yarn 1.22 / 2.4 /
   3.8 / 4.9 で実測。`yarn exec firebase deploy --project p` の firebase は、yarn 1 で `deploy`、yarn 2 以降で
-  `deploy --project p` を受け取る) ので、CLI が受け取る引数を決められない。候補にならず検証されない。引用符で包んだ
+  `deploy --project p` を受け取る) ので、CLI が受け取る引数を決められない。`yarn exec -- <CLI>` はどの版も `--` の後ろを
+  そのまま渡す (実測) が、`--` を含む形は一律に剥がさない。どれも候補にならず検証されない。引用符で包んだ
   語の中の空白の後ろの `-` (`yarn exec gcloud ... "a -b"`) でも同じく検証しない
 - `yarn exec` の CLI 名の語に空白やシェルの記号を含めた形 (`yarn exec 'gh pr create && aws s3 rm ...'` /
   `yarn exec gh\;aws s3 rm ...`) の中のクラウド CLI。yarn 3 以降はその語をシェルのコードとして実行し
   (yarn 3.8 / 4.9 で実測)、yarn 1 / 2 はその名前の CLI を見つけられずに止まる。候補にならず検証されない
-- yarn 4 の project の `.env.yarn` の env。yarn 4 は `yarn exec` / `yarn <CLI 名>` の CLI に `.env.yarn` の値を渡し、
-  前置きの代入 (`AWS_PROFILE=dev yarn exec aws ...`) より優先する (yarn 4.9 で実測) が、hook は `.env.yarn` を読まず、
-  前置きの代入と hook の env で照合する
+- yarn 4 が `.yarnrc.yml` の `injectEnvironmentFiles` (既定は `.env.yarn`) で読む env ファイルの env。yarn 4 は
+  `yarn exec` / `yarn <CLI 名>` の CLI にそのファイルの値を渡し、前置きの代入 (`AWS_PROFILE=dev yarn exec aws ...`) より
+  優先する (yarn 4.9 で実測) が、hook はそのファイルを読まず、前置きの代入と hook の env で照合する
+- `yarn exec` と CLI 名の間に redirect を挟んで代入の形の語を置いた形 (`yarn exec 2>/dev/null NAME=値 <CLI> ...`)。
+  yarn は CLI を起動しないが、hook は代入として読む (`npx` などと同じ読み)
 - `pnpm` / `yarn` と CLI 名の間に option やサブコマンドを挟んだ形 (`pnpm -C app firebase ...` /
   `pnpm run firebase ...` / `yarn run firebase ...` / `yarn workspace app firebase ...`) と、別名の `npm x`
   (`npm exec` の別名) / `pn` / `pnx` (pnpm 11 の別名) の後ろのクラウド CLI

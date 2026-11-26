@@ -315,7 +315,7 @@ class TestYarnExec(unittest.TestCase):
 
     def test_npm_exec_keeps_the_unquoted_check(self):
         """語の頭の引用符を外して探すのは `yarn exec` だけ。`npm exec` は 0.32.0 の判定 (空白で分けた語の頭が `-`)
-        のままで、引用符で包んだ `'-R'` は剥がして照合する (0.32.1 と同じ。変えると照合していた形が検証から外れる)。"""
+        のままで、引用符で包んだ `'-R'` は剥がして照合する (0.32.2 と同じ。変えると照合していた形が検証から外れる)。"""
         command = "npm exec gh pr create '-R' o/r"
         self.assertEqual(strip_transparent_wrappers(command), "gh pr create '-R' o/r")
         self.assertEqual(strip_transparent_wrappers("yarn exec gh pr create '-R' o/r"), "yarn exec gh pr create '-R' o/r")
@@ -323,7 +323,7 @@ class TestYarnExec(unittest.TestCase):
     def test_dash_inside_quotes_after_a_space_is_kept(self):
         """引用符の中の空白の後ろの `-` (`"a -b"` / `"a -- b"`) でも剥がさない (空白で分けた語の頭で探すため。
         yarn はこの語を 1 つの引数としてそのまま渡す (実測) ので照合はできるが、検証が新しく外れる形は無い:
-        0.32.1 までは `yarn exec` を剥がしていなかった)。"""
+        0.32.2 までは `yarn exec` を剥がしていなかった)。"""
         for command in (
             'yarn exec gcloud run deploy svc "a -b"',
             "yarn exec gcloud run deploy svc 'x --y'",
@@ -415,6 +415,14 @@ class TestYarnExecDispatch(unittest.TestCase):
         for command, *_rest in TestYarnExec.MEASURED_OPTION_FORMS[:4]:
             with self.subTest(command=command):
                 self.assertEqual(self._decision(command), "allow")
+
+    def test_bare_yarn_exec_does_not_stop_the_other_segments(self):
+        """`yarn exec` の後ろに語が無くても分解が止まらず (例外で検証を飛ばさず)、ほかの段の aws を照合する。
+        CLI 名の位置の `=` の判定 (`toks[2]`) は語数を確かめてから見る。"""
+        self.assertEqual(self._decision("yarn exec"), "allow")
+        for command in ("yarn exec && aws s3 rm s3://b/k", "aws s3 rm s3://b/k; yarn exec"):
+            with self.subTest(command=command):
+                self.assertEqual(self._decision(command), "deny")
 
 
 class TestEveryServiceBecomesACandidate(unittest.TestCase):

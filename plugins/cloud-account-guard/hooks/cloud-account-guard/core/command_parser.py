@@ -49,12 +49,13 @@ _WRAPPERS_THREE = {("npm", "exec", "--")}
 # `yarn exec` (v0.33.0) も同じく剥がさない。yarn 1 は CLI 名の後ろの `-` で始まる語 (`--project p` は次の語も) を
 # 自分の option として読んで CLI に渡さず、`--` も落とす。yarn 2〜4 はどれもそのまま渡す (`yarn exec firebase deploy
 # --project p` の firebase は、yarn 1.22 で `deploy`、yarn 2.4 / 3.8 / 4.9 で `deploy --project p` を受け取る)。
-# `yarn exec -- <CLI>` もこの集合の判定で剥がさない。
+# `yarn exec -- <CLI>` はどの版も `--` の後ろをそのまま渡す (実測) が、`--` を含む形は一律に候補にしないので、
+# この集合の判定で剥がさない。
 _WRAPPERS_TAKE_LATER_OPTIONS = {("npm", "exec"), ("yarn", "exec")}
 # 上の集合のうち、語の頭の引用符・`\`・`$` を外してから `-` を探す wrapper (v0.33.0)。シェルは `'-P'` /
 # `"--project"` / `\-P` / `$'-P'` を `-P` / `--project` にして渡すので、yarn 1 はこれも自分の option として読む
 # (yarn 1.22 で実測)。空白で分けた語で見るので、引用符の中の空白の後ろ (`"a -b"`) でも剥がさないが、`yarn exec`
-# は 0.32.1 まで剥がしていなかったので、検証から外れる形は増えない。`npm exec` は 0.32.0 の判定 (空白で分けた語の
+# は 0.32.2 まで剥がしていなかったので、検証から外れる形は増えない。`npm exec` は 0.32.0 の判定 (空白で分けた語の
 # 頭が `-`) のまま。
 _WRAPPERS_TAKE_LATER_QUOTED_OPTIONS = {("yarn", "exec")}
 _LEADING_QUOTING = "'\"\\$"
