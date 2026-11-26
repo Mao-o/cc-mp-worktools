@@ -209,9 +209,10 @@ def _git_file_dir(root: str) -> str | None:
             first = f.readline()
     except OSError:
         return None
-    if not first.startswith("gitdir:") or not first[len("gitdir:"):].strip():
+    g = first[len("gitdir:"):].strip() if first.startswith("gitdir:") else ""
+    if not g or "\0" in g:                 # NUL の入った壊れたファイルは読まない (os の呼び出しが ValueError を上げる)
         return None
-    return os.path.normpath(os.path.join(root, first[len("gitdir:"):].strip()))
+    return os.path.normpath(os.path.join(root, g))
 
 
 def _linked_common_dir(gitdir: str) -> str | None:
@@ -221,7 +222,7 @@ def _linked_common_dir(gitdir: str) -> str | None:
     try:
         with open(os.path.join(gitdir, "commondir"), encoding="utf-8", errors="replace") as f:
             c = f.readline().strip()
-        if c:
+        if c and "\0" not in c:            # NUL の入った commondir は読まず、下の dir の形から決める
             return os.path.normpath(os.path.join(gitdir, c))
     except OSError:
         pass
@@ -231,7 +232,8 @@ def _linked_common_dir(gitdir: str) -> str | None:
 
 def git_main_worktree(root: str) -> str | None:
     """root が git の linked worktree の最上位 (root/.git が gitdir のファイル) なら、本体の worktree の dir (realpath)。
-    本体そのもの・git の外・submodule・bare の repo の worktree (本体の worktree が無い) は None。"""
+    本体そのもの・git の外・submodule・名前が .git でない bare の repo の worktree は None (`<dir>/.git` に置いた bare の repo は
+    `<dir>` を返す。br 0.7.6 も `<dir>/.beads` を使う)。"""
     g = _git_file_dir(root)
     common = _linked_common_dir(g) if g else None
     if not common or os.path.basename(common) != ".git":
@@ -257,8 +259,10 @@ def _br_db_names(beads: str) -> set[str]:
     return {"beads.db", db} if isinstance(db, str) and db else {"beads.db"}
 
 
-def _br_home(root: str, cli) -> str:
+def _br_home(root: str, cli, entries: dict | None = None) -> str:
     """br を root で打ったときに読み書きする .beads/ の持ち主の dir。root か、root が linked worktree なら本体の worktree。
+    cli は root の entry の明示の設定。entries (登録の全件) に本体があれば、本体は本体の entry の設定でも判定し、
+    どちらかで br と読めなければまとめない (組の設定は最後に登録した一員のものなので、どちらの設定でも本体を br と読めること)。
     br 0.7.6 の実測 (使い捨ての repo で `br where` と一覧の中身を比べた):
     - worktree の最上位の .beads/ に DB (metadata.json の database か beads.db) が無いと、本体の worktree の .beads/ を使う。
       本体の .beads/ が dir なら中身を問わない (空でも、そこに DB を作る)。本体に .beads/ が無ければ worktree の .beads/ に作る
@@ -273,7 +277,10 @@ def _br_home(root: str, cli) -> str:
     if main is None:
         return root
     beads, mbeads = os.path.join(root, ".beads"), os.path.join(main, ".beads")
-    if project_kind(root, cli)[0] != BR or project_kind(main, cli)[0] != BR:
+    clis = [cli]
+    if entries is not None and main in entries:
+        clis.append(_entry_cli(entries[main]))
+    if project_kind(root, cli)[0] != BR or any(project_kind(main, c)[0] != BR for c in clis):
         return root
     if os.path.exists(os.path.join(beads, "redirect")):         # br は redirect に従う (行き先はここでは追わない)
         return root
@@ -300,13 +307,17 @@ def project_groups(sd: str) -> list[dict]:
       ないものを先に、パスの名前順で 1 つ
     - members は組に入った登録のパス (名前順)。hook・画面は一員のパスで問い合わせても、代表のパスで読み書きする
     - cli は組の明示の設定。最後に登録した (last_seen が最新の) 一員の設定 (1 つの登録で、最後の登録の設定が効くのと同じ)
-    消えたもの (.beads/ が無い) は出さないだけで、登録は残す。"""
+    消えたもの (.beads/ が無い) は出さないだけで、登録は残す。1 件の判定で os の呼び出しが例外 (OSError・ValueError) を
+    上げたら、その登録はまとめずに自分のパスのまま出す (ほかの登録の読みは続ける)。"""
     entries = _entries(sd)
     groups: dict = {}
     for p, e in entries.items():
         if not isinstance(p, str) or not os.path.isdir(os.path.join(p, ".beads")):
             continue
-        home = _br_home(p, _entry_cli(e))
+        try:
+            home = _br_home(p, _entry_cli(e), entries)
+        except (OSError, ValueError):       # 1 件の読みの失敗 (壊れた .git など) で全体を止めない。その登録は自分のパスのまま出す
+            home = p
         groups.setdefault(_identity(home), []).append((p, home))
     def seen(p: str) -> tuple[str, str]:            # 同じ秒の登録はパスの名前順の後ろ
         e = entries[p]

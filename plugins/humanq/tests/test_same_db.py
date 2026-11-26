@@ -168,7 +168,15 @@ class WorktreeGroups(Base):
             main = br_beads(main_repo(self.p("main")), "beads.db")
             return main, br_beads(linked(main, os.path.join(main, "wts", "w1")))
 
-        for build in (rel, no_admin, no_commondir, history_only, main_beads_without_db, main_beads_symlink, nested):
+        def main_beads_symlink_underscore():           # 本体の .beads が _beads という名前の dir への symlink (br 0.7.6 は本体の DB を使う)
+            store = br_beads(self.p("store"), "beads.db")
+            os.rename(os.path.join(store, ".beads"), os.path.join(store, "_beads"))
+            main = main_repo(self.p("main"))
+            os.symlink(os.path.join(store, "_beads"), os.path.join(main, ".beads"))
+            return main, br_beads(linked(main, self.p("wt")))
+
+        for build in (rel, no_admin, no_commondir, history_only, main_beads_without_db, main_beads_symlink,
+                      main_beads_symlink_underscore, nested):
             with self.subTest(layout=build.__name__):
                 shutil.rmtree(self.tmp)
                 os.makedirs(self.sd)
@@ -296,6 +304,34 @@ class WorktreeGroups(Base):
         registry.register(self.sd, wt, "bd")
         self.assertSeparate(main, wt)
         self.assertEqual(registry.project_kind(wt, registry.project_cli(self.sd, wt))[0], "conflict")
+
+    def test_explicit_cli_on_the_main_is_checked_too(self):
+        """本体の登録の HUMANQ_BEADS_CLI でも本体を br と読めなければ、まとめない (組の設定は最後に登録した一員のものなので、
+        まとめると、本体の登録の順で組のカードと worktree の hook が「読めない」になる)。どちらの順に登録しても、前の版
+        (0.16.0: 登録ごとに 1 枚) と同じに、worktree のカードと hook は worktree を br で読み、本体のカードは本体の設定で読む。"""
+        cases = [  # (本体の設定, 本体の .beads に br の印があるか, 本体のカードの種別 (前の版と同じ))
+            ("bd", True, "conflict"),      # 本体だけの誤設定 (印と食い違う)
+            ("br", False, "br"),           # 本体だけ br の明示で、印の無い本体 (auto の worktree の設定では本体を br と読めない)
+        ]
+        for mcli, marked, main_kind in cases:
+            for last in ("wt", "main"):
+                with self.subTest(main_cli=mcli, last=last):
+                    shutil.rmtree(self.tmp)
+                    os.makedirs(self.sd)
+                    main = main_repo(self.p("main"))
+                    if marked:
+                        br_beads(main, "beads.db")
+                    else:
+                        write(os.path.join(main, ".beads", "metadata.json"), BR_META)
+                        write(os.path.join(main, ".beads", "beads.db"), "")
+                    wt = br_beads(linked(main, self.p("wt")))
+                    t_main, t_wt = (("2026-11-20T00:00:00Z", "2026-11-21T00:00:00Z") if last == "wt"
+                                    else ("2026-11-22T00:00:00Z", "2026-11-21T00:00:00Z"))
+                    write(os.path.join(self.sd, "projects.json"),
+                          {"projects": {main: {"last_seen": t_main, "cli": mcli}, wt: {"last_seen": t_wt, "cli": None}}})
+                    self.assertSeparate(main, wt)
+                    for r, want in ((wt, registry.BR), (main, main_kind)):
+                        self.assertEqual(registry.project_kind(r, registry.project_cli(self.sd, r))[0], want, r)
 
 
 class PathIdentity(Base):
@@ -427,7 +463,8 @@ class GitDirs(Base):
         self.assertEqual(registry._git_file_dir(wt), os.path.join(main, ".git", "worktrees", "wt"))
 
     def test_real_git_worktrees(self):
-        """本物の git が作る形でも同じに読む (絶対パスの gitdir・相対パスの gitdir・bare の repo の worktree)。"""
+        """本物の git が作る形でも同じに読む (絶対パスの gitdir・相対パスの gitdir・bare の repo の worktree (名前が .git でない
+        bare と、<dir>/.git に置いた bare))。"""
         if shutil.which("git") is None:
             self.skipTest("git が無い")
         main = self.p("main")
@@ -449,6 +486,11 @@ class GitDirs(Base):
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIsNone(registry.git_main_worktree(self.p("barewt")), "bare の repo には本体の worktree が無い")
         self.assertEqual(registry.git_common_dir(self.p("barewt")), self.p("bare.git"))
+        p = git(self.tmp, "clone", "-q", "--bare", main, self.p("proj", ".git"))      # <dir>/.git に置いた bare の repo
+        self.assertEqual(p.returncode, 0, p.stderr)
+        p = git(self.p("proj", ".git"), "worktree", "add", "-q", self.p("projwt"))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(registry.git_main_worktree(self.p("projwt")), self.p("proj"), "br 0.7.6 と同じに <dir> を本体とする")
 
     def test_outer_git_env_does_not_change_the_reading(self):
         """製品のコードは git を打たないので、外側の GIT_DIR / GIT_WORK_TREE があっても同じに読む。"""
@@ -461,6 +503,72 @@ class GitDirs(Base):
                                           "GIT_COMMON_DIR": os.path.join(other, ".git")}):
             self.assertOneProject(main, [main, wt])
             self.assertEqual(registry.git_common_dir(wt), os.path.join(main, ".git"))
+
+
+class BrokenGitFile(Base):
+    """1 件の登録の .git・commondir が壊れていても (os の呼び出しが例外を上げる NUL など)、ほかの登録の読みを止めない。"""
+
+    def build(self, kind: str) -> tuple[str, str]:
+        good = br_beads(main_repo(self.p("good")), "beads.db")
+        bad = br_beads(self.p("bad"))
+        if kind == "gitdir-nul":
+            write(os.path.join(bad, ".git"), "gitdir: /x\0y/.git/worktrees/w\n")
+        else:                                          # commondir に NUL (.git で終わる形と、終わらない形)
+            adm = self.p("m", ".git", "worktrees", "bad")
+            write(os.path.join(adm, "commondir"), "a\0b/.git\n" if kind == "commondir-nul" else "a\0b\n")
+            write(os.path.join(bad, ".git"), f"gitdir: {adm}\n")
+        registry.register(self.sd, good)
+        registry.register(self.sd, bad)
+        return good, bad
+
+    def call(self, fn, *args):
+        try:
+            return fn(*args)
+        except Exception as e:  # noqa: BLE001  例外が漏れる変異は ERROR ではなく FAIL に数える
+            self.fail(f"{fn.__name__} が例外を上げた: {type(e).__name__}: {e}")
+
+    def test_a_broken_git_file_does_not_hide_the_other_projects(self):
+        for kind in ("gitdir-nul", "commondir-nul", "commondir-nul-plain"):
+            with self.subTest(kind=kind):
+                shutil.rmtree(self.tmp)
+                os.makedirs(self.sd)
+                good, bad = self.build(kind)
+                self.assertSeparate(good, bad)
+
+    def test_nul_in_the_git_files_is_not_read(self):
+        """NUL の入った gitdir の行は読まない。NUL の入った commondir は読まずに、gitdir の形 (<common>/worktrees/<名前>) から決める。
+        書き込みのロックの key (git_common_dir) も例外を上げない。"""
+        _, bad = self.build("gitdir-nul")
+        for fn in (registry._git_file_dir, registry.git_main_worktree, registry.git_common_dir):
+            self.assertIsNone(self.call(fn, bad), fn.__name__)
+        for kind in ("commondir-nul", "commondir-nul-plain"):
+            with self.subTest(kind=kind):
+                shutil.rmtree(self.tmp)
+                os.makedirs(self.sd)
+                _, bad = self.build(kind)
+                self.assertEqual(self.call(registry.git_common_dir, bad), self.p("m", ".git"))
+                self.assertEqual(self.call(registry.git_main_worktree, bad), self.p("m"))
+
+    def test_a_read_error_in_one_registration_keeps_it_as_its_own_project(self):
+        """1 件の判定で os の呼び出しが例外を上げたら (今後足す読みも含む)、その登録は自分のパスのまま出し、ほかの組は変えない。"""
+        main = br_beads(main_repo(self.p("main")), "beads.db")
+        wt = br_beads(linked(main, self.p("wt")))
+        bad = br_beads(linked(main, self.p("bad")))
+        for r in (main, wt, bad):
+            registry.register(self.sd, r)
+        self.assertOneProject(main, [main, wt, bad])          # 前提: 読めれば 3 件とも本体にまとまる
+        real = registry.git_main_worktree
+        for exc in (OSError, ValueError):
+            with self.subTest(exc=exc.__name__):
+                def broken(root, exc=exc):
+                    if root == bad:
+                        raise exc("壊れた読み")
+                    return real(root)
+                with mock.patch.object(registry, "git_main_worktree", broken):
+                    g = self.groups()
+                    self.assertEqual([(x["root"], x["members"]) for x in g], [(bad, [bad]), (main, sorted([main, wt]))], g)
+                    self.assertEqual(registry.resolve_project(self.sd, bad), bad)
+                    self.assertEqual(registry.resolve_project(self.sd, wt), main)
 
 
 # ---- 読み書き (偽の br・偽の bd) ---------------------------------------------------------------------------------
@@ -654,6 +762,83 @@ class SymlinkStore(FakeCli):
         self.assertEqual(self.humanq_comments("br", real, iid), ["[humanq] 回答: 案A (a)\n"], "回答のコメントが 1 件でない")
         self.assertEqual(results, ["Gone", "ok"], results)
         self.assertGreaterEqual(broken, 1)
+
+
+class OddFilesApi(FakeCli):
+    def test_odd_files_in_other_registrations_keep_the_api_answering(self):
+        """組の判定が新しく読むファイル (.git・commondir・worktree の metadata.json・.beads/) と登録のパスに、NUL・非 UTF-8・
+        長すぎるパス・読めない権限を入れた登録が並んでいても、/api/items・/api/summary・/api/answer は 200 で返り、
+        まともなプロジェクトの問いを読み書きできる。"""
+        main = self.br_main()
+        iid = self.br_question(main)
+        locked: list[str] = []
+        self.addCleanup(lambda: [os.chmod(x, 0o700) for x in locked if os.path.lexists(x)])
+
+        def wt(name: str) -> str:                     # 本体に linked した、DB の無い worktree
+            return br_beads(linked(main, self.p(name)))
+
+        def adm(name: str) -> str:
+            return os.path.join(main, ".git", "worktrees", name)
+
+        def unreadable(path: str) -> None:
+            os.chmod(path, 0)
+            locked.append(path)
+
+        odd: list[str] = []
+        for name, body in (("gitdir-nul", "gitdir: /x\0y/.git/worktrees/w\n"),
+                           ("gitdir-long", "gitdir: /" + "a" * 5000 + "/.git/worktrees/w\n")):
+            odd.append(br_beads(self.p(name)))
+            write(os.path.join(odd[-1], ".git"), body)
+        odd.append(br_beads(self.p("gitdir-non-utf8")))
+        Path(odd[-1], ".git").write_bytes(b"gitdir: /x\xff\xfe/.git/worktrees/w\n")
+        for name, body in (("commondir-nul", "a\0b/.git\n"), ("commondir-long", "a" * 5000 + "/.git\n")):
+            odd.append(wt(name))
+            write(os.path.join(adm(name), "commondir"), body)
+        odd.append(wt("commondir-non-utf8"))
+        Path(adm("commondir-non-utf8"), "commondir").write_bytes(b"\xff\xfe/../..\n")
+        for name, meta in (("meta-escaped-nul", {"database": "a\0b.db"}), ("meta-long", {"database": "x" * 5000})):
+            odd.append(br_beads(linked(main, self.p(name)), meta=meta))
+        for name, raw in (("meta-raw-nul", b'{"database": "a\0b.db"}'), ("meta-non-utf8", b'{"database": "\xff.db"}')):
+            odd.append(wt(name))
+            Path(odd[-1], ".beads", "metadata.json").write_bytes(raw)
+        if os.geteuid() != 0:                         # root は権限で読めなくならない
+            for name, target in (("git-unreadable", ".git"), ("meta-unreadable", os.path.join(".beads", "metadata.json")),
+                                 ("beads-unreadable", ".beads")):
+                odd.append(wt(name))
+                unreadable(os.path.join(odd[-1], target))
+            odd.append(wt("commondir-unreadable"))
+            unreadable(os.path.join(adm("commondir-unreadable"), "commondir"))
+        for r in odd:
+            registry.register(self.sd, r)
+        for bad in (self.p("nul\0path"), "/" + "a" * 5000):    # 登録のパスそのもの
+            registry.register(self.sd, bad)
+        self.assertIn(main, [g["root"] for g in self.groups()])
+
+        port = ts.free_port()
+        srv = ts.start_server(self.sd, port)
+        self.addCleanup(ts.stop, srv)
+        base = f"http://127.0.0.1:{port}"
+
+        def fetch(url: str, *args):
+            try:
+                return ts.fetch(url, *args)
+            except Exception as e:  # noqa: BLE001  応答なしに切れる (サーバーの handler の例外) のは ERROR ではなく FAIL
+                self.fail(f"{url[:120]}: {type(e).__name__}: {e}")
+
+        code, _, body = fetch(f"{base}/api/items")
+        self.assertEqual(code, 200, body)
+        ps = {p["path"]: p for p in json.loads(body)["projects"]}
+        self.assertIn(main, ps)
+        self.assertEqual([i["id"] for i in ps[main]["human"]], [iid])
+        for r in (main, *odd):
+            with self.subTest(project=os.path.basename(r)):
+                code, _, body = fetch(f"{base}/api/summary?project={urllib.parse.quote(r, safe='')}&fresh=1")
+                self.assertEqual(code, 200, body)
+        tok = ts.page_token(port)
+        hdr = {"Content-Type": "application/json", "X-Humanq-Token": tok}
+        code, _, body = fetch(f"{base}/api/answer", json.dumps({"project": main, "id": iid, "option": "a"}).encode(), hdr)
+        self.assertEqual(code, 200, body)
+        self.assertEqual(self.humanq_comments("br", main, iid), ["[humanq] 回答: 案A (a)\n"])
 
 
 class BdWorktreeStore(FakeCli):
