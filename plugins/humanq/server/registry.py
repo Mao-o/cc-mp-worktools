@@ -175,18 +175,168 @@ def register(sd: str, root: str, cli: str | None = None) -> None:
         _write(path, data)
 
 
-def project_cli(sd: str, root: str) -> str | None:
-    """登録した root の明示の設定 (bd / br / None=auto)。entry が無い・読めない値は None。"""
-    e = _read(os.path.join(sd, "projects.json")).get("projects", {})
-    e = e.get(root) if isinstance(e, dict) else None
+def _entries(sd: str) -> dict:
+    projects = _read(os.path.join(sd, "projects.json")).get("projects", {})
+    return projects if isinstance(projects, dict) else {}
+
+
+def _entry_cli(e) -> str | None:
     return cli_setting(e.get("cli") if isinstance(e, dict) else None)[0]
 
 
+def project_cli(sd: str, root: str, groups: list[dict] | None = None) -> str | None:
+    """root の明示の設定 (bd / br / None=auto)。root が登録の組 (project_groups) の代表か一員なら、その組の設定。
+    組に無ければ root の entry の設定。entry が無い・読めない値は None。groups は読み済みの project_groups (省略は読む)。"""
+    g = _group_of(root, project_groups(sd) if groups is None else groups)
+    return g["cli"] if g else _entry_cli(_entries(sd).get(root))
+
+
+# ---- 同じ beads の DB に届く登録をまとめる -----------------------------------------------------------------
+# git worktree で開いたセッションは worktree の dir を登録するが、br はその worktree の .beads/ に DB が無ければ、本体の
+# worktree の .beads/ を読み書きする (下の _br_home)。symlink の .beads/ や大文字小文字だけ違う登録のパスも、同じ DB に届く。
+# 同じ DB に届く登録を 1 つのプロジェクト (組) として出さないと、画面に同じ問いが 2 枚出て、2 枚から同時に答えると
+# 書き込みのロックがパスごとに別々になり、回答のコメントが 2 件になる。
+# 登録のファイル (projects.json) の形は変えない: まとめるのは読むときだけ (前の版が書いた登録もそのまま読む)。
+
+def _git_file_dir(root: str) -> str | None:
+    """root/.git が `gitdir: <path>` のファイル (linked worktree・submodule) なら、その path (相対は root から)。
+    それ以外 (dir・無い・読めない・形が違う) は None。git は打たない (外側の GIT_DIR などの env に左右されない)。"""
+    dot = os.path.join(root, ".git")
+    if not os.path.isfile(dot):
+        return None
+    try:
+        with open(dot, encoding="utf-8", errors="replace") as f:
+            first = f.readline()
+    except OSError:
+        return None
+    if not first.startswith("gitdir:") or not first[len("gitdir:"):].strip():
+        return None
+    return os.path.normpath(os.path.join(root, first[len("gitdir:"):].strip()))
+
+
+def _linked_common_dir(gitdir: str) -> str | None:
+    """linked worktree の gitdir (<common>/worktrees/<name>) の common dir。gitdir の commondir のファイルが読めればそれ、
+    読めなければ dir の形 (親が worktrees) から決める (worktree の管理 dir を消した後も br は本体を読む: br 0.7.6 で実測)。
+    linked worktree の形でなければ (submodule の modules/<name> など) None。"""
+    try:
+        with open(os.path.join(gitdir, "commondir"), encoding="utf-8", errors="replace") as f:
+            c = f.readline().strip()
+        if c:
+            return os.path.normpath(os.path.join(gitdir, c))
+    except OSError:
+        pass
+    parent = os.path.dirname(gitdir)
+    return os.path.dirname(parent) if os.path.basename(parent) == "worktrees" else None
+
+
+def git_main_worktree(root: str) -> str | None:
+    """root が git の linked worktree の最上位 (root/.git が gitdir のファイル) なら、本体の worktree の dir (realpath)。
+    本体そのもの・git の外・submodule・bare の repo の worktree (本体の worktree が無い) は None。"""
+    g = _git_file_dir(root)
+    common = _linked_common_dir(g) if g else None
+    if not common or os.path.basename(common) != ".git":
+        return None
+    return os.path.realpath(os.path.dirname(common))
+
+
+def git_common_dir(root: str) -> str | None:
+    """root/.git の common dir (realpath)。本体 (root/.git が dir) はその dir、linked worktree は本体の .git。
+    root/.git が無い・読めない・linked worktree の形でなければ None。書き込みのロックの key に使う。"""
+    dot = os.path.join(root, ".git")
+    if os.path.isdir(dot):
+        return os.path.realpath(dot)
+    g = _git_file_dir(root)
+    common = _linked_common_dir(g) if g else None
+    return os.path.realpath(common) if common else None
+
+
+def _br_db_names(beads: str) -> set[str]:
+    """br の DB のファイルの候補 (.beads/ からの相対): metadata.json の database と、br の既定の beads.db。
+    どちらかがあれば「worktree が自分の DB を持つ」とみなす (多めに見るほど、まとめない側に倒れる)。"""
+    db = _metadata(beads).get("database")
+    return {"beads.db", db} if isinstance(db, str) and db else {"beads.db"}
+
+
+def _br_home(root: str, cli) -> str:
+    """br を root で打ったときに読み書きする .beads/ の持ち主の dir。root か、root が linked worktree なら本体の worktree。
+    br 0.7.6 の実測 (使い捨ての repo で `br where` と一覧の中身を比べた):
+    - worktree の最上位の .beads/ に DB (metadata.json の database か beads.db) が無いと、本体の worktree の .beads/ を使う。
+      本体の .beads/ が dir なら中身を問わない (空でも、そこに DB を作る)。本体に .beads/ が無ければ worktree の .beads/ に作る
+    - worktree の .beads/ に DB があれば、それを使う (本体の DB とは別の DB)。DB 以外のファイル (.br_history/ など) では決まらない
+    - worktree の下の dir の .beads/ (monorepo の sub/.beads) は、本体の同じ dir ではなく、その .beads/ に DB を作る
+    - 本体の .beads/ が .beads (か _beads) という名前の dir に解決しない symlink だと、worktree では設定エラーで止まる
+    どれかが外れたら root のまま (別のプロジェクトとして出す。同じ DB を別に出すのは、別の DB を 1 つにまとめて
+    片方の判断待ちを画面から消すより害が小さい)。bd の worktree の解決は測っていない (bd にも worktree ごとに .beads/ を
+    選ぶ仕組みがあり、br と同じとは限らない) ので、bd と読むプロジェクトはまとめない (書き込みのロックだけを git の repo
+    ごとに取る: git_common_dir)。"""
+    main = git_main_worktree(root)
+    if main is None:
+        return root
+    beads, mbeads = os.path.join(root, ".beads"), os.path.join(main, ".beads")
+    if project_kind(root, cli)[0] != BR or project_kind(main, cli)[0] != BR:
+        return root
+    if os.path.exists(os.path.join(beads, "redirect")):         # br は redirect に従う (行き先はここでは追わない)
+        return root
+    if any(os.path.exists(os.path.join(beads, n)) for n in _br_db_names(beads)):
+        return root
+    if not os.path.isdir(mbeads) or os.path.basename(os.path.realpath(mbeads)) not in (".beads", "_beads"):
+        return root
+    return main
+
+
+def _identity(home: str):
+    """home/.beads の実体 (device と inode)。symlink の先・大文字小文字だけ違うパスも同じ値になる。stat できなければパスの文字列。"""
+    try:
+        st = os.stat(os.path.join(home, ".beads"))
+    except OSError:
+        return ("path", home)
+    return ("inode", st.st_dev, st.st_ino)
+
+
+def project_groups(sd: str) -> list[dict]:
+    """登録済みで .beads/ があるものを、同じ beads の DB に届くもの (同じ実体の .beads/) ごとにまとめた組 (名前順)。
+    組は {root, members, cli}:
+    - root は組の代表 (画面のパス・CLI を打つ dir)。br の worktree は本体の worktree (登録が無くても)。.beads/ が symlink で
+      ないものを先に、パスの名前順で 1 つ
+    - members は組に入った登録のパス (名前順)。hook・画面は一員のパスで問い合わせても、代表のパスで読み書きする
+    - cli は組の明示の設定。最後に登録した (last_seen が最新の) 一員の設定 (1 つの登録で、最後の登録の設定が効くのと同じ)
+    消えたもの (.beads/ が無い) は出さないだけで、登録は残す。"""
+    entries = _entries(sd)
+    groups: dict = {}
+    for p, e in entries.items():
+        if not isinstance(p, str) or not os.path.isdir(os.path.join(p, ".beads")):
+            continue
+        home = _br_home(p, _entry_cli(e))
+        groups.setdefault(_identity(home), []).append((p, home))
+    def seen(p: str) -> tuple[str, str]:            # 同じ秒の登録はパスの名前順の後ろ
+        e = entries[p]
+        return (str((e if isinstance(e, dict) else {}).get("last_seen") or ""), p)
+
+    out = []
+    for members in groups.values():
+        homes = sorted({h for _, h in members}, key=lambda h: (os.path.islink(os.path.join(h, ".beads")), h))
+        last = max((p for p, _ in members), key=seen)
+        out.append({"root": homes[0], "members": sorted(p for p, _ in members), "cli": _entry_cli(entries[last])})
+    return sorted(out, key=lambda g: (Path(g["root"]).name.lower(), g["root"]))
+
+
 def live_projects(sd: str) -> list[str]:
-    """登録済みで、まだ .beads/ があるもの (名前順)。消えたものは表示しないだけで、登録は残す。"""
-    projects = _read(os.path.join(sd, "projects.json")).get("projects", {})
-    live = [p for p in projects if isinstance(p, str) and os.path.isdir(os.path.join(p, ".beads"))]
-    return sorted(live, key=lambda p: (Path(p).name.lower(), p))
+    """画面に出すプロジェクト (project_groups の代表のパス。名前順)。消えたものは表示しないだけで、登録は残す。"""
+    return [g["root"] for g in project_groups(sd)]
+
+
+def _group_of(path, groups: list[dict]) -> dict | None:
+    for g in groups:
+        if path == g["root"] or path in g["members"]:
+            return g
+    return None
+
+
+def resolve_project(sd: str, path, groups: list[dict] | None = None) -> str | None:
+    """path (登録のパスか組の代表のパス) を、読み書きに使う代表のパスにする。どの組にも無ければ None (未登録。文字列でない値も)。
+    groups は読み済みの project_groups (省略は読む)。"""
+    g = _group_of(path, project_groups(sd) if groups is None else groups)
+    return g["root"] if g else None
 
 
 def write_server_info(sd: str, info: dict) -> None:

@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.16.1
+
+### 修正
+
+- br のプロジェクトを git worktree で開いたセッションが本体とは別のプロジェクトとして登録され、画面に同じ問いが 2 枚出ていたのを直した。2 枚から同時に答えると、書き込みのロックが登録のパスごとだったため両方が書き、回答のコメントが 2 件になった (本物の br 0.7.6 で 6 回中 6 回)。同じ beads の DB に届く登録を、サーバーが読むときに 1 つのプロジェクト (組) にまとめる (本物の br 0.7.6 で、同じ形の 6 回の同時の回答はすべてコメント 1 件・片方は `gone` になった)
+  - br は、worktree の最上位の `.beads/` に DB (`metadata.json` の `database` か `beads.db`) が無いと、本体の worktree の `.beads/` を読み書きする。本体の `.beads/` は dir なら中身を問わない (使い捨ての repo で `br where` と一覧の中身から測った)。この形の worktree の登録は本体のパスにまとめ、本体のセッションを開いていなくても本体のパスで出す。worktree が自分の DB を持つ・`.beads/redirect` がある・`.beads/` が worktree の下の dir にある・本体に `.beads/` の dir が無い・本体の `.beads/` が `.beads` (か `_beads`) という名前の dir に解決しないときは、br も別の DB を使う (か止まる) ので、まとめない
+  - `.beads/` の実体 (device と inode) が同じ登録 (symlink 越しの `.beads/`・親の dir の symlink・大文字小文字だけ違うパス) も 1 つにする
+  - 組の代表のパスは、`.beads/` が symlink でないものを名前順で 1 つ。組の `HUMANQ_BEADS_CLI` の設定は、最後に登録した (`last_seen` が最新の) 一員のもの (1 つの登録で、最後の登録の設定が効くのと同じ)
+  - hook は今までどおり自分の登録のパスで `/api/summary` を問い合わせ、サーバーが代表のパスで読む。まとめる前に開いた画面が一員のパスで送る回答・取り消しも、代表のパスで同じロックの下で書く
+  - bd のプロジェクトの worktree はまとめない (bd にも worktree ごとに `.beads/` を選ぶ仕組みがあるが、測っていない)。代わりに回答・取り消しの書き込みのロックを git の common dir ごと (本体と worktree で同じ) にし、同じ repo の 2 枚のカードからの同時の回答を 1 本ずつ書く。git の外のプロジェクトは今までどおりプロジェクトごと
+  - `.git` はファイル (`gitdir:` の行と管理 dir の `commondir`) を読むだけで、git は打たない (外側の `GIT_DIR` などに左右されない)。管理 dir を消した worktree・相対パスの `gitdir`・本体の dir の中に置いた worktree も読む。submodule・bare の repo の worktree は、本体の worktree が無いのでまとめない
+- 登録のファイル (`projects.json`) の形は変えていない。hook は今までどおり worktree の dir を登録し、まとめるのはサーバーが読むときだけ。前の版が worktree と本体を別々に登録したファイル (`cli` の無い entry を含む) も、そのまま 1 つに読む。前の版に戻しても読める
+- `/api/items` は組を 1 回だけ読み、プロジェクトごとの設定の読みに渡す (プロジェクトごとに組を作り直すと、登録の数の 2 乗のファイルの読みになる。登録 250 件の手元の計測で、1 回あたりの登録の読みは前の版と同じかそれより短い)
+
+### テスト
+
+- `tests/test_same_db.py` を足した: 組の判定 (まとめる形 7 通り・まとめない形 16 通り・`HUMANQ_BEADS_CLI` の明示・手で作った `.git` の形と本物の git の worktree・bare の repo・外側の `GIT_DIR`)、symlink の `.beads/`・親の dir の symlink・大文字小文字だけ違うパス・中身が同じ別の dir、前の版の登録のファイル、組の設定。偽の br で、画面に 1 枚だけ出ること・worktree と本体 (と symlink 越し) の 2 枚からの同時の回答でコメントが 1 件・worktree のパスでの取り消しが本体で打たれること・HTTP (`/api/items`・`/api/summary`・`/api/answer` を worktree のパスで)。偽の bd で、bd の worktree は 2 枚のまま、書き込みが 1 本ずつになること
+- `tests/test_cli_contract.py`: br の契約に、git worktree で打ったときに届く DB (DB の無い worktree は本体・自分の DB のある worktree は自分・下の dir の `.beads/` は自分・DB の無い本体の `.beads/` も本体・本体に `.beads/` が無ければ自分) と、humanq の判定が同じ dir を返すことを足した。本物の br 0.7.6 でも通ることを確かめた
+- `tests/fake_beads.py`: 偽の br が worktree で本体の `.beads/` を読み書きする (本物に合わせた)。`init` が空の `beads.db` を作る
+
 ## 0.16.0
 
 ### 画面 (並びの切り替え)

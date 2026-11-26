@@ -5,7 +5,8 @@
 usage: python3 humanq.py --state-dir DIR [--port 8765]
 
 - 待ち受けは 127.0.0.1 だけ。ポートを取れなければ (もう誰かが動かしている) 何もせず終わる
-- 対象のプロジェクトは DIR/projects.json (SessionStart hook が登録する)。リクエストのたびに読む
+- 対象のプロジェクトは DIR/projects.json (SessionStart hook が登録する)。リクエストのたびに読む。
+  同じ beads の DB に届く登録 (br の git worktree と本体・symlink 越しの .beads) は 1 つにまとめる (registry.project_groups)
 - DIR/server.json に pid・port・version を書く (hook が版の古いサーバーを止めるため。新しい版は止めない)
 - DIR/token (0600) に書き込みのトークンを保存し、再起動 (版の入れ替え) しても同じ値を使う
 規約 (問いの書き方・回答の形・拾い方) は plugin の README.md。依存は標準ライブラリと PATH 上の bd / br だけ。
@@ -207,7 +208,8 @@ def unreadable(reason: str) -> dict:
 
 
 class Store:
-    """プロジェクトごとの読みの直列化とキャッシュ。書き込みもプロジェクトごとに 1 本ずつ。"""
+    """プロジェクトごとの読みの直列化とキャッシュ。書き込みは git の repo (worktree を含む) ごと、git の外ならプロジェクトごとに 1 本ずつ。
+    repo は組の代表のパス (Store.resolve)。answer / undo は一員のパスを渡されても代表のパスにしてから書く。"""
 
     def __init__(self, state_dir: str):
         self.state_dir = state_dir
@@ -225,14 +227,24 @@ class Store:
     def projects(self) -> list[str]:
         return registry.live_projects(self.state_dir)
 
-    def route(self, repo: str) -> tuple[str, str]:
-        """repo を読み書きする CLI の種別 (bd / br / unknown / conflict) と理由。ファイルの印だけで決め、CLI は打たない。"""
-        return registry.project_kind(repo, registry.project_cli(self.state_dir, repo))
+    def resolve(self, repo) -> str | None:
+        """登録のパス (worktree・symlink 越しなど、同じ DB に届く組の一員) を、組の代表のパスにする。未登録なら None。"""
+        return registry.resolve_project(self.state_dir, repo)
 
-    def project(self, repo: str, fresh: bool = False) -> dict:
+    def _write_lock(self, repo: str) -> threading.Lock:
+        """回答・取り消しのロック。key は git の common dir (本体と worktree で同じ)、git の外なら代表のパス。
+        画面で 1 つにまとめない形 (bd の worktree など) でも、同じ repo の 2 枚のカードからの同時の回答を 1 本ずつにする。"""
+        return self._lock(self._wlocks, registry.git_common_dir(repo) or repo)
+
+    def route(self, repo: str, groups: list[dict] | None = None) -> tuple[str, str]:
+        """repo を読み書きする CLI の種別 (bd / br / unknown / conflict) と理由。ファイルの印だけで決め、CLI は打たない。
+        groups は読み済みの registry.project_groups (all が 1 回だけ読んで渡す。省略は読む)。"""
+        return registry.project_kind(repo, registry.project_cli(self.state_dir, repo, groups))
+
+    def project(self, repo: str, fresh: bool = False, groups: list[dict] | None = None) -> dict:
         """fresh なら、キャッシュが有効な間でも CLI で読み直す (/api/summary?fresh=1)。"""
         with self._lock(self._locks, repo):
-            route = self.route(repo)
+            route = self.route(repo, groups)
             kind, reason = route
             hit = self._cache.get(repo)
             # 設定 (HUMANQ_BEADS_CLI) や印が変わったら、キャッシュの時間内でも読み直す (ファイルを見るだけで安い)
@@ -277,8 +289,10 @@ class Store:
             self._cache.pop(repo, None)
 
     def all(self) -> list[dict]:
-        repos = self.projects()
-        datas = list(self._pool.map(self.project, repos))  # DB が別なので並べて読める
+        # 組は 1 回だけ読む (プロジェクトごとに読み直すと、登録の数の 2 乗のファイルの読みになる)
+        groups = registry.project_groups(self.state_dir)
+        repos = [g["root"] for g in groups]
+        datas = list(self._pool.map(lambda r: self.project(r, groups=groups), repos))  # DB が別なので並べて読める
         return [{"path": r, "name": Path(r).name, **d} for r, d in zip(repos, datas)]
 
     def writer(self, repo: str):
@@ -293,7 +307,8 @@ class Store:
         """返り値は回答の署名 (asig)。成功の応答に入れ、画面はその回答の取り消しに付けて送る。"""
         iid, key = body.get("id"), body.get("option") or ""
         text = str(body.get("text") or "").strip()
-        with self._lock(self._wlocks, repo):
+        repo = self.resolve(repo) or repo
+        with self._write_lock(repo):
             be = self.writer(repo)
             rows = be.pending(repo, iid)
             cur = {x["id"]: x for x in (shape(r) for r in rows)}
@@ -320,7 +335,8 @@ class Store:
     def undo(self, repo: str, body: dict) -> None:
         iid = body.get("id")
         seen = body.get("asig")            # 取り消す回答の署名。送らない古い画面は検査しない
-        with self._lock(self._wlocks, repo):
+        repo = self.resolve(repo) or repo
+        with self._write_lock(repo):
             be = self.writer(repo)
             cur = {r["id"] for r in be.list_answered(repo)}
             if iid not in cur:
@@ -426,8 +442,9 @@ def make_handler(store: Store, port: int, token: str, page: str, version: str):
             elif path == "/api/summary":
                 # hook 用。既定はキャッシュを待たずに返す (UserPromptSubmit を遅くしない)。fresh=1 は読み直す
                 q = {k: _unquote(v) for k, v in (p.split("=", 1) for p in query.split("&") if "=" in p)}
-                repo = q.get("project", "")
-                if repo not in store.projects():
+                # hook は自分の登録のパスで問い合わせる。worktree などで別のパスにまとめた組なら、代表のパスで読む
+                repo = store.resolve(q.get("project", ""))
+                if repo is None:
                     return self._json(404, {"error": "未登録のプロジェクト"})
                 d = store.project(repo, fresh=True) if q.get("fresh") == "1" else store.peek(repo)
                 if d is None:
@@ -458,8 +475,9 @@ def make_handler(store: Store, port: int, token: str, page: str, version: str):
                 body = json.loads(self.rfile.read(n))
                 if not isinstance(body, dict):
                     raise ValueError("body")
-                repo = body.get("project")
-                if repo not in store.projects():
+                # まとめる前の画面が送る一員のパスも、代表のパスにして同じロックの下で書く
+                repo = store.resolve(body.get("project"))
+                if repo is None:
                     raise ValueError("未登録のプロジェクト")
                 fn = {"/api/answer": store.answer, "/api/undo": store.undo}.get(self.path)
                 if fn is None:
