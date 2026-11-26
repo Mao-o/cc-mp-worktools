@@ -704,9 +704,12 @@ def suggest_accounts_entry(project_dir: str) -> str | None:
 
 # 期待値が案内するコマンドに入れられない形のとき (core/shell_word.py) の文。
 # alias / project ID の許容形は builder の `pin-env` の `firebase use` と同じ
-# (shell_word.NAME)。
+# (shell_word.NAME)。汎用の `UNSAFE` の文は `:` や `/` も許される記号に読めるので、firebase の
+# 許容形 (`shell_word.NAME_RULE`) を添える (`期待=example.com:right-project。` の直後に置くと、
+# `:` が許されるように読めた)。`UNSAFE` は部分文字列のまま残す (dispatcher の注記の判定)。
 _CHECK_BY_HAND = (
-    f'期待値は{shell_word.UNSAFE}。accounts.local.json の "{ACCOUNT_KEY}" を手で確認してください'
+    f'期待値は{shell_word.UNSAFE} ({shell_word.NAME_RULE})。'
+    f'accounts.local.json の "{ACCOUNT_KEY}" を手で確認してください'
 )
 # `firebase use <x>` / `--project <x>` が期待した project に着く案内を出せないときの文。
 # firebase-tools は x を `.firebaserc` の alias として先に解決するので、期待値の alias や project ID
