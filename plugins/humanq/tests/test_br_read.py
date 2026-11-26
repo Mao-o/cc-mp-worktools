@@ -29,9 +29,8 @@ import test_server as ts  # noqa: E402  helper だけ借りる (TestCase は名�
 registry = ts.registry
 humanq = ts.humanq
 
-STATUS = ["-s", "open", "-s", "in_progress", "-s", "blocked", "-s", "deferred"]
-LIST_HUMAN = ["list", "-l", "human", *STATUS, "--limit", "0", "--json"]
-LIST_ANSWERED = ["list", "-l", "answered", *STATUS, "--limit", "0", "--json"]
+LIST_HUMAN = ["list", "-l", "human", "--limit", "0", "--json"]          # status では絞らない (br の既定のまま)
+LIST_ANSWERED = ["list", "-l", "answered", "--limit", "0", "--json"]
 Q = ts.QUESTION["humanq"]
 CTX = json.dumps({"other": {"keep": True}, "humanq": Q})     # agent_context の top-level に他の key もある
 ANS_A = "[humanq] 回答: 案A (a)\n"
@@ -160,6 +159,30 @@ class BrRead(unittest.TestCase):
         self.assertEqual(self.assertBrOnly(root), [LIST_HUMAN, LIST_ANSWERED, ["show", q1, b3, d5, a2, "--json"]])
         self.assertEqual(sorted(n for n in os.listdir(os.path.join(root, ".beads")) if n.startswith("dolt")), [])
 
+    def test_tickets_in_every_unfinished_status_are_read(self):
+        # br 0.7.6: `br list -l human` (既定) は closed と tombstone だけを除く。組み込みの draft・pinned と、
+        # update --status が宣言なしで受け付ける独自の status (review・打ち間違いの in-progress) も出る。
+        # 画面 (と、同じ読みから数える hook の件数) にも同じものを出す。回答済みの側も同じ
+        unfinished = ("open", "in_progress", "blocked", "deferred", "draft", "pinned", "review", "in-progress")
+        root = self.br_project()
+        want: dict[str, list[str]] = {"human": [], "answered": []}
+        for label in want:
+            for st in unfinished:
+                iid = self.create(root, f"{label} {st}", label)
+                if st != "open":
+                    self.brc(root, "update", iid, "--status", st)
+                want[label].append(iid)
+            self.brc(root, "close", self.create(root, f"{label} closed", label))
+            self.brc(root, "delete", self.create(root, f"{label} deleted", label))      # tombstone になる
+        self.reset_log()
+        p = self.read(root)
+        self.assertEqual((p["ok"], p["cli"]), (True, "br"), p)
+        for label in want:
+            with self.subTest(label):
+                self.assertEqual(sorted(i["id"] for i in p[label]), sorted(want[label]),
+                                 "終わっていない status のチケットが消えた / closed か tombstone が出た")
+        self.assertEqual(self.assertBrOnly(root)[:2], [LIST_HUMAN, LIST_ANSWERED])
+
     def test_an_empty_project_is_read_without_show(self):
         root = self.br_project()
         self.reset_log()
@@ -264,6 +287,7 @@ class BrRead(unittest.TestCase):
         o = self.hook_out(self.run_hook(hook, "prompt_submit", root, "s-br"))
         ctx = o["hookSpecificOutput"]["additionalContext"]
         self.assertEqual(ctx, f"humanq: 前に伝えた後で、answered ラベルの付いたチケットが 1 件増えた: {a3}。")
+        self.assertEqual(self.run_hook(hook, "prompt_submit", root, "s-br"), "", "増えたものが無いのに知らせた")
         self.assertEqual({c["prog"] for c in self.calls() if c["cwd"] == root or root in c["argv"]}, {"br"})
 
     def test_hook_still_tells_bd_projects_the_bd_commands(self):
@@ -286,6 +310,7 @@ class BrRead(unittest.TestCase):
         self.forget(hook, "s-bd", ids[:1])
         ctx = self.hook_out(self.run_hook(hook, "prompt_submit", bd, "s-bd"))["hookSpecificOutput"]["additionalContext"]
         self.assertIn(f"1 件に回答した: {ids[1]}。`bd comments <id>`", ctx)
+        self.assertEqual(self.run_hook(hook, "prompt_submit", bd, "s-bd"), "", "増えたものが無いのに知らせた")
 
 
 if __name__ == "__main__":

@@ -272,7 +272,18 @@ class Question(unittest.TestCase):
         self.assertEqual((q["ask"], [o["key"] for o in q["options"]]), ("Q?", ["a", "b"]))
         for raw in (None, "{not json", "5", [Q], {"ask": 5}):
             with self.subTest(raw=raw):
-                self.assertIsNone(humanq.question_from_raw(raw))
+                try:
+                    got = humanq.question_from_raw(raw)
+                except Exception as e:  # noqa: BLE001  実装の変異で漏れた例外を、走っていない ERROR にしない
+                    self.fail(f"{raw!r} で例外: {type(e).__name__}: {e}")
+                self.assertIsNone(got)
+        # metadata の humanq が深い入れ子の JSON 文字列: json の parser は RecursionError を上げる。問いが未整理にする
+        # (漏らすと Store.project の catch-all で、そのプロジェクトの全チケットが読めなくなる)
+        try:
+            got = humanq.question({"humanq": "[" * 100000})
+        except Exception as e:  # noqa: BLE001  実装の変異で漏れた例外を、走っていない ERROR にしない
+            self.fail(f"深い入れ子の metadata で例外: {type(e).__name__}")
+        self.assertIsNone(got)
 
 
 def str_constants(path: Path) -> tuple[set[str], set[str]]:
@@ -287,7 +298,7 @@ class Layering(unittest.TestCase):
     """CLI の形 (起動・argv の語・問いの置き場) を知っているのは backend.py だけ。humanq.py は CLI に依らない形を読む。"""
 
     CLI_WORDS = {"bd", "-C", "--json", "--actor", "--status", "--label", "--flat", "-n", "-f", "metadata", "comments", "list",
-                 "br", "-l", "-s", "--limit", "show", "agent_context"}
+                 "br", "-l", "--limit", "show", "agent_context"}
 
     def test_humanq_py_does_not_know_the_cli(self):
         imports, consts = str_constants(SERVER_DIR / "humanq.py")
@@ -300,9 +311,9 @@ class Layering(unittest.TestCase):
 
 # ---- br (BrBackend) ------------------------------------------------------------------------------------------
 
-BR_STATUS = ("-s", "open", "-s", "in_progress", "-s", "blocked", "-s", "deferred")
-BR_HUMAN = ("list", "-l", "human", *BR_STATUS, "--limit", "0", "--json")
-BR_ANSWERED = ("list", "-l", "answered", *BR_STATUS, "--limit", "0", "--json")
+# status では絞らない (-s を付けない): br の既定 (closed と tombstone だけを除く) のまま読む
+BR_HUMAN = ("list", "-l", "human", "--limit", "0", "--json")
+BR_ANSWERED = ("list", "-l", "answered", "--limit", "0", "--json")
 
 
 def envelope(issues, **kw) -> str:
@@ -528,6 +539,20 @@ class BrLoad(unittest.TestCase):
         self.assertEqual(len(human), 1)
         self.assertEqual((human[0]["description"], human[0]["notes"]), ("list の本文", "list のメモ"), "show に無い key は一覧の値")
 
+    def test_inherited_context_is_not_a_question(self):
+        # br 0.7.6 (.beads/config.yaml の inherited_context.enabled): 子の show は親の agent_context を、agent_context
+        # ではなく別の key inherited_context に出す。子の問いにはしない (親の問いと qsig を子のカードに出さない)
+        parent_ctx = json.dumps({"humanq": Q})
+        inherited = [{"source_id": "p-1", "source_role": "epic", "source_title": "親", "field_used": "agent_context",
+                      "content": parent_ctx}]
+        cases = {"子に agent_context が無い": (br_shown("p-1.1", inherited_context=inherited), None),
+                 "子にも agent_context がある": (br_shown("p-1.1", json.dumps({"other": 1}), inherited_context=inherited), None)}
+        for what, (child, raw) in cases.items():
+            with self.subTest(what):
+                human, _ = self.ok(BrScript(human=[br_issue("p-1.1")], shows=[[child]]))   # list には出ない (実測)
+                self.assertEqual(len(human), 1)
+                self.assertEqual(human[0]["question_raw"], raw, "親から継いだ agent_context を子の問いにした")
+
 
 class BrQuestion(unittest.TestCase):
     """agent_context (JSON の文字列) の top-level key humanq。読めなければ問いが未整理 (q=None)。"""
@@ -565,7 +590,8 @@ class BrQuestion(unittest.TestCase):
 
     def test_questions_that_humanq_cannot_read_are_none(self):
         for what, ctx in {"ask が文字列でない": json.dumps({"humanq": {"ask": 5, "options": []}}),
-                          "humanq が配列": json.dumps({"humanq": [Q]}), "JSON でない": "{"}.items():
+                          "humanq が配列": json.dumps({"humanq": [Q]}), "JSON でない": "{",
+                          "humanq の値が深い入れ子の JSON 文字列": json.dumps({"humanq": "[" * 100000})}.items():
             with self.subTest(what):
                 self.assertIsNone(self.question(ctx))
         q = self.question(Q_OTHER)
@@ -652,14 +678,15 @@ class BrProject(unittest.TestCase):
         self.assertEqual((d["answered"][0]["answer"], d["answered"][0]["asig"]), ("", ""))
 
     def test_agent_context_shapes_become_questions_or_none(self):
-        cases = {"他の key がある": Q_OTHER, "JSON でない": "{x", "空": "", "key が無い": None}
+        cases = {"他の key がある": Q_OTHER, "JSON でない": "{x", "空": "", "key が無い": None,
+                 "humanq の値が深い入れ子の JSON 文字列": json.dumps({"humanq": "[" * 100000})}   # 1 件で全件を読めなくしない
         s = BrScript(human=[br_issue(f"p-{n}") for n in range(len(cases))],
                      shows=[[br_shown(f"p-{n}", ctx) for n, ctx in enumerate(cases.values())]])
         d = self.project(s)
         self.assertEqual(len(d["human"]), len(cases), d)
         got = {i["id"]: i["q"] for i in d["human"]}
         self.assertEqual(got["p-0"], humanq.question({"humanq": Q}))
-        self.assertEqual([got[f"p-{n}"] for n in (1, 2, 3)], [None, None, None])
+        self.assertEqual([got[f"p-{n}"] for n in (1, 2, 3, 4)], [None, None, None, None])
 
 
 if __name__ == "__main__":

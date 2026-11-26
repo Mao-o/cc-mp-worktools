@@ -35,7 +35,8 @@ bd を使っているプロジェクト (cwd から上に `.beads/` がある) �
 - プロジェクトごとに、`.beads/` の中のファイルの印で bd か br かを決める (CLI は打たない)。br の印は `.beads/.gitignore` の `.br_history` か `fsqlite` を含む行・`.br_history/`・`*-fsqlite-ns-*`・`.br-db-*.lock`、bd の印は `metadata.json` の `database` か `backend` が `dolt`・`embeddeddolt/`。br の印だけなら br、bd の印だけなら bd、印が無ければ bd。両方ある・どちらの印も無く SQLite の形 (`metadata.json` の `database` が `.db` で終わる) のときは決められないので、どの CLI も打たず、画面に理由を出す
 - hook の env `HUMANQ_BEADS_CLI` (`bd` / `br` / `auto`、未設定は `auto`) で決め方を指定できる。`HUMANQ_PORT` と同じくプロジェクトの settings の `env` でプロジェクトごとに決められる。指定に反する印があれば決められない扱い。`bd` / `br` / `auto` 以外の値は `auto` として扱い、SessionStart で 1 行だけ警告する
 - br のプロジェクトは、今は読み取りだけ。判断待ちと回答済みを画面に出すが、そのカードには選択肢のボタン・補足欄・「回答する」・「取り消して判断待ちに戻す」を出さず、「このプロジェクト (br) は画面からはまだ回答できません」の 1 行を出す (選択肢は押せない一覧で見せる)。回答・取り消しの書き込みは、CLI を打つ前に `readonly` で断る。hook は件数だけを伝え、bd のコマンドを含む案内は出さない
-  - 読みは 1 プロジェクトあたり 3 プロセス: `br list -l human` と `br list -l answered` (どちらも `-s open -s in_progress -s blocked -s deferred --limit 0 --json`) と、両方の ID をまとめた `br show <id...> --json`。0 件なら `show` は打たない。`show` は ID が 1 つでも無いと全体が失敗する (exit 3) ので、そのときは一覧から 1 回だけ読み直す
+  - 読みは 1 プロジェクトあたり 3 プロセス: `br list -l human` と `br list -l answered` (どちらも `--limit 0 --json`) と、両方の ID をまとめた `br show <id...> --json`。0 件なら `show` は打たない。`show` は ID が 1 つでも無いと全体が失敗する (exit 3) ので、そのときは一覧から 1 回だけ読み直す
+  - 一覧は status で絞らない (`-s` を付けない)。br の `list` の既定は `closed` と `tombstone` (`br delete` したもの) だけを除くので、利用者が `br list -l human` で見る判断待ちと同じものが画面と hook の件数に出る: `deferred`・`draft`・`pinned` と、br が宣言なしで受け付ける独自の status (`review` など) のチケットも出る。回答済み (`answered`) の側も同じ。bd の回答済みの読みは今までどおり 4 つの status で絞る (「回答を拾う」の節)
   - 問いは `show` の `agent_context` (JSON の文字列) の top-level の key `humanq` から読む (形は bd の metadata の `humanq` と同じ)。`agent_context` が JSON の object でない・`humanq` が無い・`ask` が文字列でないときは「問いが未整理」として出す
   - コメントの並びは br では決まっていないので、`created_at` の順 (同じ秒なら ID の順) に並べてから、最後の `[humanq]` コメントを回答として読む (両ラベルのチケットの向きも同じ)
   - br はプロジェクトの dir を cwd にして起動する (br に `-C` は無い)。DB・`.beads`・JSONL の場所を指す env (`BEADS_DB`・`BD_DB`・`BD_DATABASE`・`BEADS_DIR`・`BEADS_JSONL`) は br に渡さない (残っていると、登録したプロジェクトではない DB を読むため)
@@ -132,7 +133,7 @@ PLAYWRIGHT_PATH=<playwright の index.mjs> node tests/ui_test.mjs   # 画面 (Pl
 
 `tests/test_server.py` の bd を通すシナリオ (送り直し・ラベルの再試行・両ラベルの向きなど) は、`tests/fake_beads.py` (偽の bd) を一時の bin dir に置いて回すので、本物の bd が無い環境でも skip されない。偽物は bd 1.3.4 で実測した癖 (0 件の `human list --json` は `null` など) を持ち、失敗は env (`FAKE_BEADS_FAIL`) で注入する。サーバーが打つ bd の argv の列 (読み・回答・取り消し) も、このテストで固定している。discover で流すと、このシナリオは別のプロセスで並列に回る (`HUMANQ_TEST_JOBS`、既定 3。`HUMANQ_TEST_JOBS=1` で直列。クラスやテストを名前で指したとき (`python3 -m unittest test_server.WithFakeBd` など) も直列)。
 
-br のプロジェクトの読み (一覧と `show` の argv・コメントの並べ替え・両ラベルの向き・bd を打たないこと・hook の案内) は、`tests/test_br_read.py` が同じ偽物を br の名前で置いて回す (偽の br はコメントを新しい順で返す)。
+br のプロジェクトの読み (一覧と `show` の argv・終わっていない status のチケットが全部出ること・コメントの並べ替え・両ラベルの向き・bd を打たないこと・hook の案内) は、`tests/test_br_read.py` が同じ偽物を br の名前で置いて回す (偽の br はコメントを新しい順で返す)。
 
 `tests/test_cli_contract.py` は、bd・br の CLI の癖 (0 件の出力の形・拒否される flag・metadata の形・コメントの並びと id など) を、偽の bd・偽の br・本物の bd・本物の br の 4 通りに同じ assertion で当てる契約テスト。偽物 2 通りは既定の suite と CI で走る。本物は遅い (bd だけで 30 秒近い) ので、PATH に bd / br があっても既定では起動せず skip する (理由に変数名を出す)。手元で回すときは env `HUMANQ_TEST_BD` / `HUMANQ_TEST_BR` を立てる (値は起動コマンド。`bd` / `br`、前置き付きの `<launcher> -- br`、PATH のを使うなら `1`)。本物は一時 dir の使い捨てのプロジェクトでだけ打ち、利用者のプロジェクトには触れない。**bd か br を上げたら、env を立てて手元で契約テストを回す** (`HUMANQ_TEST_BD=bd HUMANQ_TEST_BR=br python3 -m unittest tests.test_cli_contract`) (食い違うと、どの CLI のどの版のどの癖かを失敗の文に出す)。
 

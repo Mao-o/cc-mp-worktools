@@ -97,7 +97,7 @@ def question_from_raw(q) -> dict | None:
     if isinstance(q, str):
         try:
             q = json.loads(q)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):    # RecursionError は深い入れ子 (json の parser の限界。backend._loads と同じ)
             return None
     if not isinstance(q, dict) or not isinstance(q.get("ask"), str):
         return None

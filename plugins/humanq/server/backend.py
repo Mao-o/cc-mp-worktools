@@ -142,8 +142,6 @@ class BdBackend:
 # list -s はカンマ区切りを受け付けず繰り返す・問いは metadata ではなく agent_context (JSON の文字列) の key humanq・
 # コメントの並びは決まっていない (id は単調に増える int)・show は id が 1 つでも無いと全体が exit 3。
 
-# 判断待ち・回答済みとして読む status (bd の ANSWERED_STATUSES と同じ組)
-STATUSES = tuple(ANSWERED_STATUSES.split(","))
 # br が cwd より優先して読む DB・.beads・JSONL の場所の env (br 0.7.6 の `br capabilities` の env_vars と実測。
 # BEADS_DIR は文書に無いが効く)。起動するときに外す: 残っていると、登録したプロジェクトではない DB を黙って読む
 BR_TARGET_ENV = ("BEADS_DB", "BD_DB", "BD_DATABASE", "BEADS_DIR", "BEADS_JSONL")
@@ -272,8 +270,10 @@ class BrBackend:
         return r
 
     def _list(self, repo: str, label: str) -> list:
-        status = [a for s in STATUSES for a in ("-s", s)]
-        return parse_br_list(self._run(repo, "list", "-l", label, *status, "--limit", "0", "--json"))
+        """label の付いたチケットの一覧。status では絞らない (-s を付けない): br の list の既定は closed と tombstone
+        だけを除き、組み込みの deferred・draft・pinned も、任意の文字列の status (br update --status は宣言なしで受け
+        付ける) も出す。利用者が `br list -l human` で見る判断待ちと同じものを、画面と hook の件数に出す (br 0.7.6 で実測)。"""
+        return parse_br_list(self._run(repo, "list", "-l", label, "--limit", "0", "--json"))
 
     def load(self, repo: str) -> tuple[list[dict], list[dict]]:
         """一覧から show までの間にチケットが消えると、show は exit 3 で全体が失敗する。そのときは 1 回だけ一覧から
