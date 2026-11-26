@@ -21,7 +21,7 @@ from unittest import mock
 
 import _testutil  # noqa: F401
 
-from core import auto_switch, budget, cache  # noqa: E402
+from core import auto_switch, budget, cache, shell_word  # noqa: E402
 from core.dispatcher import dispatch  # noqa: E402
 
 _ISOLATION = None
@@ -264,6 +264,37 @@ class TestOnlyWhereItWouldStop(AutoSwitchBase):
             )
         self.assertIn("連結", reason)
         self.assertEqual(self.gh.switches(), [])
+
+    def test_chain_deny_names_expected_file_when_value_is_hidden(self):
+        """期待値を表示できない (空白・絵文字入り) ときは、見るべきファイルを言う。
+        表示できる値のときは、その文を足さない。"""
+        cases = {
+            "space": ("my work", True),
+            "emoji": ("work\U0001F600", True),
+            "dict hidden": ({"host": "github.com", "user": "my work"}, True),
+            "dict hidden key": ({"my work": "Mao-o"}, True),
+            "shown": ("Mao-o", False),
+            "dict shown": ({"github.com": "Mao-o"}, False),
+            "dict non-str value": ({"github.com": "Mao-o", "x y": 1}, False),
+        }
+        for name, (entry, hidden) in cases.items():
+            with self.subTest(name):
+                self._write_accounts({"github": entry})
+                with self._enabled():
+                    reason = self._deny_reason(
+                        self._dispatch("gh auth switch --user other && gh pr create")
+                    )
+                self.assertIn("切替と書込を同一コマンドに連結しています", reason)
+                source = (
+                    '表示していない期待値があります (accounts.local.json の "github" を'
+                    "確認してください)"
+                )
+                self.assertEqual(source in reason, hidden, reason)
+                # この deny はコマンドの形で案内しないので、UNSAFE の理由は言わない。
+                self.assertNotIn(shell_word.UNSAFE, reason)
+                self.assertNotIn("手で確認してください", reason)
+                if hidden:
+                    self.assertIn("(表示しない値)", reason)
 
 
 class TestCannotSwitch(AutoSwitchBase):
