@@ -700,7 +700,8 @@ QUERY の不一致も止めたい場合は `accounts.local.json` に書く:
   ここに読めない値を代入したセグメントの gh は 0.29.9 と同じく読む。`GH_TOKEN=$(gh auth token --user x) gh pr create`
   は照合も自動切替もしない (gh が書き込むアカウントは代入したトークンで決まり、hook からは決められない)。
   `GH_TOKEN=$T gh ...` は 0.29.9 から照合している。同じ代入の後ろの gh 以外の CLI は照合する
-  (gh と同じセグメントにない CLI。シェル経由の wrapper の中で gh と並ぶ CLI (`GH_TOKEN=$(cmd) watch 'gh pr create && aws ...'` の aws) は、
+  (gh と同じセグメントにない CLI。シェル経由の wrapper の中で gh (wrapper を剥がした後の gh も。`npx gh` / `pnpm gh` /
+  `bunx gh` など) と並ぶ CLI (`GH_TOKEN=$(cmd) watch 'gh pr create && aws ...'` の aws) は、
   セグメントごと 0.29.9 と同じく読むので照合しない)。
   前置きの代入は、シェルと同じくそのコマンドにだけ効くものとして照合する。heredoc を置いた行
   (`AWS_PROFILE=prod cat <<EOF | aws s3 cp - ...` + 改行 + 本文 + `EOF`) の後ろの段も、起動時の env で
@@ -718,8 +719,9 @@ QUERY の不一致も止めたい場合は `accounts.local.json` に書く:
 - **ランタイム / パッケージマネージャ**: `npx` / `pnpm exec` / `pnpm dlx` /
   `mise exec --` / `bun x`。v0.32.0 から `bunx` / `pnpx` / `yarn dlx` / `npm exec` / `npm exec --` /
   `mise exec <tool>@<版> --` / `mise x [<tool>@<版>] --` (tool の指定は 0 個以上) と、CLI 名の前の
-  `pnpm` / `yarn` (`pnpm firebase deploy` / `yarn kubectl apply ...`。名前が gh / firebase / aws / gcloud /
-  kubectl と、検証の対象外の wrangler / cf のときだけ) も剥がす。`npx` 以外は語を落とすだけで option は
+  `pnpm` / `yarn` (`pnpm firebase deploy` / `yarn firebase deploy`。名前が gh / firebase / aws / gcloud /
+  kubectl と、検証の対象外の wrangler / cf のときだけ。yarn は依存の bin (node_modules/.bin) だけを起動し、PATH の
+  gh / aws / gcloud / kubectl は起動しない (yarn 1.22 で実測)) も剥がす。`npx` 以外は語を落とすだけで option は
   読まない (option 付きの形は[守る範囲と守らない範囲](#守る範囲と守らない範囲)を参照)
 - 行頭インライン env の伝播は wrapper の実行時 env 挙動に従う
   (`sudo` は preserve 無しだと env を scrub。詳細は
@@ -1539,6 +1541,12 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   (`npm exec` の別名) / `pn` / `pnx` (pnpm 11 の別名) の後ろのクラウド CLI
 - `yarn <CLI 名>` の作業ディレクトリ。yarn は package.json のあるディレクトリで CLI を起動する (yarn 1.22 で
   実測) が、hook はコマンドを打ったディレクトリの文脈で照合する
+- `yarn <CLI 名>` で CLI 名の後ろに `--` の語を置いた形 (`yarn firebase deploy -- --project p` /
+  `yarn firebase deploy --project p -- x`) の後ろのクラウド CLI。yarn 1 は `--` より前の語を自分の option として
+  読み、`--` を落として残りを CLI に渡す (yarn 1.22 で実測。firebase はそれぞれ `deploy --project p` / `deploy x`
+  を受け取る) が、hook は `--` の後ろの option を読まず、前の option は CLI に届くと読むので、照合先を決められない。
+  候補にならず検証されない (`pnpm` は `--` も前の語もそのまま渡す (pnpm 8〜11 で実測) ので、
+  `pnpm firebase deploy -- --project p` は直接打った形と同じに読む)
 - 配列の閉じの直後に語の断片が続く代入 (`a=(1 2)y aws ...`) の後ろのクラウド CLI
 - 期待値を登録した service で、identity env に値を読めない代入をした形 (`AWS_PROFILE=$(cmd) aws ...`)。
   代入した値ではなく起動時の値で照合する (起動時の値が期待どおりなら通る)。期待値が未登録でディレクトリ単位の
@@ -1555,7 +1563,8 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   (`{ watch 'aws ...' <<EOF; }`) も同じ。残り全体が 1 つの引用符の塊のとき (`watch 'kubectl delete po x'`) と、
   `|` / `&&` / `;` が続くだけのとき (`watch 'aws ...' | cat`) は検証する。リダイレクトを引用符の塊の手前に置く
   (`>/dev/null watch 'aws ...'`) か、wrapper を使わずにクラウド CLI を直接書くと検証される
-- heredoc を置いた行で、`gh` の前置きの `GH_TOKEN=$(...)` と、後ろの段の値を読めない代入が並ぶ形
+- heredoc を置いた行で、`gh` (wrapper を剥がした後の gh も。`pnpm gh` / `bunx gh` など) の前置きの
+  `GH_TOKEN=$(...)` と、後ろの段の値を読めない代入が並ぶ形
   (`GH_TOKEN=$(cmd) gh pr create <<EOF && X=$(cmd) aws s3 rm s3://b/k` + 改行 + 本文 + `EOF`) の、後ろの段の
   クラウド CLI。候補にならず検証されない (後ろの段の値を読めない代入が無い形と、`gh` の前置きが静的な値の形は
   検証する)。コマンドを行ごとに分ける (heredoc の行に後ろの段を置かない) と検証される
@@ -1633,7 +1642,10 @@ CLI ごとに 1 回。deny はせず、deny したコマンドには足さない
   pnpm / yarn は同名の script があればそちらを走らせる (pnpm 11 / yarn 1.22 で実測) が、hook は package.json を
   読まない。止まる条件は直接 `firebase deploy` と打ったときと同じで、期待値との不一致が確定したときに加えて、
   期待値が未登録で固定も無いときや相対パスの context を決められないときなど、今の版が止める側に倒す形でも
-  止まる。script を走らせるつもりなら `pnpm run <名前>` / `yarn run <名前>` と書く (検証しない)
+  止まる。script を走らせるつもりなら `pnpm run <名前>` / `yarn run <名前>` と書く (検証しない)。
+  yarn は依存の bin (node_modules/.bin) だけを起動し、PATH の CLI は起動しない (yarn 1.22 で実測)。依存に無い
+  CLI の `yarn gh ...` / `yarn aws ...` は yarn が `Command not found` で止めるが、hook は CLI として照合する
+  (gh の自動切替も走る)
 - **QUERY tier の「読むだけ」はコマンド形で判定している** (v0.14.0)。`aws \S+
   (describe|list|get)-*` をまとめて QUERY にしているため、表に無い「リモートの
   機密を返す read」があれば期待外アカウントでも警告のみになる。既知の形は

@@ -50,12 +50,18 @@ _WRAPPERS_TAKE_LATER_OPTIONS = {("npm", "exec")}
 # 1 語の別名 (v0.32.0)。`bunx` = `bun x`、`pnpx` = `pnpm dlx`。別名の元と同じく語を落とすだけ。
 _WRAPPERS_ALIAS = {"bunx", "pnpx"}
 # 後ろに使う tool の指定 (`node@20` / `aws-cli@2` / `python`。0 個以上) を並べてから `--` で
-# コマンドを始める wrapper (v0.32.0。0.31.0 までは tool の指定の無い `mise exec --` だけ)。
+# コマンドを始める wrapper (v0.32.0。0.31.1 までは tool の指定の無い `mise exec --` だけ)。
 # `--` の前に `-` で始まる語 (option) があるか、`--` が無ければ剥がさない。
 _WRAPPERS_TOOL_ARGS = {("mise", "exec"), ("mise", "x")}
 # `pnpm <名前>` / `yarn <名前>` (v0.32.0)。名前が下の CLI 名と一致するときだけ剥がす。pnpm / yarn は
 # 同じ名前の package.json の script があればそちらを走らせる (CLI 名と区別できない) ので、名前の一致に絞る。
 _BIN_RUNNERS = {"pnpm", "yarn"}
+# CLI 名の後ろに `--` があると、引数を書き換えて CLI に渡す bin runner。yarn 1 は `--` より前の語を自分の
+# option として読み、`--` を落として残りを渡す (yarn 1.22 で実測: `yarn firebase deploy -- --project p` の
+# firebase は `deploy --project p`、`yarn firebase deploy --project p -- x` は `deploy x` を受け取る)。hook は
+# `--` の後ろの option を読まず、前の option は CLI に届くと読むので、照合先を取り違える。後ろに `--` の語
+# (引用符で包んだ `'--'` も同じ) があれば剥がさない。pnpm (8〜11 で実測) は `--` も前の語もそのまま渡す。
+_BIN_RUNNERS_REWRITE_DOUBLE_DASH = {"yarn"}
 # services/ の CLI 名と、検証の対象外の CLI (`core/unverified.py` の `UNVERIFIED_CLIS`)。一致は
 # tests/test_package_runner_wrappers.py が確かめる (service を足したら、ここにも足す)。
 _BIN_RUNNER_NAMES = frozenset({"gh", "firebase", "aws", "gcloud", "kubectl", "wrangler", "cf"})
@@ -120,7 +126,7 @@ _WRAPPER_ENV_CLASS = {
     ("pnpm", "dlx"): "passthrough",
     ("bun", "x"): "passthrough",
     # v0.32.0 追加分。前置きの env が後ろの CLI に届くことを実測した (docs/wrapper-env-audit.md の D16 表)。
-    # `mise exec` は 0.31.0 までの `("mise", "exec", "--")` (tool の指定の無い形) を含む。
+    # `mise exec` は 0.31.1 までの `("mise", "exec", "--")` (tool の指定の無い形) を含む。
     ("mise", "exec"): "passthrough",
     ("mise", "x"): "passthrough",
     ("yarn", "dlx"): "passthrough",
@@ -1469,6 +1475,19 @@ def _tokens(cmd: str) -> list[str]:
     return cmd.split()
 
 
+def _has_double_dash_word(rest: str, fallback: list[str]) -> bool:
+    """`rest` のシェルの語に `--` があるか。
+
+    語は context option の走査 (`cli_options.find_context_options`) と同じ `shlex.split` で分ける。シェルは
+    `'--'` / `\\--` を `--` として渡し、`"a -- b"` は 1 語として渡すので、空白で分けた語では両方を誤る。
+    引用符が閉じず語に分けられないときは、空白で分けた語 (`fallback`) で見る。
+    """
+    try:
+        return "--" in shlex.split(rest)
+    except ValueError:
+        return "--" in fallback
+
+
 def _drop_tokens(cmd: str, n: int) -> str:
     remaining = cmd.lstrip()
     for _ in range(n):
@@ -1772,6 +1791,10 @@ def _strip_one_wrapper_kind(cmd: str) -> tuple[str | None, bool]:
         return _drop_tokens(cmd, 1), False
 
     if len(toks) >= 2 and toks[0] in _BIN_RUNNERS and toks[1] in _BIN_RUNNER_NAMES:
+        if toks[0] in _BIN_RUNNERS_REWRITE_DOUBLE_DASH and _has_double_dash_word(
+            _drop_tokens(cmd, 2), toks[2:]
+        ):
+            return None, False
         return _drop_tokens(cmd, 1), False
 
     t0 = toks[0]

@@ -46,7 +46,7 @@ D11 は「静的に解析した行頭インライン env = コマンド実行時
 | `pnpx` (v0.32.0) | 透過 (`pnpm dlx` の別名) | 収集 | 可 | 実機 (pnpm 11.25): `pnpx --help` が `pnpm dlx` の usage を出す。語を落とすだけ |
 | `yarn dlx` (v0.32.0) | 透過 (一時の環境に package を入れて bin を起動) | 収集 | 可 | [ref] yarn docs `yarn dlx`:「The binary will run within the current cwd」。開発機の yarn は 1.22 (dlx が無い) で実測できない |
 | `npm exec` / `npm exec --` (v0.32.0) | 透過 (local / global の bin か、取ってきた package の bin を起動。PATH は見ない) | 収集 | 可 | 実機 (npm 11): `AWS_PROFILE=x npm exec firebase ...` に届く。`--` の後ろはそのまま渡す。`--` が無いと CLI 名の後ろの `-` で始まる語を npm が自分の option として読む (`npm exec firebase deploy --project p` の firebase は `deploy p` を受け取る) ので、その形は剥がさない |
-| `pnpm <CLI 名>` / `yarn <CLI 名>` (v0.32.0) | 透過 (同名の script が無ければ CLI を起動) | 収集 | 可 | 実機 (pnpm 11.25 / yarn 1.22): `AWS_PROFILE=x pnpm gh ...` / `yarn firebase ...` に届く。同名の script があればそちらが走る。yarn は package.json のあるディレクトリで起動する。名前が `_BIN_RUNNER_NAMES` (services の CLI 名と検証の対象外の CLI 名) のときだけ剥がす |
+| `pnpm <CLI 名>` / `yarn <CLI 名>` (v0.32.0) | 透過 (同名の script が無ければ CLI を起動。yarn は node_modules/.bin の bin だけを起動し、PATH の CLI は起動しない) | 収集 | 可 | 実機 (pnpm 11.25 / yarn 1.22): `AWS_PROFILE=x pnpm gh ...` / `yarn firebase ...` に届く。同名の script があればそちらが走る。yarn は package.json のあるディレクトリで起動する。yarn 1.22 の `yarn gh pr list` (依存に無い) は `Command "gh" not found` で止まる。yarn 1 は CLI 名の後ろに `--` があると、`--` より前の語を自分の option として読み、`--` を落として残りを渡す (1.22 で実測: `yarn firebase deploy -- --project p` は `deploy --project p`、`yarn firebase deploy --project p -- x` は `deploy x`) ので、後ろに `--` の語があれば剥がさない (`_BIN_RUNNERS_REWRITE_DOUBLE_DASH`)。pnpm (8〜11 で実測) は `--` も前の語もそのまま渡す。名前が `_BIN_RUNNER_NAMES` (services の CLI 名と検証の対象外の CLI 名) のときだけ剥がす |
 | `mise exec [TOOL@VERSION...] --` / `mise x [...] --` (v0.32.0) | 透過 (mise の env 注入に加えて継承 env も渡す) | 収集 | 可 | 実機 (mise 2026.9): `AWS_PROFILE=x mise exec node@20 -- gh ...` / `mise x -- gh ...` に届く。解決できない tool の名前があっても警告して後ろを起動する。`--` が無いと起動しない (`[-- COMMAND]` が無いエラー)。`--` の前に option があれば剥がさない |
 | `env` (オプション無し: `env FOO=bar cmd`) | 継承 env + 指定 `KEY=VAL` を渡す | 剥がして collect (pre/post 両方) | 可 | POSIX env |
 | `env -i [...]` | 環境を **空にリセット**してから起動 | **剥がさない** (opaque) | 不可 → スキップ | 実機: `PROBE=x env -i env` に PROBE 出ない |
@@ -460,7 +460,12 @@ flag 表の取り違えに対する**構造的な保険**として、flag 領域
    `/usr/bin/env`) に `PROBE` が出るか:
    - 出る → `passthrough`
    - 出ない / 一部のみ → `conditional_scrub` (または非対応)
-2. `_WRAPPERS_SINGLE` / `_WRAPPERS_TWO` / `_WRAPPERS_THREE` に wrapper を追加する。
+2. `_WRAPPERS_SINGLE` / `_WRAPPERS_TWO` / `_WRAPPERS_THREE` / `_WRAPPERS_ALIAS` (1 語の別名) /
+   `_WRAPPERS_TOOL_ARGS` (`--` までの語を読み飛ばす) / `_BIN_RUNNERS` (CLI 名の前に置く) のどれかに wrapper を
+   追加する。`--` の無い形で CLI 名の後ろの option を wrapper が読むなら `_WRAPPERS_TAKE_LATER_OPTIONS` にも、
+   CLI 名の後ろの `--` で引数を書き換えて渡す bin runner なら `_BIN_RUNNERS_REWRITE_DOUBLE_DASH` にも足す
+   (CLI 名の後ろの option・`--`・引用符で包んだ `'--'` が CLI にどう届くかを実機で確かめる)。service を足した
+   ときは `_BIN_RUNNER_NAMES` に CLI 名を足す (`TestBinRunnerNames` が落ちる)。
 3. `_WRAPPER_ENV_CLASS` に **同じキーで分類を追加**する
    (`"passthrough"` / `"conditional_scrub"`)。
 4. `conditional_scrub` の場合は **scrub 補正ロジックと回帰テストを追加**する

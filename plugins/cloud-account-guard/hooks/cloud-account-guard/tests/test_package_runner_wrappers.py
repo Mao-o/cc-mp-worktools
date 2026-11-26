@@ -2,7 +2,7 @@
 
 `bunx` / `pnpx` / `yarn dlx` / `npm exec` / `npm exec --` / `mise exec <tool>@<版> --` / `mise x ... --` と、
 CLI 名の前の `pnpm` / `yarn` (`pnpm firebase deploy`) を透過 wrapper として剥がし、後ろのクラウド CLI を
-検証の候補にする。0.31.0 までは `npx` / `bun x` / `pnpm exec` / `pnpm dlx` / `mise exec --` だけを剥がし、
+検証の候補にする。0.31.1 までは `npx` / `bun x` / `pnpm exec` / `pnpm dlx` / `mise exec --` だけを剥がし、
 これらの形のクラウド CLI は候補にならず検証されなかった。
 
 起動の根拠 (2026-11 に実測。docs/wrapper-env-audit.md の D16 表):
@@ -59,7 +59,7 @@ def tearDownModule():
         shutil.rmtree(_ISOLATION_ROOT, ignore_errors=True)
 
 
-# 足した形 → 同じ読みになるはずの既存の形 (0.31.0 から剥がしていた `npx` / `mise exec --`)。
+# 足した形 → 同じ読みになるはずの既存の形 (0.31.1 で剥がしていた `npx` / `mise exec --`)。
 # 剥がした後の文字列が同じなら、検証の候補・env・切替・知らせもすべて同じになる。
 NEW_FORMS = {
     "bunx": "npx",
@@ -160,6 +160,11 @@ class TestStripForms(unittest.TestCase):
         ("\\bunx firebase deploy", "firebase deploy"),
         ("/opt/x/bin/pnpm firebase deploy", "firebase deploy"),
         ("npm  exec  firebase deploy", "firebase deploy"),
+        # pnpm は CLI 名の後ろの `--` も前の語もそのまま CLI に渡す (pnpm 8〜11 で実測) ので、直接打った形と同じに読む
+        ("pnpm firebase deploy -- --project p", "firebase deploy -- --project p"),
+        ("pnpm firebase deploy '--' --project p", "firebase deploy '--' --project p"),
+        # 引用符の中の `--` は 1 語の一部で、yarn は CLI にそのまま渡す (yarn 1.22 で実測)
+        ('yarn firebase deploy -m "a -- b" --project p', 'firebase deploy -m "a -- b" --project p'),
     )
     # 剥がさない形 (option 付き・`--` の無い mise・CLI 名でない名前・`--` の無い npm exec の後ろの option)
     KEPT = (
@@ -188,6 +193,19 @@ class TestStripForms(unittest.TestCase):
         "yarn run firebase deploy",
         "yarn --cwd app firebase deploy",
         "yarn ghx pr create",
+        # yarn 1 は CLI 名の後ろに `--` があると、前の語を自分の option として読み、`--` を落として残りを CLI に
+        # 渡す (yarn 1.22 で実測: `deploy -- --project p` は `deploy --project p`、`deploy --project p -- x` は
+        # `deploy x`)。hook が照合に使う引数と CLI が受け取る引数が食い違うので剥がさない
+        "yarn firebase deploy -- --project p",
+        "yarn firebase deploy -- -P p",
+        "yarn firebase -- deploy --project p",
+        "yarn firebase deploy --project p -- x",
+        "yarn firebase deploy '--' --project p",
+        "yarn kubectl apply -f x.yaml -- --context other",
+        "yarn wrangler deploy -- --env production",
+        # 引用符が閉じず語に分けられない形は、空白で分けた語で `--` を探す
+        "yarn firebase deploy -- --project p -m \"it's",
+        "yarn firebase -- deploy -m \"it's",
     )
 
     def test_stripped(self):
@@ -201,10 +219,20 @@ class TestStripForms(unittest.TestCase):
                 self.assertEqual(_targets(command), [])
                 self.assertEqual(unverified.detect(c for c, _e in extract_candidates(command)), [])
 
+    def test_double_dash_in_another_segment(self):
+        """`--` が後ろの段 (別のコマンド) にあるだけなら、yarn の段は剥がして照合する。"""
+        command = "yarn firebase deploy --project p && kubectl exec po -- ls"
+        targets = _targets(command)
+        self.assertEqual([t[:2] for t in targets], [
+            ("firebase", ["firebase deploy --project p"]),
+            ("kubectl", ["kubectl exec po -- ls"]),
+        ])
+        self.assertEqual(targets[0][3], {"project": "p"})
+
 
 class TestEveryServiceBecomesACandidate(unittest.TestCase):
     def test_new_form_times_service(self):
-        """足した形ごと × service ごとに、後ろの CLI が write の候補になる (0.31.0 は候補が空)。"""
+        """足した形ごと × service ごとに、後ろの CLI が write の候補になる (0.31.1 は候補が空)。"""
         for form in NEW_FORMS:
             for service, body in BODIES.items():
                 command = f"{form} {body}"
@@ -301,6 +329,27 @@ class TestSameReadingAsExistingWrapper(unittest.TestCase):
             command = f"{form} cd sub"
             with self.subTest(command=command):
                 self.assertEqual(command_parser.external_chdir_candidates(command), frozenset({"cd sub"}))
+
+
+class TestGhTokenSegmentReadsLikeDirectGh(unittest.TestCase):
+    """gh の token に値を読めない代入をしたセグメントは、足した形の gh でも直接の gh と同じくセグメントごと 0.29.9 の
+    読みになり、同じセグメントの aws も候補にならない (README の守らない範囲。0.31.1 は足した形の gh を剥がさず、
+    aws を照合していた。CHANGELOG の 0.32.0 に書いた、止めていたコマンドを通す唯一の種類)。"""
+
+    TEMPLATES = (
+        "GH_TOKEN=$(z) watch '{w} && aws s3 rm s3://b/k'",
+        "GH_TOKEN=$(z) {w} <<EOF && X=$(z) aws s3 rm s3://b/k\nx\nEOF",
+    )
+
+    def test_same_segment_cli_is_not_a_candidate(self):
+        for form in NEW_FORMS:
+            for tmpl in self.TEMPLATES:
+                command = tmpl.replace("{w}", f"{form} gh pr create")
+                with self.subTest(command=command):
+                    self.assertEqual(_targets(command), [])
+                    self.assertEqual(_targets(command), _targets(tmpl.replace("{w}", "gh pr create")))
+                    # 印が無ければ aws は候補 (空どうしの一致で通っていない)
+                    self.assertIn("aws", [t[0] for t in _targets(command.replace("GH_TOKEN=$(z) ", "", 1))])
 
 
 class TestUnverifiedNotice(unittest.TestCase):
