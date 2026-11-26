@@ -101,9 +101,16 @@ def question_from_raw(q) -> dict | None:
             return None
     if not isinstance(q, dict) or not isinstance(q.get("ask"), str):
         return None
-    opts = [{"key": o["key"], "label": o["label"], "desc": str(o.get("desc") or "")}
-            for o in q.get("options") or []
-            if isinstance(o, dict) and isinstance(o.get("key"), str) and isinstance(o.get("label"), str)]
+    raw_opts = q.get("options")
+    if raw_opts is None:
+        raw_opts = []
+    # options は list (無い・null は選択肢なし)。list でない値や、key と label が文字列の object でない要素が 1 つでもあれば、
+    # その 1 件だけを問いが未整理 (None) にする。例外にすると、同じプロジェクトのほかの判断待ちまで読めなくなる。
+    # 壊れた要素だけを黙って落とすと、問いの書き手が意図したものと違う選択肢を出すことになる
+    if not isinstance(raw_opts, list) or not all(
+            isinstance(o, dict) and isinstance(o.get("key"), str) and isinstance(o.get("label"), str) for o in raw_opts):
+        return None
+    opts = [{"key": o["key"], "label": o["label"], "desc": str(o.get("desc") or "")} for o in raw_opts]
     return {
         "kind": q.get("kind") if q.get("kind") in ("decision", "task") else "decision",
         "ask": q["ask"],
@@ -222,13 +229,14 @@ class Store:
         """repo を読み書きする CLI の種別 (bd / br / unknown / conflict) と理由。ファイルの印だけで決め、CLI は打たない。"""
         return registry.project_kind(repo, registry.project_cli(self.state_dir, repo))
 
-    def project(self, repo: str) -> dict:
+    def project(self, repo: str, fresh: bool = False) -> dict:
+        """fresh なら、キャッシュが有効な間でも CLI で読み直す (/api/summary?fresh=1)。"""
         with self._lock(self._locks, repo):
             route = self.route(repo)
             kind, reason = route
             hit = self._cache.get(repo)
             # 設定 (HUMANQ_BEADS_CLI) や印が変わったら、キャッシュの時間内でも読み直す (ファイルを見るだけで安い)
-            if hit and hit[2] == route and time.monotonic() - hit[0] < CACHE_SEC:
+            if hit and not fresh and hit[2] == route and time.monotonic() - hit[0] < CACHE_SEC:
                 return hit[1]
             be = BACKENDS.get(kind)
             if be is None:
@@ -421,7 +429,7 @@ def make_handler(store: Store, port: int, token: str, page: str, version: str):
                 repo = q.get("project", "")
                 if repo not in store.projects():
                     return self._json(404, {"error": "未登録のプロジェクト"})
-                d = store.project(repo) if q.get("fresh") == "1" else store.peek(repo)
+                d = store.project(repo, fresh=True) if q.get("fresh") == "1" else store.peek(repo)
                 if d is None:
                     return self._json(200, {"pending": True})
                 # ok:false (読めないプロジェクト) の human は 0 でも「0 件」ではない。hook はこれを見て「読めない」と伝える。

@@ -251,13 +251,44 @@ class BdQuirks:
         self.assertIn(iid, ids, self.m(q))
 
     def test_answered_list_argv_is_accepted(self):
-        q = "回答済みの一覧の argv (カンマ区切りの status・--flat・-n)"
+        q = "回答済みの一覧の argv (status で絞らない・--flat・-n)"
         iid = self.create("x", labels="human,answered")
         self.ok(q, "update", iid, "--status", "deferred")
-        argv = ["list", "--status", backend.ANSWERED_STATUSES, "--label", "answered", "--flat", "-n", "0"]
+        argv = ["list", "--label", "answered", "--flat", "-n", "0"]
         rows = self.load(self.ok(q, *argv, "--json").stdout, q)
         self.assertIsInstance(rows, list, self.m(q))
         self.assertIn(iid, [r.get("id") for r in rows if isinstance(r, dict)], self.m(q))
+
+    def test_default_list_shows_the_statuses_human_list_shows(self):
+        """humanq の bd の回答済みの一覧は --status を付けずに読む。bd list の既定が bd human list と同じ status を出すことに頼る
+        (bd 1.3.4 で実測: hooked・deferred・wip か未指定の独自の status は出る。closed・pinned・done か frozen の独自の status は出ない)。"""
+        q = "list の既定が human list と同じ status を出す"
+        proj = self.fresh_project()
+        self.ok(q, "config", "set", "status.custom", "wip-x:wip,plain-x,done-x:done,frozen-x:frozen", cwd=proj)
+        shown = ("open", "in_progress", "blocked", "deferred", "hooked", "wip-x", "plain-x")
+        hidden = ("pinned", "done-x", "frozen-x", "closed")
+        ids = {s: self.create(s, labels="human,answered", cwd=proj) for s in (*shown, *hidden)}
+        for s in (*shown[1:], *hidden[:-1]):
+            self.ok(q, "update", ids[s], "--status", s, cwd=proj)
+        self.ok(q, "close", ids["closed"], cwd=proj)
+        listed = self.jok(q, "list", "--label", "answered", "--flat", "-n", "0", cwd=proj)
+        human = self.jok(q, "human", "list", cwd=proj)
+        self.assertIsInstance(listed, list, self.m(q))
+        self.assertIsInstance(human, list, self.m(q))
+        want = sorted(ids[s] for s in shown)
+        self.assertEqual(sorted(r.get("id") for r in listed if isinstance(r, dict)), want, self.m(q))
+        self.assertEqual(sorted(r.get("id") for r in human if isinstance(r, dict)), want, self.m(q))
+
+    def test_list_status_filter_rejects_an_unknown_status(self):
+        q = "list --status に知らない status を書けない (exit 1)"
+        p = self.run_cli("list", "--status", "no-such-status", "--json")
+        self.assertEqual(p.returncode, 1, f"{self.m(q)}: rc={p.returncode} {p.stdout!r} {p.stderr!r}")
+        self.assertIn('invalid status "no-such-status"', p.stderr, self.m(q))
+
+    def fresh_project(self) -> str:
+        """status.custom を設定するので、共有のプロジェクトではなく専用のプロジェクトを使う。"""
+        type(self).n += 1
+        return self.new_project(f"bd-fresh-{type(self).n}")
 
     def test_comments_are_oldest_first_and_have_string_ids(self):
         q = "comments が古い順 (id は文字列)"
