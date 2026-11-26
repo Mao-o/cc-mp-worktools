@@ -4,8 +4,8 @@
 
 - ProjectKindTable: registry.project_kind の判定表 (ファイルの印だけ。CLI は打たない)
 - Routing: 偽の bd・br (tests/fake_beads.py) を PATH に置き、サーバー・書き込み・summary・hook が
-  「br と確定した dir にしか br を打たない (読みだけ。bd は打たない)」「bd の形の dir では br を 1 回も打たない」
-  「決められない dir ではどの CLI も打たない」「書き込めない (br・決められない) dir への POST はどの CLI も打たない」
+  「br と確定した dir にしか br を打たない (読み書きとも。bd は打たない)」「bd の形の dir では br を 1 回も打たない」
+  「決められない dir ではどの CLI も打たない」「書き込めない (決められない) dir への POST はどの CLI も打たない」
   ことを呼び出しの記録 (FAKE_BEADS_LOG) で確かめる
 """
 from __future__ import annotations
@@ -313,7 +313,7 @@ class Routing(unittest.TestCase):
         root = self.br_project()
         self.reset_log()
         p = self.project_of(self.store(root), root)
-        self.assertEqual((p["ok"], p["cli"], p["writable"]), (True, "br", False), p)
+        self.assertEqual((p["ok"], p["cli"], p["writable"]), (True, "br", True), p)
         self.assertNotIn("error", p)
         self.assertEqual((p["human"], p["answered"]), ([], []))
         self.assertBrOnlyAt(root)
@@ -352,7 +352,7 @@ class Routing(unittest.TestCase):
     def test_br_setting_on_unmarked_dir_is_br_and_reads_with_br(self):
         root = self.sqlite_project()
         p = self.project_of(self.store((root, "br")), root)
-        self.assertEqual((p["ok"], p["cli"], p["writable"]), (True, "br", False), p)
+        self.assertEqual((p["ok"], p["cli"], p["writable"]), (True, "br", True), p)
         self.assertBrOnlyAt(root)
 
     def test_bd_setting_on_sqlite_shape_reads_with_bd(self):
@@ -405,7 +405,7 @@ class Routing(unittest.TestCase):
         for p in by.values():
             self.assertLessEqual({"ok", "cli", "writable"}, set(p), p)
         self.assertEqual({k: (v["ok"], v["cli"], v["writable"]) for k, v in by.items()},
-                         {"brp": (True, "br", False), "bdp": (True, "bd", True), "sqlp": (False, None, False)})
+                         {"brp": (True, "br", True), "bdp": (True, "bd", True), "sqlp": (False, None, False)})
         self.assertEachCliAtItsOwnDir(br=br, bd=bd)
         self.assertTrue(all(sql not in c["argv"] and c["cwd"] != sql for c in self.calls()), "決められない dir に CLI が起動された")
 
@@ -422,14 +422,14 @@ class Routing(unittest.TestCase):
         return code, json.loads(raw)
 
     def test_post_to_unwritable_projects_is_400_readonly_without_cli(self):
-        br, sql = self.br_project(), self.sqlite_project()
+        sql = self.sqlite_project()
         conflict = self.bd_project("cfp")
         make_beads(conflict, dirs=(".br_history",))
-        for r in (br, sql, conflict):
+        for r in (sql, conflict):
             registry.register(self.sd, r)
         self.reset_log()
         port, token = self.serve()
-        for r in (br, sql, conflict):
+        for r in (sql, conflict):
             for path, op, body in (("/api/answer", "answer", {"id": "x-1", "option": "a"}),
                                    ("/api/undo", "undo", {"id": "x-1"})):
                 code, j = self.post(port, token, path, {"project": r, **body})
@@ -445,6 +445,20 @@ class Routing(unittest.TestCase):
         self.assertEqual(j.get("code"), "gone", j)       # readonly ではなく、チケットが無いという通常の失敗
         self.assertIn("bd", self.progs())
 
+    def test_post_to_br_project_is_not_readonly_and_uses_br_only(self):
+        # br のプロジェクトにも書き込める (0.15.0)。無いチケットへの回答・取り消しは、readonly ではなく gone。
+        # 打つのは br だけ・その dir を cwd にして・一覧の読みだけ (show も書き込みも打たない)。dolt のファイルを作らない
+        root = self.br_project()
+        registry.register(self.sd, root)
+        port, token = self.serve()
+        self.reset_log()
+        for path, op, body in (("/api/answer", "answer", {"id": "x-1", "option": "a"}), ("/api/undo", "undo", {"id": "x-1"})):
+            code, j = self.post(port, token, path, {"project": root, **body})
+            self.assertEqual((code, j.get("code"), j.get("op")), (400, "gone", op), (path, j))
+        self.assertBrOnlyAt(root)
+        self.assertEqual([c["argv"][:3] for c in self.calls()], [["list", "-l", "human"], ["list", "-l", "answered"]])
+        self.assertNoDoltFiles(root)
+
     def test_items_have_cli_and_writable_and_keep_old_keys(self):
         bd, br = self.bd_project(), self.br_project()
         for r in (bd, br):
@@ -455,7 +469,7 @@ class Routing(unittest.TestCase):
         by = {p["name"]: p for p in json.loads(raw)["projects"]}
         for p in by.values():
             self.assertLessEqual({"path", "name", "ok", "human", "answered", "cli", "writable"}, set(p), p)
-        self.assertEqual((by["bdp"]["cli"], by["bdp"]["writable"], by["brp"]["cli"], by["brp"]["writable"]), ("bd", True, "br", False))
+        self.assertEqual((by["bdp"]["cli"], by["bdp"]["writable"], by["brp"]["cli"], by["brp"]["writable"]), ("bd", True, "br", True))
 
     # ---- summary ----
     def summary(self, port: int, root: str) -> dict:
@@ -469,7 +483,7 @@ class Routing(unittest.TestCase):
         for r in (bd, br, sql):
             registry.register(self.sd, r)
         port, _ = self.serve()
-        for r, cli, writable in ((bd, "bd", True), (br, "br", False)):
+        for r, cli, writable in ((bd, "bd", True), (br, "br", True)):
             s = self.summary(port, r)
             self.assertLessEqual({"ok", "error", "human", "answered", "cli", "writable"}, set(s), s)
             self.assertEqual((s["ok"], s["human"], s["answered"], s["cli"], s["writable"]), (True, 0, [], cli, writable), s)

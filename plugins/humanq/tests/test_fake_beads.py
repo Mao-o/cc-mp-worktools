@@ -2,7 +2,7 @@
 
 偽の br は、後の案 (bd と br の種別判定、br の読み書き) が CI で br と bd の差を確かめるための道具。
 ここで押さえる癖は、br 0.7.6 の実測 (使い捨ての一時 dir で打った結果)。偽物が癖を落とすと、
-その癖に頼る後の案のテストが、本物の br では起きる失敗を見逃す。humanq の製品コードは br を読みだけに使う (list と show)。
+その癖に頼る後の案のテストが、本物の br では起きる失敗を見逃す。humanq の製品コードは br の list・show・comments add・label を使う。
 """
 from __future__ import annotations
 

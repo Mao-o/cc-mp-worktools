@@ -9,8 +9,11 @@ humanq.py は、ここが返す CLI に依らない形の値だけを読む:
 - comments() は**必ず古い順で返す**。送り直しの判定・両ラベルの向き・表示する回答の本文は、最後の要素を最新として読む
 - load(repo) は画面の読み 1 回分: (判断待ちの Row の list, 回答済みの Row の list)。回答済みの Row には thread
   (そのチケットの Comment の list。古い順。読めなければ None) が付く
+- 書き込み (回答・取り消し) の読み直しは pending(repo, iid) (判断待ちの Row の list。iid の問いを照合に使う) と
+  list_answered(repo) と comments(repo, iid)。pending の Row に thread が付いていれば、送り直しの判定と署名の照合は
+  その thread で行う (comments を打たない)。書き込みは add_comment と label (op は add | remove)
 
-backend は 2 つ: bd (BdBackend。読み書き) と br (BrBackend。この段では読みだけ)。
+backend は 2 つ: bd (BdBackend) と br (BrBackend)。どちらも読み書きする。
 """
 from __future__ import annotations
 
@@ -107,6 +110,11 @@ class BdBackend:
 
     def list_human(self, repo: str) -> list[dict]:
         return [self.row(i) for i in self.json(repo, "human", "list")]
+
+    def pending(self, repo: str, iid: str) -> list[dict]:
+        """回答の書き込みが照合に使う判断待ちの Row。bd は判断待ちの一覧の全件 (問いは一覧の metadata にある)。
+        thread は付けない (コメントは書き込みの側が comments で読む)。"""
+        return self.list_human(repo)
 
     def list_answered(self, repo: str) -> list[dict]:
         return [self.row(i) for i in self.json(repo, "list", "--status", ANSWERED_STATUSES, "--label", "answered",
@@ -220,20 +228,30 @@ def br_thread(raw) -> list[dict] | None:
     return [comment_of(c) for c in sorted(raw, key=_comment_order)]
 
 
+def _passable(iid) -> bool:
+    """br の引数 (show・comments add・label) に渡せる id か。文字列でない・空・- で始まる (flag に読まれる) ものは渡さない。"""
+    return isinstance(iid, str) and bool(iid) and not iid.startswith("-")
+
+
 def _br_id(i) -> str:
-    """一覧の要素の id。show の引数にするので、文字列でない・空・- で始まる (flag に読まれる) ものは BdError。"""
+    """一覧の要素の id。show の引数にするので、渡せない id (_passable) は BdError。"""
     iid = i.get("id") if isinstance(i, dict) else None
-    if not isinstance(iid, str) or not iid or iid.startswith("-"):
+    if not _passable(iid):
         raise BdError(f"br list の要素の id を読めない: {str(i)[:200]}")
     return iid
 
 
 class BrBackend:
-    """br (beads_rust) の CLI。この段では読みだけ (load)。run は br を 1 回打つ関数 (repo, *args) -> stdout で、呼ぶたびに引く。
+    """br (beads_rust) の CLI。run は br を 1 回打つ関数 (repo, *args) -> stdout で、呼ぶたびに引く。
 
     1 プロジェクトの読みは 3 プロセス: 判断待ちの list → 回答済みの list → 両方の id をまとめた show。問い
     (agent_context) とコメントは show から取る (br の schema の文書は agent_context を「list には出ない」としている)。
-    読みの flag は br の既定のまま (JSONL の方が新しければ DB へ取り込む auto-import も、利用者が打ったときと同じに効かせる)。"""
+    読みの flag は br の既定のまま (JSONL の方が新しければ DB へ取り込む auto-import も、利用者が打ったときと同じに効かせる)。
+
+    回答は 5 プロセス: 判断待ちの list → そのチケットの show (問いと署名の照合・送り直しの判定のコメント) →
+    comments add → label add answered → label remove human。取り消しは回答済みの list → show → comments add →
+    label add human → label remove answered。書き込みの形 (--actor の位置・comments add -f・label の位置引数) は bd と
+    同じで、label は付いている / 付いていないときも exit 0 (冪等。br 0.7.6 で実測)。"""
 
     def __init__(self, run: Callable[..., str] = run_br):
         self._run = run
@@ -301,3 +319,41 @@ class BrBackend:
             raise BdError(f"br show の出力に {lost[0]} が無い")
         return ([self.row(i, by[i["id"]]) for i in human],
                 [self.row(i, by[i["id"]], thread=True) for i in answered])
+
+    # ---- 書き込みの読み直しと書き込み (humanq.Store が書き込みのロックの下で呼ぶ) ----
+
+    def _show(self, repo: str, iid: str) -> dict:
+        """1 件の show。渡せない id (_passable) は打たずに BdError。出力が iid の 1 件でなければ BdError。"""
+        if not _passable(iid):
+            raise BdError(f"br show に渡せない id: {str(iid)[:200]}")
+        shown = parse_br_show(self._run(repo, "show", iid, "--json"))
+        if len(shown) != 1 or not isinstance(shown[0], dict) or shown[0].get("id") != iid:
+            raise BdError(f"br show {iid} の出力が {iid} の 1 件ではない: {str(shown)[:200]}")
+        return shown[0]
+
+    def pending(self, repo: str, iid: str) -> list[dict]:
+        """回答の書き込みが照合に使う判断待ちの Row。iid が判断待ちの一覧にあれば、その 1 件だけを show で読み、問いと
+        thread (古い順のコメント) を付けて返す。送り直しの判定と署名の照合はこの thread で行う (show を 1 回で済ます)。
+        一覧に無ければ [] (show は打たない)。"""
+        hit = [i for i in self._list(repo, "human") if isinstance(i, dict) and i.get("id") == iid]
+        if not hit:
+            return []
+        return [self.row(hit[0], self._show(repo, iid), thread=True)]
+
+    def list_answered(self, repo: str) -> list[dict]:
+        """回答済みの一覧の Row (取り消しが、チケットが回答済みにあるかを見るため)。show は打たないので問いは入らない。"""
+        return [self.row(i, {}) for i in self._list(repo, "answered") if isinstance(i, dict)]
+
+    def comments(self, repo: str, iid: str) -> list[dict]:
+        """iid のコメント (古い順)。show の comments を並べ替える。list でない comments は読めない (BdError)。"""
+        thread = br_thread(self._show(repo, iid).get("comments"))
+        if thread is None:
+            raise BdError(f"br show {iid} の comments を読めない (list ではない)")
+        return thread
+
+    def add_comment(self, repo: str, iid: str, path: str) -> None:
+        self._run(repo, "--actor", ACTOR, "comments", "add", iid, "-f", path)
+
+    def label(self, repo: str, op: str, iid: str, name: str) -> None:
+        """op は add | remove。既に付いている (exists)・付いていない (not_found) も exit 0 なので成功とみなす。"""
+        self._run(repo, "--actor", ACTOR, "label", op, iid, name)

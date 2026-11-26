@@ -3,7 +3,7 @@
 
 テストは一時の bin dir に、このファイルを `bd` の名前で置き (実行権限付き)、その dir を PATH の先頭に入れる
 (tests/test_server.py の install_fake)。振る舞いは argv[0] の basename で分ける。bd と br があり、
-ほかの名前は exit 2 にする (別の CLI の偽物を足すときは PROGS に足す)。br の癖は下の一覧の後ろにある。humanq の製品コードは br を読みだけに使う (list と show)。
+ほかの名前は exit 2 にする (別の CLI の偽物を足すときは PROGS に足す)。br の癖は下の一覧の後ろにある。humanq の製品コードは br の list・show・comments add・label を使う。
 
 - 状態: <project>/.beads/fake-state.json (issues・labels・comments・status・metadata)。
   呼び出しは .beads/fake-state.lock の flock で 1 本ずつにする (サーバーは読みと書きを別のスレッドで並べて打つ)

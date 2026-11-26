@@ -2,12 +2,14 @@
 
     python3 -m unittest discover -s tests
 
-bd を通す読み書きのシナリオ (BdScenarios) は 2 通りで回す:
+bd・br を通す読み書きのシナリオ (BdScenarios) は 3 通りで回す:
 - WithFakeBd: 偽の bd (tests/fake_beads.py) で回す。本物の bd が無い環境 (CI) でも skip しない。
   サーバーが打つ bd の argv の列も、ここで固定する (test_golden_argv)
 - WithBd: 本物の bd で回す。bd が PATH に無ければ skip する。一時ディレクトリに git init + bd init した
   使い捨てのプロジェクトで行う (本物の bd の DB には書かない)
-モジュールごと読み込んだとき (discover など) は、この 2 つのシナリオを HUMANQ_TEST_JOBS 個 (既定 3) のプロセスで
+- WithFakeBr: 偽の br (同じ fake_beads.py を br の名前で置く) で、同じシナリオを回す。コメントは新しい順で返る。
+  サーバーが打つ br の argv の列もここで固定する
+モジュールごと読み込んだとき (discover など) は、これらのシナリオを HUMANQ_TEST_JOBS 個 (既定 3) のプロセスで
 並列に回す (下の「並列のプロセスで回す」。1 で直列)。
 サーバーのプロセスを起動する確認も、シナリオの中の HTTP も、OS が選んだポートで行う (同じマシンで suite を同時に回しても取り合わない)。
 HUMANQ_SERVER_DIR で別の server/ を試せる。
@@ -348,12 +350,14 @@ class HookEnsureServer(unittest.TestCase):
 
 
 class BdScenarios:
-    """bd を通す読み書きのシナリオ。本物の bd (WithBd) と偽の bd (WithFakeBd) の両方で回す。
+    """bd・br を通す読み書きのシナリオ。本物の bd (WithBd)・偽の bd (WithFakeBd)・偽の br (WithFakeBr) で回す。
 
-    サブクラスは self.repo と self.tmp (bd init 済みの使い捨てのプロジェクトと、その置き場) と、次の 2 つを用意する:
-      failing(rule, times=None): bd の呼び出しのうち、argv に rule の語がこの順で現れるものを失敗させる
+    サブクラスは self.repo と self.tmp (init 済みの使い捨てのプロジェクトと、その置き場) と、次の 2 つを用意する:
+      failing(rule, times=None): CLI の呼び出しのうち、argv に rule の語がこの順で現れるものを失敗させる
                                   (times を付けると最初の times 回だけ)。返り値を呼ぶと元に戻す
-      calls(rule): setUp から後に、argv に rule の語がこの順で現れた bd の呼び出しの数"""
+      calls(rule): setUp から後に、argv に rule の語がこの順で現れた CLI の呼び出しの数
+    チケットを作る・読む・書き換える helper (new_question から comments_unreadable_once まで) は bd の形で書いてあり、
+    br のクラスは上書きする。シナリオの本文は CLI に依らない"""
 
     repo: str
     tmp: str
@@ -372,10 +376,28 @@ class BdScenarios:
         return created["id"]
 
     def comments(self, iid: str) -> list[str]:
+        """コメントの本文 (古い順)。"""
         return [c["text"] for c in json.loads(bdc(self.repo, "comments", iid, "--json") or "[]")]
 
     def labels(self, iid: str) -> set[str]:
         return set(json.loads(bdc(self.repo, "show", iid, "--json"))[0].get("labels") or [])
+
+    def label(self, iid: str, op: str, name: str) -> None:
+        bdc(self.repo, "label", op, iid, name)
+
+    def set_status(self, iid: str, status: str) -> None:
+        bdc(self.repo, "update", iid, "--status", status)
+
+    def close(self, iid: str) -> None:
+        bdc(self.repo, "close", iid)
+
+    def backend(self):
+        """load_project に渡す backend (None は bd)。"""
+        return None
+
+    def comments_unreadable_once(self):
+        """次の 1 回のコメントの読み (画面の一覧を作るときの読み) を、読めない状態にする。返り値を呼ぶと元に戻す。"""
+        return self.failing("comments", times=1)
 
     def store(self) -> humanq.Store:
         sd = os.path.join(self.tmp, "state")
@@ -399,7 +421,7 @@ class BdScenarios:
     def load(self) -> dict:
         """humanq.load_project を呼ぶ。想定外の例外は FAIL にする (write と同じ理由)。"""
         try:
-            return humanq.load_project(self.repo)
+            return humanq.load_project(self.repo, self.backend())
         except Exception as e:  # noqa: BLE001
             self.fail(f"load_project が例外を上げた: {type(e).__name__}: {e}")
 
@@ -411,6 +433,7 @@ class BdScenarios:
 
     def test_resend_after_partial_write_keeps_one_comment(self):
         iid = self.new_question()
+        self.add_comment(iid, "エージェントのメモ: 問いを書いた")   # 回答より古いコメント (並びが崩れて返る CLI で、最新を取り違えない)
         store = self.store()
         restore = self.failing("label remove human")
         try:
@@ -497,7 +520,7 @@ class BdScenarios:
         store = self.store()
         real = humanq.load_project
 
-        def odd(repo):
+        def odd(repo, *rest):
             raise AttributeError("'str' object has no attribute 'get'")
 
         humanq.load_project = odd
@@ -508,28 +531,6 @@ class BdScenarios:
             self.assertEqual(store.all()[0]["ok"], False)
         finally:
             humanq.load_project = real
-
-    def test_bd_json_rejects_non_list(self):
-        def listed(*args):
-            try:
-                return humanq.bd_json(self.repo, *args)
-            except Exception as e:  # noqa: BLE001  実装の変異で上がった例外を、走っていない ERROR にしない
-                self.fail(f"bd_json が例外を上げた: {type(e).__name__}: {e}")
-
-        real = humanq.bd
-        try:
-            humanq.bd = lambda repo, *a: '{"issues": []}'
-            with self.assertRaises(humanq.BdError):
-                humanq.bd_json(self.repo, "list")
-            humanq.bd = lambda repo, *a: "Update available: bd 9.9\n[]"
-            with self.assertRaises(humanq.BdError):
-                humanq.bd_json(self.repo, "list")
-            humanq.bd = lambda repo, *a: "No human-needed beads found.\n"
-            self.assertEqual(listed("human", "list"), [])
-            humanq.bd = lambda repo, *a: "null\n"
-            self.assertEqual(listed("human", "list"), [])
-        finally:
-            humanq.bd = real
 
     # ---- 0.1.5 ----
 
@@ -651,8 +652,8 @@ class BdScenarios:
         store = self.store()
         self.write(store.answer, {"id": iid, "option": "a"})
         self.add_comment(iid, "問いを書き直した: 案を 1 つ足した")             # README の手順 4
-        bdc(self.repo, "label", "add", iid, "human")
-        bdc(self.repo, "label", "remove", iid, "answered")
+        self.label(iid, "add", "human")
+        self.label(iid, "remove", "answered")
         self.write(store.answer, {"id": iid, "option": "a"})                 # 10 分以内に同じ選択肢
         texts = self.comments(iid)
         self.assertEqual(len(texts), 3, texts)
@@ -664,7 +665,7 @@ class BdScenarios:
         for status in ("in_progress", "blocked"):
             with self.subTest(status=status):
                 iid = self.new_question()
-                bdc(self.repo, "update", iid, "--status", status)
+                self.set_status(iid, status)
                 store = self.store()
                 self.assertIn(iid, [i["id"] for i in self.load()["human"]])
                 self.write(store.answer, {"id": iid, "option": "a"})
@@ -676,14 +677,14 @@ class BdScenarios:
 
     def test_human_and_answered_both_on_an_in_progress_ticket_show_once_as_answered(self):
         iid = self.new_question(labels=("human", "answered"))
-        bdc(self.repo, "update", iid, "--status", "in_progress")
+        self.set_status(iid, "in_progress")
         data = self.load()
         self.assertNotIn(iid, [i["id"] for i in data["human"]])
         self.assertIn(iid, [i["id"] for i in data["answered"]])
 
     def test_closed_tickets_are_not_listed_as_answered(self):
         iid = self.new_question(labels=("answered",))
-        bdc(self.repo, "close", iid)
+        self.close(iid)
         self.assertNotIn(iid, [i["id"] for i in self.load()["answered"]])
 
     # ---- 0.7.0: 取り消しの照合 (回答の署名 asig) ----
@@ -772,7 +773,7 @@ class BdScenarios:
         # 一覧でコメントを読めなかったときの署名は、コメントが無いときの署名とも合わない
         iid = self.new_question(labels=("answered",))
         port = self.serve(self.store())
-        restore = self.failing("comments", times=1)
+        restore = self.comments_unreadable_once()
         try:
             unread = self.answered_now(port, iid)
         finally:
@@ -805,7 +806,7 @@ class BdScenarios:
         iid = self.new_question()
         port = self.serve(self.store())
         self.answer_sig(port, iid, "a")
-        restore = self.failing("comments", times=1)
+        restore = self.comments_unreadable_once()
         try:
             it = self.answered_now(port, iid)
         finally:
@@ -826,8 +827,36 @@ class BdScenarios:
         self.assertEqual(self.labels(iid) & {"human", "answered"}, {"human"})
 
 
+class BdOnly:
+    """bd のプロジェクトだけのシナリオ (WithBd と WithFakeBd。br には bd の --json の形が無い)。"""
+
+    repo: str
+
+    def test_bd_json_rejects_non_list(self):
+        def listed(*args):
+            try:
+                return humanq.bd_json(self.repo, *args)
+            except Exception as e:  # noqa: BLE001  実装の変異で上がった例外を、走っていない ERROR にしない
+                self.fail(f"bd_json が例外を上げた: {type(e).__name__}: {e}")
+
+        real = humanq.bd
+        try:
+            humanq.bd = lambda repo, *a: '{"issues": []}'
+            with self.assertRaises(humanq.BdError):
+                humanq.bd_json(self.repo, "list")
+            humanq.bd = lambda repo, *a: "Update available: bd 9.9\n[]"
+            with self.assertRaises(humanq.BdError):
+                humanq.bd_json(self.repo, "list")
+            humanq.bd = lambda repo, *a: "No human-needed beads found.\n"
+            self.assertEqual(listed("human", "list"), [])
+            humanq.bd = lambda repo, *a: "null\n"
+            self.assertEqual(listed("human", "list"), [])
+        finally:
+            humanq.bd = real
+
+
 @unittest.skipUnless(HAVE_BD, "bd が無い")
-class WithBd(BdScenarios, unittest.TestCase):
+class WithBd(BdScenarios, BdOnly, unittest.TestCase):
     """本物の bd で回す (bd が PATH にある手元だけ)。失敗は humanq.bd を差し替えて作る。"""
 
     @classmethod
@@ -877,12 +906,40 @@ class WithBd(BdScenarios, unittest.TestCase):
         return sum(1 for a in self._calls if argv_has(rule.split(), a))
 
 
-class WithFakeBd(BdScenarios, unittest.TestCase):
+class FakeLog:
+    """偽の CLI (tests/fake_beads.py) の失敗の注入と呼び出しの記録 (WithFakeBd と WithFakeBr)。
+    失敗は env の FAKE_BEADS_FAIL で偽物に作らせ、呼び出しは FAKE_BEADS_LOG の記録 (self.log) で数える。"""
+
+    log: str
+
+    def failing(self, rule: str, times: int | None = None):
+        prev = os.environ.get("FAKE_BEADS_FAIL")
+        spec = rule if times is None else f"{rule}:{times}"
+        os.environ["FAKE_BEADS_FAIL"] = f"{prev};{spec}" if prev else spec
+
+        def restore():
+            if prev is None:
+                os.environ.pop("FAKE_BEADS_FAIL", None)
+            else:
+                os.environ["FAKE_BEADS_FAIL"] = prev
+        return restore
+
+    def log_entries(self) -> list[dict]:
+        try:
+            lines = Path(self.log).read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            return []
+        return [json.loads(x) for x in lines if x.strip()]
+
+    def calls(self, rule: str) -> int:
+        return sum(1 for e in self.log_entries() if argv_has(rule.split(), e["argv"]))
+
+
+class WithFakeBd(FakeLog, BdScenarios, BdOnly, unittest.TestCase):
     """偽の bd (tests/fake_beads.py) で回す。本物の bd が無い環境 (CI) でも skip しない。
 
     偽物を置いた dir を PATH の先頭に入れるのは、テストごとの setUp で行い addCleanup で戻す (HAVE_BD はモジュールの
-    読み込み時に決まるので、偽物を PATH に残したままにしない)。プロジェクトはテストごとに作り直す (偽物の init は速い)。
-    失敗は env の FAKE_BEADS_FAIL で偽物に作らせ、呼び出しは FAKE_BEADS_LOG の記録で数える。"""
+    読み込み時に決まるので、偽物を PATH に残したままにしない)。プロジェクトはテストごとに作り直す (偽物の init は速い)。"""
 
     @classmethod
     def setUpClass(cls):
@@ -909,28 +966,6 @@ class WithFakeBd(BdScenarios, unittest.TestCase):
         self.repo = os.path.join(self.tmp, "proj")
         os.makedirs(self.repo)
         bdc(self.repo, "init", "--non-interactive", "--quiet", "--skip-agents", "--skip-hooks", "-p", "hq")
-
-    def failing(self, rule: str, times: int | None = None):
-        prev = os.environ.get("FAKE_BEADS_FAIL")
-        spec = rule if times is None else f"{rule}:{times}"
-        os.environ["FAKE_BEADS_FAIL"] = f"{prev};{spec}" if prev else spec
-
-        def restore():
-            if prev is None:
-                os.environ.pop("FAKE_BEADS_FAIL", None)
-            else:
-                os.environ["FAKE_BEADS_FAIL"] = prev
-        return restore
-
-    def log_entries(self) -> list[dict]:
-        try:
-            lines = Path(self.log).read_text(encoding="utf-8").splitlines()
-        except FileNotFoundError:
-            return []
-        return [json.loads(x) for x in lines if x.strip()]
-
-    def calls(self, rule: str) -> int:
-        return sum(1 for e in self.log_entries() if argv_has(rule.split(), e["argv"]))
 
     # 今のサーバーが打つ bd の argv の 6 形を、読み → 回答 → 読み → 取り消しの順に並べたもの。
     # bd を利用している人の挙動を、後で呼び出しを作り直しても変えないための固定 (<repo> <id> <tmp> は置き換えて比べる)
@@ -1087,9 +1122,272 @@ class WithFakeBd(BdScenarios, unittest.TestCase):
         self.assertEqual(p.returncode, 0, "元に戻した後も失敗する")
 
 
+class WithFakeBr(FakeLog, BdScenarios, unittest.TestCase):
+    """偽の br (tests/fake_beads.py を br の名前で置いたもの) で、bd と同じシナリオ (BdScenarios) を回す。
+
+    偽の br はコメントを新しい順で返す (本物の並びは決まっていない) ので、古い順を前提にした送り直しの判定・取り消しの
+    照合・両ラベルの向きは、ここで落ちる。偽物の時刻は秒単位なので、1 つのテストのコメントはたいてい同じ秒に入り、
+    並びは id でだけ決まる (test_comments_in_the_same_second_are_ordered_by_id は時刻を揃えて確かめる)。
+    偽の bd も同じ dir に置く (br のプロジェクトで bd を打ったら記録に残り、tearDown で落ちる。本物の bd を拾わない)。
+    チケットの helper は br の形 (-C が無く cwd から .beads を探す・問いは agent_context・ラベルは位置引数) で上書きする。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bin_tmp = tempfile.mkdtemp(prefix="humanq-fakebr-bin-")
+        cls.bin = os.path.join(cls.bin_tmp, "bin")
+        os.makedirs(cls.bin)
+        for prog in ("bd", "br"):
+            install_fake(cls.bin, prog)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.bin_tmp, ignore_errors=True)
+
+    def setUp(self):
+        leaked = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d and os.path.realpath(d) in FAKE_BIN_DIRS]
+        self.assertEqual(leaked, [], "前のテストの偽の CLI が PATH に残っている")
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="humanq-fakebr-"))     # 偽物が記録する cwd は realpath
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.log = os.path.join(self.tmp, "calls.jsonl")
+        env = mock.patch.dict(os.environ, {"PATH": self.bin + os.pathsep + os.environ.get("PATH", ""), "FAKE_BEADS_LOG": self.log})
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("FAKE_BEADS_FAIL", None)
+        for prog in ("bd", "br"):
+            self.assertEqual(os.path.realpath(shutil.which(prog) or ""), os.path.realpath(os.path.join(self.bin, prog)))
+        self.repo = os.path.join(self.tmp, "proj")
+        os.makedirs(self.repo)
+        self.brc("init", "--prefix", "hq")
+        Path(self.repo, ".beads", ".gitignore").write_text(".br_history/\n*-fsqlite-ns-gate\n", encoding="utf-8")   # br init が書く印
+        self.assertEqual(registry.project_kind(self.repo)[0], registry.BR)
+
+    def tearDown(self):
+        entries = self.log_entries()
+        self.assertEqual({e["prog"] for e in entries} - {"br"}, set(), "br のプロジェクトで bd を打った")
+        self.assertEqual({e["cwd"] for e in entries} - {self.repo}, set(), "br をプロジェクトの外の dir で打った")
+
+    # ---- チケットの helper (br の形) ----
+    def brc(self, *args: str) -> str:
+        p = subprocess.run(["br", *args], cwd=self.repo, capture_output=True, text=True, timeout=60)
+        self.assertEqual(p.returncode, 0, f"br {args}: {p.stderr or p.stdout}")
+        return p.stdout
+
+    def write_ctx(self, name: str, q: dict) -> str:
+        path = os.path.join(self.tmp, name)
+        Path(path).write_text(json.dumps(q), encoding="utf-8")
+        return "@" + path
+
+    def new_question(self, labels=("human",)) -> str:
+        type(self).n += 1
+        created = json.loads(self.brc("create", f"question {self.n}", "-p", "1", "-l", ",".join(labels), "--json"))
+        self.assertIsInstance(created, dict, created)
+        self.assertIn("id", created, created)
+        self.assertEqual(set(created.get("labels") or []), set(labels), f"create がラベルを付けていない: {created}")
+        self.brc("update", created["id"], "--agent-context", self.write_ctx(f"ctx{self.n}.json", QUESTION))
+        return created["id"]
+
+    def comments(self, iid: str) -> list[str]:
+        """コメントの本文 (古い順)。偽の br の並びは新しい順なので、単調に増える id で並べ直す (製品の並べ替えは使わない)。"""
+        cs = json.loads(self.brc("comments", iid, "--json"))
+        self.assertIsInstance(cs, list, cs)
+        for c in cs:
+            self.assertIsInstance(c.get("id") if isinstance(c, dict) else None, int, cs)
+        return [c["text"] for c in sorted(cs, key=lambda c: c["id"])]
+
+    def labels(self, iid: str) -> set[str]:
+        shown = json.loads(self.brc("show", iid, "--json"))
+        self.assertIsInstance(shown, list, shown)
+        self.assertEqual(len(shown), 1, shown)
+        return set(shown[0].get("labels") or [])
+
+    def set_question(self, iid: str, **changes) -> None:
+        q = json.loads(json.dumps(QUESTION))
+        q["humanq"].update(changes)
+        self.brc("update", iid, "--agent-context", self.write_ctx(f"ctx-{iid}.json", q))
+
+    def add_comment(self, iid: str, text: str) -> None:
+        f = os.path.join(self.tmp, "comment.md")
+        Path(f).write_text(text, encoding="utf-8")
+        self.brc("comments", "add", iid, "-f", f)
+
+    def label(self, iid: str, op: str, name: str) -> None:
+        self.brc("label", op, iid, name)
+
+    def set_status(self, iid: str, status: str) -> None:
+        self.brc("update", iid, "--status", status)
+
+    def close(self, iid: str) -> None:
+        self.brc("close", iid)
+
+    def backend(self):
+        return humanq._BR
+
+    def comments_unreadable_once(self):
+        """次の 1 回の show の comments を list でない値にする (br はコメントを show で読む。exit で失敗させると
+        プロジェクト全体が読めなくなるので、そのチケットだけ読めない形を作る)。返り値を呼ぶと元に戻す。"""
+        real, left = humanq.br, [1]
+
+        def odd(repo, *args):
+            out = real(repo, *args)
+            if args[:1] == ("show",) and left[0] > 0:
+                left[0] -= 1
+                items = json.loads(out)
+                for d in items:
+                    d["comments"] = {"text": "list ではない"}
+                return json.dumps(items)
+            return out
+
+        humanq.br = odd
+
+        def restore():
+            humanq.br = real
+        self.addCleanup(restore)
+        return restore
+
+    def same_second(self, iid: str) -> None:
+        """iid のコメントの created_at を、すべて最初のコメントの値にする (偽の br の状態を直接書き換える)。並びは id でしか決まらない。"""
+        path = Path(self.repo, ".beads", "fake-state.json")
+        state = json.loads(path.read_text(encoding="utf-8"))
+        cs = state["issues"][iid]["comments"]
+        self.assertGreaterEqual(len(cs), 2, cs)
+        for c in cs:
+            c["created_at"] = cs[0]["created_at"]
+        path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+    def call(self, fn, body: dict):
+        """Store の書き込みの返り値を返す。想定外の例外は FAIL にする。"""
+        try:
+            return fn(self.repo, body)
+        except Exception as e:  # noqa: BLE001
+            self.fail(f"{fn.__name__} が想定外の例外を上げた: {type(e).__name__}: {e}")
+
+    # ---- br だけのシナリオ ----
+    def test_comments_in_the_same_second_are_ordered_by_id(self):
+        store = self.store()
+        # (a) 回答より前のメモと同じ秒の回答: 送り直しても回答のコメントは 1 件のまま
+        iid = self.new_question()
+        self.add_comment(iid, "エージェントのメモ")
+        restore = self.failing("label remove human")
+        try:
+            self.write(store.answer, {"id": iid, "option": "a"}, raises=humanq.WriteError)
+        finally:
+            restore()
+        self.same_second(iid)
+        self.write(store.answer, {"id": iid, "option": "a"})
+        self.assertEqual(len([c for c in self.comments(iid) if c.startswith("[humanq]")]), 1, "同じ秒の並びを取り違えて二重に書いた")
+        self.assertEqual(self.labels(iid) & {"human", "answered"}, {"answered"})
+        # (b) 回答の後の問い直しが同じ秒: 同じ選択肢の回答を、新しい回答として書く
+        iid = self.new_question()
+        self.write(store.answer, {"id": iid, "option": "a"})
+        self.add_comment(iid, "問いを書き直した")
+        self.label(iid, "add", "human")
+        self.label(iid, "remove", "answered")
+        self.same_second(iid)
+        self.write(store.answer, {"id": iid, "option": "a"})
+        texts = self.comments(iid)
+        self.assertEqual(len(texts), 3, texts)
+        self.assertTrue(texts[-1].startswith("[humanq] 回答: 案A (a)"), "同じ秒の問い直しの後の回答が書かれていない")
+        # (c) 同じ秒の 回答 → 取り消し → 回答: 一覧の署名は最後の回答のもの。前の回答の署名では取り消さない
+        iid = self.new_question()
+        sig1 = self.call(store.answer, {"id": iid, "option": "a"})
+        self.call(store.undo, {"id": iid, "asig": sig1})
+        sig2 = self.call(store.answer, {"id": iid, "option": "a"})
+        self.same_second(iid)
+        self.assertEqual(self.item(iid, "answered").get("asig"), sig2)
+        self.write(store.undo, {"id": iid, "asig": sig1}, raises=humanq.Stale)
+        self.write(store.undo, {"id": iid, "asig": sig2})
+        self.assertEqual(self.labels(iid) & {"human", "answered"}, {"human"})
+
+    # サーバーが打つ br の argv の列 (読み → 回答 → 読み → 取り消し)。<id> <tmp> は置き換えて比べる。cwd はどれもプロジェクト
+    LIST_HUMAN = ["list", "-l", "human", "--limit", "0", "--json"]
+    LIST_ANSWERED = ["list", "-l", "answered", "--limit", "0", "--json"]
+    SHOW = ["show", "<id>", "--json"]
+    COMMENT_ADD = ["--actor", "user/humanq", "comments", "add", "<id>", "-f", "<tmp>"]
+    ADD_ANSWERED = ["--actor", "user/humanq", "label", "add", "<id>", "answered"]
+    REMOVE_HUMAN = ["--actor", "user/humanq", "label", "remove", "<id>", "human"]
+    ADD_HUMAN = ["--actor", "user/humanq", "label", "add", "<id>", "human"]
+    REMOVE_ANSWERED = ["--actor", "user/humanq", "label", "remove", "<id>", "answered"]
+    GOLDEN = [
+        LIST_HUMAN, LIST_ANSWERED, SHOW,                                        # 読み (判断待ちの問い)
+        LIST_HUMAN, SHOW, COMMENT_ADD, ADD_ANSWERED, REMOVE_HUMAN,              # 回答 (show 1 回で問いとコメント)
+        LIST_HUMAN, LIST_ANSWERED, SHOW,                                        # 読み (回答済みの本文)
+        LIST_ANSWERED, SHOW, COMMENT_ADD, ADD_HUMAN, REMOVE_ANSWERED,           # 取り消し
+    ]
+
+    def normalized_argv(self, entries: list[dict], iid: str) -> list[list[str]]:
+        self.assertEqual({e["prog"] for e in entries}, {"br"})
+        self.assertEqual({e["cwd"] for e in entries}, {self.repo})
+        got = []
+        for e in entries:
+            argv = ["<id>" if a == iid else a for a in e["argv"]]
+            if "-f" in argv:
+                k = argv.index("-f")
+                self.assertLess(k + 1, len(argv), argv)
+                self.assertRegex(os.path.basename(argv[k + 1]), r"^humanq-.*\.md$")
+                argv[k + 1] = "<tmp>"
+            got.append(argv)
+        return got
+
+    def test_golden_argv(self):
+        iid = self.new_question()
+        port = self.serve(self.store())
+        start = len(self.log_entries())
+        items = f"http://127.0.0.1:{port}/api/items"
+
+        def project():
+            code, _, body = fetch(items)
+            self.assertEqual(code, 200, body)
+            ps = json.loads(body)["projects"]
+            self.assertEqual(len(ps), 1, ps)
+            self.assertEqual((ps[0]["ok"], ps[0]["cli"], ps[0]["writable"]), (True, "br", True), ps[0])
+            return ps[0]
+
+        p = project()
+        self.assertEqual([i["id"] for i in p["human"]], [iid])
+        code, j = self.post_json(port, "/api/answer", {"project": self.repo, "id": iid, "option": "a", "qsig": p["human"][0]["qsig"]})
+        self.assertEqual(code, 200, j)
+        p = project()
+        self.assertEqual(([i["id"] for i in p["human"]], [i["id"] for i in p["answered"]]), ([], [iid]))
+        self.assertEqual(p["answered"][0]["answer"], "[humanq] 回答: 案A (a)\n", p["answered"][0])
+        self.assertEqual(p["answered"][0].get("asig"), j.get("asig"), (p["answered"][0], j))
+        code, j = self.undo_http(port, iid, asig=j.get("asig"))
+        self.assertEqual(code, 200, j)
+        self.assertEqual(self.normalized_argv(self.log_entries()[start:], iid), self.GOLDEN)
+
+    def test_a_stale_undo_only_reads(self):
+        # 署名の違う取り消しは、回答済みの一覧とそのチケットの show を読むだけで、br に何も書かない
+        iid = self.new_question()
+        port = self.serve(self.store())
+        sig_a = self.answer_sig(port, iid, "a")
+        code, j = self.undo_http(port, iid, asig=sig_a)
+        self.assertEqual(code, 200, j)
+        self.answer_sig(port, iid, "b")
+        start = len(self.log_entries())
+        code, j = self.undo_http(port, iid, asig=sig_a)
+        self.assertEqual((code, j.get("code")), (409, "stale"), j)
+        self.assertEqual(self.normalized_argv(self.log_entries()[start:], iid), [self.LIST_ANSWERED, self.SHOW])
+
+    def test_the_written_comment_and_labels_have_the_shape_of_the_readme(self):
+        # README「回答の形」: 作者 user/humanq、1 行目 [humanq] 回答: <label> (<key>)、補足は空行の後、末尾の改行も保つ。
+        # ラベルは answered を足してから human を外す。取り消しは [humanq] 取り消し で、answered を human に戻す
+        iid = self.new_question()
+        store = self.store()
+        self.write(store.answer, {"id": iid, "option": "b", "text": "補足の 1 行"})
+        self.write(store.undo, {"id": iid})
+        cs = json.loads(self.brc("comments", iid, "--json"))
+        self.assertIsInstance(cs, list, cs)
+        self.assertEqual(len(cs), 2, cs)
+        cs.sort(key=lambda c: c["id"])
+        self.assertEqual([(c["author"], c["text"]) for c in cs],
+                         [("user/humanq", "[humanq] 回答: 案B (b)\n\n補足の 1 行\n"), ("user/humanq", "[humanq] 取り消し\n")])
+        self.assertEqual(self.labels(iid) & {"human", "answered"}, {"human"})
+        labels = [e["argv"][3:] for e in self.log_entries() if e["argv"][2:3] == ["label"]]
+        self.assertEqual(labels, [["add", iid, "answered"], ["remove", iid, "human"], ["add", iid, "human"], ["remove", iid, "answered"]])
+
+
 # ---- bd のシナリオを並列のプロセスで回す (道具は tests/bd_parallel.py) ---------------------------------------
 #
-# BdScenarios のテスト (WithBd と WithFakeBd) は、モジュールごと読み込まれたとき (discover・`-m unittest test_server`)
+# BdScenarios のテスト (WithBd・WithFakeBd・WithFakeBr) は、モジュールごと読み込まれたとき (discover・`-m unittest test_server`)
 # に限り、このファイルを --bd-worker で起動した worker で並列に回す。各 worker は自分の setUpClass (bd init した一時の
 # プロジェクト・偽の bd を置いた dir) を持つ。テストを名前で指したとき (`-m unittest test_server.WithBd` など) と
 # HUMANQ_TEST_JOBS=1 のときは今までどおり直列。
@@ -1380,9 +1678,9 @@ class ParallelRunner(unittest.TestCase):
         flat = list(bd_parallel.flatten(suite))
         remote = {type(t.orig).__name__ for t in flat if isinstance(t, bd_parallel.RemoteTest)}
         local = {type(t).__name__ for t in flat if not isinstance(t, bd_parallel.RemoteTest)}
-        self.assertEqual(remote, {"WithBd", "WithFakeBd"} if HAVE_BD else {"WithFakeBd"})
+        self.assertEqual(remote, {"WithBd", "WithFakeBd", "WithFakeBr"} if HAVE_BD else {"WithFakeBd", "WithFakeBr"})
         self.assertIn("WithBd", remote if HAVE_BD else local, "bd が無いときの WithBd は親に残して、親で skip を報告する")
-        self.assertEqual(local & {"WithFakeBd"}, set())
+        self.assertEqual(local & {"WithFakeBd", "WithFakeBr"}, set())
         self.assertIn("ParallelRunner", local)
         self.assertEqual(len(flat), suite.countTestCases())
         names = [t.name for t in flat if isinstance(t, bd_parallel.RemoteTest)]

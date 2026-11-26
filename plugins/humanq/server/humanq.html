@@ -539,7 +539,7 @@ function ageText(created) {
 // 書き込めるか (writable) と CLI の名前も入れる: 書き込めないプロジェクトのカードは回答の部品を出さないので、変わったら作り直す
 const sigQ = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, ageText(it.created_at), shownLabels(it), it.q, it.description, it.notes, it.writable, it.cli]);
 const sigA = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, ageText(it.created_at), shownLabels(it), it.answer, it.asig, it.writable, it.cli]);
-// 書き込めないプロジェクト (writable:false。今は br) のカードに、回答の部品の代わりに出す 1 行
+// 書き込めないプロジェクト (writable:false。br を読みだけで返す 0.13〜0.14 のサーバー) のカードに、回答の部品の代わりに出す 1 行
 const readonlyNote = it => el("p", { class: "ro" }, `このプロジェクト${it.cli ? ` (${it.cli}) ` : ""}は画面からはまだ回答できません`);
 
 // ID をクリップボードへ。結果は ID の隣に 1.5 秒だけ出す (押した後に何も起きないと、コピーできたか分からない)
