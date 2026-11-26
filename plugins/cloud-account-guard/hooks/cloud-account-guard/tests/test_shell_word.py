@@ -211,6 +211,8 @@ class TestShown(unittest.TestCase):
             "\u0903b", "a\ud800b", "a\ue000b", "a\U000f0000b", "a\u0378b",
             # 空白として描かれる文字 (Default_Ignorable ではない)
             "a\U00013441b", "a\U00013442b", "a\U0001d159b", "a\ufffcb", "a\u303fb",
+            # 値の末尾 (文字ごとの判定が最後の文字まで見ること)
+            "ab\u3164", "ab\u200b", "ab\u2800",
         )
         for value in hidden:
             with self.subTest(value=value):
@@ -266,7 +268,7 @@ class TestShown(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(shell_word.shown(value), value)
 
-    # 示すカテゴリ (許可リスト、v0.31.3) ごとの代表。値の途中に置き、前後を `WORD` の外の文字
+    # 示すカテゴリ (許可リスト、v0.32.1) ごとの代表。値の途中に置き、前後を `WORD` の外の文字
     # (日本語) にして、許容形 (`WORD`) の側ではなく許可リストの側を通す。
     _CATEGORY_SAMPLES = {
         "Lu": "Ä", "Ll": "ä", "Lt": "ǅ", "Lm": "ー", "Lo": "本",
@@ -285,7 +287,7 @@ class TestShown(unittest.TestCase):
     }
 
     def test_ordinary_names_are_shown(self):
-        """許可リスト (v0.31.3) でも普通の名前は示す: kubectl の `_local` / `a,b`、日本語と NFD の
+        """許可リスト (v0.32.1) でも普通の名前は示す: kubectl の `_local` / `a,b`、日本語と NFD の
         日本語、ドメイン付きの project ID、ASCII の記号 (`.` `_` `-` `/` `:` `@` `,` `+` `~`)。"""
         names = [
             "_local", "a,b", "本番", "開発クラスタ", "サーバー・本番", "proj;x",
@@ -317,7 +319,7 @@ class TestShown(unittest.TestCase):
                 self.assertEqual(shell_word.shown(value), value)
 
     def test_other_symbols_are_not_shown(self):
-        """その他の記号 (So) は、値の先頭でも途中でも示さない (v0.31.3)。全コードポイントの生成。
+        """その他の記号 (So) は、値の先頭・途中・末尾のどこでも示さない (v0.32.1)。全コードポイントの生成。
 
         So には絵文字・囲み文字のほか、空白に見える記号 (点字の空白 U+2800・U+303F・U+FFFC・
         U+1D159) がある。カテゴリごと示さないので、So に足される空白に見える記号も示さない。
@@ -329,7 +331,8 @@ class TestShown(unittest.TestCase):
             if unicodedata.category(ch) != "So":
                 continue
             symbols += 1
-            if shell_word.can_show("本" + ch + "番") or shell_word.can_show(ch + "番"):
+            if (shell_word.can_show("本" + ch + "番") or shell_word.can_show(ch + "番")
+                    or shell_word.can_show("本" + ch)):
                 shown.append(f"U+{code:04X}")
         self.assertEqual(shown, [])
         self.assertGreater(symbols, 5000)
