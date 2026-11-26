@@ -723,7 +723,8 @@ QUERY の不一致も止めたい場合は `accounts.local.json` に書く:
   `mise exec <tool>@<版> --` / `mise x [<tool>@<版>] --` (tool の指定は 0 個以上) と、CLI 名の前の
   `pnpm` / `yarn` (`pnpm firebase deploy` / `yarn firebase deploy`。名前が gh / firebase / aws / gcloud /
   kubectl と、検証の対象外の wrangler / cf のときだけ。yarn は依存の bin (node_modules/.bin) だけを起動し、PATH の
-  gh / aws / gcloud / kubectl は起動しない (yarn 1.22 で実測)) も剥がす。`npx` 以外は語を落とすだけで option は
+  gh / aws / gcloud / kubectl は起動しない (yarn 1.22 で実測)) も剥がす。v0.33.0 から `yarn exec` (PATH と依存の bin の
+  CLI を、打ったディレクトリで起動する。yarn 1.22 / 2.4 / 3.8 / 4.9 で実測) も剥がす。`npx` 以外は語を落とすだけで option は
   読まない (option 付きの形は[守る範囲と守らない範囲](#守る範囲と守らない範囲)を参照)
 - 行頭インライン env の伝播は wrapper の実行時 env 挙動に従う
   (`sudo` は preserve 無しだと env を scrub。詳細は
@@ -1531,7 +1532,7 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 - 前置きの環境変数の代入 (`AWS_PROFILE=x aws ...`。値にコマンド置換を含む `X=$(cmd) aws ...` も。
   値は読まずに、後ろの CLI を照合する)
 - よく使う透過 wrapper の素の形 (`sudo` / `env` / `npx` / `bunx` / `pnpm dlx` / `yarn dlx` / `npm exec` /
-  `mise exec` など) と、CLI 名の前の `pnpm` / `yarn` (`pnpm firebase deploy`)
+  `yarn exec` / `mise exec` など) と、CLI 名の前の `pnpm` / `yarn` (`pnpm firebase deploy`)
 - コンテキストを指定する option の正式な綴り (`--profile` / `--project` / `--context` /
   `--kubeconfig` / `--config` など)
 
@@ -1547,11 +1548,28 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   `npm exec` で CLI 名の後ろに `-` で始まる語を置いた形 (`npm exec firebase deploy --project p`) の後ろの
   クラウド CLI。後者は npm がその語を自分の option として読んで CLI に渡さない (npm 11 で実測) ので、CLI が
   受け取る引数を決められない。どれも候補にならず検証されない (`npm exec -- firebase deploy --project p` は守る範囲)
+- `yarn exec` で CLI 名の後ろに `-` で始まる語を置いた形 (`yarn exec firebase deploy --project p` /
+  `yarn exec firebase deploy -- --project p` / `yarn exec firebase deploy '-P' p` / `yarn exec gh -h`) と、
+  `yarn exec -- firebase deploy` / `yarn exec --silent gh ...` の後ろのクラウド CLI。yarn 1 はその語 (`--project p` は
+  次の語も) を自分の option として読んで CLI に渡さず、`--` も落とす。yarn 2 以降はそのまま渡す (yarn 1.22 / 2.4 /
+  3.8 / 4.9 で実測。`yarn exec firebase deploy --project p` の firebase は、yarn 1 で `deploy`、yarn 2 以降で
+  `deploy --project p` を受け取る) ので、CLI が受け取る引数を決められない。`yarn exec -- <CLI>` はどの版も `--` の後ろを
+  そのまま渡す (実測) が、`--` を含む形は一律に剥がさない。どれも候補にならず検証されない。引用符で包んだ
+  語の中の空白の後ろの `-` (`yarn exec gcloud ... "a -b"`) でも同じく検証しない
+- `yarn exec` の CLI 名の語に空白やシェルの記号を含めた形 (`yarn exec 'gh pr create && aws s3 rm ...'` /
+  `yarn exec gh\;aws s3 rm ...`) の中のクラウド CLI。yarn 3 以降はその語をシェルのコードとして実行し
+  (yarn 3.8 / 4.9 で実測)、yarn 1 / 2 はその名前の CLI を見つけられずに止まる。候補にならず検証されない
+- yarn 4 が `.yarnrc.yml` の `injectEnvironmentFiles` (既定は `.env.yarn`) で読む env ファイルの env。yarn 4 は
+  `yarn exec` / `yarn <CLI 名>` の CLI にそのファイルの値を渡し、前置きの代入 (`AWS_PROFILE=dev yarn exec aws ...`) より
+  優先する (yarn 4.9 で実測) が、hook はそのファイルを読まず、前置きの代入と hook の env で照合する
+- `yarn exec` と CLI 名の間に redirect を挟んで代入の形の語を置いた形 (`yarn exec 2>/dev/null NAME=値 <CLI> ...`)。
+  yarn は CLI を起動しないが、hook は代入として読む (`npx` などと同じ読み)
 - `pnpm` / `yarn` と CLI 名の間に option やサブコマンドを挟んだ形 (`pnpm -C app firebase ...` /
   `pnpm run firebase ...` / `yarn run firebase ...` / `yarn workspace app firebase ...`) と、別名の `npm x`
   (`npm exec` の別名) / `pn` / `pnx` (pnpm 11 の別名) の後ろのクラウド CLI
-- `yarn <CLI 名>` の作業ディレクトリ。yarn は package.json のあるディレクトリで CLI を起動する (yarn 1.22 で
-  実測) が、hook はコマンドを打ったディレクトリの文脈で照合する
+- `yarn <CLI 名>` の作業ディレクトリ。yarn 1 は package.json のあるディレクトリで CLI を起動する (yarn 1.22 で
+  実測。yarn 2.4 / 3.8 / 4.9 は打ったディレクトリで起動する) が、hook はコマンドを打ったディレクトリの文脈で照合する
+  (`yarn exec` はどの版も打ったディレクトリで起動するので、照合と揃う)
 - `yarn <CLI 名>` で CLI 名の後ろに `--` の語を置いた形 (`yarn firebase deploy -- --project p` /
   `yarn firebase deploy --project p -- x`) の後ろのクラウド CLI。yarn 1 は `--` より前の語を自分の option として
   読み、`--` を落として残りを CLI に渡す (yarn 1.22 で実測。firebase はそれぞれ `deploy --project p` / `deploy x`
@@ -1650,7 +1668,8 @@ CLI ごとに 1 回。deny はせず、deny したコマンドには足さない
 `hooks/cloud-account-guard/core/unverified.py`)。メインとサブエージェントは互いの記録で黙らない
 (サブエージェントは同じ `session_id` を持ち、知らせはツールを呼んだエージェントにだけ届くため、hook input の
 `agent_id` で分ける)。検証と同じ分解で見つけるので、検証が読まない起動の形 (`bunx --bun wrangler` /
-`pnpm -C app wrangler` など) では知らせも出ない (`bunx wrangler` / `pnpm wrangler` / `yarn wrangler` は v0.32.0 から知らせる)。
+`pnpm -C app wrangler` など) では知らせも出ない (`bunx wrangler` / `pnpm wrangler` / `yarn wrangler` は v0.32.0 から、
+`yarn exec wrangler` は v0.33.0 から知らせる)。
 
 ## 既知の制限
 
