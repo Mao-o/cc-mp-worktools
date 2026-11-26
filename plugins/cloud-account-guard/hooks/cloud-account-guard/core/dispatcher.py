@@ -604,9 +604,11 @@ def _switch_then_write_error(
     account_key: str, entry, switch_form: str, write_form: str
 ) -> str:
     expected = _expected_display(entry)
-    check_by_hand = (
-        f'(期待値は{shell_word.UNSAFE}。accounts.local.json の "{account_key}" を'
-        "手で確認してください)\n"
+    # 期待値に表示しない値があるときは出所だけを言う (services/firebase.py の
+    # `_EXPECTED_NOT_SHOWN` と同じ文型)。この deny は期待値の形に関係なくコマンドの形で案内
+    # しないので、`shell_word.UNSAFE` の言う理由は成り立たない。
+    hidden_source = (
+        f'表示していない期待値があります (accounts.local.json の "{account_key}" を確認してください)\n'
         if _expected_has_hidden(entry)
         else ""
     )
@@ -615,7 +617,7 @@ def _switch_then_write_error(
         f'"{account_key}" の切替と書込を同一コマンドに連結しています。'
         "切替後の状態で write が実行されるため、"
         f"{target}切り替える操作を単独で実行してから再度お試しください。\n"
-        f"{check_by_hand}"
+        f"{hidden_source}"
         "(hook はコマンド実行前に 1 回だけ動くため、連結された write は切替前の"
         "状態で検証され、切替後のアカウントは検証できません。切替を単独で実行すれば"
         "成功キャッシュが破棄され、次の write が切替後の状態で検証されます)\n"

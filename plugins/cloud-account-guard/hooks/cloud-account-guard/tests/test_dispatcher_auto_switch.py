@@ -21,7 +21,7 @@ from unittest import mock
 
 import _testutil  # noqa: F401
 
-from core import auto_switch, budget, cache  # noqa: E402
+from core import auto_switch, budget, cache, shell_word  # noqa: E402
 from core.dispatcher import dispatch  # noqa: E402
 
 _ISOLATION = None
@@ -275,6 +275,7 @@ class TestOnlyWhereItWouldStop(AutoSwitchBase):
             "dict hidden key": ({"my work": "Mao-o"}, True),
             "shown": ("Mao-o", False),
             "dict shown": ({"github.com": "Mao-o"}, False),
+            "dict non-str value": ({"github.com": "Mao-o", "x y": 1}, False),
         }
         for name, (entry, hidden) in cases.items():
             with self.subTest(name):
@@ -284,10 +285,15 @@ class TestOnlyWhereItWouldStop(AutoSwitchBase):
                         self._dispatch("gh auth switch --user other && gh pr create")
                     )
                 self.assertIn("切替と書込を同一コマンドに連結しています", reason)
-                self.assertEqual("手で確認してください" in reason, hidden, reason)
+                source = (
+                    '表示していない期待値があります (accounts.local.json の "github" を'
+                    "確認してください)"
+                )
+                self.assertEqual(source in reason, hidden, reason)
+                # この deny はコマンドの形で案内しないので、UNSAFE の理由は言わない。
+                self.assertNotIn(shell_word.UNSAFE, reason)
+                self.assertNotIn("手で確認してください", reason)
                 if hidden:
-                    self.assertIn("accounts.local.json", reason)
-                    self.assertIn('"github"', reason)
                     self.assertIn("(表示しない値)", reason)
 
 
