@@ -593,8 +593,9 @@ def _expected_has_hidden(entry) -> bool:
         return not shell_word.can_show(entry)
     if isinstance(entry, dict):
         return any(
-            isinstance(v, str) and v and not shell_word.can_show(v)
-            for v in entry.values()
+            isinstance(v, str) and v
+            and not (shell_word.can_show(k) and shell_word.can_show(v))
+            for k, v in entry.items()
         )
     return False
 

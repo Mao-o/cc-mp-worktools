@@ -272,6 +272,7 @@ class TestOnlyWhereItWouldStop(AutoSwitchBase):
             "space": ("my work", True),
             "emoji": ("work\U0001F600", True),
             "dict hidden": ({"host": "github.com", "user": "my work"}, True),
+            "dict hidden key": ({"my work": "Mao-o"}, True),
             "shown": ("Mao-o", False),
             "dict shown": ({"github.com": "Mao-o"}, False),
         }
