@@ -20,6 +20,10 @@ humanq は CLI の出力の形に強く依る。偽物は実測した癖を写�
   comments() が (created_at, id) に依らず書いた順で返すことを、br は CLI の値 (id・created_at) を
   (created_at, id) で並べると書いた順になることを確かめる。br の backend の並べ替え (backend.br_thread) は
   tests/test_backend.py の BrThread と tests/test_br_read.py が偽の br で固定している
+- br の読み (BrBackend.load) は、偽物にも本物にも通し、thread が書いた順 (同じ秒の 3 件・時刻をずらした 1 件・
+  本物は JSONL から取り込み直した後の 1 件)・コメント 0 件が []・空のプロジェクトが ([], []) になることを確かめる。
+  偽の br に sync は無いので、取り込み直しの脚は本物だけ
+- 偽の br が断る形 (REFUSED) は、本物の br も非 0 で断る。偽物の方が厳しい形は表に入れず、REFUSED の上のコメントに残す
 """
 from __future__ import annotations
 
@@ -200,14 +204,14 @@ class ContractBase(unittest.TestCase):
             self.assertIsInstance(c, dict, self.m(quirk))
         return out
 
-    def add_comment(self, iid: str, text: str, actor: str = "user/humanq") -> dict:
+    def add_comment(self, iid: str, text: str, actor: str = "user/humanq", cwd: str | None = None) -> dict:
         """bd は humanq と同じく --json 無しで書く。br は --json で書いた comment を返す (bd の -f 付きの --json は、
         本物は JSON を返すが偽物は返さないので、bd では --json を付けない)。"""
         path = self.write_file(text)
         if self.kind == "bd":
-            self.ok("comments add", "--actor", actor, "comments", "add", iid, "-f", path)
+            self.ok("comments add", "--actor", actor, "comments", "add", iid, "-f", path, cwd=cwd)
             return {}
-        out = self.jok("comments add", "--actor", actor, "comments", "add", iid, "-f", path)
+        out = self.jok("comments add", "--actor", actor, "comments", "add", iid, "-f", path, cwd=cwd)
         self.assertIsInstance(out, dict, self.m("comments add --json の形"))
         return out
 
@@ -555,6 +559,165 @@ class BrQuirks:
         c1 = self.add_comment(a, "x")
         c2 = self.add_comment(b, "y")
         self.assertGreater(c2.get("id", 0), c1.get("id", 0), self.m(q))
+
+    # ---- BrBackend.load を通した読み (偽物にも本物にも同じ assertion) ------------------------------------
+
+    def br_backend(self) -> "backend.BrBackend":
+        """この CLI (偽物か本物) を 1 回ずつ打つ BrBackend。cwd はプロジェクトの dir。"""
+        def run(repo: str, *args: str) -> str:
+            p = self.run_cli(*args, cwd=repo)
+            if p.returncode != 0:
+                raise backend.CliExit((p.stderr or p.stdout).strip()[:800] or f"br exit {p.returncode}", p.returncode)
+            return p.stdout
+        return backend.BrBackend(run=run)
+
+    def read(self, proj: str, quirk: str):
+        """BrBackend.load。読みの失敗 (BdError) は例外ではなく assertion の失敗にする (変異で CLI の打ち方が崩れても ERROR にしない)。"""
+        try:
+            return self.br_backend().load(proj)
+        except backend.BdError as e:
+            self.fail(f"{self.m(quirk)}: BrBackend.load が失敗: {e}")
+
+    def fresh_project(self) -> str:
+        """読みの全体 (human・answered の一覧) を assert するので、共有のプロジェクトではなく専用のプロジェクトを使う。"""
+        type(self).n += 1
+        return self.new_project(f"load-{type(self).n}")
+
+    def real_br(self) -> bool:
+        return not self.SUBJECT.startswith("fake")
+
+    def test_backend_load_thread_follows_written_order(self):
+        """同じ秒に 3 件・時刻をずらして 1 件・(本物は) JSONL から取り込み直した後に 1 件を書き、BrBackend.load の
+        thread が書いた順で返る。CLI の生の並びは決まっていない (偽物は新しい順、本物は取り込み直すと崩れる)。"""
+        q = "BrBackend.load の thread が書いた順"
+        proj = self.fresh_project()
+        iid, texts, same_second = "", [], False
+        for attempt in range(5):                # 3 件が同じ秒に収まる組を最大 5 回試す (遅い CLI では収まらないことがある)
+            iid = self.create(f"x{attempt}", labels="answered", cwd=proj)
+            texts = [f"a{attempt}", f"b{attempt}", f"c{attempt}"]
+            for t in texts:
+                self.add_comment(iid, t, cwd=proj)
+            raw = self.load(self.ok(q, "comments", iid, "--json", cwd=proj).stdout, q)
+            self.assertIsInstance(raw, list, self.m(q))
+            self.assertEqual(len(raw), 3, self.m(q))
+            for c in raw:
+                self.assertIsInstance(c, dict, self.m(q))
+            if len({c.get("created_at") for c in raw}) == 1:
+                same_second = True
+                break
+        if not self.real_br():                  # 偽物は速いので、同じ秒の組が取れないなら偽物の側が壊れている
+            self.assertTrue(same_second, f"{self.m(q)}: 5 回試しても 3 件が同じ秒に収まらなかった")
+        note = f"{self.m(q)} (同じ秒の組が取れたか: {same_second})"
+
+        def thread_of_load() -> list[str | None]:
+            human, answered = self.read(proj, q)
+            self.assertEqual(human, [], note)
+            mine = [r for r in answered if r["id"] == iid]
+            self.assertEqual(len(mine), 1, note)
+            thread = mine[0].get("thread")
+            self.assertIsInstance(thread, list, note)
+            return [c.get("text") for c in thread]
+
+        self.assertEqual(thread_of_load(), texts, note)
+        time.sleep(1.1)                         # 時刻をずらす
+        texts.append("late")
+        self.add_comment(iid, "late", cwd=proj)
+        self.assertEqual(thread_of_load(), texts, note)
+        if self.real_br():                      # 偽物に sync は無い。本物だけ JSONL に書き出して取り込み直す (DB を作り直す)
+            self.ok(q, "sync", "--flush-only", cwd=proj)
+            self.ok(q, "sync", "--import-only", "--rebuild", cwd=proj)
+            self.assertEqual(thread_of_load(), texts, f"{note}: 取り込み直した後")
+            texts.append("after-import")
+            self.add_comment(iid, "after-import", cwd=proj)
+            self.assertEqual(thread_of_load(), texts, f"{note}: 取り込み直した後に書いた 1 件")
+
+    def test_backend_load_reads_threads_and_questions_of_each_ticket(self):
+        """コメント 0 件のチケットの thread は []、3 件のチケットは書いた順。human のチケットは thread を持たない。"""
+        q = "BrBackend.load の thread (3 件・0 件)"
+        proj = self.fresh_project()
+        with_comments = self.create("with", labels="answered", cwd=proj)
+        without = self.create("without", labels="answered", cwd=proj)
+        asked = self.create("asked", labels="human", cwd=proj)
+        ctx = {"humanq": {"ask": "どちら?"}}
+        self.ok(q, "update", asked, "--agent-context", "@" + self.write_file(json.dumps(ctx)), cwd=proj)
+        texts = ["first", "second", "third"]
+        for t in texts:
+            self.add_comment(with_comments, t, cwd=proj)
+        human, answered = self.read(proj, q)
+        self.assertEqual([r["id"] for r in human], [asked], self.m(q))
+        self.assertEqual(human[0]["question_raw"], ctx["humanq"], self.m(q))
+        self.assertNotIn("thread", human[0], self.m(q))
+        by = {r["id"]: r for r in answered}
+        self.assertEqual(sorted(by), sorted([with_comments, without]), self.m(q))
+        self.assertEqual(len(by), 2, self.m(q))
+        self.assertIsInstance(by[with_comments].get("thread"), list, self.m(q))
+        self.assertEqual([c.get("text") for c in by[with_comments]["thread"]], texts, self.m(q))
+        self.assertEqual(by[without].get("thread"), [], self.m(q))
+
+    def test_backend_load_on_an_empty_project_is_empty(self):
+        q = "BrBackend.load が空のプロジェクトで ([], [])"
+        self.assertEqual(self.read(self.empty, q), ([], []), self.m(q))
+
+    # ---- 偽物が断る形は、本物も断る ---------------------------------------------------------------------
+
+    # 偽の br (tests/fake_beads.py) が usage エラー・VALIDATION・ISSUE_NOT_FOUND などで断る形。偽物が断るのに本物は通す
+    # 形があると、偽物の上で緑のテストが本物では別の経路に入る。{id} は専用のプロジェクトのチケット、{nofile} は無いファイル。
+    # 偽物の方が厳しい形 (偽物は断るが本物 0.7.6 は通す) はここに入れない (偽物の側の食い違いで、偽物を直す段で
+    # 揃える): show に id 無し (本物は exit 0 でチケットを出す)・label add に余分な引数 (本物は複数の label を付ける)・
+    # comments add -f に余分な位置引数 (本物は -f の本文で書く)・close -r に値無し (本物は通す)
+    REFUSED = {
+        "subcommand 無し": [],
+        "--actor に値無し": ["--actor"],
+        "create にタイトル無し": ["create"],
+        "create にタイトル 2 つ": ["create", "a", "b"],
+        "create の知らない flag": ["create", "a", "--nope"],
+        "create -p に値無し": ["create", "a", "-p"],
+        "update に id 無し": ["update"],
+        "update に id 2 つ": ["update", "{id}", "{id}", "--title", "t"],
+        "update の知らない flag": ["update", "{id}", "--nope"],
+        "update の無い id": ["update", "zz-999", "--title", "t"],
+        "update --agent-context @無いファイル": ["update", "{id}", "--agent-context", "@{nofile}"],
+        "close に id 無し": ["close"],
+        "close に id 2 つ": ["close", "{id}", "{id}"],
+        "close の知らない flag": ["close", "{id}", "--nope"],
+        "close の無い id": ["close", "zz-999"],
+        "delete に id 無し": ["delete"],
+        "delete の無い id": ["delete", "zz-999"],
+        "list に位置引数": ["list", "x"],
+        "list の知らない flag": ["list", "--nope"],
+        "list -s に値無し": ["list", "-s"],
+        "list --limit に値無し": ["list", "--limit"],
+        "show の知らない flag": ["show", "{id}", "--nope"],
+        "label の知らない op": ["label", "zap", "{id}", "x"],
+        "label に op 無し": ["label"],
+        "label add に label 無し": ["label", "add", "{id}"],
+        "label add の無い id": ["label", "add", "zz-999", "a"],
+        "comments add -f の無いファイル": ["comments", "add", "{id}", "-f", "{nofile}"],
+        "comments add -f に値無し": ["comments", "add", "{id}", "-f"],
+        "comments add の無い id": ["comments", "add", "zz-999", "t"],
+        "comments add に id 無し": ["comments", "add"],
+        "comments add に本文無し": ["comments", "add", "{id}"],
+        "comments に id 無し": ["comments"],
+        "comments に id 2 つ": ["comments", "{id}", "{id}"],
+        "comments の無い id": ["comments", "zz-999"],
+        "init に位置引数": ["init", "zz"],
+        "init の知らない flag": ["init", "--nope"],
+    }
+
+    def test_every_form_the_fake_refuses_is_refused_by_the_real_one(self):
+        q = "偽物が断る形は本物も断る (非 0 で終わり、チケットを増やさない)"
+        proj = self.fresh_project()
+        iid = self.create("x", cwd=proj)
+        nofile = os.path.join(self.tmp, "no-such-file.txt")
+        for name, form in self.REFUSED.items():
+            argv = [a.format(id=iid, nofile=nofile) for a in form]
+            with self.subTest(form=name):
+                p = self.run_cli(*argv, "--json", cwd=proj)
+                self.assertNotEqual(p.returncode, 0, f"{self.m(q)}: 「{name}」 {argv} が通った: {p.stdout[:200]!r}")
+        out = self.jok(q, "list", cwd=proj)
+        self.assertIsInstance(out, dict, self.m(q))
+        self.assertEqual([r.get("id") for r in out.get("issues", [])], [iid],
+                         f"{self.m(q)}: 断った形のどれかがチケットを作った・消した")
 
     def test_actor_becomes_author(self):
         q = "--actor が comment の author に入る"
