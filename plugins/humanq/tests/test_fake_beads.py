@@ -2,7 +2,7 @@
 
 偽の br は、後の案 (bd と br の種別判定、br の読み書き) が CI で br と bd の差を確かめるための道具。
 ここで押さえる癖は、br 0.7.6 の実測 (使い捨ての一時 dir で打った結果)。偽物が癖を落とすと、
-その癖に頼る後の案のテストが、本物の br では起きる失敗を見逃す。humanq の製品コードは今は br を呼ばない。
+その癖に頼る後の案のテストが、本物の br では起きる失敗を見逃す。humanq の製品コードは br を読みだけに使う (list と show)。
 """
 from __future__ import annotations
 
@@ -264,6 +264,20 @@ class BrList(FakeBrCase):
         self.assertEqual(rows[a]["agent_context"], '{"q":1}')
         self.assertIsInstance(rows[a]["agent_context"], str)
         self.assertNotIn("agent_context", rows[b])
+
+    def test_description_and_notes_only_when_set(self):
+        # br 0.7.6 の実測: description と notes は値のあるチケットにだけ、list と show の両方に出る
+        a = self.create("a", "-d", "body")
+        b = self.create("b")
+        self.ok("update", b, "--notes", "memo")
+        rows = {x["id"]: x for x in self.jok("list")["issues"]}
+        self.assertEqual(len(rows), 2)
+        self.assertEqual((rows[a].get("description"), "notes" in rows[a]), ("body", False))
+        self.assertEqual(("description" in rows[b], rows[b].get("notes")), (False, "memo"))
+        shown = {x["id"]: x for x in self.jok("show", a, b)}
+        self.assertEqual(len(shown), 2)
+        self.assertEqual((shown[a].get("description"), "notes" in shown[a]), ("body", False))
+        self.assertEqual(("description" in shown[b], shown[b].get("notes")), (False, "memo"))
 
 
 class BrShow(FakeBrCase):

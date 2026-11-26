@@ -3,7 +3,7 @@
 
 テストは一時の bin dir に、このファイルを `bd` の名前で置き (実行権限付き)、その dir を PATH の先頭に入れる
 (tests/test_server.py の install_fake)。振る舞いは argv[0] の basename で分ける。bd と br があり、
-ほかの名前は exit 2 にする (別の CLI の偽物を足すときは PROGS に足す)。br の癖は下の一覧の後ろにある。humanq の製品コードは今は br を呼ばない。
+ほかの名前は exit 2 にする (別の CLI の偽物を足すときは PROGS に足す)。br の癖は下の一覧の後ろにある。humanq の製品コードは br を読みだけに使う (list と show)。
 
 - 状態: <project>/.beads/fake-state.json (issues・labels・comments・status・metadata)。
   呼び出しは .beads/fake-state.lock の flock で 1 本ずつにする (サーバーは読みと書きを別のスレッドで並べて打つ)
@@ -27,7 +27,9 @@
     起動した cwd から上へ .beads を探す
   - list -s のカンマ区切りは stdout の JSON error (VALIDATION_FAILED) で非 0、繰り返しは通る。
     list --json は {"issues","total","limit","offset","has_more"} の envelope (0 件も同じ形)。既定は closed だけを除く
-  - show --json は配列 (comments と agent_context を含み metadata は無い)。id が 1 つでも無ければ ISSUE_NOT_FOUND で exit 3
+  - show --json は配列 (comments と agent_context を含み metadata は無い)。id が 1 つでも無ければ ISSUE_NOT_FOUND で exit 3。
+    偽物は comments の key を 0 件でも出す (本物の 0.7.6 は 0 件のとき key を出さない。読む側は両方を受ける)
+  - update --notes で notes を書ける。description・notes は値のある issue にだけ list と show に出る
   - comments の並びは決まっていない (偽物は新しいものを先頭で返す)。id は int
   - label add / remove の戻りは [{"status": added|removed|exists|not_found, ...}] で、どれも exit 0
   - update --agent-context は丸ごと置き換え。半分未満・空にする書き換えは --force が無いと非 0
@@ -565,12 +567,13 @@ def br_comments_of(i: dict) -> list[dict]:
 
 
 def br_row(i: dict) -> dict:
-    """metadata と owner の key は無い。agent_context は値のある issue にだけ文字列で出る。"""
+    """metadata と owner の key は無い。description・notes・agent_context は値のある issue にだけ出る (agent_context は文字列)。"""
     out = {"id": i["id"], "title": i["title"], "status": i["status"], "priority": i["priority"],
            "issue_type": i["issue_type"], "labels": sorted(i["labels"]), "created_at": i["created_at"],
            "updated_at": i["updated_at"]}
-    if i.get("agent_context"):
-        out["agent_context"] = i["agent_context"]
+    for k in ("description", "notes", "agent_context"):
+        if i.get(k):
+            out[k] = i[k]
     return out
 
 
@@ -611,7 +614,7 @@ def br_create(p: Project, args: list[str], as_json: bool, actor: str) -> None:
 
 
 def br_update(p: Project, args: list[str], as_json: bool) -> None:
-    opts, pos = br_take(args, {"--agent-context": True, "--force": False, "--status": True, "--title": True})
+    opts, pos = br_take(args, {"--agent-context": True, "--force": False, "--status": True, "--title": True, "--notes": True})
     if len(pos) != 1:
         raise Usage("error: expected exactly one <ID>")
     i = br_issue(p, pos[0])
@@ -635,6 +638,8 @@ def br_update(p: Project, args: list[str], as_json: bool) -> None:
         i["status"] = status
     if "--title" in opts:
         i["title"] = br_one(opts, "--title") or ""
+    if "--notes" in opts:
+        i["notes"] = br_one(opts, "--notes") or ""
     i["updated_at"] = br_time(True)
     p.save()
     if as_json:
@@ -688,7 +693,7 @@ def br_show(p: Project, args: list[str], as_json: bool) -> None:
         raise Usage("error: the following required arguments were not provided:\n  <IDS>...")
     found = [br_issue(p, iid) for iid in pos]                           # 1 つでも無ければ全体が exit 3
     if as_json:
-        emit([{**br_row(i), "description": i.get("description") or "", "comments": br_comments_of(i)} for i in found])
+        emit([{**br_row(i), "comments": br_comments_of(i)} for i in found])
     else:
         print("\n".join(f"{i['id']} · {i['title']}   [{i['status']}]" for i in found))
 

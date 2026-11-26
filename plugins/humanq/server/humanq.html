@@ -110,6 +110,13 @@ button.ctxmore[hidden] { display: none; }
 .opt .l { font-weight: 700; }
 .opt .d { display: block; color: var(--muted); font-size: 13.5px; margin-top: 2px; }
 .opt.rec { border-left: 4px solid var(--rec); }
+/* 書き込めないプロジェクトの選択肢 (押せない一覧) と、回答の部品の代わりの案内 */
+.roopts { list-style: none; padding: 0; margin: 10px 0; display: grid; gap: 6px; }
+.roopts li { padding: 6px 12px; border-left: 3px solid var(--line); }
+.roopts li.rec { border-left-color: var(--rec); }
+.roopts .l { font-weight: 700; }
+.roopts .d { display: block; color: var(--muted); font-size: 13.5px; margin-top: 2px; }
+.ro { margin: 10px 0 0; font-size: 13px; color: var(--muted); }
 .badge { font-size: 11px; font-weight: 700; color: var(--rec); background: var(--rec-soft); padding: 1px 7px; border-radius: 999px; margin-right: 6px; }
 /* 対処の深さのチップ。推奨の緑 (--rec) とは混ぜない: 根本は中立の濃色、ほかは橙・紫・灰 */
 .depth { font-size: 11px; font-weight: 700; padding: 0 7px; border-radius: 4px; margin-right: 6px; border: 1.5px solid; white-space: nowrap; }
@@ -528,8 +535,11 @@ function ageText(created) {
 // カードの表示に使う値の署名。変わったカードだけ作り直す (受け取ったときに 1 度だけ作る)。
 // 回答済みのカードには回答の署名 (asig) も入れる: 同じ本文で答え直された回答 (案 A → 取り消し → 案 A) でも作り直し、
 // 「取り消して判断待ちに戻す」が今の回答の署名を送るようにする
-const sigQ = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, ageText(it.created_at), shownLabels(it), it.q, it.description, it.notes]);
-const sigA = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, ageText(it.created_at), shownLabels(it), it.answer, it.asig]);
+// 書き込めるか (writable) と CLI の名前も入れる: 書き込めないプロジェクトのカードは回答の部品を出さないので、変わったら作り直す
+const sigQ = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, ageText(it.created_at), shownLabels(it), it.q, it.description, it.notes, it.writable, it.cli]);
+const sigA = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, ageText(it.created_at), shownLabels(it), it.answer, it.asig, it.writable, it.cli]);
+// 書き込めないプロジェクト (writable:false。今は br) のカードに、回答の部品の代わりに出す 1 行
+const readonlyNote = it => el("p", { class: "ro" }, `このプロジェクト${it.cli ? ` (${it.cli}) ` : ""}は画面からはまだ回答できません`);
 
 // ID をクリップボードへ。結果は ID の隣に 1.5 秒だけ出す (押した後に何も起きないと、コピーできたか分からない)
 const COPIED_MS = 1500;
@@ -591,7 +601,27 @@ const nextLabelId = () => "card-label-" + (++labelSeq);
 const dkOf = it => it.project + "\n" + it.id;           // 下書きの key
 function dropDraft(it) { drafts.delete(dkOf(it)); saveDrafts(); }
 
+// 書き込めないプロジェクト (writable:false) の判断待ちのカード。問い・背景・選択肢 (押せない一覧) は同じように見せ、
+// 選択肢のボタン・補足欄・「回答する」は出さずに 1 行の案内を出す。下書きも作らない
+function buildReadonlyQuestion(it) {
+  const q = it.q;
+  const ask = md("p", "ask", q ? q.ask : it.title);
+  ask.id = nextLabelId();
+  const opts = q && q.options.length ? el("ul", { class: "roopts" }, q.options.map(o =>
+    el("li", o.key === q.recommended ? { class: "rec" } : {},
+      o.key === q.recommended ? el("span", { class: "badge" }, "推奨") : null, optLabel(o.label),
+      o.desc ? md("span", "d", o.desc) : null))) : null;
+  return el("section", { class: "card", "data-id": it.id, tabindex: "-1", "aria-labelledby": ask.id },
+    head(it),
+    q ? el("p", { class: "title" }, it.title) : null,
+    ask,
+    q && q.context ? context(it, q.context) : null,
+    !q ? el("p", { class: "ctx" }, "問いがまだ整理されていません。") : null,
+    opts, readonlyNote(it), el("div", { class: "errbox" }), body(it));
+}
+
 function buildQuestion(it) {
+  if (it.writable === false) return buildReadonlyQuestion(it);
   const key = qKey(it.project, it.id);
   const dk = dkOf(it);
   const q = it.q;
@@ -667,12 +697,17 @@ function answerText(it) {
 }
 
 function buildAnswered(it) {
-  const b = el("button", { class: "ghost", type: "button" }, "取り消して判断待ちに戻す");
-  b.addEventListener("click", () => undoAnswer(it, it.asig));    // カードが出している回答の署名
+  let ctrl;
+  if (it.writable === false) ctrl = readonlyNote(it);            // 書き込めないプロジェクトには取り消しのボタンを出さない
+  else {
+    const b = el("button", { class: "ghost", type: "button" }, "取り消して判断待ちに戻す");
+    b.addEventListener("click", () => undoAnswer(it, it.asig));  // カードが出している回答の署名
+    ctrl = el("div", { class: "row" }, b);
+  }
   const title = el("p", { class: "title", id: nextLabelId() }, it.title);
   return el("section", { class: "card", "data-id": it.id, tabindex: "-1", "aria-labelledby": title.id }, head(it), title,
     el("p", { class: "ans" }, answerText(it)),
-    el("div", { class: "row" }, b), el("div", { class: "errbox" }));
+    ctrl, el("div", { class: "errbox" }));
 }
 
 // 失敗の表示 (カードの枠と、中の全文)。エラーが変わったときだけ中身を作り直す
@@ -1061,9 +1096,11 @@ function normalize(raw, prev) {
   const projects = raw.projects.map(p => {
     if (!p || typeof p.path !== "string" || !Array.isArray(p.human) || !Array.isArray(p.answered)) throw new Error("想定外のデータ (プロジェクトの形)");
     const old = prev && prev.projects.find(x => x.path === p.path);
+    // writable を返さない (古い) サーバーは、どのプロジェクトにも書き込める
+    const writable = p.writable !== false, cli = typeof p.cli === "string" ? p.cli : null;
     const conv = sig => i => {
       if (!i || typeof i.id !== "string" || (i.q != null && (typeof i.q !== "object" || !Array.isArray(i.q.options)))) throw new Error("想定外のデータ (チケットの形)");
-      const x = { ...i, project: p.path };
+      const x = { ...i, project: p.path, writable, cli };
       x._sig = sig(x);
       return x;
     };

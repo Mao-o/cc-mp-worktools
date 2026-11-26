@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""humanq: この端末の bd プロジェクトの判断待ち (human ラベル) を 1 つの localhost の画面に集め、
-回答を各プロジェクトの bd に書き戻す。
+"""humanq: この端末の beads (bd / br) のプロジェクトの判断待ち (human ラベル) を 1 つの localhost の画面に集め、
+回答を各プロジェクトの bd に書き戻す (br のプロジェクトは、この段では読みだけ)。
 
 usage: python3 humanq.py --state-dir DIR [--port 8765]
 
@@ -8,8 +8,8 @@ usage: python3 humanq.py --state-dir DIR [--port 8765]
 - 対象のプロジェクトは DIR/projects.json (SessionStart hook が登録する)。リクエストのたびに読む
 - DIR/server.json に pid・port・version を書く (hook が版の古いサーバーを止めるため。新しい版は止めない)
 - DIR/token (0600) に書き込みのトークンを保存し、再起動 (版の入れ替え) しても同じ値を使う
-規約 (問いの書き方・回答の形・拾い方) は plugin の README.md。依存は標準ライブラリと PATH 上の bd だけ。
-bd と話すコード (argv・出力の形・metadata の置き場・コメントの並び) は backend.py にだけ置き、ここは CLI に依らない形の値を読む。
+規約 (問いの書き方・回答の形・拾い方) は plugin の README.md。依存は標準ライブラリと PATH 上の bd / br だけ。
+CLI と話すコード (argv・出力の形・問いの置き場・コメントの並び) は backend.py にだけ置き、ここは CLI に依らない形の値を読む。
 """
 from __future__ import annotations
 
@@ -71,6 +71,9 @@ class Stale(ValueError):
 # BdBackend は呼ぶたびにこのモジュールの bd を引くので、差し替えはすべての読み書きに届く
 bd = backend.run_bd
 _BD = backend.BdBackend(run=lambda repo, *args: bd(repo, *args))
+# br を 1 回打つ関数。humanq.br = ... で差し替えると、br のプロジェクトの読みすべてに届く
+br = backend.run_br
+_BR = backend.BrBackend(run=lambda repo, *args: br(repo, *args))
 
 
 def bd_json(repo: str, *args: str) -> list:
@@ -79,7 +82,8 @@ def bd_json(repo: str, *args: str) -> list:
 
 
 def backend_for(repo: str) -> backend.BdBackend:
-    """repo の beads の CLI と話す backend。この段では常に bd。"""
+    """回答・取り消しを書き込む backend。書き込めるのは bd のプロジェクトだけ (br と決められないプロジェクトは、
+    HTTP の層が CLI を打つ前に readonly で断る)。"""
     return _BD
 
 
@@ -157,28 +161,25 @@ def last_of(cs: list) -> tuple[str, str]:
     return (ms[-1]["text"], asig(len(ms), ms[-1]["text"])) if ms else ("", asig(0, None))
 
 
-def last_answer(repo: str, iid: str) -> tuple[str, str]:
-    """回答済みのカードに出す、最後の [humanq] コメントの本文と署名。
-    コメントを読めなければ ("", "")。空の署名はどの回答の署名とも合わないので、そのカードからの取り消しは照合で断られる
+def last_answer(thread: list | None) -> tuple[str, str]:
+    """回答済みのカードに出す、最後の [humanq] コメントの本文と署名。thread は backend の load が読んだコメント (古い順)。
+    コメントを読めなければ (None) ("", "")。空の署名はどの回答の署名とも合わないので、そのカードからの取り消しは照合で断られる
     (None にすると、署名を送らない古い画面と同じに読まれて照合を素通りする)。"""
-    try:
-        cs = backend_for(repo).comments(repo, iid)
-    except BdError:
-        return "", ""
-    return last_of(cs)
+    return ("", "") if thread is None else last_of(thread)
 
 
 def _prio(x: dict):
     return (x["priority"] if isinstance(x["priority"], int) else 9, x["created_at"])
 
 
-def load_project(repo: str) -> dict:
-    be = backend_for(repo)
-    human = sorted((shape(r) for r in be.list_human(repo)), key=_prio)
+def load_project(repo: str, be=None) -> dict:
+    """be は読む backend (省略は bd)。"""
+    human_rows, answered_rows = (be or _BD).load(repo)
+    human = sorted((shape(r) for r in human_rows), key=_prio)
     answered = []
-    for r in be.list_answered(repo):
+    for r in answered_rows:
         s = shape(r)
-        s["answer"], s["asig"] = last_answer(repo, s["id"])
+        s["answer"], s["asig"] = last_answer(r["thread"])
         answered.append(s)
     answered.sort(key=_prio)
     # 両方のラベルが付いたチケットは、書き込みの途中か、ラベルの付け替えに失敗したもの。画面が二重に出さないよう、
@@ -191,11 +192,9 @@ def load_project(repo: str) -> dict:
     return {"human": human, "answered": answered}
 
 
-def unreadable(kind: str, reason: str) -> dict:
-    """bd として読めないプロジェクトの結果 (どの CLI も起動しない)。kind は registry.project_kind の bd 以外。
-    cli は br と決まったときだけ "br"、決められない (unknown / conflict) ときは None。"""
-    if kind == registry.BR:
-        return {"ok": False, "writable": False, "cli": registry.BR, "error": "br のプロジェクトにはまだ対応していません"}
+def unreadable(reason: str) -> dict:
+    """bd と br のどちらで読むか決められないプロジェクト (registry.project_kind の unknown / conflict) の結果。
+    どの CLI も起動しない。"""
     return {"ok": False, "writable": False, "cli": None,
             "error": f"bd と br のどちらで読むか決められない ({reason})。{registry.CLI_ENV} で指定してください"}
 
@@ -231,16 +230,20 @@ class Store:
             # 設定 (HUMANQ_BEADS_CLI) や印が変わったら、キャッシュの時間内でも読み直す (ファイルを見るだけで安い)
             if hit and hit[2] == route and time.monotonic() - hit[0] < CACHE_SEC:
                 return hit[1]
-            if kind != registry.BD:
-                data = {**unreadable(kind, reason), "human": [], "answered": []}
+            if kind not in (registry.BD, registry.BR):
+                data = {**unreadable(reason), "human": [], "answered": []}
                 self._cache[repo] = (time.monotonic(), data, route)
                 return data
+            # br は読みだけ (writable:false。画面は回答の部品を出さず、POST は CLI を打つ前に readonly で断る)。
+            # bd として読むプロジェクトは、読みに失敗しても writable:true
+            writable = kind == registry.BD
             try:
-                data = {"ok": True, **load_project(repo), "cli": registry.BD, "writable": True}
+                data = {"ok": True, **(load_project(repo) if writable else load_project(repo, _BR))}
             except BdError as e:
-                data = {"ok": False, "error": str(e), "human": [], "answered": [], "cli": registry.BD, "writable": True}
+                data = {"ok": False, "error": str(e), "human": [], "answered": []}
             except Exception as e:  # noqa: BLE001  想定外の形の出力でも、そのプロジェクトだけを読めないことにする
-                data = {"ok": False, "error": f"{type(e).__name__}: {e}", "human": [], "answered": [], "cli": registry.BD, "writable": True}
+                data = {"ok": False, "error": f"{type(e).__name__}: {e}", "human": [], "answered": []}
+            data.update(cli=kind, writable=writable)
             self._cache[repo] = (time.monotonic(), data, route)
             return data
 
@@ -408,9 +411,11 @@ def make_handler(store: Store, port: int, token: str, page: str, version: str):
                 d = store.project(repo) if q.get("fresh") == "1" else store.peek(repo)
                 if d is None:
                     return self._json(200, {"pending": True})
-                # ok:false (読めないプロジェクト) の human は 0 でも「0 件」ではない。hook はこれを見て「読めない」と伝える
+                # ok:false (読めないプロジェクト) の human は 0 でも「0 件」ではない。hook はこれを見て「読めない」と伝える。
+                # cli は hook が案内の文を選ぶため (br のプロジェクトには bd のコマンドを案内しない)
                 self._json(200, {"human": len(d["human"]), "answered": [x["id"] for x in d["answered"]],
-                                 "ok": d.get("ok", True), "error": d.get("error")})
+                                 "ok": d.get("ok", True), "error": d.get("error"),
+                                 "cli": d.get("cli"), "writable": d.get("writable")})
             else:
                 self._send(404, b"not found", "text/plain")
 

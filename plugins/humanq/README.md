@@ -34,7 +34,12 @@ bd を使っているプロジェクト (cwd から上に `.beads/` がある) �
 - ポートは `HUMANQ_PORT` で変えられる (hook の env)
 - プロジェクトごとに、`.beads/` の中のファイルの印で bd か br かを決める (CLI は打たない)。br の印は `.beads/.gitignore` の `.br_history` か `fsqlite` を含む行・`.br_history/`・`*-fsqlite-ns-*`・`.br-db-*.lock`、bd の印は `metadata.json` の `database` か `backend` が `dolt`・`embeddeddolt/`。br の印だけなら br、bd の印だけなら bd、印が無ければ bd。両方ある・どちらの印も無く SQLite の形 (`metadata.json` の `database` が `.db` で終わる) のときは決められないので、どの CLI も打たず、画面に理由を出す
 - hook の env `HUMANQ_BEADS_CLI` (`bd` / `br` / `auto`、未設定は `auto`) で決め方を指定できる。`HUMANQ_PORT` と同じくプロジェクトの settings の `env` でプロジェクトごとに決められる。指定に反する印があれば決められない扱い。`bd` / `br` / `auto` 以外の値は `auto` として扱い、SessionStart で 1 行だけ警告する
-- br のプロジェクトにはまだ対応していない (どの CLI も起動せず、画面に「まだ対応していません」と出す。回答の書き込みは `readonly` で断る)。br を bd の `.beads/` に向けて打つと、エラーを出さずに空の一覧を返して `.beads/` に dolt のファイルを作るので、br と確定した dir にしか打たない
+- br のプロジェクトは、今は読み取りだけ。判断待ちと回答済みを画面に出すが、そのカードには選択肢のボタン・補足欄・「回答する」・「取り消して判断待ちに戻す」を出さず、「このプロジェクト (br) は画面からはまだ回答できません」の 1 行を出す (選択肢は押せない一覧で見せる)。回答・取り消しの書き込みは、CLI を打つ前に `readonly` で断る。hook は件数だけを伝え、bd のコマンドを含む案内は出さない
+  - 読みは 1 プロジェクトあたり 3 プロセス: `br list -l human` と `br list -l answered` (どちらも `-s open -s in_progress -s blocked -s deferred --limit 0 --json`) と、両方の ID をまとめた `br show <id...> --json`。0 件なら `show` は打たない。`show` は ID が 1 つでも無いと全体が失敗する (exit 3) ので、そのときは一覧から 1 回だけ読み直す
+  - 問いは `show` の `agent_context` (JSON の文字列) の top-level の key `humanq` から読む (形は bd の metadata の `humanq` と同じ)。`agent_context` が JSON の object でない・`humanq` が無い・`ask` が文字列でないときは「問いが未整理」として出す
+  - コメントの並びは br では決まっていないので、`created_at` の順 (同じ秒なら ID の順) に並べてから、最後の `[humanq]` コメントを回答として読む (両ラベルのチケットの向きも同じ)
+  - br はプロジェクトの dir を cwd にして起動する (br に `-C` は無い)。DB・`.beads`・JSONL の場所を指す env (`BEADS_DB`・`BD_DB`・`BD_DATABASE`・`BEADS_DIR`・`BEADS_JSONL`) は br に渡さない (残っていると、登録したプロジェクトではない DB を読むため)
+- br を bd の `.beads/` に向けて打つと、エラーを出さずに空の一覧を返して `.beads/` に dolt のファイルを作るので、br と確定した dir にしか打たない
 - サーバーはセッションが終わっても動き続ける。止めるときは `server.json` の pid を kill する
 
 ## 問いの書き方 (`human` を付けるときは必ず書く)
@@ -108,13 +113,13 @@ metadata の `humanq` に置く。画面はこれを読んで、問い・背景�
 なし。マシンの外へは何も送らない。
 
 - 画面のサーバーは 127.0.0.1 で待ち受け、ブラウザとだけ話す。外部の CDN などから script や style を読まない (CSP で `default-src 'none'`)
-- bd の CLI (`bd human list`・`bd list`・`bd comments`・`bd label` など) を、登録したプロジェクトのディレクトリで起動する。bd の DB への書き込みは、画面で回答・取り消しを押したときだけ
+- bd の CLI (`bd human list`・`bd list`・`bd comments`・`bd label` など) と br の CLI (`br list`・`br show`) を、登録したプロジェクトのディレクトリで起動する。DB への書き込みは、画面で回答・取り消しを押したときだけ (br のプロジェクトにはまだ書き込まない)。ただし br は読みでも、JSONL の方が DB より新しいと DB へ取り込む (br の既定の動き。利用者が `br list` を打ったときと同じ)
 - hook の出力 (判断待ちの件数・回答のあったチケットの ID) は Claude Code の会話に入る
 
 ## 要件
 
 - macOS / Linux。Python 3.11 以上 (標準ライブラリだけを使う)。登録のファイルロックに `fcntl` を使うので Windows では動かない
-- bd (beads) の CLI が PATH にあること。bd が無いプロジェクトでは何もしない
+- bd (1.x、`bd human` があるもの) か br (0.7.6 で確認) のどちらかが PATH にあること。br は今は読み取りのみ。`.beads/` が無いプロジェクトでは何もしない
 - 画面はモダンなブラウザ (Chromium で確かめている)
 
 ## テスト
@@ -126,5 +131,7 @@ PLAYWRIGHT_PATH=<playwright の index.mjs> node tests/ui_test.mjs   # 画面 (Pl
 ```
 
 `tests/test_server.py` の bd を通すシナリオ (送り直し・ラベルの再試行・両ラベルの向きなど) は、`tests/fake_beads.py` (偽の bd) を一時の bin dir に置いて回すので、本物の bd が無い環境でも skip されない。偽物は bd 1.3.4 で実測した癖 (0 件の `human list --json` は `null` など) を持ち、失敗は env (`FAKE_BEADS_FAIL`) で注入する。サーバーが打つ bd の argv の列 (読み・回答・取り消し) も、このテストで固定している。discover で流すと、このシナリオは別のプロセスで並列に回る (`HUMANQ_TEST_JOBS`、既定 3。`HUMANQ_TEST_JOBS=1` で直列。クラスやテストを名前で指したとき (`python3 -m unittest test_server.WithFakeBd` など) も直列)。
+
+br のプロジェクトの読み (一覧と `show` の argv・コメントの並べ替え・両ラベルの向き・bd を打たないこと・hook の案内) は、`tests/test_br_read.py` が同じ偽物を br の名前で置いて回す (偽の br はコメントを新しい順で返す)。
 
 `tests/ui_test.mjs` はサーバーを一時ポートと一時 state dir で起動し、API の応答を台本どおりに返して画面の動き (押したカードの即時の非表示・失敗時の戻し・入力中の保護など) を確かめる。bd には触れない。

@@ -2512,3 +2512,67 @@ test("絞り込み: 判断待ちなしのプロジェクトの文は絞り込み
     assert.match(await idle.innerText(), /ほか 1 プロジェクトは判断待ちなし/);
   });
 });
+
+// ---- 書き込めないプロジェクト (writable:false。今は br) ----------------------------------------------------------
+
+test("書き込めないプロジェクト (br) のカードは、問いと選択肢を見せ、回答・取り消しの部品の代わりに 1 行の案内を出す。書き込めるかが変われば作り直す", async () => {
+  const BR = "/work/rusty";
+  const RO_NOTE = "このプロジェクト (br) は画面からはまだ回答できません";
+  const roq = item("r-1", { q: { ...item("r-1").q, context: "背景の 1 行",
+    options: [{ key: "a", label: "【応急】案A", desc: "説明A" }, { key: "b", label: "案B", desc: "" }] } });
+  // null は key を出さない (writable・cli を返さない古いサーバーの形)
+  const brProj = (writable, cli = "br") => ({ ...proj(BR, [roq, item("r-3", { q: null })], [answeredItem("r-2")]),
+    ...(writable === null ? {} : { writable }), ...(cli === null ? {} : { cli }) });
+  const s = new Script([{ ...proj(P1, [item("t-1")], [answeredItem("t-2")]), cli: "bd", writable: true }, brProj(false)]);
+  const card = (page, id) => page.locator(`section.card:has(.id:text-is("${id}"))`);
+  // 待っても満たされないのは検出 (assertion の失敗) として数える
+  const until = async (fn, what) => { try { await waitFor(fn, 3000, what); } catch (e) { assert.fail(e.message); } };
+  // 要素がちょうど 1 つあることを確かめてから文字を読む (無い要素の innerText は待ちの時間切れになり、assertion の失敗にならない)
+  const text1 = async (loc, what) => { assert.equal(await loc.count(), 1, `${what} がちょうど 1 つでない`); return loc.innerText(); };
+  const ro = async page => {
+    for (const id of ["r-1", "r-2", "r-3"]) {
+      const c = card(page, id);
+      assert.equal(await c.count(), 1, `${id} のカードが 1 枚でない`);
+      assert.equal(await c.locator(".opt, textarea, button.primary, button.ghost").count(), 0, `${id} に回答・取り消しの部品がある`);
+      assert.deepEqual(await c.locator(".ro").allInnerTexts(), [RO_NOTE], `${id} に案内の 1 行が無い`);
+    }
+    const q = card(page, "r-1");
+    assert.equal(await text1(q.locator(".ask"), "問い"), "ask r-1");
+    assert.equal(await text1(q.locator(".ctx"), "背景"), "背景の 1 行");
+    assert.equal(await q.locator(".roopts li").count(), 2, "選択肢が押せない一覧で出ていない");
+    assert.equal(await text1(q.locator(".roopts li.rec .badge"), "推奨の印"), "推奨");
+    assert.equal(await text1(q.locator(".roopts li.rec .depth"), "深さのラベルのチップ"), "応急");
+    assert.match(await text1(q.locator(".roopts li.rec"), "推奨の選択肢"), /案A\s*説明A/);
+    assert.equal(await text1(card(page, "r-3").locator(".ctx"), "問いの無いカードの文"), "問いがまだ整理されていません。");
+    assert.match(await text1(card(page, "r-2").locator(".ans"), "回答の本文"), /^回答: 案A/);
+    // 書き込めるプロジェクトのカードは今までどおり (セレクタも変えていない)
+    assert.equal(await qcard(page, "t-1").locator(".opt").count(), 2);
+    assert.equal(await qcard(page, "t-1").locator("button.primary").count(), 1);
+    assert.equal(await text1(acard(page, "t-2").locator("button.ghost"), "取り消しのボタン"), "取り消して判断待ちに戻す");
+    assert.equal(await page.locator(".ro").count(), 3, "書き込めるプロジェクトに案内が出た");
+  };
+  await withPage(s, async page => {
+    await ro(page);
+    assert.equal(await page.locator("#count").innerText(), "3 件", "書き込めないプロジェクトの判断待ちも数える");
+    // 書き込めるようになった (writable:true と、writable を返さない古いサーバー) → 作り直して回答の部品が出る
+    for (const flip of [brProj(true), brProj(null, null)]) {
+      s.projects[1] = flip;
+      await page.evaluate(() => load());
+      await until(async () => (await qcard(page, "r-1").count()) === 1, "r-1 が回答できるカードに作り直される");
+      assert.equal(await qcard(page, "r-1").locator(".opt").count(), 2);
+      assert.equal(await acard(page, "r-2").locator("button.ghost").count(), 1);
+      assert.equal(await page.locator(".ro, .roopts").count(), 0);
+    }
+    // 書き込めなくなった → 部品を外して案内に戻る (cli が無ければ名前を出さない)
+    s.projects[1] = brProj(false, null);
+    await page.evaluate(() => load());
+    await until(async () => (await page.locator(".ro").count()) === 3, "案内の 1 行に戻る");
+    assert.deepEqual(await card(page, "r-1").locator(".ro").allInnerTexts(), ["このプロジェクトは画面からはまだ回答できません"]);
+    s.projects[1] = brProj(false);
+    await page.evaluate(() => load());
+    await until(async () => (await card(page, "r-1").locator(".ro").innerText()) === RO_NOTE, "CLI の名前の付いた案内");
+    await ro(page);
+    assert.deepEqual(s.answers, [], "書き込めないプロジェクトに回答を送った");
+    assert.deepEqual(s.undos, []);
+  });
+});
