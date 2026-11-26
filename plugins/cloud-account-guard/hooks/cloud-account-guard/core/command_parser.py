@@ -9,8 +9,10 @@
 - strip_leading_env: 先頭の `FOO=bar` 形式環境変数割当を剥がす
 - strip_transparent_wrappers: 透過的 wrapper (`sudo`, `time`, `nohup`,
   `env`, `command`, `builtin`, `exec`, `npx`, `timeout`, `nice`, `stdbuf`,
-  `setsid`, `caffeinate`, `watch`, `xargs`, `pnpm exec`, `pnpm dlx`,
-  `mise exec --`, `bun x`) とその直後のフラグ (`sudo -u USER` 等) を剥がす
+  `setsid`, `caffeinate`, `watch`, `xargs`, `pnpm exec`, `pnpm dlx`, `pnpx`,
+  `yarn dlx`, `npm exec`, `mise exec [TOOL@VERSION...] --`, `mise x ... --`,
+  `bun x`, `bunx`、CLI 名の前の `pnpm` / `yarn`) とその直後のフラグ
+  (`sudo -u USER` 等) を剥がす
 - extract_candidates: 上記に加えてシェル構文プレフィックス (`(` / `{` /
   `!` / `if`〜`do` 等の予約語 / 先頭リダイレクト)、末尾の `)` `;` `}` `&`、
   コマンド名のパス・`\\` エスケープを正規化し、「コマンドマッチにかける候補
@@ -34,8 +36,35 @@ _WRAPPERS_SINGLE = {
     # service に match せず検証をすり抜けていた。
     "timeout", "nice", "stdbuf", "setsid", "caffeinate", "watch", "xargs",
 }
-_WRAPPERS_TWO = {("pnpm", "exec"), ("pnpm", "dlx"), ("bun", "x")}
-_WRAPPERS_THREE = {("mise", "exec", "--")}
+# 2 語・3 語の wrapper は語を落とすだけで、flag は読まない (option 付きは剥がさない。後ろが
+# `-` で始まる語になり、どの CLI にも一致しない)。v0.32.0 で `yarn dlx` / `npm exec` /
+# `npm exec --` を足した。起動の根拠 (docs / 実測) は docs/wrapper-env-audit.md の D16 表。
+_WRAPPERS_TWO = {
+    ("pnpm", "exec"), ("pnpm", "dlx"), ("bun", "x"), ("yarn", "dlx"), ("npm", "exec"),
+}
+_WRAPPERS_THREE = {("npm", "exec", "--")}
+# `--` の無い `npm exec` は、後ろの `-` で始まる語を npm が自分の option として読み、CLI に渡さない
+# (npm 11: `npm exec firebase deploy --project p` の firebase は `deploy p` を受け取る)。CLI が受け取る
+# 引数を決められないので、後ろに `-` で始まる語があれば剥がさない (`--` の後ろは npm が読まない)。
+_WRAPPERS_TAKE_LATER_OPTIONS = {("npm", "exec")}
+# 1 語の別名 (v0.32.0)。`bunx` = `bun x`、`pnpx` = `pnpm dlx`。別名の元と同じく語を落とすだけ。
+_WRAPPERS_ALIAS = {"bunx", "pnpx"}
+# 後ろに使う tool の指定 (`node@20` / `aws-cli@2` / `python`。0 個以上) を並べてから `--` で
+# コマンドを始める wrapper (v0.32.0。0.31.1 までは tool の指定の無い `mise exec --` だけ)。
+# `--` の前に `-` で始まる語 (option) があるか、`--` が無ければ剥がさない。
+_WRAPPERS_TOOL_ARGS = {("mise", "exec"), ("mise", "x")}
+# `pnpm <名前>` / `yarn <名前>` (v0.32.0)。名前が下の CLI 名と一致するときだけ剥がす。pnpm / yarn は
+# 同じ名前の package.json の script があればそちらを走らせる (CLI 名と区別できない) ので、名前の一致に絞る。
+_BIN_RUNNERS = {"pnpm", "yarn"}
+# CLI 名の後ろに `--` があると、引数を書き換えて CLI に渡す bin runner。yarn 1 は `--` より前の語を自分の
+# option として読み、`--` を落として残りを渡す (yarn 1.22 で実測: `yarn firebase deploy -- --project p` の
+# firebase は `deploy --project p`、`yarn firebase deploy --project p -- x` は `deploy x` を受け取る)。hook は
+# `--` の後ろの option を読まず、前の option は CLI に届くと読むので、照合先を取り違える。後ろに `--` の語
+# (引用符で包んだ `'--'` も同じ) があれば剥がさない。pnpm (8〜11 で実測) は `--` も前の語もそのまま渡す。
+_BIN_RUNNERS_REWRITE_DOUBLE_DASH = {"yarn"}
+# services/ の CLI 名と、検証の対象外の CLI (`core/unverified.py` の `UNVERIFIED_CLIS`)。一致は
+# tests/test_package_runner_wrappers.py が確かめる (service を足したら、ここにも足す)。
+_BIN_RUNNER_NAMES = frozenset({"gh", "firebase", "aws", "gcloud", "kubectl", "wrangler", "cf"})
 
 # --- 透過 wrapper の env 伝播クラス分類 (D16) ---
 #
@@ -56,7 +85,8 @@ _WRAPPERS_THREE = {("mise", "exec", "--")}
 # クラス:
 #   "passthrough" — 継承 env を素通しする。pre-wrapper env を収集・伝播してよい
 #                   (time / nohup / command / exec / npx / pnpm exec /
-#                    mise exec -- / bun x)。`command` は外部 CLI を起動する場合も
+#                    mise exec -- / bun x / bunx / npm exec / pnpm <CLI 名> など)。
+#                    `command` は外部 CLI を起動する場合も
 #                    env を素通すので passthrough。`builtin` は外部 CLI 自体を
 #                    起動しない (= service が match しない) ため env 伝播の有無は
 #                    無害だが、分類上は素通し側に置く。
@@ -95,7 +125,18 @@ _WRAPPER_ENV_CLASS = {
     ("pnpm", "exec"): "passthrough",
     ("pnpm", "dlx"): "passthrough",
     ("bun", "x"): "passthrough",
-    ("mise", "exec", "--"): "passthrough",
+    # v0.32.0 追加分。前置きの env が後ろの CLI に届くことを実測した (docs/wrapper-env-audit.md の D16 表)。
+    # `mise exec` は 0.31.1 までの `("mise", "exec", "--")` (tool の指定の無い形) を含む。
+    ("mise", "exec"): "passthrough",
+    ("mise", "x"): "passthrough",
+    ("yarn", "dlx"): "passthrough",
+    ("npm", "exec"): "passthrough",
+    ("npm", "exec", "--"): "passthrough",
+    "bunx": "passthrough",
+    "pnpx": "passthrough",
+    # `pnpm <CLI 名>` / `yarn <CLI 名>`
+    "pnpm": "passthrough",
+    "yarn": "passthrough",
 }
 
 # wrapper ごとの flag 分類。**3 分類**を厳密に区別する (PR #48 Codex P1 x2 の教訓):
@@ -1434,6 +1475,19 @@ def _tokens(cmd: str) -> list[str]:
     return cmd.split()
 
 
+def _has_double_dash_word(rest: str, fallback: list[str]) -> bool:
+    """`rest` のシェルの語に `--` があるか。
+
+    語は context option の走査 (`cli_options.find_context_options`) と同じ `shlex.split` で分ける。シェルは
+    `'--'` / `\\--` を `--` として渡し、`"a -- b"` は 1 語として渡すので、空白で分けた語では両方を誤る。
+    引用符が閉じず語に分けられないときは、空白で分けた語 (`fallback`) で見る。
+    """
+    try:
+        return "--" in shlex.split(rest)
+    except ValueError:
+        return "--" in fallback
+
+
 def _drop_tokens(cmd: str, n: int) -> str:
     remaining = cmd.lstrip()
     for _ in range(n):
@@ -1717,8 +1771,31 @@ def _strip_one_wrapper_kind(cmd: str) -> tuple[str | None, bool]:
     if len(toks) >= 3 and (toks[0], toks[1], toks[2]) in _WRAPPERS_THREE:
         return _drop_tokens(cmd, 3), False
 
+    if len(toks) >= 2 and (toks[0], toks[1]) in _WRAPPERS_TOOL_ARGS:
+        # `mise exec node@20 aws-cli@2 -- aws ...`: `--` までの語は tool の指定。option があれば剥がさない
+        for k in range(2, len(toks)):
+            if toks[k] == "--":
+                return _drop_tokens(cmd, k + 1), False
+            if toks[k].startswith("-"):
+                break
+        return None, False
+
     if len(toks) >= 2 and (toks[0], toks[1]) in _WRAPPERS_TWO:
+        if (toks[0], toks[1]) in _WRAPPERS_TAKE_LATER_OPTIONS and any(
+            tok.startswith("-") for tok in toks[2:]
+        ):
+            return None, False
         return _drop_tokens(cmd, 2), False
+
+    if toks[0] in _WRAPPERS_ALIAS:
+        return _drop_tokens(cmd, 1), False
+
+    if len(toks) >= 2 and toks[0] in _BIN_RUNNERS and toks[1] in _BIN_RUNNER_NAMES:
+        if toks[0] in _BIN_RUNNERS_REWRITE_DOUBLE_DASH and _has_double_dash_word(
+            _drop_tokens(cmd, 2), toks[2:]
+        ):
+            return None, False
+        return _drop_tokens(cmd, 1), False
 
     t0 = toks[0]
 

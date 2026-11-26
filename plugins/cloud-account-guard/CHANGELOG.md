@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.31.3
+## 0.32.1
 
 ### Changed: deny 文面に値を示すかの判定を、禁止リストから許可リストに変える (表示だけ。判定は変更なし)
 
@@ -23,6 +23,43 @@
   NFD の日本語、`_local` / `a,b`、ドメイン付きの project ID は従来どおり示す
 - deny / allow の判定と、案内するコマンドに入れる値の形 (英数字と一部の記号だけからなる形) は変えていない
 - テストを追加: `test_shell_word.py`
+
+## 0.32.0
+
+### Added: `bunx` / `npm exec` / `pnpm` / `yarn` / `mise x` 経由で起動したクラウド CLI も検証する
+
+- 次の起動の形を透過 wrapper として剥がし、後ろのクラウド CLI を検証の候補にする。0.31.1 までは
+  `npx` / `bun x` / `pnpm exec` / `pnpm dlx` / `mise exec --` だけを剥がし、これらの形は候補にならずに
+  通っていた (README の守らない範囲にも載っていなかった)
+  - `bunx` (`bun x` の別名)・`pnpx` (`pnpm dlx` の別名)・`yarn dlx`
+  - `npm exec` と `npm exec --`。`--` の無い `npm exec` は、CLI 名の後ろに `-` で始まる語があれば剥がさない
+    (npm がその語を自分の option として読み、CLI に渡さないため。`npm exec firebase deploy --project p` の
+    firebase は `deploy p` を受け取る)
+  - `mise exec <tool>@<版> --` / `mise x [<tool>@<版>] --` (tool の指定は 0 個以上。0.31.1 は tool の指定の
+    無い `mise exec --` だけ)。`--` の前に option があるとき・`--` が無いときは剥がさない
+  - CLI 名の前の `pnpm` / `yarn` (`pnpm firebase deploy` / `yarn firebase deploy`)。名前が gh / firebase /
+    aws / gcloud / kubectl と、検証の対象外の wrangler / cf のときだけ。yarn は依存の bin (node_modules/.bin)
+    だけを起動し、PATH の gh / aws / gcloud / kubectl は起動しない (yarn 1.22 で実測)。yarn は CLI 名の後ろに
+    `--` の語があれば剥がさない (yarn 1 は `--` より前の語を自分の option として読み、`--` を落として残りを
+    CLI に渡す。`yarn firebase deploy -- --project p` の firebase は `deploy --project p` を、
+    `yarn firebase deploy --project p -- x` は `deploy x` を受け取り、hook が照合に使う引数と食い違うため)
+- どの形も語を落とすだけで option は読まない (`bunx --bun firebase ...` / `pnpm -C app firebase ...` は
+  0.31.1 と同じく候補にしない。README の守らない範囲に足した)。前置きの env は後ろの CLI に届くことを実測した
+  (bun 1.3 / npm 11 / pnpm 11 / yarn 1.22 / mise 2026.9。根拠は docs/wrapper-env-audit.md の D16 表)
+- 検証の対象外の CLI の知らせ (0.31.0) も同じ分解を使うので、`bunx wrangler` / `pnpm wrangler` /
+  `yarn wrangler` も知らせる
+- 既知の制限: `pnpm <CLI 名>` / `yarn <CLI 名>` は、同じ名前の package.json の script でも CLI として照合する
+  (pnpm / yarn は script を優先して走らせる)。止まる条件は直接 CLI を打ったときと同じ
+- 判定が変わるのは足した形を含むコマンドだけ。0.31.1 で止めていたコマンドを通すのは次の 1 種類だけ: gh の token の
+  env (`GH_TOKEN` / `GITHUB_TOKEN` / `GH_ENTERPRISE_TOKEN` / `GITHUB_ENTERPRISE_TOKEN` / `GH_HOST`) に値を読めない
+  代入をしたセグメント (README の守らない範囲) の中で、gh を足した形で起動したとき
+  (`GH_TOKEN=$(cmd) watch 'pnpm gh pr create && aws s3 rm ...'` /
+  `GH_TOKEN=$(cmd) bunx gh pr create <<EOF && X=$(cmd) aws s3 rm ...` + 改行 + 本文 + `EOF`)。セグメントごと
+  0.29.9 と同じく読むので、同じセグメントの aws などが候補にならない (直接の `gh` / `npx gh` と同じ読み。0.31.1 は
+  足した形の gh を剥がさなかったので、同じセグメントの aws などを照合していた)。足した 9 形の gh と gh の token の
+  印 6 種をシェル経由の wrapper の中と heredoc の行に組んだ 4,032 件では、全 service の期待値を登録して照合が
+  不一致になる設定で 1,080 件がこの形で deny から通るようになった (9 形とも 120 件ずつ。判定は直接の `gh` /
+  `npx gh` に置き換えた形と同じ)。比べた入力 52,392 件のうち、ほかに 0.31.1 の deny が通るようになったものは無い
 
 ## 0.31.2
 
