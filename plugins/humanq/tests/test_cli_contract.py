@@ -1,15 +1,18 @@
 """bd・br の CLI の癖を、偽物 (tests/fake_beads.py) と本物の両方に同じ assertion で当てる契約テスト。
 
-    python3 -m unittest discover tests           # 偽物 2 通りは常に走る。本物は PATH に無ければ skip
+    python3 -m unittest discover tests           # 偽物 2 通りだけ走る。本物は env を立てたときだけ走る (既定は skip)
+    HUMANQ_TEST_BD=bd HUMANQ_TEST_BR=br python3 -m unittest tests.test_cli_contract   # 本物も回す
     python3 -m unittest tests.test_cli_contract  # このファイルだけ
 
 humanq は CLI の出力の形に強く依る。偽物は実測した癖を写したものなので、bd / br の版が上がって本物の形が
 変わると、偽物のテストは緑のまま本番だけが壊れる。ここは「偽物と本物が同じ癖を持つ」ことを確かめ、
 手元に本物があるときに食い違いを検出する。bd / br を上げたら、手元でこれを回す。
 
-- 対象は 4 通り: 偽の bd・偽の br (常に走る)、本物の bd・本物の br (見つからなければ skip)
-- 本物は env HUMANQ_TEST_BD / HUMANQ_TEST_BR (コマンドの文字列。例: "br" や、起動の前置き付きの
-  "<launcher> <args> -- br") で指せる。無ければ PATH の bd / br を使い、br は --version が通らなければ skip
+- 対象は 4 通り: 偽の bd・偽の br (常に走る)、本物の bd・本物の br (env を立てたときだけ走る)
+- 本物は遅い (bd は 1 回の起動が重く、契約テスト全体で 30 秒近い) ので、PATH に bd / br があっても既定の
+  suite では起動しない。env HUMANQ_TEST_BD / HUMANQ_TEST_BR が無ければ skip (理由に変数名を出す)
+- env の値は起動コマンドの文字列。例: "bd"、"br"、起動の前置き付きの "<launcher> <args> -- br"。
+  "1" なら PATH の bd / br を使う。立てても --version が通らなければ skip
 - 本物は一時 dir の使い捨てのプロジェクトでだけ打つ (利用者のプロジェクトには触れない)。
   BEADS_* / BD_* / BR_* の env は外して、手元の設定が別のプロジェクトを指さないようにする
 - 失敗の文には、どの CLI のどの版でどの癖が食い違ったかを出す
@@ -58,9 +61,11 @@ def install_fake(bin_dir: str, prog: str) -> str:
 
 
 def real_command(prog: str) -> list[str] | None:
-    """本物の起動コマンド (argv の前置き)。見つからない・起動できなければ None。"""
-    spec = os.environ.get("HUMANQ_TEST_" + prog.upper())
-    cmd = shlex.split(spec) if spec else ([found] if (found := shutil.which(prog)) else None)
+    """本物の起動コマンド (argv の前置き)。env が無い・見つからない・起動できなければ None (--version も打たない)。"""
+    spec = os.environ.get("HUMANQ_TEST_" + prog.upper(), "").strip()
+    if not spec:
+        return None
+    cmd = ([found] if (found := shutil.which(prog)) else None) if spec == "1" else shlex.split(spec)
     if not cmd:
         return None
     try:
@@ -89,7 +94,7 @@ class ContractBase(unittest.TestCase):
         else:
             real = real_command(kind)
             if real is None:
-                raise unittest.SkipTest(f"本物の {kind} が無い (PATH か HUMANQ_TEST_{kind.upper()})")
+                raise unittest.SkipTest(f"本物の {kind} の脚は env HUMANQ_TEST_{kind.upper()} を立てたときだけ走る (立っていないか、起動できない)")
             cls.cmd = real
         if cls.SUBJECT.startswith("fake"):
             cls.version = "偽物 (tests/fake_beads.py)"
