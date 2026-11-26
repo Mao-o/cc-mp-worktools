@@ -8,6 +8,8 @@ HUMANQ_SERVER_DIR で別の server/ を試せる。
 from __future__ import annotations
 
 import ast
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -28,7 +30,7 @@ Q = {"v": 1, "kind": "decision", "ask": "Q?", "context": "c", "recommended": "a"
      "options": [{"key": "a", "label": "案A", "desc": "d"}, {"key": "b", "label": "案B", "desc": "e"}]}
 ANS_A = "[humanq] 回答: 案A (a)\n"
 ROW_KEYS = {"id", "title", "priority", "labels", "created_at", "description", "notes", "question_raw"}
-ANSWERED_LIST = ("list", "--status", "open,in_progress,blocked,deferred", "--label", "answered", "--flat", "-n", "0", "--json")
+ANSWERED_LIST = ("list", "--label", "answered", "--flat", "-n", "0", "--json")      # status では絞らない
 
 
 def issue(iid: str, **kw) -> dict:
@@ -277,6 +279,32 @@ class Question(unittest.TestCase):
                 except Exception as e:  # noqa: BLE001  実装の変異で漏れた例外を、走っていない ERROR にしない
                     self.fail(f"{raw!r} で例外: {type(e).__name__}: {e}")
                 self.assertIsNone(got)
+    def test_options_that_are_not_a_list_of_key_label_objects_make_the_question_unstructured(self):
+        """list でない options (数・真偽値・文字列・object)・object でない要素・key か label が文字列でない要素は、
+        例外にせず問いが未整理 (None)。options が無い・null・[] は選択肢なしの問い。"""
+        ok = {"key": "a", "label": "案A"}
+        broken = {"数": 5, "真偽値": True, "偽": False, "空文字": "", "文字列": "案A", "object": ok, "要素が数": [1],
+                  "要素が文字列": ["a"], "要素が null": [None], "key の欠け": [{"label": "案A"}], "label の欠け": [{"key": "a"}],
+                  "key が数": [{"key": 1, "label": "案A"}], "label が数": [{"key": "a", "label": 2}],
+                  "正しい要素の後に壊れた要素": [ok, 7]}
+        for name, options in broken.items():
+            with self.subTest(options=name):
+                try:
+                    got = humanq.question_from_raw({"ask": "Q?", "options": options})
+                    got_json = humanq.question_from_raw(json.dumps({"ask": "Q?", "options": options}))
+                except Exception as e:  # noqa: BLE001  漏れた例外を、走っていない ERROR にしない
+                    self.fail(f"options={options!r} で例外: {type(e).__name__}: {e}")
+                self.assertIsNone(got)
+                self.assertIsNone(got_json)
+        for name, q in {"options が無い": {"ask": "Q?"}, "null": {"ask": "Q?", "options": None}, "[]": {"ask": "Q?", "options": []}}.items():
+            with self.subTest(options=name):
+                got = humanq.question_from_raw(q)
+                self.assertIsInstance(got, dict)
+                self.assertEqual(got["options"], [])
+        got = humanq.question_from_raw({"ask": "Q?", "options": [{"key": "a", "label": "案A", "desc": 3}, {"key": "b", "label": "案B"}]})
+        self.assertEqual(got["options"], [{"key": "a", "label": "案A", "desc": "3"}, {"key": "b", "label": "案B", "desc": ""}])
+
+    def test_deep_nesting_in_metadata_is_unstructured(self):
         # metadata の humanq が深い入れ子の JSON 文字列: json の parser は RecursionError を上げる。問いが未整理にする
         # (漏らすと Store.project の catch-all で、そのプロジェクトの全チケットが読めなくなる)
         try:
@@ -297,13 +325,15 @@ def str_constants(path: Path) -> tuple[set[str], set[str]]:
 class Layering(unittest.TestCase):
     """CLI の形 (起動・argv の語・問いの置き場) を知っているのは backend.py だけ。humanq.py は CLI に依らない形を読む。"""
 
-    CLI_WORDS = {"bd", "-C", "--json", "--actor", "--status", "--label", "--flat", "-n", "-f", "metadata", "comments", "list",
+    CLI_WORDS = {"bd", "-C", "--json", "--actor", "--label", "--flat", "-n", "-f", "metadata", "comments", "list",
                  "br", "-l", "--limit", "show", "agent_context"}
+    # backend.py は今は使わない (回答済みの読みは status で絞らない) が、humanq.py に持ち込まれないようにする語
+    UNUSED_CLI_WORDS = {"--status"}
 
     def test_humanq_py_does_not_know_the_cli(self):
         imports, consts = str_constants(SERVER_DIR / "humanq.py")
         self.assertNotIn("subprocess", imports)
-        self.assertEqual(consts & self.CLI_WORDS, set())
+        self.assertEqual(consts & (self.CLI_WORDS | self.UNUSED_CLI_WORDS), set())
         b_imports, b_consts = str_constants(SERVER_DIR / "backend.py")     # 照合の語が backend 側に実際にある (空の検査にしない)
         self.assertIn("subprocess", b_imports)
         self.assertEqual(self.CLI_WORDS - b_consts, set())
@@ -424,6 +454,48 @@ class BrRun(unittest.TestCase):
                 e, _ = self.run_with(return_value=p)
                 self.assertIsInstance(e, backend.CliExit)
                 self.assertEqual((e.code, str(e)), (code, msg))
+
+
+class BrWarnings(unittest.TestCase):
+    """br が exit 0 で stderr に出す警告 (JSONL の自動 export の失敗) は、結果を変えずに、サーバーの stderr に 1 行ずつ残す。"""
+
+    EXPORT = "Warning: Mutation succeeded, but automatic JSONL export failed: disk full"
+
+    def run_with(self, p):
+        err = io.StringIO()
+        with mock.patch.object(backend.subprocess, "run", return_value=p), contextlib.redirect_stderr(err):
+            try:
+                out = backend.run_br("/r", "label", "add", "hq-1", "answered")
+            except Exception as e:  # noqa: BLE001  例外が漏れる変異を、走っていない ERROR にしない
+                self.fail(f"例外が漏れた: {type(e).__name__}: {e}")
+        return out, err.getvalue()
+
+    def test_a_warning_on_exit_zero_is_logged_once_and_the_result_is_unchanged(self):
+        out, logged = self.run_with(subprocess.CompletedProcess([], 0, '[{"status": "added"}]', self.EXPORT + "\n"))
+        self.assertEqual(out, '[{"status": "added"}]')
+        self.assertEqual(logged.splitlines(), ["humanq: br: " + self.EXPORT])
+
+    def test_only_the_warning_lines_are_logged(self):
+        _, logged = self.run_with(subprocess.CompletedProcess([], 0, "", f"progress: 1\n{self.EXPORT}\n\nnote: x\n"))
+        self.assertEqual(logged.splitlines(), ["humanq: br: " + self.EXPORT])
+
+    def test_no_warning_logs_nothing(self):
+        for err in ("", None, "note: something\n"):
+            with self.subTest(stderr=err):
+                out, logged = self.run_with(subprocess.CompletedProcess([], 0, "[]", err))
+                self.assertEqual((out, logged), ("[]", ""))
+
+    def test_the_log_is_bounded(self):
+        _, logged = self.run_with(subprocess.CompletedProcess([], 0, "", "".join(f"Warning: w{n} " + "x" * 1000 + "\n" for n in range(9))))
+        lines = logged.splitlines()
+        self.assertEqual(len(lines), 5, "警告の行数に上限が無い")
+        self.assertTrue(all(len(ln) <= len("humanq: br: ") + 300 for ln in lines), "1 行の長さに上限が無い")
+
+    def test_a_failing_exit_is_still_an_error_with_the_message(self):
+        with mock.patch.object(backend.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", self.EXPORT + "\n")):
+            with self.assertRaises(backend.CliExit) as cm:
+                backend.run_br("/r", "list")
+        self.assertEqual(str(cm.exception), self.EXPORT)
 
 
 class BrLoad(unittest.TestCase):
