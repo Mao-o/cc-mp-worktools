@@ -24,6 +24,8 @@ humanq は CLI の出力の形に強く依る。偽物は実測した癖を写�
   本物は JSONL から取り込み直した後の 1 件)・コメント 0 件が []・空のプロジェクトが ([], []) になることを確かめる。
   偽の br に sync は無いので、取り込み直しの脚は本物だけ
 - 偽の br が断る形 (REFUSED) は、本物の br も非 0 で断る。偽物の方が厳しい形は表に入れず、REFUSED の上のコメントに残す
+- br を git worktree で打ったときにどの DB に届くか (本体の DB・自分の DB) を、偽物と本物に同じ assertion で当て、humanq の
+  判定 (registry._br_home) が同じ dir を返すことも確かめる。bd の worktree の解決は測っていないので、bd の側には無い
 """
 from __future__ import annotations
 
@@ -44,11 +46,23 @@ FAKE = HERE / "fake_beads.py"
 SERVER_DIR = Path(os.environ.get("HUMANQ_SERVER_DIR") or HERE.parent / "server")
 sys.path.insert(0, str(SERVER_DIR))
 import backend  # noqa: E402
+import registry  # noqa: E402
 
 sys.path.insert(0, str(HERE))                   # real_cli (`-m unittest tests.test_cli_contract` のように親から指したときも読む)
 from real_cli import clean_env, real_command, skip_reason  # noqa: E402
 
 SUBJECTS = ("fake-bd", "fake-br", "real-bd", "real-br")
+
+
+def git(cwd: str, *args: str) -> str:
+    """使い捨ての repo で git を打つ。外側の GIT_* (GIT_DIR など) は外す (残っていると別の repo に worktree を足す)。
+    手元の設定の hook と署名は効かせない。"""
+    env = {k: v for k, v in clean_env().items() if not k.startswith("GIT_")}
+    p = subprocess.run(["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false",
+                        "-c", "core.hooksPath=/dev/null", *args], cwd=cwd, capture_output=True, text=True, timeout=60, env=env)
+    if p.returncode != 0:
+        raise AssertionError(f"git {args}: {p.stderr or p.stdout}")
+    return p.stdout
 
 
 def install_fake(bin_dir: str, prog: str) -> str:
@@ -762,6 +776,102 @@ class BrQuirks:
         self.assertEqual(self.row_of(q, iid).get("agent_context"), long_ctx, f"{self.m(q)}: 拒否されたのに値が変わった")
         self.ok(q, "update", iid, "--agent-context", '{"q":"a"}', "--force")
         self.assertEqual(self.row_of(q, iid).get("agent_context"), '{"q":"a"}', self.m(q))
+
+    # ---- git worktree で打ったときに読み書きする DB (humanq は同じ DB に届く登録を 1 つにまとめる: registry._br_home) ----
+    # 偽物と本物の両方で、どの DB に届くかを「後から本体にだけ足したチケットが見えるか」で確かめ、humanq の判定
+    # (registry._br_home) がその DB の持ち主の dir を返すことを同じ assertion で確かめる (本物の br が解決を変えたら落ちる)
+
+    TRACKED = (".gitignore", "config.yaml", "issues.jsonl", "metadata.json")      # 本物の br の .beads/ で git が追跡するもの
+
+    def git_project(self, name: str, sub: str = "") -> tuple[str, str]:
+        """git の repo の下 (sub) に br のプロジェクトを作り、追跡するファイルだけを commit する。(repo, プロジェクトの dir)。"""
+        type(self).n += 1
+        repo = os.path.join(self.tmp, f"{name}-{type(self).n}")
+        proj = os.path.join(repo, sub) if sub else repo
+        os.makedirs(proj)
+        git(repo, "init", "-q")
+        self.ok("init", "init", cwd=proj)
+        gi = Path(proj, ".beads", ".gitignore")
+        if not gi.exists():                     # 偽の init は .gitignore を書かない。本物が書く印を足す (humanq が br と読む)
+            gi.write_text(".br_history/\n*-fsqlite-ns-gate\n", encoding="utf-8")
+        self.create("committed", cwd=proj)
+        names = [os.path.join(sub, ".beads", n) for n in self.TRACKED if os.path.exists(os.path.join(proj, ".beads", n))]
+        git(repo, "add", *names)
+        git(repo, "commit", "-q", "-m", "beads")
+        return repo, proj
+
+    def add_worktree(self, repo: str) -> str:
+        wt = repo + "-wt"
+        git(repo, "worktree", "add", "-q", wt)
+        return wt
+
+    def titles(self, quirk: str, cwd: str) -> list:
+        out = self.jok(quirk, "list", "--limit", "0", cwd=cwd)
+        self.assertIsInstance(out, dict, self.m(quirk))
+        self.assertIsInstance(out.get("issues"), list, self.m(quirk))
+        return sorted(str(r.get("title")) for r in out["issues"] if isinstance(r, dict))
+
+    def test_worktree_without_its_own_db_uses_the_main_worktree_db(self):
+        q = "worktree の .beads/ に DB が無ければ、本体の worktree の DB を読み書きする"
+        main, _ = self.git_project("wt-main")
+        wt = self.add_worktree(main)
+        self.create("main-after", cwd=main)                       # commit した JSONL には無い。本体の DB にだけある
+        deep = os.path.join(wt, "deep", "er")
+        os.makedirs(deep)
+        for cwd in (wt, deep):
+            with self.subTest(cwd=os.path.relpath(cwd, self.tmp)):
+                self.assertIn("main-after", self.titles(q, cwd), self.m(q))
+        iid = self.create("from-wt", cwd=wt)
+        self.assertIn("from-wt", self.titles(q, main), f"{self.m(q)}: worktree で作ったチケットが本体に無い")
+        self.add_comment(iid, "c-from-wt\n", cwd=wt)
+        rows = self.jok(q, "comments", iid, cwd=main)
+        self.assertIsInstance(rows, list, self.m(q))
+        self.assertIn("c-from-wt", [str(c.get("text") if isinstance(c, dict) else c).strip() for c in rows],
+                      f"{self.m(q)}: worktree で書いたコメントが本体に無い")
+        self.assertEqual(registry._br_home(wt, None), os.path.realpath(main), f"{self.m(q)}: humanq の判定が食い違った")
+
+    def test_worktree_with_its_own_db_uses_it(self):
+        q = "worktree の .beads/ に DB があれば、本体ではなくその DB を使う"
+        main, _ = self.git_project("wt-own")
+        wt = self.add_worktree(main)
+        for n in os.listdir(os.path.join(main, ".beads")):         # DB のファイル (本物は beads.db*、偽物は beads.db と中身)
+            src = os.path.join(main, ".beads", n)
+            if os.path.isfile(src) and (n.startswith("beads.db") or n == "fake-state.json"):
+                shutil.copy2(src, os.path.join(wt, ".beads", n))
+        self.create("main-after", cwd=main)
+        self.assertNotIn("main-after", self.titles(q, wt), self.m(q))
+        self.assertEqual(registry._br_home(wt, None), wt, f"{self.m(q)}: humanq の判定が食い違った")
+
+    def test_worktree_subdir_beads_is_a_separate_db(self):
+        q = "worktree の下の dir の .beads/ は、本体の同じ dir の DB を使わない"
+        main, proj = self.git_project("wt-sub", sub="sub")
+        wt = self.add_worktree(main)
+        self.create("main-after", cwd=proj)
+        self.assertNotIn("main-after", self.titles(q, os.path.join(wt, "sub")), self.m(q))
+        self.assertEqual(registry._br_home(os.path.join(wt, "sub"), None), os.path.join(wt, "sub"), self.m(q))
+
+    def test_main_beads_without_a_db_is_still_used(self):
+        q = "本体の .beads/ は DB が無くても (dir なら) 使い、そこに DB を作る"
+        main, _ = self.git_project("wt-nodb")
+        wt = self.add_worktree(main)
+        keep = {".gitignore", "metadata.json"}
+        for n in os.listdir(os.path.join(main, ".beads")):
+            p = os.path.join(main, ".beads", n)
+            if n not in keep:
+                shutil.rmtree(p) if os.path.isdir(p) else os.unlink(p)
+        self.assertEqual(registry._br_home(wt, None), os.path.realpath(main), f"{self.m(q)}: humanq の判定が食い違った")
+        self.create("wt-t", cwd=wt)
+        self.assertIn("wt-t", self.titles(q, main), f"{self.m(q)}: worktree で作ったチケットが本体に無い")
+
+    def test_main_without_beads_keeps_the_worktree_db(self):
+        q = "本体に .beads/ が無ければ、worktree の .beads/ に DB を作る"
+        main, _ = self.git_project("wt-nobeads")
+        wt = self.add_worktree(main)
+        shutil.rmtree(os.path.join(main, ".beads"))
+        self.assertEqual(registry._br_home(wt, None), wt, f"{self.m(q)}: humanq の判定が食い違った")
+        self.create("wt-t", cwd=wt)
+        self.assertIn("wt-t", self.titles(q, wt), self.m(q))
+        self.assertFalse(os.path.exists(os.path.join(main, ".beads")), f"{self.m(q)}: 本体に .beads/ を作った")
 
     def test_agent_context_is_a_string_in_list_only_where_set(self):
         q = "list --json の agent_context は文字列で、持つチケットだけに出る"

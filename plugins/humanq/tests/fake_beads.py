@@ -30,6 +30,10 @@
 - br 0.7.6 で実測した癖を持つ (名前が br のとき。詳しくは tests/test_fake_beads.py が 1 件ずつ押さえる):
   - -C・human サブコマンド・list --flat・list -n・update --metadata/--set-metadata は usage エラーで exit 2。
     起動した cwd から上へ .beads を探す
+  - 見つけた .beads が git の linked worktree の最上位にあり、そこに DB (metadata.json の database か beads.db) も
+    redirect も無ければ、本体の worktree の .beads (中身は問わない。実体が .beads か _beads という名前の dir のもの) を
+    読み書きする (br_worktree_home)。init は空の beads.db を作る (本物の init が作る DB のファイルの代わり。中身は
+    fake-state.json)
   - list -s のカンマ区切りは stdout の JSON error (VALIDATION_FAILED、exit 4) で非 0、繰り返しは通る。
     list --json は {"issues","total","limit","offset","has_more"} の envelope (0 件も同じ形)。既定は closed と tombstone だけを除く
     (draft・pinned・独自の status も出る)。-s に書けるのは組み込みの 8 つ・どれかのチケットに付いている status・all
@@ -626,6 +630,43 @@ def br_find_root(start: str) -> str | None:
         cur = parent
 
 
+def br_worktree_home(root: str) -> str:
+    """br 0.7.6 の実測 (使い捨ての repo の `br where`): root が linked worktree の最上位 (root/.git が gitdir のファイル) で、
+    root/.beads に DB も redirect も無ければ、本体の worktree の .beads (dir なら中身を問わない) を使う。本体に .beads が
+    無い・実体の名前が .beads か _beads でないときは root のまま (本物は後者で設定エラーになる。偽物は root を読む)。
+    worktree の管理 dir (gitdir) が消えていても、gitdir の形から本体を決める。"""
+    try:
+        with open(os.path.join(root, ".git"), encoding="utf-8") as f:
+            first = f.readline()
+    except OSError:                                 # 無い・dir (本体そのもの)
+        return root
+    if not first.startswith("gitdir:"):
+        return root
+    gitdir = os.path.normpath(os.path.join(root, first[len("gitdir:"):].strip()))
+    try:
+        with open(os.path.join(gitdir, "commondir"), encoding="utf-8") as f:
+            common = os.path.normpath(os.path.join(gitdir, f.readline().strip()))
+    except OSError:
+        if os.path.basename(os.path.dirname(gitdir)) != "worktrees":
+            return root
+        common = os.path.dirname(os.path.dirname(gitdir))
+    if os.path.basename(common) != ".git":
+        return root
+    main = os.path.dirname(common)
+
+    def db_names(beads: str) -> set[str]:
+        meta = read_json(os.path.join(beads, "metadata.json"), {})
+        db = meta.get("database") if isinstance(meta, dict) else None
+        return {"beads.db"} | ({db} if isinstance(db, str) and db else set())
+
+    beads, mbeads = os.path.join(root, ".beads"), os.path.join(main, ".beads")
+    if os.path.exists(os.path.join(beads, "redirect")) or any(os.path.exists(os.path.join(beads, n)) for n in db_names(beads)):
+        return root
+    if not os.path.isdir(mbeads) or os.path.basename(os.path.realpath(mbeads)) not in (".beads", "_beads"):
+        return root
+    return main
+
+
 def br_time(micro: bool = False) -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ" if micro else "%Y-%m-%dT%H:%M:%SZ")
 
@@ -661,6 +702,7 @@ def br_init(root: str, args: list[str]) -> None:
     beads = os.path.join(root, ".beads")
     os.makedirs(beads, exist_ok=True)
     write_json(os.path.join(beads, "metadata.json"), {"database": "beads.db", "jsonl_export": "issues.jsonl"})
+    open(os.path.join(beads, "beads.db"), "a").close()      # 本物の DB のファイルの代わり (worktree の解決が見る)
     p = Project(root)
     p.state = {"prefix": br_one(opts, "--prefix") or "bd", "next": 1, "next_comment": 1, "issues": {}}
     p.save()
@@ -885,6 +927,7 @@ def run_br(argv: list[str]) -> None:
     root = br_find_root(os.getcwd())
     if root is None:
         raise Fail("Error: no .beads directory found (run `br init`)")
+    root = br_worktree_home(root)
     beads = os.path.join(root, ".beads")
     meta = read_json(os.path.join(beads, "metadata.json"), {})
     if isinstance(meta, dict) and meta.get("database") == "dolt":
