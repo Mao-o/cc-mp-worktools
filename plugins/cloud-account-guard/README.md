@@ -1548,6 +1548,26 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   複合コマンドを組み合わせた形 (`cat <<EOF && watch 'true && kubectl ...'` + 改行 + 本文 + `EOF` /
   `watch 'cat <<EOF && kubectl ...'`) の中のクラウド CLI。候補にならず検証されない。heredoc だけの形
   (`cat <<EOF && kubectl ...`) と wrapper だけの形 (`watch 'true && kubectl ...'`) は守る範囲
+- シェル経由の wrapper (`watch` / `sudo -s` / `sudo -i`) に引用符で包んで渡したコマンドの後ろに、リダイレクトや
+  heredoc の後ろの段が続く形の、引用符の中のクラウド CLI (`watch 'kubectl delete po x' >/dev/null` /
+  `sudo -s 'aws s3 rm s3://b/k' 2>&1` / `sudo -i 'aws s3 rm s3://b/k' <<EOF && true` + 改行 + 本文 + `EOF`)。
+  引用符の塊が残り全体ではないので候補にならず、検証されない。heredoc の行が `; }` や `)` で終わる形
+  (`{ watch 'aws ...' <<EOF; }`) も同じ。残り全体が 1 つの引用符の塊のとき (`watch 'kubectl delete po x'`) と、
+  `|` / `&&` / `;` が続くだけのとき (`watch 'aws ...' | cat`) は検証する。リダイレクトを引用符の塊の手前に置く
+  (`>/dev/null watch 'aws ...'`) か、wrapper を使わずにクラウド CLI を直接書くと検証される
+- heredoc を置いた行で、`gh` の前置きの `GH_TOKEN=$(...)` と、後ろの段の値を読めない代入が並ぶ形
+  (`GH_TOKEN=$(cmd) gh pr create <<EOF && X=$(cmd) aws s3 rm s3://b/k` + 改行 + 本文 + `EOF`) の、後ろの段の
+  クラウド CLI。候補にならず検証されない (後ろの段の値を読めない代入が無い形と、`gh` の前置きが静的な値の形は
+  検証する)。コマンドを行ごとに分ける (heredoc の行に後ろの段を置かない) と検証される
+- シェル経由の wrapper に渡す引用符の中の、最初の段の前置きの代入 (`watch 'AWS_PROFILE=dev true ; aws s3 rm s3://b/k'`)
+  は、中の全段に効くと読む。aws は `dev` で照合するが、実際のシェルでは前置きの代入は最初の段だけに効き、
+  aws は起動時の値で走る (後ろの段の `;` の前に置いた代入 `'true ; AWS_PROFILE=dev aws ...'` は、その段の
+  ものとして読むので一致する)。照合する値と実際の値を揃えるには、代入を aws の直前に置く
+- heredoc の行が `; }` で終わり、その行の wrapper (`npx -c`) の中身が複数の段のとき
+  (`{ AWS_PROFILE=prod npx -c 'true && aws s3 rm s3://b/k' <<EOF; }` + 改行 + 本文 + `EOF`)、wrapper の前置きの
+  代入 (`AWS_PROFILE=prod`) を 2 段目以降の CLI に継がず、起動時の値で照合する (実際のシェルでは `prod` で走る)。
+  中身が 1 段のときと、行が `)` で終わる形 (`( ... <<EOF )`) は継いで照合する。前置きの代入を使わず、
+  代入を CLI の直前に置くか、行を `; }` で終えない形に書くと照合が揃う
 - 代入の頭の珍しい形 (添字の中の空白 `a[ 1 ]=x aws ...`) の後ろのクラウド CLI
 - 旧式の算術展開 `$[...]` の中に空白がある代入 (`X=$[1 + 2] aws ...`) の後ろのクラウド CLI。
   `$[` を 1 つの値として読まず、中の空白で値を終える (空白の無い `X=$[1+2] aws ...` は守る範囲)
