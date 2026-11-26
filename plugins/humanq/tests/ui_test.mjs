@@ -2576,3 +2576,244 @@ test("書き込めないプロジェクト (br) のカードは、問いと選�
     assert.deepEqual(s.undos, []);
   });
 });
+
+// ---- キー操作 (Cmd/Ctrl+Enter で送る・カードそのものにフォーカスがあるときの数字キー) -----------------------------------
+// Cmd/Ctrl+Enter は補足欄か選択肢にフォーカスがあるとき「回答する」と同じ。カードそのものでは、数字で選んだ後だけ効く。
+// 回答の後にフォーカスが移ってきた次のカードでは、押し直しやリピートの Cmd/Ctrl+Enter が下書きの選択を送らない
+
+const MOD_ENTER = ["Control+Enter", "Meta+Enter"];
+// フォーカスのあるカードそのもの (中の部品ではなく section) の ID。カードそのものでなければ null
+const focusedCard = page => page.evaluate(() => {
+  const a = document.activeElement;
+  return a && a.matches("section.card") ? a.querySelector(".id").textContent : null;
+});
+// 選択肢ごとの [.sel か, aria-pressed]
+const optStates = (page, id) => qcard(page, id).locator(".opt").evaluateAll(es => es.map(e => [e.classList.contains("sel"), e.getAttribute("aria-pressed")]));
+const NONE2 = [[false, "false"], [false, "false"]], FIRST2 = [[true, "true"], [false, "false"]], SECOND2 = [[false, "false"], [true, "true"]];
+
+test("Control+Enter / Meta+Enter: 補足欄か選択肢にフォーカスがあれば、そのカードの回答が 1 回だけ送られる (選択肢は押されない)。選択肢の無いカードの補足欄でも送れる", async () => {
+  const s = new Script([proj(P1, [item("t-A1"), item("t-B2"), item("t-C3"), item("t-D4"), item("t-E5", { q: null }), item("t-F6", { q: null })])]);
+  await withPage(s, async page => {
+    // [カード, キー, フォーカスの位置, 送られる option, 送られる text]
+    const cases = [
+      ["t-A1", "Control+Enter", "textarea", "a", "memo"], ["t-B2", "Meta+Enter", "textarea", "a", "memo"],
+      ["t-C3", "Control+Enter", "opt", "b", ""], ["t-D4", "Meta+Enter", "opt", "b", ""],
+      ["t-E5", "Control+Enter", "textarea", "", "memo"], ["t-F6", "Meta+Enter", "textarea", "", "memo"],
+    ];
+    for (const [id, key, where, option, text] of cases) {
+      const n = s.answers.length;
+      const c = qcard(page, id);
+      if (where === "textarea") {
+        if (option) await c.locator(".opt").first().click();
+        await c.locator("textarea").click();
+        await c.locator("textarea").pressSequentially("memo");
+      } else {
+        await c.locator(".opt").nth(1).click();                     // フォーカスは押した選択肢に残る
+      }
+      await page.keyboard.press(key);
+      await until(() => s.answers.length === n + 1, 3000, `${id} の回答の POST (${key} / ${where})`);
+      await page.waitForTimeout(250);                               // 2 回目が出ないこと
+      assert.equal(s.answers.length, n + 1, `${id}: 1 回だけでない`);
+      const a = s.answers[n];
+      assert.deepEqual([a.id, a.option, a.text], [id, option, text], `${key} / ${where}`);
+    }
+  });
+});
+
+test("Control+Enter / Meta+Enter: 何も選んでいない・補足が空白だけのときは送られない。補足欄に改行は入らず、選択肢も選ばれない", async () => {
+  const s = new Script([proj(P1, [item("t-A1"), item("t-B2", { q: null })])]);
+  await withPage(s, async page => {
+    const a = qcard(page, "t-A1"), b = qcard(page, "t-B2");
+    await a.locator("textarea").click();
+    for (const k of MOD_ENTER) await page.keyboard.press(k);
+    await a.locator(".opt").first().focus();
+    for (const k of MOD_ENTER) await page.keyboard.press(k);
+    await b.locator("textarea").click();
+    await b.locator("textarea").pressSequentially("   ");
+    for (const k of MOD_ENTER) await page.keyboard.press(k);
+    await page.waitForTimeout(300);
+    assert.deepEqual(s.answers, [], "送れない状態で送られた");
+    assert.deepEqual(await optStates(page, "t-A1"), NONE2, "Cmd/Ctrl+Enter で選択肢が選ばれた");
+    assert.equal(await a.locator("textarea").inputValue(), "", "補足欄に改行が入った");
+    assert.equal(await b.locator("textarea").inputValue(), "   ");
+  });
+});
+
+test("素の Enter を補足欄で押すと改行が入り、送られない", async () => {
+  const s = new Script([proj(P1, [item("t-A1")])]);
+  await withPage(s, async page => {
+    const c = qcard(page, "t-A1");
+    await c.locator(".opt").first().click();
+    const ta = c.locator("textarea");
+    await ta.click();
+    await ta.pressSequentially("x");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(300);
+    assert.deepEqual(s.answers, [], "素の Enter で送られた");
+    assert.equal(await ta.count(), 1, "補足欄のあるカードが無くなった");   // 送られて畳まれたカードに書き続けない (待ちの時間切れにしない)
+    await ta.pressSequentially("y");
+    assert.equal(await ta.inputValue(), "x\ny");
+  });
+});
+
+test("IME の変換中 (isComposing か keyCode 229) の Control+Enter / Meta+Enter では送られない。変換中でない同じイベントなら送られる", async () => {
+  const s = new Script([proj(P1, [item("t-A1")])]);
+  await withPage(s, async page => {
+    const c = qcard(page, "t-A1");
+    await c.locator(".opt").first().click();
+    await c.locator("textarea").click();
+    const fire = init => c.locator("textarea").evaluate((e, init) =>
+      e.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...init })), init);
+    for (const mod of [{ ctrlKey: true }, { metaKey: true }]) {
+      await fire({ ...mod, isComposing: true });
+      await fire({ ...mod, keyCode: 229 });
+    }
+    await page.waitForTimeout(300);
+    assert.deepEqual(s.answers, [], "変換中のキーで送られた");
+    await fire({ ctrlKey: true });                                  // 対照: 変換中でなければ、同じ作り方のイベントで送られる
+    await until(() => s.answers.length === 1, 3000, "変換中でない Control+Enter の POST");
+  });
+});
+
+test("カードそのものにフォーカスがあるとき、数字でその番の選択肢が選ばれ (aria-pressed)、送られない。同じ数字では外れず、範囲外と修飾つきの数字は何もしない。数字で選んだ後の Control+Enter で送られる", async () => {
+  const s = new Script([proj(P1, [item("t-A1"), item("t-B2", { q: null })])]);
+  await withPage(s, async page => {
+    await qcard(page, "t-A1").focus();
+    await page.keyboard.press("2");
+    assert.deepEqual(await optStates(page, "t-A1"), SECOND2, "2 で 2 番目の選択肢が選ばれない");
+    assert.equal(await focusedCard(page), "t-A1", "数字でフォーカスがカードそのものから動いた");
+    await page.keyboard.press("2");
+    assert.deepEqual(await optStates(page, "t-A1"), SECOND2, "同じ数字で選択が外れた");
+    for (const k of ["3", "9", "0", "Control+1", "Meta+1", "Alt+1"]) await page.keyboard.press(k);
+    assert.deepEqual(await optStates(page, "t-A1"), SECOND2, "範囲外か修飾つきの数字で選択が変わった");
+    await page.keyboard.press("1");
+    assert.deepEqual(await optStates(page, "t-A1"), FIRST2, "1 で 1 番目へ移らない");
+    await page.waitForTimeout(300);
+    assert.deepEqual(s.answers, [], "数字だけで送られた");
+    await page.keyboard.press("Control+Enter");
+    await until(() => s.answers.length === 1, 3000, "数字で選んだ後の Control+Enter の POST");
+    assert.deepEqual([s.answers[0].id, s.answers[0].option], ["t-A1", "a"]);
+    // フォーカスは選択肢の無い次のカードそのものへ移る。そこでの数字は何もしない (例外も出さない)
+    assert.equal(await focusedCard(page), "t-B2");
+    await page.keyboard.press("1");
+    await page.keyboard.press("Control+Enter");
+    await page.waitForTimeout(300);
+    assert.equal(s.answers.length, 1, "選択肢の無いカードで送られた");
+    assert.equal(await qcard(page, "t-B2").locator("textarea").inputValue(), "");
+  });
+});
+
+test("補足欄の中の数字は普通の入力になる。選択肢にフォーカスがあるときの数字も選択を変えない", async () => {
+  const s = new Script([proj(P1, [item("t-A1")])]);
+  await withPage(s, async page => {
+    const c = qcard(page, "t-A1");
+    await c.locator("textarea").click();
+    await c.locator("textarea").pressSequentially("12");
+    assert.equal(await c.locator("textarea").inputValue(), "12");
+    assert.deepEqual(await optStates(page, "t-A1"), NONE2, "補足欄の数字で選択肢が選ばれた");
+    await c.locator(".opt").first().focus();
+    await page.keyboard.press("2");
+    assert.deepEqual(await optStates(page, "t-A1"), NONE2, "選択肢にフォーカスがあるときの数字で選ばれた");
+    assert.deepEqual(s.answers, []);
+  });
+});
+
+test("Cmd/Ctrl+Enter で送った後、フォーカスは次のカードそのものへ移り、続けて押した Control+Enter / Meta+Enter は次のカードを送らない (下書きの選択があっても・次が回答済みでも)。続けて数字を押せば次のカードが選ばれ、送れる", async () => {
+  const s = new Script([proj(P1, [item("t-A1"), item("t-B2"), item("t-C3")])]);
+  await withPage(s, async page => {
+    await qcard(page, "t-B2").locator(".opt").nth(1).click();      // B には下書きの選択 (案B) がある
+    await qcard(page, "t-A1").locator(".opt").first().click();
+    await qcard(page, "t-A1").locator("textarea").click();
+    await page.keyboard.press("Control+Enter");
+    await until(() => s.answers.length === 1, 3000, "A の回答の POST");
+    assert.equal(await focusedCard(page), "t-B2", "フォーカスが次のカードそのものに移っていない");
+    for (const k of MOD_ENTER) { await page.keyboard.press(k); await page.waitForTimeout(50); }   // 押し直し・リピート
+    await page.waitForTimeout(300);
+    assert.deepEqual(s.answers.map(a => a.id), ["t-A1"], "次のカードの下書きの選択が、押し直しで送られた");
+    // 送った直後の数字は無視しない: 次のカードの選択肢を選ぶだけで、送らない
+    await page.keyboard.press("1");
+    assert.deepEqual(await optStates(page, "t-B2"), FIRST2, "送った直後の数字で次のカードが選ばれない");
+    await page.waitForTimeout(300);
+    assert.equal(s.answers.length, 1, "数字だけで送られた");
+    await page.keyboard.press("Meta+Enter");
+    await until(() => s.answers.length === 2, 3000, "B の回答の POST");
+    assert.deepEqual([s.answers[1].id, s.answers[1].option], ["t-B2", "a"]);
+    assert.equal(await focusedCard(page), "t-C3");
+  });
+  // 次が回答済みのカード: 押し直しで取り消しは送られない
+  const s2 = new Script([proj(P1, [item("t-X1")], [answeredItem("t-Y2")])]);
+  await withPage(s2, async page => {
+    await qcard(page, "t-X1").locator(".opt").first().click();
+    await qcard(page, "t-X1").locator("textarea").click();
+    await page.keyboard.press("Meta+Enter");
+    await until(() => s2.answers.length === 1, 3000, "X の回答の POST");
+    for (const k of MOD_ENTER) { await page.keyboard.press(k); await page.waitForTimeout(50); }
+    await page.waitForTimeout(300);
+    assert.deepEqual(s2.undos, [], "次の回答済みカードの取り消しが送られた");
+    assert.equal(s2.answers.length, 1);
+  });
+});
+
+test("カードそのもので数字を押して選んだ後にフォーカスが離れたら、戻ってきたそのカードでの Control+Enter では送らない (もう一度数字を押せば送れる)", async () => {
+  const s = new Script([proj(P1, [item("t-A1"), item("t-B2")])]);
+  await withPage(s, async page => {
+    await qcard(page, "t-B2").focus();
+    await page.keyboard.press("2");                                 // B を数字で選ぶ
+    await qcard(page, "t-A1").locator(".opt").first().click();      // A へ移って答える
+    await qcard(page, "t-A1").locator("textarea").click();
+    await page.keyboard.press("Control+Enter");
+    await until(() => s.answers.length === 1, 3000, "A の回答の POST");
+    assert.equal(await focusedCard(page), "t-B2");
+    await page.keyboard.press("Control+Enter");                     // 押し直し
+    await page.waitForTimeout(300);
+    assert.deepEqual(s.answers.map(a => a.id), ["t-A1"], "前に数字で選んだカードが、押し直しで送られた");
+    await page.keyboard.press("2");                                 // 選んだままの数字でも、押し直せば確定できる
+    assert.deepEqual(await optStates(page, "t-B2"), SECOND2);
+    await page.keyboard.press("Control+Enter");
+    await until(() => s.answers.length === 2, 3000, "B の回答の POST");
+    assert.deepEqual([s.answers[1].id, s.answers[1].option], ["t-B2", "b"]);
+  });
+});
+
+test("書き込めないプロジェクト (br) のカードでは、数字も Control+Enter / Meta+Enter も何もしない。キーのヒントは、書き込める判断待ちのカードの「回答する」の隣にだけ出る", async () => {
+  const BR = "/work/rusty";
+  const s = new Script([{ ...proj(BR, [item("r-1")], [answeredItem("r-2")]), cli: "br", writable: false },
+    { ...proj(P1, [item("t-1")], [answeredItem("t-2")]), cli: "bd", writable: true }]);
+  const card = (page, id) => page.locator(`section.card:has(.id:text-is("${id}"))`);
+  await withPage(s, async page => {
+    assert.deepEqual(await page.locator(".keyhint").allInnerTexts(), ["⌘↵ / Ctrl+↵ で送信"], "ヒントが 1 枚のカードにだけ出ていない");
+    assert.equal(await qcard(page, "t-1").locator(".row .keyhint").count(), 1, "ヒントが「回答する」の行に無い");
+    // 読み上げは「回答する」の aria-keyshortcuts に任せ、見た目のヒントは読み上げない (二重に読まない)
+    assert.equal(await page.locator(".keyhint").getAttribute("aria-hidden"), "true");
+    assert.equal(await qcard(page, "t-1").locator("button.primary").count(), 1);
+    assert.equal(await qcard(page, "t-1").locator("button.primary").getAttribute("aria-keyshortcuts"), "Meta+Enter Control+Enter");
+    for (const id of ["r-1", "r-2"]) {
+      assert.equal(await card(page, id).count(), 1, `${id} のカードが 1 枚でない`);
+      await card(page, id).focus();
+      for (const k of ["1", "2", ...MOD_ENTER]) await page.keyboard.press(k);
+      assert.equal(await focusedCard(page), id, `${id}: キーでフォーカスが動いた`);
+    }
+    await page.waitForTimeout(300);
+    assert.deepEqual(s.answers, [], "書き込めないプロジェクトに回答を送った");
+    assert.deepEqual(s.undos, []);
+    assert.equal(await page.locator(".opt.sel").count(), 0, "書き込めるカードの選択肢が選ばれた");
+  });
+});
+
+for (const scheme of ["light", "dark"]) {
+  test(`${scheme}: キーのヒントは「回答する」より小さい文字で、カードの背景に対して 4.5:1 以上`, async () => {
+    const s = new Script([proj(P1, [item("t-A1")])]);
+    await withPage(s, async page => {
+      await page.emulateMedia({ colorScheme: scheme });
+      assert.equal(await page.locator(".keyhint").count(), 1, "ヒントがちょうど 1 つでない");
+      const m = await page.evaluate(() => {
+        const card = document.querySelector("section.card:has(textarea)"), cs = e => getComputedStyle(e);
+        const hint = cs(card.querySelector(".keyhint")), send = cs(card.querySelector("button.primary"));
+        return { fg: hint.color, bg: cs(card).backgroundColor, size: parseFloat(hint.fontSize), sendSize: parseFloat(send.fontSize) };
+      });
+      const ratio = await page.evaluate(([fnSrc, m]) => eval(`(${fnSrc})()`)(m.fg, m.bg), [RATIO_FN.toString(), m]);
+      assert.ok(m.size < m.sendSize, `${scheme}: ヒントの文字 ${m.size}px が「回答する」の ${m.sendSize}px より小さくない`);
+      assert.ok(ratio >= 4.5, `${scheme}: ヒントの文字 / カードの背景 ${ratio.toFixed(2)}`);
+    });
+  });
+}

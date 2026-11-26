@@ -129,6 +129,7 @@ textarea { width: 100%; min-height: 58px; resize: vertical; font: inherit; color
 .row { display: flex; gap: 10px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
 button.primary { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 8px; padding: 8px 18px; font: inherit; font-weight: 700; cursor: pointer; }
 button.primary:disabled { opacity: .45; cursor: default; }
+.keyhint { font-size: 12px; color: var(--muted); }
 button.ghost { background: none; color: var(--muted); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; font: inherit; cursor: pointer; }
 .err { color: var(--warn); font-size: 13px; overflow-wrap: anywhere; min-width: 0; }
 .errbox { margin-top: 8px; }
@@ -628,7 +629,7 @@ function buildQuestion(it) {
   const d = drafts.get(dk) || { option: "", text: "" };
   if (d.option && !(q && q.options.some(o => o.key === d.option))) d.option = "";   // 問いが変わって無くなった選択肢
   drafts.set(dk, d);
-  const send = el("button", { class: "primary", type: "button" }, "回答する");
+  const send = el("button", { class: "primary", type: "button", "aria-keyshortcuts": "Meta+Enter Control+Enter" }, "回答する");
   const area = el("textarea", { "aria-label": q && q.options.length ? "補足" : "回答", placeholder: q && q.options.length ? "補足 (任意)。選択肢に無い答えはここに書く"
     : q && q.kind === "task" ? "結果を書く" : "回答を書く" });
   area.value = d.text;
@@ -662,13 +663,35 @@ function buildQuestion(it) {
   refresh();
   const ask = md("p", "ask", q ? q.ask : it.title);
   ask.id = nextLabelId();                                   // カードの名前 (aria-labelledby)
-  return el("section", { class: "card", "data-id": it.id, tabindex: "-1", "aria-labelledby": ask.id },
+  const card = el("section", { class: "card", "data-id": it.id, tabindex: "-1", "aria-labelledby": ask.id },
     head(it),
     q ? el("p", { class: "title" }, it.title) : null,      // 問いが無いときは、ask の位置にタイトルを出すので重ねない
     ask,
     q && q.context ? context(it, q.context) : null,
     !q ? el("p", { class: "ctx" }, "問いがまだ整理されていません。本文を読んで自由に答えてください。") : null,
-    opts, area, el("div", { class: "row" }, send), el("div", { class: "errbox" }), body(it));
+    opts, area, el("div", { class: "row" }, send, el("span", { class: "keyhint", "aria-hidden": "true" }, "⌘↵ / Ctrl+↵ で送信")),
+    el("div", { class: "errbox" }), body(it));
+  // キー操作。Cmd+Enter / Ctrl+Enter は、補足欄か選択肢にフォーカスがあれば「回答する」を押したのと同じ (送れない状態の
+  // click() は何もしない)。カードそのもの (tabindex="-1") にフォーカスがあるときは、数字でその番の選択肢を選ぶ (送らない)。
+  // カードそのものでの Cmd/Ctrl+Enter は、そこで数字を押して選んだ後だけ効く (picked。カードからフォーカスが離れたら解く)。
+  // 回答の後はフォーカスが次のカードそのものへ移る (moveFocusAway) ので、Cmd/Ctrl+Enter の押し直しやリピートが、
+  // 次のカードの前からある下書きの選択をそのまま送らないため。数字は送った直後でも効く (次のカードを選ぶだけで、送らない)
+  let picked = false;
+  card.addEventListener("blur", () => { picked = false; });
+  card.addEventListener("keydown", e => {
+    if (e.isComposing || e.keyCode === 229) return;          // IME の変換中 (変換を確定する Enter を含む)
+    const self = e.target === card;
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      if (e.target === area || e.target.classList.contains("opt") || (self && picked)) send.click();
+      return;
+    }
+    if (!self || !opts || e.ctrlKey || e.metaKey || e.altKey || !/^[1-9]$/.test(e.key)) return;
+    const b = opts.children[Number(e.key) - 1];
+    if (!b) return;
+    if (!b.classList.contains("sel")) b.click();             // 選ぶだけ (押した選択肢をもう一度押しても外さない)
+    picked = true;
+  });
+  return card;
 }
 
 // 回答を取り消して判断待ちに戻す (回答済みのカードのボタンと、回答の成功のトーストの「取り消す」)。
