@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import tempfile
 import time
 import types
@@ -525,10 +526,182 @@ class TestAttempt(_TmpCacheDir):
             auto_switch.NOTE_SWITCHING_HERE,
             auto_switch.NOTE_BUDGET,
             auto_switch.conflicting_switch("fake", [("host", "x", "new")]),
+            auto_switch.state_dir_unusable_note(),
         ]
         for text in texts:
             with self.subTest(text=text):
                 self.assertIsNone(cli.search(text), text)
+
+
+def unusable_dir_note(where: str) -> str:
+    """記録の dir を使えないときの注記の全文 (`where` は示す dir)。文面を固定するので、実装の
+    定数や関数を使わずに書く。"""
+    return (
+        "※ 自動切替 (auto-switch) は行いませんでした: 並行セッションのガードが使えないためです "
+        f"(ガードの記録を置く dir {where} を作れない、または自分の所有で group / other が"
+        "書けない実ディレクトリでない)。この dir を消すか、TMPDIR を自分だけが書ける dir に"
+        "向けると直ります。"
+    )
+
+
+class TestStateDirUnusable(_TmpCacheDir):
+    """記録を置く dir (成功 cache と同じ) を使えないなら、切り替えずに従来どおり deny する (v0.34.0)。
+
+    0.33.0 までは記録が無いのと同じに扱って切り替えていた。旧版が umask 002 で作った 0775 の
+    dir や別のユーザーの dir があると、並行セッションのガード (マシン全体の gh の切り替え合いを
+    止める保護) が利用者に見えずに消えていた。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.base = self.tmp / "cc-mp-cloud-account-guard"
+
+    def _attempt(self, svc):
+        with mock.patch("core.cache.invalidate") as invalidate:
+            try:
+                out = auto_switch.attempt(svc, "new", "/p")
+            except Exception as e:  # noqa: BLE001
+                self.fail(f"attempt が {type(e).__name__} を投げた: {e}")
+        return out, invalidate
+
+    def _assert_not_switched(self, svc, out, invalidate, where):
+        self.assertFalse(out.resolved)
+        self.assertEqual(out.switched, ())
+        # error は None (切り替えていないので、切替前の verify() の文面がそのまま deny になる)
+        self.assertIsNone(out.error)
+        self.assertIsNotNone(out.note)
+        self.assertIn(unusable_dir_note(where), out.note)
+        self.assertEqual(len(out.note.splitlines()), 1, out.note)
+        self.assertEqual(svc.calls, ["plan"], "dir を使えないのに切り替えた / 再検証した")
+        self.assertFalse(invalidate.called, "切り替えないのに成功 cache を捨てている")
+
+    @unittest.skipUnless(hasattr(os, "geteuid"), "所有者と mode は POSIX のもの")
+    def test_dir_others_can_write_is_not_switched(self):
+        """旧版が umask 002 で作った 0775 の dir (group が書ける) など。dir は直さずに残す。"""
+        self.base.mkdir()
+        for mode in (0o775, 0o770, 0o757):
+            with self.subTest(mode=oct(mode)):
+                os.chmod(self.base, mode)
+                svc = _fake_service(verify=None)
+                out, invalidate = self._attempt(svc)
+                self._assert_not_switched(svc, out, invalidate, str(self.base))
+                self.assertEqual(stat.S_IMODE(os.lstat(self.base).st_mode), mode)
+
+    @unittest.skipUnless(hasattr(os, "geteuid"), "所有者と mode は POSIX のもの")
+    def test_dir_owned_by_another_user_is_not_switched(self):
+        self.base.mkdir(mode=0o700)
+        os.chmod(self.base, 0o700)
+        svc = _fake_service(verify=None)
+        with mock.patch.object(os, "geteuid", return_value=os.geteuid() + 1):
+            out, invalidate = self._attempt(svc)
+        self._assert_not_switched(svc, out, invalidate, str(self.base))
+
+    def test_dir_that_cannot_be_made_or_is_not_a_dir_is_not_switched(self):
+        """TMPDIR の下に dir を作れない (TMPDIR がファイル)、同じ名前が symlink / ファイル。"""
+        def tmpdir_is_a_file():
+            blocker = self.tmp / "blocker"
+            blocker.write_text("x", encoding="utf-8")
+            os.environ["TMPDIR"] = str(blocker)
+            return str(blocker / "cc-mp-cloud-account-guard")
+
+        def symlink_to_private_dir():
+            elsewhere = self.tmp / "elsewhere"
+            elsewhere.mkdir(mode=0o700)
+            os.symlink(elsewhere, self.base)
+            return str(self.base)
+
+        def regular_file():
+            self.base.write_text("x", encoding="utf-8")
+            return str(self.base)
+
+        cases = {
+            "TMPDIR is a file": tmpdir_is_a_file,
+            "symlink": symlink_to_private_dir,
+            "regular file": regular_file,
+        }
+        for name, make in cases.items():
+            with self.subTest(name):
+                if os.path.lexists(self.base):
+                    os.unlink(self.base)
+                os.environ["TMPDIR"] = str(self.tmp)
+                where = make()
+                svc = _fake_service(verify=None)
+                out, invalidate = self._attempt(svc)
+                self._assert_not_switched(svc, out, invalidate, where)
+
+    @unittest.skipUnless(hasattr(os, "geteuid"), "所有者と mode は POSIX のもの")
+    def test_note_names_the_shared_tmp_dir_when_tmpdir_is_unset(self):
+        """TMPDIR が無いときは共有の tmp 配下 (cache と同じ式) のパスを示す。"""
+        shared = self.tmp / "shared"
+        (shared / "cc-mp-cloud-account-guard").mkdir(parents=True)
+        os.chmod(shared / "cc-mp-cloud-account-guard", 0o775)
+        os.environ.pop("TMPDIR", None)
+        svc = _fake_service(verify=None)
+        with mock.patch("tempfile.gettempdir", return_value=str(shared)):
+            out, invalidate = self._attempt(svc)
+        self._assert_not_switched(
+            svc, out, invalidate, str(shared / "cc-mp-cloud-account-guard")
+        )
+
+    @unittest.skipUnless(hasattr(os, "geteuid"), "所有者と mode は POSIX のもの")
+    def test_note_shows_the_dir_on_one_line(self):
+        """パスは TMPDIR (env) から来る。改行を含んでも注記は 1 行 (制御文字だけをエスケープ)。"""
+        odd = self.tmp / "a\nb"
+        (odd / "cc-mp-cloud-account-guard").mkdir(parents=True)
+        os.chmod(odd / "cc-mp-cloud-account-guard", 0o775)
+        os.environ["TMPDIR"] = str(odd)
+        svc = _fake_service(verify=None)
+        out, invalidate = self._attempt(svc)
+        self._assert_not_switched(
+            svc, out, invalidate, str(self.tmp) + "/a\\nb/cc-mp-cloud-account-guard"
+        )
+
+    @unittest.skipUnless(hasattr(os, "geteuid"), "所有者と mode は POSIX のもの")
+    def test_already_matching_plan_is_unchanged_even_if_dir_is_unusable(self):
+        """計画の時点で一致していた (steps が空) なら切り替えないので、dir を見ずに再検証で通す。"""
+        self.base.mkdir()
+        os.chmod(self.base, 0o775)
+        svc = _fake_service(plan=([], None), verify=None)
+        out, invalidate = self._attempt(svc)
+        self.assertTrue(out.resolved)
+        self.assertEqual(out.switched, ())
+        self.assertIsNone(out.note)
+        self.assertEqual(svc.calls, ["plan", "verify"])
+        self.assertFalse(invalidate.called)
+
+    def test_private_dir_still_switches_and_guards(self):
+        """対照: 自分だけが書ける dir (0700) なら従来どおり切り替え、ガードも効く。"""
+        self.base.mkdir(mode=0o700)
+        os.chmod(self.base, 0o700)
+        svc = _fake_service(verify=None)
+        out, invalidate = self._attempt(svc)
+        self.assertTrue(out.resolved)
+        self.assertEqual(out.switched, (("host", "old", "new"),))
+        self.assertIsNone(out.note)
+        self.assertEqual(svc.calls, ["plan", "apply", "verify"])
+        self.assertEqual(invalidate.call_args_list, [mock.call("fake")])
+        # 切り替えた記録で、別の値への次の切替を見送る
+        svc2 = _fake_service(plan=([("host", "new", "other")], None))
+        out2, _ = self._attempt(svc2)
+        self.assertFalse(out2.resolved)
+        self.assertIsNotNone(out2.note)
+        self.assertIn("秒前に別の作業 (/p)が host を new に自動で切り替えています", out2.note)
+        self.assertEqual(svc2.calls, ["plan"])
+
+    def test_tmpdir_through_a_symlinked_parent_still_switches(self):
+        """対照: TMPDIR が symlink を経由していても (macOS の /var → /private/var など)、
+        dir 自体が自分だけの実ディレクトリなら使える (dir の名前の位置だけを lstat する)。"""
+        real = self.tmp / "real"
+        real.mkdir(mode=0o700)
+        link = self.tmp / "link"
+        os.symlink(real, link)
+        os.environ["TMPDIR"] = str(link)
+        svc = _fake_service(verify=None)
+        out, invalidate = self._attempt(svc)
+        self.assertTrue(out.resolved)
+        self.assertIsNone(out.note)
+        self.assertEqual(svc.calls, ["plan", "apply", "verify"])
+        self.assertTrue((real / "cc-mp-cloud-account-guard" / "fake.autoswitch.json").is_file())
 
 
 class TestNotice(unittest.TestCase):

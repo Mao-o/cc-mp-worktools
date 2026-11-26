@@ -55,7 +55,10 @@ cloud-account-guard の自動切替 (auto-switch) を有効化・無効化する
   自動化しない)。トークン用の環境変数 (`GH_TOKEN` 等) や `GH_HOST` があるときも
   切り替えない
 - 直前 60 秒以内に別のセッションが同じ host を別のアカウントへ自動切替していたら、
-  切り替えずに従来どおり deny する (並行セッションで切替を奪い合わないため)
+  切り替えずに従来どおり deny する (並行セッションで切替を奪い合わないため)。このガードの
+  記録を置く dir (`$TMPDIR/cc-mp-cloud-account-guard`) を使えないとき (以前の版が作った
+  0775 の dir・別のユーザーの dir など) も、ガードが働かないので切り替えずに deny する。
+  deny 文面に出る dir を消すか、TMPDIR を自分だけが書ける dir に向けると直る
 - 対応しているのは github だけ。aws / gcloud / firebase は各 CLI の公式の仕組みで
   プロジェクトごとに固定できる (切り替えではなく、そのリポジトリでは最初から正しい
   アカウントで動く) — `/cloud-account-guard:project-accounts` の手順に従う

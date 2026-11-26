@@ -39,7 +39,9 @@ deny)、note を返す。
 実行される前にもう片方が切り替え、**通したコマンドが別アカウントで動きうる**
 (この plugin が防ぐ事故そのもの)。記録するのは自動切替だけで、手動の切替は見えない。
 記録はプロジェクトではなく**切替先の値**で照合する — 同じ repo の worktree 同士は
-同じ期待値を持つので、そこで見送る理由が無い。
+同じ期待値を持つので、そこで見送る理由が無い。記録を置く dir (成功 cache と同じ) を
+使えないときは、ガードが働かないので切り替えずに deny する (v0.34.0。0.33.0 までは記録が
+無いのと同じに切り替えていた)。
 """
 from __future__ import annotations
 
@@ -85,6 +87,21 @@ NOTE_BUDGET = (
     _NOTE_HEAD + "1 コマンド分の検証時間の予算を使い切っていたため、切替を"
     "始めませんでした。"
 )
+
+
+def state_dir_unusable_note() -> str:
+    """並行セッションのガードの記録を置く dir (`cache.state_dir`) を使えないときの注記。
+
+    dir は cache と同じで、示すパスも cache と同じ式 (`cache.dir_path`) で実行時に作る。
+    別のユーザーが作った dir は消せないので、TMPDIR を変える直し方も添える。パスは TMPDIR
+    (env) から来るので、制御文字だけをエスケープして 1 行に収める。
+    """
+    where = shell_word.escape_controls(str(cache.dir_path()))
+    return (
+        _NOTE_HEAD + "並行セッションのガードが使えないためです (ガードの記録を置く dir "
+        f"{where} を作れない、または自分の所有で group / other が書けない実ディレクトリで"
+        "ない)。この dir を消すか、TMPDIR を自分だけが書ける dir に向けると直ります。"
+    )
 
 
 def requests_help(candidate: str) -> bool:
@@ -206,7 +223,8 @@ def _guard_path(service_name: str):
 
 def _read_records(service_name: str) -> dict:
     """切替の記録。無い・読めない記録 (stat できない・壊れた・入れ子が深い・オブジェクトで
-    ない。`cache.read_state`) と、cache の dir を使えないときは、記録が無いのと同じ。
+    ない。`cache.read_state`) と、cache の dir を使えないときは、記録が無いのと同じ (dir を
+    使えないときは、`attempt` がここまで来ずに切り替えを見送る。v0.34.0)。
 
     ガードはベストエフォート (`record_switch` も書けなくても判定を変えない)。旧実装は存在
     確認に `Path.is_file()` を使い、Python 3.13 までは stat できない記録で例外にしていた
@@ -331,7 +349,9 @@ def attempt(
        「最後の確認の後に起動する呼び出し数」を前提にしているため
     3. `plan_switch` で全対象の切替先がログイン済みか確かめる。1 つでも切り替えられ
        なければ**何も切り替えない** (一部だけ切り替えて deny、を作らない)
-    4. 並行セッションのガード
+    4. 並行セッションのガード。記録を置く dir (`cache.state_dir`) を使えなければ、ガードが
+       働かないので切り替えない (v0.34.0)。計画の時点で既に一致していた (steps が空) ときは
+       切り替えないので、dir を確かめずに再検証へ進む
     5. 成功 cache を破棄してから切り替える (他プロジェクトの成功 cache が、切替後の
        状態で TTL 分通ってしまうのを防ぐ。`cache.invalidate` の in-flight 窓で、
        この後の検証成功も cache されない)
@@ -350,6 +370,11 @@ def attempt(
 
     svc_name = _service_name(service)
     if steps:
+        # ガードは cache dir の記録に頼る。dir を使えないと記録を読めも書けもせず、ガードが
+        # 黙って働かない (旧版が umask 002 で作った 0775 の dir・別のユーザーの dir)。マシン全体に
+        # 効く切替を止める保護が利用者に見えずに消えるので、切り替えずに従来どおり deny する (v0.34.0)。
+        if cache.state_dir() is None:
+            return Outcome(note=state_dir_unusable_note())
         conflict = conflicting_switch(svc_name, steps)
         if conflict:
             return Outcome(note=conflict)

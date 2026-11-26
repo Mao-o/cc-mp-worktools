@@ -428,7 +428,8 @@ PreToolUse は Bash のたびに発火するので、`gh pr list && gh pr view &
 - **dir は自分の所有で、他のユーザーが書けない実ディレクトリのときだけ使う** (v0.19.1。
   `_cache_dir`)。`os.lstat` で symlink でないことも見る。作るときは 0700。満たさない dir は
   直さずに使わない (中に他のユーザーが置いたファイルが残りうる)。使えないときは成功 cache も
-  epoch も補助ファイル (自動切替の記録・移行案内の記録) も読まず書かない。所有者と mode が
+  epoch も補助ファイル (自動切替の記録・移行案内の記録) も読まず書かない。自動切替は切り替えない
+  (v0.34.0。下の「自動切替」節)。所有者と mode が
   POSIX の意味を持たない OS (`os.geteuid` が無い) では確かめない
 - **書き込み失敗は無視** (best-effort)。キャッシュ書けないことで deny は出さない
 
@@ -576,7 +577,7 @@ opt-in (`CLOUD_ACCOUNT_GUARD_AUTO_SWITCH` → `"$auto_switch"` → 無効) で�
 - 連結規則 / self-remediation / cache hit / 予算切れは**すべて verify() より前**に
   決まるので、自動切替はそれらの後ろ (verify() が不一致を返した後) にしか入らない
 - `attempt()` の段の並び: コマンド自身の状態変更 (`switching_here`) → 予算 →
-  `plan_switch` → ガード → 予算 → `cache.invalidate` → `apply_switch` → 記録 →
+  `plan_switch` → 記録の dir の確認 → ガード → 予算 → `cache.invalidate` → `apply_switch` → 記録 →
   予算 → 再検証。**CLI を起動する前ごとに予算を確かめる**のは、`budget.worst_case_seconds`
   が「最後の確認の後に起動する呼び出し数」を前提にしているため (切替経路は計画の
   `gh auth status`・host ごとの `gh auth switch`・再検証で、verify() の後に CLI を
@@ -589,6 +590,13 @@ opt-in (`CLOUD_ACCOUNT_GUARD_AUTO_SWITCH` → `"$auto_switch"` → 無効) で�
 - **cache は切り替える前に破棄する**。後に回すと、切替と並行した他プロジェクトの
   検証が旧状態の成功を書く窓が開く (`invalidate` の tombstone で、in-flight 窓の間は
   自分の検証成功も publish されない)
+- **記録の dir (`cache.state_dir`) を使えなければ切り替えない** (v0.34.0)。ガードは dir の記録に
+  頼るので、dir を使えないと記録を読めも書けもせず、ガードが黙って働かない (旧版が umask 002 で
+  作った 0775 の dir・別のユーザーの dir)。切り替えるとマシン全体に効く切替を止める保護が利用者に
+  見えずに消えるので、`cache.invalidate` も `apply_switch` もせず注記 (dir のパスと直し方) を返し、
+  従来の deny にする。注記のパスは cache と同じ式 (`cache.dir_path`) で実行時に作る。確かめるのは
+  切り替える段 (`plan_switch` が steps を返した後) だけで、計画の時点で一致していた経路は変えない。
+  記録ファイルが壊れている・書けないだけのとき (dir は使える) は従来どおり記録が無いのと同じ
 - **ガードは切替先の値で照合する** (プロジェクトのパスではない)。同じ repo の
   worktree 同士は同じ期待値を持つので、そこで見送る理由が無い。記録は
   `<service>.autoswitch.json` (成功 cache の glob `<service>-*.json` に掛からない名前。

@@ -88,6 +88,16 @@ def _is_private_dir(path: Path) -> bool:
     return st.st_uid == geteuid() and not st.st_mode & _OTHERS_WRITE_BITS
 
 
+def dir_path() -> Path:
+    """cache dir の置き場 (`$TMPDIR/cc-mp-cloud-account-guard`。TMPDIR が無ければ共有の tmp 配下)。
+
+    使えるかは確かめない (`_cache_dir` が確かめる)。dir を使えないことを利用者に伝える文面
+    (`core/auto_switch.py` の注記) が、cache と同じ式でパスを示すための入口。
+    """
+    base = os.environ.get("TMPDIR") or tempfile.gettempdir()
+    return Path(base) / "cc-mp-cloud-account-guard"
+
+
 def _cache_dir() -> Path | None:
     """cache dir。使えなければ None (cache を使わない = 毎回、通常の照合をする)。
 
@@ -97,8 +107,7 @@ def _cache_dir() -> Path | None:
     無い) 実ディレクトリ (symlink でない)** のときだけ使う。作るときは 0700。満たさない dir は
     直さずに使わない (中に他のユーザーが置いたファイルが残りうる)。
     """
-    base = os.environ.get("TMPDIR") or tempfile.gettempdir()
-    p = Path(base) / "cc-mp-cloud-account-guard"
+    p = dir_path()
     try:
         p.mkdir(mode=0o700, parents=True, exist_ok=True)
     except OSError:
@@ -111,6 +120,8 @@ def state_dir() -> Path | None:
 
     None なら状態を読まないし書かない (dispatcher の deprecation 案内は 1 日 1 回に、検証の対象外の
     CLI の知らせ (`core/unverified.py`) はセッション × エージェントごとに 1 回に絞れず、毎回出す)。
+    自動切替 (`core/auto_switch.py` の `attempt`) は、並行セッションのガードの記録を読み書きできない
+    ので切り替えない (v0.34.0)。
     """
     return _cache_dir()
 

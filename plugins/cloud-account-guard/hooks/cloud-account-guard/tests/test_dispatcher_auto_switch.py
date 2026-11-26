@@ -23,6 +23,7 @@ import _testutil  # noqa: F401
 
 from core import auto_switch, budget, cache, shell_word  # noqa: E402
 from core.dispatcher import dispatch  # noqa: E402
+from test_auto_switch import unusable_dir_note  # noqa: E402
 
 _ISOLATION = None
 _ISOLATION_ROOT = None
@@ -477,6 +478,53 @@ class TestConcurrentSessionGuard(AutoSwitchBase):
         reason = self._deny_reason(result)
         self.assertIn(str(self.project_dir), reason)
         self.assertEqual(self.gh.active["github.com"], "Mao-o", "2 回目の切替で戻している")
+
+
+@unittest.skipUnless(hasattr(os, "geteuid"), "所有者と mode は POSIX のもの")
+class TestUnusableStateDir(AutoSwitchBase):
+    """記録の dir (成功 cache と同じ) を使えないなら、切り替えずに従来どおり deny する (v0.34.0)。
+
+    0.33.0 までは記録が無いのと同じに切り替えていた (並行セッションのガードが黙って働かない)。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.state = Path(os.environ["TMPDIR"]) / "cc-mp-cloud-account-guard"
+        self.state.mkdir()
+        os.chmod(self.state, 0o775)  # 旧版が umask 002 で作った dir
+
+    def test_denies_like_auto_switch_off_and_says_how_to_fix(self):
+        self._write_accounts({"github": "Mao-o"})
+        with self._enabled():
+            reason = self._deny_reason(self._dispatch("gh pr create --fill"))
+        self.assertEqual(self.gh.switches(), [])
+        self.assertEqual(self.gh.active["github.com"], "work")
+        self.assertIn(unusable_dir_note(str(self.state)), reason)
+        # 従来の deny (auto-switch が無いときと同じ verify() の案内) が残る
+        self.assertIn("アカウント不一致", reason)
+        self.assertIn("gh auth switch --hostname github.com --user Mao-o", reason)
+        self.assertIn("単独で実行してください", reason)
+        self.assertNotIn("自動切替 (auto-switch): ", reason, "切り替えた通知が出ている")
+        # 注記は検出コマンドの行の後ろに 1 行で付く
+        lines = reason.splitlines()
+        self.assertIn(unusable_dir_note(str(self.state)), lines)
+
+    def test_off_is_unchanged(self):
+        """対照: auto-switch が無効なら注記を付けず、従来どおり deny する。"""
+        self._write_accounts({"github": "Mao-o"})
+        reason = self._deny_reason(self._dispatch("gh pr create --fill"))
+        self.assertNotIn("並行セッションのガード", reason)
+        self.assertIn("gh auth switch --hostname github.com --user Mao-o", reason)
+        self.assertEqual(self.gh.switches(), [])
+
+    def test_private_dir_switches(self):
+        """対照: 自分だけが書ける dir (0700) に直せば、従来どおり切り替えて通す。"""
+        os.chmod(self.state, 0o700)
+        self._write_accounts({"github": "Mao-o"})
+        with self._enabled():
+            context = self._context(self._dispatch("gh pr create --fill"))
+        self.assertIn("github.com: work → Mao-o", context)
+        self.assertEqual(self.gh.active["github.com"], "Mao-o")
 
 
 class TestCacheAndReporting(AutoSwitchBase):
