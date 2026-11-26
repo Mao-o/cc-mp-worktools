@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.15.3
+
+### 修正
+
+- README の「回答を拾う」表の br の一覧が `-s` で status を 4 つ (`open`・`in_progress`・`blocked`・`deferred`) に絞っていたため、エージェントがその手順で拾うと、画面には出て答えられる `draft`・`pinned` と独自の status (`review` など) の回答済みのチケットを拾い漏らしていた。`br list -l answered --limit 0 --json` (`-s` なし) に揃えた。br 0.7.6 の使い捨てのプロジェクトで、`answered` を付けた 9 つの status (`open`・`in_progress`・`blocked`・`deferred`・`draft`・`pinned`・独自の `review`・`closed`・`delete` した `tombstone`) を測ったところ、`-s` なしは `closed` と `tombstone` 以外の 7 つを出し、4 つに絞ると 4 つしか出なかった。サーバーの読み (`list -l answered --limit 0 --json`) と同じ範囲になる。節の導入の文も「終わっていない 4 つの status」の言い方をやめた。hook の br 向けの案内は一覧のコマンドを持たず (ID を渡す)、`-s` は無いので変更なし。コードの挙動の変更なし
+
+### テスト
+
+- `tests/test_br_read.py` に `ReadmePickupMatchesServer`: README の br の回答済みの一覧がちょうど 1 つで、引数がサーバーの読みと同じであること (`-s` を付けない・`--limit 0` を付ける) を固定
+
 ## 0.15.2
 
 ### 修正
