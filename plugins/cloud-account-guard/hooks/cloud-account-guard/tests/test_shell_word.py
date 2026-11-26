@@ -631,6 +631,38 @@ class TestFirebaseGuidance(unittest.TestCase):
                     self.assertIn(shell_word.UNSAFE, reason)
                     self.assertNotIn("解決先が期待値と合わない", reason)
 
+    def test_by_hand_sentence_states_the_firebase_rule_after_the_expected_value(self):
+        """`期待=example.com:right-project。` の直後の文は、汎用の UNSAFE の文 (`一部の記号`) だけだと
+        `:` が許される記号に読める。firebase の許容形 (NAME_RULE) を同じ文に添える。UNSAFE と末尾の
+        「手で確認してください」は残る (dispatcher の注記の判定と既存の部分一致を壊さない)。"""
+        reasons = self._reasons("example.com:right-project")
+        self.assertEqual(sorted(reasons), ["--project", "mismatch", "unresolved"])
+        for case, reason in reasons.items():
+            with self.subTest(case=case):
+                head, sep, tail = reason.partition("期待=example.com:right-project")
+                self.assertEqual(sep, "期待=example.com:right-project", reason)
+                self.assertIn(shell_word.UNSAFE, tail)
+                self.assertIn(shell_word.NAME_RULE, tail)
+                self.assertLess(tail.index(shell_word.UNSAFE), tail.index(shell_word.NAME_RULE))
+                self.assertIn(CHECK_BY_HAND, tail)
+                self.assertGreater(tail.index(CHECK_BY_HAND), tail.index(shell_word.NAME_RULE))
+                self.assertNotIn("firebase use", reason)
+
+    def test_dict_by_hand_sentence_puts_the_firebase_rule_on_the_alias(self):
+        """dict の `期待=` に示すのは project ID で、`#` の後ろなので WORD で見る (`:` を許す)。
+        firebase の許容形 (NAME_RULE) は alias にだけ掛ける: 「期待値は … . _ - だけ」と置くと、
+        `期待=example.com:right-project のいずれか` の `:` が理由に読める (外れたのは alias)。"""
+        reasons = self._reasons({"prod east": "example.com:right-project"})
+        self.assertEqual(sorted(reasons), ["--project", "mismatch", "unresolved"])
+        for case, reason in reasons.items():
+            with self.subTest(case=case):
+                self.assertIn("期待=example.com:right-project のいずれか", reason)
+                self.assertIn(
+                    f"alias か project ID が{shell_word.UNSAFE} (alias に{shell_word.NAME_RULE})", reason
+                )
+                self.assertNotIn(f"期待値は{shell_word.UNSAFE}", reason)
+                self.assertIn(CHECK_BY_HAND, reason)
+
     def test_domain_scoped_project_is_guided_after_the_comment_mark(self):
         """`#` の後ろの project はコメントなので WORD で見る。ドメイン付きの project ID でも
         alias の案内行を出す (NAME で見ていたときは案内を一切出さなかった。マージ前

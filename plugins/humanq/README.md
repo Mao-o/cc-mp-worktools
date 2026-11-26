@@ -127,7 +127,8 @@ metadata の `humanq` に置く。画面はこれを読んで、問い・背景�
 
 ```
 cd plugins/humanq
-python3 -m unittest discover tests        # サーバー (bd の読み書きは偽の bd で回す。本物の bd が PATH にあれば、それでも回す)
+python3 -m unittest discover tests        # サーバー (bd の読み書きは偽の bd だけで回す。PATH に bd があっても本物は打たない)
+HUMANQ_TEST_BD=bd python3 -m unittest discover -s tests   # 本物の bd の脚も回す (bd を上げたら手元でこれを回す)
 PLAYWRIGHT_PATH=<playwright の index.mjs> node tests/ui_test.mjs   # 画面 (Playwright と chromium が要る)
 ```
 
@@ -135,6 +136,6 @@ PLAYWRIGHT_PATH=<playwright の index.mjs> node tests/ui_test.mjs   # 画面 (Pl
 
 br のプロジェクトの読み (一覧と `show` の argv・終わっていない status のチケットが全部出ること・コメントの並べ替え・両ラベルの向き・bd を打たないこと・hook の案内) は、`tests/test_br_read.py` が同じ偽物を br の名前で置いて回す (偽の br はコメントを新しい順で返す)。
 
-`tests/test_cli_contract.py` は、bd・br の CLI の癖 (0 件の出力の形・拒否される flag・metadata の形・コメントの並びと id など) を、偽の bd・偽の br・本物の bd・本物の br の 4 通りに同じ assertion で当てる契約テスト。偽物 2 通りは既定の suite と CI で走る。本物は遅い (bd だけで 30 秒近い) ので、PATH に bd / br があっても既定では起動せず skip する (理由に変数名を出す)。手元で回すときは env `HUMANQ_TEST_BD` / `HUMANQ_TEST_BR` を立てる (値は起動コマンド。`bd` / `br`、前置き付きの `<launcher> -- br`、PATH のを使うなら `1`)。本物は一時 dir の使い捨てのプロジェクトでだけ打ち、利用者のプロジェクトには触れない。**bd か br を上げたら、env を立てて手元で契約テストを回す** (`HUMANQ_TEST_BD=bd HUMANQ_TEST_BR=br python3 -m unittest tests.test_cli_contract`) (食い違うと、どの CLI のどの版のどの癖かを失敗の文に出す)。
+`tests/test_cli_contract.py` は、bd・br の CLI の癖 (0 件の出力の形・拒否される flag・metadata の形・コメントの並びと id など) を、偽の bd・偽の br・本物の bd・本物の br の 4 通りに同じ assertion で当てる契約テスト。br は、画面の読み (`BrBackend.load`) の thread が書いた順で返ること (同じ秒のコメント・時刻をずらしたコメント・本物は JSONL から取り込み直した後のコメント、0 件は `[]`) と、偽の br が断る形を本物の br も断ること (偽物が通さない形を本物が通す食い違いの検出) もここで当てる。偽物 2 通りは既定の suite と CI で走る。本物は遅い (bd だけで 30 秒近い) ので、PATH に bd / br があっても既定では起動せず skip する (理由に変数名を出す)。手元で回すときは env `HUMANQ_TEST_BD` / `HUMANQ_TEST_BR` を立てる (値は起動コマンド。`bd` / `br`、前置き付きの `<launcher> -- br`、PATH のを使うなら `1`)。本物は一時 dir の使い捨てのプロジェクトでだけ打ち、利用者のプロジェクトには触れない。**bd か br を上げたら、env を立てて手元で契約テストを回す** (`HUMANQ_TEST_BD=bd HUMANQ_TEST_BR=br python3 -m unittest tests.test_cli_contract`) (食い違うと、どの CLI のどの版のどの癖かを失敗の文に出す)。
 
 `tests/ui_test.mjs` はサーバーを一時ポートと一時 state dir で起動し、API の応答を台本どおりに返して画面の動き (押したカードの即時の非表示・失敗時の戻し・入力中の保護など) を確かめる。bd には触れない。
