@@ -189,7 +189,7 @@ def _service_name(service) -> str:
     return service.__name__.rsplit(".", 1)[-1]
 
 
-def _cache_state(service, env, context) -> str | None:
+def _cache_state(service, env, context, trace: dict | None = None) -> str | None:
     """成功 cache の entry に記録する、CLI の状態ファイルの指紋 (v0.35.0。`cache.state_fingerprint`)。
 
     状態ファイルを宣言しない service (`state_files` が無い) は空文字 (指紋で見ない = 0.34.0 と
@@ -201,6 +201,11 @@ def _cache_state(service, env, context) -> str | None:
     例外は握るが、止まる形は握れない (cache を見る前に毎回走り、止まると hook が timeout で打ち切られて
     検証が飛ぶ) ので、state_files の側で FIFO などを止まる形で開かない (`cli_config.read_text`)。
     env は検証に渡すのと同じ (hook プロセスの env + 行頭の inline env)。
+
+    trace (`CLOUD_ACCOUNT_GUARD_DEBUG=1` のときだけ非 None) には、None を返した理由を
+    `trace["cache_state"][<service>]` に残す (v0.36.0): `settling` (書かれてから 2 秒の窓の中) /
+    `unknown-dir` (state_files が場所を決められない) / 例外の型の名前。指紋が取れたときは何も足さない。
+    観測専用で、返す値・例外の握り方・cache の読み書きは trace の有無で変わらない。
     """
     state_files = getattr(service, "state_files", None)
     if state_files is None:
@@ -208,10 +213,21 @@ def _cache_state(service, env, context) -> str | None:
     try:
         files = state_files(env, context)
         if files is None:
+            _trace_cache_state(trace, service, "unknown-dir")
             return None
-        return cache.state_fingerprint(files)
-    except Exception:  # noqa: BLE001
+        fingerprint = cache.state_fingerprint(files)
+        if fingerprint is None:
+            _trace_cache_state(trace, service, "settling")
+        return fingerprint
+    except Exception as e:  # noqa: BLE001
+        _trace_cache_state(trace, service, type(e).__name__)
         return None
+
+
+def _trace_cache_state(trace: dict | None, service, reason: str) -> None:
+    """`_cache_state` が None を返した理由を debug trace に残す (trace が無いときは何もしない)。"""
+    if trace is not None:
+        trace.setdefault("cache_state", {})[_service_name(service)] = reason
 
 
 def _find_accounts_file(
@@ -1324,7 +1340,7 @@ def _dispatch_impl(
         # ファイルの指紋で見る (v0.35.0。`_cache_state`)。None なら成功 cache を読まず書かない。
         # 検証の**前**に取り、書く側も同じ値を使う (検証の後に取ると、その間の切替後の指紋で
         # 旧状態の成功を記録する)。
-        state = _cache_state(svc, {**os.environ, **(inline_env or {})}, ctx)
+        state = _cache_state(svc, {**os.environ, **(inline_env or {})}, ctx, trace)
         if not switching_here and state is not None and cache.get_success(
             svc_name, project_dir, entry, accounts_mtime, inline_env, cache_ctx,
             identity_env=ident, state=state,
