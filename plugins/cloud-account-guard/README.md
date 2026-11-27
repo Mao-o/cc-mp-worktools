@@ -1970,13 +1970,19 @@ hook 実行時に環境変数 `CLOUD_ACCOUNT_GUARD_DEBUG=1` を立てると、�
 ```json
 {"segments": [{"segment": "gh pr create", "service": "github", "readonly": false,
    "tier": "write"}],
- "cache_hit": {}, "verify_ms": {"github": 12.3}, "auto_switch": {},
+ "cache_hit": {}, "cache_state": {"github": "settling"},
+ "verify_ms": {"github": 12.3}, "auto_switch": {},
  "elapsed_ms": 13.1, "decision": "deny"}
 ```
 
 - `segments`: 抽出した各セグメントと、マッチした service / readonly 判定 /
   [tier](#検証の-3-tier--v0140) (`readonly` / `query` / `write`)
 - `cache_hit`: 成功 cache を使って verify を省略した service
+- `cache_state`: CLI の状態ファイルの指紋を作れず、成功 cache を読まず書かなかった service と、その理由 (v0.36.0)。
+  `settling` (状態ファイルが書かれてから 2 秒の窓の中) / `unknown-dir` (設定ディレクトリを決められない) /
+  例外の型の名前 (`OSError` など)。指紋を作れた target は項目を足さず、1 件も無ければ項目ごと出ない
+  (同じ service の target が複数あり、どれかが指紋を作れなければ、その理由が出る)。
+  成功 cache が毎回効かない (`cache_hit: {}` が続く) ときは、この項目の有無で、指紋を作れなかったのが原因かを区別する
 - `verify_ms`: 実際に `verify()` を呼んだ service とその所要時間 (ms)
 - `auto_switch`: [自動切替](#自動切替-auto-switch--v0160) を試みた service ごとの結果
   (`resolved` = 切替後の再検証が一致した / `switched` = 切り替えた

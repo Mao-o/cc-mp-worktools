@@ -699,7 +699,8 @@ echo '{"tool_input":{"command":"gh auth status"},"cwd":"/tmp"}' \
 ```
 
 `CLOUD_ACCOUNT_GUARD_DEBUG=1` を付けると、セグメント分解・マッチしたサービス・
-readonly 判定・cache hit・verify 所要 ms・最終判定を stderr に 1 行 JSON で出す。
+readonly 判定・cache hit・cache を使わなかった理由 (`cache_state`。指紋を作れなかった service だけ)・
+verify 所要 ms・最終判定を stderr に 1 行 JSON で出す。
 
 ### E2E
 

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.36.0
+
+### Added: デバッグ trace に、成功 cache を使わなかった理由 (`cache_state`) を出す
+
+- `CLOUD_ACCOUNT_GUARD_DEBUG=1` の trace に `cache_state` を足した。0.35.0 から、CLI の状態ファイルの指紋を作れない
+  target は成功 cache を読まず書かない (毎回照合する)。trace には `cache_hit: {}` しか出ず、cache が効かなかった理由を
+  区別できなかったので、状態ファイルを数える関数にバグが入って gh / gcloud の cache が毎回 miss になっても、
+  テストにも trace にも出なかった
+- `cache_state` は service ごとの理由 (指紋を作れた target には項目を足さない。1 件も無ければ `cache_state` ごと出ない):
+  `settling` (状態ファイルが書かれてから 2 秒の窓の中) / `unknown-dir` (設定ディレクトリを決められない。
+  Windows で env がどれも無いときなど) / 例外の型の名前 (`OSError` など。状態ファイルの場所を決める処理か指紋を
+  作る処理が例外を投げた)。例外の本文は出さない
+- 観測専用。trace が無効のときの出力は 0.35.1 と同じで、判定・cache の読み書き・`state_files` と指紋の呼び出しの回数は
+  trace の有無で変わらない。trace が有効のときの違いは `cache_state` の項目だけ
+
 ## 0.35.1
 
 ### Fixed: Windows では gh / gcloud の設定を `%AppData%` の下から読み、`~/.config` の下の古いファイルで一致と判定しない

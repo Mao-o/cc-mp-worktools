@@ -11,7 +11,9 @@ fixture のファイルは mtime を過去にずらしてから使う (書いた
 """
 from __future__ import annotations
 
+import contextlib
 import errno
+import io
 import json
 import os
 import shutil
@@ -27,7 +29,7 @@ from unittest import mock
 import _testutil  # noqa: F401
 
 from core import cache  # noqa: E402
-from core.dispatcher import dispatch  # noqa: E402
+from core.dispatcher import _cache_state, dispatch  # noqa: E402
 from services import aws, gcloud, github  # noqa: E402
 
 _PKG_DIR = Path(__file__).resolve().parent.parent
@@ -700,6 +702,150 @@ if args[:2] == ["auth", "switch"] and "--user" in args:
 sys.stderr.write("fake gh: unsupported " + " ".join(args) + "\\n")
 sys.exit(1)
 """
+
+
+class TestCacheStateTrace(_DispatchBase):
+    """成功 cache を使わなかった理由 (`_cache_state` が None を返した理由) を debug trace に出す (v0.36.0)。
+
+    trace の `cache_state` に service ごとの理由が出る: `settling` (書かれてから 2 秒の窓の中) /
+    `unknown-dir` (場所を決められない) / 例外の型の名前。観測専用で、判定・cache の読み書き・
+    state_files の呼び出し回数は trace の有無で変わらない。
+    """
+
+    def _run(self, command, *, debug=True):
+        """dispatch を 1 回流し、(結果, trace または None) を返す。debug=False では stderr が空のこと。"""
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ), contextlib.redirect_stderr(stderr):
+            if debug:
+                os.environ["CLOUD_ACCOUNT_GUARD_DEBUG"] = "1"
+            else:
+                os.environ.pop("CLOUD_ACCOUNT_GUARD_DEBUG", None)
+            try:
+                result = dispatch(command, str(self.project))
+            except Exception as e:  # noqa: BLE001
+                self.fail(f"dispatch から例外が漏れた: {e!r}")
+        if not debug:
+            self.assertEqual(stderr.getvalue(), "")
+            return result, None
+        lines = [line for line in stderr.getvalue().splitlines() if line.startswith("{")]
+        self.assertEqual(len(lines), 1, stderr.getvalue())
+        return result, json.loads(lines[0])
+
+    def test_settling_window_is_reported_per_service(self):
+        # 書いた直後 (age=0) のファイルは指紋を作らない。
+        _write(self.gh_dir / "hosts.yml", _hosts("work"), age=0)
+        _write(self.gcloud_dir / "active_config", "work\n", age=0)
+        _write(
+            self.gcloud_dir / "configurations" / "config_work",
+            "[core]\nproject = vca-probe-project\n",
+            age=0,
+        )
+        for command, service in ((self.GH_WRITE, "github"), (self.GCLOUD_WRITE, "gcloud")):
+            with self.subTest(service=service), mock.patch(
+                f"services.{service}.verify", return_value=None
+            ) as verify:
+                self.assertIsNone(self._run(command)[0])
+                _, trace = self._run(command)
+                self.assertEqual(trace.get("cache_state"), {service: "settling"})
+                self.assertEqual(trace["cache_hit"], {})
+                self.assertEqual(verify.call_count, 2)
+
+    def test_unknown_dir_is_reported(self):
+        with mock.patch("services.github.state_files", return_value=None), mock.patch(
+            "services.github.verify", return_value=None
+        ):
+            _, trace = self._run(self.GH_WRITE)
+        self.assertEqual(trace.get("cache_state"), {"github": "unknown-dir"})
+        self.assertEqual(trace["cache_hit"], {})
+
+    def test_exception_type_name_is_reported(self):
+        for exc in (OSError("boom"), ValueError("boom"), RuntimeError("boom")):
+            with self.subTest(exc=type(exc).__name__), mock.patch(
+                "services.github.state_files", side_effect=exc
+            ), mock.patch("services.github.verify", return_value=None):
+                result, trace = self._run(self.GH_WRITE)
+            self.assertIsNone(result)
+            self.assertEqual(trace.get("cache_state"), {"github": type(exc).__name__})
+
+    def test_exception_in_the_fingerprint_is_reported_too(self):
+        _write(self.gh_dir / "hosts.yml", _hosts("work"))
+        with mock.patch(
+            "core.cache.state_fingerprint", side_effect=MemoryError("boom")
+        ), mock.patch("services.github.verify", return_value=None):
+            _, trace = self._run(self.GH_WRITE)
+        self.assertEqual(trace.get("cache_state"), {"github": "MemoryError"})
+
+    def test_no_reason_when_the_fingerprint_is_made(self):
+        _write(self.gh_dir / "hosts.yml", _hosts("work"))
+        with mock.patch("services.github.verify", return_value=None):
+            _, first = self._run(self.GH_WRITE)
+            _, second = self._run(self.GH_WRITE)
+        for trace in (first, second):
+            self.assertNotIn("cache_state", trace)
+        self.assertEqual(second["cache_hit"], {"github": True})
+
+    def test_no_reason_for_a_service_without_state_files(self):
+        with mock.patch("services.aws.verify", return_value=None):
+            _, trace = self._run("aws s3 rm s3://vca-probe-bucket/x")
+        self.assertNotIn("cache_state", trace)
+
+    def test_trace_off_prints_nothing_and_decides_the_same(self):
+        """trace の有無で、結果・verify の回数・state_files の回数・cache の書き込みが変わらない。"""
+        labels = ("fingerprint", "settling", "unknown-dir", "exception")
+        patches = {
+            "fingerprint": {},
+            "settling": {},
+            "unknown-dir": {"return_value": None},
+            "exception": {"side_effect": OSError("boom")},
+        }
+        observed = {}
+        for debug in (False, True):
+            for label in labels:
+                cache_tmp = self.tmp / f"cache-{label}-{debug}"
+                cache_tmp.mkdir(mode=0o700)
+                _write(self.gh_dir / "hosts.yml", _hosts("work"), age=0 if label == "settling" else 100)
+                if patches[label]:
+                    patch_state = mock.patch("services.github.state_files", **patches[label])
+                else:
+                    patch_state = mock.patch("services.github.state_files", wraps=github.state_files)
+                with mock.patch.dict(os.environ, {"TMPDIR": str(cache_tmp)}), patch_state as state_files, mock.patch(
+                    "services.github.verify", return_value=None
+                ) as verify:
+                    results = [self._run(self.GH_WRITE, debug=debug)[0] for _ in range(3)]
+                written = sorted(p.name.split("-")[0] for p in cache_tmp.rglob("*.json"))
+                observed[(label, debug)] = (results, verify.call_count, state_files.call_count, written)
+        for label in labels:
+            with self.subTest(label=label):
+                self.assertEqual(observed[(label, False)], observed[(label, True)])
+        # 対照: 指紋が取れる場合だけ cache が効き (verify 1 回)、他は毎回照合する (3 回)。
+        self.assertEqual(observed[("fingerprint", True)][1], 1)
+        self.assertEqual(observed[("fingerprint", True)][3], ["github"])
+        for label in ("settling", "unknown-dir", "exception"):
+            self.assertEqual(observed[(label, True)][1:], (3, 3, []), label)
+
+    def test_cache_state_return_value_is_the_same_with_or_without_a_trace(self):
+        (self.tmp / "f").write_text("x", encoding="utf-8")
+        cases = {
+            "unknown-dir": mock.patch.object(github, "state_files", return_value=None),
+            "exception": mock.patch.object(github, "state_files", side_effect=OSError("x")),
+            "settling": mock.patch.object(github, "state_files", return_value=[self.tmp / "f"]),
+        }
+        for label, patcher in cases.items():
+            with self.subTest(label=label), patcher:
+                trace: dict = {}
+                try:
+                    plain = _cache_state(github, {}, None)
+                    traced = _cache_state(github, {}, None, trace)
+                except Exception as e:  # noqa: BLE001
+                    self.fail(f"_cache_state から例外が漏れた: {e!r}")
+                self.assertIsNone(plain)
+                self.assertIsNone(traced)
+                self.assertEqual(list(trace), ["cache_state"])
+                self.assertEqual(len(trace.get("cache_state", {})), 1)
+        # 状態ファイルを宣言しない service は空文字で、trace には何も足さない。
+        trace = {}
+        self.assertEqual(_cache_state(aws, {}, None, trace), "")
+        self.assertEqual(trace, {})
 
 
 class TestTerminalSwitchEndToEnd(_Tmp):
