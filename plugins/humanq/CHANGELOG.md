@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.18.1
+
+### テスト
+
+テストの偽の bd・br (`tests/fake_beads.py`) を本物 (bd 1.3.4・br 0.7.6) に合わせた。製品コード (`server/`・`hooks/`) は変えていない (挙動の変更なし)。偽物のほうが本物と食い違うと、偽物の上で緑のテストが本物では別の経路に入る。
+
+- 偽の br の `show --json` は、コメントの無いチケットで `comments` の key を出さない (前は `[]` を出していた。本物の 0.7.6 は 0 件のとき key を出さない)。読む側 (`backend.br_thread`) は key の無い show を 0 件と読む。契約テストの「コメントの無い show」を「無いか空」から「key が無い」に締め、コメントを書いた後は出ることも確かめる。偽物にも本物にも通す
+- 偽の br は `update --agent-context` の JSON を、本物と同じく詰めて (空白を除き、escape を正規化し、key の順は保つ) 保存する。半分未満の判定は詰めた後の長さで行う。偽物は JSON でない値をそのまま保存する (本物は exit 7 で断る。偽物が寛容な側の食い違いで、そのまま残した)。契約テストに「詰めて返る」を足した (inline と `@file`、show と list)
+- 偽の bd の `comments add <id> -f <file> --json` は、書いたコメントを JSON で返す (前は 1 行の案内文)。humanq は `--json` を付けない。契約テストに 1 件足した (戻りの形は `comments --json` の要素と同じと仮定していて、本物の bd では測っていない)
+- 偽の br が本物より厳しかった 4 つの形を、本物に合わせて通すようにした。契約テストは、偽物が断る形の表 (`REFUSED`) と対になる、本物が通す形の表 (`ACCEPTED`) を持つ:
+  - `show` に id 無し: 最後に触ったチケット (create・update・close・label・comments add が記録する。show・list・comments の読み・delete は記録しない) を出す。記録が無ければ `VALIDATION_FAILED` (exit 4)
+  - `label add` / `label remove` に label が 2 つ以上: 1 個ずつ処理し、label ごとに 1 行を返す。id が無ければどれも処理しない
+  - `comments add <id> x -f <file>`: `-f` があれば本文の位置引数は無視し、ファイルの本文で書く (id の位置は問わない)
+  - `close <id> -r` (後ろに `--json` が付く形): `--reason` (`-r`)・`--notes`・`--description` (`-d`) は、次の語が `-` で始まっても値に取る。`--json` が理由になって閉じる。`-r` が最後の語なら usage エラー (本物も exit 2)
+- 偽の br の usage エラーの分岐 (`raise Usage(`) の全部を、`REFUSED` の形のどれかが踏むことを確かめるテストを足した (`FakeBrUsageBranches`)。偽物を進程内で動かして断りが上がった行を集め、ソースの分岐 (ast) と比べる。分岐を足して `REFUSED` に形を足し忘れると落ちる。後ろに `--json` を付けると断られない形 (`--actor`・`close -r` の値無し) は、何も付けない形の表 (`REFUSED_AS_LAST_WORD`) に分けた。`-C`・知らない subcommand・`comments add -f` に id 無しの行を `REFUSED` に足した
+- 偽物は、まだ本物と食い違う形が残る: 後ろに何も付けない `update` と `close` (id 無し) は本物では最後に触ったチケットに効くが、偽物は断る (`--json` を付けると本物も断る)。humanq は使わない形
+
 ## 0.18.0
 
 ### 画面

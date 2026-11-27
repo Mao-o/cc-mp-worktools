@@ -24,7 +24,8 @@
     担当は `update --assignee` (`-a`) で書ける
   - labels は名前の順で返す (付けた順ではない)
   - `comments --json` は古い順。要素は {id, issue_id, author, text, created_at}。id は UUID 文字列。
-    `--actor X` が author に入る
+    `--actor X` が author に入る。`comments add <id> -f <file> --json` は書いたコメントを同じ形の JSON で返す
+    (--json が無ければ 1 行の案内文。この JSON の形は本物の bd で測っていない: 要素と同じと仮定した)
   - `.beads/metadata.json` の database が beads.db で embeddeddolt/ が無いと、
     `Error: historical SQLite workspace detected; ...` で exit 1 (embeddeddolt/ があれば本物も database の値を見ない)
   - `-C <dir>` に .beads/ が無ければ `Error: cannot use -C directory "<dir>": no beads project found` で exit 1
@@ -41,12 +42,21 @@
     (all は tombstone を含まない)。ほかは VALIDATION_FAILED
   - update --status は組み込み以外の任意の文字列 (宣言は要らない) を受け付ける。closed と tombstone は断る (VALIDATION_FAILED、
     exit 4。close / delete を使わせる)。delete はチケットを tombstone にする (show では読める)
-  - show --json は配列 (comments と agent_context を含み metadata は無い)。id が 1 つでも無ければ ISSUE_NOT_FOUND で exit 3。
-    偽物は comments の key を 0 件でも出す (本物の 0.7.6 は 0 件のとき key を出さない。読む側は両方を受ける)
+  - show --json は配列 (agent_context を含み metadata は無い)。id が 1 つでも無ければ ISSUE_NOT_FOUND で exit 3。
+    comments の key は、コメントのあるチケットにだけ出る (0 件なら key が無い。読む側は key の無い show を読む)。
+    id を 1 つも書かないと、最後に触ったチケット (create・update・close・label・comments add が記録する。show・list・
+    comments の読み・delete は記録しない) を出す。記録が無ければ VALIDATION_FAILED (exit 4)
   - update --notes で notes を、--assignee で担当を書ける。description・notes・assignee は値のある issue にだけ list と show に出る
   - comments の並びは決まっていない (偽物は新しいものを先頭で返す)。id は int
-  - label add / remove の戻りは [{"status": added|removed|exists|not_found, ...}] で、どれも exit 0
-  - update --agent-context は丸ごと置き換え。半分未満・空にする書き換えは --force が無いと非 0
+  - comments add は -f があると、id のほかの位置引数 (本文) を無視してファイルの本文で書く (id の位置はどこでもよい)
+  - label add / remove は <id> のあとに label を何個でも取り、1 個ずつ処理する。戻りは label ごとの
+    [{"status": added|removed|exists|not_found, ...}] で、どれも exit 0。id が無ければ、どの label も処理せず exit 3
+  - 値を取る option のうち --reason (-r)・--notes・--description (-d) は、次の語が `-` で始まっても値に取る
+    (close <id> -r --json は --json が理由になって閉じる。-r が最後の語なら usage エラー)。ほかの option は
+    `--json` や `--actor` が続くと値が無い扱いで、それらは globals として先に取り除かれる
+  - update --agent-context は丸ごと置き換え。JSON として読める値は詰めて (空白を除き、escape を正規化し、key の順は保つ)
+    保存する。半分未満・空にする書き換えは (詰めた後の長さで) --force が無いと非 0。偽物は JSON でない値も、そのまま保存する
+    (本物は exit 7 で断る。偽物が寛容な側の食い違い)
   - database が dolt の dir で打つと、エラーにせず .beads/dolt・dolt-wal・dolt-shm を作って空の結果を返す
 依存は標準ライブラリだけ (fcntl を使うので macOS / Linux)。
 """
@@ -412,11 +422,14 @@ def bd_comments(p: Project, args: list[str], as_json: bool, actor: str) -> None:
             want(pos, 2, "comments add <id> <text>")
             text = pos[1]
         i = p.issue(pos[0], "resolving")
-        i["comments"].append({"id": str(uuid.uuid4()), "issue_id": i["id"], "author": actor, "text": text,
-                              "created_at": now()})
+        added = {"id": str(uuid.uuid4()), "issue_id": i["id"], "author": actor, "text": text, "created_at": now()}
+        i["comments"].append(added)
         touch(i)
         p.save()
-        print(f"Comment added to {i['id']}")
+        if as_json:                                                 # 本物は書いたコメントを JSON で返す
+            emit(added)
+        else:
+            print(f"Comment added to {i['id']}")
         return
     _, pos = take(args, {})
     want(pos, 1, "comments <id>")
@@ -554,22 +567,32 @@ def br_json_error(code: str, message: str, exit_code: int) -> Fail:
     return Fail(json.dumps({"error": {"code": code, "message": message}}, ensure_ascii=False), code=exit_code, stdout=True)
 
 
-def br_validation(reason: str, as_json: bool) -> Fail:
+def br_validation(reason: str, as_json: bool, field: str = "status") -> Fail:
     """VALIDATION_FAILED。--json なら stdout の JSON の error、無ければ stderr の 1 行 (どちらも exit 4)。"""
-    msg = f"Validation failed: status: {reason}"
+    msg = f"Validation failed: {field}: {reason}"
     if as_json:
         return br_json_error("VALIDATION_FAILED", msg, BR_VALIDATION_EXIT)
     return Fail(f"Error: {msg}", code=BR_VALIDATION_EXIT)
 
 
+# 次の語が `-` で始まっても値に取る option (本物の 0.7.6 で実測: close <id> -r --json は --json が理由になって閉じる。
+# -p・-t・--title・-s・--limit・-f・--actor・--agent-context・--status・--assignee・-l は `--json` を値に取らず usage エラー)
+BR_HYPHEN_VALUE = ("-r", "--reason", "--notes", "-d", "--description")
+
+
 def br_split_globals(argv: list[str]) -> tuple[str | None, bool, list[str]]:
-    """--actor <name>・--json はどこに書いてもよい。-C は無い (usage エラー)。残りを返す。"""
+    """--actor <name>・--json はどこに書いてもよい。-C は無い (usage エラー)。残りを返す。
+    ただし BR_HYPHEN_VALUE の option の次の語は値なので、`--json` でも `--actor` でも globals にせずそのまま残す。"""
     actor = None
     as_json = False
     rest: list[str] = []
     i = 0
     while i < len(argv):
         a = argv[i]
+        if a in BR_HYPHEN_VALUE:                    # 最後の語なら値が無いまま残り、br_take が usage エラーにする
+            rest.extend(argv[i:i + 2])
+            i += 2
+            continue
         if a == "-C" or a.startswith("-C="):
             raise br_usage_unexpected("-C")
         if a == "--actor":
@@ -682,6 +705,24 @@ def br_issue(p: Project, iid: str) -> dict:
     return i
 
 
+def br_touch(p: Project, i: dict) -> None:
+    """`show` に id を書かないときに出す、最後に触ったチケットを覚える (本物は .beads/last-touched に書く)。"""
+    p.state["last_touched"] = i["id"]
+
+
+def br_compact_context(raw: str) -> str:
+    """agent_context の値。JSON として読めるものは、本物の br と同じく詰めて返す (空白を除き、escape を正規化し、key の順と
+    後ろの重複 key の値を保つ)。読めないもの (空を含む) はそのまま返す: 本物は JSON でない inline の値を exit 7 で断るが、
+    偽物は寛容にしてある。数は Python の表記なので、`-0` (本物は -0.0) などの端は本物と違う。"""
+    try:
+        # NaN・Infinity は Python の json は読むが JSON ではない (allow_nan=False の dumps が ValueError にする)
+        out = json.dumps(json.loads(raw), ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        out.encode("utf-8")                                         # 対の無いサロゲートなどは書けない
+    except (ValueError, RecursionError):                            # 深く入れ子の値は RecursionError
+        return raw
+    return out
+
+
 def br_comments_of(i: dict) -> list[dict]:
     """並びは決まっていない。偽物は新しいものを先頭にする (古い順を前提にした読み方を落とすため)。"""
     return [{"id": c["id"], "issue_id": i["id"], "author": c["author"], "text": c["text"], "created_at": c["created_at"]}
@@ -729,6 +770,7 @@ def br_create(p: Project, args: list[str], as_json: bool, actor: str) -> None:
          "issue_type": br_one(opts, "-t", "--type") or "task", "created_at": t, "created_by": actor, "updated_at": t,
          "description": br_one(opts, "-d", "--description") or "", "labels": labels, "comments": [], "agent_context": ""}
     p.state["issues"][iid] = i
+    br_touch(p, i)
     p.save()
     if as_json:
         emit(br_row(i))
@@ -753,6 +795,7 @@ def br_update(p: Project, args: list[str], as_json: bool) -> None:
                     raw = f.read()
             except OSError as e:
                 raise Fail(f"Error: reading agent-context file: {e}") from None
+        raw = br_compact_context(raw)                                       # 本物は詰めてから、長さを比べて保存する
         old = i.get("agent_context") or ""
         if old and len(raw) * 2 < len(old) and not opts.get("--force"):      # 今の値の半分未満・空にする書き換えは断る
             raise Fail(f"Error: refusing to overwrite non-empty 'agent_context' ({len(old)} chars) with a shorter value "
@@ -767,6 +810,7 @@ def br_update(p: Project, args: list[str], as_json: bool) -> None:
     if "--assignee" in opts:                        # 本物は show・list に assignee を出す (br 0.7.6 で実測)
         i["assignee"] = br_one(opts, "--assignee") or ""
     i["updated_at"] = br_time(True)
+    br_touch(p, i)
     p.save()
     if as_json:
         emit(br_row(i))
@@ -781,6 +825,7 @@ def br_close(p: Project, args: list[str]) -> None:
     i = br_issue(p, pos[0])
     i["status"] = "closed"
     i["updated_at"] = br_time(True)
+    br_touch(p, i)
     p.save()
     print(f"Closed {i['id']}")
 
@@ -837,11 +882,14 @@ def br_list(p: Project, args: list[str], as_json: bool) -> None:
 
 def br_show(p: Project, args: list[str], as_json: bool) -> None:
     _, pos = br_take(args, {})
-    if not pos:
-        raise Usage("error: the following required arguments were not provided:\n  <IDS>...")
+    if not pos:                                                         # id が無ければ最後に触ったチケット (本物は exit 0 で出す)
+        last = p.state.get("last_touched")
+        if last not in p.state["issues"]:
+            raise br_validation("no issue IDs provided and no last-touched issue", as_json, field="ids")
+        pos = [last]
     found = [br_issue(p, iid) for iid in pos]                           # 1 つでも無ければ全体が exit 3
-    if as_json:
-        emit([{**br_row(i), "comments": br_comments_of(i)} for i in found])
+    if as_json:                                                         # comments の key は、コメントが 0 件なら無い (本物の 0.7.6)
+        emit([{**br_row(i), **({"comments": br_comments_of(i)} if i["comments"] else {})} for i in found])
     else:
         print("\n".join(f"{i['id']} · {i['title']}   [{i['status']}]" for i in found))
 
@@ -851,23 +899,26 @@ def br_label(p: Project, args: list[str], as_json: bool) -> None:
         raise Usage(f"error: unrecognized subcommand '{args[0] if args else ''}'")
     op = args[0]
     _, pos = br_take(args[1:], {})
-    if len(pos) != 2:
+    if len(pos) < 2:
         raise Usage(f"error: expected <ID> <LABEL> for 'label {op}'")
-    i = br_issue(p, pos[0])
-    name = pos[1]
-    if op == "add":
-        status = "exists" if name in i["labels"] else "added"
-        if status == "added":
-            i["labels"].append(name)
-    else:
-        status = "removed" if name in i["labels"] else "not_found"
-        i["labels"] = [x for x in i["labels"] if x != name]
+    i = br_issue(p, pos[0])                                             # id が無ければ、どの label も処理しない
+    rows = []
+    for name in pos[1:]:                                                # 本物は label を何個でも取り、順に 1 個ずつ処理する
+        if op == "add":
+            status = "exists" if name in i["labels"] else "added"
+            if status == "added":
+                i["labels"].append(name)
+        else:
+            status = "removed" if name in i["labels"] else "not_found"
+            i["labels"] = [x for x in i["labels"] if x != name]
+        rows.append({"status": status, "issue_id": i["id"], "label": name})
     i["updated_at"] = br_time(True)
+    br_touch(p, i)
     p.save()
     if as_json:
-        emit([{"status": status, "issue_id": i["id"], "label": name}])
+        emit(rows)
     else:
-        print(f"{status}: {name} {i['id']}")
+        print("\n".join(f"{r['status']}: {r['label']} {i['id']}" for r in rows))
 
 
 def br_comments(p: Project, args: list[str], as_json: bool, actor: str) -> None:
@@ -875,8 +926,8 @@ def br_comments(p: Project, args: list[str], as_json: bool, actor: str) -> None:
         opts, pos = br_take(args[1:], {"-f": True, "--file": True})
         f = br_one(opts, "-f", "--file")
         if f:
-            if len(pos) != 1:
-                raise Usage("error: expected exactly one <ID> with --file")
+            if not pos:                                                 # id のほかの位置引数 (本文) は、-f があれば無視される
+                raise Usage("error: the following required arguments were not provided:\n  <ID>")
             try:
                 with open(f, encoding="utf-8", newline="") as fh:       # 本文末尾の改行は保つ
                     text = fh.read()
@@ -891,6 +942,7 @@ def br_comments(p: Project, args: list[str], as_json: bool, actor: str) -> None:
         p.state["next_comment"] = cid + 1                               # int で単調に増える
         i["comments"].append({"id": cid, "author": actor, "text": text, "created_at": br_time()})
         i["updated_at"] = br_time(True)
+        br_touch(p, i)
         p.save()
         if as_json:
             emit({"id": cid, "issue_id": i["id"], "author": actor, "text": text, "created_at": i["comments"][-1]["created_at"]})
