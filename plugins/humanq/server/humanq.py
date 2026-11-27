@@ -58,7 +58,8 @@ MAX_BODY = 64 * 1024
 CACHE_SEC = 8.0
 # 保留の thread の覚え (backend.ThreadMemo)。SNOOZE_MEMO_SEC は覚えを使う上限 (このサーバーの書き込みは、その場で捨てる)、
 # SNOOZE_READ_SEC は 1 回の読みで保留の thread を CLI で読む時間の上限。SessionStart の hook は件数の読みを 8 秒で
-# 打ち切り、画面の読みの最中ならその後ろで待つので、2 回分の読みが 8 秒に収まるようにする
+# 打ち切る。画面の読みの最中なら、その読みの結果を受け取る (Store.project の fresh)。上限は一覧と回答済みのコメントの読みの
+# 後に数え始めるので、1 回の読みはその分だけ 2 秒より長い
 SNOOZE_MEMO_SEC = 600.0
 SNOOZE_READ_SEC = 2.0
 # 時間の上限で読めなかった保留の thread を裏で読むとき、1 件ごとに読みのロックを放す間 (待っている読みを先に通す)
@@ -338,14 +339,18 @@ class Store:
         return registry.project_kind(repo, registry.project_cli(self.state_dir, repo, groups))
 
     def project(self, repo: str, fresh: bool = False, groups: list[dict] | None = None) -> dict:
-        """fresh なら、キャッシュが有効な間でも CLI で読み直す (/api/summary?fresh=1)。fresh でも、保留の thread は覚え
-        (ThreadMemo) から使う (読み直すのは一覧と回答済みのコメント)。"""
+        """fresh なら、キャッシュが有効な間でも CLI で読み直す (/api/summary?fresh=1)。ただし問い合わせの後に終わった読み
+        (このロックを待っていた間に終わった画面の読み) の結果はそのまま返す。fresh でも、保留の thread は覚え (ThreadMemo)
+        から使う (読み直すのは一覧と回答済みのコメント)。"""
+        asked = time.monotonic()
         with self._lock(self._locks, repo):
             route = self.route(repo, groups)
             kind, reason = route
             hit = self._cache.get(repo)
-            # 設定 (HUMANQ_BEADS_CLI) や印が変わったら、キャッシュの時間内でも読み直す (ファイルを見るだけで安い)
-            if hit and not fresh and hit[2] == route and time.monotonic() - hit[0] < CACHE_SEC:
+            # 設定 (HUMANQ_BEADS_CLI) や印が変わったら、キャッシュの時間内でも読み直す (ファイルを見るだけで安い)。
+            # fresh でも、問い合わせの後に終わった読みの結果は返す (SessionStart の hook が画面の読みの後ろで、もう 1 回分を
+            # 読まない。2 回分を待つと、保留と回答済みのコメントの読みの分だけ 8 秒の打ち切りに近づく)
+            if hit and hit[2] == route and (hit[0] >= asked if fresh else time.monotonic() - hit[0] < CACHE_SEC):
                 return hit[1]
             be = BACKENDS.get(kind)
             if be is None:

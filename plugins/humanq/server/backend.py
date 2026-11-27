@@ -131,10 +131,12 @@ class ThreadMemo:
                 self._memo[(repo, iid)] = (self.clock(), thread)
 
     def drop(self, repo: str, iid: str) -> None:
-        """iid の覚えを捨て、repo の世代を進める (書き込みの後に呼ぶ)。"""
+        """iid の覚えを捨て、repo の世代を進める (書き込みの後に呼ぶ)。同じ DB に届く別の登録 (bd の linked worktree は本体と
+        まとめない) の同じチケットの覚えも捨て、その登録の世代も進める (別の DB の同じ id なら、読み直すだけ)。"""
         with self._lock:
-            self._memo.pop((repo, iid), None)
-            self._gen[repo] = self._gen.get(repo, 0) + 1
+            for r in {k[0] for k in self._memo if k[1] == iid} | {repo}:
+                self._memo.pop((r, iid), None)
+                self._gen[r] = self._gen.get(r, 0) + 1
 
     def keep(self, repo: str, ids) -> None:
         """repo の覚えを ids (今の保留のラベルの付いた判断待ち) だけにする。ラベルが外れたチケットの覚えは捨てる

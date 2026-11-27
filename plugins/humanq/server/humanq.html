@@ -260,6 +260,7 @@ const openCtx = new Set();         // 全文を開いている「背景 (context
 const pending = new Map();
 const errors = new Map();          // カードの key -> {summary, full} (送信の失敗。戻したカードに出す)
 let seen = null;                   // 前回までに見た判断待ち (通知用)
+let prevSnz = new Set();           // 前回の読みで保留中だった判断待ち (通知用)
 let lastData = null;               // 最後に受け取ったデータ (正規化済み。書き換えない)
 let loadSeq = 0;                   // load の通し番号
 let failStreak = 0;                // 読み込みが続けて失敗した回数 (成功で 0)
@@ -1418,9 +1419,15 @@ async function failed(key, it, e, op) {
 
 // ---- 読み込み -------------------------------------------------------------------------------
 
-function notifyNew(ids) {
+function notifyNew(projects) {
+  const keyOf = (p, i) => p.path + "\n" + i.id;
+  const ids = projects.flatMap(p => p.human.map(i => keyOf(p, i)));
+  // 前の読みで保留中だったものが、保留の情報なし (snooze: null) で判断待ちに出たのは、戻る日を読めなかった読み (サーバーの
+  // 入れ替え直後の読み残しなど)。増えたとは数えない (戻る日が来た・問いが書き換わったものは snooze が付くので数える)
+  const quiet = new Set(projects.flatMap(p => p.human.filter(i => !i.snooze && prevSnz.has(keyOf(p, i))).map(i => keyOf(p, i))));
+  prevSnz = new Set(projects.flatMap(p => (p.snoozed || []).map(i => keyOf(p, i))));
   if (seen === null) { seen = new Set(ids); return; }
-  const fresh = ids.filter(i => !seen.has(i));
+  const fresh = ids.filter(i => !seen.has(i) && !quiet.has(i));
   seen = new Set(ids);
   if (fresh.length && "Notification" in window && Notification.permission === "granted")
     new Notification("判断待ちが増えました", { body: `${fresh.length} 件` });
@@ -1486,7 +1493,7 @@ async function runLoad() {
   hideNotice("offline");
   lastData = data;
   settlePending(data, seq);
-  notifyNew(data.projects.flatMap(p => p.human.map(i => p.path + "\n" + i.id)));
+  notifyNew(data.projects);
   try {
     render();
     meta.textContent = "更新 " + new Date().toLocaleTimeString() + (staleCount ? " (入力中のカードの更新は後回し)" : "");

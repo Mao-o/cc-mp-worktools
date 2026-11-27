@@ -1489,6 +1489,68 @@ class BdOnly:
         self.assertEqual(sorted(self.ids(self.read(store), "snoozed", ids)), sorted(ids), "裏で読んだ覚えを次の読みが使っていない")
         self.assertEqual(self.comment_reads(ids), n)
 
+    def test_a_read_behind_racing_a_resnooze_does_not_memorise_the_old_comment(self):
+        ids = [self.new_question() for _ in range(2)]
+        store = self.store()
+        for i in ids:
+            self.write(store.snooze, {"id": i, "until": None, "note": "old"})
+        store._threads.budget = 0.0                         # 全部読み残して、裏の読みに回す
+        be = humanq.BACKENDS["bd"]
+        real = be.comments
+        entered, go = threading.Event(), threading.Event()
+
+        def slow(repo, iid):
+            out = real(repo, iid)                           # 書き込みの前のコメント (補足 old)
+            if iid == ids[0] and threading.current_thread().name.startswith("ThreadPoolExecutor") and not go.is_set():
+                entered.set()
+                go.wait(10)
+            return out
+        with mock.patch.object(be, "comments", slow):
+            self.read(store)
+            self.assertTrue(entered.wait(10), "裏の読みが始まらない")
+            store._threads.budget = 120.0
+            self.write(store.snooze, {"id": ids[0], "until": None, "note": "new"})   # ラベルは残る
+            go.set()
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and store._warming:
+                time.sleep(0.05)
+        self.assertEqual(self.pick(self.read(store), "snoozed", ids[0])["snooze"]["note"], "new", "裏の読みが古いコメントで覚え直した")
+
+    def test_a_fresh_read_waiting_behind_a_read_returns_that_read(self):
+        # SessionStart の hook (fresh=1) が画面の読みの最中に来たら、その読みの結果を受け取り、もう 1 回分を読まない
+        self.new_question()
+        store = self.store()
+        key = store.resolve(self.repo) or self.repo
+        real = humanq.bd
+        started = threading.Event()
+        lists = []
+
+        def slow(repo, *args):
+            if list(args[:2]) == ["human", "list"]:
+                lists.append(args)
+                started.set()
+                time.sleep(1.0)
+            return real(repo, *args)
+        got: dict = {}
+
+        def poll():
+            try:
+                got["poll"] = store.project(key)
+            except Exception as e:  # noqa: BLE001
+                got["poll"] = e
+        with mock.patch.object(humanq, "bd", slow):
+            th = threading.Thread(target=poll)
+            th.start()
+            try:
+                self.assertTrue(started.wait(10), "画面の読みが始まらない")
+                fresh = store.project(key, fresh=True)
+            finally:
+                th.join(30)
+        self.assertIsInstance(got.get("poll"), dict, got)
+        self.assertTrue(got["poll"].get("ok"), got["poll"])
+        self.assertEqual(len(lists), 1, "fresh の読みが、待っていた間に終わった読みの後に、もう一度読んだ")
+        self.assertIs(fresh, got["poll"], "fresh の読みが、待っていた間に終わった読みの結果を返していない")
+
     def test_bd_json_rejects_non_list(self):
         def listed(*args):
             try:

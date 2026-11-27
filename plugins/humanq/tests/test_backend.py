@@ -446,6 +446,17 @@ class ThreadMemoGen(unittest.TestCase):
         m.drop("/r", "hq-1")
         self.assertEqual(m.get("/r", "hq-1"), (None, False))
 
+    def test_a_write_through_one_registration_forgets_the_same_ticket_of_the_other(self):
+        m = backend.ThreadMemo(ttl=600.0, budget=2.0, clock=Clock())
+        t = [{"text": f"[humanq] 保留: 期限なし (qsig: {QSIG})"}]
+        m.put("/main", "bd-1", t, m.gen("/main"))
+        m.put("/wt", "bd-1", t, m.gen("/wt"))
+        g = m.gen("/wt")
+        m.drop("/main", "bd-1")                     # 本体のカードから書いた (bd は worktree と本体をまとめない)
+        self.assertEqual(m.get("/wt", "bd-1"), (None, False), "同じ DB に届く worktree の登録の覚えが残った")
+        m.put("/wt", "bd-1", [{"text": "old"}], g)  # worktree の読みの途中の古いコメント
+        self.assertEqual(m.get("/wt", "bd-1"), (None, False))
+
 
 class LoadProjectSnoozeGate(unittest.TestCase):
     """humanq.load_project は、保留のラベルの付いた判断待ちの thread だけを保留として読む (backend が thread を付けすぎても、

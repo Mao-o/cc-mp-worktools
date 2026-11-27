@@ -3480,6 +3480,18 @@ test("保留: 成功のトーストの「解除」と保留中のカードの「
   }, {}, fakeNotification);
 });
 
+test("保留: サーバーの入れ替え直後に、戻る日を読み残した保留 (snooze: null) が判断待ちに出ても「判断待ちが増えました」を出さない", async () => {
+  const s = new Script([withSnoozed(proj(P1, [item("t-A1")]), [snoozedItem("t-S1", "2999-12-31", "", { labels: ["human", "snoozed"] }), snoozedItem("t-S2", null, "", { labels: ["human", "snoozed"] })])]);
+  await withPage(s, async page => {
+    assert.equal(await page.evaluate(() => load()), true);
+    const p = s.projects[0];
+    p.human.push(...p.snoozed.map(i => ({ ...i, snooze: null })));
+    p.snoozed = [];
+    assert.equal(await page.evaluate(() => load()), true);
+    assert.deepEqual(await notes(page), [], "サーバーの入れ替えだけで「判断待ちが増えました」を出した");
+  }, {}, fakeNotification);
+});
+
 test("保留: 「保留する」を続けて 2 回押しても、「保留を解除」を 2 回押しても、トーストの「解除」と保留中のカードの「保留を解除」を重ねて押しても、送るのは 1 回", async () => {
   const s = new Script([withSnoozed(proj(P1, [item("t-A1"), item("t-B2")]), [snoozedItem("t-S1", "2999-12-31")])]);
   await withPage(s, async page => {
