@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.35.1
+
+### Fixed: Windows では gh / gcloud の設定を `%AppData%` の下から読み、`~/.config` の下の古いファイルで一致と判定しない
+
+- Windows の Python (`os.name` が `nt`) で動く hook は、gh の設定ディレクトリを `GH_CONFIG_DIR` →
+  `$XDG_CONFIG_HOME/gh` → `%AppData%\GitHub CLI`、gcloud の設定ディレクトリを `CLOUDSDK_CONFIG` → `%APPDATA%\gcloud`
+  の順に決める (gh は `gh help environment` とソースの go-gh `ConfigDir`、gcloud は公式文書の configurations の頁の
+  記述)。ローカル読取 (gh の `hosts.yml`・gcloud の `active_config` と `config_<name>`)、hook を通らない切替の検出の
+  指紋、プロジェクトごとの固定 (`CLOUDSDK_ACTIVE_CONFIG_NAME` が指す構成の account) の判定、pin-env が探す構成の
+  一覧は、どれもこの場所を見る
+- 0.35.0 までは Windows でも `~/.config` の下を読んでいた。そこに CLI が使っていない古いファイルが残っていると、
+  ローカル読取で一致と判定して CLI に聞かずに allow し、指紋もそのファイルで取るので、hook を通らない切替の後も
+  成功 cache で通っていた (内部バックログ)
+- 場所を決められないとき (Windows で上の env がどれも無い・大文字小文字だけ違う名前の env が別々の値で並ぶ・hook が
+  Cygwin / MSYS の Python で動く) は、ローカル読取をせず CLI に聞き、成功 cache も読まず書かない (毎回照合する)。
+  AppData も無いときの CLI の行き先は推測で組まない。Windows では、場所を決める env の名前を大文字小文字を区別せずに読む
+- Windows (と Cygwin / MSYS) では、gcloud のアカウントを決める env (成功 cache のキーと、ディレクトリごとの固定の
+  判定で見る env) に `APPDATA` を足した。行頭の `APPDATA=...` は gcloud の読む構成を変えるので、固定とはみなさない。
+  macOS / Linux の gcloud は APPDATA を見ないので足していない (足すと行頭の `APPDATA=...` で固定が外れ、未登録の
+  deny に変わる。0.35.0 と同じ判定に保つ)
+- macOS / Linux の読み・判定・cache hit は変えていない (0.35.0 と同じ入力を流した旧新比較で、gh 1,440・gcloud 3,024・
+  期待値が未登録で固定で決まる gcloud 240 の世界の判定・照合と CLI の回数・cache hit・読む場所が全件一致。FIFO の設定
+  ファイルの世界を含む)。Windows の形の世界では、変わった判定は、行頭の env を別の綴りで書いた形 (`AppData=... gcloud ...` /
+  `cloudsdk_config=... gcloud ...` は固定を外さず、`gh_token=...` / `cloudsdk_core_account=...` は AppData の下のローカル
+  読取で通る。README の既知の制限) を除き、どれも CLI が実際に読むファイル (公式の文書の場所) に合わせる向き。別の綴りの
+  形は、0.35.0 で未登録の deny や CLI に聞いての deny だったものが通る。Windows の実機では確かめていない (README の既知の制限に、確かめた範囲と確かめていない範囲を書いた)
+
+### 文書
+
+- README の「守る範囲と守らない範囲」に、`mise exec` / `mise x` 経由で起動した CLI には mise.toml の `[env]` が前置きの
+  代入や起動時の env より優先して届き、hook は前置きの代入 (か起動時の env) で照合するので食い違う、を足した
+  (docs/wrapper-env-audit.md の mise の行と同じ。読みは足していない)
+
 ## 0.35.0
 
 ### Changed: hook を通らない gh / gcloud の切替の後は、成功 cache を使わずに照合し直す

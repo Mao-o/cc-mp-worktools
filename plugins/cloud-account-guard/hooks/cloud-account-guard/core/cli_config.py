@@ -21,6 +21,7 @@ from __future__ import annotations
 import configparser
 import os
 import stat
+import sys
 from pathlib import Path
 
 # 設定ファイルの読み取り上限。gh の hosts.yml / gcloud の config_<name> はいずれも
@@ -63,7 +64,8 @@ def home_overridden(env) -> bool:
     方が安全。コストは「CLI を 1 回呼ぶ」だけ。
 
     `GH_CONFIG_DIR` / `CLOUDSDK_CONFIG` が明示されていて `HOME` が効かない場合も
-    区別せず bail する (判断を単純に保つ側に倒す)。
+    区別せず bail する (判断を単純に保つ側に倒す)。Windows の gh / gcloud は既定の設定ディレクトリを
+    `HOME` からは組まない (`config_dir_rule`) が、同じく区別せず bail する。
     """
     value = env.get(HOME_ENV_VAR)
     return bool(value) and value != os.environ.get(HOME_ENV_VAR)
@@ -77,6 +79,81 @@ def overriding_home(env) -> Path | None:
     (v0.35.0)。ローカル読取は HOME が違えば CLI に委ねるので、これを使わない。
     """
     return Path(env[HOME_ENV_VAR]) if home_overridden(env) else None
+
+
+# Windows の gh / gcloud が既定の設定ディレクトリを置く env (v0.35.1。gh は `%AppData%\GitHub CLI`、
+# gcloud は `%APPDATA%\gcloud`)。Windows の環境変数の名前は大文字小文字を区別しないので、gh の `AppData` と
+# gcloud の `APPDATA` は同じ変数を指す。hook の Python の `os.environ` は Windows で名前を大文字にして持つ。
+APPDATA_ENV_VAR = "APPDATA"
+WINDOWS = "windows"
+POSIX = "posix"
+
+
+def config_dir_rule() -> str | None:
+    """gh / gcloud の既定の設定ディレクトリの決まりを、hook の Python の OS で選ぶ (v0.35.1)。
+
+    - `WINDOWS` (`os.name == "nt"`): gh は `GH_CONFIG_DIR` → `$XDG_CONFIG_HOME/gh` → `%AppData%\\GitHub CLI`
+      (gh のソースの go-gh `ConfigDir` と `gh help environment`)、gcloud は `CLOUDSDK_CONFIG` →
+      `%APPDATA%\\gcloud` (gcloud の公式文書の configurations の頁)。どちらも `HOME` から組まない
+    - `POSIX` (macOS / Linux): gh は `GH_CONFIG_DIR` → `$XDG_CONFIG_HOME/gh` → `~/.config/gh`、gcloud は
+      `CLOUDSDK_CONFIG` → `~/.config/gcloud` (0.35.0 までと同じ)
+    - None: Cygwin / MSYS の Python (`os.name` は `posix`)。hook の Python は POSIX の `HOME` を見るが、
+      そこから起動する gh / gcloud は Windows の決まりで動きうるので、場所を決められない
+
+    呼び出し側は、場所を決められないとき (None、または Windows で値のある env が無いとき) は
+    ローカル読取をせず CLI に聞く (`windows_config_dir` の docstring)。0.35.0 までは Windows でも
+    `~/.config` の下を読み、CLI が使っていない古いファイルで一致と判定することがあった。
+    """
+    if os.name == "nt":
+        return WINDOWS
+    if sys.platform.startswith(("cygwin", "msys")):
+        return None
+    return POSIX
+
+
+def windows_env(env, name: str) -> str | None:
+    """Windows の決まりで env から name の値を読む。未設定と空の値は ""、決められないなら None。
+
+    Windows の環境変数の名前は大文字小文字を区別しない。行頭の inline env (`AppData=... gh ...`) は書かれた
+    綴りのまま env に入るので、大文字小文字だけ違う名前が別々の値で並びうる。CLI がどちらを読むかは
+    決められないので None を返す (値が同じなら、その値)。
+    """
+    wanted = name.upper()
+    values = {value for key, value in env.items() if key.upper() == wanted}
+    if len(values) > 1:
+        return None
+    return next(iter(values)) if values else ""
+
+
+def windows_config_dir(env, candidates) -> Path | None:
+    """Windows の CLI の設定ディレクトリを、candidates の順に env を見て決める (v0.35.1)。
+
+    candidates は (env の名前, その値の下の dir 名。値そのものなら None) の列。CLI と同じく、最初に値の
+    ある (空でない) env で決まる。どの env にも値が無いとき、または途中の env を決められないとき
+    (`windows_env` が None) は None。AppData も無いときの行き先 (gh は go-gh の `os.UserHomeDir()` =
+    `USERPROFILE` の下の `.config\\gh`。gcloud は公式の文書に書かれていない) は組まない。普段の Windows には
+    APPDATA があり、無い環境は確かめられないため (呼び出し側はローカル読取をせず CLI に聞き、成功 cache の
+    指紋も取らない)。
+    """
+    for name, child in candidates:
+        value = windows_env(env, name)
+        if value is None:
+            return None
+        if value:
+            return Path(value) / child if child else Path(value)
+    return None
+
+
+def state_files_when_dir_unknown() -> list[Path] | None:
+    """設定ディレクトリを決められないときに service の `state_files` が返す値 (v0.35.1)。
+
+    POSIX で `HOME` を決められないとき (`Path.home()` が失敗) は 0.35.0 のまま `[]` (指紋は一定で、
+    成功 cache は今までどおり hit する)。Windows / Cygwin / MSYS で場所を決められないときは None
+    (dispatcher はその target の成功 cache を読まず書かない = 毎回照合する)。CLI が実際に書き換える
+    ファイルを見ずに cache で通すと、hook を通らない切替の後に期待と違うアカウントの write が通りうるので、
+    通す側に倒さない。
+    """
+    return [] if config_dir_rule() == POSIX else None
 
 
 def read_bounded_text(path: Path, limit: int = MAX_FILE_BYTES) -> str:

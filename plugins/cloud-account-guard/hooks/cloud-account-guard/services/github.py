@@ -413,6 +413,8 @@ def _fetch_active_accounts(env=None) -> tuple[dict[str, str] | None, str | None]
 #   いないため、照合先がずれる可能性を避けて CLI に委ねる
 # - `HOME` が hook プロセスと違う (`cli_config.home_overridden`) — 実行される gh は
 #   別の設定ファイルを読む
+# - 設定ディレクトリを決められない (Windows で `GH_CONFIG_DIR` / `XDG_CONFIG_HOME` / `AppData` の
+#   どれも無い・Cygwin / MSYS の Python。v0.35.1、`cli_config.config_dir_rule`)
 # - 設定ファイルが読めない / 最小 YAML サブセットで解釈できない
 #
 # **この列挙は閉じている = 漏れると黙って false allow 経路になる** (gcloud 側は
@@ -448,13 +450,28 @@ IDENTITY_ENV_VARS = frozenset(
 IDENTITY_ENV_PREFIXES: tuple[str, ...] = ()
 _HOSTS_FILE = "hosts.yml"
 _ACTIVE_USER_KEY = "user"
+# Windows の gh の設定ディレクトリの決まり (v0.35.1。go-gh の `ConfigDir` と `gh help environment`):
+# `GH_CONFIG_DIR` → `$XDG_CONFIG_HOME/gh` → `%AppData%\GitHub CLI`。
+_WINDOWS_CONFIG_DIRS = (
+    (_CONFIG_DIR_ENV_VAR, None),
+    (_XDG_CONFIG_HOME_ENV_VAR, "gh"),
+    (cli_config.APPDATA_ENV_VAR, "GitHub CLI"),
+)
 
 
 def _config_dir(env, home: Path | None = None) -> Path | None:
-    """gh の設定ディレクトリ (`GH_CONFIG_DIR` → `$XDG_CONFIG_HOME/gh` → `~/.config/gh`)。
+    """gh の設定ディレクトリ。決められないなら None (呼び出し側は CLI に聞く)。
 
-    home: `~` に使う HOME。None なら hook プロセスの `Path.home()`。
+    macOS / Linux は `GH_CONFIG_DIR` → `$XDG_CONFIG_HOME/gh` → `~/.config/gh`。Windows は `~/.config/gh` の
+    代わりに `%AppData%\\GitHub CLI` で、AppData も無ければ決めない (v0.35.1。`cli_config.config_dir_rule`)。
+
+    home: `~` に使う HOME。None なら hook プロセスの `Path.home()`。Windows では使わない。
     """
+    rule = cli_config.config_dir_rule()
+    if rule == cli_config.WINDOWS:
+        return cli_config.windows_config_dir(env, _WINDOWS_CONFIG_DIRS)
+    if rule is None:
+        return None
     explicit = env.get(_CONFIG_DIR_ENV_VAR)
     if explicit:
         return Path(explicit)
@@ -469,7 +486,7 @@ def _config_dir(env, home: Path | None = None) -> Path | None:
     return home / ".config" / "gh"
 
 
-def state_files(env=None, context=None) -> list[Path]:
+def state_files(env=None, context=None) -> list[Path] | None:
     """hook を通らない切替 (ターミナルでの `gh auth switch` など) で gh が書き換えるファイル (v0.35.0)。
 
     gh は host ごとのアクティブアカウントを `hosts.yml` の `<host>.user` に書き、切替
@@ -479,12 +496,15 @@ def state_files(env=None, context=None) -> list[Path]:
     (`core/cache.state_fingerprint`) を成功 cache に記録し、変わっていれば照合し直す。
 
     設定ディレクトリはローカル読取と同じ `_config_dir` で決める。HOME は実行される gh のもの
-    (行頭の `HOME=...` があればそれ。`cli_config.overriding_home`)。gh が Windows で使う
-    `%AppData%` 配下は見ない (README の既知の制限)。context は使わない。
+    (行頭の `HOME=...` があればそれ。`cli_config.overriding_home`)。Windows では `%AppData%\\GitHub CLI`
+    の下 (v0.35.1)。場所を決められないときは `cli_config.state_files_when_dir_unknown` (Windows で AppData が
+    無いときなどは None = 成功 cache を使わない)。context は使わない。
     """
     e = os.environ if env is None else env
     config_dir = _config_dir(e, cli_config.overriding_home(e))
-    return [] if config_dir is None else [config_dir / _HOSTS_FILE]
+    if config_dir is None:
+        return cli_config.state_files_when_dir_unknown()
+    return [config_dir / _HOSTS_FILE]
 
 
 def _local_active_accounts(env=None) -> dict[str, str] | None:

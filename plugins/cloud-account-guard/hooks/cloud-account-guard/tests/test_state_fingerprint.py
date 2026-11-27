@@ -346,8 +346,8 @@ class TestGithubStateFiles(unittest.TestCase):
         )
 
     def test_same_home_as_the_hook_process_uses_path_home(self):
-        """env の HOME が hook プロセスと同じなら `Path.home()` (Windows の gh は HOME ではなく
-        USERPROFILE を見る。`Path.home()` も同じ)。"""
+        """env の HOME が hook プロセスと同じなら `Path.home()` (macOS / Linux の決まり。Windows の決まりは
+        test_windows_config_dir.py)。"""
         with mock.patch.dict(os.environ, {"HOME": "/vca-same-home"}), mock.patch.object(
             Path, "home", return_value=Path("/vca-profile-home")
         ):
