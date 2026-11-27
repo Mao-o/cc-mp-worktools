@@ -178,11 +178,15 @@ button.snzgo:disabled { opacity: .45; cursor: default; }
 .snzinfo { margin: 8px 0 0; font-size: 14px; font-weight: 600; }
 .snznotetext, .snzback { margin: 6px 0 0; font-size: 13px; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
 .snzback { margin: 8px 0 0; padding-left: 10px; border-left: 3px solid var(--control-line); }
-/* 保留中の節 (ページの下。既定は畳む)。見出しは全体の表示の節の見出し (h2.sec) と同じ見た目で、summary の行に収める */
-details.snz { margin-top: 28px; }
-details.snz > summary { font-size: 14px; }
-details.snz > summary h2.sec { display: inline; margin: 0; }
-details.snz[open] > summary { margin-bottom: 10px; }
+/* 保留中の節 (ページの下。既定は畳む) と、回答済み・反映待ちの節 (各プロジェクトの下・全体の表示の下。既定は畳む)。
+   見出し (保留中と全体の表示は h2.sec、プロジェクトごとの表示の回答済みは h3) は節の見出しと同じ見た目で、summary の行に収める。
+   子孫ではなく子の結合子で書く: 節の中のカードも details (チケット本文・失敗の全文) を持つ */
+details.snz, details.ansgrp { margin-top: 28px; }
+details.snz > summary, details.ansgrp > summary { font-size: 14px; }
+details.snz > summary h2.sec, details.ansgrp > summary h2.sec, details.ansgrp > summary h3 { display: inline; margin: 0; }
+details.snz[open] > summary, details.ansgrp[open] > summary { margin-bottom: 10px; }
+/* 回答の後のフォーカスは、見えるカードが他に無いとき、畳んだ節の summary へ移る (moveFocusAway) */
+details.snz > summary:focus-visible, details.ansgrp > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .snz .head .pj { display: block; }
 .empty { color: var(--muted); padding: 24px 0; text-align: center; }
 .banner { background: var(--panel); border: 1px solid var(--warn); color: var(--warn); border-radius: var(--radius); padding: 10px 14px; margin-top: 14px; overflow-wrap: anywhere; }
@@ -486,12 +490,17 @@ function enter(e) {
 // ボタンや選択肢には移さない: 「回答する」を押した Enter のリピートや押し直しが、移った先の
 // 「取り消して判断待ちに戻す」や選択肢をそのまま押してしまうため。Tab を押せば中へ入れる
 function moveFocusAway(card) {
-  // 畳んだ保留中の節 (閉じた details) の中のカードは見えずフォーカスできないので、移り先にしない
+  // 畳んだ節 (保留中・回答済み・反映待ち。閉じた details) の中のカードは見えずフォーカスできないので、移り先にしない
   const all = [...document.querySelectorAll("#main .card")].filter(c => c === card
     || (!c.inert && !c.classList.contains("leaving") && !c.closest("details:not([open])")));
   const i = all.indexOf(card);
   const next = all[i + 1] || all[i - 1];
-  if (next) next.focus();
+  if (next) { next.focus(); return; }
+  // 見えるカードがほかに無い (残りは畳んだ節の中だけ): フォーカスを捨てずに、畳んだ節の見出しの行 (summary) へ移す。
+  // カードの後ろにある節を先に、無ければ前の節。カードの中の details (チケット本文など) の summary は含めない
+  const sums = [...document.querySelectorAll("#main details.snz:not([open]) > summary, #main details.ansgrp:not([open]) > summary")];
+  const to = sums.find(s => card.compareDocumentPosition(s) & Node.DOCUMENT_POSITION_FOLLOWING) || sums[sums.length - 1];
+  if (to) to.focus();
 }
 
 // 高さを畳みながら消し、終わったら DOM から外して onGone を呼ぶ。畳んでいる間は unleave で戻せる
@@ -956,6 +965,7 @@ function syncError(c, key) {
 // ---- 描き直し (key ごとの突き合わせ) --------------------------------------------------------------
 // main の中身は作り直さない。プロジェクト → 節 (判断 / 作業・確認 / 回答済み) → カードの入れ物を key ごとに持ち、
 // 署名が変わったカードだけ作り直す。データから消えた (送信中のものも含む) カードは畳む。
+// 回答済みの節は、どちらの表示でも details に包み、初めは畳む (makeGroup)。
 // 全体を優先度順の表示 (view が "prio") では、プロジェクトの入れ物の代わりに 1 つの入れ物 (flatBox) に、
 // 読めなかったプロジェクトのバナー → 判断待ち (全プロジェクトを優先度 → 作成日の順) → 回答済み (同じ順) を並べる。
 // カードの key と要素は両方の表示で共通で、表示を切り替えても作り直さずに入れ物を移すだけ (入力・フォーカス・開いた本文を保つ)
@@ -966,6 +976,21 @@ const TITLES = { dec: "判断", task: "作業・確認", ans: "回答済み・�
 const FLAT_TITLES = { wait: "判断待ち", ans: "回答済み・反映待ち" };
 let flatBox = null;                // 全体の表示の入れ物 {el, groups: Map(kind -> {el, h3}), banners: Map(path -> el)}
 let emptyNote = null, idleNote = null;
+// 節の入れ物 {el, h3 (見出し。ここへ件数つきの文を書く), top (入れ物の最初の子。place に渡す)}。
+// 判断 / 作業・確認 / 判断待ち (全体の表示) は div に見出しとカードを並べる。回答済み・反映待ち (ans) は details で包み、初めは畳む:
+// 見出し (プロジェクトごとの表示は h3、全体の表示は h2.sec) は summary の中に置き、カードは summary の後ろに並べる。
+// 開いたかどうかは入れ物ではなく openAns が覚える (key はプロジェクトの path、全体の表示は固定の FLAT_ANS_KEY): 読み込みでは入れ物を
+// 作り直さないが、節が空になって外れた後や表示を切り替えた後に作り直しても、開いていた節は開いたまま出る (ページを読み直すと畳んだ状態に戻る)
+const FLAT_ANS_KEY = "\nflat";
+const openAns = new Set();
+function makeGroup(kind, tag, cls, openKey) {
+  const h3 = el(tag, cls ? { class: cls } : {});
+  if (kind !== "ans") return { el: el("div", { class: "grp", "data-kind": kind }), h3, top: h3 };
+  const top = el("summary", {}, h3);
+  const d = el("details", { class: "grp ansgrp", "data-kind": kind, open: openAns.has(openKey) }, top);
+  d.addEventListener("toggle", () => { d.open ? openAns.add(openKey) : openAns.delete(openKey); });
+  return { el: d, h3, top };
+}
 // 保留中の節 {el (details。既定は閉じる), sum (summary), h (見出し h2)}。判断待ちの一覧から外したものを、ページの下にまとめる
 let snzBox = null;
 function makeSnzBox() {
@@ -1210,9 +1235,9 @@ function render() {
       if (!lists[kind].length) continue;
       let g = pr.groups.get(kind);
       if (g) { if (g.el._leave) unleave(g.el); }
-      else { g = { el: el("div", { class: "grp", "data-kind": kind }), h3: el("h3", {}) }; pr.groups.set(kind, g); }
+      else { g = makeGroup(kind, "h3", "", p.path); pr.groups.set(kind, g); }
       g.h3.textContent = `${TITLES[kind]} (${lists[kind].length})`;
-      groups.push({ kind, g, els: [g.h3, ...lists[kind].map(i => ensureCard(i, kind))] });
+      groups.push({ kind, g, els: [g.top, ...lists[kind].map(i => ensureCard(i, kind))] });
     }
     plan.push({ pr, groups });
   }
@@ -1227,9 +1252,9 @@ function render() {
       if (!lists[kind].length) continue;
       let g = fb.groups.get(kind);
       if (g) { if (g.el._leave) unleave(g.el); }
-      else { g = { el: el("div", { class: "grp", "data-kind": kind }), h3: el("h2", { class: "sec" }) }; fb.groups.set(kind, g); }
+      else { g = makeGroup(kind, "h2", "sec", FLAT_ANS_KEY); fb.groups.set(kind, g); }
       g.h3.textContent = `${FLAT_TITLES[kind]} (${lists[kind].length})`;
-      groups.push({ kind, g, els: [g.h3, ...lists[kind].map(i => ensureCard(i, kind))] });
+      groups.push({ kind, g, els: [g.top, ...lists[kind].map(i => ensureCard(i, kind))] });
     }
     const banners = flatBad.map(p => {
       let b = fb.banners.get(p.path);

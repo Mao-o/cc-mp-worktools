@@ -246,6 +246,12 @@ async function withPage(script, fn, ctxOptions = {}, setup = null, b = browser) 
 const ready = page => page.waitForFunction(() => /更新/.test(document.getElementById("meta").textContent));
 const qcard = (page, id) => page.locator(`section.card:has(textarea):has(.id:text-is("${id}"))`);
 const acard = (page, id) => page.locator(`section.card:has(.ans):has(.id:text-is("${id}"))`);
+// 回答済み・反映待ちの節は初めは畳んである (details.ansgrp)。回答済みのカードを押す・測るテストは、先にこれで開く。
+// 畳んである節だけを押す (開いている節の summary を押すと閉じてしまう)。開いたかどうかは節ごとに覚えられるので、一度開けば読み込みで閉じない
+const openAnswered = async page => {
+  const closed = page.locator("details.ansgrp:not([open]) > summary");     // 開くと一致から外れるので、先頭を押し続ける (all() の添字は押すたびにずれる)
+  for (let i = 0; i < 20 && (await closed.count()) > 0; i++) await closed.first().click();
+};
 
 async function waitFor(fn, ms = 4000, what = "条件") {
   const t0 = Date.now();
@@ -680,6 +686,7 @@ test("回答は選択肢と補足を送り、カードは消えて回答済み�
 test("取り消しは判断待ちに戻す", async () => {
   const s = new Script([proj(P1, [item("t-B2")], [answeredItem("t-A1")])]);
   await withPage(s, async page => {
+    await openAnswered(page);
     await acard(page, "t-A1").getByRole("button", { name: "取り消して判断待ちに戻す" }).click();
     await waitFor(() => s.undos.length === 1, 3000, "POST");
     assert.deepEqual(s.undos[0], { project: P1, id: "t-A1", asig: "asig-t-A1" });   // カードが出している回答の署名
@@ -776,6 +783,7 @@ test("「回答する」を Enter で 2 回押しても、次の回答済みカ�
   const s = new Script([proj(P1, [item("t-B2")], [answeredItem("t-A1")])]);
   s.hold("answer");
   await withPage(s, async page => {
+    await openAnswered(page);                                   // 次のカード (回答済み) が見えている状態で押す (畳んだ節の中では次のカードにならない)
     await qcard(page, "t-B2").locator(".opt").first().click();
     await qcard(page, "t-B2").locator("button.primary").focus();
     await page.keyboard.press("Enter");
@@ -1015,6 +1023,7 @@ test("取り消しのラベルの付け替えだけ失敗したときは、「�
   const s = new Script([proj(P1, [item("t-B2")], [answeredItem("t-A1")])]);
   s.undoResult = () => ({ status: 502, body: { error: "label add boom", stage: "label", written: true, op: "undo" } });
   await withPage(s, async page => {
+    await openAnswered(page);
     await acard(page, "t-A1").getByRole("button", { name: "取り消して判断待ちに戻す" }).click();
     await waitFor(async () => (await page.locator("section.card.failed").count()) === 1, 3000, "カードが戻る");
     const t = await page.locator(".toast").first().innerText();
@@ -1026,6 +1035,7 @@ test("取り消しのラベルの付け替えだけ失敗したときは、「�
   const s2 = new Script([proj(P1, [item("t-B2")], [answeredItem("t-A1")])]);
   s2.undoResult = body => { s2.moveToHuman(body); return { status: 502, body: { error: "label remove boom", stage: "label", written: true, op: "undo" } }; };
   await withPage(s2, async page => {
+    await openAnswered(page);
     await acard(page, "t-A1").getByRole("button", { name: "取り消して判断待ちに戻す" }).click();
     await page.locator(".toast").first().waitFor({ timeout: 3000 });
     const t = await page.locator(".toast").first().innerText();
@@ -1109,6 +1119,7 @@ test("回答済みのカードで取り消したら、その回答の成功の�
     await answerFirst(page, "t-A1");                                          // 案A
     await okToasts(page).first().waitFor({ timeout: 3000 });
     await waitFor(async () => (await acard(page, "t-A1").count()) === 1, 3000, "回答済みに出る");
+    await openAnswered(page);
     const releaseUndo = s.hold("undo");                                      // カードの取り消しの POST は止めておく
     await acard(page, "t-A1").getByRole("button", { name: "取り消して判断待ちに戻す" }).click();
     await waitFor(() => s.undos.length === 1, 3000, "カードの取り消しの POST");
@@ -1157,6 +1168,7 @@ test("トーストの「取り消す」が 400 gone なら、カードが無く�
     await page.locator("#toasts .toast:not(.ok)").first().waitFor({ timeout: 3000 });
     assert.equal(await page.locator("#toasts .toast:not(.ok)").first().locator(".toast-msg").innerText(), "「title t-A1」(t-A1): bd boom。カードを戻しました");
     await waitFor(async () => (await page.locator("section.card.failed:has(.ans)").count()) === 1, 3000, "回答済みのカードが赤い枠で出る");
+    await openAnswered(page);                                                // 失敗で戻ったカードも、畳んだ節の中 (トーストに要約は出ている)
     assert.match(await acard(page, "t-A1").locator(".errbox").innerText(), /bd boom/);
   });
 });
@@ -1166,6 +1178,7 @@ test("回答が成功した直後に Enter を押し続けても、トースト�
   for (const projects of [[proj(P1, [item("t-B2")], [answeredItem("t-A1")])], [proj(P1, [item("t-B2")])]]) {
     const s = new Script(projects);
     await withPage(s, async page => {
+      await openAnswered(page);                                              // 次のカード (回答済み) が見えている状態で押す (無いプロジェクトでは何もしない)
       await qcard(page, "t-B2").locator(".opt").first().click();
       await qcard(page, "t-B2").locator("button.primary").focus();
       await page.keyboard.press("Enter");
@@ -1338,6 +1351,7 @@ test("トーストは、カードの操作の行のボタン (「回答する」
       await okToasts(page).first().waitFor({ timeout: 3000 });
       await answerFirst(page, "t-B2");
       await waitFor(async () => (await acard(page, "t-A1").count()) === 1 && (await acard(page, "t-B2").count()) === 1, 3000, "回答済みに出る");
+      await openAnswered(page);                                              // 取り消しのボタンを測るので、節を開く
       for (const w of [481, 560, 640, 641, 700, 1280]) {
         const at = `sb ${sb} 幅 ${w}`;
         await page.setViewportSize({ width: w, height: 800 });
@@ -1488,6 +1502,7 @@ test("別のタブで取り消して答え直した後に、前の回答のト�
     await answerFirst(page, "t-A1");                                          // 案A で答える
     await okToasts(page).first().waitFor({ timeout: 3000 });
     await waitFor(async () => (await acard(page, "t-A1").count()) === 1, 3000, "回答済みに出る");
+    await openAnswered(page);                                                 // 読み直した後のカードの本文を読むので、節を開く (読み直しでも閉じない)
     // 別のタブで取り消して、案B で答え直した (このタブはまだ読み直していない)
     const p = s.project(P1);
     p.answered = p.answered.filter(i => i.id !== "t-A1");
@@ -1509,6 +1524,7 @@ test("別のタブで取り消して答え直した後に、前の回答のト�
 test("回答済みのカードの取り消しも照合を通る: 読み直す前にほかで答え直されていたら取り消さず、読み直したカードからは今の回答を取り消せる", async () => {
   const s = new Script([proj(P1, [item("t-B2")], [answeredItem("t-A1")])]);
   await withPage(s, async page => {
+    await openAnswered(page);
     s.project(P1).answered = [answeredItem("t-A1", "[humanq] 回答: 案B (b)\n", "asig-again")];   // ほかで取り消して案B で答え直した
     await undoOnCard(page, "t-A1").click();
     await waitFor(() => s.undos.length === 1, 3000, "カードの取り消しの POST");
@@ -1528,6 +1544,7 @@ test("回答済みのカードの取り消しも照合を通る: 読み直す前
 test("回答の本文が同じでも署名が変われば、読み直しで回答済みのカードは作り直され、取り消しは今の署名を送る", async () => {
   const s = new Script([proj(P1, [item("t-B2")], [answeredItem("t-A1")])]);
   await withPage(s, async page => {
+    await openAnswered(page);
     s.project(P1).answered = [answeredItem("t-A1", undefined, "asig-again")];   // ほかで取り消して、同じ案A で答え直した
     await page.evaluate(() => load());
     await undoOnCard(page, "t-A1").click();
@@ -1594,6 +1611,7 @@ test("回答済みの本文の末尾の (key) は、問いの選択肢の key �
     mk("t-F6", "[humanq] 回答: 案A (zz)\n"),
   ])]);
   await withPage(s, async page => {
+    await openAnswered(page);
     const ans = async id => (await acard(page, id).locator(".ans").innerText()).replace(/\n+$/, "");
     assert.equal(await ans("t-A1"), "回答: 【応急】止める");
     assert.equal(await ans("t-B2"), "回答: (自由記述)\n補足の本文 (a)", "自由記述と補足の中の括弧はそのまま");
@@ -1609,6 +1627,7 @@ test("head には human / answered 以外のラベルが全文で出る。多い
   const s = new Script([proj(P1, [item("t-A1", { labels: ["human", "plugin:x", "area:ui"] }), item("t-B2", { labels: many })],
     [item("t-C3", { labels: ["answered", "plugin:y"] })])]);
   await withPage(s, async page => {
+    await openAnswered(page);
     const spans = card => card.locator(".head > span:not(.prio):not(.id)").allInnerTexts();
     const a = await spans(qcard(page, "t-A1"));
     assert.deepEqual(a.slice(1), ["plugin:x", "area:ui"], "全文で、human は出ない");
@@ -1625,6 +1644,7 @@ test("作成日の横に「作成から N 日」が出る。当日は「今日�
   const s = new Script([proj(P1, [item("t-A1", { created_at: "2026-11-24" }), item("t-B2", { created_at: "2026-11-27" }),
     item("t-C3", { created_at: "2026-11-30" }), item("t-D4", { created_at: "" })], [item("t-E5", { created_at: "2026-11-20" })])]);
   await withPage(s, async page => {
+    await openAnswered(page);
     const date = card => card.locator(".head > span:not(.prio):not(.id)").first().innerText();
     assert.equal(await date(qcard(page, "t-A1")), "2026-11-24 (作成から 3 日)");
     assert.equal(await date(qcard(page, "t-B2")), "2026-11-27 (今日)");
@@ -2127,8 +2147,10 @@ test("見出しは h1 → h2 (プロジェクト) → h3 (節) の順で、文�
     assert.deepEqual(heads.filter(h => h.level === 3).map(h => h.text), ["判断 (1)", "判断 (2)", "回答済み・反映待ち (1)"]);
     assert.deepEqual(await page.$$eval("h2 .pname", es => es.map(e => e.textContent)), ["alpha", "beta"]);
     assert.equal(await page.locator(".proj > h2").count(), 2);
-    assert.equal(await page.locator(".proj .grp > h3").count(), 3);
-    // カードの名前: 問いがあれば問い、問いが無ければタイトル、回答済みはタイトル
+    // 節の見出しは各節の入れ物 (.grp) の先頭。回答済みの節は details で、見出しはその summary の中 (.grp > summary > h3)
+    assert.equal(await page.locator(".proj .grp > h3, .proj .grp > summary > h3").count(), 3);
+    // カードの名前: 問いがあれば問い、問いが無ければタイトル、回答済みはタイトル (回答済みの節は畳んであり、畳んだ中のカードは名前を引けないので開く)
+    await openAnswered(page);
     assert.equal(await page.getByRole("region", { name: "ask t-A1" }).count(), 1);
     assert.equal(await page.getByRole("region", { name: "ask t-B2" }).count(), 1);
     assert.equal(await page.getByRole("region", { name: "title t-C3" }).count(), 1);
@@ -2504,6 +2526,7 @@ test("絞り込み: 回答済みのカードにも効き、判断待ちが 0 件
   const s = manyScript();
   await withPage(s, async page => {
     await page.selectOption("#fproject", "/work/gamma");
+    await openAnswered(page);                                            // 回答済みのカードの ID の文字を読むので、節を開く
     assert.deepEqual(await acards(page).locator(".id").allInnerTexts(), ["g-ans"]);
     await page.fill("#fq", "g-ans");
     assert.equal(await pcards(page).count(), 0);
@@ -2580,6 +2603,7 @@ test("書き込めないプロジェクト (br) のカードは、問いと選�
   // 要素がちょうど 1 つあることを確かめてから文字を読む (無い要素の innerText は待ちの時間切れになり、assertion の失敗にならない)
   const text1 = async (loc, what) => { assert.equal(await loc.count(), 1, `${what} がちょうど 1 つでない`); return loc.innerText(); };
   const ro = async page => {
+    await openAnswered(page);                                           // 回答済みのカードの本文とボタンを読むので、節を開く (開いた節は押さない)
     for (const id of ["r-1", "r-2", "r-3"]) {
       const c = card(page, id);
       assert.equal(await c.count(), 1, `${id} のカードが 1 枚でない`);
@@ -2793,10 +2817,12 @@ test("Cmd/Ctrl+Enter で送った後、フォーカスは次のカードその�
   // 次が回答済みのカード: 押し直しで取り消しは送られない
   const s2 = new Script([proj(P1, [item("t-X1")], [answeredItem("t-Y2")])]);
   await withPage(s2, async page => {
+    await openAnswered(page);                                      // 回答済みの節は畳んであるので、開いて次のカードにする (畳んだままだと次のカードが見えず、フォーカスは別へ移る)
     await qcard(page, "t-X1").locator(".opt").first().click();
     await qcard(page, "t-X1").locator("textarea").click();
     await page.keyboard.press("Meta+Enter");
     await until(() => s2.answers.length === 1, 3000, "X の回答の POST");
+    assert.equal(await focusedCard(page), "t-Y2", "フォーカスが次の回答済みのカードそのものに移っていない (このテストの前提)");
     for (const k of MOD_ENTER) { await page.keyboard.press(k); await page.waitForTimeout(50); }
     await page.waitForTimeout(300);
     assert.deepEqual(s2.undos, [], "次の回答済みカードの取り消しが送られた");
@@ -2831,6 +2857,7 @@ test("書き込めないプロジェクト (br) のカードでは、数字も C
     { ...proj(P1, [item("t-1")], [answeredItem("t-2")]), cli: "bd", writable: true }]);
   const card = (page, id) => page.locator(`section.card:has(.id:text-is("${id}"))`);
   await withPage(s, async page => {
+    await openAnswered(page);                                       // 回答済みのカード (r-2) にフォーカスして数字と Enter を押すので、節を開く
     assert.deepEqual(await page.locator(".keyhint").allInnerTexts(), ["⌘↵ / Ctrl+↵ で送信"], "ヒントが 1 枚のカードにだけ出ていない");
     assert.equal(await qcard(page, "t-1").locator(".row .keyhint").count(), 1, "ヒントが「回答する」の行に無い");
     // 読み上げは「回答する」の aria-keyshortcuts に任せ、見た目のヒントは読み上げない (二重に読まない)
@@ -2882,7 +2909,8 @@ test("書き込める br のプロジェクト (cli:br・writable:true) のカ�
     await undoInToast(page).last().click();
     await until(() => s.undos.length === 1, 3000, "トーストからの取り消しの POST");
     assert.deepEqual([s.undos[0].project, s.undos[0].id, s.undos[0].asig], [BR, "r-2", "asig-r-2-2"]);
-    // 回答済みのカードの「取り消して判断待ちに戻す」
+    // 回答済みのカードの「取り消して判断待ちに戻す」(畳んだ節を開いてから)
+    await openAnswered(page);
     await undoOnCard(page, "r-9").click();
     await until(() => s.undos.length === 2, 3000, "回答済みのカードからの取り消しの POST");
     assert.deepEqual([s.undos[1].project, s.undos[1].id, s.undos[1].asig], [BR, "r-9", "asig-r-9"]);
@@ -3062,6 +3090,7 @@ test("並び: 全体の表示で回答すると、カードが畳まれ (送信�
     await until(async () => (await acard(page, "t-B1").count()) === 1, 3000, "回答済みの節に出る");
     assert.deepEqual(await cardOrder(page), [["t-A1", "alpha"], ["t-B2", "beta"], ["t-B1", "beta"]]);
     assert.deepEqual(await page.locator("h2.sec").allInnerTexts(), ["判断待ち (2)", "回答済み・反映待ち (1)"]);
+    await openAnswered(page);                                             // 回答済みの節 (h2.sec の summary) を開く (畳んだ中のボタンは getByRole で数えられない)
     assert.equal(await undoOnCard(page, "t-B1").count(), 1, "回答済みのカードに取り消しのボタンが無い");
     await undoOnCard(page, "t-B1").click();
     await until(() => s.undos.length === 1, 3000, "取り消しの POST");
@@ -3365,6 +3394,7 @@ test("保留: 「保留」は書き込める判断待ちのカードにだけ出
   const s = new Script([proj(P1, [item("t-A1")], [answeredItem("t-A9")]),
     { ...withSnoozed(proj(P2, [item("t-B1")]), [snoozedItem("t-B8", "2999-12-31")]), cli: "br", writable: false }]);
   await withPage(s, async page => {
+    await openAnswered(page);
     await one(acard(page, "t-A9"), "回答済みのカード");
     assert.equal(await acard(page, "t-A9").locator("button.snz").count(), 0, "回答済みのカードに「保留」がある");
     const ro = await one(page.locator(`#main section.card:has(.id:text-is("t-B1"))`), "書き込めないプロジェクトのカード");
@@ -3684,6 +3714,7 @@ test("保留: snoozed のラベルは、カードの head のラベルの印に�
     const qs = await spans(await one(qcard(page, "t-A1"), "戻ったカード"));
     assert.equal(qs.length, 2, qs);
     assert.equal(qs[1], "area:ui", "戻ったカードに snoozed の印を出した");
+    await openAnswered(page);
     assert.equal((await spans(await one(acard(page, "t-A9"), "回答済みのカード"))).length, 1, "回答済みのカードに snoozed の印を出した");
     await openSnzSection(page);
     const ss = await spans(await one(scard(page, "t-S1"), "保留中のカード"));
@@ -3691,4 +3722,286 @@ test("保留: snoozed のラベルは、カードの head のラベルの印に�
     assert.equal(ss[1], "x:y", "保留中のカードに snoozed の印を出した");
     assert.deepEqual(await page.locator("#flabel option").allInnerTexts(), ["すべてのラベル", "area:ui", "x:y"], "「ラベル」の絞り込みに snoozed を出した");
   });
+});
+
+// ---- 回答済み・反映待ちの節は、初めは畳む -------------------------------------------------------------------------
+// 節の中身 (カード) を details で包み、初めは閉じる。summary に「回答済み・反映待ち (n)」を出し、見出しはその中。開いたかどうかは
+// プロジェクトの path (全体を優先度順の表示は固定の key) で覚え、読み込みでも、節が空になって外れた後の作り直しでも閉じない。
+// 回答の後のフォーカスは、次のカードが畳んだ節の中なら、そこへ移さず、ほかの見えるカードか畳んだ節の summary へ移す
+
+const ansSections = page => page.locator("#main details.ansgrp");
+// プロジェクトごとの表示で、そのプロジェクトの回答済みの節 (details)
+const ansOf = (page, path) => page.locator(`#main .proj:has(> h2 .path[title="${path}"]) details.ansgrp`);
+// 節 (details) が開いているか。節が 1 つでなければ assert の失敗にする (無い要素を読む待ちの時間切れにしない)
+async function isOpen(loc, what) {
+  assert.equal(await loc.count(), 1, `${what} がちょうど 1 つでない`);
+  return loc.evaluate(d => d.open);
+}
+// 節の見出しの行 (summary)。ちょうど 1 つあることを確かめてから返す (無い要素を押す・読む待ちの時間切れ (ERROR) を assertion の失敗にする)。
+// path が無ければ、ページに 1 つだけの節 (1 プロジェクトだけの表示か、全体の表示) の summary
+async function ansSum(page, path) {
+  const sum = (path ? ansOf(page, path) : ansSections(page)).locator(":scope > summary");
+  assert.equal(await sum.count(), 1, `${path || "回答済みの節"} の summary がちょうど 1 つでない`);
+  return sum;
+}
+const ansText = async (page, path) => (await (await ansSum(page, path)).innerText()).trim();
+// 判断待ちのカードに答える。押す前に「回答する」が見えていることを assert する (畳んだ節の中などで見えないと、押す待ちの時間切れ (ERROR) でなく assertion の失敗にする)
+async function answerVisible(page, id) {
+  await oneQ(page, id);
+  assert.equal(await qcard(page, id).locator("button.primary").isVisible(), true, `${id} の「回答する」が見えていない`);
+  await answerFirst(page, id);
+}
+// フォーカスのある要素: 畳んだ節の summary なら {kind: "summary", sec, proj}、カードそのものなら {kind: "card", id}
+const focusInfo = page => page.evaluate(() => {
+  const a = document.activeElement;
+  if (!a || a === document.body) return { kind: "body" };
+  if (a.matches("details.ansgrp > summary, details.snz > summary")) {
+    const pr = a.closest(".proj");
+    return { kind: "summary", sec: a.parentElement.classList.contains("snz") ? "snz" : "ans", proj: pr ? pr.querySelector("h2 .path").title : null, text: a.textContent.trim() };
+  }
+  if (a.matches("section.card")) return { kind: "card", id: a.querySelector(".id").textContent };
+  return { kind: a.tagName.toLowerCase() };
+});
+
+test("回答済みの節: 回答済みが 2 件あるデータで、初めは畳んであり (.ans が見えない)、summary に件数が出る。summary を押す (Enter でも) と見え、読み込みでも開いたまま。もう一度押すと畳み、読み込みでも畳んだまま", async () => {
+  const s = new Script([proj(P1, [item("t-A1")], [answeredItem("t-A8"), answeredItem("t-A9")])]);
+  await withPage(s, async page => {
+    assert.equal(await isOpen(ansSections(page), "回答済みの節"), false, "最初から開いている");
+    assert.equal(await ansSections(page).getAttribute("data-kind"), "ans", "節の種類 (data-kind) が ans でない");
+    assert.equal(await ansSections(page).evaluate(d => d.classList.contains("grp")), true, "節の入れ物の class (grp) が無い");
+    assert.equal(await (await ansSum(page)).isVisible(), true, "畳んだ節の summary が見えていない");
+    assert.equal(await ansText(page), "回答済み・反映待ち (2)");
+    assert.equal(await (await ansSum(page)).locator("h3").count(), 1, "見出し (h3) が summary の中に無い");
+    assert.equal(await page.locator("#main .ans").count(), 2, "回答済みのカードの本文が 2 つでない");
+    assert.equal(await acard(page, "t-A8").count(), 1);
+    assert.equal(await acard(page, "t-A9").count(), 1);
+    for (const id of ["t-A8", "t-A9"]) {
+      assert.equal(await acard(page, id).locator(".ans").isVisible(), false, `${id}: 畳んだ節の中の .ans が見えている`);
+      assert.equal(await acard(page, id).locator("button.ghost").count(), 1, `${id}: 取り消しのボタンがちょうど 1 つでない`);
+      assert.equal(await acard(page, id).locator("button.ghost").isVisible(), false, `${id}: 畳んだ節の中の取り消しが見えている`);
+    }
+    assert.equal(await qcard(page, "t-A1").locator("button.primary").isVisible(), true, "判断待ちのカードまで畳まれた");
+    await (await ansSum(page)).click();
+    assert.equal(await isOpen(ansSections(page), "回答済みの節"), true, "summary を押しても開かない");
+    for (const id of ["t-A8", "t-A9"]) {
+      assert.equal(await acard(page, id).locator(".ans").isVisible(), true, `${id}: 開いたのに .ans が見えない`);
+      assert.equal(await acard(page, id).getByRole("button", { name: "取り消して判断待ちに戻す" }).isVisible(), true, `${id}: 開いたのに取り消しが見えない`);
+    }
+    // 読み込みでは閉じない (件数が変わっても、カードが作り直されても)
+    assert.equal(await page.evaluate(() => load()), true);
+    assert.equal(await isOpen(ansSections(page), "回答済みの節"), true, "読み込みで閉じた");
+    s.projects[0].answered.push(answeredItem("t-A7"));
+    s.projects[0].answered[0] = answeredItem("t-A8", "[humanq] 回答: 案B (b)\n", "asig-again");
+    assert.equal(await page.evaluate(() => load()), true);
+    await until(async () => (await ansText(page)) === "回答済み・反映待ち (3)", 3000, "件数が 3 になる");
+    assert.equal(await isOpen(ansSections(page), "回答済みの節"), true, "件数が変わる読み込みで閉じた");
+    assert.equal(await acard(page, "t-A7").locator(".ans").isVisible(), true, "開いた節に入った新しいカードが見えない");
+    assert.match(await acard(page, "t-A8").locator(".ans").innerText(), /案B/);
+    // もう一度押すと畳む。畳んだまま読み込んでも開かない。キーボード (summary にフォーカスして Enter) でも開く
+    await (await ansSum(page)).click();
+    assert.equal(await isOpen(ansSections(page), "回答済みの節"), false, "もう一度押しても畳まない");
+    assert.equal(await page.evaluate(() => load()), true);
+    assert.equal(await isOpen(ansSections(page), "回答済みの節"), false, "畳んだ節が読み込みで開いた");
+    await (await ansSum(page)).focus();
+    await page.keyboard.press("Enter");
+    assert.equal(await isOpen(ansSections(page), "回答済みの節"), true, "Enter で開かない");
+    assert.equal(await acard(page, "t-A9").locator(".ans").isVisible(), true);
+  });
+});
+
+test("回答済みの節: 開いたかどうかはプロジェクトごと (全体を優先度順の表示は別の 1 つ) に覚え、節が空になって外れた後の作り直しや、表示の切り替えでも保たれる。覚えているのは開いた節だけで、ほかの節は畳んだまま", async () => {
+  const s = new Script([proj(P1, [item("t-A1")], [answeredItem("t-A9")]), proj(P2, [item("t-B1")], [answeredItem("t-B9")])]);
+  await withPage(s, async page => {
+    assert.equal(await ansSections(page).count(), 2);
+    assert.deepEqual([await isOpen(ansOf(page, P1), "alpha の節"), await isOpen(ansOf(page, P2), "beta の節")], [false, false]);
+    await (await ansSum(page, P1)).click();                                   // alpha だけ開く
+    assert.deepEqual([await isOpen(ansOf(page, P1), "alpha の節"), await isOpen(ansOf(page, P2), "beta の節")], [true, false], "ほかのプロジェクトの節まで開いた");
+    assert.equal(await acard(page, "t-A9").locator(".ans").isVisible(), true);
+    assert.equal(await acard(page, "t-B9").locator(".ans").isVisible(), false, "開いていないプロジェクトの回答済みが見えている");
+    // alpha の回答済みが 0 件になって節が外れ、また回答済みが出たとき: alpha の節は開いたまま、beta の節は畳んだまま
+    s.projects[0].answered = [];
+    assert.equal(await page.evaluate(() => load()), true);
+    await until(async () => (await ansOf(page, P1).count()) === 0, 3000, "alpha の空になった節が外れる");
+    s.projects[0].answered = [answeredItem("t-A9")];
+    assert.equal(await page.evaluate(() => load()), true);
+    await until(async () => (await ansOf(page, P1).count()) === 1, 3000, "alpha の節が作り直される");
+    assert.deepEqual([await isOpen(ansOf(page, P1), "alpha の節"), await isOpen(ansOf(page, P2), "beta の節")], [true, false], "作り直した節の開閉が覚えと違う");
+    // 全体を優先度順の表示: 別の節なので、初めは畳む。そこで開いても、プロジェクトごとの表示の節は変わらない
+    await setView(page, "prio");
+    await until(async () => (await page.locator(".proj").count()) === 0, 3000, "プロジェクトごとの入れ物が外れる");
+    assert.equal(await isOpen(page.locator("#main .flat details.ansgrp"), "全体の表示の回答済みの節"), false, "全体の表示の節が、プロジェクトごとの開閉を引き継いだ");
+    assert.equal(await ansText(page), "回答済み・反映待ち (2)");              // 全体の表示では、節はページに 1 つ
+    await (await ansSum(page)).click();
+    assert.equal(await isOpen(page.locator("#main .flat details.ansgrp"), "全体の表示の回答済みの節"), true);
+    assert.equal(await page.evaluate(() => load()), true);
+    assert.equal(await isOpen(page.locator("#main .flat details.ansgrp"), "全体の表示の回答済みの節"), true, "全体の表示の節が読み込みで閉じた");
+    await setView(page, "proj");
+    await until(async () => (await page.locator(".flat").count()) === 0 && (await ansSections(page).count()) === 2, 3000, "プロジェクトごとの表示に戻る");
+    assert.deepEqual([await isOpen(ansOf(page, P1), "alpha の節"), await isOpen(ansOf(page, P2), "beta の節")], [true, false], "表示を切り替えて戻ると、開閉が変わった");
+    await setView(page, "prio");
+    await until(async () => (await page.locator(".proj").count()) === 0, 3000, "プロジェクトごとの入れ物が外れる");
+    assert.equal(await isOpen(page.locator("#main .flat details.ansgrp"), "全体の表示の回答済みの節"), true, "全体の表示の開閉を覚えていない");
+    // 閉じた節は覚えから外れる: alpha の節を畳んでから作り直すと、畳んだまま (開いたままの覚えが残らない)。全体の表示の節は開いたまま
+    await setView(page, "proj");
+    await until(async () => (await page.locator(".flat").count()) === 0 && (await ansSections(page).count()) === 2, 3000, "プロジェクトごとの表示に戻る");
+    await (await ansSum(page, P1)).click();
+    assert.equal(await isOpen(ansOf(page, P1), "alpha の節"), false, "前提: alpha の節が畳まれていない");
+    await setView(page, "prio");
+    await until(async () => (await page.locator(".proj").count()) === 0, 3000, "プロジェクトごとの入れ物が外れる");
+    await setView(page, "proj");
+    await until(async () => (await page.locator(".flat").count()) === 0 && (await ansSections(page).count()) === 2, 3000, "プロジェクトごとの表示に戻る");
+    assert.deepEqual([await isOpen(ansOf(page, P1), "alpha の節"), await isOpen(ansOf(page, P2), "beta の節")], [false, false], "畳んだ節が、作り直したときに開いた");
+    await setView(page, "prio");
+    await until(async () => (await page.locator(".proj").count()) === 0, 3000, "プロジェクトごとの入れ物が外れる");
+    assert.equal(await isOpen(page.locator("#main .flat details.ansgrp"), "全体の表示の回答済みの節"), true, "プロジェクトごとの節を畳んだら、全体の表示の節まで畳んだ");
+  });
+});
+
+test("回答済みの節: 見出しは summary の中に置く (プロジェクトごとは h3、全体を優先度順は h2)。見出しの階層・文言・件数と、見出しの見た目 (小さい字・止まらない・summary の行に収まる) は変えない。節の上の余白は 28px、開いたときだけ summary の下に 10px", async () => {
+  const s = new Script([proj(P1, [item("t-A1")], [answeredItem("t-A8"), answeredItem("t-A9")]), proj(P2, [], [answeredItem("t-B9")])]);
+  await withPage(s, async page => {
+    assert.deepEqual(await headings(page), ["h1:判断待ち", "h2:alpha", "h3:判断 (1)", "h3:回答済み・反映待ち (2)", "h2:beta", "h3:回答済み・反映待ち (1)"]);
+    assert.equal(await page.locator(".proj .grp > summary > h3").count(), 2, "回答済みの見出しが summary の中の h3 でない");
+    assert.equal(await page.locator(".proj .grp > h3").count(), 1, "判断の節の見出しが入れ物の直下の h3 でない");
+    const look = () => ansOf(page, P1).evaluate(d => {
+      const cs = e => getComputedStyle(e), sum = d.querySelector(":scope > summary"), h = sum.querySelector("h3");
+      return { marginTop: cs(d).marginTop, sumMb: cs(sum).marginBottom, sumFs: cs(sum).fontSize, hDisplay: cs(h).display, hMargin: cs(h).margin,
+        hFs: cs(h).fontSize, hPos: cs(h).position, oneLine: sum.getBoundingClientRect().height < 2 * parseFloat(cs(h).lineHeight) };
+    });
+    assert.deepEqual(await look(), { marginTop: "28px", sumMb: "0px", sumFs: "14px", hDisplay: "inline", hMargin: "0px", hFs: "14px", hPos: "static", oneLine: true });
+    // キーボードで届いた summary には、カードと同じ色の 2px の枠が出る (ブラウザの既定の枠ではない)
+    await (await ansSum(page, P1)).focus();
+    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.press("Tab");
+    assert.equal(await page.evaluate(() => document.activeElement.matches("details.ansgrp > summary")), true, "前提: Tab で summary にフォーカスが届かない");
+    assert.deepEqual(await page.evaluate(() => { const c = getComputedStyle(document.activeElement); return [c.outlineStyle, c.outlineWidth, c.outlineOffset]; }),
+      ["solid", "2px", "2px"], "キーボードで届いた summary の枠が、カードと同じ形でない");
+    await (await ansSum(page, P1)).click();
+    assert.equal((await look()).sumMb, "10px", "開いた節の summary の下に余白が無い");
+    await setView(page, "prio");
+    await until(async () => (await page.locator(".proj").count()) === 0, 3000, "プロジェクトごとの入れ物が外れる");
+    assert.deepEqual(await headings(page), ["h1:判断待ち", "h2:判断待ち (1)", "h2:回答済み・反映待ち (3)"]);
+    assert.equal(await page.locator(".flat details.ansgrp > summary > h2.sec").count(), 1, "全体の表示の回答済みの見出しが summary の中の h2 でない");
+    assert.equal(await page.locator(".flat > .grp > h2.sec").count(), 1, "判断待ちの見出しが入れ物の直下の h2 でない");
+    const flat = await page.locator(".flat details.ansgrp").evaluate(d => {
+      const cs = e => getComputedStyle(e), sum = d.querySelector(":scope > summary"), h = sum.querySelector("h2");
+      return { marginTop: cs(d).marginTop, sumMb: cs(sum).marginBottom, hDisplay: cs(h).display, hMargin: cs(h).margin, hFs: cs(h).fontSize, hPos: cs(h).position };
+    });
+    assert.deepEqual(flat, { marginTop: "28px", sumMb: "0px", hDisplay: "inline", hMargin: "0px", hFs: "14px", hPos: "static" });
+  });
+});
+
+test("回答済みの節: 回答の後のフォーカスは、次のカードが畳んだ節の中なら、そこへ移さず、見えるカード (次、無ければ前) か、畳んだ節の summary へ移る。見えているものが移り先になる (どちらの表示でも)", async () => {
+  const answerOne = answerVisible;       // このテストの答える操作は、押す前に「回答する」が見えていることを assert するもの (見えなければ時間切れでなく assertion の失敗)
+  // 1. 判断待ちの最後の 1 件に答える: 残りは畳んだ回答済みの節だけ → その summary (見えている) へ。カードの中の「チケット本文」の summary ではない
+  for (const view of ["proj", "prio"]) {
+    const s = new Script([proj(P1, [item("t-A1")], [answeredItem("t-A9")])]);
+    await withPage(s, async page => {
+      if (view === "prio") await setView(page, "prio");
+      assert.equal(await isOpen(ansSections(page), "回答済みの節"), false, `${view}: 前提: 回答済みの節が畳んでない`);
+      s.hold("answer");
+      await answerOne(page, "t-A1");
+      const f = await focusInfo(page);
+      assert.deepEqual([f.kind, f.sec], ["summary", "ans"], `${view}: フォーカスが畳んだ節の summary へ移らない ${JSON.stringify(f)}`);
+      assert.equal(await page.locator(":focus").count(), 1);
+      assert.equal(await page.locator(":focus").isVisible(), true, `${view}: フォーカスが見えていない要素にある`);
+      assert.equal(await isOpen(ansSections(page), "回答済みの節"), false, `${view}: 移しただけで節が開いた`);
+      // Enter の押し直し・リピートで取り消しは送られない (畳んだ中のカードの取り消しにフォーカスは移っていない)
+      await page.keyboard.press("Enter");
+      await page.keyboard.press("Enter");
+      await page.waitForTimeout(300);
+      assert.deepEqual(s.undos, [], `${view}: 取り消しが送られた`);
+      assert.deepEqual(s.answers.map(a => a.id), ["t-A1"]);
+    });
+  }
+  // 2. 次が畳んだ節の中でも、判断待ちのカードがほかにあれば、そのカード (前) そのものへ。節の summary へは移らない。次の見えるカードがあれば次へ
+  const s2 = new Script([proj(P1, [item("t-A1"), item("t-A2")], [answeredItem("t-A9")])]);
+  await withPage(s2, async page => {
+    s2.hold("answer");
+    await answerOne(page, "t-A2");
+    assert.deepEqual(await focusInfo(page), { kind: "card", id: "t-A1" }, "最後の判断待ちに答えたとき、前の見えるカードへ移らない");
+    await answerOne(page, "t-A1");
+    assert.equal((await focusInfo(page)).kind, "summary", "残りが畳んだ節だけになったとき、summary へ移らない");
+  });
+  const s3 = new Script([proj(P1, [item("t-A1"), item("t-A2")], [answeredItem("t-A9")])]);
+  await withPage(s3, async page => {
+    s3.hold("answer");
+    await answerOne(page, "t-A1");
+    assert.deepEqual(await focusInfo(page), { kind: "card", id: "t-A2" }, "次の見えるカードへ移らない");
+  });
+  // 3. 畳んだ節が、カードの前だけにあるとき (別のプロジェクトの回答済み) は、その summary へ。前後の両方にあるときは、後ろ (同じプロジェクトの) のほうへ
+  const s4 = new Script([proj(P1, [], [answeredItem("t-A9")]), proj(P2, [item("t-B1")])]);
+  await withPage(s4, async page => {
+    s4.hold("answer");
+    await answerOne(page, "t-B1");
+    assert.deepEqual(await focusInfo(page), { kind: "summary", sec: "ans", proj: P1, text: "回答済み・反映待ち (1)" }, "前にだけある畳んだ節の summary へ移らない");
+  });
+  const s5 = new Script([proj(P1, [], [answeredItem("t-A9")]), proj(P2, [item("t-B1")], [answeredItem("t-B9")])]);
+  await withPage(s5, async page => {
+    s5.hold("answer");
+    await answerOne(page, "t-B1");
+    const f = await focusInfo(page);
+    assert.deepEqual([f.kind, f.sec, f.proj], ["summary", "ans", P2], `前後に畳んだ節があるとき、後ろの (同じプロジェクトの) summary へ移らない ${JSON.stringify(f)}`);
+  });
+  // 3'. 畳んだ節が 3 つ: 後ろにあるもののうち最も近いもの (最後のものではない) / 後ろに無ければ、前にあるもののうち最も近いもの (最初のものではない)
+  const s7 = new Script([proj(P1, [], [answeredItem("t-A9")]), proj(P2, [item("t-B1")], [answeredItem("t-B9")]), proj("/work/gamma", [], [answeredItem("t-C9")])]);
+  await withPage(s7, async page => {
+    s7.hold("answer");
+    await answerOne(page, "t-B1");
+    const f = await focusInfo(page);
+    assert.deepEqual([f.kind, f.sec, f.proj], ["summary", "ans", P2], `後ろにある畳んだ節のうち、最も近い (同じプロジェクトの) summary へ移らない ${JSON.stringify(f)}`);
+  });
+  const s8 = new Script([proj(P1, [], [answeredItem("t-A9")]), proj(P2, [], [answeredItem("t-B9")]), proj("/work/gamma", [item("t-C1")])]);
+  await withPage(s8, async page => {
+    s8.hold("answer");
+    await answerOne(page, "t-C1");
+    const f = await focusInfo(page);
+    assert.deepEqual([f.kind, f.sec, f.proj], ["summary", "ans", P2], `前にある畳んだ節のうち、最も近い summary へ移らない ${JSON.stringify(f)}`);
+  });
+  // 3''. 保留中の畳んだ節も同じ (残りが畳んだ節だけなら、その summary へ)
+  const s9 = new Script([{ ...proj(P1, [item("t-A1")]), snoozed: [{ ...item("t-S1"), snooze: { until: "2999-12-31", note: "", expired: false, changed: false } }] }]);
+  await withPage(s9, async page => {
+    s9.hold("answer");
+    await answerOne(page, "t-A1");
+    const f = await focusInfo(page);
+    assert.deepEqual([f.kind, f.sec], ["summary", "snz"], `残りが畳んだ保留中の節だけのとき、その summary へ移らない ${JSON.stringify(f)}`);
+    assert.equal(await page.locator(":focus").isVisible(), true);
+  });
+  // 3'''. 移り先が何も無い (見えるカードも畳んだ節も無い) ときは、何も移さない (例外を出さない)。withPage がページの例外の有無を検査する
+  const s10 = new Script([proj(P1, [item("t-A1")])]);
+  await withPage(s10, async page => {
+    s10.hold("answer");
+    await answerOne(page, "t-A1");
+    // フォーカスは、畳んでいるカードの中の押したボタンに残る (畳み終わって外れるまで。inert でも activeElement のまま)。別の要素へは移らない
+    const f = await focusInfo(page);
+    assert.equal(["summary", "card"].includes(f.kind), false, `移り先が無いのに、フォーカスが ${JSON.stringify(f)} へ移った`);
+    // 移り先を探す処理が例外で止まると、描き直しが途中で終わる (件数が 0 件に変わらない)。例外は画面側が握るので、ページの例外では分からない
+    assert.equal((await page.locator("#count").textContent()).trim(), "0 件", "回答した直後の描き直しが終わっていない (移り先を探す処理が止まった)");
+  });
+  // 4. 節を開いてあれば、次のカードは回答済みのカードそのもの (今までどおり)
+  const s6 = new Script([proj(P1, [item("t-A1")], [answeredItem("t-A9")])]);
+  await withPage(s6, async page => {
+    await openAnswered(page);
+    s6.hold("answer");
+    await answerOne(page, "t-A1");
+    assert.deepEqual(await focusInfo(page), { kind: "card", id: "t-A9" }, "開いた節の回答済みのカードへ移らない");
+  });
+});
+
+test("回答済みの節: 畳んだ節の中のカードでも、トーストの「取り消す」は効き、節の件数が変わり、空になった節は外れる。動きを減らす設定でも同じ", async () => {
+  for (const opts of [{}, { reducedMotion: "reduce" }]) {
+    const s = new Script([proj(P1, [item("t-A1"), item("t-B2")])]);
+    await withPage(s, async page => {
+      await answerVisible(page, "t-A1");
+      await until(async () => (await acard(page, "t-A1").count()) === 1, 3000, "回答済みに出る");
+      assert.equal(await isOpen(ansSections(page), "回答済みの節"), false, "回答済みの節が畳んでない");
+      assert.equal(await ansText(page), "回答済み・反映待ち (1)");
+      assert.equal(await okToasts(page).count(), 1, "成功のトーストが 1 つでない");
+      assert.equal(await undoInToast(page).count(), 1, "トーストに「取り消す」が 1 つでない");
+      await undoInToast(page).click({ timeout: 3000 });
+      await until(() => s.undos.length === 1, 3000, "取り消しの POST");
+      await until(async () => (await qcard(page, "t-A1").count()) === 1, 3000, "判断待ちに戻る");
+      await until(async () => (await ansSections(page).count()) === 0, 3000, "空になった回答済みの節が外れる");
+    }, opts);
+  }
 });
