@@ -37,7 +37,7 @@ def _get(path: str, timeout: float) -> dict | None:
     try:
         with urllib.request.urlopen(URL.rstrip("/") + path, timeout=timeout) as r:
             return json.loads(r.read())
-    except (urllib.error.URLError, OSError, ValueError):
+    except (urllib.error.URLError, OSError, ValueError, RecursionError):    # RecursionError は深い入れ子の応答 (json の parser の限界)
         return None
 
 
@@ -142,7 +142,7 @@ def _remember(sd: str, session_id: str, answered: list[str]) -> list[str]:
     try:
         with open(path, encoding="utf-8") as f:
             seen = set(json.load(f))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):   # RecursionError は深い入れ子の記憶のファイル。壊れたファイルと同じに空として読む
         seen = set()
     with open(path, "w", encoding="utf-8") as f:
         json.dump(sorted(answered), f)
@@ -233,7 +233,7 @@ def prompt_submit(inp: dict) -> None:
 def main() -> None:
     try:
         inp = json.load(sys.stdin)
-    except (ValueError, OSError):
+    except (ValueError, OSError, RecursionError):   # RecursionError は深い入れ子の stdin。読めない入力と同じに {} で進める
         inp = {}
     try:
         {"session-start": session_start, "prompt-submit": prompt_submit}[sys.argv[1]](inp)

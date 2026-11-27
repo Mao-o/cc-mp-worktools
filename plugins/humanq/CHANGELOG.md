@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.17.1
+
+### 修正
+
+- hook (`hooks/humanq_hook.py`) が JSON として読む入力が深く入れ子のとき (`[` を何万個も並べたものなど)、json の parser が上げる `RecursionError` が抜けていたのを、壊れた JSON と同じ扱いにした (同じ欠陥の最後の入口。サーバーの bd の読みと書き込みの body は 0.17.0 で直してある):
+  - stdin (`main`): 読めない入力と同じに `{}` で進める。前は hook が例外で終わっていた (exit 1)
+  - サーバーの応答 (`_get`): 読めない応答と同じに `None` (サーバーを使えない扱い)。前は `RecursionError` が `ensure_server` と `summary` から抜け、SessionStart の出力が無くなっていた (`main` が握って stderr に 1 行だけ出す)。ポートを別のものが使っていて、深く入れ子の応答を返すときに起きる
+  - 前に伝えた回答済みの記憶のファイル (`_remember`): 壊れたファイルと同じに空として読み、今の集合で書き直す。前は SessionStart の出力が無くなり、UserPromptSubmit は何も伝えなかった
+
+### テスト
+
+- `tests/test_hook_input.py` (新規): 上の 3 つの入力について、深い入れ子 3 形 (閉じない `[`・閉じる `[]`・`{"a":` の連なり) が、壊れた JSON (JSON でない・空) と同じ結果になること。`_get` は応答を受けたうえで `None` になること・応答の途中で止まる (時間切れ)・つながらない・正常な応答、`ensure_server` / `summary` / `session_start` の出力が壊れた応答のときと同じこと (「使えない」扱いに固定した対照と比べる)、`_remember` は記憶のファイルが無いときと正常なとき、`main` は stdin が読めないとき (`OSError`) と正常な入力のとき。本物の hook のプロセスが、深く入れ子の stdin で exit 0・出力なしで終わること。例外が漏れる版は FAIL として数える
+
 ## 0.17.0
 
 ### 保留
