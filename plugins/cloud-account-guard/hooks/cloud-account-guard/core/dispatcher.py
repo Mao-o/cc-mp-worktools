@@ -194,8 +194,10 @@ def _cache_state(service, env, context) -> str | None:
 
     状態ファイルを宣言しない service (`state_files` が無い) は空文字 (指紋で見ない = 0.34.0 と
     同じ)。None は「今は指紋を作れない」で、呼び出し側は成功 cache を読まず書かない (毎回照合する):
-    ファイルが書かれた直後のとき (`cache.state_fingerprint`) と、パスを決める処理が例外を投げた
-    とき (握らないと dispatch() の外まで抜け、__main__ の最終防波堤が検証をスキップする)。
+    ファイルが書かれた直後のとき (`cache.state_fingerprint`)、state_files がファイルの場所を決められない
+    (None を返す。Windows で APPDATA が無いときなど。v0.35.1、`cli_config.state_files_when_dir_unknown`) とき、
+    パスを決める処理が例外を投げたとき (握らないと dispatch() の外まで抜け、__main__ の最終防波堤が検証を
+    スキップする)。
     例外は握るが、止まる形は握れない (cache を見る前に毎回走り、止まると hook が timeout で打ち切られて
     検証が飛ぶ) ので、state_files の側で FIFO などを止まる形で開かない (`cli_config.read_text`)。
     env は検証に渡すのと同じ (hook プロセスの env + 行頭の inline env)。
@@ -204,7 +206,10 @@ def _cache_state(service, env, context) -> str | None:
     if state_files is None:
         return ""
     try:
-        return cache.state_fingerprint(state_files(env, context))
+        files = state_files(env, context)
+        if files is None:
+            return None
+        return cache.state_fingerprint(files)
     except Exception:  # noqa: BLE001
         return None
 

@@ -418,6 +418,10 @@ v0.19.0 から、その CLI に**ディレクトリ単位でアカウントを�
   `declare -x` / `unset` / 代入、内容を読めない `source` / `.` / `eval` / `set` の後。
   これを固定とみなすと、未登録の deny を行頭の 1 語で抜けられる (その値でアカウントが
   決まるのに、何とも照合しない)
+- gcloud の `CLOUDSDK_ACTIVE_CONFIG_NAME` が指す構成は、gcloud の設定ディレクトリ (macOS / Linux は
+  `~/.config/gcloud`、Windows は `%APPDATA%\gcloud`。v0.35.1) の下で読む。Windows では行頭の `APPDATA=...` も
+  設定ディレクトリを変えるので、その場だけ指定した値として固定とみなさない。Windows で場所を決められないとき
+  (APPDATA が無いなど) は、構成による固定とみなさない (`CLOUDSDK_CORE_ACCOUNT` による固定はそのまま)
 - 固定は、そのコマンドが走りうる**すべての**ディレクトリで確かめる (v0.29.3)。
   `cd a && firebase deploy; cd ../b && firebase deploy` は a と b の両方で `firebase use` の記録が
   要る。括弧・条件・パイプの中の `cd` があるコマンド (`(cd sub && npm test); firebase deploy`) は、
@@ -1421,8 +1425,8 @@ cache が無い (TTL 切れ / 初回) ときの現在値取得を、まずその
 
 | service | 読むファイル | 読む値 |
 |---|---|---|
-| GitHub | `$GH_CONFIG_DIR` \| `$XDG_CONFIG_HOME/gh` \| `~/.config/gh` の `hosts.yml` | host ごとの `user:` (アクティブアカウント) |
-| GCP | `$CLOUDSDK_CONFIG` \| `~/.config/gcloud` の `active_config` + `configurations/config_<name>` | `[core]` の `project` / `account` |
+| GitHub | `$GH_CONFIG_DIR` \| `$XDG_CONFIG_HOME/gh` \| `~/.config/gh` (Windows は `~/.config/gh` の代わりに `%AppData%\GitHub CLI`。v0.35.1) の `hosts.yml` | host ごとの `user:` (アクティブアカウント) |
+| GCP | `$CLOUDSDK_CONFIG` \| `~/.config/gcloud` (Windows は `%APPDATA%\gcloud`。v0.35.1) の `active_config` + `configurations/config_<name>` | `[core]` の `project` / `account` |
 
 `gh auth status` は全 host のトークンを **API で検証**するためネットワーク往復が入り
 (〜500ms)、オフラインでは失敗して deny に倒れていた。`gcloud config get-value` は
@@ -1451,6 +1455,11 @@ Python CLI の起動込みで 1 回 〜1s (dict 期待値では project / accoun
   (`HOME=/other gh pr create` など)。`HOME` は gh / gcloud のどちらも設定
   ディレクトリ解決に使うため、実行される CLI は**別の設定ファイル**を読む。
   hook 側のファイルで判断すると違うアカウントで allow しうるので CLI に委ねる
+- 両方共通: 設定ディレクトリを決められない (v0.35.1): Windows で上の表の env がどれも無い (GitHub は
+  `GH_CONFIG_DIR` / `XDG_CONFIG_HOME` / `AppData`、GCP は `CLOUDSDK_CONFIG` / `APPDATA`)、Windows で大文字小文字
+  だけ違う名前の env が別々の値で並ぶ (`AppData=... gh ...` と hook の `APPDATA`)、hook が Cygwin / MSYS の
+  Python で動く。読む場所を推測で決めず CLI に委ねる。[hook を通らない切替の検出](#hook-を通らない切替の検出-v0350)
+  の指紋も取れないので、成功 cache も使わない
 - 両方共通: 設定ファイルが通常のファイルでない (FIFO・デバイスなど) ときは、読まずに、読めないのと
   同じに扱う (v0.35.0)。書き手のいない FIFO を普通に開くと open が戻らず、hook が timeout で打ち切られて
   検証が飛ぶため (止まらない開き方で種類を確かめる)。gcloud の `active_config` は、読めないときと同じく
@@ -1513,11 +1522,14 @@ service ごとの epoch (`<service>.epoch`、単調増加) を進め、切替を
 
 | service | 指紋を取るファイル |
 |---|---|
-| GitHub | `$GH_CONFIG_DIR` \| `$XDG_CONFIG_HOME/gh` \| `~/.config/gh` の `hosts.yml` (gh は切替・login・logout のたびに `<host>.user` を書き直す。トークンを keyring に置く構成でも同じ) |
-| GCP | `$CLOUDSDK_CONFIG` \| `~/.config/gcloud` の `active_config` と、使う構成の `configurations/config_<name>` (名前は `--configuration` → `CLOUDSDK_ACTIVE_CONFIG_NAME` → `active_config` → `default` の順。`gcloud config configurations activate` は前者を、`gcloud config set` / `gcloud auth login` は後者を書き換える) |
+| GitHub | `$GH_CONFIG_DIR` \| `$XDG_CONFIG_HOME/gh` \| `~/.config/gh` (Windows は `~/.config/gh` の代わりに `%AppData%\GitHub CLI`。v0.35.1) の `hosts.yml` (gh は切替・login・logout のたびに `<host>.user` を書き直す。トークンを keyring に置く構成でも同じ) |
+| GCP | `$CLOUDSDK_CONFIG` \| `~/.config/gcloud` (Windows は `%APPDATA%\gcloud`。v0.35.1) の `active_config` と、使う構成の `configurations/config_<name>` (名前は `--configuration` → `CLOUDSDK_ACTIVE_CONFIG_NAME` → `active_config` → `default` の順。`gcloud config configurations activate` は前者を、`gcloud config set` / `gcloud auth login` は後者を書き換える) |
 
 - 場所は検証に渡すのと同じ env (行頭の inline env を含む) で決める。`~` は、行頭の `HOME=...` が
-  あればその HOME
+  あればその HOME (Windows の gh / gcloud は既定の場所を HOME から組まないので、Windows では使わない)
+- 場所を決められないとき ([ローカル読取](#ローカル設定ファイルからの現在値取得-v0130)を諦めるのと同じ条件。
+  Windows で `APPDATA` が無いなど) は、指紋を取れないので成功 cache を読まず書かない (毎回照合する。v0.35.1)。
+  macOS / Linux で HOME を決められないときは、0.35.0 と同じく指紋を取らずに cache を使う
 - 指紋はファイルの中身ではなく stat (symlink は辿る) の device・inode・大きさ・mtime・ctime で取り、
   ファイルごとに stat を 1 回取るだけなので、切り替えていないときの cache hit は今までどおり効く
   (gcloud だけは使う構成の名前を決めるために `active_config` の中身も読む。この読みは cache を見る前に
@@ -1833,9 +1845,20 @@ CLI ごとに 1 回。deny はせず、deny したコマンドには足さない
   違うセッションで切り替えると、その前の成功 cache が最大 30 秒 (TTL) 効き、期待と違うアカウントの
   write が通りうる。これらの CLI が普段のコマンドでもそのファイルを書き換えるか (書き換えるなら cache が
   効かなくなる) と、どのファイルを読むか (KUBECONFIG の連結・AWS の認証情報の探索順) を確かめられて
-  いないため、指紋を取っていない。gh / gcloud でも、既定の設定ディレクトリが `%AppData%` 配下になる
-  Windows では、hook は `~/.config` 配下を見るので検出が働かない (`GH_CONFIG_DIR` / `CLOUDSDK_CONFIG` を
-  設定していれば働く)
+  いないため、指紋を取っていない
+- **Windows の gh / gcloud の設定ディレクトリ** (v0.35.1): Windows の Python (`os.name` が `nt`) で動く hook は、
+  gh は `GH_CONFIG_DIR` → `$XDG_CONFIG_HOME/gh` → `%AppData%\GitHub CLI`、gcloud は `CLOUDSDK_CONFIG` →
+  `%APPDATA%\gcloud` の順に場所を決め、[ローカル読取](#ローカル設定ファイルからの現在値取得-v0130)も
+  [指紋](#hook-を通らない切替の検出-v0350)もそこで行う。0.35.0 までは Windows でも `~/.config` の下を読み、
+  CLI が使っていない古いファイルで一致と判定することがあった。順序は gh の `gh help environment` とソース
+  (go-gh の `ConfigDir`)、gcloud の公式文書 (configurations の頁) の記述に合わせた。
+  確かめた範囲: macOS / Linux の上で `os.name` と env を差し替えたテストで、読む場所と順序、`~/.config` の下の
+  古いファイルで一致と判定しないこと、指紋を取るファイル、場所を決められないときに CLI に聞くこと。
+  確かめていない範囲: Windows の実機での動作 (本物の gh / gcloud が書くファイルの場所と形、Git Bash から hook に
+  渡る env、Windows のパスの扱い)。AppData も無いときの行き先は組まず、CLI に聞く。名前の大文字小文字を区別しない
+  Windows の env の読みは、場所を決める env (`GH_CONFIG_DIR` / `XDG_CONFIG_HOME` / `APPDATA` / `CLOUDSDK_CONFIG`)
+  だけに当てる。ほかの env (`GH_TOKEN` や `CLOUDSDK_CORE_ACCOUNT` など) は書かれた綴りのまま見るので、
+  `gh_token=... gh ...` のような小文字の綴りの inline env は、ローカル読取を諦める条件に当たらない
 - Firebase の alias object 形式は `.firebaserc` の `projects` マップとの
   対応を前提にしており、ユーザー任意の key 名を受け付けるだけで "alias 名"
   自体のバリデーションはしない

@@ -195,6 +195,8 @@ def _get(key: str, env=None, configuration=None) -> tuple[str | None, str | None
 #   **エミュレートを諦めて CLI に委ねる**方が、取り違えた値で allow するより安全)
 # - `HOME` が hook プロセスと違う (`cli_config.home_overridden`) — 実行される
 #   gcloud は別の設定ディレクトリ (`$HOME/.config/gcloud`) を読む
+# - 設定ディレクトリを決められない (Windows で `CLOUDSDK_CONFIG` も `APPDATA` も無い・
+#   Cygwin / MSYS の Python。v0.35.1、`cli_config.config_dir_rule`)
 # - configuration 名が gcloud の命名規則から外れる (パス要素の混入を防ぐ)
 # - 設定ファイルが読めない / INI として解釈できない
 _CONFIG_DIR_ENV_VAR = "CLOUDSDK_CONFIG"
@@ -218,11 +220,32 @@ _CLOUDSDK_ENV_PREFIX = "CLOUDSDK_"
 _OTHER_OVERRIDE_ENV_VARS = frozenset(
     {"GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT", "GOOGLE_CLOUD_QUOTA_PROJECT"}
 )
-# CLI がどのアカウント / project で動くかを決める env (成功 cache のキーに含める。
-# services/__init__.py の IDENTITY_ENV_* 契約)。ローカル読取を諦める条件と同じ集合
-# (`CLOUDSDK_*` 全部 + 上の override) に、設定ディレクトリの既定を決める `HOME`。
-IDENTITY_ENV_VARS = frozenset({*_OTHER_OVERRIDE_ENV_VARS, "HOME"})
+
+
+def _identity_env_vars(rule) -> frozenset[str]:
+    """CLI がどのアカウント / project で動くかを決める env (成功 cache のキーに含める。
+    services/__init__.py の IDENTITY_ENV_* 契約)。
+
+    ローカル読取を諦める条件と同じ集合 (`CLOUDSDK_*` 全部 + 上の override) に、設定ディレクトリの
+    既定を決める `HOME`。Windows (と場所を決められない Cygwin / MSYS) では、設定ディレクトリの既定を
+    決める `APPDATA` も入れる (v0.35.1。rule は `cli_config.config_dir_rule()`)。macOS / Linux の gcloud は
+    APPDATA を見ないので入れない (入れると、行頭の `APPDATA=...` がディレクトリごとの固定 (`is_pinned`) を
+    外して未登録の deny に変わる。0.35.0 と同じ判定に保つ)。
+    """
+    names = {*_OTHER_OVERRIDE_ENV_VARS, "HOME"}
+    if rule != cli_config.POSIX:
+        names.add(cli_config.APPDATA_ENV_VAR)
+    return frozenset(names)
+
+
+IDENTITY_ENV_VARS = _identity_env_vars(cli_config.config_dir_rule())
 IDENTITY_ENV_PREFIXES = (_CLOUDSDK_ENV_PREFIX,)
+# Windows の gcloud の設定ディレクトリの決まり (v0.35.1。gcloud の公式文書の configurations の頁:
+# `%APPDATA%\gcloud`、`CLOUDSDK_CONFIG` で変えられる)。
+_WINDOWS_CONFIG_DIRS = (
+    (_CONFIG_DIR_ENV_VAR, None),
+    (cli_config.APPDATA_ENV_VAR, "gcloud"),
+)
 _ACTIVE_CONFIG_FILE = "active_config"
 _CONFIGURATIONS_DIR = "configurations"
 _CONFIG_FILE_PREFIX = "config_"
@@ -234,10 +257,18 @@ _CONFIG_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,63}$")
 
 
 def _config_dir(env, home: Path | None = None) -> Path | None:
-    """gcloud の設定ディレクトリ (`CLOUDSDK_CONFIG` → `~/.config/gcloud`)。
+    """gcloud の設定ディレクトリ。決められないなら None (呼び出し側は CLI に聞く)。
 
-    home: `~` に使う HOME。None なら hook プロセスの `Path.home()`。
+    macOS / Linux は `CLOUDSDK_CONFIG` → `~/.config/gcloud`。Windows は `CLOUDSDK_CONFIG` →
+    `%APPDATA%\\gcloud` で、APPDATA も無ければ決めない (v0.35.1。`cli_config.config_dir_rule`)。
+
+    home: `~` に使う HOME。None なら hook プロセスの `Path.home()`。Windows では使わない。
     """
+    rule = cli_config.config_dir_rule()
+    if rule == cli_config.WINDOWS:
+        return cli_config.windows_config_dir(env, _WINDOWS_CONFIG_DIRS)
+    if rule is None:
+        return None
     explicit = env.get(_CONFIG_DIR_ENV_VAR)
     if explicit:
         return Path(explicit)
@@ -249,7 +280,7 @@ def _config_dir(env, home: Path | None = None) -> Path | None:
     return home / ".config" / "gcloud"
 
 
-def state_files(env=None, context=None) -> list[Path]:
+def state_files(env=None, context=None) -> list[Path] | None:
     """hook を通らない切替 (ターミナルでの `gcloud config set` など) で gcloud が書き換えるファイル (v0.35.0)。
 
     gcloud はアクティブな configuration 名を `active_config` に、その project / account を
@@ -263,12 +294,13 @@ def state_files(env=None, context=None) -> list[Path]:
     外れるときは `active_config` だけ。`active_config` の中身はローカル読取と同じ `cli_config.read_text` で
     読む (cache を見る前に毎回走るので止まってはいけない。FIFO など通常のファイルでなければ読まず、
     読めないときと同じ `default`)。HOME は実行される gcloud のもの (`cli_config.overriding_home`)。
-    gcloud が Windows で使う `%APPDATA%` 配下は見ない (README の既知の制限)。
+    Windows では `%APPDATA%\\gcloud` の下 (v0.35.1)。場所を決められないときは
+    `cli_config.state_files_when_dir_unknown` (Windows で APPDATA が無いときなどは None = 成功 cache を使わない)。
     """
     e = os.environ if env is None else env
     config_dir = _config_dir(e, cli_config.overriding_home(e))
     if config_dir is None:
-        return []
+        return cli_config.state_files_when_dir_unknown()
     files = [config_dir / _ACTIVE_CONFIG_FILE]
     name = _local_config_name(e, config_dir, (context or {}).get("configuration"))
     if name is not None:
