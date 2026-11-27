@@ -283,13 +283,52 @@ def _expand_home(path: str) -> str:
     return os.path.expanduser(path)
 
 
-def _resolve(base: str | None, path: str, msys: bool = False, memo: dict[str, str] | None = None) -> str | None:
+# realpath の覚え (`_Norms`) に入れる綴りと値の文字数の合計の上限。途中の行き先を全部覚えると、相対パスを深くする形で深さの 2 乗の
+# 大きさになる (`x || cd d<i>;` 6 回の後に `cd <40 字>;` 300 回の 13 KB のコマンドで、期限までに 250 MB ほど)。
+# 超えた分は覚えずに realpath を呼ぶ (値は同じで、遅くなるだけ。期限が閉じる)
+_NORMS_CHARS = 1 << 22
+
+
+class _Norms(dict):
+    """realpath の覚え。綴りと値の文字数の合計 (chars) が `_NORMS_CHARS` を超える分は覚えない (値は同じで、遅くなるだけ)。"""
+
+    chars = 0
+
+
+def _norm_once(path: str, norms: dict[str, str] | None) -> str:
+    """norm(path)。norms があれば、正規化する前のパスの綴りを key に値を覚え、同じ綴りの realpath を繰り返さない。"""
+    if norms is None:
+        return norm(path)
+    value = norms.get(path)
+    if value is None:
+        value = norm(path)
+        chars = getattr(norms, "chars", 0) + len(path) + len(value)
+        if chars <= _NORMS_CHARS:
+            norms[path] = value
+            if isinstance(norms, _Norms):
+                norms.chars = chars
+    return value
+
+
+def _resolve(
+    base: str | None,
+    path: str,
+    msys: bool = False,
+    memo: dict[str, str] | None = None,
+    norms: dict[str, str] | None = None,
+) -> str | None:
     """base から見た path の正規化済み絶対パス。解決できなければ None。msys は Git Bash の読み (`_drive_readings`)。
 
     memo は、絶対パスになる語 (`~` の展開と Git Bash の読みの後で) を正規化した値の覚えで、語をそのまま key にする
     (1 つの読みの中で、同じ msys で使う)。絶対パスの行き先は base に関係なく同じ値になるので、状態ごとに同じ realpath を
     繰り返さない。値は覚えないときと同じ (1 つの読みの間にファイルシステムと home は変わらない)。相対パスは基点ごとに値が
-    違うので覚えない。
+    違うので memo には入れない。
+
+    norms は、realpath に渡す綴り (相対パスは基点と繋いだもの) を key にした正規化の覚えで、`analyze_readings` の 1 回の
+    呼び出しの全部の読み (shell・here-document の読み直し・Git Bash の読み・作業ディレクトリの読み) で 1 つを使う。読みはどれも
+    同じ場所から同じ移動を読むので、覚えないと同じ realpath を読みの数だけ繰り返す (Windows は存在しない要素ごとに API を
+    2 回呼ぶので重く、相対パスを深くする形が期限に届いていた)。値は覚えないときと同じ (呼び出しの間にファイルシステムは変わらない)。
+    覚える大きさには上限 (`_NORMS_CHARS`) がある。
     """
     if memo is not None and path in memo:
         return memo[path]
@@ -300,19 +339,26 @@ def _resolve(base: str | None, path: str, msys: bool = False, memo: dict[str, st
     if msys:
         path = _msys_drive(path)
     if os.path.isabs(path):
-        resolved = norm(path)
+        resolved = _norm_once(path, norms)
         if memo is not None:
             memo[word] = resolved
         return resolved
     if base is None:
         return None
-    return norm(os.path.join(base, path))
+    return _norm_once(os.path.join(base, path), norms)
 
 
 def _git_targets(
-    args: list[str], cwd: str | None, fam: Family, env: dict[str, str] | None = None, msys: bool = False
+    args: list[str],
+    cwd: str | None,
+    fam: Family,
+    env: dict[str, str] | None = None,
+    msys: bool = False,
+    norms: dict[str, str] | None = None,
 ) -> tuple[list[str], str | None, list[str], bool]:
     """git の global option を読み、(書き換わる場所のパス一覧, 解決できない理由, 残りの引数, git が読む repo がこの repo か) を返す。
+
+    norms は `_resolve` の realpath の覚え (`analyze_readings` の 1 回の呼び出しで 1 つ)。
 
     書き換わる場所は 2 つある: HEAD / index を持つ repo 側 (`-C` / `--git-dir` で決まる) と、
     作業ツリー側 (`--work-tree`。無ければ、`--git-dir` だけが効いているときは今の場所、それ以外は repo 側と同じ)。
@@ -340,7 +386,7 @@ def _git_targets(
         if name == "-C":
             if _dynamic(value):
                 return [], f"git -C {value}", args[i:], False
-            here = _resolve(here, value, msys)
+            here = _resolve(here, value, msys, norms=norms)
         elif name == "--work-tree":
             work_tree = value
         elif name == "--git-dir":
@@ -350,14 +396,14 @@ def _git_targets(
     targets: list[str] = []
     unresolved = None
     if git_dir is not None:
-        resolved = _resolve(here, git_dir, msys)
+        resolved = _resolve(here, git_dir, msys, norms=norms)
         if resolved is None:
             return [], f"--git-dir {git_dir}", rest, False
         mapped = dict(fam.gitdirs).get(resolved)
         if mapped is not None:
             targets.append(mapped)  # その git dir を持つ checkout の HEAD / index を書き換える
         elif resolved == fam.common_dir:
-            targets.append(norm(os.path.dirname(fam.common_dir)))
+            targets.append(_norm_once(os.path.dirname(fam.common_dir), norms))
         elif resolved.startswith(fam.common_dir.rstrip(os.sep) + os.sep):
             return [], f"--git-dir {git_dir}", rest, False  # 同じ repo の、対応の分からない git dir
         in_repo = bool(targets)
@@ -374,7 +420,7 @@ def _git_targets(
     else:
         return [], "cd の移動先", rest, False
     if work_tree is not None:
-        resolved = _resolve(here, work_tree, msys)
+        resolved = _resolve(here, work_tree, msys, norms=norms)
         if resolved is None:
             return [], f"--work-tree {work_tree}", rest, in_repo  # 作業ツリーが決まらなくても repo は決まっている
         targets.append(resolved)
@@ -388,10 +434,12 @@ def _worktree_operand(rest: list[str]) -> str | None:
     return next((a for a in rest[2:] if not a.startswith("-")), None)
 
 
-def _worktree_targets(rest: list[str], here: str | None, msys: bool = False) -> list[str]:
-    """`git worktree remove|move <path>` の `<path>` を、here からのパスとして読んだ先。"""
+def _worktree_targets(
+    rest: list[str], here: str | None, msys: bool = False, norms: dict[str, str] | None = None
+) -> list[str]:
+    """`git worktree remove|move <path>` の `<path>` を、here からのパスとして読んだ先。norms は `_resolve` の realpath の覚え。"""
     operand = _worktree_operand(rest)
-    resolved = _resolve(here, operand, msys) if operand is not None else None
+    resolved = _resolve(here, operand, msys, norms=norms) if operand is not None else None
     return [resolved] if resolved else []
 
 
@@ -434,20 +482,22 @@ def _worktree_by_name(rest: list[str], fam: Family) -> set[str]:
     return found
 
 
-def _worktree_may_be_other(rest: list[str], fam: Family, msys: bool = False) -> bool:
+def _worktree_may_be_other(
+    rest: list[str], fam: Family, msys: bool = False, norms: dict[str, str] | None = None
+) -> bool:
     """git が読む repo か今の場所が決まらないときに、`git worktree remove|move <worktree>` が別の worktree を指しうるか。
 
     名前 (パスの末尾) が別の worktree に一致するときと、名前で決まらない相対パスのときに True。相対パスは基点が決まらないので、
     綴りに関係なくどの worktree にも届きうる (`../wt-b` や、symlink を通る `wt/<name>`・`lnk`。git は名前で決まらないとパスを
     realpath で比べる)。変数の語 (`"$Z"` / `"../$Z"`) も、どの worktree の名前にもパスにもなりうるので True。
-    自分の worktree の名前と絶対パス (パスとして読む側で判定する) は False。
+    自分の worktree の名前と絶対パス (パスとして読む側で判定する) は False。norms は `_resolve` の realpath の覚え。
     """
     operand = _worktree_operand(rest)
     if operand is None:
         return False
     if _dynamic(operand):
         return True
-    if _resolve(None, operand, msys) is not None:
+    if _resolve(None, operand, msys, norms=norms) is not None:
         return False
     names = _worktree_by_name(rest, fam)
     if names:
@@ -778,7 +828,9 @@ class _Deadline:
         return Finding(False, f"コマンドの読み取りが期限 ({self.seconds:g} 秒) を超えたため、途中から後ろの git を確かめていない")
 
 
-def _analyze_tokens(tokens: list[str], cwd: str, fam: Family, deadline: _Deadline | None = None) -> list[Finding]:
+def _analyze_tokens(
+    tokens: list[str], cwd: str, fam: Family, deadline: _Deadline | None = None, norms: dict[str, str] | None = None
+) -> list[Finding]:
     """zsh の読みと bash の読みの両方で判定し、どちらかで見つかったものを返す。
 
     Bash tool の shell は環境で違い、`command cd` / `chdir` / `cd -q` などは shell で動きが割れる。shell ごとに通して読むので、
@@ -788,24 +840,27 @@ def _analyze_tokens(tokens: list[str], cwd: str, fam: Family, deadline: _Deadlin
     改行のあとの git が見る変数を取り違えることがある (`export GIT_DIR=<worktree>/.git; command export GIT_DIR=<main>/.git &&` と
     改行のあとの `true & git -C <main> reset --hard`)。
     Windows では、パスの綴りの読み (`_drive_readings`) ごとにも通す。期限を過ぎた後の読みは、最初の字句で返る。
+    norms は realpath の覚え (`_resolve`)。どの読みにも同じものを渡す。
     """
     findings: list[Finding] = []
     seen: set[str] = set()
     for msys in _drive_readings():
         for shell, fold in (("zsh", True), ("bash", True), ("bash", False)):
-            for f in _Analyzer(cwd, fam, shell, fold, msys, deadline).run(tokens):
+            for f in _Analyzer(cwd, fam, shell, fold, msys, deadline, norms).run(tokens):
                 if f.message not in seen:
                     seen.add(f.message)
                     findings.append(f)
     return findings
 
 
-def _read(normalized: str, cwd: str, fam: Family, deadline: _Deadline | None = None) -> list[Finding]:
+def _read(
+    normalized: str, cwd: str, fam: Family, deadline: _Deadline | None = None, norms: dict[str, str] | None = None
+) -> list[Finding]:
     # comment は正規化で捨てた。残った `#` は単語の一部
     tokens = _tokens(normalized, commenters="")
     if deadline is not None:
         deadline.start()
-    return [] if tokens is None else _analyze_tokens(tokens, cwd, fam, deadline)
+    return [] if tokens is None else _analyze_tokens(tokens, cwd, fam, deadline, norms)
 
 
 def analyze(command: str, cwd: str, fam: Family) -> list[Finding]:
@@ -816,14 +871,16 @@ def analyze_readings(command: str, readings: tuple[tuple[str, Family], ...]) -> 
     """作業ディレクトリの読み (`family.detect_readings` の (cwd, Family)) ごとに判定し、どれかで見つかったものを返す (読みの和)。
 
     期限は全体で 1 つ (読みが 2 つになっても、hook の時間の上限までの余裕を減らさない)。読みが 1 つなら `analyze` と同じ。
+    realpath の覚え (`_resolve` の norms) も全体で 1 つ。
     """
     if "git" not in command:
         return []
     deadline = _Deadline(_READ_SECONDS)
+    norms: dict[str, str] = _Norms()
     findings: list[Finding] = []
     seen: set[str] = set()
     for cwd, fam in readings:
-        for f in _analyze(command, cwd, fam, deadline):
+        for f in _analyze(command, cwd, fam, deadline, norms):
             if f.message not in seen:
                 seen.add(f.message)
                 findings.append(f)
@@ -832,9 +889,9 @@ def analyze_readings(command: str, readings: tuple[tuple[str, Family], ...]) -> 
     return findings
 
 
-def _analyze(command: str, cwd: str, fam: Family, deadline: _Deadline) -> list[Finding]:
+def _analyze(command: str, cwd: str, fam: Family, deadline: _Deadline, norms: dict[str, str]) -> list[Finding]:
     normalizer = _Normalizer(command)
-    findings = _read(normalizer.run(), cwd, fam, deadline)
+    findings = _read(normalizer.run(), cwd, fam, deadline, norms)
     if not normalizer.unclosed:
         return findings
     # 安全網: 閉じない frame か終わらない here-document が残ったときは、正規化の読みが shell とずれて
@@ -847,13 +904,13 @@ def _analyze(command: str, cwd: str, fam: Family, deadline: _Deadline) -> list[F
     if not deadline.check():
         legacy = _tokens(_legacy_strip_heredocs(command), commenters="#")
         if legacy is not None:
-            readings.append(_analyze_tokens(legacy, cwd, fam, deadline))
+            readings.append(_analyze_tokens(legacy, cwd, fam, deadline, norms))
     ignore = frozenset(normalizer.open_heredocs)
     for _ in range(_REREAD_LIMIT):
         if not ignore or deadline.check():
             break
         again = _Normalizer(command, ignore)
-        readings.append(_read(again.run(), cwd, fam, deadline))
+        readings.append(_read(again.run(), cwd, fam, deadline, norms))
         if again.open_heredocs <= ignore:
             break
         ignore |= again.open_heredocs
@@ -977,7 +1034,14 @@ class _Analyzer:
     """
 
     def __init__(
-        self, cwd: str, fam: Family, shell: str, fold: bool = True, msys: bool = False, deadline: _Deadline | None = None
+        self,
+        cwd: str,
+        fam: Family,
+        shell: str,
+        fold: bool = True,
+        msys: bool = False,
+        deadline: _Deadline | None = None,
+        norms: dict[str, str] | None = None,
     ):
         self.shell = shell  # この読みの shell ("zsh" / "bash")
         self.fold = fold  # `&&` / `||` の直後の区切りで list を切らない読みか
@@ -988,7 +1052,8 @@ class _Analyzer:
         self._seen: set[str] = set()
         self.stacks = _Stacks()  # 状態のスタックの番号を引く表
         self._absolute: dict[str, str] = {}  # 移動の行き先の絶対パスを正規化した値 (`_resolve` の memo)
-        self.alts: set[_Alt] = {(norm(cwd), _EMPTY, "ok")}
+        self._norms: dict[str, str] = _Norms() if norms is None else norms  # realpath の覚え (`_resolve` の norms。ほかの読みと共有)
+        self.alts: set[_Alt] = {(_norm_once(cwd, self._norms), _EMPTY, "ok")}
         self.env: dict[str, str] = {}  # export 済みの GIT_DIR / GIT_WORK_TREE
         self.shvars: dict[str, str] = {}  # 代入したが export していないもの
         self.op: str | None = None  # 次のコマンドの前にある && / ||
@@ -1239,7 +1304,7 @@ class _Analyzer:
                         env[k] = v
             heres = {h for h, _, _ in alts}
             if chdir is not None:
-                heres = {_resolve(h, chdir, self.msys) for h in heres}
+                heres = {_resolve(h, chdir, self.msys, norms=self._norms) for h in heres}
             self._check_git(seg[1:], heres, env)
         return self._both(alts)
 
@@ -1260,7 +1325,7 @@ class _Analyzer:
                 return failed
             words = _before_redirect(args[2:] if args[1:2] == ["--"] else args[1:])
             if words and not words[0].startswith(("+", "-")):
-                return {(here, push(stack, _resolve(here, words[0], self.msys, self._absolute)), "ok")}
+                return {(here, push(stack, _resolve(here, words[0], self.msys, self._absolute, self._norms)), "ok")}
             return {(here, push(stack, None), "ok")}  # 語なしと `+1` はスタックを回す。次の popd の行き先は分からない
         shells, words = _chdir_form(cmd, args, self.braces > 0) if form is None else form
         if self.shell not in shells:
@@ -1269,7 +1334,7 @@ class _Analyzer:
             # 語の無い pushd はスタックの先頭と入れ替える (`pushd >x` / `pushd -q` も同じ)
             return {(None, push(stack, here), "ok")}
         dest = _cd_target(words)
-        new = _resolve(here, dest, self.msys, self._absolute) if dest is not None else None
+        new = _resolve(here, dest, self.msys, self._absolute, self._norms) if dest is not None else None
         return {(new, push(stack, here) if cmd == "pushd" else stack, "ok")}
 
     def _popd(self, args: list[str], here: str | None, stack: int) -> set[_Alt]:
@@ -1297,7 +1362,7 @@ class _Analyzer:
         for here in sorted(heres, key=lambda h: h or ""):
             if self.deadline is not None and self.deadline.check():
                 break  # 語の多い 1 つの git (`git -C a -C a ...` を数万個) は、状態ごとの読みが重い
-            targets, unresolved, rest, in_repo = _git_targets(args, here, fam, env, self.msys)
+            targets, unresolved, rest, in_repo = _git_targets(args, here, fam, env, self.msys, self._norms)
             if not rest:
                 return
             sub = rest[0]
@@ -1305,7 +1370,7 @@ class _Analyzer:
                 # 相対パスの基点は作業ツリーの指定や git dir で変わる。どの基点でも別の worktree なら止める
                 hits = []
                 for base in targets or [None]:
-                    for path in _worktree_targets(rest, base, self.msys):
+                    for path in _worktree_targets(rest, base, self.msys, self._norms):
                         o = owner(path, fam)
                         if o is not None and path == o:
                             hits.append(o)
@@ -1315,7 +1380,7 @@ class _Analyzer:
                 others = [o for o in hits if o != fam.home]
                 operand = _worktree_operand(rest)
                 if not others:  # 止めるときは注意を足さない
-                    if unresolved and _worktree_may_be_other(rest, fam, self.msys):
+                    if unresolved and _worktree_may_be_other(rest, fam, self.msys, self._norms):
                         # git が読む repo か今の場所 (相対パスの基点の 1 つ) が決まらない (行き先の決まらない cd の後ろや、状態が上限を
                         # 超えた後) が、対象は別の worktree でありうる。ほかの書き込み (`cd "$X"; git reset --hard`) と同じく、止めずに注意を出す
                         note = note or Finding(False, f"`git worktree {rest[1]}` の対象 ({unresolved}) を静的に解決できない")

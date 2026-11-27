@@ -1,8 +1,8 @@
 """読み取りの時間: 読み取りの期限 (`command._READ_SECONDS`)。
 
 相対パスの `cd a;` を続けると、行き先のパスが深くなる。相対パスの解決 (`command._resolve`) は 0.9.3 と同じく移動のたびに
-realpath でパスの全要素を辿り直すので、深さの 2 乗の時間になる (`cd a;` 2,000 回で約 6 秒、`x || cd d<i>;` 6 回の後に
-`cd a;` 400 回で約 17 秒)。hook が時間切れになるとコマンドはそのまま走るので、こうした遅い形は読み取りの期限で閉じる
+realpath でパスの全要素を辿り直すので、深さの 2 乗の時間になる (`cd a;` 2,000 回で約 4 秒、`x || cd d<i>;` 6 回の後に
+`cd a;` 400 回で約 15 秒。macOS の Python 3.14)。hook が時間切れになるとコマンドはそのまま走るので、こうした遅い形は読み取りの期限で閉じる
 (期限を過ぎたら、それまでの判定に注意を足して返す)。pushd のスタックを深く重ねる形は、0.10.4 からスタックの深さに比例しない
 時間で 1 回の移動を読む (`DeepStackTest`)。
 """
@@ -137,16 +137,16 @@ class CachedLoopDecisionTest(test_guard.GuardBase):
 class DeepRelativePathTest(test_state_limit.BoundedBase):
     """相対パスを深くし続ける形は、深さの 2 乗の時間で読む (0.9.3 と同じ)。期限を過ぎたら、注意を 1 つ足して返す。
 
-    どの形も、期限が無ければ読むのに 3 秒から 20 秒ほどかかる (macOS の Python 3.14)。3 秒の期限のままだと形ごとに 3 秒かかるので、
-    期限を短くして (その 10 分の 1 ほど) 流す。
+    どの形も、期限が無ければ読むのに 0.5 秒から 15 秒ほどかかる (macOS の Python 3.14。0.10.5 で realpath の覚えを読みの間で
+    共有してから)。3 秒の期限のままだと形ごとに 3 秒かかるので、期限を短くして (最も短い形の 5 分の 1 ほど) 流す。
     """
 
-    SECONDS = 0.3
+    SECONDS = 0.1
+    SHORTEST = "or_cd 6 + cd a 100 + heredoc 9"  # 期限が無いときに最も早く読み終える形
 
-    def test_deep_relative_moves_end_with_a_note(self):
-        note = command._Deadline(self.SECONDS).finding()
+    def _shapes(self) -> tuple[tuple[str, str], ...]:
         k = test_state_limit._limit_exponent()
-        for name, cmd in (
+        return (
             ("cd a 2000", cd_a(2000) + GIT),
             ("cd a; (区切りの空白なし) 2000", "cd a;" * 2000 + GIT),
             ('cd "a b" 2000', 'cd "a b"; ' * 2000 + GIT),
@@ -157,7 +157,11 @@ class DeepRelativePathTest(test_state_limit.BoundedBase):
             ("or_cd k-1 + cd a 200 + heredoc 9", or_cd(k - 1) + cd_a(200) + GIT + heredocs(9)),
             # 0.9.3 が読み終えて止めていた形 (後ろの main への git)。期限より後ろなので注意になる (CHANGELOG の「判定が変わる形」)
             ("cd a 2000 + main", cd_a(2000) + f'cd "{MAIN}"; {GIT}'),
-        ):
+        )
+
+    def test_deep_relative_moves_end_with_a_note(self):
+        note = command._Deadline(self.SECONDS).finding()
+        for name, cmd in self._shapes():
             with self.subTest(name=name):
                 with mock.patch.object(command, "_READ_SECONDS", self.SECONDS):
                     t = time.perf_counter()
@@ -167,6 +171,18 @@ class DeepRelativePathTest(test_state_limit.BoundedBase):
                 # 期限を過ぎた後に読むのは、1 つの状態の 1 回の読みまで
                 self.assertLess(elapsed, self.SECONDS + 1.0)
 
+    def test_shortest_shape_takes_three_times_the_deadline(self):
+        # 上のテストは、どの形も期限に届くことを前提にする。読みが速くなると余裕が黙って縮み、速い機械で期限の手前に読み終えて
+        # 落ちる (0.10.5 で realpath の覚えを読みの間で共有して、最も短い形が 14 秒ほどから 0.5 秒ほどになった)。
+        # 最も短い形を期限なしで 1 回読み、期限の 3 倍以上かかることを確かめる
+        shapes = dict(self._shapes())
+        self.assertIn(self.SHORTEST, shapes)
+        with no_deadline():
+            t = time.perf_counter()
+            self.findings(shapes[self.SHORTEST])
+            elapsed = time.perf_counter() - t
+        self.assertGreaterEqual(elapsed, 3 * self.SECONDS, elapsed)
+
     def test_findings_before_the_deadline_are_kept(self):
         # 期限の手前で見つけた停止は残す
         with mock.patch.object(command, "_READ_SECONDS", self.SECONDS):
@@ -175,8 +191,9 @@ class DeepRelativePathTest(test_state_limit.BoundedBase):
         self.assertIn("期限", out[1].message)
 
     def test_short_moves_are_read_to_the_end(self):
-        # 期限 (3 秒) の手前で読み終える深さは、0.9.3 と同じく後ろの git まで読む (注意は出さない)
-        out = self.findings(f'{cd_a(200)}cd "{MAIN}"; {GIT}')
+        # 期限 (3 秒) の手前で読み終える深さは、0.9.3 と同じく後ろの git まで読む (注意は出さない)。深さの 2 乗の時間なので、
+        # Windows の realpath (存在しない要素ごとに API を呼び直す) でも期限に十分届かない深さにする (200 段は Windows の CI で届いた)
+        out = self.findings(f'{cd_a(100)}cd "{MAIN}"; {GIT}')
         self.assertEqual([(f.blocked, f.root) for f in out], [(True, family.norm(MAIN))])
 
 
@@ -189,14 +206,16 @@ class DeepStackTest(test_state_limit.BoundedBase):
     """
 
     def _shapes(self) -> tuple[tuple[str, str], ...]:
-        # 読みの数は Windows で倍になる (`_drive_readings`) ので、スタックの深さを読みの数で割り、読む量をそろえる
+        # 読みの数は Windows で倍になる (`_drive_readings`) ので、スタックの深さを読みの数で割り、読む量をそろえる。
+        # 深さは、手元 (macOS の Python 3.14) で期限の 5% ほどを使う大きさにする。Windows の CI はこの形で手元の 6 倍から 9 倍ほど
+        # 遅く、3,500 段 / 600 段 (手元で期限の 16% / 24%) では期限に届いた。深さの 2 乗の時間に戻る退行は、伸び方のテスト (下) が見る
         readings = len(command._drive_readings())
         k = test_state_limit._limit_exponent()
         return (
             # 最後の移動は bash だけが移動する `command cd <main>` (zsh の読みが前半を読み終えた後、bash の読みで止める)
-            ("or_cd 6 + pushd 3500 + command cd", or_cd(k) + pushd_abs(3500 // readings) + f'command cd "{MAIN}"; {GIT}'),
+            ("or_cd 6 + pushd 1000 + command cd", or_cd(k) + pushd_abs(1000 // readings) + f'command cd "{MAIN}"; {GIT}'),
             # 終わらない here-document 7 個の後ろの git は、安全網の 7 回目の読み直しだけが読む (重い前半を 9 回読む)
-            ("or_cd 6 + pushd 600 + heredoc 7", or_cd(k) + pushd_abs(600 // readings) + heredocs(7) + f'\ngit -C "{MAIN}" {RESET}'),
+            ("or_cd 6 + pushd 120 + heredoc 7", or_cd(k) + pushd_abs(120 // readings) + heredocs(7) + f'\ngit -C "{MAIN}" {RESET}'),
         )
 
     def test_deep_stacks_stop_before_the_deadline(self):
@@ -232,7 +251,8 @@ class DeepStackTest(test_state_limit.BoundedBase):
 
     def test_state_independent_work_is_done_once(self):
         # 1 つの移動を状態ごとに読むところで、状態に関係しない処理を状態の数だけ繰り返さない (64 状態なら 64 倍の時間になり、
-        # 上の形が期限の手前に収まらない)。絶対パスの行き先の正規化は 1 つの読みの中で語ごとに 1 回、option と語の読みはコマンドごとに 1 回
+        # 上の形が期限の手前に収まらない)。絶対パスの行き先の正規化は 1 回の読み取りの中で綴りごとに 1 回 (読みの間で覚えを共有する。
+        # `RealpathOnceTest`)、option と語の読みは 1 つの読みの中でコマンドごとに 1 回
         k = test_state_limit._limit_exponent()
         n = 50
         dirs = [os.path.join(test_state_limit._BASE, f"p{i}") for i in range(n)]  # ドライブ付きの絶対パス (repo の外)
@@ -254,7 +274,7 @@ class DeepStackTest(test_state_limit.BoundedBase):
         self.assertEqual((self.peak, self.collapses), (command._STATE_LIMIT, 0))
         readings = 3 * len(command._drive_readings())  # zsh の読みと bash の 2 つの読み × パスの綴りの読み
         targets = set(dirs)
-        self.assertEqual(sum(p in targets for p in norms), n * readings)
+        self.assertEqual(sum(p in targets for p in norms), n)
         # `cd d<i>` (k 個) と `pushd <dir>` (n 個) のコマンドごとに 1 回
         self.assertEqual(len(forms), (k + n) * readings)
 
@@ -267,6 +287,151 @@ class DeepStackTest(test_state_limit.BoundedBase):
         # main より下まで戻ると、スタックが空に見える popd は「失敗してその場に残る」と「行き先の分からない場所」の両方
         out = self.findings(cmd + "popd; " * (n + 2) + GIT)
         self.assertEqual([(f.blocked, f.root) for f in out if f.blocked], [(True, family.norm(MAIN))])
+
+
+class RealpathOnceTest(test_state_limit.BoundedBase):
+    """1 回の読み取り (`analyze_readings`) の中で、同じ綴りの realpath は 1 回だけ (`command._resolve` の norms)。
+
+    読み (zsh と bash の 2 つ・here-document の読み直し・Windows のパスの綴りの読み) はどれも同じ場所から同じ移動を読むので、
+    覚えを読みごとに持つと、同じ realpath を読みの数だけ繰り返す。Windows の realpath は存在しない要素ごとに API を呼び直すので重く、
+    相対パスを 200 段深くする形と深いスタックの形が、Windows の CI でだけ期限 (3 秒) に届いた。
+    ここでは Windows の読みの数 (`_drive_readings` が 2 つ) を手元で組み立てて確かめる。
+    """
+
+    def _count(self, cmd: str, drive_readings: tuple[bool, ...]) -> tuple[list[command.Finding], dict[str, int], int]:
+        calls: dict[str, int] = {}
+        analyzers = []
+        real_norm, real_init = command.norm, command._Analyzer.__init__
+
+        def counted_norm(path):
+            calls[path] = calls.get(path, 0) + 1
+            return real_norm(path)
+
+        def counted_init(analyzer, *args, **kwargs):
+            analyzers.append(analyzer)
+            return real_init(analyzer, *args, **kwargs)
+
+        with mock.patch.object(command, "norm", counted_norm), mock.patch.object(
+            command._Analyzer, "__init__", counted_init
+        ), mock.patch.object(command, "_drive_readings", lambda: drive_readings):
+            out = self.findings(cmd)
+        return out, calls, len(analyzers)
+
+    def test_each_spelling_is_resolved_once(self):
+        k = 3
+        dirs = [os.path.join(test_state_limit._BASE, f"p{i}") for i in range(20)]
+        outside = os.path.join(test_state_limit._BASE, "zz")  # どの worktree でもない絶対パス
+        # Git Bash の読みで綴りが変わらないパスだけを使う (手元で Windows の読みの数を組み立てても、読みの中身は同じ)
+        self.assertEqual([family._msys_drive(p) for p in (*dirs, outside, MAIN, B)], [*dirs, outside, MAIN, B])
+        for name, cmd, want in (
+            ("cd a 30 + main", f'{cd_a(30)}cd "{MAIN}"; {GIT}', True),
+            ("or_cd 3 + cd a 10", or_cd(k) + cd_a(10) + GIT, False),
+            ("pushd 20", "".join(f'pushd "{d}"; ' for d in dirs) + f'cd "{MAIN}"; {GIT}', True),
+            ("git -C の相対パス", f'cd "{MAIN}"; git -C a -C a -C .. {RESET}', True),
+            ("--git-dir と --work-tree", f'git --git-dir="{MAIN}/.git" --work-tree=a {RESET}', True),
+            ("env -C", f"cd a; env -C ../.. {GIT}", True),
+            ("pushd -n (bash の読みだけ)", f'pushd -n "{MAIN}"; popd; {GIT}', True),
+            ("git worktree remove", f'git worktree remove "{B}"', True),
+            # 今の場所が決まらない後ろの対象は、別の worktree でありうるかを見るところ (`_worktree_may_be_other`) でも正規化する
+            ("git worktree remove (今の場所が決まらない)", f'cd "$X"; git worktree remove "{outside}"', False),
+            ("heredoc の読み直し", f'{cd_a(10)}git -C "{B}" {RESET}' + heredocs(3), True),
+        ):
+            for drive_readings in ((False,), (False, True)):
+                with self.subTest(name=name, drive_readings=drive_readings):
+                    out, calls, analyzers = self._count(cmd, drive_readings)
+                    self.assertEqual(any(f.blocked for f in out), want, out)
+                    # 対照: 読みが複数あり (zsh・bash 2 つ × 綴りの読み、here-document は読み直しも)、realpath を通っている
+                    self.assertGreaterEqual(analyzers, 3 * len(drive_readings))
+                    self.assertTrue(calls)
+                    self.assertEqual({p: c for p, c in calls.items() if c > 1}, {})
+
+    def test_readings_of_the_cwd_share_the_memo(self):
+        # 作業ディレクトリの読みが 2 つ (Windows の `/c/x` の cwd) でも、同じ綴りの realpath は 1 回
+        calls: dict[str, int] = {}
+        real_norm = command.norm
+
+        def counted_norm(path):
+            calls[path] = calls.get(path, 0) + 1
+            return real_norm(path)
+
+        cwd = family.norm(test_state_limit.A)
+        with mock.patch.object(command, "norm", counted_norm):
+            try:
+                out = command.analyze_readings(f'{cd_a(10)}cd "{MAIN}"; {GIT}', ((cwd, self.fam), (cwd, self.fam)))
+            except Exception as e:  # noqa: BLE001 - 読みの例外も読みの誤りとして数える (ERROR ではなく FAIL)
+                self.fail(f"読みが例外を投げた: {e!r}")
+        self.assertEqual([(f.blocked, f.root) for f in out], [(True, family.norm(MAIN))])
+        self.assertTrue(calls)
+        self.assertEqual({p: c for p, c in calls.items() if c > 1}, {})
+
+
+class RealpathMemoBoundTest(test_state_limit.BoundedBase):
+    """realpath の覚えの大きさは、相対パスを深くする形でも上限 (`command._NORMS_CHARS`) で止まる。
+
+    覚えは 1 回の読み取りの間、途中の行き先 (相対パスは基点と繋いだ綴り) を全部持つので、上限が無いと深さの 2 乗 × 状態の数の
+    大きさになる。上限を超えた分は覚えずに realpath を呼ぶだけで、判定の中身は変えない。
+    """
+
+    def _stored(self, cmd: str) -> tuple[list[command.Finding], int, int]:
+        """(findings, 覚えの数, 覚えに入れた綴りと値の文字数の合計)。期限なしで読み切る。"""
+        memos = []
+        real_init = command._Analyzer.__init__
+
+        def recording_init(analyzer, *args, **kwargs):
+            real_init(analyzer, *args, **kwargs)
+            memos.append(analyzer._norms)
+
+        with mock.patch.object(command._Analyzer, "__init__", recording_init), no_deadline():
+            out = self.findings(cmd)
+        unique = list({id(m): m for m in memos}.values())
+        return out, len(unique), sum(len(k) + len(v) for m in unique for k, v in m.items())
+
+    def test_deep_relative_moves_do_not_fill_memory(self):
+        # `x || cd d<i>;` 6 回の後に `cd <40 字>;` 100 回 (4 KB)。途中の行き先を全部覚えると 2,700 万字ほどになる
+        out, memos, stored = self._stored(or_cd(6) + f"cd {'x' * 40}; " * 100 + f'cd "{MAIN}"; {GIT}')
+        self.assertEqual([(f.blocked, f.root) for f in out], [(True, family.norm(MAIN))])
+        self.assertEqual(memos, 1)
+        self.assertLessEqual(stored, command._NORMS_CHARS)
+
+    def test_shapes_that_failed_on_windows_stay_under_the_bound(self):
+        # Windows の CI で期限に届いた形 (縮める前の深さ) は、上限の内側で覚えを使い切る (手元で上限の 3% ほど)。
+        # 一時ディレクトリの綴りが長い OS でも収まるように、上限の 8 分の 1 に収まることを見る
+        k = test_state_limit._limit_exponent()
+        readings = len(command._drive_readings())
+        for name, cmd in (
+            ("cd a 200 + main", f'{cd_a(200)}cd "{MAIN}"; {GIT}'),
+            ("or_cd 6 + pushd 3500 + command cd", or_cd(k) + pushd_abs(3500 // readings) + f'command cd "{MAIN}"; {GIT}'),
+            ("or_cd 6 + pushd 600 + heredoc 7", or_cd(k) + pushd_abs(600 // readings) + heredocs(7) + f'\ngit -C "{MAIN}" {RESET}'),
+        ):
+            with self.subTest(name=name):
+                out, memos, stored = self._stored(cmd)
+                self.assertEqual([(f.blocked, f.root) for f in out], [(True, family.norm(MAIN))])
+                self.assertEqual(memos, 1)
+                self.assertGreater(stored, 0)
+                self.assertLessEqual(stored, command._NORMS_CHARS // 8)
+
+    def test_bound_does_not_change_findings(self):
+        # 上限を小さくしても (0 は何も覚えない)、判定は上限の無いときと同じ。覚えた大きさは上限で止まる
+        outside = os.path.join(test_state_limit._BASE, "zz")
+        for name, cmd in (
+            ("cd a 30 + main", f'{cd_a(30)}cd "{MAIN}"; {GIT}'),
+            ("or_cd 3 + cd a 10", or_cd(3) + cd_a(10) + GIT),
+            ("pushd + cd main", "".join(f'pushd "{test_state_limit._BASE}/p{i}"; ' for i in range(20)) + f'cd "{MAIN}"; {GIT}'),
+            ("git -C の相対パス", f'cd "{MAIN}"; git -C a -C a -C .. {RESET}'),
+            ("--git-dir と --work-tree", f'git --git-dir="{MAIN}/.git" --work-tree=a {RESET}'),
+            ("env -C", f"cd a; env -C ../.. {GIT}"),
+            ("git worktree remove", f'cd "$X"; git worktree remove "{outside}"; git worktree remove "{B}"'),
+            ("heredoc の読み直し", f'{cd_a(10)}git -C "{B}" {RESET}' + heredocs(3)),
+        ):
+            with self.subTest(name=name):
+                with mock.patch.object(command, "_NORMS_CHARS", 1 << 40):
+                    want, _, unbounded = self._stored(cmd)
+                self.assertGreater(unbounded, 0)
+                for bound in (0, unbounded // 2):
+                    with mock.patch.object(command, "_NORMS_CHARS", bound):
+                        out, _, stored = self._stored(cmd)
+                    self.assertEqual(out, want, bound)
+                    self.assertLessEqual(stored, bound)
 
 
 class _FakeClock:
@@ -498,7 +663,8 @@ class ReadTimeHookTest(test_guard.GuardBase):
                     self.assertIn(f"期限 ({command._READ_SECONDS:g} 秒)", out["hookSpecificOutput"]["additionalContext"])
 
     def test_shape_past_the_deadline_returns_a_note(self):
-        # 期限が無ければ hook の timeout を大きく超える形 (状態の数 × 相対パスの深さの 2 乗。期限なしで 30 秒ほど)
+        # 期限が無ければ hook の timeout を大きく超える形 (状態の数 × 相対パスの深さの 2 乗。期限なしで 15 秒ほど (macOS の
+        # Python 3.14)。realpath の覚えは上限 (`command._NORMS_CHARS`) を超えた先を覚えないので、覚えの共有ではほとんど速くならない)
         timeout = self._timeout()
         k = test_state_limit._limit_exponent()
         cmd = or_cd(k) + cd_a(400) + GIT
