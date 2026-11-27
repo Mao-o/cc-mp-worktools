@@ -22,8 +22,16 @@
   deny に変わる。0.35.0 と同じ判定に保つ)
 - macOS / Linux の読み・判定・cache hit は変えていない (0.35.0 と同じ入力を流した旧新比較で、gh 1,440・gcloud 3,024・
   期待値が未登録で固定で決まる gcloud 240 の世界の判定・照合と CLI の回数・cache hit・読む場所が全件一致。FIFO の設定
-  ファイルの世界を含む)。Windows の形の世界では、変わった判定はどれも CLI が実際に読むファイル (公式の文書の場所) に
-  合わせる向き。Windows の実機では確かめていない (README の既知の制限に、確かめた範囲と確かめていない範囲を書いた)
+  ファイルの世界を含む)。Windows の形の世界では、変わった判定は、行頭の env を別の綴りで書いた形 (`AppData=... gcloud ...` /
+  `cloudsdk_config=... gcloud ...` は固定を外さず、`gh_token=...` / `cloudsdk_core_account=...` は AppData の下のローカル
+  読取で通る。README の既知の制限) を除き、どれも CLI が実際に読むファイル (公式の文書の場所) に合わせる向き。別の綴りの
+  形は、0.35.0 で未登録の deny や CLI に聞いての deny だったものが通る。Windows の実機では確かめていない (README の既知の制限に、確かめた範囲と確かめていない範囲を書いた)
+
+### 文書
+
+- README の「守る範囲と守らない範囲」に、`mise exec` / `mise x` 経由で起動した CLI には mise.toml の `[env]` が前置きの
+  代入や起動時の env より優先して届き、hook は前置きの代入 (か起動時の env) で照合するので食い違う、を足した
+  (docs/wrapper-env-audit.md の mise の行と同じ。読みは足していない)
 
 ## 0.35.0
 

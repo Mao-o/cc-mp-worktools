@@ -420,7 +420,9 @@ v0.19.0 から、その CLI に**ディレクトリ単位でアカウントを�
   決まるのに、何とも照合しない)
 - gcloud の `CLOUDSDK_ACTIVE_CONFIG_NAME` が指す構成は、gcloud の設定ディレクトリ (macOS / Linux は
   `~/.config/gcloud`、Windows は `%APPDATA%\gcloud`。v0.35.1) の下で読む。Windows では行頭の `APPDATA=...` も
-  設定ディレクトリを変えるので、その場だけ指定した値として固定とみなさない。Windows で場所を決められないとき
+  設定ディレクトリを変えるので、その場だけ指定した値として固定とみなさない (名前をこの綴りで書いたとき。
+  `AppData=...` / `cloudsdk_config=...` のような別の綴りは固定を外さない。[既知の制限](#既知の制限))。
+  Windows で場所を決められないとき
   (APPDATA が無いなど) は、構成による固定とみなさない (`CLOUDSDK_CORE_ACCOUNT` による固定はそのまま)
 - 固定は、そのコマンドが走りうる**すべての**ディレクトリで確かめる (v0.29.3)。
   `cd a && firebase deploy; cd ../b && firebase deploy` は a と b の両方で `firebase use` の記録が
@@ -1616,6 +1618,9 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 - `yarn exec` の CLI 名の語に空白やシェルの記号を含めた形 (`yarn exec 'gh pr create && aws s3 rm ...'` /
   `yarn exec gh\;aws s3 rm ...`) の中のクラウド CLI。yarn 3 以降はその語をシェルのコードとして実行し
   (yarn 3.8 / 4.9 で実測)、yarn 1 / 2 はその名前の CLI を見つけられずに止まる。候補にならず検証されない
+- `mise exec` / `mise x` 経由で起動した CLI に届く env。mise.toml の `[env]` は前置きの代入や起動時の env より優先して
+  CLI に届くが、hook は前置きの代入 (か起動時の env) で照合するので、`[env]` が同じ名前を持つと CLI が実際に使う値と
+  食い違う。`[env]` の値は読まない (docs/wrapper-env-audit.md の mise の行と同じ。読みは足していない)
 - yarn 4 が `.yarnrc.yml` の `injectEnvironmentFiles` (既定は `.env.yarn`) で読む env ファイルの env。yarn 4 は
   `yarn exec` / `yarn <CLI 名>` の CLI にそのファイルの値を渡し、前置きの代入 (`AWS_PROFILE=dev yarn exec aws ...`) より
   優先する (yarn 4.9 で実測) が、hook はそのファイルを読まず、前置きの代入と hook の env で照合する
@@ -1859,6 +1864,13 @@ CLI ごとに 1 回。deny はせず、deny したコマンドには足さない
   Windows の env の読みは、場所を決める env (`GH_CONFIG_DIR` / `XDG_CONFIG_HOME` / `APPDATA` / `CLOUDSDK_CONFIG`)
   だけに当てる。ほかの env (`GH_TOKEN` や `CLOUDSDK_CORE_ACCOUNT` など) は書かれた綴りのまま見るので、
   `gh_token=... gh ...` のような小文字の綴りの inline env は、ローカル読取を諦める条件に当たらない
+  (0.35.0 は `~/.config` の下を読み、読むファイルが無ければ CLI に聞いて deny にしていた形が、AppData の下の
+  ローカル読取で通る。`cloudsdk_core_account=...` も同じ)。ディレクトリごとの固定を外す条件 (行頭の inline env) も
+  書かれた綴りのまま見るので、`AppData=... gcloud ...` / `cloudsdk_config=... gcloud ...` は固定を外さず、hook の env の
+  構成で固定とみなして通す (実行される gcloud は行頭の場所の構成を読む。0.35.0 は `~/.config` の下を読んで未登録の
+  deny にしていた)。gcloud は Windows で APPDATA が無いとき `%SystemDrive%\gcloud` を使い、`XDG_CONFIG_HOME` はどの
+  OS でも見ない (どちらも gcloud の配布物のソースの記述で、実機では確かめていない。hook の動きは変えず、APPDATA が
+  無いときは CLI に聞く)
 - Firebase の alias object 形式は `.firebaserc` の `projects` マップとの
   対応を前提にしており、ユーザー任意の key 名を受け付けるだけで "alias 名"
   自体のバリデーションはしない

@@ -618,6 +618,8 @@ class TestReadmeWindowsScope(unittest.TestCase):
             "確かめた範囲: macOS / Linux の上で `os.name` と env を差し替えたテスト",
             "確かめていない範囲: Windows の実機での動作",
             "AppData も無いときの行き先は組まず、CLI に聞く",
+            "`AppData=... gcloud ...` / `cloudsdk_config=... gcloud ...` は固定を外さず",
+            "`%SystemDrive%\\gcloud`",
         ])
 
 
