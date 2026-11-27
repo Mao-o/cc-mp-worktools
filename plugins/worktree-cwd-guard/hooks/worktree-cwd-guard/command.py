@@ -283,13 +283,30 @@ def _expand_home(path: str) -> str:
     return os.path.expanduser(path)
 
 
+# realpath の覚え (`_Norms`) に入れる綴りと値の文字数の合計の上限。途中の行き先を全部覚えると、相対パスを深くする形で深さの 2 乗の
+# 大きさになる (`x || cd d<i>;` 6 回の後に `cd <40 字>;` 300 回の 13 KB のコマンドで、期限までに 250 MB ほど)。
+# 超えた分は覚えずに realpath を呼ぶ (値は同じで、遅くなるだけ。期限が閉じる)
+_NORMS_CHARS = 1 << 22
+
+
+class _Norms(dict):
+    """realpath の覚え。綴りと値の文字数の合計 (chars) が `_NORMS_CHARS` を超える分は覚えない (値は同じで、遅くなるだけ)。"""
+
+    chars = 0
+
+
 def _norm_once(path: str, norms: dict[str, str] | None) -> str:
     """norm(path)。norms があれば、正規化する前のパスの綴りを key に値を覚え、同じ綴りの realpath を繰り返さない。"""
     if norms is None:
         return norm(path)
     value = norms.get(path)
     if value is None:
-        value = norms[path] = norm(path)
+        value = norm(path)
+        chars = getattr(norms, "chars", 0) + len(path) + len(value)
+        if chars <= _NORMS_CHARS:
+            norms[path] = value
+            if isinstance(norms, _Norms):
+                norms.chars = chars
     return value
 
 
@@ -311,6 +328,7 @@ def _resolve(
     呼び出しの全部の読み (shell・here-document の読み直し・Git Bash の読み・作業ディレクトリの読み) で 1 つを使う。読みはどれも
     同じ場所から同じ移動を読むので、覚えないと同じ realpath を読みの数だけ繰り返す (Windows は存在しない要素ごとに API を
     2 回呼ぶので重く、相対パスを深くする形が期限に届いていた)。値は覚えないときと同じ (呼び出しの間にファイルシステムは変わらない)。
+    覚える大きさには上限 (`_NORMS_CHARS`) がある。
     """
     if memo is not None and path in memo:
         return memo[path]
@@ -464,20 +482,22 @@ def _worktree_by_name(rest: list[str], fam: Family) -> set[str]:
     return found
 
 
-def _worktree_may_be_other(rest: list[str], fam: Family, msys: bool = False) -> bool:
+def _worktree_may_be_other(
+    rest: list[str], fam: Family, msys: bool = False, norms: dict[str, str] | None = None
+) -> bool:
     """git が読む repo か今の場所が決まらないときに、`git worktree remove|move <worktree>` が別の worktree を指しうるか。
 
     名前 (パスの末尾) が別の worktree に一致するときと、名前で決まらない相対パスのときに True。相対パスは基点が決まらないので、
     綴りに関係なくどの worktree にも届きうる (`../wt-b` や、symlink を通る `wt/<name>`・`lnk`。git は名前で決まらないとパスを
     realpath で比べる)。変数の語 (`"$Z"` / `"../$Z"`) も、どの worktree の名前にもパスにもなりうるので True。
-    自分の worktree の名前と絶対パス (パスとして読む側で判定する) は False。
+    自分の worktree の名前と絶対パス (パスとして読む側で判定する) は False。norms は `_resolve` の realpath の覚え。
     """
     operand = _worktree_operand(rest)
     if operand is None:
         return False
     if _dynamic(operand):
         return True
-    if _resolve(None, operand, msys) is not None:
+    if _resolve(None, operand, msys, norms=norms) is not None:
         return False
     names = _worktree_by_name(rest, fam)
     if names:
@@ -856,7 +876,7 @@ def analyze_readings(command: str, readings: tuple[tuple[str, Family], ...]) -> 
     if "git" not in command:
         return []
     deadline = _Deadline(_READ_SECONDS)
-    norms: dict[str, str] = {}
+    norms: dict[str, str] = _Norms()
     findings: list[Finding] = []
     seen: set[str] = set()
     for cwd, fam in readings:
@@ -1032,7 +1052,7 @@ class _Analyzer:
         self._seen: set[str] = set()
         self.stacks = _Stacks()  # 状態のスタックの番号を引く表
         self._absolute: dict[str, str] = {}  # 移動の行き先の絶対パスを正規化した値 (`_resolve` の memo)
-        self._norms: dict[str, str] = {} if norms is None else norms  # realpath の覚え (`_resolve` の norms。ほかの読みと共有)
+        self._norms: dict[str, str] = _Norms() if norms is None else norms  # realpath の覚え (`_resolve` の norms。ほかの読みと共有)
         self.alts: set[_Alt] = {(_norm_once(cwd, self._norms), _EMPTY, "ok")}
         self.env: dict[str, str] = {}  # export 済みの GIT_DIR / GIT_WORK_TREE
         self.shvars: dict[str, str] = {}  # 代入したが export していないもの
@@ -1360,7 +1380,7 @@ class _Analyzer:
                 others = [o for o in hits if o != fam.home]
                 operand = _worktree_operand(rest)
                 if not others:  # 止めるときは注意を足さない
-                    if unresolved and _worktree_may_be_other(rest, fam, self.msys):
+                    if unresolved and _worktree_may_be_other(rest, fam, self.msys, self._norms):
                         # git が読む repo か今の場所 (相対パスの基点の 1 つ) が決まらない (行き先の決まらない cd の後ろや、状態が上限を
                         # 超えた後) が、対象は別の worktree でありうる。ほかの書き込み (`cd "$X"; git reset --hard`) と同じく、止めずに注意を出す
                         note = note or Finding(False, f"`git worktree {rest[1]}` の対象 ({unresolved}) を静的に解決できない")
