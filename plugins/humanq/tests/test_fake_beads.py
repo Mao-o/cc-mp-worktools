@@ -74,8 +74,7 @@ class FakeBrCase(unittest.TestCase):
             self.assertIsInstance(out, list)
             self.assertEqual(len(out), len(args) - 1)
             for item in out:
-                self.assertIsInstance(item, dict)
-                self.assertIn("comments", item)
+                self.assertIsInstance(item, dict)       # comments の key はコメントがあるときだけ (BrShow が押さえる)
         if "comments" in args and "add" in args:
             self.assertIsInstance(out, dict)
             for k in ("id", "author", "text"):
@@ -295,11 +294,58 @@ class BrShow(FakeBrCase):
         self.assertEqual(len(out), 1)
         item = out[0]
         self.assertIn("agent_context", item)
-        self.assertIn("comments", item)
         self.assertIsInstance(item["agent_context"], str)
         self.assertEqual(self.load(item["agent_context"]), {"options": ["x", "y"]})
-        self.assertEqual(item["comments"], [])
         self.assertNotIn("metadata", item)
+
+    def test_comments_key_is_absent_until_there_is_a_comment(self):
+        """br 0.7.6 の実測: コメントの無いチケットの show は comments の key を出さない ([] ではない)。"""
+        a = self.create("a")
+        b = self.create("b")
+        self.ok("comments", "add", b, "c1")
+        shown = {x["id"]: x for x in self.jok("show", a, b)}
+        self.assertEqual(sorted(shown), sorted([a, b]))
+        self.assertNotIn("comments", shown[a], "コメントが 0 件なのに comments の key がある")
+        self.assertEqual([c["text"] for c in shown[b].get("comments", [])], ["c1"])
+        self.assertNotIn("comments", self.jok("show", a)[0], "1 件だけ打っても同じ")
+
+    def test_without_ids_it_shows_the_last_touched_ticket(self):
+        """本物は id を書かないと最後に触ったチケットを出す (exit 0)。create・update・close・label・comments add が触れ、
+        show・list・comments の読み・delete は触れない。"""
+        a = self.create("a")
+        b = self.create("b")
+        c = self.create("c")
+
+        def last() -> list[str]:
+            out = self.load(self.ok("show", "--json").stdout)      # jok は id の個数と戻りの個数を比べるので使わない
+            self.assertIsInstance(out, list)
+            for x in out:
+                self.assertIsInstance(x, dict)
+            return [x.get("id") for x in out]
+        self.assertEqual(last(), [c], "create が触れる")
+        self.ok("update", a, "--title", "a2")
+        self.assertEqual(last(), [a], "update が触れる")
+        self.ok("label", "add", b, "x")
+        self.assertEqual(last(), [b], "label add が触れる")
+        self.ok("comments", "add", a, "t")
+        self.assertEqual(last(), [a], "comments add が触れる")
+        self.ok("close", c)
+        self.assertEqual(last(), [c], "close が触れる")
+        self.ok("label", "remove", b, "nolabel")
+        self.assertEqual(last(), [b], "label remove (not_found) も触れる")
+        self.ok("show", c, "--json")
+        self.ok("list", "--json")
+        self.ok("comments", a, "--json")
+        self.ok("delete", c)
+        self.assertEqual(last(), [b], "show・list・comments の読み・delete は触れない")
+
+    def test_without_ids_and_without_a_last_touched_ticket_is_a_validation_error(self):
+        p = self.run_br("show", "--json")
+        self.assertEqual(p.returncode, 4, p.stderr)
+        out = self.load(p.stdout)
+        self.assertEqual(out.get("error", {}).get("code"), "VALIDATION_FAILED")
+        self.assertEqual(out["error"].get("message"),
+                         "Validation failed: ids: no issue IDs provided and no last-touched issue")      # 本物の文 (0.7.6)
 
     def test_many_ids_in_one_call(self):
         a = self.create("a")
@@ -381,12 +427,123 @@ class BrComments(FakeBrCase):
         self.assertIn("error", out)
         self.assertEqual(out["error"]["code"], "ISSUE_NOT_FOUND")
 
+    def test_file_wins_over_extra_positionals_and_the_id_can_come_after_it(self):
+        """br 0.7.6 の実測: -f があると id のほかの位置引数 (本文) は無視され、本文はファイルのもの。id の位置は問わない。"""
+        body = Path(self.tmp, "body.txt")
+        body.write_text("from-file\n", encoding="utf-8")
+        forms = {"id 本文 -f": ["comments", "add", self.a, "x", "-f", str(body)],
+                 "id -f 本文": ["comments", "add", self.a, "-f", str(body), "zzz"],
+                 "id 本文 本文 -f": ["comments", "add", self.a, "x", "y", "-f", str(body)],
+                 "-f id": ["comments", "add", "-f", str(body), self.a]}
+        for name, form in forms.items():
+            with self.subTest(form=name):
+                added = self.jok(*form)
+                self.assertEqual(added.get("text"), "from-file\n")
+        texts = sorted(c["text"] for c in self.jok("comments", self.a))
+        self.assertEqual(texts, ["from-file\n"] * len(forms), "どの形も -f の本文で書き、本文の位置引数は使わない")
+
+    def test_file_without_an_id_is_a_usage_error(self):
+        body = Path(self.tmp, "body.txt")
+        body.write_text("x\n", encoding="utf-8")
+        p = self.run_br("comments", "add", "-f", str(body))
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("<ID>", p.stderr)
+        self.assertEqual(self.jok("comments", self.a), [], "id の無い書き込みでコメントができた")
+
+
+class BrClose(FakeBrCase):
+    """close の理由 (-r・--reason) は、次の語が `-` で始まっても値に取る。--json が理由になる。"""
+
+    def setUp(self):
+        super().setUp()
+        self.init()
+
+    def status_of(self, iid: str) -> str:
+        shown = self.jok("show", iid)
+        self.assertEqual(len(shown), 1)
+        return shown[0].get("status")
+
+    def test_json_after_a_reason_flag_becomes_the_reason(self):
+        for flag in ("-r", "--reason"):
+            with self.subTest(flag=flag):
+                iid = self.create(f"c{flag}")
+                p = self.run_br("close", iid, flag, "--json")
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertEqual(self.status_of(iid), "closed", "--json を理由に取らず、値が無い扱いにした")
+
+    def test_a_dash_word_after_a_reason_flag_is_the_reason(self):
+        iid = self.create("c")
+        self.assertEqual(self.run_br("close", iid, "-r", "-x").returncode, 0)
+        self.assertEqual(self.status_of(iid), "closed")
+
+    def test_reason_flag_as_the_last_word_is_a_usage_error(self):
+        iid = self.create("c")
+        for flag in ("-r", "--reason"):
+            with self.subTest(flag=flag):
+                p = self.run_br("close", iid, flag)
+                self.assertEqual(p.returncode, 2, p.stderr)
+                self.assertIn("a value is required", p.stderr)
+                self.assertEqual(self.status_of(iid), "open")
+
+    def test_json_before_a_reason_flag_is_still_a_global(self):
+        """`--json` が -r の前にあれば globals で、-r は最後の語になる (本物も exit 2)。"""
+        iid = self.create("c")
+        p = self.run_br("close", iid, "--json", "-r")
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertEqual(self.status_of(iid), "open")
+
+    def test_other_value_flags_do_not_take_json(self):
+        """-p・--title・--status などは `--json` を値に取らない (本物は値が無いと exit 2)。"""
+        iid = self.create("c")
+        for args in (["create", "x", "-p", "--json"], ["update", iid, "--title", "--json"],
+                     ["update", iid, "--status", "--json"], ["list", "-s", "--json"]):
+            with self.subTest(args=args):
+                self.assertEqual(self.run_br(*args).returncode, 2)
+
+    def test_notes_and_description_take_a_dash_word_too(self):
+        iid = self.create("c")
+        self.assertEqual(self.run_br("update", iid, "--notes", "--json").returncode, 0)
+        shown = self.jok("show", iid)[0]
+        self.assertEqual(shown.get("notes"), "--json")
+        for flag, title in (("-d", "dd"), ("--description", "dl")):
+            with self.subTest(flag=flag):
+                made = self.run_br("create", title, flag, "--json")
+                self.assertEqual(made.returncode, 0, made.stderr)
+        rows = {r["title"]: r for r in self.jok("list")["issues"]}
+        for title in ("dd", "dl"):
+            self.assertEqual(rows.get(title, {}).get("description"), "--json", title)
+
 
 class BrLabels(FakeBrCase):
     def setUp(self):
         super().setUp()
         self.init()
         self.a = self.create("a")
+
+    def test_several_labels_are_processed_one_by_one(self):
+        """br 0.7.6 の実測: label add / remove は <id> のあとに label を何個でも取り、label ごとに 1 行を返す。"""
+        self.assertEqual(self.jok("label", "add", self.a, "x1", "x2"),
+                         [{"status": "added", "issue_id": self.a, "label": "x1"},
+                          {"status": "added", "issue_id": self.a, "label": "x2"}])
+        self.assertEqual(self.jok("label", "add", self.a, "x2", "x3", "x3"),
+                         [{"status": "exists", "issue_id": self.a, "label": "x2"},
+                          {"status": "added", "issue_id": self.a, "label": "x3"},
+                          {"status": "exists", "issue_id": self.a, "label": "x3"}])
+        self.assertEqual(self.jok("show", self.a)[0].get("labels"), ["x1", "x2", "x3"])
+        self.assertEqual(self.jok("label", "remove", self.a, "x1", "zz"),
+                         [{"status": "removed", "issue_id": self.a, "label": "x1"},
+                          {"status": "not_found", "issue_id": self.a, "label": "zz"}])
+        self.assertEqual(self.jok("show", self.a)[0].get("labels"), ["x2", "x3"])
+
+    def test_several_labels_on_an_unknown_issue_change_nothing(self):
+        p = self.run_br("label", "add", "bd-999", "x1", "x2", "--json")
+        self.assertEqual(p.returncode, 3)
+        self.assertEqual(self.load(p.stdout).get("error", {}).get("code"), "ISSUE_NOT_FOUND")
+        self.assertEqual(self.jok("list")["issues"][0].get("labels"), [])
+
+    def test_text_output_has_one_line_per_label(self):
+        p = self.ok("label", "add", self.a, "x1", "x2")
+        self.assertEqual(len(p.stdout.strip().splitlines()), 2)
 
     def test_add_then_exists(self):
         self.assertEqual(self.jok("label", "add", self.a, "human"),
@@ -457,6 +614,79 @@ class BrAgentContext(FakeBrCase):
     def test_first_write_to_empty_is_accepted(self):
         self.assertEqual(self.put("z").returncode, 0)
         self.assertEqual(self.current(), "z")
+
+    # ---- JSON は詰めて保存する (br 0.7.6 の実測。inline と @file のどちらも、show と list の両方に詰めた値が出る) ----
+
+    COMPACT = {
+        "空白入りの object": ('{"q": "x"}', '{"q":"x"}'),
+        "key の順は保つ (並べ替えない)": ('{"b": 1, "a": 2, "c": {"z": 1, "y": [1, 2, {"k": "v"}]}}',
+                                       '{"b":1,"a":2,"c":{"z":1,"y":[1,2,{"k":"v"}]}}'),
+        "前後の空白": ('  {"a": 1}  ', '{"a":1}'),
+        "改行つきの整形": ('{\n  "q": "x",\n  "o": [\n    1,\n    2\n  ]\n}\n', '{"q":"x","o":[1,2]}'),
+        "空の object": ("{ }", "{}"),
+        "配列": ("[1, 2]", "[1,2]"),
+        "生の日本語はそのまま": ('{"q": "日本語 é"}', '{"q":"日本語 é"}'),
+        "\\u の escape は文字に戻り、\\/ は / になる": ('{"q": "\\u65e5\\u672c\\u00e9 \\n tab\\t quote\\" slash\\/ "}',
+                                              '{"q":"日本é \\n tab\\t quote\\" slash/ "}'),
+        "数": ('{"a": 1.0, "b": 1e3, "e": 0.1}', '{"a":1.0,"b":1000.0,"e":0.1}'),
+        "重複した key は後の値": ('{"a": 1, "a": 2}', '{"a":2}'),
+        "null": ("null", "null"),
+    }
+
+    def test_json_is_stored_compact(self):
+        for name, (given, stored) in self.COMPACT.items():
+            with self.subTest(form=name, via="inline"):
+                self.assertEqual(self.run_br("update", self.a, "--agent-context", given, "--force").returncode, 0)
+                self.assertEqual(self.current(), stored)
+                rows = self.jok("list")["issues"]
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0].get("agent_context"), stored, "list にも詰めた値が出る")
+            with self.subTest(form=name, via="@file"):
+                self.assertEqual(self.put(given, "--force").returncode, 0)
+                self.assertEqual(self.current(), stored)
+
+    def test_the_shrink_check_compares_the_compact_length(self):
+        """半分未満の判定は、詰めた後の長さで行う (空白で水増しした短い値で、断りをすり抜けられない)。"""
+        long_ctx = json.dumps({"q": "x" * 50}, separators=(",", ":"))
+        self.assertEqual(self.put(long_ctx).returncode, 0)
+        padded = '{"q":' + " " * 200 + '"a"}'
+        p = self.put(padded)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("refusing to overwrite non-empty 'agent_context'", p.stderr)
+        self.assertEqual(self.current(), long_ctx, "断られた書き換えで値が変わった")
+
+    def test_a_value_that_is_not_json_is_kept_as_written(self):
+        """本物は JSON でない inline の値を exit 7 で断るが、偽物は寛容にしてある (今の食い違いを固定する)。"""
+        deep = "[" * 100000                      # json の parser が RecursionError を上げる深さ (閉じない形と、閉じる形)
+        for raw in ("plain  text", '{"a": ', "NaN", '{"a": Infinity}', '"\\ud800"', deep, deep + "]" * 100000):
+            with self.subTest(raw=raw[:30]):
+                self.assertEqual(self.put(raw, "--force").returncode, 0)
+                self.assertEqual(self.current(), raw)
+
+
+class BdCommentsAdd(FakeBrCase):
+    """bd の comments add は --json で書いたコメントを JSON で返す (--json が無ければ 1 行の案内文)。"""
+
+    def setUp(self):
+        super().setUp()
+        self.ok("init", prog=self.bd)
+        made = self.ok("create", "t", "--json", prog=self.bd)
+        self.iid = self.load(made.stdout)["id"]
+        self.body = Path(self.tmp, "body.txt")
+        self.body.write_text("answer\n", encoding="utf-8")
+
+    def test_json_returns_the_written_comment(self):
+        p = self.ok("--actor", "user/humanq", "comments", "add", self.iid, "-f", str(self.body), "--json", prog=self.bd)
+        out = self.load(p.stdout)
+        self.assertIsInstance(out, dict, p.stdout)
+        self.assertEqual((out.get("author"), out.get("text"), out.get("issue_id")), ("user/humanq", "answer\n", self.iid))
+        self.assertIsInstance(out.get("id"), str)
+        stored = self.load(self.ok("comments", self.iid, "--json", prog=self.bd).stdout)
+        self.assertEqual([(c.get("id"), c.get("text")) for c in stored], [(out["id"], "answer\n")])
+
+    def test_without_json_it_prints_one_line(self):
+        p = self.ok("comments", "add", self.iid, "-f", str(self.body), prog=self.bd)
+        self.assertEqual(p.stdout.strip(), f"Comment added to {self.iid}")
 
 
 class BrOnDoltProject(FakeBrCase):

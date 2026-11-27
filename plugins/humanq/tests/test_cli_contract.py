@@ -23,7 +23,11 @@ humanq は CLI の出力の形に強く依る。偽物は実測した癖を写�
 - br の読み (BrBackend.load) は、偽物にも本物にも通し、thread が書いた順 (同じ秒の 3 件・時刻をずらした 1 件・
   本物は JSONL から取り込み直した後の 1 件)・コメント 0 件が []・空のプロジェクトが ([], []) になることを確かめる。
   偽の br に sync は無いので、取り込み直しの脚は本物だけ
-- 偽の br が断る形 (REFUSED) は、本物の br も非 0 で断る。偽物の方が厳しい形は表に入れず、REFUSED の上のコメントに残す
+- 偽の br が断る形 (REFUSED・REFUSED_AS_LAST_WORD) は、本物の br も非 0 で断る。偽物の方が厳しい形 (本物は通す) は、
+  偽物を直して ACCEPTED (本物が通す形) に移す。まだ直していないものは REFUSED の上のコメントに残す。偽物の `raise Usage(`
+  の分岐を全部踏む形が REFUSED にあることは、FakeBrUsageBranches (偽物だけ) が確かめる
+- 偽物の形 (comments の key・agent_context の詰め方・show に id 無し・label の複数・comments add -f・close -r) は、
+  偽物と本物に同じ assertion を当てる。偽物だけが寛容な食い違い (JSON でない agent_context を本物は exit 7 で断る) は残っている
 - br を git worktree で打ったときにどの DB に届くか (本体の DB・自分の DB) を、偽物と本物に同じ assertion で当て、humanq の
   判定 (registry._br_home) が同じ dir を返すことも確かめる。bd の worktree の解決は測っていないので、bd の側には無い
 - 保留と保留の解除の書き込み (humanq.Store.snooze / unsnooze) を 4 通りに通し、差し替え口 (humanq.bd / humanq.br) から
@@ -31,6 +35,10 @@ humanq は CLI の出力の形に強く依る。偽物は実測した癖を写�
 """
 from __future__ import annotations
 
+import ast
+import contextlib
+import importlib.util
+import io
 import json
 import os
 import re
@@ -205,8 +213,8 @@ class ContractBase(unittest.TestCase):
         return out
 
     def add_comment(self, iid: str, text: str, actor: str = "user/humanq", cwd: str | None = None) -> dict:
-        """bd は humanq と同じく --json 無しで書く。br は --json で書いた comment を返す (bd の -f 付きの --json は、
-        本物は JSON を返すが偽物は返さないので、bd では --json を付けない)。"""
+        """bd は humanq と同じく --json 無しで書く。br は --json で書いた comment を返す (bd の --json 付きの戻りは
+        BdQuirks.test_comments_add_with_json_returns_the_written_comment が押さえる)。"""
         path = self.write_file(text)
         if self.kind == "bd":
             self.ok("comments add", "--actor", actor, "comments", "add", iid, "-f", path, cwd=cwd)
@@ -330,6 +338,17 @@ class BdQuirks:
         rows = self.comment_rows(q, iid)
         self.assertEqual([c.get("author") for c in rows], ["user/humanq"], self.m(q))
         self.assertEqual([c.get("text") for c in rows], ["answer\n"], self.m(q))
+
+    def test_comments_add_with_json_returns_the_written_comment(self):
+        """humanq は bd の comments add に --json を付けない (add_comment も付けない)。付けると本物は JSON を返す。
+        偽物の戻りが 1 行の案内文だった食い違いを、ここで固定する。戻りは書いたコメント 1 件の object
+        (bd 1.3.4 で実測。要素の key に schema_version が加わる。偽物は出さない)。"""
+        q = "comments add -f --json が JSON を返す"
+        iid = self.create("x")
+        out = self.jok(q, "--actor", "user/humanq", "comments", "add", iid, "-f", self.write_file("answer\n"))
+        self.assertIsInstance(out, dict, self.m(q))
+        self.assertEqual((out.get("author"), out.get("text")), ("user/humanq", "answer\n"), self.m(q))
+        self.assertEqual([c.get("text") for c in self.comment_rows(q, iid)], ["answer\n"], self.m(q))
 
     def test_backend_comments_follow_written_order(self):
         """同じ秒に 2 件・時刻をずらして 1 件を書き、backend の comments() が書いた順で返す。"""
@@ -526,15 +545,93 @@ class BrQuirks:
         self.assertEqual([c.get("text") for c in item.get("comments", [])], ["c1"], self.m(q))
         self.assertNotIn("metadata", item, self.m("show に metadata が無い"))
 
-    def test_show_without_comments_has_none_or_empty(self):
-        """コメントも agent_context も無いチケット。本物は comments の key を出さず、偽物は [] を出す。読む側は
-        どちらも「無い」と読むので、ここでは「無いか空」までを契約にする。"""
+    def test_show_without_comments_has_no_comments_key(self):
+        """コメントも agent_context も無いチケット。本物は comments の key を出さない ([] ではない)。読む側
+        (backend.br_thread) が key の無い show を 0 件と読むことは、下の test_backend_load_* が偽物にも本物にも通す。"""
         q = "コメントの無い show の comments"
         iid = self.create("x")
-        item = self.jok(q, "show", iid)[0]
+        shown = self.jok(q, "show", iid)
+        self.assertIsInstance(shown, list, self.m(q))
+        self.assertEqual(len(shown), 1, self.m(q))
+        item = shown[0]
         self.assertIsInstance(item, dict, self.m(q))
-        self.assertEqual(item.get("comments", []), [], self.m(q))
+        self.assertNotIn("comments", item, self.m(q))
         self.assertNotIn("agent_context", item, self.m(q))
+        self.add_comment(iid, "c1")
+        self.assertEqual([c.get("text") for c in self.jok(q, "show", iid)[0].get("comments", [])], ["c1"],
+                         f"{self.m(q)}: コメントを書いた後は comments が出る")
+
+    def test_agent_context_json_is_stored_compact(self):
+        """本物の br は JSON の agent_context を詰めて保存する ({"q": "x"} は {"q":"x"})。show にも list にも詰めた値が出て、
+        key の順は保つ。inline と @file のどちらでも同じ (偽物は書いたまま返さない)。"""
+        q = "agent_context は詰めて返る"
+        iid = self.create("x")
+        given = '{"b": 1, "a": [1, 2], "c": {"k": "v"}}'
+        stored = '{"b":1,"a":[1,2],"c":{"k":"v"}}'
+        for how, args in (("inline", ["--agent-context", given]), ("@file", ["--agent-context", "@" + self.write_file(given)])):
+            self.ok(q, "update", iid, *args, "--force")
+            self.assertEqual(self.jok(q, "show", iid)[0].get("agent_context"), stored, f"{self.m(q)}: {how} の show")
+            self.assertEqual(self.row_of(q, iid).get("agent_context"), stored, f"{self.m(q)}: {how} の list")
+            self.ok(q, "update", iid, "--agent-context", "", "--force")       # 次の書き方の前に空にする (半分未満の書き換えは --force)
+            self.assertNotIn("agent_context", self.row_of(q, iid), self.m(q))
+
+    def test_show_without_ids_shows_the_last_touched_ticket(self):
+        """br は id を書かない show で、最後に触ったチケットを出す (exit 0)。create・update・label add が触れる。
+        まだ何も触れていないプロジェクトは VALIDATION_FAILED (exit 4)。"""
+        q = "show に id 無しは最後に触ったチケット"
+        proj = self.fresh_project()
+        p = self.run_cli("show", "--json", cwd=proj)
+        self.assertEqual(p.returncode, 4, f"{self.m(q)}: 空のプロジェクト rc={p.returncode} {p.stderr!r} {p.stdout!r}")
+        self.assertEqual(self.load(p.stdout, q).get("error", {}).get("code"), "VALIDATION_FAILED", self.m(q))
+        a = self.create("a", cwd=proj)
+        b = self.create("b", cwd=proj)
+
+        def last() -> list:
+            out = self.jok(q, "show", cwd=proj)
+            self.assertIsInstance(out, list, self.m(q))
+            return [x.get("id") for x in out if isinstance(x, dict)]
+        self.assertEqual(last(), [b], f"{self.m(q)}: create の後")
+        self.ok(q, "update", a, "--title", "a2", cwd=proj)
+        self.assertEqual(last(), [a], f"{self.m(q)}: update の後")
+        self.ok(q, "label", "add", b, "x", cwd=proj)
+        self.assertEqual(last(), [b], f"{self.m(q)}: label add の後")
+        self.ok(q, "delete", a, "--force", cwd=proj)                         # 最後に触ったのでないチケットの delete は記録を変えない
+        self.assertEqual(last(), [b], f"{self.m(q)}: ほかのチケットの delete の後")
+        self.ok(q, "delete", b, "--force", cwd=proj)                         # 最後に触ったチケットを delete すると記録が消える
+        p = self.run_cli("show", "--json", cwd=proj)
+        self.assertEqual(p.returncode, 4, f"{self.m(q)}: 最後に触ったチケットの delete の後 rc={p.returncode} {p.stdout[:200]!r}")
+
+    def test_label_add_and_remove_take_several_labels(self):
+        q = "label add / remove は label を何個でも取る"
+        iid = self.create("x")
+        rows = [{"status": "added", "issue_id": iid, "label": n} for n in ("l1", "l2")]
+        self.assertEqual(self.jok(q, "label", "add", iid, "l1", "l2"), rows, self.m(q))
+        self.assertEqual(self.row_of(q, iid).get("labels"), ["l1", "l2"], self.m(q))
+        self.assertEqual(self.jok(q, "label", "remove", iid, "l1", "zz"),
+                         [{"status": "removed", "issue_id": iid, "label": "l1"},
+                          {"status": "not_found", "issue_id": iid, "label": "zz"}], self.m(q))
+        self.assertEqual(self.row_of(q, iid).get("labels"), ["l2"], self.m(q))
+
+    def test_comments_add_with_a_file_ignores_the_extra_text(self):
+        q = "comments add -f は本文の位置引数を無視してファイルの本文で書く"
+        iid = self.create("x")
+        path = self.write_file("from-file\n")
+        added = self.jok(q, "--actor", "user/humanq", "comments", "add", iid, "ignored text", "-f", path)
+        self.assertIsInstance(added, dict, self.m(q))
+        self.assertEqual(added.get("text"), "from-file\n", self.m(q))
+        self.assertEqual([c.get("text") for c in self.comment_rows(q, iid)], ["from-file\n"], self.m(q))
+
+    def test_close_reason_flag_takes_the_next_word_even_if_it_is_json(self):
+        """`close <id> -r --json` は --json が理由になって閉じる (理由の無い -r の拒否ではない)。-r が最後の語なら断る。"""
+        q = "close -r の次の語は値になる"
+        iid = self.create("x")
+        p = self.run_cli("close", iid, "-r", "--json")
+        self.assertEqual(p.returncode, 0, f"{self.m(q)}: rc={p.returncode} {p.stderr!r} {p.stdout!r}")
+        self.assertEqual(self.jok(q, "show", iid)[0].get("status"), "closed", self.m(q))
+        last = self.create("y")
+        p = self.run_cli("close", last, "-r")
+        self.assertNotEqual(p.returncode, 0, f"{self.m(q)}: -r が最後の語なのに通った")
+        self.assertEqual(self.jok(q, "show", last)[0].get("status"), "open", self.m(q))
 
     def test_show_many_ids_in_one_call(self):
         q = "show に複数の id"
@@ -692,11 +789,17 @@ class BrQuirks:
     # ---- 偽物が断る形は、本物も断る ---------------------------------------------------------------------
 
     # 偽の br (tests/fake_beads.py) が usage エラー・VALIDATION・ISSUE_NOT_FOUND などで断る形。偽物が断るのに本物は通す
-    # 形があると、偽物の上で緑のテストが本物では別の経路に入る。{id} は専用のプロジェクトのチケット、{nofile} は無いファイル。
-    # 偽物の方が厳しい形 (偽物は断るが本物 0.7.6 は通す) はここに入れない (偽物の側の食い違いで、偽物を直す段で
-    # 揃える): show に id 無し (本物は exit 0 でチケットを出す)・label add に余分な引数 (本物は複数の label を付ける)・
-    # comments add -f に余分な位置引数 (本物は -f の本文で書く)・close -r に値無し (本物は通す)
+    # 形があると、偽物の上で緑のテストが本物では別の経路に入る。{id} は専用のプロジェクトのチケット、{nofile} は無いファイル、
+    # {file} は在るファイル (id 無しの形は、ファイルが無いことでも断られるので、在るファイルで試す)。
+    # 後ろに --json を付けて試す (--reason・--notes・--description は --json を値に取るので、値の無い形は付けずに試す:
+    # REFUSED_AS_LAST_WORD)。偽物の方が厳しい形 (偽物は断るが本物 0.7.6 は通す) は、この表ではなく ACCEPTED に入れ、
+    # 偽物を直して揃える。偽物が断る分岐 (`raise Usage(`) の全部を、この 2 つの表の形のどれかが踏むことは
+    # FakeBrUsageBranches が確かめる。
+    # まだ偽物が断る側の食い違い (本物は通す。humanq は使わない): 後ろに何も付けない `update` と `close` (id 無し) は、
+    # 本物では最後に触ったチケットに効く (--json を付けると本物も断る)
     REFUSED = {
+        "-C": ["-C", "{nofile}", "list"],
+        "知らない subcommand": ["zap"],
         "subcommand 無し": [],
         "--actor に値無し": ["--actor"],
         "create にタイトル無し": ["create"],
@@ -714,6 +817,7 @@ class BrQuirks:
         "close の無い id": ["close", "zz-999"],
         "delete に id 無し": ["delete"],
         "delete の無い id": ["delete", "zz-999"],
+        "delete --reason に値無し (後ろの --json を値に取らない)": ["delete", "{id}", "--reason"],
         "list に位置引数": ["list", "x"],
         "list の知らない flag": ["list", "--nope"],
         "list -s に値無し": ["list", "-s"],
@@ -725,6 +829,7 @@ class BrQuirks:
         "label add の無い id": ["label", "add", "zz-999", "a"],
         "comments add -f の無いファイル": ["comments", "add", "{id}", "-f", "{nofile}"],
         "comments add -f に値無し": ["comments", "add", "{id}", "-f"],
+        "comments add -f に id 無し": ["comments", "add", "-f", "{file}"],
         "comments add の無い id": ["comments", "add", "zz-999", "t"],
         "comments add に id 無し": ["comments", "add"],
         "comments add に本文無し": ["comments", "add", "{id}"],
@@ -735,20 +840,55 @@ class BrQuirks:
         "init の知らない flag": ["init", "--nope"],
     }
 
+    # 偽の br が断る形と対になる、本物が通す形 (偽物が断っていた 4 つ。偽物は通すようにした)。後ろに --json を付けて試す。
+    # {id} は専用のプロジェクトの、形ごとに新しいチケット。効果 (どのチケットに何が起きたか) は、下の個別のテストが確かめる
+    ACCEPTED = {
+        "show に id 無し (最後に触ったチケットを出す)": ["show"],
+        "label add に label が 2 つ": ["label", "add", "{id}", "a", "b"],
+        "comments add -f に余分な位置引数 (本文はファイルのもの)": ["comments", "add", "{id}", "x", "-f", "{file}"],
+        "close -r に値無し (後ろの --json が理由になる)": ["close", "{id}", "-r"],
+    }
+
+    # 後ろに何も付けず、最後の語が値を取る option のときだけ断られる形 (--json を付けると、--json が値になって通るか、
+    # 別の語が値の無い扱いになる)。--reason は --json を値に取るので REFUSED には入れられず、--actor は globals の位置の都合で
+    # REFUSED では「subcommand 無し」の分岐に落ちる。偽物の分岐を全部踏むために、FakeBrUsageBranches もこの表を流す
+    REFUSED_AS_LAST_WORD = {
+        "--actor に値無し": ["--actor"],
+        "close -r に値無し": ["close", "{id}", "-r"],
+        "close --reason に値無し": ["close", "{id}", "--reason"],
+    }
+
     def test_every_form_the_fake_refuses_is_refused_by_the_real_one(self):
         q = "偽物が断る形は本物も断る (非 0 で終わり、チケットを増やさない)"
         proj = self.fresh_project()
         iid = self.create("x", cwd=proj)
         nofile = os.path.join(self.tmp, "no-such-file.txt")
+        body = self.write_file("x\n")
         for name, form in self.REFUSED.items():
-            argv = [a.format(id=iid, nofile=nofile) for a in form]
+            argv = [a.format(id=iid, nofile=nofile, file=body) for a in form]
             with self.subTest(form=name):
                 p = self.run_cli(*argv, "--json", cwd=proj)
                 self.assertNotEqual(p.returncode, 0, f"{self.m(q)}: 「{name}」 {argv} が通った: {p.stdout[:200]!r}")
+        for name, form in self.REFUSED_AS_LAST_WORD.items():
+            argv = [a.format(id=iid, nofile=nofile, file=body) for a in form]
+            with self.subTest(form=name, last_word=True):
+                p = self.run_cli(*argv, cwd=proj)
+                self.assertNotEqual(p.returncode, 0, f"{self.m(q)}: 「{name}」 {argv} (後ろに何も付けない) が通った: {p.stdout[:200]!r}")
         out = self.jok(q, "list", cwd=proj)
         self.assertIsInstance(out, dict, self.m(q))
         self.assertEqual([r.get("id") for r in out.get("issues", [])], [iid],
-                         f"{self.m(q)}: 断った形のどれかがチケットを作った・消した")
+                         f"{self.m(q)}: 断った形のどれかがチケットを作った・消した・閉じた")
+
+    def test_every_form_the_fake_used_to_refuse_is_accepted_by_the_real_one(self):
+        q = "偽物が断っていた形は本物が通す (exit 0)"
+        proj = self.fresh_project()
+        body = self.write_file("from-file\n")
+        for name, form in self.ACCEPTED.items():
+            iid = self.create(name, cwd=proj)                    # 形ごとに新しいチケット (close が閉じる・最後に触るのを分ける)
+            argv = [a.format(id=iid, file=body) for a in form]
+            with self.subTest(form=name):
+                p = self.run_cli(*argv, "--json", cwd=proj)
+                self.assertEqual(p.returncode, 0, f"{self.m(q)}: 「{name}」 {[*argv, '--json']} が rc={p.returncode}: {p.stderr or p.stdout}")
 
     def test_actor_becomes_author(self):
         q = "--actor が comment の author に入る"
@@ -988,6 +1128,87 @@ class SnoozeWrites:
             self.assertEqual(([i["id"] for i in data["human"]], data["snoozed"]), ([iid], []), self.m(q))
         after = {k: self.shown(q, proj, iid).get(k) for k in ("status", "assignee")}
         self.assertEqual(after, before, f"{self.m(q)}: 保留で status か担当が変わった")
+
+
+# ---- 偽の br の断る分岐と REFUSED の突き合わせ ------------------------------------------------------------
+
+class FakeBrUsageBranches(unittest.TestCase):
+    """偽の br (tests/fake_beads.py) の usage エラーの分岐 (`raise Usage(` と `raise br_usage_unexpected(`) の全部を、
+    BrQuirks.REFUSED の形のどれかが踏むこと。分岐を足したのに REFUSED へ形を足し忘れると、その分岐は本物の br と
+    突き合わされないまま、偽物だけが断る形になる (本物は通す形が 4 つ見つかったのはこの型の漏れ)。
+    数えるのは、ソースの `raise Usage(` と `raise br_usage_unexpected(` の字面だけ。別名を介した raise (`_U = Usage` の
+    後の `raise _U(...)` など) と、usage でない断り (`raise Fail(`・`raise br_validation(`・`raise br_json_error(`) は
+    対象外 (そちらの追従漏れはこのテストでは気づけない)。
+    偽物を進程内で動かし、断りが上がった raise の行を集めて、ソースの分岐の行 (ast) と比べる。REFUSED は後ろに --json を付けて、
+    REFUSED_AS_LAST_WORD は何も付けずに流す (test_every_form_the_fake_refuses_is_refused_by_the_real_one と同じ)。"""
+
+    RAISERS = ("Usage", "br_usage_unexpected")
+
+    def load_fake(self):
+        spec = importlib.util.spec_from_file_location("fake_beads_usage_branches", FAKE)
+        fb = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fb)
+        return fb
+
+    def source_branches(self) -> dict[int, str]:
+        """{行: その行の raise の文}。"""
+        text = FAKE.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        out = {}
+        for node in ast.walk(ast.parse(text)):
+            if (isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call) and isinstance(node.exc.func, ast.Name)
+                    and node.exc.func.id in self.RAISERS):
+                out[node.lineno] = lines[node.lineno - 1].strip()
+        return out
+
+    def raised_lines(self, fb, argv: list[str]) -> set[int]:
+        """argv で br を進程内に動かして、usage エラーを上げた raise の行 (偽物のファイルの中で一番内側の行)。usage エラーで
+        なければ空。偽物が usage エラー以外の例外 (クラッシュ) で落ちたら、テストの失敗にする。"""
+        sink = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                fb.run_br(argv)
+        except fb.Usage as e:
+            last = 0
+            tb = e.__traceback__
+            while tb is not None:
+                if tb.tb_frame.f_code.co_filename == str(FAKE):
+                    last = tb.tb_lineno
+                tb = tb.tb_next
+            return {last}
+        except fb.Fail:
+            return set()
+        except Exception as e:  # noqa: BLE001  偽物がクラッシュしたら、走っていないのではなく失敗として数える
+            self.fail(f"偽の br が {argv} で usage エラー以外の例外 {type(e).__name__}: {e} で落ちた")
+        return set()
+
+    def test_every_usage_branch_of_the_fake_is_reached_by_a_refused_form(self):
+        branches = self.source_branches()
+        self.assertGreaterEqual(len(branches), 10, f"ast で分岐を拾えていない: {branches}")
+        fb = self.load_fake()
+        tmp = os.path.realpath(tempfile.mkdtemp(prefix="humanq-usage-branches-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        cwd = os.getcwd()
+        self.addCleanup(os.chdir, cwd)
+        os.chdir(tmp)
+        with mock.patch.dict(os.environ, {k: v for k, v in os.environ.items() if not k.startswith("FAKE_BEADS_")}, clear=True):
+            fb.br_init(tmp, [])
+            sink = io.StringIO()
+            with contextlib.redirect_stdout(sink):
+                fb.run_br(["create", "x"])
+            ids = list(fb.Project(tmp).state["issues"])
+            self.assertEqual(len(ids), 1)
+            reached: set[int] = set()
+            nofile = os.path.join(tmp, "no-such-file.txt")
+            body = os.path.join(tmp, "body.txt")
+            Path(body).write_text("x\n", encoding="utf-8")
+            for table, suffix in ((BrQuirks.REFUSED, ["--json"]), (BrQuirks.REFUSED_AS_LAST_WORD, [])):
+                for name, form in table.items():
+                    argv = [a.format(id=ids[0], nofile=nofile, file=body) for a in form]
+                    reached |= self.raised_lines(fb, [*argv, *suffix])
+        missing = {line: src for line, src in branches.items() if line not in reached}
+        self.assertEqual(missing, {}, "偽の br の usage エラーの分岐のうち、REFUSED のどの形も踏まないもの (行: 文)。"
+                                      "REFUSED に、その分岐を踏む形を足す (本物の br も断ることを契約テストが確かめる)")
 
 
 for _subject in SUBJECTS:
