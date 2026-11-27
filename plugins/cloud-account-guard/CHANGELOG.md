@@ -21,6 +21,11 @@
   コマンドを照合し直す向き)。切り替えていないときの cache hit と、照合そのものの判定は変えていない。Firebase /
   AWS / Kubernetes は指紋を取らない (README の既知の制限に足した)。`state` の記録の無い 0.34.0 までの entry は、
   gh / gcloud では 1 回だけ照合し直す
+- ローカル読取 (gh の `hosts.yml`・gcloud の `active_config` と `config_<name>`) で、設定ファイルが通常のファイルで
+  ないとき (FIFO・デバイスなど) は、読まずに、読めないのと同じに扱い、CLI に聞く (止まらない開き方で種類を確かめる。
+  gcloud の `active_config` は、読めないときと同じく `default` の構成を読む)。0.34.0 までは書き手のいない FIFO を開くと open が戻らず、hook が timeout で
+  打ち切られて検証が飛んでいた (公式仕様上の fail-open。マージ前レビューの指摘)。gcloud の指紋のパスを決める
+  `active_config` の読みは cache を見る前に毎回走るので、同じ読み方にして cache hit の経路でも止まらないようにした
 
 ## 0.34.0
 

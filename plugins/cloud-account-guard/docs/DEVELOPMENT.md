@@ -428,7 +428,10 @@ PreToolUse は Bash のたびに発火するので、`gh pr list && gh pr view &
   書く側も同じ値を使う (後に取ると、その間の切替後の指紋で旧状態の成功を記録する)。mtime から 2 秒
   (`_STATE_SETTLE_NS`) の間は指紋を作らず cache を読まず書かない (1 秒単位の時刻の FS で同じ 1 秒の
   2 回の書き換えを区別できない)。`state_files` の例外は dispatcher (`_cache_state`) が握り、その
-  target は cache を使わない。宣言しない service は空文字で、`state` の無い 0.34.0 までの entry と
+  target は cache を使わない。止まる形は握れない (cache を見る前に毎回走り、hook が timeout で
+  打ち切られると検証が飛ぶ) ので、`state_files` は FIFO などを止まる形で開かない (gcloud の
+  active_config の中身は `cli_config.read_text` で読む。`O_NONBLOCK` で開き、通常のファイルでなければ
+  読まない)。宣言しない service は空文字で、`state` の無い 0.34.0 までの entry と
   一致する (アップグレードで照合し直さない)。多すぎる分には再検証が増えるだけ、漏れると hook の外の
   切替の後 TTL の間 cache で通る。CLI が普段のコマンドでも書き換えるファイルを入れると cache が
   効かなくなる (firebase / aws / kubectl を入れていないのはこれを確かめられていないため)

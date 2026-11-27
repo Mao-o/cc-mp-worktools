@@ -196,6 +196,8 @@ def _cache_state(service, env, context) -> str | None:
     同じ)。None は「今は指紋を作れない」で、呼び出し側は成功 cache を読まず書かない (毎回照合する):
     ファイルが書かれた直後のとき (`cache.state_fingerprint`) と、パスを決める処理が例外を投げた
     とき (握らないと dispatch() の外まで抜け、__main__ の最終防波堤が検証をスキップする)。
+    例外は握るが、止まる形は握れない (cache を見る前に毎回走り、止まると hook が timeout で打ち切られて
+    検証が飛ぶ) ので、state_files の側で FIFO などを止まる形で開かない (`cli_config.read_text`)。
     env は検証に渡すのと同じ (hook プロセスの env + 行頭の inline env)。
     """
     state_files = getattr(service, "state_files", None)

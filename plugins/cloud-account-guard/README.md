@@ -1451,6 +1451,10 @@ Python CLI の起動込みで 1 回 〜1s (dict 期待値では project / accoun
   (`HOME=/other gh pr create` など)。`HOME` は gh / gcloud のどちらも設定
   ディレクトリ解決に使うため、実行される CLI は**別の設定ファイル**を読む。
   hook 側のファイルで判断すると違うアカウントで allow しうるので CLI に委ねる
+- 両方共通: 設定ファイルが通常のファイルでない (FIFO・デバイスなど) ときは、読まずに、読めないのと
+  同じに扱う (v0.35.0)。書き手のいない FIFO を普通に開くと open が戻らず、hook が timeout で打ち切られて
+  検証が飛ぶため (止まらない開き方で種類を確かめる)。gcloud の `active_config` は、読めないときと同じく
+  `default` の構成を読む
 - GCP の `CLOUDSDK_*` 判定は **prefix 一致**なので、`CLOUDSDK_PYTHON` のように
   値に無関係な変数が 1 つでも立っていると CLI 実行に戻る (安全側だが「速く
   ならない」ように見える)。安全な変数の個別許可は、漏れが false allow になる
@@ -1514,8 +1518,11 @@ service ごとの epoch (`<service>.epoch`、単調増加) を進め、切替を
 
 - 場所は検証に渡すのと同じ env (行頭の inline env を含む) で決める。`~` は、行頭の `HOME=...` が
   あればその HOME
-- 指紋はファイルの中身ではなく stat (symlink は辿る) の device・inode・大きさ・mtime・ctime で取る。
-  stat の 1 回で済み、切り替えていないときの cache hit は今までどおり効く
+- 指紋はファイルの中身ではなく stat (symlink は辿る) の device・inode・大きさ・mtime・ctime で取り、
+  ファイルごとに stat を 1 回取るだけなので、切り替えていないときの cache hit は今までどおり効く
+  (gcloud だけは使う構成の名前を決めるために `active_config` の中身も読む。この読みは cache を見る前に
+  毎回走り、止まると hook が timeout で打ち切られて検証が飛ぶので、止まらない開き方で種類を確かめ、FIFO など
+  通常のファイルでないものは読まない)
 - ファイルが無い・読めない (権限が無い・辿れない symlink など) ときも、その状態を指紋にする。
   無いままなら同じ指紋で、作られれば変わる。照合は今までどおり (ローカル読取ができなければ CLI で照合する)
 - ファイルが書かれてから 2 秒の間は、cache を読まず書かない (毎回照合する)。時刻を 1 秒単位でしか

@@ -260,7 +260,9 @@ def state_files(env=None, context=None) -> list[Path]:
 
     構成の名前はローカル読取と同じ順で決める (`--configuration` (context) → env の
     `CLOUDSDK_ACTIVE_CONFIG_NAME` → `active_config` の中身 → `default`)。名前が gcloud の命名規則から
-    外れるときは `active_config` だけ。HOME は実行される gcloud のもの (`cli_config.overriding_home`)。
+    外れるときは `active_config` だけ。`active_config` の中身はローカル読取と同じ `cli_config.read_text` で
+    読む (cache を見る前に毎回走るので止まってはいけない。FIFO など通常のファイルでなければ読まず、
+    読めないときと同じ `default`)。HOME は実行される gcloud のもの (`cli_config.overriding_home`)。
     gcloud が Windows で使う `%APPDATA%` 配下は見ない (README の既知の制限)。
     """
     e = os.environ if env is None else env

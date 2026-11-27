@@ -121,6 +121,12 @@
                                     切替の後 TTL の間 cache で通る。指紋は中身ではなく
                                     stat で取るので、CLI が普段のコマンドでも書き換える
                                     ファイルは入れない (cache が効かなくなる)。
+                                    呼び出しは cache を見る前に毎回走るので、
+                                    止まってはいけない (FIFO などを普通に開かない。
+                                    中身を読むなら `cli_config.read_text` を使う
+                                    (通常のファイルでなければ読まない))。止まると hook が
+                                    timeout で打ち切られ、検証が飛ぶ (例外と違い
+                                    dispatcher は握れない)。
                                     github (hosts.yml) と gcloud (active_config と
                                     構成のファイル) が宣言する
      - ACCOUNT_KEY: str             accounts.local.json 上のキー名

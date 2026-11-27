@@ -418,6 +418,63 @@ class TestGcloudStateFiles(_Tmp):
         )
 
 
+# 別プロセスで `gcloud.state_files` を呼ぶ (止まる形を timeout で FAIL にするため)。
+_PROBE = """
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from services import gcloud
+env = {"CLOUDSDK_CONFIG": sys.argv[2], "HOME": sys.argv[3]}
+if len(sys.argv) > 4:
+    env.update(dict(a.split("=", 1) for a in sys.argv[4:]))
+print(json.dumps([str(p) for p in gcloud.state_files(env)]))
+"""
+
+
+@unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO の無い OS")
+class TestGcloudStateFilesFifo(_Tmp):
+    """active_config が FIFO でも止まらない (止まると hook timeout で検証が飛ぶ)。
+
+    `state_files` は cache を見る前に毎回走る。名前を active_config の中身から決める形では
+    `cli_config.read_text` で開くので、その読みが止まらないことを固定する。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.cfg = self.tmp / "gcloud"
+        (self.cfg / "configurations").mkdir(parents=True)
+        os.mkfifo(self.cfg / "active_config")
+
+    def _state_files(self, *extra):
+        try:
+            res = subprocess.run(
+                [sys.executable, "-c", _PROBE, str(_PKG_DIR), str(self.cfg), os.environ["HOME"], *extra],
+                capture_output=True, text=True, timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            self.fail("state_files が FIFO の active_config を開いて止まった")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return json.loads(res.stdout)
+
+    def test_fifo_active_config_does_not_block(self):
+        files = self._state_files()
+        self.assertGreaterEqual(len(files), 1)
+        self.assertEqual(files[0], str(self.cfg / "active_config"))
+
+    def test_fifo_with_env_that_skips_the_local_read(self):
+        """0.34.0 がローカル読取を諦めて CLI に委ねていた形 (CLI の timeout で deny した)。"""
+        for extra in ("CLOUDSDK_CORE_DISABLE_PROMPTS=1", "GOOGLE_CLOUD_PROJECT=p"):
+            with self.subTest(extra=extra):
+                files = self._state_files(extra)
+                self.assertGreaterEqual(len(files), 1)
+                self.assertEqual(files[0], str(self.cfg / "active_config"))
+
+    def test_name_from_env_does_not_open_active_config(self):
+        self.assertEqual(
+            self._state_files("CLOUDSDK_ACTIVE_CONFIG_NAME=work"),
+            [str(self.cfg / "active_config"), str(self.cfg / "configurations" / "config_work")],
+        )
+
+
 class _DispatchBase(_Tmp):
     GH_WRITE = "gh pr create --fill"
     GCLOUD_WRITE = "gcloud run deploy svc --image vca-probe-image"
@@ -548,6 +605,14 @@ class TestDispatchWithGhHosts(_DispatchBase):
             _write(other / "hosts.yml", _hosts("side"), age=40)
             dispatch(command, str(self.project))
         self.assertEqual(verify.call_count, 2)
+
+    def test_no_state_files_keeps_the_cache_hit(self):
+        """HOME が決まらず state_files が空: 指紋は一定で、今までどおり hit する (毎回照合に落ちない)。"""
+        with mock.patch("services.github.state_files", return_value=[]), mock.patch(
+            "services.github.verify", return_value=None
+        ) as verify:
+            self.assertEqual(self.run_all([self.GH_WRITE] * 2), [None, None])
+        self.assertEqual(verify.call_count, 1)
 
     def test_service_without_state_files_keeps_the_cache_hit(self):
         self.assertFalse(hasattr(aws, "state_files"))
