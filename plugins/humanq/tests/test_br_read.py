@@ -315,19 +315,22 @@ class BrRead(unittest.TestCase):
                 "bd": (bd, bd_create, bd_comment)}
         port = self.serve()
         hook = self.load_hook(port)
+        q = ts.humanq.qsig(None)                           # 問いを書いていないチケットの問いの署名
         for cli, (root, create, comment) in clis.items():
             with self.subTest(cli=cli):
                 create("問い", "human")
-                comment(create("保留中", "human,snoozed"), "[humanq] 保留: 2999-12-31 まで\n")
-                comment(create("期限なしの保留", "human,snoozed"), "[humanq] 保留: 期限なし\n\nあとで\n")
-                comment(create("期日を過ぎた保留", "human,snoozed"), "[humanq] 保留: 2000-01-01 まで\n")
-                comment(create("期日を読めない保留", "human,snoozed"), "[humanq] 保留: 2026-02-30 まで\n")
+                comment(create("保留中", "human,snoozed"), f"[humanq] 保留: 2999-12-31 に戻る (qsig: {q})\n")
+                comment(create("期限なしの保留", "human,snoozed"), f"[humanq] 保留: 期限なし (qsig: {q})\n\nあとで\n")
+                comment(create("戻る日の来た保留", "human,snoozed"), f"[humanq] 保留: 2000-01-01 に戻る (qsig: {q})\n")
+                comment(create("問いが書き換わった保留", "human,snoozed"), f"[humanq] 保留: 期限なし (qsig: {'0' * 16})\n")
+                comment(create("戻る日を読めない保留", "human,snoozed"), f"[humanq] 保留: 2026-02-30 に戻る (qsig: {q})\n")
+                comment(create("問いの署名の無い保留", "human,snoozed"), "[humanq] 保留: 期限なし\n")
                 o = self.hook_out(self.run_hook(hook, "session_start", root, f"s-snz-{cli}"))
                 ctx = o["hookSpecificOutput"]["additionalContext"]
-                self.assertIn("今は判断待ち 3 件", ctx, "保留中 (2 件) を数えた / 期日を過ぎた・読めない保留を除いた")
+                self.assertIn("今は判断待ち 5 件", ctx, "保留中 (2 件) を数えた / 戻った・読めない保留を除いた")
                 self.assertIn("ユーザーが保留にした判断待ち 2 件", ctx)
-                self.assertIn("保留の期日を過ぎて判断待ちに戻ったもの 1 件", ctx)
-                self.assertEqual(o.get("systemMessage"), f"humanq: 判断待ち 3 件 / 回答済み 0 件 → {hook.URL}")
+                self.assertIn("保留から判断待ちに戻ったもの 2 件", ctx, "戻る日の来たもの・問いが書き換わったものを「戻った」に数えていない")
+                self.assertEqual(o.get("systemMessage"), f"humanq: 判断待ち 5 件 / 回答済み 0 件 → {hook.URL}")
 
     def test_hook_with_an_old_read_only_server_says_it_cannot_answer(self):
         # br を読みだけで返す古いサーバー (writable:false) が動いているときは、回答できないと伝える (bd の案内は出さない)

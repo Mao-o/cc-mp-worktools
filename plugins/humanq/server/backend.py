@@ -7,9 +7,10 @@ humanq.py は、ここが返す CLI に依らない形の値だけを読む:
 - Comment: {text, created_at}。値は CLI が返したまま。dict でない要素は {text: None, created_at: None} にする
   (本文の無いコメントとして数えない)
 - comments() は**必ず古い順で返す**。送り直しの判定・両ラベルの向き・表示する回答の本文は、最後の要素を最新として読む
-- load(repo) は画面の読み 1 回分: (判断待ちの Row の list, 回答済みの Row の list)。回答済みの Row と、判断待ちの Row のうち
-  保留のラベル (SNOOZE_LABEL) の付いたものには thread (そのチケットの Comment の list。古い順。読めなければ None) が付く
-  (保留の期日はコメントが正本で、ラベルはコメントを読むチケットを絞るための印。ラベルの無い判断待ちのコメントは読まない)
+- load(repo, memo=None) は画面の読み 1 回分: (判断待ちの Row の list, 回答済みの Row の list)。回答済みの Row と、判断待ちの
+  Row のうち保留のラベル (SNOOZE_LABEL) の付いたものには thread (そのチケットの Comment の list。古い順。読めなければ None) が付く
+  (保留の戻る日はコメントが正本で、ラベルはコメントを読むチケットを絞るための印。ラベルの無い判断待ちのコメントは読まない)。
+  memo (ThreadMemo) を渡すと、保留の thread を覚えから使い、CLI で読むのは覚えの無い・古いものを時間の上限まで (bd だけ)
 - 書き込み (回答・取り消し・保留・保留の解除) の読み直しは pending(repo, iid) (判断待ちの Row の list。iid の問いを照合に使う) と
   list_answered(repo) と comments(repo, iid)。pending の Row に thread が付いていれば、送り直しの判定と署名の照合は
   その thread で行う (comments を打たない)。書き込みは add_comment と label (op は add | remove)
@@ -23,6 +24,8 @@ import os
 import re
 import subprocess
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -88,6 +91,72 @@ def labeled(row, name: str) -> bool:
     return isinstance(labels, list) and name in labels
 
 
+class ThreadMemo:
+    """保留のラベルの付いた判断待ちの thread (bd では 1 件ごとに `bd comments` を 1 プロセス) の覚え。key は (repo, id)。
+    サーバー (humanq.Store) が 1 つ持ち、BdBackend.load に渡す。読むたびに打つと、保留の件数に比例して読みが遅くなり、
+    SessionStart の hook の件数の読み (8 秒) が時間切れになる (本物の bd 1.3.4 で 1 件あたり約 0.2 秒)。
+
+    - 覚えた thread は ttl 秒の間、CLI を打たずに使う。保留の判定に効く [humanq] のコメントはこのサーバーだけが書くので、
+      サーバー自身の書き込み (回答・取り消し・保留・保留の解除) がそのチケットの覚えを捨てれば (drop)、変化は拾える。
+      ttl は、ほかで書かれたコメント (別の端末からの同期など) を拾い直すまでの上限。ラベルと問いは毎回の一覧で読む
+      (エージェントがラベルを外す・問いを書き換えるのは、thread を読まなくても分かる)
+    - 1 回の読みで CLI を打つのは budget 秒まで (覚えの無いものから先に読む)。間に合わなかったものは、古い覚えがあればそれを
+      使い、無ければ thread を None (戻る日を読めない = 判断待ちに出す) にして、left に残す (サーバーが裏で読む)
+    - 読みの途中で書き込みが覚えを捨てたら、その読みが読んだ古い thread で覚え直さない (repo ごとの世代で照合する)"""
+
+    def __init__(self, ttl: float, budget: float, clock: Callable[[], float] = time.monotonic):
+        self.ttl, self.budget, self.clock = ttl, budget, clock
+        self._lock = threading.Lock()
+        self._memo: dict[tuple[str, str], tuple[float, list]] = {}
+        self._gen: dict[str, int] = {}
+        self._left: dict[str, list[str]] = {}
+
+    def get(self, repo: str, iid: str) -> tuple[list | None, bool]:
+        """(覚えた thread (無ければ None), ttl の内か)。"""
+        with self._lock:
+            hit = self._memo.get((repo, iid))
+        if hit is None:
+            return None, False
+        return hit[1], self.clock() - hit[0] < self.ttl
+
+    def gen(self, repo: str) -> int:
+        """読み始める前に取る世代。put に渡す。"""
+        with self._lock:
+            return self._gen.get(repo, 0)
+
+    def put(self, repo: str, iid: str, thread: list, gen: int) -> None:
+        """読んだ thread を覚える。読み始めてから repo の覚えが捨てられていたら (世代が違えば) 覚えない。"""
+        with self._lock:
+            if self._gen.get(repo, 0) == gen:
+                self._memo[(repo, iid)] = (self.clock(), thread)
+
+    def drop(self, repo: str, iid: str) -> None:
+        """iid の覚えを捨て、repo の世代を進める (書き込みの後に呼ぶ)。"""
+        with self._lock:
+            self._memo.pop((repo, iid), None)
+            self._gen[repo] = self._gen.get(repo, 0) + 1
+
+    def keep(self, repo: str, ids) -> None:
+        """repo の覚えを ids (今の保留のラベルの付いた判断待ち) だけにする。ラベルが外れたチケットの覚えは捨てる
+        (もう一度保留されたら読み直す)。"""
+        ids = set(ids)
+        with self._lock:
+            for k in [k for k in self._memo if k[0] == repo and k[1] not in ids]:
+                del self._memo[k]
+
+    def set_left(self, repo: str, ids: list[str]) -> None:
+        with self._lock:
+            if ids:
+                self._left[repo] = list(ids)
+            else:
+                self._left.pop(repo, None)
+
+    def take_left(self, repo: str) -> list[str]:
+        """最後の読みが時間の上限で読まなかったチケット (取ると空になる)。"""
+        with self._lock:
+            return self._left.pop(repo, [])
+
+
 class BdBackend:
     """bd (beads) の CLI。run は bd を 1 回打つ関数 (repo, *args) -> stdout で、呼ぶたびに引く
     (humanq.py は自分の bd を引く関数を渡し、テストの humanq.bd の差し替えをここまで届かせる)。"""
@@ -135,11 +204,12 @@ class BdBackend:
         # bd はコメントを古い順で返す (bd 1.3.4 で実測。偽の bd も同じ)。並べ替えずにそのまま渡す
         return [comment_of(c) for c in self.json(repo, "comments", iid)]
 
-    def load(self, repo: str) -> tuple[list[dict], list[dict]]:
+    def load(self, repo: str, memo: ThreadMemo | None = None) -> tuple[list[dict], list[dict]]:
         """判断待ちの一覧 → 回答済みの一覧 → 回答済みごとのコメント → 保留のラベルの付いた判断待ちごとのコメント、の順に打つ
         (サーバーが打つ bd の argv の列の固定。保留が無ければ今までと同じ列)。
-        コメントを読めないチケットの thread は None (回答済みはそのチケットだけ回答の本文と署名が空になり、保留は期日を
-        読めないので判断待ちに出す)。bd の引数に渡せない id (_passable) の保留は、打たずに None。"""
+        コメントを読めないチケットの thread は None (回答済みはそのチケットだけ回答の本文と署名が空になり、保留は戻る日を
+        読めないので判断待ちに出す)。bd の引数に渡せない id (_passable) の保留は、打たずに None。
+        memo を渡すと、保留の thread は覚え (ThreadMemo) から使い、覚えの無い・古いものだけを memo.budget 秒まで読む。"""
         human = self.list_human(repo)
         answered = []
         for r in self.list_answered(repo):
@@ -148,14 +218,45 @@ class BdBackend:
             except BdError:
                 thread = None
             answered.append({**r, "thread": thread})
-        for r in human:
-            if not labeled(r, SNOOZE_LABEL):
-                continue
-            try:
-                r["thread"] = self.comments(repo, r["id"]) if _passable(r["id"]) else None
-            except BdError:
+        snoozed = [r for r in human if labeled(r, SNOOZE_LABEL)]
+        if memo is None:
+            for r in snoozed:
+                r["thread"] = self._thread(repo, r["id"])
+            return human, answered
+        memo.keep(repo, [r["id"] for r in snoozed if _passable(r["id"])])
+        todo = []
+        for r in snoozed:
+            if not _passable(r["id"]):
                 r["thread"] = None
+                continue
+            r["thread"], fresh = memo.get(repo, r["id"])
+            if not fresh:
+                todo.append(r)
+        todo.sort(key=lambda r: r["thread"] is not None)        # 覚えの無いもの (戻る日を読めないもの) から先に読む
+        deadline = memo.clock() + memo.budget
+        left = []
+        for r in todo:
+            if memo.clock() >= deadline:
+                left.append(r["id"])
+                continue
+            gen = memo.gen(repo)
+            try:
+                thread = self.comments(repo, r["id"])
+            except BdError:
+                continue            # 読めない: 古い覚えがあればそれ、無ければ None のまま (次の読みで読み直す)
+            r["thread"] = thread
+            memo.put(repo, r["id"], thread, gen)
+        memo.set_left(repo, left)
         return human, answered
+
+    def _thread(self, repo: str, iid) -> list[dict] | None:
+        """保留の thread を 1 件読む。渡せない id は打たずに None、読めなければ None。"""
+        if not _passable(iid):
+            return None
+        try:
+            return self.comments(repo, iid)
+        except BdError:
+            return None
 
     def add_comment(self, repo: str, iid: str, path: str) -> None:
         self._run(repo, "--actor", ACTOR, "comments", "add", iid, "-f", path)
@@ -326,9 +427,10 @@ class BrBackend:
         付ける) も出す。利用者が `br list -l human` で見る判断待ちと同じものを、画面と hook の件数に出す (br 0.7.6 で実測)。"""
         return parse_br_list(self._run(repo, "list", "-l", label, "--limit", "0", "--json"))
 
-    def load(self, repo: str) -> tuple[list[dict], list[dict]]:
+    def load(self, repo: str, memo: ThreadMemo | None = None) -> tuple[list[dict], list[dict]]:
         """一覧から show までの間にチケットが消えると、show は exit 3 で全体が失敗する。そのときは 1 回だけ一覧から
-        読み直し、それでも失敗したら BdError。どちらの一覧も空なら show は打たない。"""
+        読み直し、それでも失敗したら BdError。どちらの一覧も空なら show は打たない。
+        memo は使わない (保留の thread も同じ show から読むので、覚えても CLI の呼び出しは減らない)。"""
         for attempt in (1, 2):
             human, answered = self._list(repo, "human"), self._list(repo, "answered")
             ids = list(dict.fromkeys(_br_id(i) for i in human + answered))
@@ -353,7 +455,7 @@ class BrBackend:
         rows = []
         for i in human:
             r = self.row(i, by[i["id"]])
-            if labeled(r, SNOOZE_LABEL):        # 保留の期日はコメントにある (show はもう読んであるので、打ち足さない)
+            if labeled(r, SNOOZE_LABEL):        # 保留の戻る日はコメントにある (show はもう読んであるので、打ち足さない)
                 r["thread"] = br_thread(by[i["id"]].get("comments"))
             rows.append(r)
         return rows, [self.row(i, by[i["id"]], thread=True) for i in answered]

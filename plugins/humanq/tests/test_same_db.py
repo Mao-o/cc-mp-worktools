@@ -36,6 +36,7 @@ BR_META = {"database": "beads.db", "jsonl_export": "issues.jsonl"}
 DEEP = "[" * 200000 + "]" * 200000                        # json の parser の再帰の限界を超える入れ子
 BD_META = {"database": "dolt", "backend": "dolt", "dolt_mode": "embedded"}
 WAIT = 1.5                       # 待ち合わせの時間切れ (秒)。1 本ずつ書くとき、先の 1 本はこれだけ待ってから書く
+QSIG = humanq.qsig(humanq.question(ts.QUESTION))      # br_question の問いの署名 (保留のコメントに書く)
 
 
 def write(path: str, body) -> None:
@@ -727,7 +728,7 @@ class BrWorktreeStore(FakeCli):
                                                   write=lambda path, i: store.snooze(path, {"id": i, "until": None}))
         self.assertEqual(results, ["ok", "ok"], "後の保留は送り直しとして通る")
         self.assertGreaterEqual(broken, 1, "2 本の書き込みが同時にロックの中にいた")
-        self.assertEqual(self.humanq_comments("br", main, iid), ["[humanq] 保留: 期限なし\n"], "保留のコメントが 1 件でない")
+        self.assertEqual(self.humanq_comments("br", main, iid), [f"[humanq] 保留: 期限なし (qsig: {QSIG})\n"], "保留のコメントが 1 件でない")
 
     def test_snooze_and_unsnooze_by_the_worktree_path_write_to_the_main(self):
         """まとめる前の画面は worktree のパスで保留を送る。書き込みは本体のパスで打ち、画面には本体の 1 つのプロジェクトの保留中に出る。"""
@@ -749,7 +750,7 @@ class BrWorktreeStore(FakeCli):
         writes = [c for c in calls if c["prog"] == "br" and "--actor" in c["argv"]]
         self.assertEqual(len(writes), 4, writes)                       # 保留: comments add + label add / 解除: comments add + label remove
         self.assertEqual({c["cwd"] for c in calls if c["prog"] == "br"}, {main}, "worktree のパスの保留・解除を、本体ではない dir で打った")
-        self.assertEqual(self.humanq_comments("br", main, iid), ["[humanq] 保留: 期限なし\n", humanq.UNSNOOZE_HEAD + "\n"])
+        self.assertEqual(self.humanq_comments("br", main, iid), [f"[humanq] 保留: 期限なし (qsig: {QSIG})\n", humanq.UNSNOOZE_HEAD + "\n"])
 
     def test_http_summary_and_answer_by_the_worktree_path(self):
         """hook は worktree の登録のパスで summary を問い合わせ、まとめる前の画面は worktree のパスで回答を送る。"""

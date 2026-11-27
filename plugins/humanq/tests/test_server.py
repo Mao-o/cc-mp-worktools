@@ -432,7 +432,7 @@ class HookInstructionsByCli(unittest.TestCase):
             self.assertNotIn(w, ctx)
 
     SNOOZED = "ユーザーが保留にした判断待ち {} 件 (判断待ちの件数に入れていない。回答待ちのままなので、問いを取り下げたり、答えを推測して進めたりしない)"
-    RETURNED = "保留の期日を過ぎて判断待ちに戻ったもの {} 件 (判断待ちの件数に入っている)"
+    RETURNED = "保留から判断待ちに戻ったもの {} 件 (戻る日が来たか、保留の後に問いが書き換わった。判断待ちの件数に入っている)"
 
     def snooze_lines(self, ctx: str) -> list[str]:
         return [ln for ln in ctx.splitlines() if "保留" in ln]
@@ -1056,15 +1056,17 @@ class BdScenarios:
         before = self.state(iid)
         self.assertEqual(before, ("in_progress", "agent-x"))
         store = self.store()
-        self.write(store.snooze, {"id": iid, "until": self.day(3), "note": " 仕様の確認待ち \n", "qsig": self.item(iid)["qsig"]})
+        q = self.item(iid)["qsig"]
+        self.write(store.snooze, {"id": iid, "until": self.day(3), "note": " 仕様の確認待ち \n", "qsig": q})
         self.assertEqual(self.state(iid), before, "保留で status か担当が変わった")
         self.assertEqual(self.labels(iid) & {"human", "answered", "snoozed"}, {"human", "snoozed"})
-        self.assertEqual(self.marks(iid), [f"[humanq] 保留: {self.day(3)} まで\n\n仕様の確認待ち"])
+        self.assertEqual(self.marks(iid), [f"[humanq] 保留: {self.day(3)} に戻る (qsig: {q})\n\n仕様の確認待ち"])
         data = self.load()
         mine = (iid, other)
         self.assertEqual((self.ids(data, "human", mine), self.ids(data, "snoozed", mine)), ([other], [iid]),
                          "保留した問いが判断待ちに残った")
-        self.assertEqual(self.pick(data, "snoozed", iid)["snooze"], {"until": self.day(3), "note": "仕様の確認待ち", "expired": False})
+        self.assertEqual(self.pick(data, "snoozed", iid)["snooze"],
+                         {"until": self.day(3), "note": "仕様の確認待ち", "expired": False, "changed": False})
         self.assertIsNone(self.pick(data, "human", other)["snooze"])
         self.assertIsNotNone(self.pick(data, "snoozed", iid)["q"], "保留中のチケットも問いを持つ")
 
@@ -1073,32 +1075,34 @@ class BdScenarios:
         self.set_assignee(iid, "agent-y")
         before = self.state(iid)
         store = self.store()
-        self.write(store.snooze, {"id": iid, "until": None})
-        self.assertEqual(self.marks(iid), ["[humanq] 保留: 期限なし"])
+        self.write(store.snooze, {"id": iid, "until": None})               # qsig を送らない画面でも、今の問いの署名を書く
+        q = self.item(iid, "snoozed")["qsig"]
+        self.assertEqual(self.marks(iid), [f"[humanq] 保留: 期限なし (qsig: {q})"])
         data = self.load()
         self.assertEqual(self.ids(data, "human", (iid,)), [])
-        self.assertEqual(self.pick(data, "snoozed", iid)["snooze"], {"until": None, "note": "", "expired": False})
+        self.assertEqual(self.pick(data, "snoozed", iid)["snooze"], {"until": None, "note": "", "expired": False, "changed": False})
         with mock.patch.object(humanq, "today", lambda: date(9999, 12, 30)):       # 期限なしは何年経っても戻らない
             self.assertEqual(self.ids(self.load(), "snoozed", (iid,)), [iid])
         self.write(store.unsnooze, {"id": iid})
-        self.assertEqual(self.marks(iid), ["[humanq] 保留: 期限なし", "[humanq] 保留の解除"])
+        self.assertEqual(self.marks(iid), [f"[humanq] 保留: 期限なし (qsig: {q})", "[humanq] 保留の解除"])
         self.assertEqual(self.labels(iid) & {"human", "snoozed"}, {"human"}, "解除で snoozed が外れていない")
         data = self.load()
         self.assertEqual((self.ids(data, "human", (iid,)), self.ids(data, "snoozed", (iid,))), ([iid], []))
         self.assertEqual(self.state(iid), before, "保留と解除で status か担当が変わった")
 
-    def test_a_snooze_returns_to_the_pending_list_after_its_date(self):
+    def test_a_snooze_returns_to_the_pending_list_on_its_date(self):
         iid = self.new_question()
         store = self.store()
-        until = self.day(0)                                  # 今日まで: 今日の終わりまで保留
+        until = self.day(1)                                  # 明日に戻る: 今日は保留、明日の読みから判断待ち
         self.write(store.snooze, {"id": iid, "until": until, "note": "明日見る"})
-        self.assertEqual(self.ids(self.load(), "snoozed", (iid,)), [iid], "期日の当日に保留から外れた")
+        self.assertEqual(self.ids(self.load(), "snoozed", (iid,)), [iid], "戻る日の前の日に保留から外れた")
         tomorrow = humanq.today() + timedelta(days=1)
         with mock.patch.object(humanq, "today", lambda: tomorrow):
             data = self.load()
             self.assertEqual((self.ids(data, "human", (iid,)), self.ids(data, "snoozed", (iid,))), ([iid], []),
-                             "期日を過ぎても判断待ちに戻らない")
-            self.assertEqual(self.pick(data, "human", iid)["snooze"], {"until": until, "note": "明日見る", "expired": True})
+                             "戻る日の当日に判断待ちに戻らない")
+            self.assertEqual(self.pick(data, "human", iid)["snooze"],
+                             {"until": until, "note": "明日見る", "expired": True, "changed": False})
             self.assertIn("snoozed", self.labels(iid), "読むだけでラベルを外した (ラベルは次の回答で外す)")
             self.write(store.answer, {"id": iid, "option": "a"})       # 戻った問いに答えると、保留のラベルも外れる
         self.assertEqual(self.labels(iid) & {"human", "answered", "snoozed"}, {"answered"})
@@ -1202,9 +1206,10 @@ class BdScenarios:
                 if "id" in extra:
                     code, j = self.post_json(port, "/api/unsnooze", body)
                     self.assertEqual((code, j.get("op")), (400, "unsnooze"), j)
-        # 形の誤り (YYYY-MM-DD でない) と、形は合うが日付として読めない・過去の日付は、別の文で断る
+        # 形の誤り (YYYY-MM-DD でない) と、形は合うが日付として読めない・今日以前の日付 (戻る日は明日以降) は、別の文で断る
         for until, head in (("2099-02-30", "until が日付として読めない"), ("2099-12-01 ", "until は YYYY-MM-DD か null"),
-                            ("٢٠٩٩-١٢-٠١", "until は YYYY-MM-DD か null"), ("2000-01-01", "過去の日付")):
+                            ("٢٠٩٩-١٢-٠١", "until は YYYY-MM-DD か null"), ("2000-01-01", "戻る日 (2000-01-01) が今日以前"),
+                            (self.day(-1), f"戻る日 ({self.day(-1)}) が今日以前"), (self.day(0), f"戻る日 ({self.day(0)}) が今日以前")):
             with self.subTest(until=until):
                 code, j = self.post_json(port, "/api/snooze", {"project": self.repo, "id": iid, "until": until})
                 self.assertEqual(code, 400, j)
@@ -1237,7 +1242,7 @@ class BdScenarios:
         port = self.serve(self.store())
         h0, s0, r0 = self.counts(port)                       # 共有のプロジェクト (WithBd) では前のテストのチケットが残る
         a, b, c = self.new_question(), self.new_question(), self.new_question()
-        for iid, until in ((a, self.day(3)), (b, self.day(0))):
+        for iid, until in ((a, self.day(3)), (b, self.day(1))):
             code, j = self.post_json(port, "/api/snooze", {"project": self.repo, "id": iid, "until": until, "note": "n"})
             self.assertEqual((code, j), (200, {"ok": True}))
         self.assertEqual(self.counts(port), (h0 + 1, s0 + 2, r0))
@@ -1246,7 +1251,7 @@ class BdScenarios:
         tomorrow = humanq.today() + timedelta(days=1)
         with mock.patch.object(humanq, "today", lambda: tomorrow):
             h1, s1, r1 = self.counts(port)
-        self.assertEqual((h1 - h0, r1 - r0), (2, 1), "期日を過ぎた b が判断待ちと「戻った」に数えられていない")
+        self.assertEqual((h1 - h0, r1 - r0), (2, 1), "戻る日の来た b が判断待ちと「戻った」に数えられていない")
         self.assertLessEqual(s1, s0 + 1)
         code, j = self.post_json(port, "/api/unsnooze", {"project": self.repo, "id": a})
         self.assertEqual((code, j), (200, {"ok": True}))
@@ -1281,6 +1286,122 @@ class BdScenarios:
         self.assertIsNone(self.pick(data, "human", iid)["snooze"])
         self.assertEqual(self.ids(self.load(), "snoozed", (iid,)), [iid], "読めるようになったら保留中に戻る")
 
+    # ---- 保留は問いに結び付く (保留のコメントの問いの署名) ----
+
+    def read(self, store: humanq.Store) -> dict:
+        """サーバーの読み (Store.project、fresh。保留の thread の覚えを使う)。読めたことを確かめる。"""
+        try:
+            data = store.project(store.resolve(self.repo) or self.repo, fresh=True)     # HTTP と同じく代表のパスで読む
+        except Exception as e:  # noqa: BLE001
+            self.fail(f"Store.project が例外を上げた: {type(e).__name__}: {e}")
+        self.assertTrue(data.get("ok"), data)
+        return data
+
+    def test_a_new_question_after_the_question_was_taken_off_is_not_hidden_by_an_old_snooze(self):
+        # 期限なしで保留 → エージェントが画面の外で片付けて human を外す → 同じチケットで新しく問う
+        iid = self.new_question()
+        store = self.store()
+        self.write(store.snooze, {"id": iid, "until": None})
+        self.assertEqual(self.ids(self.read(store), "snoozed", (iid,)), [iid])
+        self.label(iid, "remove", "human")
+        self.set_question(iid, ask="まったく別の新しい問い")
+        self.label(iid, "add", "human")
+        for data in (self.load(), self.read(store)):
+            self.assertEqual((self.ids(data, "human", (iid,)), self.ids(data, "snoozed", (iid,))), ([iid], []),
+                             "新しい問いが古い保留に隠れた")
+            self.assertEqual(self.pick(data, "human", iid)["snooze"], {"until": None, "note": "", "expired": False, "changed": True})
+
+    def test_a_rewritten_question_brings_the_snooze_back_and_a_desc_edit_does_not(self):
+        iid, other = self.new_question(), self.new_question()
+        store = self.store()
+        port = self.serve(store)
+        for i in (iid, other):
+            self.write(store.snooze, {"id": i, "until": self.day(5), "note": "待ち"})
+        h0, s0, r0 = self.counts(port)
+        # 選択肢の説明 (desc) だけの直しは問いの署名に入らないので、保留のまま
+        opts = json.loads(json.dumps(QUESTION))["humanq"]["options"]
+        opts[0]["desc"] = "言い回しだけ直した"
+        self.set_question(other, options=opts)
+        self.set_question(iid, ask="前提が変わったので問い直す")
+        data = self.read(store)
+        self.assertEqual((self.ids(data, "human", (iid, other)), self.ids(data, "snoozed", (iid, other))), ([iid], [other]))
+        self.assertEqual(self.pick(data, "human", iid)["snooze"], {"until": self.day(5), "note": "待ち", "expired": False, "changed": True})
+        self.assertEqual(self.counts(port), (h0 + 1, s0 - 1, r0 + 1), "書き換わって戻った保留を「戻った」に数えていない")
+        # 戻ったカードからもう一度保留すれば、今の問いで保留になる
+        self.write(store.snooze, {"id": iid, "until": None, "qsig": self.pick(data, "human", iid)["qsig"]})
+        self.assertEqual(self.ids(self.read(store), "snoozed", (iid, other)), [other, iid])
+
+    # ---- 回答と保留のラベル ----
+
+    def test_answer_of_a_returned_snooze_whose_label_removal_failed_is_resent(self):
+        iid = self.new_question()
+        store = self.store()
+        self.write(store.snooze, {"id": iid, "until": self.day(1)})
+        tomorrow = humanq.today() + timedelta(days=1)
+        with mock.patch.object(humanq, "today", lambda: tomorrow):
+            self.assertEqual(self.ids(self.read(store), "human", (iid,)), [iid])        # 戻った (覚えを作る)
+            restore = self.failing("label remove snoozed")
+            try:
+                e = self.write(store.answer, {"id": iid, "option": "a"}, raises=humanq.WriteError)
+            finally:
+                restore()
+            self.assertEqual((e.stage, e.written), ("label", True))
+            self.assertEqual(self.labels(iid) & {"human", "answered", "snoozed"}, {"human", "snoozed"},
+                             "保留のラベルを外す前に、ラベルを付け替えた")
+            data = self.read(store)
+            self.assertEqual((self.ids(data, "human", (iid,)), self.ids(data, "snoozed", (iid,))), ([iid], []),
+                             "回答のコメントの後のチケットを保留として隠した (書き込みの後に覚えを捨てていない)")
+            self.write(store.answer, {"id": iid, "option": "a"})                       # 送り直しで残りを済ませる
+        self.assertEqual(self.labels(iid) & {"human", "answered", "snoozed"}, {"answered"})
+        self.assertEqual(len([m for m in self.marks(iid) if m.startswith("[humanq] 回答")]), 1, "送り直しで回答が二重になった")
+
+    def test_answer_removes_only_a_snoozed_label_that_humanq_put(self):
+        # 利用者が自分の意味で付けた snoozed (humanq の保留のコメントが無い) は、回答で外さない
+        own = self.new_question(labels=("human", "snoozed"))
+        store = self.store()
+        self.assertEqual(self.ids(self.load(), "human", (own,)), [own], "コメントの無い snoozed を保留中に出した")
+        self.write(store.answer, {"id": own, "option": "a"})
+        self.assertEqual(self.labels(own) & {"human", "answered", "snoozed"}, {"answered", "snoozed"}, "humanq が付けていない snoozed を外した")
+        # 保留の解除でラベルを外し損ねたもの (最後の [humanq] コメントが解除) は、humanq が付けたラベルなので外す
+        left = self.new_question()
+        self.write(store.snooze, {"id": left, "until": None})
+        restore = self.failing("label remove snoozed")
+        try:
+            self.write(store.unsnooze, {"id": left}, raises=humanq.WriteError)
+        finally:
+            restore()
+        self.assertIn("snoozed", self.labels(left))
+        self.write(store.answer, {"id": left, "option": "a"})
+        self.assertEqual(self.labels(left) & {"human", "answered", "snoozed"}, {"answered"})
+        # 取り消して答え直した (最後の [humanq] コメントが取り消し) チケットに後から付いた snoozed も、humanq のものではない
+        again = self.new_question()
+        self.write(store.answer, {"id": again, "option": "a"})
+        self.write(store.undo, {"id": again})
+        self.label(again, "add", "snoozed")
+        self.write(store.answer, {"id": again, "option": "b"})
+        self.assertIn("snoozed", self.labels(again))
+
+    def test_answer_and_undo_reject_an_id_that_is_not_a_string(self):
+        self.new_question()
+        port = self.serve(self.store())
+        writes = (self.calls("comments add"), self.calls("label"))
+        for path in ("/api/answer", "/api/undo"):
+            for name, iid in {"list": ["x"], "数": 5, "object": {"a": 1}, "null": None, "空": ""}.items():
+                with self.subTest(path=path, id=name):
+                    code, j = self.post_json(port, path, {"project": self.repo, "id": iid, "option": "a"})
+                    self.assertEqual((code, j.get("op")), (400, path.rsplit("/", 1)[1]), j)
+                    self.assertNotIn("code", j, f"形の誤りを gone などと取り違えた: {j}")
+        self.assertEqual((self.calls("comments add"), self.calls("label")), writes, "壊れた id で書き込んだ")
+
+    def test_items_carry_the_server_today(self):
+        # 画面は期間の選択と日付の下限を、ブラウザの TZ ではなくサーバーの今日で数える
+        port = self.serve(self.store())
+        for day in (date(2031, 1, 31), date(2032, 2, 29)):
+            with self.subTest(day=day), mock.patch.object(humanq, "today", lambda: day):
+                code, _, raw = fetch(f"http://127.0.0.1:{port}/api/items")
+                self.assertEqual(code, 200, raw)
+                self.assertEqual(json.loads(raw).get("today"), day.isoformat())
+
 
 class BdOnly:
     """bd のプロジェクトだけのシナリオ (WithBd と WithFakeBd。br には bd の --json の形が無い)。"""
@@ -1301,6 +1422,72 @@ class BdOnly:
                 data = self.load()
                 self.assertIn(iid, [i["id"] for i in data["answered"]], "独自の status のチケットがどの一覧にも出ない")
                 self.assertNotIn(iid, [i["id"] for i in data["human"]])
+
+    # ---- 保留の thread の覚え: bd は保留 1 件ごとに bd comments を打つので、読むたびには打たない ----
+
+    def comment_reads(self, ids) -> int:
+        """ids のチケットのコメントの読み (bd comments <id> --json。書き込みの comments add は数えない) の数。"""
+        return sum(self.calls(f"comments {i} --json") for i in ids)
+
+    def test_reads_after_the_first_do_not_read_the_snoozed_comments_again(self):
+        store = self.store()
+        port = self.serve(store)
+        ids = [self.new_question() for _ in range(4)]
+        for i in ids:
+            self.write(store.snooze, {"id": i, "until": None, "note": "n"})
+        first = self.summary(port, fresh=True)
+        n = self.comment_reads(ids)
+        for _ in range(2):                                   # hook の fresh=1 の読みも、画面の読みも覚えを使う
+            self.assertEqual(self.summary(port, fresh=True)["snoozed"], first["snoozed"])
+            # 並びは見ない (期限なし・同じ優先度で、本物の bd の作成日は秒の単位なので同じ値になりうる)
+            self.assertEqual(sorted(self.ids(self.http_project(port), "snoozed", ids)), sorted(ids))
+        self.assertEqual(self.comment_reads(ids), n, "2 回目からの読みで、保留のコメントを読み直した")
+        # このサーバーの書き込み (保留の補足を書き換える) は、そのチケットだけ読み直す
+        self.write(store.snooze, {"id": ids[0], "until": None, "note": "書き換えた補足"})
+        n = self.comment_reads(ids)
+        data = self.read(store)
+        self.assertEqual(self.comment_reads(ids), n + 1, "書いたチケットだけを読み直していない")
+        self.assertEqual(self.pick(data, "snoozed", ids[0])["snooze"]["note"], "書き換えた補足", "書き込みの後も古い覚えを使った")
+        # 解除のラベルの段階の失敗 (ラベルが残る) も、覚えを捨てるので判断待ちに出る
+        restore = self.failing("label remove snoozed")
+        try:
+            self.write(store.unsnooze, {"id": ids[1]}, raises=humanq.WriteError)
+        finally:
+            restore()
+        self.assertEqual(self.ids(self.read(store), "human", ids), [ids[1]], "解除のコメントの後のチケットを、古い覚えで保留に隠した")
+        # ほかで変わったラベルと問いは、コメントを読まずに一覧で分かる
+        self.label(ids[2], "remove", "snoozed")
+        self.set_question(ids[3], ask="書き直した問い")
+        n = self.comment_reads(ids)
+        data = self.read(store)
+        self.assertEqual(self.comment_reads(ids), n, "ラベルと問いの変化を見るのにコメントを読んだ")
+        self.assertEqual((sorted(self.ids(data, "human", ids)), self.ids(data, "snoozed", ids)), (sorted(ids[1:]), [ids[0]]))
+        self.assertIsNone(self.pick(data, "human", ids[2])["snooze"])
+        self.assertTrue(self.pick(data, "human", ids[3])["snooze"]["changed"])
+
+    def test_snoozes_left_unread_by_the_time_limit_are_pending_and_read_behind(self):
+        store = self.store()
+        ids = [self.new_question() for _ in range(3)]
+        for i in ids:
+            self.write(store.snooze, {"id": i, "until": None})
+        store._threads.budget = 0.0                         # 時間の上限に当たって、1 件も読めない読み
+        data = self.read(store)
+        self.assertEqual((sorted(self.ids(data, "human", ids)), self.ids(data, "snoozed", ids)), (sorted(ids), []),
+                         "期日を読めていない保留を隠した")
+        for i in ids:
+            self.assertIsNone(self.pick(data, "human", i)["snooze"])
+        key = store.resolve(self.repo) or self.repo
+        deadline = time.monotonic() + 30                    # 裏の読みが読み終えるのを待つ
+        while time.monotonic() < deadline and (store._warming or not all(store._threads.get(key, i)[1] for i in ids)):
+            time.sleep(0.05)
+        self.assertEqual(store._warming, set(), "裏の読みが終わらない")
+        n = self.comment_reads(ids)
+        # 裏の読みはキャッシュを古い扱いにする: キャッシュの時間の内の読み (画面のポーリング) も、覚えで作り直す
+        cached = store.project(key)
+        self.assertTrue(cached.get("ok"), cached)
+        self.assertEqual(sorted(self.ids(cached, "snoozed", ids)), sorted(ids), "裏で読んだ後も、キャッシュの古い結果 (判断待ちに出したもの) を返した")
+        self.assertEqual(sorted(self.ids(self.read(store), "snoozed", ids)), sorted(ids), "裏で読んだ覚えを次の読みが使っていない")
+        self.assertEqual(self.comment_reads(ids), n)
 
     def test_bd_json_rejects_non_list(self):
         def listed(*args):
@@ -1362,6 +1549,13 @@ class WithBd(BdScenarios, BdOnly, unittest.TestCase):
 
         humanq.bd = recorded
         self.addCleanup(setattr, humanq, "bd", real)
+
+    def store(self) -> humanq.Store:
+        # 共有のプロジェクトには前のテストの保留が溜まり、本物の bd では 1 回の読みの時間の上限 (コメントの読み 2 秒) に当たる。
+        # 当たると、残りを裏で読むたびに件数がテストの途中で動くので、上限を広げる (上限を当てるテストは自分で 0 にする)
+        store = super().store()
+        store._threads.budget = 120.0
+        return store
 
     def failing(self, rule: str, times: int | None = None):
         r = [rule.split(), times]

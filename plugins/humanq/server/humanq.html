@@ -168,7 +168,7 @@ details pre { white-space: pre-wrap; word-break: break-word; font: 13px/1.6 ui-m
 .snzopt { font: inherit; font-size: 13px; line-height: 1.6; padding: 2px 12px; border-radius: 999px; border: 1px solid var(--control-line);
   background: var(--panel); color: var(--ink); cursor: pointer; }
 .snzopt[aria-pressed="true"], .snzdate.sel input { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 700; }
-.snzdate { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); }
+.snzdate, .snzlead { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); }
 .snzdate input, input.snznote { font: inherit; font-size: 13px; color: var(--ink); background: var(--panel); border: 1px solid var(--control-line);
   border-radius: 8px; padding: 2px 8px; }
 input.snznote { width: 100%; }
@@ -419,7 +419,7 @@ function dropToasts(kind, it) {
 
 // 保留が成功した知らせ。「解除」で判断待ちに戻せる (保留中の節は畳んであり、ページの下にある)。key と閉じ方は回答の知らせと同じ形
 function snoozedToast(it, until) {
-  const msg = `「${summarize(it.title, 24)}」を保留しました (${until ? untilText(until) : "期限なし"})`;
+  const msg = `「${summarize(it.title, 24)}」を保留しました (${until ? `${until} に戻る` : "期限なし"})`;
   dropToasts("snz", it);
   toast(msg, { kind: "ok", key: ["snz", it.project, it.id, msg].join("\n"), action: { label: "解除", run: () => unsnoozeIt(it) } });
 }
@@ -589,8 +589,10 @@ const qKey = (path, id) => "q\n" + path + "\n" + id;
 const aKey = (path, id) => "a\n" + path + "\n" + id;
 const sKey = (path, id) => "s\n" + path + "\n" + id;     // 保留中のカード
 const KEY_OF = { q: qKey, a: aKey, s: sKey };
-// head に出すラベル: humanq 自身のもの (human / answered) を除いた全部。接頭辞では選ばない
-const shownLabels = it => (Array.isArray(it.labels) ? it.labels : []).filter(l => typeof l === "string" && l !== "human" && l !== "answered");
+// head に出すラベル: humanq 自身のもの (human / answered / snoozed) を除いた全部。接頭辞では選ばない
+// (snoozed は保留中の節と「保留中」の絞り込みで出すので、ラベルの印と「ラベル」の絞り込みには出さない)
+const HUMANQ_LABELS = new Set(["human", "answered", "snoozed"]);
+const shownLabels = it => (Array.isArray(it.labels) ? it.labels : []).filter(l => typeof l === "string" && !HUMANQ_LABELS.has(l));
 const MAX_LABELS = 4;
 // 作成日からの経過日数の表示 (暦の日数。当日は「今日」)。日付が読めない・未来のときは出さない
 function ageText(created) {
@@ -605,36 +607,42 @@ function ageText(created) {
 // 「取り消して判断待ちに戻す」が今の回答の署名を送るようにする
 // 書き込めるか (writable) と CLI の名前も入れる: 書き込めないプロジェクトのカードは回答の部品を出さないので、変わったら作り直す。
 // プロジェクトの名前 (pname) も入れる: 全体の表示で head に出す
-// 保留 (snooze) も入れる: 判断待ちのカードは期日を過ぎて戻った旨を、保留中のカードは期日と補足と残りの日数を出す
+// 保留 (snooze) も入れる: 判断待ちのカードは保留から戻った旨を、保留中のカードは戻る日と補足と残りの日数を出す
 const sigQ = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, ageText(it.created_at), shownLabels(it), it.q, it.description, it.notes, it.writable, it.cli, it.pname, snoozeOf(it)]);
 const sigA = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, ageText(it.created_at), shownLabels(it), it.answer, it.asig, it.writable, it.cli, it.pname]);
 const sigS = it => { const sn = snoozeOf(it); return JSON.stringify([it.id, it.title, it.priority, it.created_at, ageText(it.created_at), shownLabels(it), it.q && it.q.ask, sn, sn && sn.until ? untilText(sn.until) : "", it.writable, it.cli, it.pname]); };
 
 // ---- 保留 (snooze) の日付 ----
-// 日付はブラウザのローカルの日付 (サーバーも同じ端末のローカルの日付で、期日の終わりまで保留にする)
+// 保留の日付は「判断待ちに戻る日」(サーバーはその日の読みから判断待ちに出す)。今日はサーバーの今日 (/api/items の today)
+// で数え、ブラウザの TZ では決めない。today を返さない (古い) サーバーのときだけ、ブラウザのローカルの日付を使う
 const pad2 = n => String(n).padStart(2, "0");
 const ymd = d => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-function localDate(days) { const d = new Date(); d.setDate(d.getDate() + days); return ymd(d); }
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-// 今日から期日までの日数 (暦の日数)。読めなければ null
+let serverToday = null;            // 最後に受け取った /api/items の today (YYYY-MM-DD の形のときだけ)
+const todayYmd = () => serverToday || ymd(new Date());
+const dayNum = s => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || "")); return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) / 86400000 : null; };
+const fmtDay = n => { const d = new Date(n * 86400000); return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`; };
+const validDay = s => typeof s === "string" && DATE_RE.test(s) && fmtDay(dayNum(s)) === s;     // 2 月 30 日などは読まない
+// 今日から days 日後の日付 (暦の日数。UTC の日付の計算なので夏時間に左右されない)
+const localDate = days => fmtDay(dayNum(todayYmd()) + days);
+// 今日から戻る日までの日数 (暦の日数)。読めなければ null
 function daysUntil(until) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(until || ""));
-  if (!m) return null;
-  const now = new Date();
-  return Math.round((Date.UTC(+m[1], +m[2] - 1, +m[3]) - Date.UTC(now.getFullYear(), now.getMonth(), now.getDate())) / 86400000);
+  const a = dayNum(until), b = dayNum(todayYmd());
+  return a === null || b === null ? null : Math.round(a - b);
 }
 function untilText(until) {
   const n = daysUntil(until);
-  return `${until} まで` + (n === 0 ? " (今日まで)" : n === 1 ? " (明日まで)" : n > 1 ? ` (あと ${n} 日)` : "");
+  return `${until} に戻る` + (n === 1 ? " (明日)" : n > 1 ? ` (あと ${n} 日)` : "");
 }
-// サーバーが付けた保留の情報 ({until, note, expired})。形が崩れていれば、読める値だけを残す (until は文字列か null)
+// サーバーが付けた保留の情報 ({until, note, expired, changed})。形が崩れていれば、読める値だけを残す (until は文字列か null)
 function snoozeOf(it) {
   const s = it && it.snooze;
   if (!s || typeof s !== "object") return null;
-  return { until: typeof s.until === "string" ? s.until : null, note: typeof s.note === "string" ? s.note : "", expired: s.expired === true };
+  return { until: typeof s.until === "string" ? s.until : null, note: typeof s.note === "string" ? s.note : "",
+    expired: s.expired === true, changed: s.changed === true };
 }
-// 期間の選び方 (「日付を選ぶ」は別の入力)。days が null は期限なし
-const SNOOZE_PRESETS = [["d1", "明日まで", 1], ["d3", "3 日", 3], ["d7", "1 週間", 7], ["none", "期限なし", null]];
+// 期間の選び方 (「日付を選ぶ」は別の入力)。days は判断待ちに戻るまでの日数 (その日に戻る)。null は期限なし
+const SNOOZE_PRESETS = [["d1", "明日", 1], ["d3", "3 日後", 3], ["d7", "1 週間後", 7], ["none", "期限なし", null]];
 const snzDrafts = new Map();       // 下書きの key -> {open, kind, date, note}。保留の欄の状態 (カードが作り直されても保つ。メモリだけ)
 // 書き込めないプロジェクト (writable:false。br を読みだけで返す 0.13〜0.14 のサーバー) のカードに、回答の部品の代わりに出す 1 行
 const readonlyNote = it => el("p", { class: "ro" }, `このプロジェクト${it.cli ? ` (${it.cli}) ` : ""}は画面からはまだ回答できません`);
@@ -720,9 +728,9 @@ function buildReadonlyQuestion(it) {
     opts, readonlyNote(it), el("div", { class: "errbox" }), body(it));
 }
 
-// 判断待ちのカードの「保留」と、押すと開く欄。期間 (明日まで / 3 日 / 1 週間 / 期限なし) か日付を選び、補足を書いて「保留する」で送る
-// (選ぶだけでは送らない)。欄の状態は snzDrafts に置き、カードが作り直されても保つ。期日は送るときに数える (日付が変わっても今日から数える)。
-// 返り値は {toggle (「保留」のボタン), box (欄)}
+// 判断待ちのカードの「保留」と、押すと開く欄。判断待ちに戻す日 (明日 / 3 日後 / 1 週間後 / 期限なし) か日付 (明日以降) を選び、
+// 補足を書いて「保留する」で送る (選ぶだけでは送らない)。欄の状態は snzDrafts に置き、カードが作り直されても保つ。
+// 戻る日は送るときに数える (日付が変わっても今日から数える)。返り値は {toggle (「保留」のボタン), box (欄)}
 function snoozePanel(it, key) {
   const dk = dkOf(it);
   const st = snzDrafts.get(dk) || { open: false, kind: "", date: "", note: "" };
@@ -733,17 +741,18 @@ function snoozePanel(it, key) {
     b.addEventListener("click", () => { st.kind = st.kind === kind ? "" : kind; sync(); });
     return b;
   });
-  const date = el("input", { type: "date", "aria-label": "保留の期日" });
+  const date = el("input", { type: "date", "aria-label": "判断待ちに戻す日" });
   const dateBox = el("label", { class: "snzdate" }, "日付を選ぶ", date);
   const note = el("input", { type: "text", class: "snznote", "aria-label": "保留の補足", maxlength: "2000",
     placeholder: "補足 (任意)。例: 情報が揃うまで・来週の会議で決める" });
   const go = el("button", { class: "snzgo", type: "button" }, "保留する");
   const cancel = el("button", { class: "ghost snzcancel", type: "button" }, "やめる");
-  const box = el("div", { class: "snzbox", role: "group", "aria-label": "保留の期間と補足" },
-    el("div", { class: "snzopts" }, presets, dateBox), note, el("div", { class: "snzrow" }, go, cancel));
+  const box = el("div", { class: "snzbox", role: "group", "aria-label": "判断待ちに戻す日と補足" },
+    el("div", { class: "snzopts" }, el("span", { class: "snzlead" }, "戻す日:"), presets, dateBox), note, el("div", { class: "snzrow" }, go, cancel));
   date.value = st.date;
   note.value = st.note;
-  const pickedDate = () => DATE_RE.test(date.value) && date.value >= localDate(0) ? date.value : null;
+  // 選べるのは明日以降 (戻る日の当日から判断待ちに出すので、今日を選ぶと保留にならない)
+  const pickedDate = () => DATE_RE.test(date.value) && date.value >= localDate(1) ? date.value : null;
   const sync = () => {
     box.hidden = !st.open;
     toggle.setAttribute("aria-expanded", String(st.open));
@@ -753,7 +762,7 @@ function snoozePanel(it, key) {
   };
   const setOpen = open => {
     st.open = open;
-    if (open) date.min = localDate(0);
+    if (open) date.min = localDate(1);
     sync();
   };
   toggle.addEventListener("click", () => setOpen(!st.open));
@@ -822,9 +831,11 @@ function buildQuestion(it) {
   ask.id = nextLabelId();                                   // カードの名前 (aria-labelledby)
   const snz = snoozePanel(it, key);
   const sn = snoozeOf(it);
-  // 保留の期日を過ぎて戻ったカードには、その旨と保留したときの補足を出す (何を待っていたかを思い出せる)
-  const back = sn && sn.expired ? el("p", { class: "snzback" },
-    `保留の期日${sn.until ? ` (${sn.until}) ` : ""}を過ぎて判断待ちに戻りました` + (sn.note ? `。補足: ${sn.note}` : "")) : null;
+  // 保留から戻ったカードには、戻った理由 (保留の後に問いが書き換わった / 戻る日が来た) と保留したときの補足を出す
+  // (何を待っていたかを思い出せる)
+  const why = !sn ? null : sn.changed ? "保留の後に問いが書き換わったので、判断待ちに戻りました"
+    : sn.expired ? `保留の戻る日${sn.until ? ` (${sn.until}) ` : ""}が来たので、判断待ちに戻りました` : null;
+  const back = why ? el("p", { class: "snzback" }, why + (sn.note ? `。補足: ${sn.note}` : "")) : null;
   // 「保留」は「回答する」の隣 (キーのヒントより前): .row のボタンは、右下のトーストに横から掛からない幅に収める
   const card = el("section", { class: "card", "data-id": it.id, tabindex: "-1", "aria-labelledby": ask.id },
     head(it), back,
@@ -896,7 +907,7 @@ function buildAnswered(it) {
     ctrl, el("div", { class: "errbox" }));
 }
 
-// 保留中のカード (ページの下の畳んだ節に出す)。題・期日 (と残りの日数)・補足と「保留を解除」。回答の部品は出さない
+// 保留中のカード (ページの下の畳んだ節に出す)。題・戻る日 (と残りの日数)・補足と「保留を解除」。回答の部品は出さない
 // (答えるときは解除して判断待ちに戻す)。書き込めないプロジェクトには解除のボタンを出さない
 function buildSnoozed(it) {
   const sn = snoozeOf(it) || { until: null, note: "" };
@@ -961,7 +972,7 @@ function makeSnzBox() {
   const sum = el("summary", {}, h);
   return { el: el("details", { class: "snz" }, sum), sum, h };
 }
-// 保留中の並び: 期日の早いもの (期限なし・読めない期日は最後) → 優先度 → 作成日
+// 保留中の並び: 戻る日の早いもの (期限なし・読めない戻る日は最後) → 優先度 → 作成日
 const untilOf = it => { const s = snoozeOf(it); return s && s.until && DATE_RE.test(s.until) ? s.until : null; };
 const bySnooze = (x, y) => {
   const ux = untilOf(x), uy = untilOf(y);
@@ -1228,7 +1239,7 @@ function render() {
     for (const path of [...fb.banners.keys()]) if (!flatBad.some(p => p.path === path)) fb.banners.delete(path);
     flatPlan = { fb, groups, banners };
   }
-  // 保留中の節: 期日の早いもの (期限なしは最後) → 優先度 → 作成日。開いたかどうかは入れ物 (details) が持つ (作り直さない)
+  // 保留中の節: 戻る日の早いもの (期限なしは最後) → 優先度 → 作成日。開いたかどうかは入れ物 (details) が持つ (作り直さない)
   let snzEls = null;
   if (allS.length) {
     const sb = snzBox || (snzBox = makeSnzBox());
@@ -1321,7 +1332,7 @@ function restore(key, info) {
   if (c) flash(c.el);
 }
 
-// 保留中 (入力中で作り直しを後回しにしている) のカードが見せている問いが、今のデータの問いと違うか。
+// 入力中で作り直しを後回しにしているカードが見せている問いが、今のデータの問いと違うか。
 // 違えば、その問いの選択肢への回答は、見ていない意味で記録されかねない (サーバーも qsig で同じ検査をする)
 function questionChanged(it) {
   const p = lastData && lastData.projects.find(x => x.path === it.project);
@@ -1419,6 +1430,8 @@ function notifyNew(ids) {
 // 読めなかったプロジェクト (ok:false) は、前に読めたときのカードを残す (空に見せて入れ替えない)
 function normalize(raw, prev) {
   if (!raw || !Array.isArray(raw.projects)) throw new Error("想定外のデータ (projects が配列でない)");
+  // サーバーの今日。カードの署名 (残りの日数) を数える前に入れる。形が崩れていれば (古いサーバーは返さない) ブラウザの日付
+  serverToday = validDay(raw.today) ? raw.today : null;
   const projects = raw.projects.map(p => {
     if (!p || typeof p.path !== "string" || !Array.isArray(p.human) || !Array.isArray(p.answered)) throw new Error("想定外のデータ (プロジェクトの形)");
     // 保留中 (snoozed) を返さない (古い) サーバーは、保留中が無い。返すなら配列でなければならない
@@ -1476,7 +1489,7 @@ async function runLoad() {
   notifyNew(data.projects.flatMap(p => p.human.map(i => p.path + "\n" + i.id)));
   try {
     render();
-    meta.textContent = "更新 " + new Date().toLocaleTimeString() + (staleCount ? " (入力中のカードの更新は保留)" : "");
+    meta.textContent = "更新 " + new Date().toLocaleTimeString() + (staleCount ? " (入力中のカードの更新は後回し)" : "");
   } catch (e) {
     console.error(e);
     toast(`画面を描けませんでした: ${summarize(e.message)}`);

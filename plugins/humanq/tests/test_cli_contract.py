@@ -41,6 +41,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -947,7 +948,7 @@ class SnoozeWrites:
         before = {k: self.shown(q, proj, iid).get(k) for k in ("status", "assignee")}
         self.assertEqual(before, {"status": "in_progress", "assignee": "agent-x"}, self.m(q))
         be = humanq.BACKENDS[self.kind]
-        until = humanq.today().isoformat()
+        until = (humanq.today() + timedelta(days=1)).isoformat()       # 戻る日は明日以降
         rules = {"label add snoozed": 2}
 
         def call(q, fn, *args, label_fails=False):
@@ -969,7 +970,7 @@ class SnoozeWrites:
             store = humanq.Store(sd)
             call(q, store.snooze, proj, {"id": iid, "until": until, "note": "情報待ち"}, label_fails=True)
             self.assertEqual(rules, {"label add snoozed": 0}, f"{self.m(q)}: ラベルの段階を 1 回だけ再試行していない")
-            want = [f"[humanq] 保留: {until} まで\n\n情報待ち"]
+            want = [f"[humanq] 保留: {until} に戻る (qsig: {humanq.qsig(None)})\n\n情報待ち"]      # 問いの無いチケット
             self.assertEqual(self.humanq_marks(q, proj, iid), want, self.m(q))
             call(q, store.snooze, proj, {"id": iid, "until": until, "note": "情報待ち"})       # 送り直し
             self.assertEqual(self.humanq_marks(q, proj, iid), want, f"{self.m(q)}: 送り直しでコメントが二重になった")
