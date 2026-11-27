@@ -175,8 +175,9 @@ class DeepRelativePathTest(test_state_limit.BoundedBase):
         self.assertIn("期限", out[1].message)
 
     def test_short_moves_are_read_to_the_end(self):
-        # 期限 (3 秒) の手前で読み終える深さは、0.9.3 と同じく後ろの git まで読む (注意は出さない)
-        out = self.findings(f'{cd_a(200)}cd "{MAIN}"; {GIT}')
+        # 期限 (3 秒) の手前で読み終える深さは、0.9.3 と同じく後ろの git まで読む (注意は出さない)。深さの 2 乗の時間なので、
+        # Windows の realpath (存在しない要素ごとに API を呼び直す) でも期限に十分届かない深さにする (200 段は Windows の CI で届いた)
+        out = self.findings(f'{cd_a(100)}cd "{MAIN}"; {GIT}')
         self.assertEqual([(f.blocked, f.root) for f in out], [(True, family.norm(MAIN))])
 
 
@@ -189,14 +190,16 @@ class DeepStackTest(test_state_limit.BoundedBase):
     """
 
     def _shapes(self) -> tuple[tuple[str, str], ...]:
-        # 読みの数は Windows で倍になる (`_drive_readings`) ので、スタックの深さを読みの数で割り、読む量をそろえる
+        # 読みの数は Windows で倍になる (`_drive_readings`) ので、スタックの深さを読みの数で割り、読む量をそろえる。
+        # 深さは、手元 (macOS の Python 3.14) で期限の 5% ほどを使う大きさにする。Windows の CI はこの形で手元の 6 倍から 9 倍ほど
+        # 遅く、3,500 段 / 600 段 (手元で期限の 16% / 24%) では期限に届いた。深さの 2 乗の時間に戻る退行は、伸び方のテスト (下) が見る
         readings = len(command._drive_readings())
         k = test_state_limit._limit_exponent()
         return (
             # 最後の移動は bash だけが移動する `command cd <main>` (zsh の読みが前半を読み終えた後、bash の読みで止める)
-            ("or_cd 6 + pushd 3500 + command cd", or_cd(k) + pushd_abs(3500 // readings) + f'command cd "{MAIN}"; {GIT}'),
+            ("or_cd 6 + pushd 1000 + command cd", or_cd(k) + pushd_abs(1000 // readings) + f'command cd "{MAIN}"; {GIT}'),
             # 終わらない here-document 7 個の後ろの git は、安全網の 7 回目の読み直しだけが読む (重い前半を 9 回読む)
-            ("or_cd 6 + pushd 600 + heredoc 7", or_cd(k) + pushd_abs(600 // readings) + heredocs(7) + f'\ngit -C "{MAIN}" {RESET}'),
+            ("or_cd 6 + pushd 120 + heredoc 7", or_cd(k) + pushd_abs(120 // readings) + heredocs(7) + f'\ngit -C "{MAIN}" {RESET}'),
         )
 
     def test_deep_stacks_stop_before_the_deadline(self):
@@ -232,7 +235,8 @@ class DeepStackTest(test_state_limit.BoundedBase):
 
     def test_state_independent_work_is_done_once(self):
         # 1 つの移動を状態ごとに読むところで、状態に関係しない処理を状態の数だけ繰り返さない (64 状態なら 64 倍の時間になり、
-        # 上の形が期限の手前に収まらない)。絶対パスの行き先の正規化は 1 つの読みの中で語ごとに 1 回、option と語の読みはコマンドごとに 1 回
+        # 上の形が期限の手前に収まらない)。絶対パスの行き先の正規化は 1 回の読み取りの中で綴りごとに 1 回 (読みの間で覚えを共有する。
+        # `RealpathOnceTest`)、option と語の読みは 1 つの読みの中でコマンドごとに 1 回
         k = test_state_limit._limit_exponent()
         n = 50
         dirs = [os.path.join(test_state_limit._BASE, f"p{i}") for i in range(n)]  # ドライブ付きの絶対パス (repo の外)
@@ -254,7 +258,7 @@ class DeepStackTest(test_state_limit.BoundedBase):
         self.assertEqual((self.peak, self.collapses), (command._STATE_LIMIT, 0))
         readings = 3 * len(command._drive_readings())  # zsh の読みと bash の 2 つの読み × パスの綴りの読み
         targets = set(dirs)
-        self.assertEqual(sum(p in targets for p in norms), n * readings)
+        self.assertEqual(sum(p in targets for p in norms), n)
         # `cd d<i>` (k 個) と `pushd <dir>` (n 個) のコマンドごとに 1 回
         self.assertEqual(len(forms), (k + n) * readings)
 
@@ -267,6 +271,79 @@ class DeepStackTest(test_state_limit.BoundedBase):
         # main より下まで戻ると、スタックが空に見える popd は「失敗してその場に残る」と「行き先の分からない場所」の両方
         out = self.findings(cmd + "popd; " * (n + 2) + GIT)
         self.assertEqual([(f.blocked, f.root) for f in out if f.blocked], [(True, family.norm(MAIN))])
+
+
+class RealpathOnceTest(test_state_limit.BoundedBase):
+    """1 回の読み取り (`analyze_readings`) の中で、同じ綴りの realpath は 1 回だけ (`command._resolve` の norms)。
+
+    読み (zsh と bash の 2 つ・here-document の読み直し・Windows のパスの綴りの読み) はどれも同じ場所から同じ移動を読むので、
+    覚えを読みごとに持つと、同じ realpath を読みの数だけ繰り返す。Windows の realpath は存在しない要素ごとに API を呼び直すので重く、
+    相対パスを 200 段深くする形と深いスタックの形が、Windows の CI でだけ期限 (3 秒) に届いた。
+    ここでは Windows の読みの数 (`_drive_readings` が 2 つ) を手元で組み立てて確かめる。
+    """
+
+    def _count(self, cmd: str, drive_readings: tuple[bool, ...]) -> tuple[list[command.Finding], dict[str, int], int]:
+        calls: dict[str, int] = {}
+        analyzers = []
+        real_norm, real_init = command.norm, command._Analyzer.__init__
+
+        def counted_norm(path):
+            calls[path] = calls.get(path, 0) + 1
+            return real_norm(path)
+
+        def counted_init(analyzer, *args, **kwargs):
+            analyzers.append(analyzer)
+            return real_init(analyzer, *args, **kwargs)
+
+        with mock.patch.object(command, "norm", counted_norm), mock.patch.object(
+            command._Analyzer, "__init__", counted_init
+        ), mock.patch.object(command, "_drive_readings", lambda: drive_readings):
+            out = self.findings(cmd)
+        return out, calls, len(analyzers)
+
+    def test_each_spelling_is_resolved_once(self):
+        k = 3
+        dirs = [os.path.join(test_state_limit._BASE, f"p{i}") for i in range(20)]
+        # Git Bash の読みで綴りが変わらないパスだけを使う (手元で Windows の読みの数を組み立てても、読みの中身は同じ)
+        self.assertEqual([family._msys_drive(p) for p in (*dirs, MAIN, B)], [*dirs, MAIN, B])
+        for name, cmd, want in (
+            ("cd a 30 + main", f'{cd_a(30)}cd "{MAIN}"; {GIT}', True),
+            ("or_cd 3 + cd a 10", or_cd(k) + cd_a(10) + GIT, False),
+            ("pushd 20", "".join(f'pushd "{d}"; ' for d in dirs) + f'cd "{MAIN}"; {GIT}', True),
+            ("git -C の相対パス", f'cd "{MAIN}"; git -C a -C a -C .. {RESET}', True),
+            ("--git-dir と --work-tree", f'git --git-dir="{MAIN}/.git" --work-tree=a {RESET}', True),
+            ("env -C", f"cd a; env -C ../.. {GIT}", True),
+            ("pushd -n (bash の読みだけ)", f'pushd -n "{MAIN}"; popd; {GIT}', True),
+            ("git worktree remove", f'git worktree remove "{B}"', True),
+            ("heredoc の読み直し", f'{cd_a(10)}git -C "{B}" {RESET}' + heredocs(3), True),
+        ):
+            for drive_readings in ((False,), (False, True)):
+                with self.subTest(name=name, drive_readings=drive_readings):
+                    out, calls, analyzers = self._count(cmd, drive_readings)
+                    self.assertEqual(any(f.blocked for f in out), want, out)
+                    # 対照: 読みが複数あり (zsh・bash 2 つ × 綴りの読み、here-document は読み直しも)、realpath を通っている
+                    self.assertGreaterEqual(analyzers, 3 * len(drive_readings))
+                    self.assertTrue(calls)
+                    self.assertEqual({p: c for p, c in calls.items() if c > 1}, {})
+
+    def test_readings_of_the_cwd_share_the_memo(self):
+        # 作業ディレクトリの読みが 2 つ (Windows の `/c/x` の cwd) でも、同じ綴りの realpath は 1 回
+        calls: dict[str, int] = {}
+        real_norm = command.norm
+
+        def counted_norm(path):
+            calls[path] = calls.get(path, 0) + 1
+            return real_norm(path)
+
+        cwd = family.norm(test_state_limit.A)
+        with mock.patch.object(command, "norm", counted_norm):
+            try:
+                out = command.analyze_readings(f'{cd_a(10)}cd "{MAIN}"; {GIT}', ((cwd, self.fam), (cwd, self.fam)))
+            except Exception as e:  # noqa: BLE001 - 読みの例外も読みの誤りとして数える (ERROR ではなく FAIL)
+                self.fail(f"読みが例外を投げた: {e!r}")
+        self.assertEqual([(f.blocked, f.root) for f in out], [(True, family.norm(MAIN))])
+        self.assertTrue(calls)
+        self.assertEqual({p: c for p, c in calls.items() if c > 1}, {})
 
 
 class _FakeClock:

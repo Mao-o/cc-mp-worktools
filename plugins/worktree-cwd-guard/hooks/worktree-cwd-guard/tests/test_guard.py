@@ -72,6 +72,17 @@ def tree_state(base: Path) -> dict[str, tuple]:
     return state
 
 
+def shared_tree_message(changed: list[str]) -> str:
+    """SHARE_REPO の検査の失敗の文面。変わったパス (base からの相対) を、綴りのまま並べる (最初の 10 個)。
+
+    list の repr を埋めると、Windows の区切り `\\` が `\\\\` に重なり、文面から `repo\\README.md` を探せない。
+    """
+    return (
+        "SHARE_REPO のクラスのテストが、共有の repo とその周りを書き換えた "
+        f"(書くテストは SHARE_REPO を外したクラスに置く): {', '.join(changed[:10])}"
+    )
+
+
 def _git_marker(path: Path) -> tuple:
     """`.git` の形: symlink の行き先 (symlink でなければ None)、種類 (dir / file / missing)、ファイルなら中身。"""
     link = os.readlink(path) if os.path.islink(path) else None
@@ -167,10 +178,7 @@ class GuardBase(HermeticGitTestCase):
         after = tree_state(self._shared_base)
         changed = sorted(k for k in before.keys() | after.keys() if before.get(k) != after.get(k))
         if changed:
-            self.fail(
-                "SHARE_REPO のクラスのテストが、共有の repo とその周りを書き換えた "
-                f"(書くテストは SHARE_REPO を外したクラスに置く): {changed[:10]}"
-            )
+            self.fail(shared_tree_message(changed))
 
     def forget_family(self):
         self._families.clear()

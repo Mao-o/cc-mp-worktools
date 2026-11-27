@@ -13,7 +13,9 @@ suite が green で通りうる (前提がコメントにしか無かったこ�
 """
 from __future__ import annotations
 
+import ntpath
 import os
+import posixpath
 import tempfile
 import unittest
 from pathlib import Path
@@ -126,6 +128,35 @@ class SharedRepoCheckTest(ProbeCase):
     def test_rewrite_with_same_content_passes(self):
         # 中身の変わらない書き直しは、同じクラスの他のテストに漏れないので止めない (mtime は比べない)
         self.assert_passes(self._shared(lambda t: (t.main / "README.md").write_text("# demo\n", encoding="utf-8")))
+
+
+class SharedTreeMessageTest(unittest.TestCase):
+    """SHARE_REPO の検査の文面は、変わったパスを綴りのまま載せる (区切りが `\\` の Windows でも、文面から探せる)。
+
+    上の検査は、文面から `os.path.join("repo", "README.md")` を探す。list の repr を埋めると、Windows では `\\` が重なって
+    見つからない (Windows の CI だけで 3 件落ちた)。ここでは Windows の綴り (ntpath) を手元で組み立てて確かめる。
+    """
+
+    def test_windows_separators_are_kept(self):
+        changed = [ntpath.join("repo", ".claude", "worktrees", "a", "x.py"), ntpath.join("repo", "README.md")]
+        self.assertEqual(changed[1], "repo\\README.md")  # 組み立てた綴りの対照 (区切りは 1 文字の `\`)
+        text = test_guard.shared_tree_message(changed)
+        for path in changed:
+            self.assertIn(path, text)
+        self.assertNotIn("\\\\", text)
+
+    def test_posix_separators_are_kept(self):
+        changed = [posixpath.join("repo", "README.md"), "sibling.txt"]
+        text = test_guard.shared_tree_message(changed)
+        for path in changed:
+            self.assertIn(path, text)
+        self.assertIn(SHARED, text)
+
+    def test_only_the_first_ten_are_listed(self):
+        changed = [f"f{i:02d}" for i in range(12)]
+        text = test_guard.shared_tree_message(changed)
+        self.assertIn("f09", text)
+        self.assertNotIn("f10", text)
 
 
 class RememberedFamilyCheckTest(ProbeCase):
