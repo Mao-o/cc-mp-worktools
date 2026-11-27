@@ -36,6 +36,7 @@ BR_META = {"database": "beads.db", "jsonl_export": "issues.jsonl"}
 DEEP = "[" * 200000 + "]" * 200000                        # json の parser の再帰の限界を超える入れ子
 BD_META = {"database": "dolt", "backend": "dolt", "dolt_mode": "embedded"}
 WAIT = 1.5                       # 待ち合わせの時間切れ (秒)。1 本ずつ書くとき、先の 1 本はこれだけ待ってから書く
+QSIG = humanq.qsig(humanq.question(ts.QUESTION))      # br_question の問いの署名 (保留のコメントに書く)
 
 
 def write(path: str, body) -> None:
@@ -630,9 +631,10 @@ class FakeCli(Base):
             cs.sort(key=lambda c: c["id"])
         return [c["text"] for c in cs if str(c.get("text")).startswith(humanq.MARK)]
 
-    def concurrent_answers(self, store, prog: str, calls: list[tuple[str, str]]) -> tuple[list[str], int]:
-        """calls の (登録のパス, id) を 2 本のスレッドで同時に Store.answer する。回答のコメントを書く CLI の手前で
-        待ち合わせる (WAIT 秒で時間切れ)。(結果の型の名前の list, 待ち合わせが時間切れ・壊れた回数)。"""
+    def concurrent_answers(self, store, prog: str, calls: list[tuple[str, str]], write=None) -> tuple[list[str], int]:
+        """calls の (登録のパス, id) を 2 本のスレッドで同時に Store.answer する (write (path, id) を渡すとそれを呼ぶ)。
+        コメントを書く CLI の手前で待ち合わせる (WAIT 秒で時間切れ)。(結果の型の名前の list, 待ち合わせが時間切れ・壊れた回数)。"""
+        write = write or (lambda path, iid: store.answer(path, {"id": iid, "option": "a"}))
         self.assertEqual(len(calls), 2)
         barrier = threading.Barrier(2, timeout=WAIT)
         broken = [0]
@@ -652,7 +654,7 @@ class FakeCli(Base):
         def go(path: str, iid: str):
             start.wait()
             try:
-                store.answer(path, {"id": iid, "option": "a"})
+                write(path, iid)
                 results.append("ok")
             except Exception as e:  # noqa: BLE001
                 results.append(type(e).__name__)
@@ -718,6 +720,37 @@ class BrWorktreeStore(FakeCli):
         self.assertGreaterEqual(len(calls), 10, calls)                 # 回答 5 プロセス + 取り消し 5 プロセス
         self.assertEqual({c["cwd"] for c in calls}, {main}, "worktree のパスの回答・取り消しを、本体ではない dir で打った")
         self.assertEqual(self.humanq_comments("br", main, iid), ["[humanq] 回答: 案A (a)\n", humanq.UNDO_HEAD + "\n"])
+
+    def test_concurrent_snoozes_from_both_cards_write_one_comment(self):
+        main, wt, iid = self.pair()
+        store = humanq.Store(self.sd)
+        results, broken = self.concurrent_answers(store, "br", [(main, iid), (wt, iid)],
+                                                  write=lambda path, i: store.snooze(path, {"id": i, "until": None}))
+        self.assertEqual(results, ["ok", "ok"], "後の保留は送り直しとして通る")
+        self.assertGreaterEqual(broken, 1, "2 本の書き込みが同時にロックの中にいた")
+        self.assertEqual(self.humanq_comments("br", main, iid), [f"[humanq] 保留: 期限なし (qsig: {QSIG})\n"], "保留のコメントが 1 件でない")
+
+    def test_snooze_and_unsnooze_by_the_worktree_path_write_to_the_main(self):
+        """まとめる前の画面は worktree のパスで保留を送る。書き込みは本体のパスで打ち、画面には本体の 1 つのプロジェクトの保留中に出る。"""
+        main, wt, iid = self.pair()
+        port = ts.free_port()
+        srv = ts.start_server(self.sd, port)
+        self.addCleanup(ts.stop, srv)
+        base = f"http://127.0.0.1:{port}"
+        hdr = {"Content-Type": "application/json", "X-Humanq-Token": ts.page_token(port)}
+        Path(self.log).unlink(missing_ok=True)
+        code, _, body = ts.fetch(f"{base}/api/snooze", json.dumps({"project": wt, "id": iid, "until": None, "note": ""}).encode(), hdr)
+        self.assertEqual(code, 200, body)
+        code, _, body = ts.fetch(f"{base}/api/items")
+        self.assertEqual(code, 200, body)
+        ps = json.loads(body)["projects"]
+        self.assertEqual([(p["path"], [i["id"] for i in p.get("snoozed") or []], p["human"]) for p in ps], [(main, [iid], [])])
+        humanq.Store(self.sd).unsnooze(wt, {"id": iid})
+        calls = [json.loads(x) for x in Path(self.log).read_text(encoding="utf-8").splitlines() if x.strip()]
+        writes = [c for c in calls if c["prog"] == "br" and "--actor" in c["argv"]]
+        self.assertEqual(len(writes), 4, writes)                       # 保留: comments add + label add / 解除: comments add + label remove
+        self.assertEqual({c["cwd"] for c in calls if c["prog"] == "br"}, {main}, "worktree のパスの保留・解除を、本体ではない dir で打った")
+        self.assertEqual(self.humanq_comments("br", main, iid), [f"[humanq] 保留: 期限なし (qsig: {QSIG})\n", humanq.UNSNOOZE_HEAD + "\n"])
 
     def test_http_summary_and_answer_by_the_worktree_path(self):
         """hook は worktree の登録のパスで summary を問い合わせ、まとめる前の画面は worktree のパスで回答を送る。"""

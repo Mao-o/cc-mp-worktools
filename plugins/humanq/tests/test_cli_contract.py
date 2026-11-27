@@ -26,6 +26,8 @@ humanq は CLI の出力の形に強く依る。偽物は実測した癖を写�
 - 偽の br が断る形 (REFUSED) は、本物の br も非 0 で断る。偽物の方が厳しい形は表に入れず、REFUSED の上のコメントに残す
 - br を git worktree で打ったときにどの DB に届くか (本体の DB・自分の DB) を、偽物と本物に同じ assertion で当て、humanq の
   判定 (registry._br_home) が同じ dir を返すことも確かめる。bd の worktree の解決は測っていないので、bd の側には無い
+- 保留と保留の解除の書き込み (humanq.Store.snooze / unsnooze) を 4 通りに通し、差し替え口 (humanq.bd / humanq.br) から
+  ラベルの段階の失敗を注入した送り直しで、コメントが二重にならず・ラベルが付く (外れる)・status と担当が変わらないことを確かめる
 """
 from __future__ import annotations
 
@@ -39,13 +41,16 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import timedelta
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 FAKE = HERE / "fake_beads.py"
 SERVER_DIR = Path(os.environ.get("HUMANQ_SERVER_DIR") or HERE.parent / "server")
 sys.path.insert(0, str(SERVER_DIR))
 import backend  # noqa: E402
+import humanq  # noqa: E402
 import registry  # noqa: E402
 
 sys.path.insert(0, str(HERE))                   # real_cli (`-m unittest tests.test_cli_contract` のように親から指したときも読む)
@@ -884,10 +889,111 @@ class BrQuirks:
         self.assertNotIn("agent_context", rows[b], self.m(q))
 
 
+# ---- 保留の書き込み (bd・br の両方) -------------------------------------------------------------------------
+
+class SnoozeWrites:
+    """保留と保留の解除 (humanq.Store.snooze / unsnooze) を、偽物と本物の CLI に通す。途中の失敗は humanq の差し替え口
+    (humanq.bd / humanq.br。CLI を 1 回打つ関数) から注入する: ラベルの段階を 2 回続けて失敗させ (1 回は再試行で通る)、
+    送り直しでコメントが 1 件のまま・ラベルが付く (外れる) こと。status と担当が変わらないこと (保留は status を使わない)。"""
+
+    def snooze_project(self) -> str:
+        type(self).n += 1
+        proj = self.new_project(f"snz-{type(self).n}")
+        gi = Path(proj, ".beads", ".gitignore")
+        if self.kind == "br" and not gi.exists():        # 偽の br の init は .gitignore を書かない。本物が書く印を足す (humanq が br と読む)
+            gi.write_text(".br_history/\n*-fsqlite-ns-gate\n", encoding="utf-8")
+        return proj
+
+    def via_swap_point(self, rules: dict):
+        """humanq の差し替え口に入れる、CLI を 1 回打つ関数。rules は {語の列: 残りの失敗の回数}。語がこの順で argv に
+        現れる呼び出しを、回数が残っている間だけ (CLI を打たずに) BdError で失敗させる。"""
+        def run(repo, *args):
+            for words, left in list(rules.items()):
+                it = iter(args)
+                if left > 0 and all(any(a == w for a in it) for w in words.split()):
+                    rules[words] = left - 1
+                    raise backend.BdError(f"injected ({words})")
+            if self.kind == "bd":                       # backend.run_bd / run_br と同じ打ち方・同じ例外
+                p = subprocess.run([*self.cmd, "-C", repo, *args], capture_output=True, text=True, timeout=120, env=clean_env())
+                if p.returncode != 0:
+                    raise backend.BdError((p.stderr or p.stdout).strip()[:800] or f"bd exit {p.returncode}")
+                return p.stdout
+            p = subprocess.run([*self.cmd, *args], cwd=repo, capture_output=True, text=True, timeout=120, env=clean_env())
+            if p.returncode != 0:
+                raise backend.CliExit((p.stderr or p.stdout).strip()[:800] or f"br exit {p.returncode}", p.returncode)
+            return p.stdout
+        return run
+
+    def humanq_marks(self, quirk: str, proj: str, iid: str) -> list[str]:
+        rows = self.jok(quirk, "comments", iid, cwd=proj)
+        self.assertIsInstance(rows, list, self.m(quirk))
+        return sorted(str(c.get("text")).rstrip() for c in rows if isinstance(c, dict) and str(c.get("text")).startswith("[humanq]"))
+
+    def shown(self, quirk: str, proj: str, iid: str) -> dict:
+        out = self.jok(quirk, "show", iid, cwd=proj)
+        self.assertIsInstance(out, list, self.m(quirk))
+        self.assertEqual(len(out), 1, self.m(quirk))
+        self.assertIsInstance(out[0], dict, self.m(quirk))
+        return out[0]
+
+    def test_snooze_resend_after_an_injected_label_failure(self):
+        q = "保留の送り直し (差し替え口からラベルの失敗を注入)"
+        proj = self.snooze_project()
+        sd = os.path.join(self.tmp, f"state-snz-{type(self).n}")
+        os.makedirs(sd)
+        registry.register(sd, proj)
+        self.assertEqual(registry.project_kind(proj)[0], self.kind, self.m(q))
+        iid = self.create("snooze me", labels="human", cwd=proj)
+        self.ok(q, "update", iid, "--status", "in_progress", "--assignee", "agent-x", cwd=proj)
+        before = {k: self.shown(q, proj, iid).get(k) for k in ("status", "assignee")}
+        self.assertEqual(before, {"status": "in_progress", "assignee": "agent-x"}, self.m(q))
+        be = humanq.BACKENDS[self.kind]
+        until = (humanq.today() + timedelta(days=1)).isoformat()       # 戻る日は明日以降
+        rules = {"label add snoozed": 2}
+
+        def call(q, fn, *args, label_fails=False):
+            """fn を呼ぶ。label_fails なら label の段階の WriteError を確かめる。想定外の例外は FAIL (変異で漏れた例外を ERROR にしない)。"""
+            try:
+                got = fn(*args)
+            except humanq.WriteError as e:
+                self.assertTrue(label_fails, f"{self.m(q)}: 想定外の WriteError ({e.stage}): {e}")
+                self.assertEqual((e.stage, e.written), ("label", True), self.m(q))
+                return None
+            except AssertionError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                self.fail(f"{self.m(q)}: 想定外の例外 {type(e).__name__}: {e}")
+            self.assertFalse(label_fails, f"{self.m(q)}: ラベルの段階の失敗が上がらなかった")
+            return got
+
+        with mock.patch.object(humanq, self.kind, self.via_swap_point(rules)):
+            store = humanq.Store(sd)
+            call(q, store.snooze, proj, {"id": iid, "until": until, "note": "情報待ち"}, label_fails=True)
+            self.assertEqual(rules, {"label add snoozed": 0}, f"{self.m(q)}: ラベルの段階を 1 回だけ再試行していない")
+            want = [f"[humanq] 保留: {until} に戻る (qsig: {humanq.qsig(None)})\n\n情報待ち"]      # 問いの無いチケット
+            self.assertEqual(self.humanq_marks(q, proj, iid), want, self.m(q))
+            call(q, store.snooze, proj, {"id": iid, "until": until, "note": "情報待ち"})       # 送り直し
+            self.assertEqual(self.humanq_marks(q, proj, iid), want, f"{self.m(q)}: 送り直しでコメントが二重になった")
+            self.assertIn("snoozed", self.shown(q, proj, iid).get("labels") or [], self.m(q))
+            data = call(q, humanq.load_project, proj, be)
+            self.assertEqual([(i["id"], i["snooze"]["until"]) for i in data["snoozed"]], [(iid, until)], self.m(q))
+            self.assertEqual(data["human"], [], self.m(q))
+            rules["label remove snoozed"] = 2
+            call(q, store.unsnooze, proj, {"id": iid}, label_fails=True)
+            call(q, store.unsnooze, proj, {"id": iid})
+            self.assertEqual(self.humanq_marks(q, proj, iid), sorted(want + ["[humanq] 保留の解除"]),
+                             f"{self.m(q)}: 解除の送り直しでコメントが二重になった")
+            self.assertNotIn("snoozed", self.shown(q, proj, iid).get("labels") or [], self.m(q))
+            data = call(q, humanq.load_project, proj, be)
+            self.assertEqual(([i["id"] for i in data["human"]], data["snoozed"]), ([iid], []), self.m(q))
+        after = {k: self.shown(q, proj, iid).get(k) for k in ("status", "assignee")}
+        self.assertEqual(after, before, f"{self.m(q)}: 保留で status か担当が変わった")
+
+
 for _subject in SUBJECTS:
     _mixin = BdQuirks if _subject.endswith("bd") else BrQuirks
     _name = _mixin.__name__ + "_" + _subject.replace("-", "_")
-    globals()[_name] = type(_name, (_mixin, ContractBase), {"SUBJECT": _subject})
+    globals()[_name] = type(_name, (_mixin, SnoozeWrites, ContractBase), {"SUBJECT": _subject})
 del _subject, _mixin, _name
 
 

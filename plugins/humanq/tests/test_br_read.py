@@ -295,6 +295,43 @@ class BrRead(unittest.TestCase):
         self.assertEqual(self.run_hook(hook, "prompt_submit", root, "s-br"), "", "増えたものが無いのに知らせた")
         self.assertEqual({c["prog"] for c in self.calls() if c["cwd"] == root or root in c["argv"]}, {"br"})
 
+    def test_hook_counts_leave_out_snoozes_end_to_end(self):
+        # 保留を CLI で直接書いた形 (README の「回答の形」) でも、サーバーの読みから hook の件数まで通る。bd・br の両方
+        br = self.br_project()
+        bd = os.path.join(self.tmp, "bdp")
+        os.makedirs(bd)
+        ts.bdc(bd, "init", "--non-interactive", "--quiet", "--skip-agents", "--skip-hooks", "-p", "hq")
+        os.makedirs(os.path.join(bd, ".beads", "embeddeddolt"))
+
+        def bd_create(title: str, labels: str) -> str:
+            created = json.loads(ts.bdc(bd, "create", title, "-l", labels, "--json"))
+            self.assertIn("id", created)
+            return created["id"]
+
+        def bd_comment(iid: str, text: str) -> None:
+            ts.bdc(bd, "--actor", "user/humanq", "comments", "add", iid, "-f", self.file(text))
+
+        clis = {"br": (br, lambda t, labels: self.create(br, t, labels), lambda i, x: self.comment(br, i, x)),
+                "bd": (bd, bd_create, bd_comment)}
+        port = self.serve()
+        hook = self.load_hook(port)
+        q = ts.humanq.qsig(None)                           # 問いを書いていないチケットの問いの署名
+        for cli, (root, create, comment) in clis.items():
+            with self.subTest(cli=cli):
+                create("問い", "human")
+                comment(create("保留中", "human,snoozed"), f"[humanq] 保留: 2999-12-31 に戻る (qsig: {q})\n")
+                comment(create("期限なしの保留", "human,snoozed"), f"[humanq] 保留: 期限なし (qsig: {q})\n\nあとで\n")
+                comment(create("戻る日の来た保留", "human,snoozed"), f"[humanq] 保留: 2000-01-01 に戻る (qsig: {q})\n")
+                comment(create("問いが書き換わった保留", "human,snoozed"), f"[humanq] 保留: 期限なし (qsig: {'0' * 16})\n")
+                comment(create("戻る日を読めない保留", "human,snoozed"), f"[humanq] 保留: 2026-02-30 に戻る (qsig: {q})\n")
+                comment(create("問いの署名の無い保留", "human,snoozed"), "[humanq] 保留: 期限なし\n")
+                o = self.hook_out(self.run_hook(hook, "session_start", root, f"s-snz-{cli}"))
+                ctx = o["hookSpecificOutput"]["additionalContext"]
+                self.assertIn("今は判断待ち 5 件", ctx, "保留中 (2 件) を数えた / 戻った・読めない保留を除いた")
+                self.assertIn("ユーザーが保留にした判断待ち 2 件", ctx)
+                self.assertIn("保留から判断待ちに戻ったもの 2 件", ctx, "戻る日の来たもの・問いが書き換わったものを「戻った」に数えていない")
+                self.assertEqual(o.get("systemMessage"), f"humanq: 判断待ち 5 件 / 回答済み 0 件 → {hook.URL}")
+
     def test_hook_with_an_old_read_only_server_says_it_cannot_answer(self):
         # br を読みだけで返す古いサーバー (writable:false) が動いているときは、回答できないと伝える (bd の案内は出さない)
         root = self.br_project()

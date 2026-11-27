@@ -20,7 +20,8 @@
     `list --status` には知らない status を書けない (`Error: invalid status "x" (valid: ...)`、exit 1)
   - `human list --json` は 0 件で null を返す。`list --json` は 0 件で [] を返す
   - 知らない flag は `Error: unknown flag: <flag>` で exit 1 (`human list --label x` もこれ)
-  - metadata は object で返し、値が無ければ key を出さない (labels・description・notes も同じ)
+  - metadata は object で返し、値が無ければ key を出さない (labels・description・notes・assignee も同じ)。
+    担当は `update --assignee` (`-a`) で書ける
   - labels は名前の順で返す (付けた順ではない)
   - `comments --json` は古い順。要素は {id, issue_id, author, text, created_at}。id は UUID 文字列。
     `--actor X` が author に入る
@@ -42,7 +43,7 @@
     exit 4。close / delete を使わせる)。delete はチケットを tombstone にする (show では読める)
   - show --json は配列 (comments と agent_context を含み metadata は無い)。id が 1 つでも無ければ ISSUE_NOT_FOUND で exit 3。
     偽物は comments の key を 0 件でも出す (本物の 0.7.6 は 0 件のとき key を出さない。読む側は両方を受ける)
-  - update --notes で notes を書ける。description・notes は値のある issue にだけ list と show に出る
+  - update --notes で notes を、--assignee で担当を書ける。description・notes・assignee は値のある issue にだけ list と show に出る
   - comments の並びは決まっていない (偽物は新しいものを先頭で返す)。id は int
   - label add / remove の戻りは [{"status": added|removed|exists|not_found, ...}] で、どれも exit 0
   - update --agent-context は丸ごと置き換え。半分未満・空にする書き換えは --force が無いと非 0
@@ -260,7 +261,7 @@ class Project:
 
 def view(i: dict, counts: bool = False) -> dict:
     out = {k: i[k] for k in ("id", "title", "status", "priority", "issue_type", "created_at", "created_by", "updated_at")}
-    for k in ("description", "notes"):
+    for k in ("description", "notes", "assignee"):
         if i.get(k):
             out[k] = i[k]
     if i.get("metadata"):
@@ -336,11 +337,14 @@ def bd_create(p: Project, args: list[str], as_json: bool, actor: str) -> None:
 
 
 def bd_update(p: Project, args: list[str]) -> None:
-    opts, pos = take(args, {"--metadata": True, "--status": True, "-s": True, "--title": True})
+    opts, pos = take(args, {"--metadata": True, "--status": True, "-s": True, "--title": True, "--assignee": True, "-a": True})
     want(pos, 1, "update <id> [flags]")
     i = p.issue(pos[0], "resolving")
     if "--metadata" in opts:
         i["metadata"] = read_metadata(str(opts["--metadata"]))
+    assignee = opts.get("--assignee") or opts.get("-a")
+    if assignee is not None:                        # 本物は show・list・human list に assignee を出す (bd 1.3.4 で実測)
+        i["assignee"] = str(assignee)
     status = opts.get("--status") or opts.get("-s")
     if status is not None:
         if status not in valid_statuses(p.state):
@@ -689,7 +693,7 @@ def br_row(i: dict) -> dict:
     out = {"id": i["id"], "title": i["title"], "status": i["status"], "priority": i["priority"],
            "issue_type": i["issue_type"], "labels": sorted(i["labels"]), "created_at": i["created_at"],
            "updated_at": i["updated_at"]}
-    for k in ("description", "notes", "agent_context"):
+    for k in ("description", "notes", "agent_context", "assignee"):
         if i.get(k):
             out[k] = i[k]
     return out
@@ -733,7 +737,8 @@ def br_create(p: Project, args: list[str], as_json: bool, actor: str) -> None:
 
 
 def br_update(p: Project, args: list[str], as_json: bool) -> None:
-    opts, pos = br_take(args, {"--agent-context": True, "--force": False, "--status": True, "--title": True, "--notes": True})
+    opts, pos = br_take(args, {"--agent-context": True, "--force": False, "--status": True, "--title": True, "--notes": True,
+                               "--assignee": True})
     if len(pos) != 1:
         raise Usage("error: expected exactly one <ID>")
     i = br_issue(p, pos[0])
@@ -759,6 +764,8 @@ def br_update(p: Project, args: list[str], as_json: bool) -> None:
         i["title"] = br_one(opts, "--title") or ""
     if "--notes" in opts:
         i["notes"] = br_one(opts, "--notes") or ""
+    if "--assignee" in opts:                        # 本物は show・list に assignee を出す (br 0.7.6 で実測)
+        i["assignee"] = br_one(opts, "--assignee") or ""
     i["updated_at"] = br_time(True)
     p.save()
     if as_json:

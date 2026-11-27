@@ -3,7 +3,7 @@
 //   PLAYWRIGHT_PATH=<playwright の index.mjs> node tests/ui_test.mjs
 //
 // PLAYWRIGHT_PATH が無ければ `import("playwright")` を使う。サーバー (humanq.py) は OS が選んだ空きの
-// ポートと一時の state dir で起動し、/api/items・/api/answer・/api/undo は page.route の台本で返す
+// ポートと一時の state dir で起動し、/api/items・/api/answer・/api/undo・/api/snooze・/api/unsnooze は page.route の台本で返す
 // (遅延・失敗・データの変化を決定的に作るため。bd は要らない)。poll の setInterval は止めて、
 // ページの load() を直接呼んで進める。HUMANQ_SERVER_DIR で別の server/ を試せる。
 import test, { before, after } from "node:test";
@@ -115,8 +115,39 @@ class Script {
       this.moveToHuman(body);
       return { status: 200, body: { ok: true } };
     };
+    this.snoozes = [];
+    this.unsnoozes = [];
+    // 既定の保留の応答も、サーバーと同じく、問いの署名が違えば 409 changed、判断待ちに無ければ 400 gone
+    this.snoozeResult = body => {
+      const cur = (this.project(body.project) || { human: [] }).human.find(i => i.id === body.id);
+      if (!cur) return { status: 400, body: { error: "このチケットは判断待ちに無い", code: "gone", op: "snooze" } };
+      if (body.qsig !== undefined && body.qsig !== cur.qsig)
+        return { status: 409, body: { error: "問いが書き換わっている", code: "changed", op: "snooze" } };
+      this.moveToSnoozed(body);
+      return { status: 200, body: { ok: true } };
+    };
+    this.unsnoozeResult = body => {
+      const p = this.project(body.project) || { human: [], snoozed: [] };
+      if (!(p.snoozed || []).some(i => i.id === body.id) && !p.human.some(i => i.id === body.id))
+        return { status: 400, body: { error: "このチケットは判断待ちに無い", code: "gone", op: "unsnooze" } };
+      this.moveFromSnoozed(body);
+      return { status: 200, body: { ok: true } };
+    };
   }
   project(p) { return this.projects.find(x => x.path === p); }
+  // 判断待ちから保留中へ (サーバーの読みと同じく snooze {until, note, expired, changed} を付ける)
+  moveToSnoozed({ project, id, until, note }) {
+    const p = this.project(project);
+    const it = p.human.find(i => i.id === id);
+    p.human = p.human.filter(i => i.id !== id);
+    p.snoozed = [...(p.snoozed || []), { ...it, snooze: { until, note: (note || "").trim(), expired: false, changed: false } }];
+  }
+  moveFromSnoozed({ project, id }) {
+    const p = this.project(project);
+    const it = (p.snoozed || []).find(i => i.id === id);
+    p.snoozed = (p.snoozed || []).filter(i => i.id !== id);
+    if (it && !p.human.some(i => i.id === id)) p.human.push({ ...it, snooze: null });
+  }
   // 回答済みに移し、回答の署名を返す (サーバーと同じく、回答のたびに別の値)
   moveToAnswered({ project, id }) {
     const p = this.project(project);
@@ -130,8 +161,9 @@ class Script {
     p.answered = p.answered.filter(i => i.id !== id);
     p.human.push(item(id));
   }
-  snapshot() { return JSON.parse(JSON.stringify({ projects: this.projects })); }
-  // kind (items / answer / undo) の応答を release() するまで止める
+  // today (サーバーの今日) は、テストが入れたときだけ返す (返さないのは古いサーバーと同じ)
+  snapshot() { return JSON.parse(JSON.stringify({ projects: this.projects, ...(this.today !== undefined ? { today: this.today } : {}) })); }
+  // kind (items / answer / undo / snooze / unsnooze) の応答を release() するまで止める
   hold(kind) {
     let resolve;
     const p = new Promise(r => { resolve = r; });
@@ -175,6 +207,18 @@ async function withPage(script, fn, ctxOptions = {}, setup = null, b = browser) 
     if (script.gates.undo) await script.gates.undo;
     await reply(route, script.undoResult(body));
   });
+  await page.route("**/api/snooze", async route => {
+    const body = route.request().postDataJSON();
+    script.snoozes.push(body);
+    if (script.gates.snooze) await script.gates.snooze;
+    await reply(route, script.snoozeResult(body));
+  });
+  await page.route("**/api/unsnooze", async route => {
+    const body = route.request().postDataJSON();
+    script.unsnoozes.push(body);
+    if (script.gates.unsnooze) await script.gates.unsnooze;
+    await reply(route, script.unsnoozeResult(body));
+  });
   try {
     if (setup) await setup(page);
     await page.goto(baseUrl);
@@ -199,7 +243,7 @@ async function withPage(script, fn, ctxOptions = {}, setup = null, b = browser) 
   }
 }
 
-const ready = page => page.waitForFunction(() => /更新|保留/.test(document.getElementById("meta").textContent));
+const ready = page => page.waitForFunction(() => /更新/.test(document.getElementById("meta").textContent));
 const qcard = (page, id) => page.locator(`section.card:has(textarea):has(.id:text-is("${id}"))`);
 const acard = (page, id) => page.locator(`section.card:has(.ans):has(.id:text-is("${id}"))`);
 
@@ -229,7 +273,7 @@ async function press(page, locator, ms = 60) {
 // 古い要素が畳み終わって外れ、そのカードが 1 枚だけになるまで待つ
 const single = (page, id) => waitFor(async () => (await qcard(page, id).count()) === 1, 3000, `${id} のカードが 1 枚`);
 
-// B の選択肢を選び、補足欄に書いて保留にする (B の中身を s.projects[0].human[i] で変えて load すると、B は作り直されず保留になる)
+// B の選択肢を選び、補足欄に書く (B の中身を s.projects[0].human[i] で変えて load すると、B は作り直しを後回しにされる)
 async function typeInto(page, id, text = "memo") {
   await qcard(page, id).locator(".opt").first().click();
   const ta = qcard(page, id).locator("textarea");
@@ -790,8 +834,8 @@ test("送信中のカードは、データに居なくても居ても、書き�
 
 // ---- 0.1.5: 押している最中の描き直し・問いの署名・失敗の知らせ・下書き ---------------------------------------
 
-test("入力中に保留になったカードの下のカードを押している最中に、上のカードが作り直されても、click が消えない", async () => {
-  // B の補足欄に入力している間に B の背景が長くなって保留になる。入力欄からフォーカスが外れたとき B が作り直されて高くなり、
+test("入力中で作り直しを後回しにしているカードの下のカードを押している最中に、上のカードが作り直されても、click が消えない", async () => {
+  // B の補足欄に入力している間に B の背景が長くなって作り直しが後回しになる。入力欄からフォーカスが外れたとき B が作り直されて高くなり、
   // その下の C が押している最中に動くと、離した位置にボタンが無く click が消える (スクロールしていない背の高い画面)
   const s = new Script([proj(P1, [item("t-B2"), item("t-C3")])]);
   await withPage(s, async page => {
@@ -799,7 +843,7 @@ test("入力中に保留になったカードの下のカードを押してい�
     const b = s.projects[0].human[0];
     s.projects[0].human[0] = { ...changedQ(b), q: { ...changedQ(b).q, context: Array.from({ length: 8 }, (_, i) => `line${i + 1}`).join("\n") } };
     await page.evaluate(() => load());
-    assert.equal(await page.evaluate(() => staleCount), 1, "B が保留になっていない");
+    assert.equal(await page.evaluate(() => staleCount), 1, "B の作り直しが後回しになっていない");
     await qcard(page, "t-C3").locator(".opt").first().evaluate(e => e.click());     // C に選択を入れる (フォーカスは B の入力欄のまま)
     await press(page, qcard(page, "t-C3").locator("button.primary"));
     await waitFor(() => s.answers.length === 1, 3000, "C の回答の POST");
@@ -809,13 +853,13 @@ test("入力中に保留になったカードの下のカードを押してい�
   }, { viewport: { width: 1280, height: 1600 } });
 });
 
-test("保留中のカード (問い以外が変わっただけ) 自身の「回答する」を押している最中に作り直されず、click が届いて送られる", async () => {
+test("作り直しを後回しにしているカード (問い以外が変わっただけ) 自身の「回答する」を押している最中に作り直されず、click が届いて送られる", async () => {
   const s = new Script([proj(P1, [item("t-A1"), item("t-B2")])]);
   await withPage(s, async page => {
     await typeInto(page, "t-B2", "memo");
     s.projects[0].human[1].description = "NEW BODY";                         // 問いは変わらない
     await page.evaluate(() => load());
-    assert.equal(await page.evaluate(() => staleCount), 1, "B が保留になっていない");
+    assert.equal(await page.evaluate(() => staleCount), 1, "B の作り直しが後回しになっていない");
     await press(page, qcard(page, "t-B2").locator("button.primary"));
     await waitFor(() => s.answers.length === 1, 3000, "B の回答の POST");
     assert.equal(s.answers[0].id, "t-B2");
@@ -823,13 +867,13 @@ test("保留中のカード (問い以外が変わっただけ) 自身の「回�
   });
 });
 
-test("保留中のカード (問い以外が変わっただけ) の「回答する」へ Tab で移して Enter を押しても、作り直されずに送られる", async () => {
+test("作り直しを後回しにしているカード (問い以外が変わっただけ) の「回答する」へ Tab で移して Enter を押しても、作り直されずに送られる", async () => {
   const s = new Script([proj(P1, [item("t-A1"), item("t-B2")])]);
   await withPage(s, async page => {
     await typeInto(page, "t-B2", "memo");
     s.projects[0].human[1].description = "NEW BODY";
     await page.evaluate(() => load());
-    assert.equal(await page.evaluate(() => staleCount), 1, "B が保留になっていない");
+    assert.equal(await page.evaluate(() => staleCount), 1, "B の作り直しが後回しになっていない");
     await page.keyboard.press("Tab");                                         // 入力欄から同じカードの「回答する」へ
     await page.waitForTimeout(60);                                            // focusout の setTimeout 0 が走る (人が Enter を押すまでの間)
     await page.keyboard.press("Enter");
@@ -838,7 +882,7 @@ test("保留中のカード (問い以外が変わっただけ) の「回答す�
   });
 });
 
-test("入力中で保留のカードは、別のカードのボタンへフォーカスが移ると、読み込みを待たずに作り直される", async () => {
+test("入力中で作り直しを後回しにしているカードは、別のカードのボタンへフォーカスが移ると、読み込みを待たずに作り直される", async () => {
   const s = new Script([proj(P1, [item("t-A1"), item("t-B2")])]);
   await withPage(s, async page => {
     await typeInto(page, "t-B2", "abc");
@@ -872,7 +916,7 @@ test("問いが変わったのに古い表示のまま送った回答は書か�
   });
 });
 
-test("入力中で保留のカードの問いが変わっていたら、「回答する」は送らずに作り直して見直してもらう", async () => {
+test("入力中で作り直しを後回しにしているカードの問いが変わっていたら、「回答する」は送らずに作り直して見直してもらう", async () => {
   const s = new Script([proj(P1, [item("t-A1"), item("t-B2")])]);
   await withPage(s, async page => {
     await typeInto(page, "t-B2", "memo");
@@ -3062,7 +3106,7 @@ test("並び: 全体の表示でも、入力中のカードはデータが変わ
     assert.deepEqual(ids(await cardOrder(page)), ["t-B1", "t-B2", "t-A1"]);
     assert.ok(!/NEW BODY/.test(await qcard(page, "t-B2").textContent()), "入力中のカードが作り直された");
     assert.ok(await handle.evaluate(e => e.isConnected && e === document.activeElement && e.value === "abc"), "入力中の補足のフォーカスか値が失われた");
-    assert.match(await page.locator("#meta").innerText(), /入力中のカードの更新は保留/);
+    assert.match(await page.locator("#meta").innerText(), /入力中のカードの更新は後回し/);
     await page.locator("h1").click();                                    // フォーカスを外す
     await page.evaluate(() => load());
     await until(async () => /NEW BODY/.test(await qcard(page, "t-B2").textContent()), 3000, "離れたあとの読み込みで作り直される");
@@ -3262,3 +3306,389 @@ for (const scheme of ["light", "dark"]) {
     });
   });
 }
+
+// ---- 保留 (snooze) ------------------------------------------------------------------------------
+
+const scard = (page, id) => page.locator(`#main section.snzcard:has(.id:text-is("${id}"))`);
+const snzPanel = (page, id) => qcard(page, id).locator(".snzbox");
+const snzSection = page => page.locator("#main details.snz");
+const snzSummary = page => snzSection(page).locator("summary");
+const snoozedItem = (id, until = null, note = "", o = {}) => ({ ...item(id, o), snooze: { until, note, expired: false, changed: false } });
+const withSnoozed = (p, snoozed) => ({ ...p, snoozed });
+const DATE_LIKE = /^\d{4}-\d{2}-\d{2}$/;
+// ブラウザのローカルの日付で、今日から n 日後 (画面が数えるのと同じ暦)
+const localDay = (page, n) => page.evaluate(n => {
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}, n);
+// 通知 (Notification) を許可済みの偽物にして、出した通知を window.__notes に残す
+const fakeNotification = page => page.addInitScript(() => {
+  window.__notes = [];
+  window.Notification = class {
+    constructor(title, o) { window.__notes.push([title, o && o.body]); }
+    static get permission() { return "granted"; }
+    static requestPermission() { return Promise.resolve("granted"); }
+  };
+});
+const notes = page => page.evaluate(() => window.__notes);
+
+// 操作する前に、ちょうど 1 つあって見えていることを assert する (無い・隠れた要素を押す待ちの時間切れにしない)
+async function one(loc, what) {
+  assert.equal(await loc.count(), 1, `${what} がちょうど 1 つでない`);
+  assert.equal(await loc.isVisible(), true, `${what} が見えていない`);
+  return loc;
+}
+// カードの「保留」を押して欄を開く
+async function openSnooze(page, id) {
+  await (await one(qcard(page, id).locator("button.snz"), `${id} の「保留」`)).click();
+  assert.equal(await snzPanel(page, id).isVisible(), true, `${id} の保留の欄が開かない`);
+}
+// 欄で期間 (data-kind) か日付 (YYYY-MM-DD) を選び、補足を書いて「保留する」を押す
+async function snoozeIt(page, id, pick, note = "") {
+  await openSnooze(page, id);
+  const box = snzPanel(page, id);
+  if (DATE_LIKE.test(pick)) await (await one(box.locator('input[type="date"]'), "日付の入力")).fill(pick);
+  else await (await one(box.locator(`.snzopt[data-kind="${pick}"]`), `期間 ${pick} のボタン`)).click();
+  if (note) await (await one(box.locator("input.snznote"), "補足の入力")).fill(note);
+  const go = await one(box.locator("button.snzgo"), "「保留する」");
+  assert.equal(await go.isEnabled(), true, "選んだのに「保留する」が押せない");
+  await go.click();
+}
+// 保留中の節を開く (畳んである)
+async function openSnzSection(page) {
+  await (await one(snzSummary(page), "保留中の節の見出し")).click();
+  assert.equal(await snzSection(page).evaluate(d => d.open), true, "保留中の節が開かない");
+}
+
+test("保留: 「保留」は書き込める判断待ちのカードにだけ出る (回答済み・書き込めないプロジェクトには出ない)。押すと欄が開き、選ぶまで「保留する」は押せず、今日以前の日付も選べない (戻る日は明日以降)。「やめる」と Escape で閉じる", async () => {
+  const s = new Script([proj(P1, [item("t-A1")], [answeredItem("t-A9")]),
+    { ...withSnoozed(proj(P2, [item("t-B1")]), [snoozedItem("t-B8", "2999-12-31")]), cli: "br", writable: false }]);
+  await withPage(s, async page => {
+    await one(acard(page, "t-A9"), "回答済みのカード");
+    assert.equal(await acard(page, "t-A9").locator("button.snz").count(), 0, "回答済みのカードに「保留」がある");
+    const ro = await one(page.locator(`#main section.card:has(.id:text-is("t-B1"))`), "書き込めないプロジェクトのカード");
+    assert.equal(await ro.locator("button.snz").count(), 0, "書き込めないプロジェクトのカードに「保留」がある");
+    await openSnzSection(page);
+    await one(scard(page, "t-B8"), "書き込めないプロジェクトの保留中のカード");
+    assert.equal(await scard(page, "t-B8").getByRole("button", { name: "保留を解除" }).count(), 0, "書き込めないプロジェクトに「保留を解除」がある");
+    assert.equal(await scard(page, "t-B8").locator("p.ro").count(), 1, "書き込めない旨の 1 行が無い");
+    assert.equal(await snzPanel(page, "t-A1").count(), 1, "保留の欄がちょうど 1 つでない");
+    assert.equal(await snzPanel(page, "t-A1").isVisible(), false, "保留の欄が最初から開いている");
+    await openSnooze(page, "t-A1");
+    const box = snzPanel(page, "t-A1");
+    assert.equal(await qcard(page, "t-A1").locator("button.snz").getAttribute("aria-expanded"), "true");
+    assert.deepEqual(await box.locator(".snzopt").allInnerTexts(), ["明日", "3 日後", "1 週間後", "期限なし"]);
+    const go = await one(box.locator("button.snzgo"), "「保留する」");
+    assert.equal(await go.isEnabled(), false, "何も選ばずに「保留する」を押せる");
+    const d3 = await one(box.locator('.snzopt[data-kind="d3"]'), "期間 3 日後");
+    await d3.click();
+    assert.equal(await d3.getAttribute("aria-pressed"), "true");
+    assert.equal(await go.isEnabled(), true);
+    const dateIn = await one(box.locator('input[type="date"]'), "日付の入力");
+    assert.equal(await dateIn.getAttribute("min"), await localDay(page, 1), "日付の下限が明日でない");
+    await dateIn.fill(await localDay(page, -1));
+    assert.equal(await d3.getAttribute("aria-pressed"), "false", "日付を選んだのに期間の選びが残った");
+    assert.equal(await go.isEnabled(), false, "過去の日付で「保留する」を押せる");
+    await dateIn.fill(await localDay(page, 0));
+    assert.equal(await go.isEnabled(), false, "今日 (戻る日の当日から判断待ちなので保留にならない) で「保留する」を押せる");
+    await dateIn.fill(await localDay(page, 1));
+    assert.equal(await go.isEnabled(), true, "明日を選べない");
+    await dateIn.fill(await localDay(page, -1));
+    await (await one(box.locator(".snzcancel"), "「やめる」")).click();
+    assert.equal(await box.isVisible(), false, "「やめる」で閉じない");
+    await openSnooze(page, "t-A1");
+    await (await one(box.locator("input.snznote"), "補足の入力")).press("Escape");
+    assert.equal(await box.isVisible(), false, "Escape で閉じない");
+    assert.deepEqual(s.snoozes, [], "選ぶだけで送った");
+  });
+});
+
+test("保留: 明日・3 日後・1 週間後・期限なし・日付を選ぶは、判断待ちに戻る日 (今日から N 日後。today を返さない古いサーバーではブラウザのローカルの日付で数える) の until (期限なしは null) と補足と qsig を送る。カードは判断待ちから消え、ページの下の畳んだ「保留中 (N)」に戻る日の早い順で出る。ヘッダーの件数とタイトルには数えない", async () => {
+  const ids = ["t-A1", "t-A2", "t-A3", "t-A4", "t-A5"];
+  const s = new Script([proj(P1, [...ids.map(i => item(i)), item("t-B9")])]);
+  await withPage(s, async page => {
+    const plan = [["t-A1", "d1", "", 1], ["t-A2", "d3", "仕様の確認待ち", 3], ["t-A3", "d7", "", 7], ["t-A4", "none", "あとで", null],
+      ["t-A5", await localDay(page, 10), "", 10]];
+    assert.equal((await page.locator("#count").textContent()).trim(), "6 件");
+    for (const [id, pick, note] of plan) {
+      await snoozeIt(page, id, pick, note);
+      await until(async () => (await qcard(page, id).count()) === 0, 3000, `${id} が判断待ちから消える`);
+    }
+    const want = [];
+    for (const [id, , note, days] of plan) want.push({ project: P1, id, qsig: "sig-1", until: days === null ? null : await localDay(page, days), note });
+    assert.deepEqual(s.snoozes, want);
+    await until(async () => (await page.locator("#count").textContent()).trim() === "1 件", 3000, "ヘッダーの件数が保留を除いた 1 件");
+    assert.equal(await page.title(), "(1) 判断待ち");
+    await until(async () => (await scard(page, "t-A5").count()) === 1, 3000, "保留中に出る");
+    assert.equal(await snzSection(page).count(), 1, "保留中の節が 1 つでない");
+    assert.equal(await snzSection(page).evaluate(d => d.open), false, "保留中の節が開いている (既定は畳む)");
+    assert.equal(await snzSummary(page).innerText(), "保留中 (5)");
+    assert.equal(await scard(page, "t-A1").isVisible(), false, "畳んだ節の中のカードが見えている");
+    await openSnzSection(page);
+    assert.equal(await scard(page, "t-A1").isVisible(), true, "開いた節の中のカードが見えない");
+    assert.deepEqual(await snzSection(page).locator("section.snzcard .id").allInnerTexts(), ["t-A1", "t-A2", "t-A3", "t-A5", "t-A4"],
+      "期日の早い順 (期限なしは最後) でない");
+    assert.equal(await scard(page, "t-A1").locator(".snzinfo").innerText(), `保留: ${await localDay(page, 1)} に戻る (明日)`);
+    assert.equal(await scard(page, "t-A2").locator(".snzinfo").innerText(), `保留: ${await localDay(page, 3)} に戻る (あと 3 日)`);
+    assert.equal(await scard(page, "t-A2").locator(".snznotetext").innerText(), "補足: 仕様の確認待ち");
+    assert.equal(await scard(page, "t-A4").locator(".snzinfo").innerText(), "保留: 期限なし");
+    assert.equal(await scard(page, "t-A3").locator(".snznotetext").count(), 0, "補足が無いのに補足の行を出した");
+    assert.equal(await scard(page, "t-A1").locator("textarea, .opt, button.primary, button.snz").count(), 0, "保留中のカードに回答の部品がある");
+  });
+});
+
+test("保留: 成功のトーストの「解除」と保留中のカードの「保留を解除」は /api/unsnooze を {project,id} で送り、判断待ちに戻す。自分で戻したものは通知しない。戻る日が来て戻ったもの・問いが書き換わって戻ったもの (読み込みのデータ) は通知し、カードに戻った理由と補足を出す", async () => {
+  const s = new Script([withSnoozed(proj(P1, [item("t-A1")]), [snoozedItem("t-S1", "2999-12-31"), snoozedItem("t-S2", "2999-12-30", "見積もり待ち")])]);
+  await withPage(s, async page => {
+    await snoozeIt(page, "t-A1", "none");
+    const act = okToasts(page).getByRole("button", { name: "解除" });
+    await until(async () => (await act.count()) === 1, 3000, "保留の成功のトーストに「解除」が出る");
+    assert.match(await okToasts(page).first().innerText(), /「title t-A1」を保留しました \(期限なし\)/);
+    await until(async () => (await scard(page, "t-A1").count()) === 1, 3000, "保留中に出る");
+    assert.equal((await page.locator("#count").textContent()).trim(), "0 件");
+    await (await one(act, "トーストの「解除」")).click();
+    await until(async () => (await qcard(page, "t-A1").count()) === 1, 3000, "トーストの「解除」で判断待ちに戻る");
+    assert.deepEqual(s.unsnoozes, [{ project: P1, id: "t-A1" }]);
+    await openSnzSection(page);
+    await (await one(scard(page, "t-S1").getByRole("button", { name: "保留を解除" }), "t-S1 の「保留を解除」")).click();
+    await until(async () => (await qcard(page, "t-S1").count()) === 1, 3000, "「保留を解除」で判断待ちに戻る");
+    assert.deepEqual(s.unsnoozes, [{ project: P1, id: "t-A1" }, { project: P1, id: "t-S1" }]);
+    await until(async () => (await okToasts(page).filter({ hasText: "「title t-S1」の保留を解除しました" }).count()) === 1, 3000, "解除の知らせ");
+    assert.equal(await page.evaluate(() => load()), true);
+    assert.deepEqual(await notes(page), [], "自分で保留・解除したものを通知した");
+    assert.equal(await qcard(page, "t-A1").locator(".snzback").count(), 0, "解除で戻したカードに期日の旨を出した");
+    // 戻る日の来た t-S2 と、問いが書き換わった t-S3 は、サーバーの読みで判断待ちに戻る (snooze.expired / snooze.changed)
+    const p = s.projects[0];
+    p.snoozed = p.snoozed.filter(i => i.id !== "t-S2");
+    p.human.push({ ...item("t-S2"), snooze: { until: "2026-11-01", note: "見積もり待ち", expired: true, changed: false } });
+    p.human.push({ ...item("t-S3"), snooze: { until: "2999-12-31", note: "", expired: false, changed: true } });
+    assert.equal(await page.evaluate(() => load()), true);
+    await until(async () => (await qcard(page, "t-S2").count()) === 1 && (await qcard(page, "t-S3").count()) === 1, 3000,
+      "保留から戻ったものが判断待ちに出る");
+    assert.deepEqual(await notes(page), [["判断待ちが増えました", "2 件"]]);
+    assert.equal(await (await one(qcard(page, "t-S2").locator(".snzback"), "戻る日が来た旨")).innerText(),
+      "保留の戻る日 (2026-11-01) が来たので、判断待ちに戻りました。補足: 見積もり待ち");
+    assert.equal(await (await one(qcard(page, "t-S3").locator(".snzback"), "問いが書き換わった旨")).innerText(),
+      "保留の後に問いが書き換わったので、判断待ちに戻りました");
+    await until(async () => (await snzSection(page).count()) === 0, 3000, "保留中が無くなれば節ごと外れる");
+    assert.equal((await page.locator("#count").textContent()).trim(), "4 件");
+    // 戻った旨は、データの snooze が消えれば (ほかで解除された) カードから消える
+    p.human = p.human.map(i => (i.id === "t-S2" ? { ...i, snooze: null } : i));
+    assert.equal(await page.evaluate(() => load()), true);
+    await until(async () => (await qcard(page, "t-S2").locator(".snzback").count()) === 0, 3000, "snooze の消えたカードが作り直される");
+  }, {}, fakeNotification);
+});
+
+test("保留: サーバーの入れ替え直後に、戻る日を読み残した保留 (snooze: null) が判断待ちに出ても「判断待ちが増えました」を出さない", async () => {
+  const s = new Script([withSnoozed(proj(P1, [item("t-A1")]), [snoozedItem("t-S1", "2999-12-31", "", { labels: ["human", "snoozed"] }), snoozedItem("t-S2", null, "", { labels: ["human", "snoozed"] })])]);
+  await withPage(s, async page => {
+    assert.equal(await page.evaluate(() => load()), true);
+    const p = s.projects[0];
+    p.human.push(...p.snoozed.map(i => ({ ...i, snooze: null })));
+    p.snoozed = [];
+    assert.equal(await page.evaluate(() => load()), true);
+    assert.deepEqual(await notes(page), [], "サーバーの入れ替えだけで「判断待ちが増えました」を出した");
+  }, {}, fakeNotification);
+});
+
+test("保留: 「保留する」を続けて 2 回押しても、「保留を解除」を 2 回押しても、トーストの「解除」と保留中のカードの「保留を解除」を重ねて押しても、送るのは 1 回", async () => {
+  const s = new Script([withSnoozed(proj(P1, [item("t-A1"), item("t-B2")]), [snoozedItem("t-S1", "2999-12-31")])]);
+  await withPage(s, async page => {
+    const release = s.hold("snooze");
+    await openSnooze(page, "t-A1");
+    await (await one(snzPanel(page, "t-A1").locator('.snzopt[data-kind="d1"]'), "期間 明日まで")).click();
+    const go = await one(snzPanel(page, "t-A1").locator("button.snzgo"), "「保留する」");
+    await go.evaluate(b => { b.click(); b.click(); });
+    await page.waitForTimeout(100);
+    release();
+    await until(async () => (await scard(page, "t-A1").count()) === 1, 3000, "保留中に出る");
+    assert.equal(s.snoozes.length, 1, "2 回押しで 2 回送った");
+    const releaseU = s.hold("unsnooze");
+    await openSnzSection(page);
+    await (await one(scard(page, "t-S1").getByRole("button", { name: "保留を解除" }), "t-S1 の「保留を解除」")).evaluate(x => { x.click(); x.click(); });
+    const act = await one(okToasts(page).getByRole("button", { name: "解除" }), "トーストの「解除」");
+    const onCard = await (await one(scard(page, "t-A1").getByRole("button", { name: "保留を解除" }), "t-A1 の「保留を解除」")).elementHandle();
+    await act.click();
+    await onCard.evaluate(x => x.click());       // 押した後に外れていく (畳む) 要素でも、押せば送りかける
+    await page.waitForTimeout(100);
+    releaseU();
+    await until(async () => (await qcard(page, "t-S1").count()) === 1 && (await qcard(page, "t-A1").count()) === 1, 3000, "判断待ちに戻る");
+    assert.deepEqual(s.unsnoozes.map(b => b.id).sort(), ["t-A1", "t-S1"], "解除を重ねて押して 2 回以上送った");
+  });
+});
+
+test("保留: 書けなかった失敗 (502) ではカードが戻って .failed が付き、欄の選択と補足が残る。ラベルだけ失敗 (記録済み) なら「保留は記録済み」と知らせ、判断待ちに残っていればカードを戻し、保留中に居ればそこに出す (回答の下書きは残す)。gone は「もう判断待ちにありませんでした」と知らせて今の状態を出す", async () => {
+  const s = new Script([proj(P1, [item("t-A1"), item("t-A2"), item("t-A3"), item("t-A4"), item("t-B9")])]);
+  s.snoozeResult = body => {
+    if (body.id === "t-A1") return { status: 502, body: { error: "bd boom", stage: "comment", written: false, op: "snooze" } };
+    // ラベルが付かなかった (サーバーはラベルで保留中と読むので、判断待ちに残る)
+    if (body.id === "t-A2") return { status: 502, body: { error: "label boom", stage: "label", written: true, op: "snooze" } };
+    // 応答は失敗だが、保留中に居る (ラベルは付いた)
+    if (body.id === "t-A4") { s.moveToSnoozed(body); return { status: 502, body: { error: "label boom", stage: "label", written: true, op: "snooze" } }; }
+    s.moveToAnswered(body);
+    return { status: 400, body: { error: "このチケットは判断待ちに無い", code: "gone", op: "snooze" } };
+  };
+  await withPage(s, async page => {
+    await snoozeIt(page, "t-A1", "d3", "keep me");
+    await until(async () => (await page.locator("section.card.failed").count()) === 1, 3000, "カードが戻る");
+    await one(qcard(page, "t-A1"), "戻った t-A1");
+    assert.equal(await snzPanel(page, "t-A1").isVisible(), true, "戻ったカードの保留の欄が閉じた");
+    assert.equal(await snzPanel(page, "t-A1").locator("input.snznote").inputValue(), "keep me");
+    assert.equal(await snzPanel(page, "t-A1").locator('.snzopt[data-kind="d3"]').getAttribute("aria-pressed"), "true");
+    await snoozeIt(page, "t-A2", "d1");
+    await until(async () => (await failToast(page).filter({ hasText: "保留は記録済みですが、ラベルの付け替えだけ失敗しました" }).count()) === 1,
+      3000, "判断待ちに残ったときの「保留は記録済み」の知らせ");
+    await until(async () => (await page.locator(`section.card.failed:has(.id:text-is("t-A2"))`).count()) === 1, 3000, "t-A2 のカードが戻る");
+    await (await one(qcard(page, "t-A4").locator("textarea"), "t-A4 の補足欄")).fill("下書き A4");
+    await snoozeIt(page, "t-A4", "d1");
+    await until(async () => (await failToast(page).filter({ hasText: "保留は記録済みです (ラベルの付け替えだけ失敗)。保留中の一覧を確認してください" }).count()) === 1,
+      3000, "保留中に居たときの「保留は記録済み」の知らせ");
+    await until(async () => (await scard(page, "t-A4").count()) === 1, 3000, "保留中に出る");
+    await until(async () => (await qcard(page, "t-A4").count()) === 0, 3000, "判断待ちには戻さない (畳み終わって消える)");
+    s.moveFromSnoozed({ project: P1, id: "t-A4" });                 // ほかのタブで解除された
+    assert.equal(await page.evaluate(() => load()), true);
+    await until(async () => (await qcard(page, "t-A4").count()) === 1, 3000, "判断待ちに戻る");
+    assert.equal(await qcard(page, "t-A4").locator("textarea").inputValue(), "下書き A4", "保留の失敗で回答の下書きを消した");
+    await snoozeIt(page, "t-A3", "none");
+    await until(async () => (await failToast(page).filter({ hasText: "もう判断待ちにありませんでした" }).count()) === 1, 3000, "gone の知らせ");
+    await until(async () => (await acard(page, "t-A3").count()) === 1 && (await qcard(page, "t-A3").count()) === 0, 3000, "今の状態 (回答済み) を出す");
+  });
+});
+
+test("保留: 絞り込みの「保留中: 含めない」で保留中の節ごと出さず (URL に snoozed=hide)、戻せば出る。検索は保留中のカードにも効く。保留中が無ければ選択肢を出さない", async () => {
+  const s = new Script([withSnoozed(proj(P1, [item("t-A1")]), [snoozedItem("t-S1", "2999-12-31"), snoozedItem("t-S2")])]);
+  await withPage(s, async page => {
+    const fld = page.locator("label.fld:has(#fsnoozed)");
+    await one(fld, "「保留中」の選択肢");
+    assert.equal(await snzSummary(page).innerText(), "保留中 (2)");
+    await page.selectOption("#fsnoozed", "hide");
+    await until(async () => (await snzSection(page).count()) === 0, 3000, "保留中の節が消える");
+    assert.match(page.url(), /[?&]snoozed=hide(&|$)/);
+    assert.equal(await qcard(page, "t-A1").count(), 1, "判断待ちまで隠した");
+    await page.selectOption("#fsnoozed", "");
+    await until(async () => (await snzSection(page).count()) === 1, 3000, "保留中の節が戻る");
+    assert.doesNotMatch(page.url(), /snoozed=/);
+    await (await one(page.locator("#fq"), "検索欄")).fill("t-S2");
+    await until(async () => (await snzSummary(page).innerText()) === "保留中 (1)", 3000, "検索が保留中に効く");
+    assert.deepEqual([await scard(page, "t-S2").count(), await scard(page, "t-S1").count()], [1, 0]);
+    await page.locator("#fq").fill("");
+    s.projects[0].snoozed = [];
+    assert.equal(await page.evaluate(() => load()), true);
+    await until(async () => (await snzSection(page).count()) === 0, 3000, "保留中の節が消える");
+    assert.equal(await fld.isVisible(), false, "保留中が無いのに「保留中」の選択肢が出ている");
+  });
+});
+
+test("保留: 全体を優先度順の表示でも、保留中はページの最後の 1 つの節に出て、どちらの表示でも head にプロジェクトの名前が出る", async () => {
+  const s = new Script([withSnoozed(proj(P1, [item("t-A1")]), [snoozedItem("t-S1", "2999-12-31")]),
+    withSnoozed(proj(P2, [item("t-B1")]), [snoozedItem("t-S2", "2999-12-30")])]);
+  const shown = page => snzSection(page).locator("section.snzcard").evaluateAll(cs => cs.map(c => {
+    const pj = c.querySelector(".head .pj");
+    return [c.querySelector(".id").textContent, pj && pj.offsetWidth > 0 ? pj.textContent : null];
+  }));
+  await withPage(s, async page => {
+    await one(snzSection(page), "保留中の節");
+    await openSnzSection(page);
+    assert.deepEqual(await shown(page), [["t-S2", "beta"], ["t-S1", "alpha"]], "プロジェクトごとの表示");
+    await setView(page, "prio");
+    await until(async () => (await snzSection(page).count()) === 1, 2000, "全体の表示で保留中の節が 1 つ");
+    assert.deepEqual(await shown(page), [["t-S2", "beta"], ["t-S1", "alpha"]], "全体の表示");
+    assert.equal(await page.evaluate(() => document.getElementById("main").lastElementChild.matches("details.snz")), true, "節がページの最後に無い");
+  });
+});
+
+test("保留: snoozed の key を返さない古いサーバーでも出て、snoozed が配列でない・要素が壊れているデータは使わない。保留の情報の形が崩れていても、読める値だけで出す", async () => {
+  const s = new Script([withSnoozed(proj(P1, [item("t-A1")]), [snoozedItem("t-S1", "2999-12-31", "メモ")])]);
+  await withPage(s, async page => {
+    assert.equal(await snzSummary(page).innerText(), "保留中 (1)");
+    for (const bad of ["x", { a: 1 }, 5, true, [{ id: 5 }], [null], [{ ...item("t-S9"), q: "not an object" }]]) {
+      s.queue.push({ projects: [{ ...s.snapshot().projects[0], snoozed: bad }] });
+      assert.equal(await page.evaluate(() => load()), false, `snoozed=${JSON.stringify(bad)} を読めたことにした`);
+      assert.equal(await snzSummary(page).innerText(), "保留中 (1)", "使わないデータで保留中を書き換えた");
+      if (bad === "x") assert.equal(await failToast(page).filter({ hasText: "想定外のデータ (プロジェクトの形)" }).count(), 1,
+        "配列でない snoozed を、プロジェクトの形の誤りとして知らせていない");
+    }
+    s.queue.push({ projects: [proj(P1, [item("t-A1")])] });             // 古いサーバー: snoozed の key が無い
+    assert.equal(await page.evaluate(() => load()), true);
+    await until(async () => (await snzSection(page).count()) === 0, 3000, "保留中の無いデータで節が外れる");
+    await one(qcard(page, "t-A1"), "t-A1");
+    s.queue.push({ projects: [{ ...proj(P1, [{ ...item("t-A1"), snooze: { until: "2026-01-01", note: "x", expired: "yes", changed: 1 } }]),
+      snoozed: [{ ...item("t-S1"), snooze: { until: 5, note: ["x"] } }, { ...item("t-S2"), snooze: "garbage" },
+        { ...item("t-S3"), snooze: { until: "2999-12-31", note: "a\u0000b" } }] }] });
+    assert.equal(await page.evaluate(() => load()), true);
+    await until(async () => (await snzSection(page).count()) === 1, 3000, "保留中の節が出る");
+    await openSnzSection(page);
+    assert.equal(await scard(page, "t-S1").locator(".snzinfo").innerText(), "保留: 期限なし", "読めない期日を期限なしとして出さない");
+    assert.equal(await scard(page, "t-S1").locator(".snznotetext").count(), 0, "文字列でない補足を出した");
+    assert.equal(await scard(page, "t-S2").locator(".snzinfo").innerText(), "保留: 期限なし");
+    assert.equal(await scard(page, "t-S3").locator(".snznotetext").textContent(), "補足: a\u0000b");
+    assert.equal(await qcard(page, "t-A1").locator(".snzback").count(), 0, "expired・changed が true でないのに戻った旨を出した");
+  });
+});
+
+test("保留: 保留中が無くなると節ごと外れ、次に保留したときは畳んだ節で出直す (前に開いていても)", async () => {
+  const s = new Script([withSnoozed(proj(P1, [item("t-A1")]), [snoozedItem("t-S1", "2999-12-31")])]);
+  await withPage(s, async page => {
+    await openSnzSection(page);
+    await (await one(scard(page, "t-S1").getByRole("button", { name: "保留を解除" }), "t-S1 の「保留を解除」")).click();
+    await until(async () => (await snzSection(page).count()) === 0, 3000, "保留中が無くなれば節ごと外れる");
+    await snoozeIt(page, "t-A1", "none");
+    await until(async () => (await scard(page, "t-A1").count()) === 1, 3000, "保留中に出る");
+    await one(snzSection(page), "保留中の節");
+    assert.equal(await snzSection(page).evaluate(d => d.open), false, "出直した節が開いている (前の節を使い回した)");
+  });
+});
+
+test("保留: 判断待ちの最後のカードに答えたとき、フォーカスは畳んだ保留中の節の中のカードではなく、前のカードへ移る", async () => {
+  const s = new Script([withSnoozed(proj(P1, [item("t-A0"), item("t-A1")]), [snoozedItem("t-S1", "2999-12-31")])]);
+  await withPage(s, async page => {
+    await one(qcard(page, "t-A1"), "t-A1");
+    await answerFirst(page, "t-A1");
+    await until(async () => (await focusedCard(page)) === "t-A0", 3000, "フォーカスが前のカード (t-A0) へ移る");
+  });
+});
+
+test("保留: 期間の選択・日付の下限・残りの日数は、ブラウザの TZ ではなくサーバーの今日 (/api/items の today) で数える。today の形が崩れていればブラウザの日付で数える", async () => {
+  const s = new Script([withSnoozed(proj(P1, [item("t-A1"), item("t-A2")]), [snoozedItem("t-S1", "2031-02-02")])]);
+  s.today = "2031-01-30";                            // ブラウザの今日 (テストを流す日) と違う日
+  await withPage(s, async page => {
+    assert.notEqual(await localDay(page, 0), s.today, "前提: ブラウザの今日がサーバーの今日と違う");
+    await openSnzSection(page);
+    assert.equal(await scard(page, "t-S1").locator(".snzinfo").innerText(), "保留: 2031-02-02 に戻る (あと 3 日)");
+    await openSnooze(page, "t-A1");
+    const dateIn = await one(snzPanel(page, "t-A1").locator('input[type="date"]'), "日付の入力");
+    assert.equal(await dateIn.getAttribute("min"), "2031-01-31", "日付の下限がサーバーの明日でない");
+    await dateIn.fill("2031-01-30");
+    assert.equal(await snzPanel(page, "t-A1").locator("button.snzgo").isEnabled(), false, "サーバーの今日を選べる");
+    await (await one(snzPanel(page, "t-A1").locator(".snzcancel"), "「やめる」")).click();
+    await snoozeIt(page, "t-A1", "d1");
+    await until(async () => (await okToasts(page).filter({ hasText: "「title t-A1」を保留しました (2031-01-31 に戻る)" }).count()) === 1,
+      3000, "保留の知らせに戻る日が出る");
+    await snoozeIt(page, "t-A2", "d7");
+    assert.deepEqual(s.snoozes.map(b => b.until), ["2031-01-31", "2031-02-06"], "期間をサーバーの今日から数えていない (月をまたぐ)");
+    s.today = "2031-02-30";                          // 形は合うが日付でない: 使わない
+    assert.equal(await page.evaluate(() => load()), true);
+    assert.match(await scard(page, "t-A2").locator(".snzinfo").innerText(), /^保留: 2031-02-06 に戻る \(あと \d+ 日\)$/);
+    assert.notEqual(await scard(page, "t-A2").locator(".snzinfo").innerText(), "保留: 2031-02-06 に戻る (あと 7 日)",
+      "日付でない today で数えた");
+  });
+});
+
+test("保留: snoozed のラベルは、カードの head のラベルの印にも「ラベル」の絞り込みにも出さない (保留中の節と「保留中」の絞り込みで出す)", async () => {
+  const back = { ...item("t-A1", { labels: ["snoozed", "area:ui"] }), snooze: { until: "2026-11-01", note: "", expired: true, changed: false } };
+  const s = new Script([{ ...withSnoozed(proj(P1, [back], [answeredItem("t-A9")]), [snoozedItem("t-S1", "2999-12-31", "", { labels: ["snoozed", "x:y"] })]) }]);
+  s.projects[0].answered[0].labels = ["snoozed", "answered"];
+  await withPage(s, async page => {
+    const spans = card => card.locator(".head > span:not(.prio):not(.id)").allInnerTexts();
+    const qs = await spans(await one(qcard(page, "t-A1"), "戻ったカード"));
+    assert.equal(qs.length, 2, qs);
+    assert.equal(qs[1], "area:ui", "戻ったカードに snoozed の印を出した");
+    assert.equal((await spans(await one(acard(page, "t-A9"), "回答済みのカード"))).length, 1, "回答済みのカードに snoozed の印を出した");
+    await openSnzSection(page);
+    const ss = await spans(await one(scard(page, "t-S1"), "保留中のカード"));
+    assert.equal(ss.length, 2, ss);
+    assert.equal(ss[1], "x:y", "保留中のカードに snoozed の印を出した");
+    assert.deepEqual(await page.locator("#flabel option").allInnerTexts(), ["すべてのラベル", "area:ui", "x:y"], "「ラベル」の絞り込みに snoozed を出した");
+  });
+});
