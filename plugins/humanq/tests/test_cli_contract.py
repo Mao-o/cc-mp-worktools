@@ -341,14 +341,13 @@ class BdQuirks:
 
     def test_comments_add_with_json_returns_the_written_comment(self):
         """humanq は bd の comments add に --json を付けない (add_comment も付けない)。付けると本物は JSON を返す。
-        偽物の戻りが 1 行の案内文だった食い違いを、ここで固定する。戻りの形は comments の要素と同じコメント 1 件
-        (1 件の配列で返す版にも備える)。"""
+        偽物の戻りが 1 行の案内文だった食い違いを、ここで固定する。戻りは書いたコメント 1 件の object
+        (bd 1.3.4 で実測。要素の key に schema_version が加わる。偽物は出さない)。"""
         q = "comments add -f --json が JSON を返す"
         iid = self.create("x")
         out = self.jok(q, "--actor", "user/humanq", "comments", "add", iid, "-f", self.write_file("answer\n"))
-        item = out[0] if isinstance(out, list) and len(out) == 1 else out
-        self.assertIsInstance(item, dict, self.m(q))
-        self.assertEqual((item.get("author"), item.get("text")), ("user/humanq", "answer\n"), self.m(q))
+        self.assertIsInstance(out, dict, self.m(q))
+        self.assertEqual((out.get("author"), out.get("text")), ("user/humanq", "answer\n"), self.m(q))
         self.assertEqual([c.get("text") for c in self.comment_rows(q, iid)], ["answer\n"], self.m(q))
 
     def test_backend_comments_follow_written_order(self):
@@ -596,6 +595,11 @@ class BrQuirks:
         self.assertEqual(last(), [a], f"{self.m(q)}: update の後")
         self.ok(q, "label", "add", b, "x", cwd=proj)
         self.assertEqual(last(), [b], f"{self.m(q)}: label add の後")
+        self.ok(q, "delete", a, "--force", cwd=proj)                         # 最後に触ったのでないチケットの delete は記録を変えない
+        self.assertEqual(last(), [b], f"{self.m(q)}: ほかのチケットの delete の後")
+        self.ok(q, "delete", b, "--force", cwd=proj)                         # 最後に触ったチケットを delete すると記録が消える
+        p = self.run_cli("show", "--json", cwd=proj)
+        self.assertEqual(p.returncode, 4, f"{self.m(q)}: 最後に触ったチケットの delete の後 rc={p.returncode} {p.stdout[:200]!r}")
 
     def test_label_add_and_remove_take_several_labels(self):
         q = "label add / remove は label を何個でも取る"
@@ -785,7 +789,8 @@ class BrQuirks:
     # ---- 偽物が断る形は、本物も断る ---------------------------------------------------------------------
 
     # 偽の br (tests/fake_beads.py) が usage エラー・VALIDATION・ISSUE_NOT_FOUND などで断る形。偽物が断るのに本物は通す
-    # 形があると、偽物の上で緑のテストが本物では別の経路に入る。{id} は専用のプロジェクトのチケット、{nofile} は無いファイル。
+    # 形があると、偽物の上で緑のテストが本物では別の経路に入る。{id} は専用のプロジェクトのチケット、{nofile} は無いファイル、
+    # {file} は在るファイル (id 無しの形は、ファイルが無いことでも断られるので、在るファイルで試す)。
     # 後ろに --json を付けて試す (--reason・--notes・--description は --json を値に取るので、値の無い形は付けずに試す:
     # REFUSED_AS_LAST_WORD)。偽物の方が厳しい形 (偽物は断るが本物 0.7.6 は通す) は、この表ではなく ACCEPTED に入れ、
     # 偽物を直して揃える。偽物が断る分岐 (`raise Usage(`) の全部を、この 2 つの表の形のどれかが踏むことは
@@ -812,6 +817,7 @@ class BrQuirks:
         "close の無い id": ["close", "zz-999"],
         "delete に id 無し": ["delete"],
         "delete の無い id": ["delete", "zz-999"],
+        "delete --reason に値無し (後ろの --json を値に取らない)": ["delete", "{id}", "--reason"],
         "list に位置引数": ["list", "x"],
         "list の知らない flag": ["list", "--nope"],
         "list -s に値無し": ["list", "-s"],
@@ -823,7 +829,7 @@ class BrQuirks:
         "label add の無い id": ["label", "add", "zz-999", "a"],
         "comments add -f の無いファイル": ["comments", "add", "{id}", "-f", "{nofile}"],
         "comments add -f に値無し": ["comments", "add", "{id}", "-f"],
-        "comments add -f に id 無し": ["comments", "add", "-f", "{nofile}"],
+        "comments add -f に id 無し": ["comments", "add", "-f", "{file}"],
         "comments add の無い id": ["comments", "add", "zz-999", "t"],
         "comments add に id 無し": ["comments", "add"],
         "comments add に本文無し": ["comments", "add", "{id}"],
@@ -857,13 +863,14 @@ class BrQuirks:
         proj = self.fresh_project()
         iid = self.create("x", cwd=proj)
         nofile = os.path.join(self.tmp, "no-such-file.txt")
+        body = self.write_file("x\n")
         for name, form in self.REFUSED.items():
-            argv = [a.format(id=iid, nofile=nofile) for a in form]
+            argv = [a.format(id=iid, nofile=nofile, file=body) for a in form]
             with self.subTest(form=name):
                 p = self.run_cli(*argv, "--json", cwd=proj)
                 self.assertNotEqual(p.returncode, 0, f"{self.m(q)}: 「{name}」 {argv} が通った: {p.stdout[:200]!r}")
         for name, form in self.REFUSED_AS_LAST_WORD.items():
-            argv = [a.format(id=iid, nofile=nofile) for a in form]
+            argv = [a.format(id=iid, nofile=nofile, file=body) for a in form]
             with self.subTest(form=name, last_word=True):
                 p = self.run_cli(*argv, cwd=proj)
                 self.assertNotEqual(p.returncode, 0, f"{self.m(q)}: 「{name}」 {argv} (後ろに何も付けない) が通った: {p.stdout[:200]!r}")
@@ -1129,6 +1136,9 @@ class FakeBrUsageBranches(unittest.TestCase):
     """偽の br (tests/fake_beads.py) の usage エラーの分岐 (`raise Usage(` と `raise br_usage_unexpected(`) の全部を、
     BrQuirks.REFUSED の形のどれかが踏むこと。分岐を足したのに REFUSED へ形を足し忘れると、その分岐は本物の br と
     突き合わされないまま、偽物だけが断る形になる (本物は通す形が 4 つ見つかったのはこの型の漏れ)。
+    数えるのは、ソースの `raise Usage(` と `raise br_usage_unexpected(` の字面だけ。別名を介した raise (`_U = Usage` の
+    後の `raise _U(...)` など) と、usage でない断り (`raise Fail(`・`raise br_validation(`・`raise br_json_error(`) は
+    対象外 (そちらの追従漏れはこのテストでは気づけない)。
     偽物を進程内で動かし、断りが上がった raise の行を集めて、ソースの分岐の行 (ast) と比べる。REFUSED は後ろに --json を付けて、
     REFUSED_AS_LAST_WORD は何も付けずに流す (test_every_form_the_fake_refuses_is_refused_by_the_real_one と同じ)。"""
 
@@ -1190,9 +1200,11 @@ class FakeBrUsageBranches(unittest.TestCase):
             self.assertEqual(len(ids), 1)
             reached: set[int] = set()
             nofile = os.path.join(tmp, "no-such-file.txt")
+            body = os.path.join(tmp, "body.txt")
+            Path(body).write_text("x\n", encoding="utf-8")
             for table, suffix in ((BrQuirks.REFUSED, ["--json"]), (BrQuirks.REFUSED_AS_LAST_WORD, [])):
                 for name, form in table.items():
-                    argv = [a.format(id=ids[0], nofile=nofile) for a in form]
+                    argv = [a.format(id=ids[0], nofile=nofile, file=body) for a in form]
                     reached |= self.raised_lines(fb, [*argv, *suffix])
         missing = {line: src for line, src in branches.items() if line not in reached}
         self.assertEqual(missing, {}, "偽の br の usage エラーの分岐のうち、REFUSED のどの形も踏まないもの (行: 文)。"

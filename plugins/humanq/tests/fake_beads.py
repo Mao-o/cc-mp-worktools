@@ -24,8 +24,8 @@
     担当は `update --assignee` (`-a`) で書ける
   - labels は名前の順で返す (付けた順ではない)
   - `comments --json` は古い順。要素は {id, issue_id, author, text, created_at}。id は UUID 文字列。
-    `--actor X` が author に入る。`comments add <id> -f <file> --json` は書いたコメントを同じ形の JSON で返す
-    (--json が無ければ 1 行の案内文。この JSON の形は本物の bd で測っていない: 要素と同じと仮定した)
+    `--actor X` が author に入る。`comments add <id> -f <file> --json` は書いたコメントを 1 件の object で返す
+    (--json が無ければ 1 行の案内文。本物の bd 1.3.4 は要素の key に `schema_version` を加えるが、偽物は出さない)
   - `.beads/metadata.json` の database が beads.db で embeddeddolt/ が無いと、
     `Error: historical SQLite workspace detected; ...` で exit 1 (embeddeddolt/ があれば本物も database の値を見ない)
   - `-C <dir>` に .beads/ が無ければ `Error: cannot use -C directory "<dir>": no beads project found` で exit 1
@@ -45,15 +45,16 @@
   - show --json は配列 (agent_context を含み metadata は無い)。id が 1 つでも無ければ ISSUE_NOT_FOUND で exit 3。
     comments の key は、コメントのあるチケットにだけ出る (0 件なら key が無い。読む側は key の無い show を読む)。
     id を 1 つも書かないと、最後に触ったチケット (create・update・close・label・comments add が記録する。show・list・
-    comments の読み・delete は記録しない) を出す。記録が無ければ VALIDATION_FAILED (exit 4)
+    comments の読み・ほかのチケットの delete は記録を変えない。最後に触ったチケットを delete すると記録が消える) を出す。
+    記録が無ければ VALIDATION_FAILED (exit 4)
   - update --notes で notes を、--assignee で担当を書ける。description・notes・assignee は値のある issue にだけ list と show に出る
   - comments の並びは決まっていない (偽物は新しいものを先頭で返す)。id は int
   - comments add は -f があると、id のほかの位置引数 (本文) を無視してファイルの本文で書く (id の位置はどこでもよい)
   - label add / remove は <id> のあとに label を何個でも取り、1 個ずつ処理する。戻りは label ごとの
     [{"status": added|removed|exists|not_found, ...}] で、どれも exit 0。id が無ければ、どの label も処理せず exit 3
-  - 値を取る option のうち --reason (-r)・--notes・--description (-d) は、次の語が `-` で始まっても値に取る
-    (close <id> -r --json は --json が理由になって閉じる。-r が最後の語なら usage エラー)。ほかの option は
-    `--json` や `--actor` が続くと値が無い扱いで、それらは globals として先に取り除かれる
+  - 値を取る option のうち close の --reason (-r)・create の --description (-d)・update の --notes は、次の語が `-` で
+    始まっても値に取る (close <id> -r --json は --json が理由になって閉じる。-r が最後の語なら usage エラー)。ほかの
+    option (delete の --reason を含む) は `--json` や `--actor` が続くと値が無い扱いで、それらは globals として先に取り除かれる
   - update --agent-context は丸ごと置き換え。JSON として読める値は詰めて (空白を除き、escape を正規化し、key の順は保つ)
     保存する。半分未満・空にする書き換えは (詰めた後の長さで) --force が無いと非 0。偽物は JSON でない値も、そのまま保存する
     (本物は exit 7 で断る。偽物が寛容な側の食い違い)
@@ -575,21 +576,23 @@ def br_validation(reason: str, as_json: bool, field: str = "status") -> Fail:
     return Fail(f"Error: {msg}", code=BR_VALIDATION_EXIT)
 
 
-# 次の語が `-` で始まっても値に取る option (本物の 0.7.6 で実測: close <id> -r --json は --json が理由になって閉じる。
-# -p・-t・--title・-s・--limit・-f・--actor・--agent-context・--status・--assignee・-l は `--json` を値に取らず usage エラー)
-BR_HYPHEN_VALUE = ("-r", "--reason", "--notes", "-d", "--description")
+# subcommand ごとの、次の語が `-` で始まっても値に取る option (本物の 0.7.6 で実測: close <id> -r --json は --json が理由に
+# なって閉じる。delete の --reason は取らない: delete <id> --reason --json は exit 2。-p・-t・--title・-s・--limit・-f・
+# --actor・--agent-context・--status・--assignee・-l も `--json` を値に取らず usage エラー)
+BR_HYPHEN_VALUE = {"close": ("-r", "--reason"), "create": ("-d", "--description"), "update": ("--notes",)}
 
 
 def br_split_globals(argv: list[str]) -> tuple[str | None, bool, list[str]]:
     """--actor <name>・--json はどこに書いてもよい。-C は無い (usage エラー)。残りを返す。
-    ただし BR_HYPHEN_VALUE の option の次の語は値なので、`--json` でも `--actor` でも globals にせずそのまま残す。"""
+    ただし subcommand (rest の先頭) ごとの BR_HYPHEN_VALUE の option の次の語は値なので、`--json` でも `--actor` でも
+    globals にせずそのまま残す。"""
     actor = None
     as_json = False
     rest: list[str] = []
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a in BR_HYPHEN_VALUE:                    # 最後の語なら値が無いまま残り、br_take が usage エラーにする
+        if rest and a in BR_HYPHEN_VALUE.get(rest[0], ()):   # 最後の語なら値が無いまま残り、br_take が usage エラーにする
             rest.extend(argv[i:i + 2])
             i += 2
             continue
@@ -839,6 +842,8 @@ def br_delete(p: Project, args: list[str], as_json: bool) -> None:
     for i in found:
         i["status"] = "tombstone"
         i["updated_at"] = br_time(True)
+    if p.state.get("last_touched") in {i["id"] for i in found}:     # 本物は最後に触ったチケットを消すと記録 (last-touched) を消す
+        p.state.pop("last_touched")
     p.save()
     if as_json:
         emit({"deleted": [i["id"] for i in found], "deleted_count": len(found), "dependencies_removed": 0,
