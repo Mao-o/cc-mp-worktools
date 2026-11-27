@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +19,16 @@ from unittest import mock
 import _testutil  # noqa: F401
 
 from core import cli_config  # noqa: E402
+
+_PKG_DIR = Path(__file__).resolve().parent.parent
+
+# 別プロセスで `read_text` を呼んで結果を repr で出す (止まる形を timeout で FAIL にするため)。
+_READ_PROBE = """
+import sys
+sys.path.insert(0, sys.argv[1])
+from core import cli_config
+print(repr(cli_config.read_text(sys.argv[2])))
+"""
 
 # gh 2.9x が書く hosts.yml の形 (実測: インデント 4、host 直下に `users:` と
 # `user:` が並ぶ)。`users:` はそのホストに紐付く**全**アカウントで、アクティブな
@@ -167,6 +180,52 @@ class TestReadText(unittest.TestCase):
         path = self.tmp / "bin.yml"
         path.write_bytes(b"\xff\xfe\x00")
         self.assertIsNone(cli_config.read_text(path))
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO の無い OS")
+    def test_fifo_returns_none_without_blocking(self):
+        """書き手のいない FIFO: 開くと止まる形 (止まると hook timeout で検証が飛ぶ)。読まずに None。
+
+        止まる変異でも suite 全体を止めないよう、別プロセスで timeout を付けて読む。
+        """
+        path = self.tmp / "hosts.yml"
+        os.mkfifo(path)
+        try:
+            res = subprocess.run(
+                [sys.executable, "-c", _READ_PROBE, str(_PKG_DIR), str(path)],
+                capture_output=True, text=True, timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            self.fail("read_text が FIFO を開いて止まった")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.stdout.strip(), "None")
+
+    @unittest.skipUnless(os.path.exists(os.devnull) and stat.S_ISCHR(os.stat(os.devnull).st_mode),
+                         "キャラクタデバイスの無い OS")
+    def test_device_returns_none(self):
+        """デバイス (`/dev/null` への symlink): 通常のファイルでないので読まない (0.34.0 までは空文字)。"""
+        path = self.tmp / "active_config"
+        path.symlink_to(os.devnull)
+        self.assertIsNone(cli_config.read_text(path))
+
+    def test_path_with_nul_returns_none(self):
+        try:
+            self.assertIsNone(cli_config.read_text(self.tmp / "a\x00b"))
+        except ValueError as e:
+            self.fail(f"パスの NUL の ValueError が漏れた: {e!r}")
+
+    @unittest.skipUnless(os.path.isdir("/dev/fd"), "/dev/fd の無い OS")
+    def test_does_not_leak_file_descriptors(self):
+        """開いた fd は、読まずに返す形 (ディレクトリ・デバイス) でも閉じる。"""
+        regular = self.tmp / "f.yml"
+        regular.write_text("x: y\n", encoding="utf-8")
+        paths = [regular, self.tmp, self.tmp / "absent.yml"]
+        if os.path.exists(os.devnull):
+            paths.append(Path(os.devnull))
+        before = len(os.listdir("/dev/fd"))
+        for _ in range(20):
+            for path in paths:
+                cli_config.read_text(path)
+        self.assertEqual(len(os.listdir("/dev/fd")), before)
 
 
 class TestHomeOverridden(unittest.TestCase):

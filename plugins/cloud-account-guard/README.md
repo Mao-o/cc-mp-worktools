@@ -1403,7 +1403,9 @@ PreToolUse は Bash の度に発火するため、`gh pr list && gh pr view && g
 - 無効化: TTL 経過 / `accounts.local.json` の mtime 変化 / ファイル破損 (読めない
   entry や、値が期待した型でない entry も使わない。timestamp が数値でない・未来の時刻の
   ものなど。v0.19.1) / **アカウント状態を変えうるコマンドの検出** (v0.8.0、下記) /
-  entry の epoch が現在と異なる
+  entry の epoch が現在と異なる / **CLI のアカウントの状態ファイル (gh の `hosts.yml`・
+  gcloud の `active_config` と構成のファイル) が書き換わった** (v0.35.0。
+  [hook を通らない切替の検出](#hook-を通らない切替の検出-v0350))
 - **失敗 (deny) 状態はキャッシュしない** — 切り替え後は即座に再検証が走る
 - キーには行頭の inline env と context option (`--profile` 等) に加え、**hook
   プロセスの env のうちアカウントを決める変数** (`AWS_*` / `CLOUDSDK_*` /
@@ -1449,6 +1451,10 @@ Python CLI の起動込みで 1 回 〜1s (dict 期待値では project / accoun
   (`HOME=/other gh pr create` など)。`HOME` は gh / gcloud のどちらも設定
   ディレクトリ解決に使うため、実行される CLI は**別の設定ファイル**を読む。
   hook 側のファイルで判断すると違うアカウントで allow しうるので CLI に委ねる
+- 両方共通: 設定ファイルが通常のファイルでない (FIFO・デバイスなど) ときは、読まずに、読めないのと
+  同じに扱う (v0.35.0)。書き手のいない FIFO を普通に開くと open が戻らず、hook が timeout で打ち切られて
+  検証が飛ぶため (止まらない開き方で種類を確かめる)。gcloud の `active_config` は、読めないときと同じく
+  `default` の構成を読む
 - GCP の `CLOUDSDK_*` 判定は **prefix 一致**なので、`CLOUDSDK_PYTHON` のように
   値に無関係な変数が 1 つでも立っていると CLI 実行に戻る (安全側だが「速く
   ならない」ように見える)。安全な変数の個別許可は、漏れが false allow になる
@@ -1491,6 +1497,38 @@ service ごとの epoch (`<service>.epoch`、単調増加) を進め、切替を
 
 従来 (〜0.7.3) は `gh pr list` (検証成功・cache 書込) → `gh auth switch --user other`
 → `gh pr create` が 30 秒以内なら cache hit で別アカウントの write が通っていた。
+
+### hook を通らない切替の検出 (v0.35.0)
+
+上の破棄は、hook が切替コマンドを見たときに、同じ cache dir (`$TMPDIR/cc-mp-cloud-account-guard`) を
+見るセッションの中でだけ効く。次の切替は epoch を進めない:
+
+- 利用者がターミナルで `gh auth switch` を打つ
+- TMPDIR の違うセッションでの切替 ([自動切替](#自動切替-auto-switch--v0160)を含む)
+- cache dir を使えないセッションでの切替
+
+そこで、CLI が切替のたびに書き換える**アカウントの状態ファイル**の指紋を entry に記録し、読むときに
+今の指紋と違えば cache を使わずに照合し直す。0.34.0 までは、これらの切替の後 TTL (30 秒) の間、期待と
+違うアカウントの write が cache hit で通っていた。
+
+| service | 指紋を取るファイル |
+|---|---|
+| GitHub | `$GH_CONFIG_DIR` \| `$XDG_CONFIG_HOME/gh` \| `~/.config/gh` の `hosts.yml` (gh は切替・login・logout のたびに `<host>.user` を書き直す。トークンを keyring に置く構成でも同じ) |
+| GCP | `$CLOUDSDK_CONFIG` \| `~/.config/gcloud` の `active_config` と、使う構成の `configurations/config_<name>` (名前は `--configuration` → `CLOUDSDK_ACTIVE_CONFIG_NAME` → `active_config` → `default` の順。`gcloud config configurations activate` は前者を、`gcloud config set` / `gcloud auth login` は後者を書き換える) |
+
+- 場所は検証に渡すのと同じ env (行頭の inline env を含む) で決める。`~` は、行頭の `HOME=...` が
+  あればその HOME
+- 指紋はファイルの中身ではなく stat (symlink は辿る) の device・inode・大きさ・mtime・ctime で取り、
+  ファイルごとに stat を 1 回取るだけなので、切り替えていないときの cache hit は今までどおり効く
+  (gcloud だけは使う構成の名前を決めるために `active_config` の中身も読む。この読みは cache を見る前に
+  毎回走り、止まると hook が timeout で打ち切られて検証が飛ぶので、止まらない開き方で種類を確かめ、FIFO など
+  通常のファイルでないものは読まない)
+- ファイルが無い・読めない (権限が無い・辿れない symlink など) ときも、その状態を指紋にする。
+  無いままなら同じ指紋で、作られれば変わる。照合は今までどおり (ローカル読取ができなければ CLI で照合する)
+- ファイルが書かれてから 2 秒の間は、cache を読まず書かない (毎回照合する)。時刻を 1 秒単位でしか
+  持たないファイルシステムで、同じ 1 秒の中で切り替えて戻した書き換えを区別できないため
+- 使っていない構成のファイル (gcloud の別の `config_<name>`) の書き換えでは照合し直さない
+- Firebase / AWS / Kubernetes はこの検出をしない ([既知の制限](#既知の制限))
 
 ### 検証時間の予算 (v0.12.0)
 
@@ -1789,6 +1827,15 @@ CLI ごとに 1 回。deny はせず、deny したコマンドには足さない
   呼出) があった場合、その検証が login 前の状態で成功すると entry が書かれ、login
   完了後も最大 30 秒 (TTL) 有効になりうる。PostToolUse hook で実行後に無効化すれば
   閉じるが、全 Bash 呼出に Python プロセスが恒久的に乗るため採用していない
+- **[hook を通らない切替の検出](#hook-を通らない切替の検出-v0350) は gh と gcloud だけ** (v0.35.0)。
+  Firebase (`firebase use` が書く configstore)・AWS (`aws configure` が書く `~/.aws/config` /
+  `credentials`)・Kubernetes (`kubectl config use-context` が書く kubeconfig) は、ターミナルや TMPDIR の
+  違うセッションで切り替えると、その前の成功 cache が最大 30 秒 (TTL) 効き、期待と違うアカウントの
+  write が通りうる。これらの CLI が普段のコマンドでもそのファイルを書き換えるか (書き換えるなら cache が
+  効かなくなる) と、どのファイルを読むか (KUBECONFIG の連結・AWS の認証情報の探索順) を確かめられて
+  いないため、指紋を取っていない。gh / gcloud でも、既定の設定ディレクトリが `%AppData%` 配下になる
+  Windows では、hook は `~/.config` 配下を見るので検出が働かない (`GH_CONFIG_DIR` / `CLOUDSDK_CONFIG` を
+  設定していれば働く)
 - Firebase の alias object 形式は `.firebaserc` の `projects` マップとの
   対応を前提にしており、ユーザー任意の key 名を受け付けるだけで "alias 名"
   自体のバリデーションはしない

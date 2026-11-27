@@ -13,6 +13,10 @@ hook プロセスの env のうちアカウントを決める変数 (`identity_e
 キャッシュ無効化:
 - TTL (既定 30 秒) を過ぎた (timestamp が未来の時刻の entry も使わない)
 - accounts.local.json の mtime が変わった
+- CLI の状態ファイル (service の `state_files`。gh の hosts.yml、gcloud の active_config と
+  構成のファイル) の指紋 (`state_fingerprint`) が、書いた時と違う (v0.35.0)。hook を通らない
+  切替 (ターミナルでの `gh auth switch`・TMPDIR の違うセッションや cache dir を使えないセッション
+  での切替) は下の epoch を進めないので、CLI が書き換えるファイルの側で気づく
 - キャッシュファイルが無い・読めない (JSON 破損・UTF-8 でない・入れ子が深い・stat
   できない など)・JSON のオブジェクトでない (`read_state`) か、値が期待した型でない
   (timestamp が数値でない・float に収まらない・NaN や無限大、success が true でない)。
@@ -71,6 +75,10 @@ _NS_LIMIT = 1 << 63
 # 読まれ、予算 (`core.budget`) の判定より前に走るので、`cli_config.MAX_FILE_BYTES` (256 KiB) より
 # ずっと小さくする。書くのは数十バイトの JSON だけ (v0.25.0)。
 _MAX_STATE_BYTES = 4 * 1024
+# CLI の状態ファイルが書かれてからこの時間は、指紋 (`state_fingerprint`) を作らない (成功 cache を
+# 読まず書かない)。時刻を 1 秒単位でしか持たないファイルシステムでは、同じ 1 秒の中で切り替えて
+# 戻すと、時刻も大きさも同じになり書き換えを区別できないため (v0.35.0)。
+_STATE_SETTLE_NS = 2 * 1_000_000_000
 
 
 def _is_private_dir(path: Path) -> bool:
@@ -225,6 +233,46 @@ def identity_env(service, env) -> dict[str, str]:
     }
 
 
+def state_fingerprint(paths) -> str | None:
+    """CLI の状態ファイル (service の `state_files` が返すパス) の指紋 (v0.35.0)。
+
+    成功 cache の entry に記録し、読むときに今の指紋と比べる (違えば使わない)。hook を通らない
+    切替 (ターミナルでの `gh auth switch` など) は epoch を進めないが、CLI はアカウントの状態を
+    これらのファイルに書くので、書き換えで指紋が変わる。
+
+    ファイルごとに、symlink を辿った stat の (device, inode, 大きさ, mtime_ns, ctime_ns) を使う。
+    中身は読まない (NUL を含む・UTF-8 でない・読む権限が無いファイルも、stat できれば同じ扱い)。
+    stat できないファイル (無い・辿れない symlink・パスに NUL を含む など) は、その理由を指紋に
+    入れる (無いままなら同じ指紋で、作られれば変わる)。
+
+    どれかのファイルの mtime から `_STATE_SETTLE_NS` 経っていなければ None を返す (指紋を作れない。
+    呼び出し側は cache を読まず書かない)。CLI の書き換えは mtime を今の時刻にする。未来の mtime は
+    待たない (その後の書き換えは今の時刻になり、指紋が変わる)。
+    """
+    now = time.time_ns()
+    parts: list[list] = []
+    for path in paths:
+        name = os.fspath(path)
+        try:
+            st = os.stat(name)
+        except OSError as e:
+            parts.append([name, "error", e.errno])
+            continue
+        except ValueError:
+            # パスに NUL を含む (`embedded null byte`)・符号化できない文字を含む。
+            parts.append([name, "invalid"])
+            continue
+        if 0 <= now - st.st_mtime_ns < _STATE_SETTLE_NS:
+            return None
+        parts.append(
+            [name, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns]
+        )
+    # 名前は surrogate を含みうる (`os.environ` の UTF-8 でないバイト) ので、ASCII に escape した JSON に
+    # してから hash する。
+    material = json.dumps(parts, ensure_ascii=True)
+    return hashlib.sha256(material.encode("ascii")).hexdigest()
+
+
 def _cache_key(
     service_name: str,
     project_dir: str,
@@ -298,6 +346,7 @@ def get_success(
     inline_env=None,
     context=None,
     identity_env=None,
+    state: str = "",
 ) -> bool:
     """検証成功が短期キャッシュにあれば True を返す。
 
@@ -307,6 +356,9 @@ def get_success(
     含める。差で別エントリになり、profile A の成功が profile B で誤って allow される
     ことを防ぐ。
     entry の epoch が現在の epoch と違えば (書かれた後に切替が検出された) 無視する。
+    state (CLI の状態ファイルの指紋。`state_fingerprint`。状態ファイルを宣言しない service は
+    空文字) が entry に記録したものと違えば (書かれた後に hook の外で切り替えられた) 無視する。
+    記録の無い entry (0.34.0 までの形) は空文字と同じに読む。
 
     無い・読めない entry (stat できない・壊れた・オブジェクトでない。`read_state`) と、
     値が期待した型でない entry は cache miss (検証し直す)。timestamp は float にできる有限の
@@ -325,6 +377,8 @@ def get_success(
     if data is None:
         return False
     if data.get("accounts_mtime") != accounts_mtime:
+        return False
+    if data.get("state", "") != state:
         return False
     ts = data.get("timestamp")
     # bool (int の subclass) は 1970 年の時刻 (0 / 1) なので下の TTL の判定でも落ちるが、
@@ -351,6 +405,7 @@ def set_success(
     context=None,
     epoch: int | None = None,
     identity_env=None,
+    state: str = "",
 ) -> bool:
     """検証成功をキャッシュする。書けたら True。
 
@@ -359,6 +414,9 @@ def set_success(
     False を返す。None なら現在の epoch で書く (後方互換)。
     切替検出 (tombstone) から IN_FLIGHT_SEC 以内も書かない (切替の実行中とみなす)。
     identity_env はキーにだけ使い、entry には書かない (`get_success` と同じ値を渡す)。
+    state は verify **開始前**に取った `state_fingerprint` (`get_success` に渡したものと同じ値)。
+    検証の後に取ると、その間に hook の外で切り替えられたときに、切替後の指紋で旧状態の成功を
+    記録してしまう。
     書き込み失敗は無視 (キャッシュはベストエフォート)。
     """
     path = _cache_path(
@@ -380,6 +438,7 @@ def set_success(
         "accounts_mtime": accounts_mtime,
         "timestamp": time.time(),
         "epoch": epoch,
+        "state": state,
     }
     try:
         _write_atomic(path, json.dumps(data))

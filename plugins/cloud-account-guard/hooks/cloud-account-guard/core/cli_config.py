@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import configparser
 import os
+import stat
 from pathlib import Path
 
 # 設定ファイルの読み取り上限。gh の hosts.yml / gcloud の config_<name> はいずれも
@@ -68,6 +69,16 @@ def home_overridden(env) -> bool:
     return bool(value) and value != os.environ.get(HOME_ENV_VAR)
 
 
+def overriding_home(env) -> Path | None:
+    """コマンドの行頭の `HOME=...` が hook プロセスと違う (`home_overridden`) なら、その HOME。
+
+    違わなければ None (呼び出し側は hook プロセスの `Path.home()` を使う)。成功 cache の指紋を取る
+    状態ファイル (service の `state_files`) の場所を、実行される CLI と同じ HOME で決めるために使う
+    (v0.35.0)。ローカル読取は HOME が違えば CLI に委ねるので、これを使わない。
+    """
+    return Path(env[HOME_ENV_VAR]) if home_overridden(env) else None
+
+
 def read_bounded_text(path: Path, limit: int = MAX_FILE_BYTES) -> str:
     """limit (既定 `MAX_FILE_BYTES`) を超えない範囲で UTF-8 の文字列として読む (parse の前の大きさの確認)。
 
@@ -83,12 +94,34 @@ def read_bounded_text(path: Path, limit: int = MAX_FILE_BYTES) -> str:
 
 
 def read_text(path: Path) -> str | None:
-    """設定ファイルを文字列で読む。読めない / 大きすぎる / UTF-8 でないなら None。"""
+    """設定ファイルを文字列で読む。読めない / 大きすぎる / UTF-8 でない / 通常のファイルでないなら None。
+
+    **開くときにも読むときにも止まらない**: FIFO (書き手のいない名前付きパイプ) を普通に開くと
+    open が書き手を待って戻らない (デバイスも読みが終わらないものがある)。hook の中の読み取りには
+    subprocess の timeout (検証時間の予算) が効かず、Claude Code の hook timeout で打ち切られると
+    出力が捨てられて検証が飛ぶ (公式仕様上の fail-open)。成功 cache の指紋のパスを決める読み
+    (gcloud の `state_files`) は cache を見る前に毎回走るので、cache hit の経路も止まる。
+    そこで `O_NONBLOCK` で開き (FIFO の open がすぐ戻る)、fstat で通常のファイルと確かめてから
+    読む。通常のファイルでなければ読まずに None (呼び出し側は CLI に委ねる)。通常のファイルの
+    読みは `O_NONBLOCK` の影響を受けない。`O_NONBLOCK` / `O_BINARY` の無い OS では 0 として
+    扱う (Windows に FIFO のパスは無く、`O_BINARY` は Windows で改行の変換をさせないため)。
+    パスに NUL があるときの ValueError も読めないのと同じに扱う。
+    """
     try:
-        with Path(path).open("rb") as handle:
+        fd = os.open(
+            path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+        )
+    except (OSError, ValueError):
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with os.fdopen(fd, "rb", closefd=False) as handle:
             raw = handle.read(MAX_FILE_BYTES + 1)
     except OSError:
         return None
+    finally:
+        os.close(fd)
     if len(raw) > MAX_FILE_BYTES:
         return None
     try:

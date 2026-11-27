@@ -189,6 +189,26 @@ def _service_name(service) -> str:
     return service.__name__.rsplit(".", 1)[-1]
 
 
+def _cache_state(service, env, context) -> str | None:
+    """成功 cache の entry に記録する、CLI の状態ファイルの指紋 (v0.35.0。`cache.state_fingerprint`)。
+
+    状態ファイルを宣言しない service (`state_files` が無い) は空文字 (指紋で見ない = 0.34.0 と
+    同じ)。None は「今は指紋を作れない」で、呼び出し側は成功 cache を読まず書かない (毎回照合する):
+    ファイルが書かれた直後のとき (`cache.state_fingerprint`) と、パスを決める処理が例外を投げた
+    とき (握らないと dispatch() の外まで抜け、__main__ の最終防波堤が検証をスキップする)。
+    例外は握るが、止まる形は握れない (cache を見る前に毎回走り、止まると hook が timeout で打ち切られて
+    検証が飛ぶ) ので、state_files の側で FIFO などを止まる形で開かない (`cli_config.read_text`)。
+    env は検証に渡すのと同じ (hook プロセスの env + 行頭の inline env)。
+    """
+    state_files = getattr(service, "state_files", None)
+    if state_files is None:
+        return ""
+    try:
+        return cache.state_fingerprint(state_files(env, context))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _find_accounts_file(
     project_dir: str,
 ) -> tuple[Path | None, str | None, list[tuple[str, Path]], Path | None, str | None]:
@@ -1295,9 +1315,14 @@ def _dispatch_impl(
         # cache キーに含めないと値を変えた直後に前の値での成功で通る。読む側と書く側で
         # 同じ snapshot を使う。
         ident = cache.identity_env(svc, {**os.environ, **(inline_env or {})})
-        if not switching_here and cache.get_success(
+        # hook を通らない切替 (ターミナルでの `gh auth switch` など) を、CLI が書き換える状態
+        # ファイルの指紋で見る (v0.35.0。`_cache_state`)。None なら成功 cache を読まず書かない。
+        # 検証の**前**に取り、書く側も同じ値を使う (検証の後に取ると、その間の切替後の指紋で
+        # 旧状態の成功を記録する)。
+        state = _cache_state(svc, {**os.environ, **(inline_env or {})}, ctx)
+        if not switching_here and state is not None and cache.get_success(
             svc_name, project_dir, entry, accounts_mtime, inline_env, cache_ctx,
-            identity_env=ident,
+            identity_env=ident, state=state,
         ):
             if trace is not None:
                 trace["cache_hit"][svc_name] = True
@@ -1377,10 +1402,10 @@ def _dispatch_impl(
                 f"{err}\n(検出コマンド: {_detected(cands)})"
                 + (f"\n{switch_note}" if switch_note else "")
             )
-        elif not switching_here:
+        elif not switching_here and state is not None:
             cache.set_success(
                 svc_name, project_dir, entry, accounts_mtime, inline_env, cache_ctx,
-                epoch=epoch, identity_env=ident,
+                epoch=epoch, identity_env=ident, state=state,
             )
 
     note = _deprecation_note(kind) if kind in ("deprecated", "legacy") else ""
