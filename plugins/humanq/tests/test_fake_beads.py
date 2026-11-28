@@ -17,7 +17,9 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-FAKE = HERE / "fake_beads.py"
+sys.path.insert(0, str(HERE))                   # fake_cli (`-m unittest tests.test_fake_beads` のように親から指したときも読む)
+import fake_cli  # noqa: E402
+
 ISO_MICRO = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z$")
 ISO_SEC = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
@@ -35,13 +37,8 @@ class FakeBrCase(unittest.TestCase):
         self.log = os.path.join(self.tmp, "calls.log")
 
     def install(self, prog: str) -> str:
-        """test_server.install_fake と同じ作り (名前を変えた写しに、今の python の shebang)。"""
-        _, _, body = FAKE.read_text(encoding="utf-8").partition("\n")
-        shebang = "#!/usr/bin/env python3" if re.search(r"\s", sys.executable) else "#!" + sys.executable
-        dst = os.path.join(self.bin, prog)
-        Path(dst).write_text(shebang + "\n" + body, encoding="utf-8")
-        os.chmod(dst, 0o755)
-        return dst
+        """test_server.install_fake と同じ置き方 (tests/fake_cli.py。prog の名前で、今の python で起動する)。"""
+        return fake_cli.install(self.bin, prog)
 
     def env(self) -> dict:
         e = {k: v for k, v in os.environ.items() if not k.startswith("FAKE_BEADS_")}

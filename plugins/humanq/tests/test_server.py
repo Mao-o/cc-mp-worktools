@@ -51,6 +51,7 @@ SERVER_DIR = Path(os.environ.get("HUMANQ_SERVER_DIR") or HERE.parent / "server")
 sys.path.insert(0, str(SERVER_DIR))
 sys.path.insert(0, str(HERE))                   # bd_parallel (`-m unittest tests.test_server` のように親から指したときも読む)
 import bd_parallel  # noqa: E402
+import fake_cli  # noqa: E402
 import humanq  # noqa: E402
 import real_cli  # noqa: E402
 import registry  # noqa: E402
@@ -115,18 +116,13 @@ def bdc(repo: str, *args: str) -> str:
     return p.stdout
 
 
-FAKE_BEADS = HERE / "fake_beads.py"
 FAKE_BIN_DIRS: set[str] = set()        # 偽の bd を置いた dir (realpath)。WithBd がそこの bd を拾っていないことを確かめる
 
 
 def install_fake(bin_dir: str, prog: str = "bd") -> str:
     """tests/fake_beads.py を bin_dir に prog の名前で置く。偽物は argv[0] の basename で振る舞いを決めるので、
-    名前を変えた写しにし、shebang を今の python に替えて実行権限を付ける (元のファイルの mode に頼らない)。"""
-    _, _, body = FAKE_BEADS.read_text(encoding="utf-8").partition("\n")
-    shebang = "#!/usr/bin/env python3" if re.search(r"\s", sys.executable) else "#!" + sys.executable
-    dst = os.path.join(bin_dir, prog)
-    Path(dst).write_text(shebang + "\n" + body, encoding="utf-8")
-    os.chmod(dst, 0o755)
+    その名前で置く (置き方は tests/fake_cli.py。今の python で起動し、元のファイルの mode に頼らない)。"""
+    dst = fake_cli.install(bin_dir, prog)
     FAKE_BIN_DIRS.add(os.path.realpath(bin_dir))
     return dst
 
@@ -628,7 +624,7 @@ class BdScenarios:
         srv = ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
         port = srv.server_address[1]
         srv.RequestHandlerClass = humanq.make_handler(store, port, "tok", "<html></html>", "t")
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()   # shutdown を待たせない
         self.addCleanup(srv.server_close)
         self.addCleanup(srv.shutdown)
         code, _, body = fetch(f"http://127.0.0.1:{port}/api/ping")      # handler が bind したポートを Host に使っている

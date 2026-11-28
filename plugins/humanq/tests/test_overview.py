@@ -16,7 +16,6 @@ import importlib.util
 import io
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -33,23 +32,19 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 SERVER_DIR = Path(os.environ.get("HUMANQ_SERVER_DIR") or HERE.parent / "server")
 sys.path.insert(0, str(SERVER_DIR))
+sys.path.insert(0, str(HERE))                   # fake_cli (`-m unittest tests.test_overview` のように親から指したときも読む)
 import backend  # noqa: E402
+import fake_cli  # noqa: E402
 import humanq  # noqa: E402
 import registry  # noqa: E402
 
-FAKE = HERE / "fake_beads.py"
 HOOK_PATH = SERVER_DIR.parent / "hooks" / "humanq_hook.py"
 OVERVIEW_KEYS = {"counts", "total", "ready", "ready_total", "blocked"}     # 見通しにだけ出す key (/api/items に出さない)
 
 
 def install_fake(bin_dir: str, prog: str) -> str:
-    """偽物を prog の名前で置く (偽物は argv[0] の basename で振る舞いを決める)。"""
-    _, _, body = FAKE.read_text(encoding="utf-8").partition("\n")
-    shebang = "#!/usr/bin/env python3" if re.search(r"\s", sys.executable) else "#!" + sys.executable
-    dst = os.path.join(bin_dir, prog)
-    Path(dst).write_text(shebang + "\n" + body, encoding="utf-8")
-    os.chmod(dst, 0o755)
-    return dst
+    """偽物を prog の名前で置く (偽物は argv[0] の basename で振る舞いを決める。置き方は tests/fake_cli.py)。"""
+    return fake_cli.install(bin_dir, prog)
 
 
 def fetch(url: str, data: bytes | None = None, headers: dict | None = None):
@@ -250,31 +245,78 @@ class OverviewShape(unittest.TestCase):
 
 # ---- 偽の bd・偽の br を通す ------------------------------------------------------------------------
 
+# 状態・優先度・ラベルの違うチケット (名前, 優先度, ラベル, status)
+SCENARIO = [("p3-plain", 3, "", ""), ("p2-plugin", 2, "plugin:x,lane:y", ""), ("p0-answered", 0, "answered", ""),
+            ("p1-human", 1, "human", ""), ("p2-plain", 2, "", ""), ("p4-plain", 4, "", ""), ("p1-plain", 1, "", ""),
+            ("p0-busy", 0, "", "in_progress"), ("p0-blocked", 0, "", "blocked"), ("p0-closed", 0, "", "closed")]
+
+
+def cli_env(bin_dir: str) -> dict:
+    """偽物を打つ env。beads 系の env と偽物の env を外し、PATH の先頭に偽物の bin dir を置く。"""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("FAKE_BEADS_", "BEADS_", "BD_", "BR_"))}
+    env["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+    return env
+
+
+def run_cli(prog: str, repo: str, *args: str, env: dict | None = None) -> str:
+    """偽物を repo で打って stdout を返す (bd は -C <repo>、br は cwd)。0 以外で終わったら AssertionError (FAIL に数える)。"""
+    argv = [prog, "-C", repo, *args] if prog == "bd" else [prog, *args]
+    p = subprocess.run(argv, cwd=repo, capture_output=True, text=True, timeout=60, env=env)
+    if p.returncode != 0:
+        raise AssertionError(f"{argv}: {p.stderr or p.stdout}")
+    return p.stdout
+
+
+def new_ticket(prog: str, repo: str, title: str, prio: int = 2, labels: str = "", status: str = "",
+               env: dict | None = None) -> str:
+    args = ["create", title, "-p", str(prio)] + (["-l", labels] if labels else []) + ["--json"]
+    created = json.loads(run_cli(prog, repo, *args, env=env))
+    if not isinstance(created, dict):
+        raise AssertionError(f"create の戻りが object でない: {created!r}")
+    iid = created["id"]
+    if status == "closed":
+        run_cli(prog, repo, "close", iid, env=env)
+    elif status:
+        run_cli(prog, repo, "update", iid, "--status", status, env=env)
+    return iid
+
+
 class FakeCliProject:
-    """偽の CLI のプロジェクト 1 つを Store と HTTP で読む道具。サブクラスが PROG を決める。"""
+    """偽の CLI のプロジェクト 1 つを Store と HTTP で読む道具。サブクラスが PROG を決める。
+    SCENARIO のチケットを入れたプロジェクトはクラスごとに 1 回だけ偽物で作り、テストごとにその写しを読む (偽物の状態は
+    .beads/ の中のファイルだけなので、写しは同じ打ち方で作り直したものと同じ。テストの間で状態を分け合わない)。"""
 
     PROG = ""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        tmp = os.path.realpath(tempfile.mkdtemp(prefix="humanq-overview-class-"))
+        cls.addClassCleanup(shutil.rmtree, tmp, True)
+        cls.bin_dir = os.path.join(tmp, "bin")
+        os.makedirs(cls.bin_dir)
+        for prog in ("bd", "br"):
+            install_fake(cls.bin_dir, prog)
+        env = cli_env(cls.bin_dir)
+        cls.template = os.path.join(tmp, "proj")
+        os.makedirs(cls.template)
+        if cls.PROG == "bd":
+            run_cli("bd", cls.template, "init", "--non-interactive", "--quiet", "--skip-agents", "--skip-hooks", "-p", "hq", env=env)
+        else:
+            run_cli("br", cls.template, "init", "--prefix", "hq", env=env)
+            Path(cls.template, ".beads", ".gitignore").write_text(".br_history/\n", encoding="utf-8")   # br init が書く印
+        cls.template_ids = {name: new_ticket(cls.PROG, cls.template, name, prio, labels, status, env=env)
+                            for name, prio, labels, status in SCENARIO}
 
     def setUp(self):
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="humanq-overview-"))
         self.addCleanup(shutil.rmtree, self.tmp, True)
-        bin_dir = os.path.join(self.tmp, "bin")
-        os.makedirs(bin_dir)
-        for prog in ("bd", "br"):
-            install_fake(bin_dir, prog)
         self.log = os.path.join(self.tmp, "calls.jsonl")
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("FAKE_BEADS_", "BEADS_", "BD_", "BR_"))}
-        env.update({"PATH": bin_dir + os.pathsep + os.environ.get("PATH", ""), "FAKE_BEADS_LOG": self.log})
-        patch = mock.patch.dict(os.environ, env, clear=True)
+        patch = mock.patch.dict(os.environ, {**cli_env(self.bin_dir), "FAKE_BEADS_LOG": self.log}, clear=True)
         patch.start()
         self.addCleanup(patch.stop)
         self.repo = os.path.join(self.tmp, "proj")
-        os.makedirs(self.repo)
-        if self.PROG == "bd":
-            self.cli("init", "--non-interactive", "--quiet", "--skip-agents", "--skip-hooks", "-p", "hq")
-        else:
-            self.cli("init", "--prefix", "hq")
-            Path(self.repo, ".beads", ".gitignore").write_text(".br_history/\n", encoding="utf-8")   # br init が書く印
+        shutil.copytree(self.template, self.repo, symlinks=True)
         self.assertEqual(registry.project_kind(self.repo)[0], self.PROG)
         self.sd = os.path.join(self.tmp, "state")
         os.makedirs(self.sd)
@@ -282,21 +324,10 @@ class FakeCliProject:
         self.store = humanq.Store(self.sd)
 
     def cli(self, *args: str) -> str:
-        argv = [self.PROG, "-C", self.repo, *args] if self.PROG == "bd" else [self.PROG, *args]
-        p = subprocess.run(argv, cwd=self.repo, capture_output=True, text=True, timeout=60)
-        self.assertEqual(p.returncode, 0, f"{argv}: {p.stderr or p.stdout}")
-        return p.stdout
+        return run_cli(self.PROG, self.repo, *args)
 
     def new(self, title: str, prio: int = 2, labels: str = "", status: str = "") -> str:
-        args = ["create", title, "-p", str(prio)] + (["-l", labels] if labels else []) + ["--json"]
-        created = json.loads(self.cli(*args))
-        self.assertIsInstance(created, dict, created)
-        iid = created["id"]
-        if status == "closed":
-            self.cli("close", iid)
-        elif status:
-            self.cli("update", iid, "--status", status)
-        return iid
+        return new_ticket(self.PROG, self.repo, title, prio, labels, status)
 
     def entries(self) -> list[dict]:
         try:
@@ -324,7 +355,7 @@ class FakeCliProject:
         srv = ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
         port = srv.server_address[1]
         srv.RequestHandlerClass = humanq.make_handler(self.store, port, "tok", "<html></html>", "t")
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()   # shutdown を待たせない
         self.addCleanup(srv.server_close)
         self.addCleanup(srv.shutdown)
         return port
@@ -343,14 +374,9 @@ class FakeCliProject:
         return code, json.loads(raw)
 
     def scenario(self) -> dict:
-        """状態・優先度・ラベルの違うチケット。返り値は名前 -> id。"""
-        ids = {}
-        for name, prio, labels, status in [
-                ("p3-plain", 3, "", ""), ("p2-plugin", 2, "plugin:x,lane:y", ""), ("p0-answered", 0, "answered", ""),
-                ("p1-human", 1, "human", ""), ("p2-plain", 2, "", ""), ("p4-plain", 4, "", ""), ("p1-plain", 1, "", ""),
-                ("p0-busy", 0, "", "in_progress"), ("p0-blocked", 0, "", "blocked"), ("p0-closed", 0, "", "closed")]:
-            ids[name] = self.new(name, prio, labels, status)
-        return ids
+        """SCENARIO のチケット (このテストのプロジェクトは、クラスで作ったものの写し)。返り値は名前 -> id。"""
+        self.assertEqual(len(self.template_ids), len(SCENARIO))
+        return dict(self.template_ids)
 
 
 class FakeCliOverview(FakeCliProject):

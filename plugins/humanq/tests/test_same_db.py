@@ -35,7 +35,7 @@ BR_GITIGNORE = ".br_history/\n*-fsqlite-ns-gate\n"          # br init が .beads
 BR_META = {"database": "beads.db", "jsonl_export": "issues.jsonl"}
 DEEP = "[" * 200000 + "]" * 200000                        # json の parser の再帰の限界を超える入れ子
 BD_META = {"database": "dolt", "backend": "dolt", "dolt_mode": "embedded"}
-WAIT = 1.5                       # 待ち合わせの時間切れ (秒)。1 本ずつ書くとき、先の 1 本はこれだけ待ってから書く
+WAIT = 1.5                       # 待ち合わせの時間切れ (秒)。1 本ずつ書くとき、先の 1 本は、相手が書き込みのロックを待って止まるまで (長くてもこれだけ) 待ってから書く
 QSIG = humanq.qsig(humanq.question(ts.QUESTION))      # br_question の問いの署名 (保留のコメントに書く)
 
 
@@ -633,19 +633,64 @@ class FakeCli(Base):
 
     def concurrent_answers(self, store, prog: str, calls: list[tuple[str, str]], write=None) -> tuple[list[str], int]:
         """calls の (登録のパス, id) を 2 本のスレッドで同時に Store.answer する (write (path, id) を渡すとそれを呼ぶ)。
-        コメントを書く CLI の手前で待ち合わせる (WAIT 秒で時間切れ)。(結果の型の名前の list, 待ち合わせが時間切れ・壊れた回数)。"""
+        コメントを書く CLI の手前で待ち合わせる。2 本がそこに揃えば、2 本が同時に書き込みのロックの中にいる。
+        待ち合わせは、相手が来ないまま WAIT 秒たつか、相手が「待っているスレッドが持っている書き込みのロック」を取ろうとして
+        止まったら、成り立たない (1 本ずつ書いている)。後者は時間切れを待たずに分かるので、その時点で切る (相手はロックを放す
+        まで来られない)。一度成り立たなかったら、後から来たものも成り立たない (threading.Barrier の壊れた状態と同じ)。
+        (結果の型の名前の list, 待ち合わせが成り立たなかった回数)。"""
         write = write or (lambda path, iid: store.answer(path, {"id": iid, "option": "a"}))
         self.assertEqual(len(calls), 2)
-        barrier = threading.Barrier(2, timeout=WAIT)
+        cond = threading.Condition()
+        gate = {"present": 0, "met": False, "broken": False}
+        owner: dict[int, int] = {}          # id(書き込みのロック) -> 持っているスレッド
+        waiting: dict[int, int] = {}        # id(書き込みのロック) -> それを取ろうとして止まっているスレッドの数
         broken = [0]
         real = getattr(humanq, prog)
+        real_write_lock = store._write_lock
+
+        class Watched:
+            """書き込みのロックを包み、持ち主と、取ろうとして止まっているスレッドの数を数える。"""
+
+            def __init__(self, lock):
+                self.lock = lock
+
+            def __enter__(self):
+                k = id(self.lock)
+                if not self.lock.acquire(blocking=False):
+                    with cond:
+                        waiting[k] = waiting.get(k, 0) + 1
+                        cond.notify_all()
+                    self.lock.acquire()
+                    with cond:
+                        waiting[k] -= 1
+                with cond:
+                    owner[k] = threading.get_ident()
+                return self
+
+            def __exit__(self, *exc):
+                with cond:
+                    owner.pop(id(self.lock), None)
+                self.lock.release()
+                return False
+
+        def blocked_behind_me() -> bool:
+            me = threading.get_ident()
+            return any(n > 0 and owner.get(k) == me for k, n in waiting.items())
 
         def gated(repo, *args):
             if "comments" in args and "add" in args:
-                try:
-                    barrier.wait()
-                except threading.BrokenBarrierError:
-                    broken[0] += 1
+                with cond:
+                    if not gate["broken"] and not gate["met"]:
+                        gate["present"] += 1
+                        if gate["present"] >= 2:
+                            gate["met"] = True
+                            cond.notify_all()
+                        else:
+                            cond.wait_for(lambda: gate["met"] or blocked_behind_me(), timeout=WAIT)
+                            if not gate["met"]:
+                                gate["broken"] = True
+                    if gate["broken"]:
+                        broken[0] += 1
             return real(repo, *args)
 
         results: list[str] = []
@@ -659,7 +704,8 @@ class FakeCli(Base):
             except Exception as e:  # noqa: BLE001
                 results.append(type(e).__name__)
 
-        with mock.patch.object(humanq, prog, gated):
+        with mock.patch.object(humanq, prog, gated), \
+                mock.patch.object(store, "_write_lock", lambda repo: Watched(real_write_lock(repo))):
             ts_ = [threading.Thread(target=go, args=c) for c in calls]
             for t in ts_:
                 t.start()

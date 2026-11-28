@@ -62,6 +62,7 @@ import humanq  # noqa: E402
 import registry  # noqa: E402
 
 sys.path.insert(0, str(HERE))                   # real_cli (`-m unittest tests.test_cli_contract` のように親から指したときも読む)
+import fake_cli  # noqa: E402
 from real_cli import clean_env, real_command, skip_reason  # noqa: E402
 
 SUBJECTS = ("fake-bd", "fake-br", "real-bd", "real-br")
@@ -79,13 +80,8 @@ def git(cwd: str, *args: str) -> str:
 
 
 def install_fake(bin_dir: str, prog: str) -> str:
-    """偽物を prog の名前で置く (偽物は argv[0] の basename で振る舞いを決める)。"""
-    _, _, body = FAKE.read_text(encoding="utf-8").partition("\n")
-    shebang = "#!/usr/bin/env python3" if re.search(r"\s", sys.executable) else "#!" + sys.executable
-    dst = os.path.join(bin_dir, prog)
-    Path(dst).write_text(shebang + "\n" + body, encoding="utf-8")
-    os.chmod(dst, 0o755)
-    return dst
+    """偽物を prog の名前で置く (偽物は argv[0] の basename で振る舞いを決める。置き方は tests/fake_cli.py)。"""
+    return fake_cli.install(bin_dir, prog)
 
 
 class ContractBase(unittest.TestCase):

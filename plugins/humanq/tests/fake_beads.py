@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """テスト用の偽の beads CLI。本物の bd が無い環境 (CI) でも、humanq のサーバーの読み書きを端から端まで回すため。
 
-テストは一時の bin dir に、このファイルを `bd` の名前で置き (実行権限付き)、その dir を PATH の先頭に入れる
-(tests/test_server.py の install_fake)。振る舞いは argv[0] の basename で分ける。bd と br があり、
+テストは一時の bin dir に、このファイルを `bd` の名前で起動できるように置き (tests/fake_cli.py。このファイルを
+pyc にして読む起動の script を、その名前で置く)、その dir を PATH の先頭に入れる。起動の入口は entry()。振る舞いは argv[0] の basename で分ける。bd と br があり、
 ほかの名前は exit 2 にする (別の CLI の偽物を足すときは PROGS に足す)。br の癖は下の一覧の後ろにある。humanq の製品コードは br の list・show・comments add・label を使う。
 
 - 状態: <project>/.beads/fake-state.json (issues・labels・comments・status・metadata)。
@@ -70,12 +70,10 @@
 """
 from __future__ import annotations
 
-import contextlib
 import fcntl
 import json
 import os
 import sys
-import tempfile
 import uuid
 from datetime import datetime, timezone
 
@@ -173,6 +171,7 @@ def read_json(path: str, default):
 
 
 def write_json(path: str, data) -> None:
+    import tempfile                     # 書く呼び出しだけが読む (読むだけの呼び出しの起動を軽くする。tempfile は shutil などを連れてくる)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tmp-fake-")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=1)
@@ -1167,6 +1166,13 @@ def main() -> int:
     return 0
 
 
-if __name__ == "__main__":
-    with contextlib.suppress(BrokenPipeError):
+def entry() -> None:
+    """起動の入口。このファイルを直に起動したときと、tests/fake_cli.py の起動の script (pyc を読む) の両方がここに来る。"""
+    try:
         sys.exit(main())
+    except BrokenPipeError:
+        pass
+
+
+if __name__ == "__main__":
+    entry()
