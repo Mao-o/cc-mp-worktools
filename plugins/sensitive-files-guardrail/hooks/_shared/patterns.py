@@ -401,9 +401,11 @@ def _read_git_pointer_file(path: str) -> Optional[str]:
     **開くときにも読むときにも止まらない** (0.36.5)。書き手のいない FIFO を
     普通に開くと open が書き手を待って戻らず、hook が Claude Code の hook
     timeout で打ち切られる (打ち切られた hook の出力は捨てられ、ツール呼出は
-    検証されずに通る)。``load_patterns`` は毎回 ``_project_section_keys`` →
-    ``_main_repo_root`` で linked worktree の ``commondir`` を読むので、そこが
-    FIFO だと全ツール呼出で止まっていた。そこで ``O_NONBLOCK`` で開き (FIFO の
+    検証されずに通る)。``load_patterns`` は ``[project:]`` の第 1 候補が
+    worktree 自身のとき (``$CLAUDE_PROJECT_DIR`` が worktree) 毎回
+    ``_project_section_keys`` → ``_main_repo_root`` で linked worktree の
+    ``commondir`` を読むので、そこが FIFO だとその形では全ツール呼出で止まって
+    いた (main repo を指すときは worktree のファイルを評価する呼出だけ)。そこで ``O_NONBLOCK`` で開き (FIFO の
     open がすぐ戻る)、``fstat`` で通常のファイルと確かめてから読む。通常の
     ファイルでないもの (FIFO・デバイス・ディレクトリ) は読まずに None
     (= 今までの「読めない pointer」と同じ扱い)。通常のファイルの読みは
@@ -433,7 +435,10 @@ def _read_git_pointer_file(path: str) -> Optional[str]:
     except OSError:
         return None
     finally:
-        os.close(fd)
+        try:
+            os.close(fd)
+        except OSError:
+            pass  # close の失敗で、読めた中身や None を例外に変えない (0.36.4 は None)
     return head or None
 
 

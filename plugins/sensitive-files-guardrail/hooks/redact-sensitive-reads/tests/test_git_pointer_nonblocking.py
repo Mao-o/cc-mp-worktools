@@ -1,9 +1,10 @@
 """git の pointer (``.git`` ファイル / linked worktree の ``commondir``) の読みが止まらないこと (0.36.5)。
 
 ``_shared.patterns._read_git_pointer_file`` は 0.36.4 まで ``open(path, "r")`` で開いていたので、
-書き手のいない FIFO だと open が書き手を待って戻らなかった。``load_patterns`` は毎回
-``_project_section_keys`` → ``_main_repo_root`` で linked worktree の ``commondir`` を読むので、そこが
-FIFO だと全ツール呼出で hook が止まり、Claude Code の hook timeout で打ち切られる (打ち切られた hook の
+書き手のいない FIFO だと open が書き手を待って戻らなかった。``$CLAUDE_PROJECT_DIR`` が worktree 自身の
+とき、``load_patterns`` は毎回 ``_project_section_keys`` → ``_main_repo_root`` で linked worktree の
+``commondir`` を読むので、そこが FIFO だと全ツール呼出で hook が止まり (main repo を指すときは worktree の
+ファイルを評価する呼出だけ)、Claude Code の hook timeout で打ち切られる (打ち切られた hook の
 出力は捨てられ、ツール呼出は検証されずに通る)。Bash operand ごとの ``resolve_path_rule_root`` →
 ``_git_common_dir`` も同じ読みを通る。
 
@@ -289,6 +290,29 @@ class TestRegularFileReadIsUnchanged(unittest.TestCase):
             except Exception as e:  # noqa: BLE001
                 self.fail(f"_read_git_pointer_file から {type(e).__name__} が抜けた")
         self.assertIsNone(got)
+
+    def test_ctrl_z_is_not_eof(self):
+        """0x1A で読みを打ち切らない (Windows で ``O_BINARY`` を落とすと C ランタイムのテキストモードが打ち切る)。"""
+        self.assertEqual(self._read(b"gitdir: /a\x1a/b\n"), "gitdir: /a\x1a/b\n")
+
+    def test_close_failure_keeps_the_result(self):
+        """``os.close`` の OSError は読みの結果を変えない (読めた中身か None がそのまま返る)。"""
+        real_close = os.close
+
+        def failing_close(fd):
+            real_close(fd)  # fd は閉じてから失敗させる (リークさせない)
+            raise OSError("mock")
+
+        path = self.tmp / "pointer"
+        path.write_text("../..\n")
+        got = {}
+        with mock.patch.object(P.os, "close", side_effect=failing_close):
+            for label, target in (("file", path), ("dir", self.tmp)):
+                try:
+                    got[label] = P._read_git_pointer_file(str(target))
+                except Exception as e:  # noqa: BLE001
+                    self.fail(f"{label}: _read_git_pointer_file から {type(e).__name__} が抜けた")
+        self.assertEqual(got, {"file": "../..\n", "dir": None})
 
     @unittest.skipUnless(os.path.isdir("/dev/fd"), "/dev/fd の無い OS")
     def test_fd_is_closed(self):
