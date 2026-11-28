@@ -25,8 +25,9 @@
   起動時の値、zsh -f が dev を使う。`AWS_PROFILE=$(echo q); AWS_PROFILE=$AWS_PROFILE aws ...` の aws は q で走る。
   自己参照で始まって後ろに文字が続く語も、ほかの場所の名前に数える:
   `AWS_PROFILE=${AWS_PROFILE}-x X=$(echo q); AWS_PROFILE=$AWS_PROFILE aws ...` の aws は `<起動時の値>-x` で走る。
-  語の終わりと読むのは空白・`;` `&` `|` `<` `>` `)`・末尾だけで、`(` は zsh -f が語の続きと読む)、
-  env を scrub する `sudo` (`-E` / `--preserve-env` の無い形。`--preserve-env=LIST` も LIST の外を scrub する
+  語の終わりと読むのは空白・`;` `&` `|` `<` `>` `)`・末尾だけで、`(` は zsh -f が語の続きと読む。
+  `<(` / `>(` (プロセス置換) と zsh の `<N-M>` も語の続き)、
+  env を scrub する `sudo` (`-E` / `--preserve-env` を単独の語で書いていない形 (`-nE` のように束ねた形も含む)。`--preserve-env=LIST` も LIST の外を scrub する
   ので含める) の後ろのシェル経由 wrapper の中身 (`sudo watch 'AWS_PROFILE=${AWS_PROFILE:-dev} aws ...'`
   の aws は dev で走る。`sudo` との間に `nohup` / `env` などを挟んでも同じ)。前置きの代入の照合 env と印を
   `sudo` で捨てるかの判定は変えていない (`--preserve-env=LIST` は従来どおり保持に倒す)

@@ -369,8 +369,9 @@ QUERY が緩めるのは「アカウントが期待値と違う」「期待値�
   例外 (v0.36.5): 同じキーの素の参照だけの代入 (`AWS_PROFILE=${AWS_PROFILE:-dev}` / `$AWS_PROFILE` など) は、
   値が起動時の値のままと決められる形 (`_keeps_launch_value`) に限って印を付けない。コマンドのほかの場所で
   そのキーを使う形 (`_self_reference_env` の名前の数。自己参照の語に数えるのは、語の全体がその形で、空白・
-  `;` `&` `|` `<` `>` `)`・末尾で終わるときだけ。`K=${K}-x` / `K=$K(x)` の頭は数えない)・既定の語に特殊な文字を
-  含む形・env を scrub する `sudo` (`-E` / `--preserve-env` の無い形と `--preserve-env=LIST`。
+  `;` `&` `|` `<` `>` `)`・末尾で終わるときだけ (`<(` / `>(` と zsh の `<N-M>` は語の続き)。
+  `K=${K}-x` / `K=$K(x)` の頭は数えない)・既定の語に特殊な文字を
+  含む形・env を scrub する `sudo` (`-E` / `--preserve-env` を単独の語で書いていない形 (`-nE` のように束ねた形も含む)と `--preserve-env=LIST`。
   `_sudo_preserves_env(..., whole_env=True)` が偽) の後ろのシェル経由 wrapper の中身は従来どおり印を付ける。
   収集 env と前置きの印の破棄では、`--preserve-env=LIST` は従来どおり保持に倒す (安全な向きが逆なので
   `whole_env` で切り替える)

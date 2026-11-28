@@ -241,6 +241,8 @@ class AssignmentShapeTests(_EnvMixin, unittest.TestCase):
         f"{K}=${K}$OTHER", f"{K}=${{{K}:-w}}x", f'{K}="${{{K}:-w}}"x', f"{K}=${{{K}-w}}x", f"{K}=${K}(x)",
         f"{K}=${{{K}}}'x'", f'{K}=${K}"x"', f"{K}=${K}\\ x", f"{K}=${K}#x", f"{K}=${K}}}x", f"{K}=${K}=x",
         f"{K}=${K}\rx", f"{K}=${K}\vx", f"{K}=${K}\u00a0x",
+        # \u30d7\u30ed\u30bb\u30b9\u7f6e\u63db\u306f\u4e21\u65b9\u306e\u30b7\u30a7\u30eb\u3067\u8a9e\u306b\u7d9a\u304f (`launch/dev/fd/63`)\u3002`<N-M>` \u306f zsh -f \u306e\u6570\u306e\u7bc4\u56f2\u306e glob (`launch<->`)
+        f"{K}=${K}<(echo x)", f'{K}="${K}">(cat)', f"{K}=${{{K}}}<->", f"{K}=${K}<1-5>",
     )
 
     def test_a_word_that_only_starts_with_a_self_reference_keeps_the_mark(self):
@@ -509,6 +511,8 @@ STILL_DENIED = [
     f'{K}="${K}"x X=$(echo q); {K}="${K}" {AWS}',
     f"{K}=${{{K}}}${{OTHER}} X=$(date); {K}=${K} {AWS}",
     f"{K}=${K}(x) X=$(echo q); {K}=${K} {AWS}",
+    # プロセス置換は両方のシェルで語に続く (aws は dev/dev/fd/63 などで走る)
+    f"{K}=${K}<(echo x) X=$(echo q); {K}=${K} {AWS}",
     # 前段で値を変えた形は env_changes が数える (代入の無い aws と同じ)
     f"export {K}=q; {K}=${K} {AWS}",
     f"unset {K}; {K}=${{{K}:-dev}} {AWS}",
