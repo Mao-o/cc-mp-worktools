@@ -356,9 +356,14 @@ QUERY が緩めるのは「アカウントが期待値と違う」「期待値�
   `X=${Y:- aws s3 rm x} gh ...`) は、0.29.9 の読みでも分解して候補の和集合を取る
   (`_LEGACY_VALUE_READING`)。値の終端は分割と同じ `_skip_opaque` で求める。
   0.29.9 の読みはシェルの読み方ではないので、`sure_chdirs` の読みの数には数えない
-  (`extract_candidate_readings(..., legacy_values=False)`)。値を飛ばした代入の後ろが代入だけの
-  セグメントは、0.29.9 と同じ候補 (最初に値を飛ばした代入から後ろ) を返す (`_env_names_changed` が
-  候補の文字列から変えた env の名前を読むため)。gh の token / host の env (`_GH_IDENTITY_ENV`) に
+  (`extract_candidate_readings(..., legacy_values=False)`)。代入だけのセグメントは、先頭の代入から後ろを
+  basename に揃えずに候補として返す (v0.36.8。`_env_names_changed` が候補の文字列から変えた env の名前を読むため。
+  0.36.7 までは 0.29.9 と同じく最後の代入か、最初に値を飛ばした代入から後ろを返していて、その前の代入の名前を
+  落としていた。先頭の語の置換の中にパスがある形 (`AWS_PROFILE=$(/bin/cat .p)`) は basename の `cat .p)` になり、
+  名前を読めなかった)。0.36.7 までの候補の先頭の語を `_strip_command_path` が basename に揃えていた形
+  (`X=1 Y=$(/usr/bin/firebase deploy)` / `X=$(/usr/bin/firebase deploy)`) は、0.36.7 までの読み
+  (`_ASSIGNMENT_TAIL_READING`) を足して置換の中の CLI を候補に残す (0.29.9 の読みと同じく `sure_chdirs` の読みの数
+  には数えない)。gh の token / host の env (`_GH_IDENTITY_ENV`) に
   読めない値を代入したセグメントの gh は、セグメントごと 0.29.9 の読みで分解し直す
   (書き込むアカウントを hook から決められない。`GH_TOKEN=$(cmd) gh ...` は 0.29.9 と同じく照合も
   自動切替もしない)

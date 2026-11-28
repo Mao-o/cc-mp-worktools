@@ -91,13 +91,13 @@ class UnreadKeysTests(unittest.TestCase):
             (f"AWS_PROFILE=~/x {AWS}", {}),
             # 別のコマンドの代入 (代入はそのコマンドだけ)
             (f"AWS_PROFILE=$(echo q) true; {AWS}", {"true": {"AWS_PROFILE"}}),
-            # 代入だけのセグメント。最初に値を飛ばした代入から後ろの断片を候補にするので、印はその代入より
-            # 前のものだけ。後ろのコマンドへの効き目は `core/workdir.py` の `segment_env_changes` が
-            # `$(cmd)` (置換の中に空白が無い値) でだけ数える。置換の中に空白がある値 (`$(echo q)`) や、前に
-            # 静的な代入が並ぶ形は前段の env の変更としても数えておらず、固定のある世界では aws を固定で通す
-            # (0.30.2 と同じ。別途)
+            # 代入だけのセグメント。先頭の代入から後ろを候補にし、剥がした代入が無いので印は付かない (v0.36.8。
+            # 0.36.7 までは最初に値を飛ばした代入から後ろの断片を候補にし、その代入より前の印を付けていた)。
+            # 後ろのコマンドへの効き目は `core/workdir.py` の `segment_env_changes` が、置換の中の空白 (`$(echo q)`)
+            # や前に並ぶ静的な代入によらず数える (v0.36.8。tests/test_assignment_only_pin.py。0.36.7 までは
+            # 数えておらず、固定のある世界では aws を固定で通していた)
             (f"AWS_PROFILE=$(echo q) X=1; {AWS}", {}),
-            (f"Y=$P AWS_PROFILE=$(echo q) X=1; {AWS}", {"AWS_PROFILE=$(echo q) X=1": {"Y"}}),
+            (f"Y=$P AWS_PROFILE=$(echo q) X=1; {AWS}", {}),
         ):
             with self.subTest(command=command):
                 self.assertEqual(self._unread(command), want)

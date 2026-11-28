@@ -34,6 +34,7 @@ import shlex
 from pathlib import Path
 
 from core.command_parser import (
+    _ASSIGNMENT_HEAD,
     BACKGROUND,
     LIST_TERMINATORS,
     _ansi_c_quote_end,
@@ -210,8 +211,15 @@ def _env_names_changed(segment: str) -> set[str]:
     (`export $(cat .env | xargs)` / `export $V` / `declare -x `...``) があれば、どの env を変えたか決められない
     ので {ANY_ENV} (v0.36.7。`_has_unreadable_name`)。0.36.6 までは shlex で分けた語の `=` の前を名前として
     数え、`$(cat` などの断片を名前と読んでいた (実際の CLI は展開した名前の値で走る。bash 3.2 / zsh -f で実測)。
-    名前を読める語 (`export FOO=$(cat f)` の FOO) は 0.36.6 と同じ読み。
+    名前を読める語 (`export FOO=$(cat f)` の FOO) は 0.36.6 と同じ読みに、追記と要素の代入の名前の本体
+    (`export HOME+=/x` の HOME / `declare arr[1]=x` の arr) を足す (v0.36.8。`_base_names`)。
+    `unset` も名前を読めない語 (`unset $V` / `unset $(env | grep -o '^AWS_PROFILE')` / `unset {A,B}`) があれば
+    {ANY_ENV} (v0.36.8。0.36.7 までは `$V` を名前と読んでいた。実シェルは展開した名前の変数を消す)。読める名前は
+    0.36.7 と同じ読み (要素の `unset 'HOME[0]'` は、bash 3.2 / zsh -f ともスカラーの変数を消さずに失敗する)。
     `read` は引数の名前、`printf` は `-v` の名前に値を入れる (v0.36.7。`_read_names` / `_printf_names`)。
+    代入だけのセグメント (`X=1; cmd` の `X=1`) は、引用符・置換 (`AWS_PROFILE=$(echo q)`)・語の頭の配列代入の値の
+    中の空白で語を切らずに読んだ (`_shell_words`) 代入の名前 (`_assignment_names`。追記の `AWS_PROFILE+=x` を含む)
+    と、0.36.7 までの shlex の読みの和 (v0.36.8)。
     """
     try:
         words = shlex.split(segment)
@@ -223,20 +231,67 @@ def _env_names_changed(segment: str) -> set[str]:
     if head in _OPAQUE_ENV_BUILTINS:
         return {ANY_ENV}
     if head in _UNSET_BUILTINS:
-        return {w for w in words[1:] if not w.startswith("-")} or set()
+        if _has_unreadable_name(segment):
+            return {ANY_ENV}
+        return {w for w in words[1:] if not w.startswith("-")}
     if head in _ASSIGN_BUILTINS:
         if _has_unreadable_name(segment):
             return {ANY_ENV}
-        return {w.split("=", 1)[0] for w in words[1:] if not w.startswith("-")}
+        return _base_names({w.split("=", 1)[0] for w in words[1:] if not w.startswith("-")})
     if head == "read":
         return _read_names(words[1:])
     if head == "printf":
         return _printf_names(words[1:])
     # 代入だけのセグメント (`X=1; cmd` の `X=1`)。export されていなくても、すでに
     # export 済みの変数なら後続の子プロセスに効く。
+    names = _assignment_names(segment)
     if all("=" in w and w.split("=", 1)[0].isidentifier() for w in words):
-        return {w.split("=", 1)[0] for w in words}
-    return set()
+        names |= {w.split("=", 1)[0] for w in words}
+    return names
+
+
+def _base_names(names: set[str]) -> set[str]:
+    """`names` に、追記と要素の代入の形 (`HOME+` / `arr[1]` / `arr[1]+`) の名前の本体 (`HOME` / `arr`) を足す (v0.36.8)。
+
+    0.36.7 までは `export HOME+=/x` の名前を `HOME+` と数え、完全一致で比べる identity env (`HOME`) に当たらなかった
+    (bash 3.2 は HOME に `/x` を足して後ろの CLI を走らせる。zsh -f は export の追記を構文の誤りとして止める)。
+    名前の形でない語 (`f)` など) は本体を足さない (0.36.7 の名前はそのまま残す)。
+    """
+    out = set(names)
+    for name in names:
+        if _ASSIGNED_NAME.fullmatch(name):
+            out.add(_SHELL_NAME.match(name).group())
+    return out
+
+
+def _assignment_names(segment: str) -> set[str]:
+    """代入だけのセグメントの、代入の名前 (v0.36.8)。代入でない語があれば空集合。
+
+    語は `_shell_words` で分け (引用符・置換・語の頭の配列代入の値の中の空白で切らない。`AWS_PROFILE=$(echo q)` は
+    1 語)、各語の頭を `command_parser._ASSIGNMENT_HEAD` (`NAME=` / `NAME+=` / `NAME[添字]=`) で読む。名前は添字と
+    `+` を除いた本体。リダイレクトの語 (`2>/dev/null`。演算子だけの語は次の語も) は飛ばす。0.36.7 までは shlex で
+    分けた語が全部 `NAME=` で始まるときだけ数えたので、置換の中の空白で語が割れる形 (`AWS_PROFILE=$(echo q)`) と
+    追記 (`AWS_PROFILE+=x`) を数えていなかった。引用符で始まる語 (`"AWS_PROFILE"=prod`) はシェルが代入と読まない
+    (コマンド名になる) ので、代入に数えない (0.36.7 までの shlex の読みは数えるので、呼び出し側は和を取る)。
+    """
+    head = segment.lstrip()
+    if not (_ASSIGNMENT_HEAD.match(head) or _REDIRECT_WORD.match(head)):
+        return set()  # 先頭の語が代入でもリダイレクトでもない (コマンドの語を全部分けずに済ませる。下の走査と同じ結果)
+    names: set[str] = set()
+    skip = False
+    for word in _shell_words(segment):
+        if skip:
+            skip = False
+            continue
+        redirect = _REDIRECT_WORD.match(word)
+        if redirect:
+            skip = redirect.end() == len(word)
+            continue
+        m = _ASSIGNMENT_HEAD.match(word)
+        if not m:
+            return set()
+        names.add(m.group(1))
+    return names
 
 
 def _has_unreadable_name(segment: str) -> bool:

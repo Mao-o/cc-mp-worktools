@@ -1340,6 +1340,21 @@ def expand_word_tilde(candidate: str, home: str) -> str:
 _LEGACY_VALUE_READING = False
 # 分解の間に、上の形の代入を読んだか。
 _LEGACY_VALUE_SEEN = False
+# 0.36.7 までの代入だけの行の候補の読み (`_ASSIGNMENT_TAIL_READING`。v0.36.8)。既定の読みは代入だけの行の
+# 先頭の代入から後ろを、basename に揃えずに候補にする (`_parse_leading_env` と `_normalize_segment_chdir`)。0.36.7
+# までは最初に値を飛ばした代入 (無ければ最後の代入) から後ろを候補にしていて、前者の先頭の語を
+# `_strip_command_path` が basename に揃えると、置換の中のパス付き CLI が候補になっていた
+# (`X=1 Y=$(/usr/bin/firebase deploy)` の `firebase deploy)`)。既定の読みがその形の行を読んだとき
+# (`_ASSIGNMENT_TAIL_SEEN`) だけ、この読みでも分解して候補の和集合を取る (0.36.7 が候補にしていたものを落とさない)。
+# 0.29.9 の読み (`_LEGACY_VALUE_READING`) では代わりにならない (空白を含む `${...}` を前に置いた行
+# (`A=${B:- x y} C=$(/usr/bin/aws s3 rm s3://b/k)`) は、そこで値を終えて別の候補になる)。
+_ASSIGNMENT_TAIL_READING = False
+_ASSIGNMENT_TAIL_SEEN = False
+# 直前の `_parse_leading_env` が代入だけの行の、先頭の代入から後ろを返したか (v0.36.8)。`_normalize_segment_chdir` は
+# その文字列を `_strip_command_path` で basename に揃えない。揃えると、先頭の代入の値の置換の中のパス
+# (`AWS_PROFILE=$(/bin/cat .p)` の `cat .p)`) が候補になり、`core/workdir.py` の `_env_names_changed` が代入の名前を
+# 読めない (0.36.7 までは、この形の AWS_PROFILE を後ろの aws への上書きに数えていなかった)。
+_ASSIGNMENT_ONLY_RETURNED = False
 _COMMAND_NAME = re.compile(r"[A-Za-z0-9_.@+-]+")
 # gh の token と host を決める env (`services/github.py` の `_TOKEN_ENV_VARS` と `_HOST_ENV_VAR`。
 # 一致は tests/test_assignment_value_skip.py が確かめる)。この env に読めない値 (検証の env に入れない
@@ -1414,7 +1429,7 @@ def _self_reference_env(command: str) -> dict[str, str]:
     (`_SELF_ASSIGNMENT`。1 語に左辺と参照の 2 つ。語の全体がその形のときだけ) の中にあり、hook の env にキーが
     あるものだけを返す。ほかの場所に名前があれば、値を変えうるので返さない
     (`AWS_PROFILE=$(echo q); AWS_PROFILE=$AWS_PROFILE aws ...` の aws は q で走る。前の代入だけのセグメントの
-    `$(echo q)` は `core/workdir.py` の `env_changes` が数えていない形。
+    `$(echo q)` は、0.36.7 までは `core/workdir.py` の `env_changes` が数えていなかった形 (v0.36.8 から数える)。
     `AWS_PROFILE=${AWS_PROFILE}-x X=$(echo q); AWS_PROFILE=$AWS_PROFILE aws ...` の頭の語も自己参照の語に数えないので、
     名前が余って返さない。aws は `<起動時の値>-x` で走る)。
     同じ前置きの前の代入 (`AWS_PROFILE=dev AWS_PROFILE=$AWS_PROFILE aws ...`。bash 3.2 は起動時の値、zsh -f は dev)・
@@ -1470,10 +1485,17 @@ def _parse_leading_env(
     - 値の終端は `_assignment_value_end` で求める。値にコマンド置換・backtick・算術展開・空白を
       含むパラメータ展開があっても、値を読まずに飛ばして後ろのコマンドを残す (v0.29.10。
       0.29.9 までは `$(` / backtick で剥がすのをやめ、`X=$(z) aws ...` の aws を候補にしていなかった)
-    - `FOO=bar` のみで後続コマンドが無いケースはそのまま返す (空コマンド化回避)。値を飛ばした
-      代入の後ろが代入だけのとき (`AWS_PROFILE=$(z) X=1`) は、最初に値を飛ばした代入から後ろを
-      返す (0.29.9 と同じ候補。`core/workdir.py` の `_env_names_changed` は候補の文字列から変えた
-      env の名前を読むので、飛ばした代入の名前を落とさない)
+    - 代入だけで後続コマンドが無いケース (`FOO=bar` / `AWS_PROFILE=prod X=1` / `AWS_PROFILE=$(z) X=1`) は、
+      先頭の代入から後ろをそのまま返し、収集 env は空、`unread` は呼んだときの状態に戻す (v0.36.8。空コマンド化
+      回避)。呼び出し側 (`_normalize_segment_chdir`) はその文字列を basename に揃えない (`_ASSIGNMENT_ONLY_RETURNED`)。
+      `core/workdir.py` の `_env_names_changed` は候補の文字列から変えた env の名前を読むので、どの代入の
+      名前も落とさない。0.36.7 までは最後の代入 (`X=1`) か、最初に値を飛ばした代入から後ろを返していたので、
+      その前の代入 (`AWS_PROFILE=prod X=1; aws ...` の AWS_PROFILE) を後ろの aws への上書きに数えていなかった
+      (シェルでは、export 済みの AWS_PROFILE を書き換えた後ろの aws は代入した値で走る)。返した代入の値の置換に
+      パスがある形 (`AWS_PROFILE=$(/bin/cat .p)`) は、basename に揃えた `cat .p)` が候補になり、同じく数えていなかった。
+      0.36.7 までの候補が置換の中のパス付き CLI を basename で拾っていた形 (`X=1 Y=$(/usr/bin/firebase deploy)`
+      の `firebase deploy)`。`_strip_command_path`) は、0.36.7 までの読み (`_ASSIGNMENT_TAIL_READING`) を足して
+      候補に残す。その読みの間は 0.36.7 と同じく、最初に値を飛ばした代入から後ろと、それより前の収集 env を返す
     収集 env には静的に解決できた値のみ入る (`$VAR` を含む値と、`$(` / backtick を含む値は
     キーごと除外)。検証は hook の env で行う。ただし前に同じキーへの静的な代入があれば、
     その値が残る (`AWS_PROFILE=dev AWS_PROFILE=$(z) aws ...` は dev で照合する。0.29.9 から)。
@@ -1486,18 +1508,22 @@ def _parse_leading_env(
     代入: `$(` / backtick / `$VAR` / 配列 / 追記 / 要素の代入) のキーを足す (v0.30.3)。後ろに同じキーへの
     静的な代入があれば、そちらが勝つので外す (`AWS_PROFILE=$(z) AWS_PROFILE=dev aws ...` は dev)。
     前の静的な代入の値が収集 env に残るとき (`AWS_PROFILE=dev AWS_PROFILE=$(z) aws ...`) もキーを足す
-    (実際の値は後ろの読めない値)。最初に値を飛ばした代入から後ろを返すとき (代入だけのセグメント) は、
-    その代入より前の状態に戻す。値で照合するのではなく、上書きされたことだけを伝える印
-    (`unread_env_candidates`)。
+    (実際の値は後ろの読めない値)。代入だけのセグメントは、呼んだときの状態に戻す (v0.36.8。剥がした代入が
+    無い)。値で照合するのではなく、上書きされたことだけを伝える印 (`unread_env_candidates`)。
 
     `launch_env` (`_self_reference_env` の結果。代入の値を Bash のシェルが展開するときに呼び出し側が渡す) を渡すと、
     値が同じキーの素の参照だけで値が `launch_env` の値のままの代入 (`AWS_PROFILE=${AWS_PROFILE:-dev} aws ...`。
     `_keeps_launch_value`) には印を付けない (v0.36.5)。印を外しもしない (値は前の状態のまま)。None なら全部に印を
     付ける (0.36.3 まで)。
     """
-    global _LEGACY_VALUE_SEEN, _GH_UNREAD_SEEN
+    global _LEGACY_VALUE_SEEN, _GH_UNREAD_SEEN, _ASSIGNMENT_TAIL_SEEN, _ASSIGNMENT_ONLY_RETURNED
+    _ASSIGNMENT_ONLY_RETURNED = False
     collected: dict[str, str] = {}
-    # 最初に値を飛ばした (0.29.9 が剥がすのをやめた) 代入から後ろの文字列と、その前までに集めた env
+    # 代入だけのセグメントで返す、先頭の代入から後ろの文字列と、呼んだときの `unread` (v0.36.8)
+    origin = cmd
+    unread_at_origin = set(unread) if unread is not None else set()
+    # 最初に値を飛ばした (0.29.9 が剥がすのをやめた) 代入から後ろの文字列と、その前までに集めた env と `unread`
+    # (0.36.7 までの読み (`_ASSIGNMENT_TAIL_READING`) が返す)
     first_dynamic = None
     unread_at_first_dynamic: set[str] = set()
     while True:
@@ -1538,16 +1564,29 @@ def _parse_leading_env(
                     # は bash で aws が走る)。
                     _LEGACY_VALUE_SEEN = True
         rest = cmd[end:]
-        if not rest and first_dynamic is not None:
-            # 値を飛ばした代入の後ろが代入だけ (コマンド語が無い)。`AWS_PROFILE=$(z) X=1; aws ...` の
-            # AWS_PROFILE は export 済みなら後ろの aws に効く。`X=1` だけを返すと、`core/workdir.py` の
-            # `_env_names_changed` が AWS_PROFILE を変えたと読まず、hook の env の AWS_PROFILE を
-            # ディレクトリ単位の固定として通してしまう。
+        if not rest:
+            # 代入だけ (コマンド語が無い)。`AWS_PROFILE=prod X=1; aws ...` / `AWS_PROFILE=$(z) X=1; aws ...` の
+            # AWS_PROFILE は export 済みなら後ろの aws に効く。最後の代入 (`X=1`) や値を飛ばした代入から後ろだけを
+            # 返すと、`core/workdir.py` の `_env_names_changed` がその前の代入を変えた名前に数えず、hook の env の
+            # AWS_PROFILE をディレクトリ単位の固定として通してしまう (0.36.7 まで)。先頭の代入から後ろを返し、
+            # 呼び出し側は basename に揃えない (`_ASSIGNMENT_ONLY_RETURNED`)。
+            # 0.36.7 までの候補 (最初に値を飛ばした代入から後ろ) の先頭の語を `_strip_command_path` が basename に
+            # 揃えていた形 (置換の中のパス付き CLI) は、0.36.7 までの読みを足して候補に残す (docstring)。値を飛ばした
+            # 代入が無い行の 0.36.7 の候補 (最後の代入) は揃わない (値を `_scan_value_end` で読めるので、
+            # `_strip_command_path` がそのまま返す)。
+            if first_dynamic is not None and _strip_command_path(first_dynamic[0]) != first_dynamic[0]:
+                if _ASSIGNMENT_TAIL_READING:
+                    if unread is not None:
+                        unread.clear()
+                        unread.update(unread_at_first_dynamic)
+                    return first_dynamic
+                _ASSIGNMENT_TAIL_SEEN = True
             if unread is not None:
                 unread.clear()
-                unread.update(unread_at_first_dynamic)
-            return first_dynamic
-        if not rest or rest[0] not in " \t":
+                unread.update(unread_at_origin)
+            _ASSIGNMENT_ONLY_RETURNED = True
+            return origin, {}
+        if rest[0] not in " \t":
             return cmd, collected
         key = m.group(1)
         # 配列の代入 (`a=(1 2)`)・追記 (`a+=x`)・要素の代入 (`a[1]=x`) は剥がすが、値は集めない
@@ -2199,9 +2238,13 @@ def _strip_command_path(cmd: str) -> str:
     # 先に剥がしている) は、コマンドの呼び出しではない。値が `/…/firebase-tools` で終わるだけで
     # basename に揃えると、firebase のコマンドとして検出され誤 deny になる。代入の値は
     # コマンド名として読まない。
-    # 値に `$(` / バッククォートがある代入だけのセグメントは、その中のコマンド置換に書かれた
+    # 値に `$(` / バッククォートがある代入は、その中のコマンド置換に書かれた
     # パス付き CLI (`X=$(/usr/bin/firebase deploy)`) を従来どおり basename 化して検出する
-    # (ここで返すと deny が allow に変わる)。後ろにコマンドがある形 (`X=$(/usr/bin/firebase deploy) aws ...`)
+    # (ここで返すと deny が allow に変わる)。代入だけの行は、既定の読みでは `_normalize_segment_chdir` が
+    # ここを呼ばず (`_ASSIGNMENT_ONLY_RETURNED`。v0.36.8。追記 `HOME+=/x` と要素の代入 `a[1]=/x/y` も揃えない。
+    # 0.36.7 までは `NAME=` の形だけを下で代入と読み、`HOME+=/x` を basename の `x` に揃えていたので、
+    # `core/workdir.py` の `_env_names_changed` が HOME を変えた名前に数えなかった)、0.36.7 までの読み
+    # (`_ASSIGNMENT_TAIL_READING`) でだけここに来る。後ろにコマンドがある形 (`X=$(/usr/bin/firebase deploy) aws ...`)
     # は、既定の読みでは `_parse_leading_env` が代入を飛ばすのでここに来ず、0.29.9 までの読み
     # (`_LEGACY_VALUE_READING`) でだけここに来る。
     am = _ASSIGNMENT_HEAD_RE.match(tok)
@@ -2421,7 +2464,9 @@ def _normalize_segment_chdir(
         unread.difference_update(env)
         unread.update(round_unread)
         pathed = cmd
-        cmd = _strip_command_path(cmd)
+        # 代入だけの行 (コマンドの呼び出しではない) は basename に揃えない (`_ASSIGNMENT_ONLY_RETURNED`。v0.36.8)
+        if not _ASSIGNMENT_ONLY_RETURNED:
+            cmd = _strip_command_path(cmd)
         if cmd != pathed:
             reserved_position = False  # `\time` / `/usr/bin/time` は予約語ではない
             if "/" in pathed.split(None, 1)[0]:
@@ -2537,23 +2582,30 @@ def extract_candidate_readings(
       シェルの読み方ではなく、0.29.9 の候補を落とさないための読みなので、`legacy_values=False` で
       足さずに返せる (`core/workdir.py` の `sure_chdirs` は読みの数を数えるときに足さない。足すと
       `cd sub && X=$(/bin/date +%s) firebase deploy` の `cd sub` を確実とみなさなくなる)
+    - 0.36.7 までの代入だけの行の読み (`_ASSIGNMENT_TAIL_READING`。v0.36.8): 上の読み (既定の読みを含む) の分解で、
+      0.36.7 の候補 (最初に値を飛ばした代入から後ろ) が置換の中のパス付き CLI を basename で拾っていた代入だけの行
+      (`X=1 Y=$(/usr/bin/firebase deploy)`) を読んだとき、その読みを 0.36.7 までの読みでもう一度分解する。
+      0.29.9 の読みと同じく、シェルの読み方ではないので `legacy_values=False` では足さない
 
     どれも既定の読みに足す側で、既定の読みの候補は減らない。読みごとに区切りの並びを保つので、
     `cd` の追跡 (`core/workdir.py`) は読みごとに辿る。
     """
-    global _LEGACY_VALUE_SEEN
-    saved_seen = _LEGACY_VALUE_SEEN
-    _LEGACY_VALUE_SEEN = False
+    global _LEGACY_VALUE_SEEN, _ASSIGNMENT_TAIL_SEEN
+    saved_seen = (_LEGACY_VALUE_SEEN, _ASSIGNMENT_TAIL_SEEN)
+    _LEGACY_VALUE_SEEN = _ASSIGNMENT_TAIL_SEEN = False
     try:
         readings = [extract_candidates_with_separators(command)]
         legacy = [None] if _LEGACY_VALUE_SEEN else []
+        tails = [None] if _ASSIGNMENT_TAIL_SEEN else []
         alternatives = _alternative_readings(command)
         for zsh, bash in alternatives:
-            _LEGACY_VALUE_SEEN = False
+            _LEGACY_VALUE_SEEN = _ASSIGNMENT_TAIL_SEEN = False
             with _reading(zsh, bash):
                 other = extract_candidates_with_separators(command)
             if _LEGACY_VALUE_SEEN:
                 legacy.append((zsh, bash))
+            if _ASSIGNMENT_TAIL_SEEN:
+                tails.append((zsh, bash))
             if other not in readings:
                 readings.append(other)
         for config in legacy if legacy_values else ():
@@ -2561,8 +2613,13 @@ def extract_candidate_readings(
                 other = extract_candidates_with_separators(command)
             if other not in readings:
                 readings.append(other)
+        for config in tails if legacy_values else ():
+            with _assignment_tail_reading(config):
+                other = extract_candidates_with_separators(command)
+            if other not in readings:
+                readings.append(other)
     finally:
-        _LEGACY_VALUE_SEEN = saved_seen
+        _LEGACY_VALUE_SEEN, _ASSIGNMENT_TAIL_SEEN = saved_seen
     return readings
 
 
@@ -2601,6 +2658,25 @@ def _legacy_value_reading(config: tuple[bool, bool] | None):
                 yield
     finally:
         _LEGACY_VALUE_READING = saved
+
+
+@contextlib.contextmanager
+def _assignment_tail_reading(config: tuple[bool, bool] | None):
+    """0.36.7 までの代入だけの行の読み (`_ASSIGNMENT_TAIL_READING`) に切り替える (v0.36.8)。
+
+    `config` は重ねる別の読み (`_reading` の (zsh, bash))。None なら既定の読みのまま。
+    """
+    global _ASSIGNMENT_TAIL_READING
+    saved = _ASSIGNMENT_TAIL_READING
+    _ASSIGNMENT_TAIL_READING = True
+    try:
+        if config is None:
+            yield
+        else:
+            with _reading(*config):
+                yield
+    finally:
+        _ASSIGNMENT_TAIL_READING = saved
 
 
 @contextlib.contextmanager

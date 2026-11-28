@@ -225,7 +225,11 @@ class TestExtractCandidates(unittest.TestCase):
                 "FT=/x/node_modules/firebase-tools; echo hi",
                 [("FT=/x/node_modules/firebase-tools", {}), ("echo hi", {})],
             ),
-            "代入を 2 つ重ねる": ("X=1 FT=/x/firebase-tools", [("FT=/x/firebase-tools", {"X": "1"})]),
+            # v0.36.8 から、代入だけの行は先頭の代入から後ろを候補にする (0.36.7 までは最後の代入だけ)
+            "代入を 2 つ重ねる": ("X=1 FT=/x/firebase-tools", [("X=1 FT=/x/firebase-tools", {})]),
+            # 追記と要素の代入も代入と読む (v0.36.8。0.36.7 までは basename の `firebase-tools` / `gh` に揃えていた)
+            "追記の値": ("FT+=/x/firebase-tools", [("FT+=/x/firebase-tools", {})]),
+            "要素の代入の値": ("a[1]=/usr/local/bin/gh", [("a[1]=/usr/local/bin/gh", {})]),
             "小文字と数字の名前": ("ft_2=/x/firebase-tools", [("ft_2=/x/firebase-tools", {})]),
             "先頭が _ の名前": ("_ft=/x/firebase-tools", [("_ft=/x/firebase-tools", {})]),
             "gh の値": ("X=/usr/local/bin/gh", [("X=/usr/local/bin/gh", {})]),
@@ -238,10 +242,19 @@ class TestExtractCandidates(unittest.TestCase):
 
     def test_assignment_with_command_substitution_keeps_detecting_the_inner_cli(self):
         """値に `$(` / バッククォートを含む代入だけのセグメント (後ろにコマンドが無いので `_parse_leading_env` が剥がさない) は、
-        置換の中のパス付き CLI を basename 化で検出する (代入として返すと deny が allow に変わる)。"""
+        置換の中のパス付き CLI を basename 化で検出する (代入として返すと deny が allow に変わる)。
+
+        v0.36.8 から、既定の読みは代入のまま返し (変えた env の名前を読むため)、basename 化した候補は
+        0.36.7 までの読みで足す。"""
         cases = {
-            "$() の中のパス付き firebase": ("X=$(/usr/bin/firebase deploy)", [("firebase deploy", {})]),
-            "backtick の中のパス付き gh": ("X=`/usr/bin/gh pr create`", [("gh pr create`", {})]),
+            "$() の中のパス付き firebase": (
+                "X=$(/usr/bin/firebase deploy)",
+                [("X=$(/usr/bin/firebase deploy)", {}), ("firebase deploy", {})],
+            ),
+            "backtick の中のパス付き gh": (
+                "X=`/usr/bin/gh pr create`",
+                [("X=`/usr/bin/gh pr create`", {}), ("gh pr create`", {})],
+            ),
         }
         for label, (command, expected) in cases.items():
             with self.subTest(label):

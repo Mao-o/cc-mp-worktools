@@ -428,7 +428,12 @@ v0.19.0 から、その CLI に**ディレクトリ単位でアカウントを�
   (`export $(cat .env | xargs)` / `export $V` / `` export `cat f` `` / `export {A,B}=x`) は、どの環境変数を変えたか
   決められないので、どの service も固定とみなさない。前段の `read` / `printf -v` で identity の環境変数に値を
   入れた後 (`read -r AWS_PROFILE < f`) も同じ (v0.36.7。0.36.6 までは、名前を読めない引数を変えた名前に数えず、
-  `read` / `printf -v` も数えていなかった)
+  `read` / `printf -v` も数えていなかった)。前段の代入だけのセグメントは、どの代入も変えた名前に数える
+  (`AWS_PROFILE=prod X=1; aws ...` / `AWS_PROFILE=$(echo q); aws ...` / `AWS_PROFILE=$(/bin/cat .p); aws ...` /
+  `AWS_PROFILE+=x; aws ...` / `HOME+=/x; aws ...`)。名前を読めない `unset` (`unset $V` /
+  `unset $(env | grep -o '^AWS_PROFILE')`) の後ろはどの service も固定とみなさず、`export HOME+=/x` の名前は `HOME` と
+  数える (v0.36.8。0.36.7 までは、代入だけのセグメントの最後の代入と、置換の中に空白もパスも無い値だけを数え、
+  `unset $V` は `$V` を名前と読んでいた)
 - コマンドの [context option](#コンテキスト指定-flag-の反映-v090) が固定と違う値を指すときも固定とみなさない
   (v0.36.6。0.36.5 までは option を見ず、`aws --profile prod s3 rm ...` を `AWS_PROFILE=dev` の固定で通していた。
   CLI は option の値で動く)。固定と同じ値を指す option は固定のまま。違うとみなす条件:
@@ -1791,13 +1796,16 @@ CLI ごとに 1 回。deny はせず、deny したコマンドには足さない
 
 ## 既知の制限
 
-- **前段で環境変数に値を入れる形のうち、ディレクトリ単位の固定の判定が数えないものがある** (v0.36.7)。数えるのは
-  `export` / `declare` / `typeset` / `readonly` / `local` / `unset` / 代入 / `read` / `printf -v` と、内容を読めない
-  `source` / `.` / `eval` / `set`。名前を変数で渡す `read "$V"` / `unset $V` (`unset $(env | grep ^AWS_ | cut -d= -f1)`
-  を含む)、値の置換に空白がある代入だけのセグメント (`AWS_PROFILE=$(cat f); aws ...`。引用符で包んだ
-  `AWS_PROFILE="$(cat f)"` は数える)、`for AWS_PROFILE in ...` のループ変数、`getopts` / `let` / `mapfile` / zsh の
-  `print -v` / `vared` は数えないので、期待値が未登録で固定のある世界では、その後ろの CLI を固定の値で通す (CLI は
-  入れ直した値で走る)
+- **前段で環境変数に値を入れる形のうち、ディレクトリ単位の固定の判定が数えないものがある** (v0.36.7。v0.36.8 で
+  代入だけのセグメントと `unset $V` を数えるようにした)。数えるのは `export` / `declare` / `typeset` / `readonly` /
+  `local` / `unset` / 代入 / `read` / `printf -v` と、内容を読めない `source` / `.` / `eval` / `set`。名前を変数で渡す
+  `read "$V"`、`for AWS_PROFILE in ...` のループ変数、`getopts` / `let` / `mapfile` / zsh の `print -v` / `vared` は
+  数えない。代入だけのセグメントのうち、代入の後ろに空白を挟んでリダイレクトを置いた形 (`AWS_PROFILE=prod 2>/dev/null;
+  aws ...`。空白なしの `AWS_PROFILE=prod>/dev/null` は数える)、最後の代入が配列の形 (`AWS_PROFILE=prod X=(1 2); aws ...`。
+  配列が最後でなければ数える)、二重引用符の中の置換の、中の二重引用符に空白がある値
+  (`AWS_PROFILE="$(printf "%s" "a b")"; aws ...`。中の `"` で値を閉じ、空白の後ろをコマンドと読む。守らない範囲の
+  「二重引用符の中の置換」と同じ読み) も数えない。期待値が未登録で固定のある世界では、これらの後ろの CLI を固定の値で
+  通す (CLI は入れ直した値で走る)
 - **`pnpm <CLI 名>` / `yarn <CLI 名>` は、同じ名前の package.json の script でも CLI として照合する** (v0.32.0)。
   pnpm / yarn は同名の script があればそちらを走らせる (pnpm 11 / yarn 1.22 で実測) が、hook は package.json を
   読まない。止まる条件は直接 `firebase deploy` と打ったときと同じで、期待値との不一致が確定したときに加えて、

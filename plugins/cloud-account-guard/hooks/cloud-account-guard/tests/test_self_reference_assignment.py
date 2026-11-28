@@ -205,7 +205,8 @@ class AssignmentShapeTests(_EnvMixin, unittest.TestCase):
         """コマンドのほかの場所にキーの名前があれば、値を変えうるので印を付ける (`_self_reference_env`)。
 
         `AWS_PROFILE=$(echo q); AWS_PROFILE=$AWS_PROFILE aws ...` の aws は q で走る (前の代入だけのセグメントの
-        `$(echo q)` は env_changes が数えていない形)。読むだけの使い方 (`X=$AWS_PROFILE` / `echo`) も数える (保守側)。
+        `$(echo q)` は、0.36.7 までは env_changes が数えていなかった形。v0.36.8 から数える)。読むだけの使い方
+        (`X=$AWS_PROFILE` / `echo`) も数える (保守側)。
         """
         for command in (
             f"{K}=$(echo q); {K}=${K} {AWS}",
@@ -217,8 +218,8 @@ class AssignmentShapeTests(_EnvMixin, unittest.TestCase):
             f"echo ${K}; {K}=${K} {AWS}",
             f"{K}=$(echo q) aws s3 ls s3://b && {K}=${K} {AWS}",
             # 自己参照で始まって後ろに文字が続く語は、自己参照の語に数えない (`_SELF_ASSIGNMENT` の後ろの境界)。
-            # 前の代入だけのセグメントで値を変え、`X=$(echo q)` が並ぶと env_changes が数えない
-            # (bash 3.2 / zsh -f で aws は launch-x / launchx / launchotherval で走る)
+            # 前の代入だけのセグメントで値を変え、`X=$(echo q)` が並ぶ形は、0.36.7 までは env_changes が数えなかった
+            # (v0.36.8 から数える。bash 3.2 / zsh -f で aws は launch-x / launchx / launchotherval で走る)
             f"{K}=${{{K}}}-x X=$(echo q); {K}=${K} {AWS}",
             f"{K}=${K}-x X=$(echo q); {K}=${{{K}:-dev}} {AWS}",
             f'{K}="${K}"x X=$(echo q); {K}="${K}" {AWS}',

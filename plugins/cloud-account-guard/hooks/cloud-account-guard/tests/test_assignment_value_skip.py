@@ -287,7 +287,8 @@ class WorkdirAfterSkippedValueTests(_Case):
         self.assertIn("AWS_PROFILE", changes.get(AWS, set()))
 
     def test_assignment_only_segment_keeps_the_skipped_names(self):
-        """値を飛ばした代入の後ろが代入だけのセグメントは、0.29.9 と同じ候補 (最初に値を飛ばした代入から後ろ)。
+        """値を飛ばした代入の後ろが代入だけのセグメントは、先頭の代入から後ろを候補にする (v0.36.8。0.36.7 までは
+        最初に値を飛ばした代入から後ろ)。
 
         `AWS_PROFILE=$(z) X=1; aws ...` の AWS_PROFILE は、export 済みなら後ろの aws に効く (bash 3.2 /
         zsh -f で実測)。`X=1` だけを候補にすると、変えた env の名前から AWS_PROFILE が消え、hook の env の
@@ -302,14 +303,20 @@ class WorkdirAfterSkippedValueTests(_Case):
                         self.assertIn(cli, changes)
                         self.assertLessEqual({name, "X"}, changes[cli])
 
-    def test_assignment_only_candidate_is_the_previous_one(self):
-        """候補は最初に値を飛ばした代入から後ろで、env はそれより前の静的な代入だけ (0.29.9 と同じ)。"""
+    def test_assignment_only_candidate_starts_at_the_first_assignment(self):
+        """候補は先頭の代入から後ろで、env は空 (v0.36.8。剥がした代入が無い)。
+
+        0.36.7 までは最初に値を飛ばした代入から後ろを候補にし、それより前の静的な代入 (Y=1) を env に入れていた
+        (0.29.9 と同じ)。前の代入の名前が候補の文字列から消え、`_env_names_changed` が数えなかった。
+        """
         cases = {
             "AWS_PROFILE=$(z) X=1": [("AWS_PROFILE=$(z) X=1", {})],
-            "Y=1 AWS_PROFILE=$(z) X=1": [("AWS_PROFILE=$(z) X=1", {"Y": "1"})],
-            "Y=1 AWS_PROFILE=$(z) X=$(y) W=2": [("AWS_PROFILE=$(z) X=$(y) W=2", {"Y": "1"})],
-            # 値を飛ばした代入より後ろの静的な代入 (W=2) は、返す env に入れない (0.29.9 は剥がしていない)
-            "Y=1 AWS_PROFILE=$(z) W=2 X=1": [("AWS_PROFILE=$(z) W=2 X=1", {"Y": "1"})],
+            "Y=1 AWS_PROFILE=$(z) X=1": [("Y=1 AWS_PROFILE=$(z) X=1", {})],
+            "Y=1 AWS_PROFILE=$(z) X=$(y) W=2": [("Y=1 AWS_PROFILE=$(z) X=$(y) W=2", {})],
+            "Y=1 AWS_PROFILE=$(z) W=2 X=1": [("Y=1 AWS_PROFILE=$(z) W=2 X=1", {})],
+            # 値を読める代入だけの行も同じ (0.36.7 までは最後の代入 (X=1) だけが候補で、前の代入は env に入れていた)
+            "AWS_PROFILE=prod X=1": [("AWS_PROFILE=prod X=1", {})],
+            "AWS_PROFILE=prod": [("AWS_PROFILE=prod", {})],
         }
         for command, expected in cases.items():
             with self.subTest(command=command):
