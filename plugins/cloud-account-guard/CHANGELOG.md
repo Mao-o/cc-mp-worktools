@@ -22,9 +22,14 @@
   単引用符の `'$AWS_PROFILE'`、追記 (`+=`)・要素の代入。値は起動時の値のままでも、次の形は保守側に倒して印を残す:
   既定の語に `$(` / backtick / 空白 / 引用符 / `{` / `}` / `\` を含む形 (展開の閉じの読みが bash と zsh で割れうる)、
   コマンドのほかの場所でそのキーの名前を使う形 (`AWS_PROFILE=dev AWS_PROFILE=$AWS_PROFILE aws ...` は bash 3.2 が
-  起動時の値、zsh -f が dev を使う。`AWS_PROFILE=$(echo q); AWS_PROFILE=$AWS_PROFILE aws ...` の aws は q で走る)、
-  env を scrub する `sudo` の後ろのシェル経由 wrapper の中身 (`sudo watch 'AWS_PROFILE=${AWS_PROFILE:-dev} aws ...'`
-  の aws は dev で走る)
+  起動時の値、zsh -f が dev を使う。`AWS_PROFILE=$(echo q); AWS_PROFILE=$AWS_PROFILE aws ...` の aws は q で走る。
+  自己参照で始まって後ろに文字が続く語も、ほかの場所の名前に数える:
+  `AWS_PROFILE=${AWS_PROFILE}-x X=$(echo q); AWS_PROFILE=$AWS_PROFILE aws ...` の aws は `<起動時の値>-x` で走る。
+  語の終わりと読むのは空白・`;` `&` `|` `<` `>` `)`・末尾だけで、`(` は zsh -f が語の続きと読む)、
+  env を scrub する `sudo` (`-E` / `--preserve-env` の無い形。`--preserve-env=LIST` も LIST の外を scrub する
+  ので含める) の後ろのシェル経由 wrapper の中身 (`sudo watch 'AWS_PROFILE=${AWS_PROFILE:-dev} aws ...'`
+  の aws は dev で走る。`sudo` との間に `nohup` / `env` などを挟んでも同じ)。前置きの代入の照合 env と印を
+  `sudo` で捨てるかの判定は変えていない (`--preserve-env=LIST` は従来どおり保持に倒す)
 - 期待値を登録した service の照合は変えていない (印は固定の判定でだけ使う)
 
 ### 比較
@@ -39,6 +44,12 @@
   (`xargs` の 56 形は空の入力では CLI が走らないので、うち 32 形に入力を与えて確かめた)
 - 候補の文字列 (読みごと) は、上の形と文法型の生成器の 3 万形、それに自己参照の代入を差し込んだ 3 万形で、全形
   0.36.3 と同じ。値を読めない代入の印は、自己参照のキーが外れただけ (足された印は 0)
+- 前の代入だけのセグメントに印が残るべき値 (自己参照で始まって後ろに文字が続く値など 25 種) を置いた形と、`sudo` の
+  `--preserve-env` の各形・`sudo` とシェル経由 wrapper の間に wrapper を挟んだ形など 7,047 形を足した比較: 0.36.3 より
+  緩む判定は、自己参照の代入を除いた形がある形では全部その形の 0.36.3 の判定と同じ。緩んだ 431 形のうち `exec -c` の
+  2 形を除く 429 形を bash 3.2 と zsh -f で走らせ、CLI が起動時と違う値を受け取ったのは、`--preserve-env=LIST` の `sudo` の前に置いた自己参照の代入
+  (`sudo` が捨てるので値に効かない。自己参照の代入を除いた形も 0.36.3 から allow。既知の制限の `-E` の無い `sudo`) と、
+  `let` での代入・名前を引用符や行の継続で割った形・`{ ...; }` の中の heredoc の行のシェル経由 wrapper だけ
 
 ## 0.36.4
 

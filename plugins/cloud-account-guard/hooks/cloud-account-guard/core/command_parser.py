@@ -1393,9 +1393,14 @@ _SELF_REFERENCE = re.compile(
     r"(?:(?P<op>:?-)" + _SELF_DEFAULT_WORD + r")?\}"
 )
 # コマンド全体の中の、自己参照の代入の語 (`_self_reference_env`)。左辺の名前の前は名前の文字でない。
+# 語は空白 (` ` / タブ / 改行)・区切り (`;` `&` `|` `<` `>` `)`)・末尾で終わる (v0.36.5)。自己参照で始まって
+# 後ろに文字が続く語 (`K=${K}-x` / `K=$K-x` / `K="$K"x` / `K=${K}${OTHER}`) は、値が起動時の値に文字を足したもの
+# なので数えない。`(` は zsh -f が語の続きと読む (`K=$K(x)` の値は `launch(x)`。bash 3.2 は構文エラー)。
+# CR・VT・FF・NBSP などは両方のシェルで語の続き (Python の `\s` には入るので使わない。bash 3.2 / zsh -f で実測)。
 _SELF_ASSIGNMENT = re.compile(
     r"(?<![A-Za-z0-9_])(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<q>\"?)"
     r"\$(?:(?P=key)(?![A-Za-z0-9_])|\{(?P=key)(?::?-" + _SELF_DEFAULT_WORD + r")?\})(?P=q)"
+    r"(?![^ \t\n;&|<>)])"
 )
 _NAME_RUN = re.compile(r"[A-Za-z0-9_]+")
 
@@ -1404,9 +1409,12 @@ def _self_reference_env(command: str) -> dict[str, str]:
     """自己参照の代入を、値が hook の env の値のままと読んでよいキーと、その hook の env の値 (v0.36.5)。
 
     コマンドの中のそのキーの名前 (名前の文字に挟まれていない綴り) が、全部自己参照の代入の語
-    (`_SELF_ASSIGNMENT`。1 語に左辺と参照の 2 つ) の中にあり、hook の env にキーがあるものだけを返す。ほかの場所に
-    名前があれば、値を変えうるので返さない (`AWS_PROFILE=$(echo q); AWS_PROFILE=$AWS_PROFILE aws ...` の aws は q で
-    走る。前の代入だけのセグメントの `$(echo q)` は `core/workdir.py` の `env_changes` が数えていない形)。
+    (`_SELF_ASSIGNMENT`。1 語に左辺と参照の 2 つ。語の全体がその形のときだけ) の中にあり、hook の env にキーが
+    あるものだけを返す。ほかの場所に名前があれば、値を変えうるので返さない
+    (`AWS_PROFILE=$(echo q); AWS_PROFILE=$AWS_PROFILE aws ...` の aws は q で走る。前の代入だけのセグメントの
+    `$(echo q)` は `core/workdir.py` の `env_changes` が数えていない形。
+    `AWS_PROFILE=${AWS_PROFILE}-x X=$(echo q); AWS_PROFILE=$AWS_PROFILE aws ...` の頭の語も自己参照の語に数えないので、
+    名前が余って返さない。aws は `<起動時の値>-x` で走る)。
     同じ前置きの前の代入 (`AWS_PROFILE=dev AWS_PROFILE=$AWS_PROFILE aws ...`。bash 3.2 は起動時の値、zsh -f は dev)・
     `export` / `unset` / `read` などの名前もここで外れる。名前は多めに数える側 (引用符の中・heredoc の本文・
     `$AWS_PROFILE` を表示するだけの `echo` も数える。別の名前の一部の `X_AWS_PROFILE` は数えない) で、多く数えると
@@ -1934,7 +1942,7 @@ def _strip_one_wrapper_kind(cmd: str) -> tuple[str | None, bool]:
 _SUDO_PRESERVE_ENV_FLAGS = {"-E", "--preserve-env"}
 
 
-def _sudo_preserves_env(cmd_after_sudo: str) -> bool:
+def _sudo_preserves_env(cmd_after_sudo: str, whole_env: bool = False) -> bool:
     """`sudo` 直後のフラグ列に preserve-env 指定があるかを判定する。
 
     `sudo` は `-E` / `--preserve-env` / `--preserve-env=LIST` が無いと継承環境を
@@ -1946,6 +1954,10 @@ def _sudo_preserves_env(cmd_after_sudo: str) -> bool:
     env_keep/env_reset まで静的には不可知なので、preserve 指定があれば「pre-sudo
     env を伝播してよい」と保守的に判断する (= scrub による誤 allow を防ぐのが目的で、
     保持しすぎ方向は誤 deny を増やさない安全側)。
+
+    `whole_env` が真なら、`--preserve-env=LIST` は保持に数えない (LIST の外の変数は scrub される。sudo(8))。
+    自己参照の代入の印を外すかの判定 (`_normalize_segment_chdir` の `scrubbed`) で使う: そこでは保持と読むと
+    印が外れる側なので、向きが収集 env の伝播と逆になる (v0.36.5。LIST の中身は読まない)。
     """
     s = cmd_after_sudo.lstrip()
     while s:
@@ -1959,8 +1971,8 @@ def _sudo_preserves_env(cmd_after_sudo: str) -> bool:
             return False
         if tok in _SUDO_PRESERVE_ENV_FLAGS:
             return True
-        # `--preserve-env=AWS_PROFILE` のような = 形式。
-        if tok.startswith("--preserve-env="):
+        # `--preserve-env=AWS_PROFILE` のような = 形式 (`whole_env` では保持に数えず、下の `=` の形として読み飛ばす)。
+        if tok.startswith("--preserve-env=") and not whole_env:
             return True
         # 値を取るフラグ (`-u deploy` 等) は次トークンが値なのでまとめて skip。
         # そうしないと値トークン (例: `-u -E`... は通常無いが) を誤って flag と
@@ -2322,7 +2334,8 @@ def _normalize_segment_chdir(
     (`_strip_heredoc_bodies` で文字列が変わったか。v0.30.3)。落とした行は区切りを含んだまま返る
     (`cat <<EOF && kubectl ...`) ので、呼び出し側 (`_segment_candidates`) が分割し直す。
 
-    8 つ目は、env を scrub する sudo (`_sudo_preserves_env` が偽) を剥がした後に、シェル経由 wrapper の中身を
+    8 つ目は、env を scrub する sudo (`_sudo_preserves_env(..., whole_env=True)` が偽。`-E` / `--preserve-env` の
+    無い形で、`--preserve-env=LIST` も scrub に数える) を剥がした後に、シェル経由 wrapper の中身を
     取り出したか (v0.36.5)。その中身の代入の値は scrub した env のシェルが展開する
     (`sudo watch 'AWS_PROFILE=${AWS_PROFILE:-dev} aws ...'` は dev。実測) ので、自己参照の代入にも印を付ける。
     sudo の引数の代入 (`sudo AWS_PROFILE=$AWS_PROFILE aws ...`) は Bash のシェルが展開するので当てない。
@@ -2420,6 +2433,9 @@ def _normalize_segment_chdir(
             if not _sudo_preserves_env(rest_after_sudo):
                 collected.clear()
                 unread.clear()
+            # `--preserve-env=LIST` も LIST の外を scrub する (sudo(8))。収集 env は保持に倒す (誤 deny を増やすだけの
+            # 側) が、自己参照の代入の読みでは scrub に倒す (保持と読むと印が外れる側。docstring の 8 つ目)
+            if not _sudo_preserves_env(rest_after_sudo, whole_env=True):
                 scrubbed = True
             if _has_flag(rest_after_sudo, "sudo", _SUDO_CHDIR_FLAGS):
                 chdir = True

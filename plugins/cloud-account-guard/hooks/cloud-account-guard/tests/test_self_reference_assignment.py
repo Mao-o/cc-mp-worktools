@@ -216,6 +216,13 @@ class AssignmentShapeTests(_EnvMixin, unittest.TestCase):
             f"X=${K} {K}=${{{K}}} {AWS}",
             f"echo ${K}; {K}=${K} {AWS}",
             f"{K}=$(echo q) aws s3 ls s3://b && {K}=${K} {AWS}",
+            # 自己参照で始まって後ろに文字が続く語は、自己参照の語に数えない (`_SELF_ASSIGNMENT` の後ろの境界)。
+            # 前の代入だけのセグメントで値を変え、`X=$(echo q)` が並ぶと env_changes が数えない
+            # (bash 3.2 / zsh -f で aws は launch-x / launchx / launchotherval で走る)
+            f"{K}=${{{K}}}-x X=$(echo q); {K}=${K} {AWS}",
+            f"{K}=${K}-x X=$(echo q); {K}=${{{K}:-dev}} {AWS}",
+            f'{K}="${K}"x X=$(echo q); {K}="${K}" {AWS}',
+            f"{K}=${{{K}}}${{OTHER}} X=$(date); {K}=${K} {AWS}",
         ):
             with self.subTest(command=command):
                 self.assertTrue(self._marked(command))
@@ -223,6 +230,40 @@ class AssignmentShapeTests(_EnvMixin, unittest.TestCase):
         for command in (
             f"X_{K}=1 {K}=${K} {AWS}",
             f"{K}=${K} aws s3 ls s3://b && {K}=${{{K}:-dev}} {AWS}",
+        ):
+            with self.subTest(command=command):
+                self.assertFalse(self._marked(command))
+
+    # 自己参照で始まり、後ろに語の続きがある頭 (値は起動時の値に文字を足したもの。bash 3.2 / zsh -f で実測。
+    # `(` は zsh -f が語の続きと読み、`launch(x)` になる。CR・VT・NBSP は両方のシェルで語の続き)
+    LONGER_HEADS = (
+        f"{K}=${{{K}}}-x", f"{K}=${K}-x", f'{K}="${K}"x', f'{K}="${{{K}}}"-x', f"{K}=${{{K}}}${{OTHER}}",
+        f"{K}=${K}$OTHER", f"{K}=${{{K}:-w}}x", f'{K}="${{{K}:-w}}"x', f"{K}=${{{K}-w}}x", f"{K}=${K}(x)",
+        f"{K}=${{{K}}}'x'", f'{K}=${K}"x"', f"{K}=${K}\\ x", f"{K}=${K}#x", f"{K}=${K}}}x", f"{K}=${K}=x",
+        f"{K}=${K}\rx", f"{K}=${K}\vx", f"{K}=${K}\u00a0x",
+    )
+
+    def test_a_word_that_only_starts_with_a_self_reference_keeps_the_mark(self):
+        tails = (f"{K}=${K} {AWS}", f"{K}=${{{K}:-dev}} {AWS}", f'{K}="${K}" {AWS}', f"{K}=${{{K}}} {AWS}")
+        for head in self.LONGER_HEADS:
+            for sep in ("; ", "\n", " && "):
+                for tail in tails:
+                    command = f"{head} X=$(echo q){sep}{tail}"
+                    with self.subTest(command=command):
+                        self.assertTrue(self._marked(command))
+
+    def test_a_self_reference_word_ends_at_a_blank_a_separator_or_the_end(self):
+        """対照: 語が空白・区切り・末尾で終わる自己参照の語は数える (値は起動時の値のまま。印を付けない)。"""
+        for sep in ("; ", ";", "\n", "\t;", " && ", "&&", " || ", "|", "&", ">/dev/null; ", "</dev/null; "):
+            command = f"{K}=${K}{sep}{K}=${K} {AWS}"
+            with self.subTest(command=command):
+                self.assertFalse(self._marked(command))
+        for command in (
+            f"({K}=${K}) && {K}=${K} {AWS}",
+            f'{K}="${K}"; {K}="${K}" {AWS}',
+            f"{K}=${{{K}:-w}}; {K}=${K} {AWS}",
+            f"{K}=${K} {AWS}; {K}=${K}",
+            f"{K}=${K} {AWS} && {K}=${{{K}:-dev}}",
         ):
             with self.subTest(command=command):
                 self.assertFalse(self._marked(command))
@@ -347,9 +388,41 @@ class ScrubbedShellTests(_EnvMixin, unittest.TestCase):
             # 文字列からは引用符の中身と区別できないので印を付ける (保守側)
             f"sudo -i {K}=${K} {AWS}",
             f"sudo npx -c '{K}=${K} {AWS}'",
+            # scrub した sudo とシェル経由 wrapper の間に、env を素通しする wrapper を挟んだ形 (実測で dev / 空)
+            f"sudo nohup watch '{K}=${{{K}:-dev}} {AWS}'",
+            f"sudo env npx -c '{K}=${K} {AWS}'",
         ):
             with self.subTest(command=command):
                 self.assertTrue(self._marked(command))
+
+    def test_a_preserve_env_list_still_scrubs_for_the_self_reference(self):
+        """`--preserve-env=LIST` は LIST の外の変数を scrub する (sudo(8))。中のシェルの `${K:-dev}` は dev。
+
+        LIST の中身は読まない (`--preserve-env=AWS_PROFILE` も scrub に数える。保守側)。
+        """
+        for command in (
+            f"sudo --preserve-env=OTHER watch '{K}=${{{K}:-dev}} {AWS}'",
+            f"sudo --preserve-env=OTHER npx -c '{K}=${K} {AWS}'",
+            f"sudo -u u --preserve-env=OTHER watch '{K}=${K} {AWS}'",
+            f"sudo --preserve-env=OTHER nohup watch '{K}=${K} {AWS}'",
+            f"sudo --preserve-env=OTHER watch 'true && {K}=${{{K}:-dev}} {AWS}'",
+        ):
+            with self.subTest(command=command):
+                self.assertTrue(self._marked(command))
+        # 対照: `-E` / `--preserve-env` (LIST なし) は env を保つ。sudo の引数の代入は Bash のシェルが展開する
+        for command in (
+            f"sudo --preserve-env=OTHER -E watch '{K}=${{{K}:-dev}} {AWS}'",
+            f"sudo -E --preserve-env=OTHER watch '{K}=${{{K}:-dev}} {AWS}'",
+            f"sudo --preserve-env watch '{K}=${{{K}:-dev}} {AWS}'",
+            f"sudo --preserve-env=OTHER {K}=${K} {AWS}",
+        ):
+            with self.subTest(command=command):
+                self.assertFalse(self._marked(command))
+
+    def test_a_preserve_env_list_keeps_the_marks_before_the_sudo(self):
+        # 収集 env と前置きの印の向きは変えない (`--preserve-env=LIST` は保持に倒す。誤 deny を増やすだけの側)
+        self.assertTrue(self._marked(f"{K}=$(echo q) sudo --preserve-env=OTHER {AWS}"))
+        self.assertFalse(self._marked(f"{K}=$(echo q) sudo {AWS}"))
 
     def test_split_stages_inside_the_wrapper_stay_marked(self):
         command = f"sudo watch 'true && {K}=${{{K}:-dev}} {AWS}'"
@@ -419,6 +492,7 @@ SELF_FORMS = [
     f"X=1 {K}=${K} {AWS}",
     f"env {K}=${{{K}:-prod}} {AWS}",
     f"cd sub && {K}=${{{K}:-prod}} {AWS}",
+    f"sudo --preserve-env watch '{K}=${{{K}:-prod}} {AWS}'",
 ]
 STILL_DENIED = [
     f"{K}=${{OTHER}} {AWS}",
@@ -427,6 +501,14 @@ STILL_DENIED = [
     f"{K}=${{{K}:+x}} {AWS}",
     f"{K}=dev {K}=${K} {AWS}",
     f"sudo watch '{K}=${{{K}:-prod}} {AWS}'",
+    f"sudo --preserve-env=OTHER watch '{K}=${{{K}:-prod}} {AWS}'",
+    # 前の代入だけのセグメントで、自己参照で始まる別の値を代入する形 (aws は dev-x / devx / devotherval で走る。
+    # `(x)` の形は zsh -f で dev(x)、bash 3.2 は構文エラー)
+    f"{K}=${{{K}}}-x X=$(echo q); {K}=${K} {AWS}",
+    f"{K}=${K}-x X=$(echo q); {K}=${{{K}:-dev}} {AWS}",
+    f'{K}="${K}"x X=$(echo q); {K}="${K}" {AWS}',
+    f"{K}=${{{K}}}${{OTHER}} X=$(date); {K}=${K} {AWS}",
+    f"{K}=${K}(x) X=$(echo q); {K}=${K} {AWS}",
     # 前段で値を変えた形は env_changes が数える (代入の無い aws と同じ)
     f"export {K}=q; {K}=${K} {AWS}",
     f"unset {K}; {K}=${{{K}:-dev}} {AWS}",
