@@ -3,7 +3,7 @@
 //   PLAYWRIGHT_PATH=<playwright の index.mjs> node tests/ui_test.mjs
 //
 // PLAYWRIGHT_PATH が無ければ `import("playwright")` を使う。サーバー (humanq.py) は OS が選んだ空きの
-// ポートと一時の state dir で起動し、/api/items・/api/answer・/api/undo・/api/snooze・/api/unsnooze は page.route の台本で返す
+// ポートと一時の state dir で起動し、/api/items・/api/answer・/api/undo・/api/snooze・/api/unsnooze・/api/needinfo は page.route の台本で返す
 // (遅延・失敗・データの変化を決定的に作るため。bd は要らない)。poll の setInterval は止めて、
 // ページの load() を直接呼んで進める。HUMANQ_SERVER_DIR で別の server/ を試せる。
 import test, { before, after } from "node:test";
@@ -137,8 +137,25 @@ class Script {
       this.moveFromSnoozed(body);
       return { status: 200, body: { ok: true } };
     };
+    this.needinfos = [];
+    // 既定の情報待ちの応答も、サーバーと同じく、判断待ちに無ければ 400 gone、問いの署名が違えば 409 changed
+    this.needinfoResult = body => {
+      const cur = (this.project(body.project) || { human: [] }).human.find(i => i.id === body.id);
+      if (!cur) return { status: 400, body: { error: "このチケットは判断待ちに無い", code: "gone", op: "needinfo" } };
+      if (body.qsig !== undefined && body.qsig !== cur.qsig)
+        return { status: 409, body: { error: "問いが書き換わっている", code: "changed", op: "needinfo" } };
+      this.moveToNeedinfo(body);
+      return { status: 200, body: { ok: true } };
+    };
   }
   project(p) { return this.projects.find(x => x.path === p); }
+  // 判断待ちから情報待ちへ (サーバーの読みと同じく needinfo {note} を付ける。note はコメントの補足を前後の空白を除いて読んだもの)
+  moveToNeedinfo({ project, id, note }) {
+    const p = this.project(project);
+    const it = p.human.find(i => i.id === id);
+    p.human = p.human.filter(i => i.id !== id);
+    p.needinfo = [...(p.needinfo || []), { ...it, needinfo: { note: (note || "").trim() } }];
+  }
   // 判断待ちから保留中へ (サーバーの読みと同じく snooze {until, note, expired, changed} を付ける)
   moveToSnoozed({ project, id, until, note }) {
     const p = this.project(project);
@@ -167,7 +184,7 @@ class Script {
   }
   // today (サーバーの今日) は、テストが入れたときだけ返す (返さないのは古いサーバーと同じ)
   snapshot() { return JSON.parse(JSON.stringify({ projects: this.projects, ...(this.today !== undefined ? { today: this.today } : {}) })); }
-  // kind (items / answer / undo / snooze / unsnooze) の応答を release() するまで止める
+  // kind (items / answer / undo / snooze / unsnooze / needinfo) の応答を release() するまで止める
   hold(kind) {
     let resolve;
     const p = new Promise(r => { resolve = r; });
@@ -229,6 +246,12 @@ async function withPage(script, fn, ctxOptions = {}, setup = null, b = browser) 
     script.unsnoozes.push(body);
     if (script.gates.unsnooze) await script.gates.unsnooze;
     await reply(route, script.unsnoozeResult(body));
+  });
+  await page.route("**/api/needinfo", async route => {
+    const body = route.request().postDataJSON();
+    script.needinfos.push(body);
+    if (script.gates.needinfo) await script.gates.needinfo;
+    await reply(route, script.needinfoResult(body));
   });
   try {
     if (setup) await setup(page);
@@ -1351,7 +1374,10 @@ test("答え直しが 400 gone (ほかで回答済み) なら、そのチケッ�
   });
 });
 
-test("トーストは、カードの操作の行のボタン (「回答する」「取り消して判断待ちに戻す」) と重ならない。常時表示のスクロールバーがあっても同じ", async () => {
+// 測るボタン: 操作の行 (.row) と、その下の「情報が足りない」の行 (.nirow)
+const ROW_BUTTONS = "section.card .row button, section.card .nirow button";
+
+test("トーストは、カードの操作の行のボタン (「回答する」「取り消して判断待ちに戻す」) とその下の「情報が足りない」と重ならない。常時表示のスクロールバーがあっても同じ", async () => {
   const long = "とても長い題".repeat(5);
   const ids = ["t-A1", "t-B2", "t-C3", "t-D4", "t-E5", "t-F6"];
   for (const sb of [0, 15]) {
@@ -1374,10 +1400,11 @@ test("トーストは、カードの操作の行のボタン (「回答する」
         assert.equal(w - cw, sb, `${at}: スクロールバーの幅が台本と違う (このテストの前提)`);
         const kinds = await page.locator("section.card .row button").evaluateAll(bs => bs.map(b => b.className));
         assert.ok(kinds.includes("primary") && kinds.includes("ghost"), `${at}: 「回答する」と「取り消して判断待ちに戻す」の両方が無い ${kinds}`);
+        assert.equal(await page.locator("section.card .nirow button").count(), 4, `${at}: 判断待ちの 4 枚に「情報が足りない」が無い`);
         if (w > 640) {                                                         // 右下に出し、横に重ならない (スクロールの位置によらない)
           const box = await page.locator("#toasts").boundingBox();
           assert.ok(Math.abs(box.x + box.width - (cw - 16)) <= 1 && Math.abs(box.y + box.height - (800 - 16)) <= 1, `${at}: 右下に無い ${JSON.stringify(box)}`);
-          for (const b of await page.locator("section.card .row button").all()) {      // 接するだけでなく 8px は空ける
+          for (const b of await page.locator(ROW_BUTTONS).all()) {      // 接するだけでなく 8px は空ける
             const r = await b.boundingBox();
             assert.ok(r.x + r.width + 8 <= box.x, `${at}: ボタン (${r.x}〜${r.x + r.width}) とトーストの横幅 (${box.x}〜) の間が 8px ない`);
           }
@@ -1387,7 +1414,7 @@ test("トーストは、カードの操作の行のボタン (「回答する」
           assert.ok(Math.abs(box.x - 8) <= 1 && Math.abs(box.x + box.width - (cw - 8)) <= 1, `${at}: 全幅でない ${JSON.stringify(box)}`);
           const last = await acard(page, "t-B2").locator(".row button").boundingBox();
           assert.ok(last.y >= 0 && last.y + last.height <= 800, `${at}: 最後のカードの「取り消して判断待ちに戻す」が画面に入っていない ${JSON.stringify(last)}`);
-          for (const b of await page.locator("section.card .row button").all()) {
+          for (const b of await page.locator(ROW_BUTTONS).all()) {
             const r = await b.boundingBox();
             if (r.y + r.height > 0 && r.y < 800) assert.ok(!overlaps(r, box), `${at}: ボタン ${JSON.stringify(r)} がトースト ${JSON.stringify(box)} と重なる`);
           }
@@ -4313,5 +4340,377 @@ test("見通し: 開き直した後に、前の読みの応答が遅れて届い
     await page.waitForTimeout(200);
     assert.deepEqual(await ovBox(page, P1).locator(".ovid").allTextContents(), ["new-1"], "遅れて届いた古い読みで描き直した");
     assert.match(await page.locator("#ovstatus").textContent(), /に読みました/);
+  });
+});
+
+// ---- 情報待ち (needinfo) -----------------------------------------------------------------------------
+// 判断待ちのカードの「情報が足りない」で、何が足りないかを書いて送る。サーバーは needs-info のラベルを付け、判断待ちの一覧から外して
+// 情報待ち (needinfo) に読む。エージェントが調べてチケットに足し、問いを書き直す (問いの署名が変わる) と、判断待ちに新しい問いとして戻る
+
+const ncard = (page, id) => page.locator(`#main section.nicard:has(.id:text-is("${id}"))`);
+const niPanel = (page, id) => qcard(page, id).locator(".nibox");
+const niSection = page => page.locator("#main details.ni");
+const niSummary = page => niSection(page).locator("summary");
+const niItem = (id, note = "", o = {}) => ({ ...item(id, o), needinfo: { note } });
+const withNeedinfo = (p, needinfo) => ({ ...p, needinfo });
+// カードの「情報が足りない」を押して欄を開く
+async function openNeedinfo(page, id) {
+  await (await one(qcard(page, id).locator("button.niopen"), `${id} の「情報が足りない」`)).click();
+  assert.equal(await niPanel(page, id).isVisible(), true, `${id} の情報待ちの欄が開かない`);
+}
+// 欄に足りない情報を書いて「情報待ちにする」を押す
+async function needinfoIt(page, id, note) {
+  await openNeedinfo(page, id);
+  await (await one(niPanel(page, id).locator("input.ninote"), `${id} の足りない情報の入力`)).fill(note);
+  const go = await one(niPanel(page, id).locator("button.nigo"), `${id} の「情報待ちにする」`);
+  assert.equal(await go.isEnabled(), true, "書いたのに「情報待ちにする」が押せない");
+  await go.click();
+}
+// 情報待ちの節を開く (畳んである)
+async function openNiSection(page) {
+  await (await one(niSummary(page), "情報待ちの節の見出し")).click();
+  assert.equal(await niSection(page).evaluate(d => d.open), true, "情報待ちの節が開かない");
+}
+// ページの最後の 2 つ (情報待ちの節・保留中の節の並び) の class
+const lastTwo = page => page.evaluate(() => [...document.getElementById("main").children].slice(-2).map(e => e.className));
+
+test("情報待ち: 「情報が足りない」は書き込める判断待ちのカードにだけ出る (回答済み・書き込めないプロジェクト・保留中・情報待ちのカードには出ない)。押すと欄が開いて入力にフォーカスが移り、何が足りないかを書くまで (空白だけでも)「情報待ちにする」は押せない。「やめる」と Escape で閉じてボタンにフォーカスが戻り、書いた内容は開き直しても、カードが作り直されても残る", async () => {
+  const s = new Script([withSnoozed(withNeedinfo(proj(P1, [item("t-A1"), item("t-A2")], [answeredItem("t-A9")]), [niItem("t-N1", "環境")]), [snoozedItem("t-S1", "2999-12-31")]),
+    { ...proj(P2, [item("t-B1")]), cli: "br", writable: false }]);
+  await withPage(s, async page => {
+    await openAnswered(page);
+    await one(acard(page, "t-A9"), "回答済みのカード");
+    assert.equal(await acard(page, "t-A9").locator("button.niopen, .nibox").count(), 0, "回答済みのカードに「情報が足りない」がある");
+    const ro = await one(page.locator(`#main section.card:has(.id:text-is("t-B1"))`), "書き込めないプロジェクトのカード");
+    assert.equal(await ro.locator("button.niopen, .nibox").count(), 0, "書き込めないプロジェクトのカードに「情報が足りない」がある");
+    await openSnzSection(page);
+    assert.equal(await (await one(scard(page, "t-S1"), "保留中のカード")).locator("button.niopen, .nibox").count(), 0, "保留中のカードに「情報が足りない」がある");
+    await openNiSection(page);
+    assert.equal(await (await one(ncard(page, "t-N1"), "情報待ちのカード")).locator("button:not(.id), input, textarea").count(), 0, "情報待ちのカードに操作の部品がある (ID のコピーのほか)");
+    const toggle = await one(qcard(page, "t-A1").locator("button.niopen"), "「情報が足りない」");
+    assert.equal(await toggle.innerText(), "情報が足りない");
+    assert.equal(await toggle.getAttribute("aria-expanded"), "false");
+    assert.equal(await niPanel(page, "t-A1").count(), 1, "情報待ちの欄がちょうど 1 つでない");
+    assert.equal(await niPanel(page, "t-A1").isVisible(), false, "情報待ちの欄が最初から開いている");
+    await openNeedinfo(page, "t-A1");
+    assert.equal(await toggle.getAttribute("aria-expanded"), "true");
+    const box = niPanel(page, "t-A1");
+    const input = await one(box.locator("input.ninote"), "足りない情報の入力");
+    assert.equal(await isActive(input), true, "開いても入力にフォーカスが移らない");
+    assert.equal(await input.getAttribute("aria-label"), "足りない情報");
+    const go = await one(box.locator("button.nigo"), "「情報待ちにする」");
+    assert.equal(await go.innerText(), "情報待ちにする");
+    assert.equal(await go.isEnabled(), false, "何も書かずに「情報待ちにする」を押せる");
+    await input.fill("   ");
+    assert.equal(await go.isEnabled(), false, "空白だけで「情報待ちにする」を押せる");
+    await input.press("Enter");
+    await input.fill("見積もりの根拠");
+    assert.equal(await go.isEnabled(), true, "書いたのに「情報待ちにする」が押せない");
+    await (await one(box.locator("button.nicancel"), "「やめる」")).click();
+    assert.equal(await box.isVisible(), false, "「やめる」で閉じない");
+    assert.equal(await toggle.getAttribute("aria-expanded"), "false");
+    assert.equal(await isActive(toggle), true, "「やめる」の後のフォーカスが「情報が足りない」に戻らない");
+    await openNeedinfo(page, "t-A1");
+    assert.equal(await input.inputValue(), "見積もりの根拠", "開き直すと書いた内容が消えた");
+    await input.press("Escape");
+    assert.equal(await box.isVisible(), false, "Escape で閉じない");
+    assert.equal(await isActive(toggle), true, "Escape の後のフォーカスが「情報が足りない」に戻らない");
+    // 欄を開いたまま離れ、データが変わってカードが作り直されても、欄の開閉と書いた内容は残る
+    await openNeedinfo(page, "t-A1");
+    await page.evaluate(() => document.activeElement.blur());
+    s.projects[0].human[0] = { ...s.projects[0].human[0], title: "renamed A1" };
+    assert.equal(await page.evaluate(() => load()), true);
+    await until(async () => (await qcard(page, "t-A1").locator(".title").innerText()) === "renamed A1", 3000, "t-A1 のカードが作り直される");
+    assert.equal(await niPanel(page, "t-A1").isVisible(), true, "作り直したカードで情報待ちの欄が閉じた");
+    assert.equal(await niPanel(page, "t-A1").locator("input.ninote").inputValue(), "見積もりの根拠", "作り直したカードで書いた内容が消えた");
+    assert.equal(await niPanel(page, "t-A2").isVisible(), false, "ほかのカードの欄まで開いた");
+    assert.deepEqual(s.needinfos, [], "開く・書くだけで送った");
+  });
+});
+
+test("情報待ち: 「情報待ちにする」(入力で Enter でも) は {project,id,qsig,note} を /api/needinfo に送る。カードは判断待ちから消え、保留中の節の上の畳んだ「情報待ち (N)」に優先度順で出る (問い・足りない情報・エージェントの番である旨。回答の部品は無い)。ヘッダーの件数とタイトルには数えず、成功の知らせを出す。全体を優先度順の表示でも同じ節で、どちらの表示でも head にプロジェクトの名前が出る", async () => {
+  const s = new Script([withSnoozed(proj(P1, [item("t-A1", { priority: 2 }), item("t-A2", { priority: 0 }), item("t-A3")]), [snoozedItem("t-S1", "2999-12-31")]),
+    proj(P2, [item("t-B1", { priority: 1 })])]);
+  await withPage(s, async page => {
+    assert.equal((await page.locator("#count").textContent()).trim(), "4 件");
+    await needinfoIt(page, "t-A1", "  見積もりの根拠  ");
+    await until(async () => (await qcard(page, "t-A1").count()) === 0, 3000, "t-A1 が判断待ちから消える");
+    await until(async () => (await okToasts(page).filter({ hasText: "「title t-A1」を情報待ちにしました (エージェントが調べて問いを書き直すと、判断待ちに戻ります)" }).count()) === 1,
+      3000, "情報待ちにした知らせ");
+    await openNeedinfo(page, "t-A2");
+    const input = await one(niPanel(page, "t-A2").locator("input.ninote"), "t-A2 の足りない情報の入力");
+    await input.fill("どの環境の話か");
+    await input.press("Shift+Enter");
+    assert.deepEqual(s.needinfos.map(b => b.id), ["t-A1"], "Shift+Enter で送った");
+    await input.press("Enter");
+    await until(async () => (await qcard(page, "t-A2").count()) === 0, 3000, "Enter で送って t-A2 が判断待ちから消える");
+    await needinfoIt(page, "t-B1", "期限");
+    await until(async () => (await qcard(page, "t-B1").count()) === 0, 3000, "t-B1 が判断待ちから消える");
+    assert.deepEqual(s.needinfos, [
+      { project: P1, id: "t-A1", qsig: "sig-1", note: "  見積もりの根拠  " },
+      { project: P1, id: "t-A2", qsig: "sig-1", note: "どの環境の話か" },
+      { project: P2, id: "t-B1", qsig: "sig-1", note: "期限" }]);
+    await until(async () => (await page.locator("#count").textContent()).trim() === "1 件", 3000, "ヘッダーの件数が情報待ちを除いた 1 件");
+    assert.equal(await page.title(), "(1) 判断待ち");
+    await until(async () => (await ncard(page, "t-B1").count()) === 1, 3000, "情報待ちに出る");
+    assert.equal(await niSection(page).count(), 1, "情報待ちの節が 1 つでない");
+    assert.equal(await niSection(page).evaluate(d => d.open), false, "情報待ちの節が開いている (既定は畳む)");
+    assert.equal(await niSummary(page).innerText(), "情報待ち (3)");
+    assert.equal(await ncard(page, "t-A1").isVisible(), false, "畳んだ節の中のカードが見えている");
+    assert.deepEqual(await lastTwo(page), ["ni", "snz"], "情報待ちの節が保留中の節のすぐ上に無い");
+    await openNiSection(page);
+    assert.deepEqual(await niSection(page).locator("section.nicard .id").allInnerTexts(), ["t-A2", "t-B1", "t-A1"], "優先度順でない");
+    const c = ncard(page, "t-A1");
+    // 無い要素を読む待ちの時間切れ (ERROR) にしないよう、待たない読み (allInnerTexts) で数ごと比べる
+    const texts = sel => c.locator(sel).allInnerTexts();
+    assert.deepEqual(await texts(".title"), ["title t-A1"]);
+    assert.deepEqual(await texts(".niask"), ["ask t-A1"], "情報待ちのカードに問いが無い");
+    assert.deepEqual(await texts(".niinfo"), ["足りない情報: 見積もりの根拠"]);
+    assert.deepEqual(await texts(".nistate"), ["エージェントの番です。調べてチケットに足し、問いを書き直すと判断待ちに戻ります"], "エージェントの番である旨が無い");
+    assert.equal(await c.locator("textarea, input, .opt, button:not(.id)").count(), 0, "情報待ちのカードに回答の部品がある (ID のコピーのほか)");
+    const shown = () => niSection(page).locator("section.nicard").evaluateAll(cs => cs.map(x => {
+      const pj = x.querySelector(".head .pj");
+      return [x.querySelector(".id").textContent, pj && pj.offsetWidth > 0 ? pj.textContent : null];
+    }));
+    assert.deepEqual(await shown(), [["t-A2", "alpha"], ["t-B1", "beta"], ["t-A1", "alpha"]], "プロジェクトごとの表示");
+    await setView(page, "prio");
+    await until(async () => (await niSection(page).count()) === 1, 2000, "全体の表示で情報待ちの節が 1 つ");
+    assert.deepEqual(await shown(), [["t-A2", "alpha"], ["t-B1", "beta"], ["t-A1", "alpha"]], "全体の表示");
+    assert.deepEqual(await lastTwo(page), ["ni", "snz"], "全体の表示で情報待ちの節が保留中の節のすぐ上に無い");
+    // データの問い・足りない情報が変われば (どちらか 1 つだけでも) 作り直す
+    const setNi = f => { s.projects[0].needinfo = s.projects[0].needinfo.map(i => (i.id === "t-A1" ? f(i) : i)); };
+    setNi(i => ({ ...i, q: { ...i.q, ask: "ask 2" } }));
+    assert.equal(await page.evaluate(() => load()), true);
+    await until(async () => (await texts(".niask")).join() === "ask 2", 3000, "問いの変化で作り直す");
+    setNi(i => ({ ...i, needinfo: { note: "根拠 2" } }));
+    assert.equal(await page.evaluate(() => load()), true);
+    await until(async () => (await texts(".niinfo")).join() === "足りない情報: 根拠 2", 3000, "足りない情報の変化で作り直す");
+  });
+});
+
+test("情報待ち: エージェントが情報を足して問いを書き直す (問いの署名が変わる) と、判断待ちに新しい問いとして戻り「判断待ちが増えました」で知らせ、今の問いで答えられる。戻ったカードの「情報が足りない」の欄は閉じて空。問いを書き直さずに戻ったもの (同じ署名。サーバーの入れ替え直後の読み残しなど) は知らせない。情報待ちが無くなると節ごと外れ、次は畳んだ節で出直す", async () => {
+  const s = new Script([withNeedinfo(proj(P1, [item("t-A1")]), [niItem("t-N1", "見積もり"), niItem("t-N2", "環境")])]);
+  await withPage(s, async page => {
+    assert.equal(await page.evaluate(() => load()), true);
+    await needinfoIt(page, "t-A1", "根拠");
+    await until(async () => (await ncard(page, "t-A1").count()) === 1, 3000, "t-A1 が情報待ちに出る");
+    await openNiSection(page);
+    const p = s.projects[0];
+    p.needinfo = p.needinfo.filter(i => i.id !== "t-N1");               // エージェントが t-N1 の問いを書き直した
+    p.human.push(changedQ(item("t-N1")));
+    assert.equal(await page.evaluate(() => load()), true);
+    await until(async () => (await qcard(page, "t-N1").count()) === 1, 3000, "書き直した問いが判断待ちに出る");
+    assert.equal(await qcard(page, "t-N1").locator(".ask").innerText(), "NEW ASK");
+    assert.deepEqual(await notes(page), [["判断待ちが増えました", "1 件"]], "書き直して戻った問いを知らせない");
+    assert.equal(await niSummary(page).innerText(), "情報待ち (2)");
+    p.needinfo = p.needinfo.filter(i => i.id !== "t-A1");               // 自分で情報待ちにしたものも、書き直されて戻る
+    p.human.push(changedQ(item("t-A1")));
+    assert.equal(await page.evaluate(() => load()), true);
+    await until(async () => (await qcard(page, "t-A1").count()) === 1, 3000, "t-A1 が判断待ちに戻る");
+    assert.deepEqual(await notes(page), [["判断待ちが増えました", "1 件"], ["判断待ちが増えました", "1 件"]]);
+    assert.equal(await niPanel(page, "t-A1").isVisible(), false, "戻ったカードで情報待ちの欄が開いている");
+    assert.equal(await niPanel(page, "t-A1").locator("input.ninote").inputValue(), "", "戻ったカードに前に送った足りない情報が残る");
+    assert.equal(await qcard(page, "t-A1").locator("button.niopen").getAttribute("aria-expanded"), "false");
+    p.needinfo = [];                                                    // 同じ問いのまま判断待ちに出た
+    p.human.push(item("t-N2"));
+    assert.equal(await page.evaluate(() => load()), true);
+    await until(async () => (await qcard(page, "t-N2").count()) === 1, 3000, "t-N2 が判断待ちに出る");
+    assert.equal((await notes(page)).length, 2, "同じ問いのまま戻ったものを知らせた");
+    await until(async () => (await niSection(page).count()) === 0, 3000, "情報待ちが無くなれば節ごと外れる");
+    await answerFirst(page, "t-N1");
+    await until(async () => s.answers.length === 1, 3000, "書き直した問いへの回答");
+    assert.deepEqual([s.answers[0].id, s.answers[0].qsig], ["t-N1", "sig-2"], "今の問いの署名で送っていない");
+    await needinfoIt(page, "t-N2", "x");
+    await until(async () => (await ncard(page, "t-N2").count()) === 1, 3000, "情報待ちに出る");
+    assert.equal(await niSection(page).evaluate(d => d.open), false, "出直した節が開いている (前の節を使い回した)");
+  }, {}, fakeNotification);
+});
+
+test("情報待ち: 情報待ちが無くなった直後 (節を畳んで外している間) に情報待ちが戻っても、節は外れずに出たまま", async () => {
+  const s = new Script([withNeedinfo(proj(P1, [item("t-A1")]), [niItem("t-N1", "環境")])]);
+  await withPage(s, async page => {
+    await one(niSummary(page), "情報待ちの節の見出し");
+    const keep = s.projects[0].needinfo;
+    s.projects[0].needinfo = [];
+    assert.equal(await page.evaluate(() => load()), true);
+    s.projects[0].needinfo = keep;
+    assert.equal(await page.evaluate(() => load()), true);
+    await page.waitForTimeout(800);                                     // 外す動き (450ms まで) が終わる
+    assert.equal(await niSection(page).count(), 1, "戻った情報待ちの節が外れた");
+    assert.equal(await ncard(page, "t-N1").count(), 1, "戻った情報待ちのカードが外れた");
+    assert.equal(await niSummary(page).innerText(), "情報待ち (1)");
+  });
+});
+
+test("情報待ち: 「情報待ちにする」を続けて 2 回押しても送るのは 1 回", async () => {
+  const s = new Script([proj(P1, [item("t-A1"), item("t-B2")])]);
+  await withPage(s, async page => {
+    const release = s.hold("needinfo");
+    await openNeedinfo(page, "t-A1");
+    await niPanel(page, "t-A1").locator("input.ninote").fill("根拠");
+    await (await one(niPanel(page, "t-A1").locator("button.nigo"), "「情報待ちにする」")).evaluate(b => { b.click(); b.click(); });
+    await page.waitForTimeout(100);
+    release();
+    await until(async () => (await ncard(page, "t-A1").count()) === 1, 3000, "情報待ちに出る");
+    assert.equal(s.needinfos.length, 1, "2 回押しで 2 回送った");
+  });
+});
+
+test("情報待ち: 書けなかった失敗 (502) ではカードが戻って .failed が付き、欄と足りない情報が残る。ラベルだけ失敗なら「情報待ちは記録済み」と知らせ、判断待ちに残っていればカードを戻し、情報待ちに居ればそこに出す。応答の失敗でも情報待ちに居れば反映済みと知らせる。gone は「もう判断待ちにありませんでした」。見ていた問いが書き換わっていれば (サーバーの 409・画面の検査とも) 今の問いで作り直し、足りない情報は残す", async () => {
+  const ids = ["t-A1", "t-A2", "t-A3", "t-A4", "t-A5", "t-A6", "t-A7"];
+  const s = new Script([proj(P1, [...ids.map(i => item(i)), item("t-B9")])]);
+  const base = s.needinfoResult;
+  s.needinfoResult = body => {
+    if (body.id === "t-A1") return { status: 502, body: { error: "bd boom", stage: "comment", written: false, op: "needinfo" } };
+    // ラベルが付かなかった (サーバーはラベルで情報待ちと読むので、判断待ちに残る)
+    if (body.id === "t-A2") return { status: 502, body: { error: "label boom", stage: "label", written: true, op: "needinfo" } };
+    // 応答は失敗だが、情報待ちに居る (ラベルは付いた)
+    if (body.id === "t-A4") { s.moveToNeedinfo(body); return { status: 502, body: { error: "label boom", stage: "label", written: true, op: "needinfo" } }; }
+    if (body.id === "t-A3") { s.moveToAnswered(body); return { status: 400, body: { error: "このチケットは判断待ちに無い", code: "gone", op: "needinfo" } }; }
+    // サーバーの内部エラーで、書けたかどうか分からない (読み直すと情報待ちに居る)
+    if (body.id === "t-A7") { s.moveToNeedinfo(body); return { status: 500, body: { error: "boom" } }; }
+    return base(body);
+  };
+  await withPage(s, async page => {
+    await needinfoIt(page, "t-A1", "keep me");
+    await until(async () => (await page.locator(`section.card.failed:has(.id:text-is("t-A1"))`).count()) === 1, 3000, "t-A1 のカードが戻る");
+    await one(qcard(page, "t-A1"), "戻った t-A1");
+    assert.equal(await niPanel(page, "t-A1").isVisible(), true, "戻ったカードの情報待ちの欄が閉じた");
+    assert.equal(await niPanel(page, "t-A1").locator("input.ninote").inputValue(), "keep me");
+    assert.equal(await failToast(page).filter({ hasText: "「title t-A1」(t-A1): bd boom。カードを戻しました" }).count(), 1, "書けなかった知らせ");
+    await needinfoIt(page, "t-A2", "a2");
+    await until(async () => (await failToast(page).filter({ hasText: "情報待ちは記録済みですが、ラベルの付け替えだけ失敗しました" }).count()) === 1,
+      3000, "判断待ちに残ったときの「情報待ちは記録済み」の知らせ");
+    await until(async () => (await page.locator(`section.card.failed:has(.id:text-is("t-A2"))`).count()) === 1, 3000, "t-A2 のカードが戻る");
+    await needinfoIt(page, "t-A4", "a4");
+    await until(async () => (await failToast(page).filter({ hasText: "情報待ちは記録済みです (ラベルの付け替えだけ失敗)。情報待ちの一覧を確認してください" }).count()) === 1,
+      3000, "情報待ちに居たときの「情報待ちは記録済み」の知らせ");
+    await until(async () => (await ncard(page, "t-A4").count()) === 1, 3000, "情報待ちに出る");
+    await until(async () => (await qcard(page, "t-A4").count()) === 0, 3000, "判断待ちには戻さない (畳み終わって消える)");
+    await needinfoIt(page, "t-A7", "a7");
+    await until(async () => (await failToast(page).filter({ hasText: "「title t-A7」(t-A7): 送信の応答は失敗でしたが、反映されていました" }).count()) === 1,
+      3000, "情報待ちに居たときの反映済みの知らせ");
+    await until(async () => (await ncard(page, "t-A7").count()) === 1 && (await qcard(page, "t-A7").count()) === 0, 3000, "情報待ちに出る");
+    await needinfoIt(page, "t-A3", "a3");
+    await until(async () => (await failToast(page).filter({ hasText: "「title t-A3」(t-A3): もう判断待ちにありませんでした (ほかで回答・反映済み)" }).count()) === 1, 3000, "gone の知らせ");
+    await until(async () => (await acard(page, "t-A3").count()) === 1 && (await qcard(page, "t-A3").count()) === 0, 3000, "今の状態 (回答済み) を出す");
+    // サーバーの検査: 欄を書いている間に問いが書き換わった (画面はまだ前の問い)。送ると 409 changed で、今の問いで作り直す
+    await openNeedinfo(page, "t-A5");
+    await niPanel(page, "t-A5").locator("input.ninote").fill("a5");
+    const p = s.projects[0];
+    p.human = p.human.map(i => (i.id === "t-A5" ? changedQ(i) : i));
+    await (await one(niPanel(page, "t-A5").locator("button.nigo"), "t-A5 の「情報待ちにする」")).click();
+    await until(async () => (await qcard(page, "t-A5").locator(".ask").innerText()) === "NEW ASK", 3000, "409 の後に今の問いで作り直す");
+    assert.equal(await failToast(page).filter({ hasText: "「title t-A5」(t-A5): 問いが更新されました。見直してから送ってください" }).count(), 1, "問いが変わった知らせ");
+    assert.equal(await niPanel(page, "t-A5").locator("input.ninote").inputValue(), "a5", "問いが変わったときに足りない情報を消した");
+    assert.deepEqual(s.needinfos.filter(b => b.id === "t-A5").map(b => b.qsig), ["sig-1"]);
+    // 画面の検査: 入力中に読み込みで問いが変わった (カードは作り直しを後回し)。押すと送らずに今の問いで作り直す
+    await openNeedinfo(page, "t-A6");
+    await niPanel(page, "t-A6").locator("input.ninote").fill("a6");
+    p.human = p.human.map(i => (i.id === "t-A6" ? changedQ(i) : i));
+    assert.equal(await page.evaluate(() => load()), true);
+    assert.equal(await qcard(page, "t-A6").locator(".ask").innerText(), "ask t-A6", "前提: 入力中のカードは作り直さない");
+    await (await one(niPanel(page, "t-A6").locator("button.nigo"), "t-A6 の「情報待ちにする」")).click();
+    await until(async () => (await qcard(page, "t-A6").locator(".ask").innerText()) === "NEW ASK", 3000, "押すと今の問いで作り直す");
+    assert.equal(s.needinfos.filter(b => b.id === "t-A6").length, 0, "問いが変わったのに送った");
+    assert.equal(await niPanel(page, "t-A6").locator("input.ninote").inputValue(), "a6", "問いが変わったときに足りない情報を消した");
+  });
+});
+
+test("情報待ち: needinfo の key を返さない古いサーバーでも出て、needinfo が配列でない・要素が壊れているデータは使わない (null は無いのと同じ)。足りない情報の形が崩れていれば「(書かれていません)」と出す。読めなかったプロジェクトは前に読めた情報待ちを残す", async () => {
+  const s = new Script([withNeedinfo(proj(P1, [item("t-A1")]), [niItem("t-N1", "メモ")])]);
+  await withPage(s, async page => {
+    assert.equal(await niSummary(page).innerText(), "情報待ち (1)");
+    for (const bad of ["x", { a: 1 }, 5, true, [{ id: 5 }], [null], [{ ...item("t-N9"), q: "not an object" }]]) {
+      s.queue.push({ projects: [{ ...s.snapshot().projects[0], needinfo: bad }] });
+      assert.equal(await page.evaluate(() => load()), false, `needinfo=${JSON.stringify(bad)} を読めたことにした`);
+      assert.equal(await niSummary(page).innerText(), "情報待ち (1)", "使わないデータで情報待ちを書き換えた");
+      if (bad === "x") assert.equal(await failToast(page).filter({ hasText: "想定外のデータ (プロジェクトの形)" }).count(), 1,
+        "配列でない needinfo を、プロジェクトの形の誤りとして知らせていない");
+    }
+    s.queue.push({ projects: [proj(P1, [item("t-A1")], [], false)] });   // 読めなかった: 前に読めた情報待ちを残す
+    await page.evaluate(() => load());
+    await page.waitForTimeout(600);                                     // 外すなら外し終わる (450ms まで) のを待つ
+    assert.equal(await niSection(page).count(), 1, "読めなかったプロジェクトの情報待ちの節を外した");
+    assert.equal(await ncard(page, "t-N1").count(), 1, "読めなかったプロジェクトの情報待ちを消した");
+    assert.equal(await niSummary(page).innerText(), "情報待ち (1)");
+    s.queue.push({ projects: [{ ...proj(P1, [item("t-A1")]), needinfo: null }] });
+    assert.equal(await page.evaluate(() => load()), true, "needinfo: null を読めなかった");
+    await until(async () => (await niSection(page).count()) === 0, 3000, "情報待ちの無いデータで節が外れる");
+    s.queue.push({ projects: [proj(P1, [item("t-A1")])] });             // 古いサーバー: needinfo の key が無い
+    assert.equal(await page.evaluate(() => load()), true);
+    await one(qcard(page, "t-A1"), "t-A1");
+    s.queue.push({ projects: [withNeedinfo(proj(P1, [item("t-A1")]), [{ ...item("t-N1"), needinfo: { note: 5 } }, { ...item("t-N2"), needinfo: "garbage" },
+      item("t-N3"), { ...item("t-N4"), needinfo: { note: "a\u0000b" } }, { ...item("t-N5"), q: null, needinfo: { note: "n" } }])] });
+    assert.equal(await page.evaluate(() => load()), true);
+    await until(async () => (await niSection(page).count()) === 1, 3000, "情報待ちの節が出る");
+    await openNiSection(page);
+    await until(async () => (await page.locator("#main .anim, #main .leaving").count()) === 0, 3000, "入場の動きが終わる");
+    for (const id of ["t-N1", "t-N2", "t-N3"])
+      assert.equal(await (await one(ncard(page, id), id)).locator(".niinfo").innerText(), "足りない情報: (書かれていません)", `${id} の崩れた足りない情報を出した`);
+    assert.equal(await ncard(page, "t-N4").locator(".niinfo").textContent(), "足りない情報: a\u0000b");
+    assert.equal(await ncard(page, "t-N5").locator(".niask").count(), 0, "問いの無いチケットに問いの行を出した");
+    assert.equal(await ncard(page, "t-N5").locator(".title").innerText(), "title t-N5");
+  });
+});
+
+test("情報待ち: needs-info のラベルは、カードの head のラベルの印にも「ラベル」の絞り込みにも出さない。検索と「ラベル」の絞り込みは情報待ちのカードにも効き (隠れるカードは畳まずに外す)、節の件数は絞り込みに合うものだけ", async () => {
+  const s = new Script([withNeedinfo(proj(P1, [item("t-A1", { labels: ["needs-info", "area:ui"] })]),
+    [niItem("t-N1", "", { labels: ["human", "needs-info", "x:y"] }), niItem("t-N2", "", { labels: ["human", "needs-info"] })])]);
+  await withPage(s, async page => {
+    const spans = card => card.locator(".head > span:not(.prio):not(.id)").allInnerTexts();
+    const qs = await spans(await one(qcard(page, "t-A1"), "判断待ちのカード"));
+    assert.equal(qs.length, 2, qs);
+    assert.equal(qs[1], "area:ui", "判断待ちのカードに needs-info の印を出した");
+    await openNiSection(page);
+    const ns = await spans(await one(ncard(page, "t-N1"), "情報待ちのカード"));
+    assert.equal(ns.length, 2, ns);
+    assert.equal(ns[1], "x:y", "情報待ちのカードに needs-info の印を出した");
+    assert.deepEqual(await page.locator("#flabel option").allInnerTexts(), ["すべてのラベル", "area:ui", "x:y"],
+      "「ラベル」の絞り込みに needs-info を出した、か情報待ちだけのラベルを出していない");
+    assert.equal(await niSummary(page).innerText(), "情報待ち (2)");
+    // 検索で隠れる情報待ちのカードは、畳む動きを付けずにその場で外す
+    const left = await page.evaluate(() => {
+      const f = document.getElementById("fq");
+      f.value = "t-N2";
+      f.dispatchEvent(new Event("input"));
+      return [...document.querySelectorAll("#main section.nicard .id")].map(e => e.textContent);
+    });
+    assert.deepEqual(left, ["t-N2"], "検索で隠れた情報待ちのカードを残した (畳む動きで残した)");
+    assert.equal(await niSummary(page).innerText(), "情報待ち (1)");
+    await page.locator("#fq").fill("");
+    await page.selectOption("#flabel", "x:y");
+    await until(async () => (await niSummary(page).innerText()) === "情報待ち (1)", 3000, "「ラベル」の絞り込みが情報待ちに効く");
+    assert.deepEqual([await ncard(page, "t-N1").count(), await ncard(page, "t-N2").count()], [1, 0]);
+  });
+});
+
+test("情報待ち: 見通しの判断待ち (human) の ready が情報待ちのチケットなら、リンクで畳んだ情報待ちの節を開いてそのカードにフォーカスが移る (絞り込みで隠れていれば絞り込みを解く)。needs-info のラベルは見通しにも出さない", async () => {
+  const s = new Script([withNeedinfo(proj(P1, [item("t-A1")]), [niItem("t-N1", "環境")])]);
+  s.overview = { projects: [ovProj(P1, { ready: [ovRow("t-N1", { human: true, labels: ["human", "needs-info", "lane:z"] })], ready_total: 1 })] };
+  await withPage(s, async page => {
+    await openOverview(page, s, 1);
+    assert.deepEqual(await ovBox(page, P1).locator(".ovrow").nth(0).locator(".head span").allTextContents(), ["P2", "t-N1", "open", "判断待ち", "lane:z"],
+      "見通しに needs-info のラベルを出した");
+    assert.equal(await niSection(page).evaluate(d => d.open), false, "情報待ちの節は初め畳んである");
+    await ovPanel(page).getByRole("link", { name: "title t-N1" }).click();
+    await until(async () => isActive(ncard(page, "t-N1")), 3000, "情報待ちの t-N1 のカードにフォーカスが移らない");
+    assert.equal(await niSection(page).evaluate(d => d.open), true, "情報待ちの節が開かない");
+    await page.locator("#fq").fill("t-A1");
+    await until(async () => (await ncard(page, "t-N1").count()) === 0, 3000, "絞り込みで t-N1 が隠れない");
+    await openOverview(page, s, 2);
+    await ovPanel(page).getByRole("link", { name: "title t-N1" }).click();
+    await until(async () => isActive(ncard(page, "t-N1")), 3000, "絞り込みで隠れた t-N1 のカードにフォーカスが移らない");
+    assert.equal(await page.locator("#fq").inputValue(), "", "絞り込みが解けていない");
+  });
+});
+
+test("情報待ち: 判断待ちの最後のカードを情報待ちにしたとき、ほかに見えるカードが無ければ、フォーカスは畳んだ情報待ちの節の見出しの行へ移る", async () => {
+  const s = new Script([withNeedinfo(proj(P1, [item("t-A1")]), [niItem("t-N1", "環境")])]);
+  const onNiSummary = page => page.evaluate(() => !!document.activeElement && document.activeElement.matches("#main details.ni > summary"));
+  await withPage(s, async page => {
+    await needinfoIt(page, "t-A1", "根拠");
+    await until(async () => (await ncard(page, "t-A1").count()) === 1, 3000, "t-A1 が情報待ちに出る");
+    await until(async () => onNiSummary(page), 3000, "情報待ちにした後のフォーカスが情報待ちの節の見出しへ移らない");
   });
 });

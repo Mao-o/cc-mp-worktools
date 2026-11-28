@@ -3,7 +3,8 @@
 
     humanq_hook.py session-start   (SessionStart)
         プロジェクトを登録し、画面のサーバーが動いていなければ切り離して起動する (版が古ければ入れ替える。新しければそのまま使う)。
-        判断待ちと、画面で回答済みの件数を Claude に伝える (保留中は判断待ちに数えず、保留中と保留から戻った件数を 1 行で添える)
+        判断待ちと、画面で回答済みの件数を Claude に伝える (保留中は判断待ちに数えず、保留中と保留から戻った件数を 1 行で添える。
+        情報待ち (ユーザーが回答に必要な情報が足りないと返したもの) も判断待ちに数えず、エージェントの番として ID と手順を 1 行で添える)
     humanq_hook.py prompt-submit   (UserPromptSubmit)
         このセッションで前に伝えた後に画面で回答されたものがあれば、Claude に伝える。
         サーバーのキャッシュを見るだけで bd は読まない (応答を遅くしない)
@@ -118,7 +119,7 @@ def _count(v) -> int:
 
 def snooze_line(s: dict) -> str | None:
     """保留の件数の 1 行。保留中 (判断待ちの件数に入れていない) と、保留から判断待ちに戻ったもの (戻る日が来た・問いが
-    書き換わった。入っている)、保留かどうかを読み残している判断待ち (unread。入っている)。どれも 0 なら None。"""
+    書き換わった。入っている)、保留中か情報待ちかを読み残している判断待ち (unread。入っている)。どれも 0 なら None。"""
     n, m, u = _count(s.get("snoozed")), _count(s.get("returned")), _count(s.get("unread"))
     parts = []
     if n:
@@ -127,9 +128,29 @@ def snooze_line(s: dict) -> str | None:
     if m:
         parts.append(f"保留から判断待ちに戻ったもの {m} 件 (戻る日が来たか、保留の後に問いが書き換わった。判断待ちの件数に入っている)")
     if u:
-        parts.append(f"判断待ちの件数のうち {u} 件は、保留かどうかを確認中 (サーバーの起動直後の読み残し。保留中のものが混じっていて、"
-                     "次の読みで減る。保留中かもしれないチケットに取りかかったり、答えを推測して進めたりしない)")
+        parts.append(f"判断待ちの件数のうち {u} 件は、保留中か情報待ちかを確認中 (サーバーの起動直後の読み残し。保留中・情報待ちのものが"
+                     "混じっていて、次の読みで減る。保留中かもしれないチケットに取りかかったり、答えを推測して進めたりしない)")
     return "humanq: " + "。".join(parts) + "。" if parts else None
+
+
+def needinfo_line(s: dict) -> str | None:
+    """情報待ち (エージェントの番) の 1 行。summary の needinfo は情報待ちのチケットの ID の list (判断待ちの件数に入っていない。
+    古いサーバーは返さない)。空でない文字列の ID だけを数え、0 件なら None。コマンドはプロジェクトの CLI のものだけを出す。"""
+    v = s.get("needinfo")
+    ids = [x for x in v if isinstance(x, str) and x] if isinstance(v, list) else []
+    if not ids:
+        return None
+    if _is_br(s):
+        read = "`br comments <id> --json` を (created_at, id) の昇順に並べ直した最後の `[humanq] 情報待ち`"
+        drop = "`br label remove <id> needs-info`"
+    else:
+        read = "`bd comments <id>` の最後の `[humanq] 情報待ち`"
+        drop = "`bd label remove <id> needs-info`"
+    return (f"humanq: 情報待ち {len(ids)} 件 (エージェントの番): {', '.join(ids)}。ユーザーが判断待ちの画面で、回答に必要な情報が"
+            f"足りないと返した問い (判断待ちの件数に入れていない)。{read} (作者 user/humanq) の補足が足りない情報。調べてチケット (本文・"
+            f"notes・問いの背景) に足し、問いを書き直してから {drop} で外す (書き直した問いは判断待ちに戻る)。調べても分からないときも、"
+            f"分からなかったこと (何を探したか) をコメントと問いの背景に書いて問いを書き直し、ラベルを外す (問いは取り下げない)。"
+            f"手順は {README} の「回答を拾う」")
 
 
 def _seen_path(sd: str, session_id: str) -> str:
@@ -211,6 +232,9 @@ def session_start(inp: dict) -> None:
     sn = snooze_line(s)
     if sn:
         lines.append(sn)
+    ni = needinfo_line(s)
+    if ni:
+        lines.append(ni)
     msg = (f"humanq: 判断待ち {s.get('human', 0)} 件 / 回答済み {len(answered)} 件 → {URL}"
            if s.get("human") or answered else None)
     _out("SessionStart", "\n".join([*lines, *warn]), msg)

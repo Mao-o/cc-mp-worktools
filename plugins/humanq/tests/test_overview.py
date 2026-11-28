@@ -523,12 +523,16 @@ class FakeCliOverview(FakeCliProject):
         # 判断待ちに印を付け、回答済みを除く (CLI は打ち足さない)
         ids = self.scenario()
         snoozed = self.new("p1-snoozed", 1, "human")
+        asked = self.new("p1-needinfo", 1, "human")
         port = self.serve()
         code, j = self.post(port, "/api/snooze", {"project": self.repo, "id": snoozed, "until": None})
+        self.assertEqual(code, 200, j)
+        code, j = self.post(port, "/api/needinfo", {"project": self.repo, "id": asked, "note": "どの環境の話か"})
         self.assertEqual(code, 200, j)
         code, items = self.get(port, "/api/items")
         self.assertEqual(code, 200, items)
         self.assertEqual([i["id"] for i in items["projects"][0]["snoozed"]], [snoozed], "前提: 保留中に出ていない")
+        self.assertEqual([i["id"] for i in items["projects"][0]["needinfo"]], [asked], "前提: 情報待ちに出ていない")
         real = humanq.bd if self.PROG == "bd" else humanq.br
 
         def no_labels(repo, *args):
@@ -548,6 +552,7 @@ class FakeCliOverview(FakeCliProject):
         self.assertNotIn(ids["p0-answered"], ready, "回答済みの一覧にあるチケットを ready に出した")
         self.assertTrue(ready.get(ids["p1-human"], {}).get("human"), "判断待ちの一覧にあるチケットに印が付かない")
         self.assertTrue(ready.get(snoozed, {}).get("human"), "保留中の一覧にあるチケットに印が付かない")
+        self.assertTrue(ready.get(asked, {}).get("human"), "情報待ちの一覧にあるチケットに印が付かない")
         self.assertEqual(ready.get(ids["p1-plain"], {}).get("human"), False, "判断待ちでないチケットに印が付いた")
         self.assertEqual(len(self.argvs(start)), 2, "判断待ちの id を知るために CLI を打ち足した")
 
