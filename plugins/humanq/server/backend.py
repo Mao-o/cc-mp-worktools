@@ -15,6 +15,10 @@ humanq.py は、ここが返す CLI に依らない形の値だけを読む:
 - 書き込み (回答・取り消し・保留・保留の解除) の読み直しは pending(repo, iid) (判断待ちの Row の list。iid の問いを照合に使う) と
   list_answered(repo) と comments(repo, iid)。pending の Row に thread が付いていれば、送り直しの判定と署名の照合は
   その thread で行う (comments を打たない)。書き込みは add_comment と label (op は add | remove)
+- 見通し (読むだけ。判断待ちの読みとは別に、画面が見通しのタブを開いたときだけ読む) は status_counts(repo) と ready(repo)。
+  status_counts は (status, 件数) の list (CLI が返した並び。数える範囲は CLI の既定のまま)。ready は ReadyRow の list
+  ({id, title, priority, status, labels, created_at}。値は CLI が返したまま。並びは CLI のもので、読む側が並べ直す)。
+  ready は件数の上限を外して読む (上位を決めるのは読む側)
 
 backend は 2 つ: bd (BdBackend) と br (BrBackend)。どちらも読み書きする。
 """
@@ -286,6 +290,59 @@ class BdBackend:
         """op は add | remove。"""
         self._run(repo, "--actor", ACTOR, "label", op, iid, name)
 
+    # ---- 見通し (読むだけ) ----
+
+    def status_counts(self, repo: str) -> list[tuple[str, int]]:
+        """状態別の件数 (`bd count --by-status --json`。{total, groups, schema_version} を返す)。数える範囲は bd の既定のまま。"""
+        return parse_count_groups(self._run(repo, "count", "--by-status", "--json"), "bd count ")
+
+    def ready(self, repo: str) -> list[dict]:
+        """次に着手できるチケット (`bd ready --limit 0 --json`。--limit 0 は件数の上限を外す。0 件の null も読む)。"""
+        return ready_rows(self.json(repo, "ready", "--limit", "0"))
+
+
+# ---- 見通しの読み (bd と br で共通の形) -----------------------------------------------------------------------------
+
+def ready_rows(items: list) -> list[dict]:
+    """ready の要素を ReadyRow の list にする。dict でない・id が空でない文字列でない要素は落とす (1 件の崩れで、そのプロジェクトの
+    見通し全体を読めなくしない。落とした件数は数えない)。"""
+    rows = []
+    for i in items:
+        if not isinstance(i, dict) or not isinstance(i.get("id"), str) or not i["id"]:
+            continue
+        rows.append({"id": i["id"], "title": i.get("title"), "priority": i.get("priority"), "status": i.get("status"),
+                     "labels": i.get("labels"), "created_at": i.get("created_at")})
+    return rows
+
+
+def parse_count_groups(out: str, what: str) -> list[tuple[str, int]]:
+    """count の --json ({total, groups: [{group, count}, ...]}) を (status, 件数) の list にする (groups の並びのまま)。
+    groups が null なら 0 件 (bd は空の list を null で返すことがある)。JSON でない・object でない・groups が list でない・
+    要素の group が文字列でない・count が 0 以上の int でない (真偽値を含む) ときは BdError。total は読まない (読む側が足す)。"""
+    v = _loads(out, what)
+    if not isinstance(v, dict) or "groups" not in v:
+        raise BdError(f"{what}の出力が {{total, groups}} の形ではない: {out.strip()[:200]}")
+    groups = v["groups"]
+    if groups is None:
+        return []
+    if not isinstance(groups, list):
+        raise BdError(f"{what}の groups が list ではない ({type(groups).__name__}): {out.strip()[:200]}")
+    pairs = []
+    for g in groups:
+        name = g.get("group") if isinstance(g, dict) else None
+        n = g.get("count") if isinstance(g, dict) else None
+        if not isinstance(name, str) or type(n) is not int or n < 0:
+            raise BdError(f"{what}の groups の要素を読めない: {str(g)[:200]}")
+        pairs.append((name, n))
+    return pairs
+
+
+def _loads(out: str, what: str):
+    try:
+        return json.loads(out)
+    except (ValueError, RecursionError):    # RecursionError は深い入れ子 (json の parser の限界)
+        raise BdError(f"{what}の出力が JSON ではない: {out.strip()[:200]}") from None
+
 
 # ---- br (beads_rust。0.7.6 で実測) ------------------------------------------------------------------------------
 # bd との違い: -C が無い (cwd から上へ .beads を探す)・human サブコマンドが無い・list は envelope で返す・
@@ -323,13 +380,6 @@ def _log_warnings(stderr: str | None) -> None:
     lines = [ln.strip() for ln in (stderr or "").splitlines() if "Warning:" in ln]
     for ln in lines[:5]:
         print(f"humanq: br: {ln[:300]}", file=sys.stderr, flush=True)
-
-
-def _loads(out: str, what: str):
-    try:
-        return json.loads(out)
-    except (ValueError, RecursionError):    # RecursionError は深い入れ子 (json の parser の限界)
-        raise BdError(f"{what}の出力が JSON ではない: {out.strip()[:200]}") from None
 
 
 def parse_br_list(out: str) -> list:
@@ -518,3 +568,18 @@ class BrBackend:
     def label(self, repo: str, op: str, iid: str, name: str) -> None:
         """op は add | remove。既に付いている (exists)・付いていない (not_found) も exit 0 なので成功とみなす。"""
         self._run(repo, "--actor", ACTOR, "label", op, iid, name)
+
+    # ---- 見通し (読むだけ) ----
+
+    def status_counts(self, repo: str) -> list[tuple[str, int]]:
+        """状態別の件数 (`br count --by status --json`。{total, groups} を返し、groups は status の名前の順)。
+        数える範囲は br の既定のまま (closed・tombstone・deferred は数えない。br 0.7.6 で実測)。"""
+        return parse_count_groups(self._run(repo, "count", "--by", "status", "--json"), "br count ")
+
+    def ready(self, repo: str) -> list[dict]:
+        """次に着手できるチケット (`br ready --limit 0 --json`。素の配列で、要素は labels を持つ。human の付いたチケットも出る。
+        --limit 0 は件数の上限を外す (br 0.7.6 の既定も 0)。list でなければ BdError。"""
+        v = _loads(self._run(repo, "ready", "--limit", "0", "--json"), "br ready ")
+        if not isinstance(v, list):
+            raise BdError(f"br ready の出力が list ではない ({type(v).__name__}): {str(v)[:200]}")
+        return ready_rows(v)

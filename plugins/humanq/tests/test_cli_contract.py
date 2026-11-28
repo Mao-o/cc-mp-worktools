@@ -838,6 +838,11 @@ class BrQuirks:
         "comments の無い id": ["comments", "zz-999"],
         "init に位置引数": ["init", "zz"],
         "init の知らない flag": ["init", "--nope"],
+        "ready に位置引数": ["ready", "x"],
+        "ready の知らない flag": ["ready", "--nope"],
+        "ready --limit に数でない値": ["ready", "--limit", "x"],
+        "count に位置引数": ["count", "x"],
+        "count --by に知らない値": ["count", "--by", "bogus"],
     }
 
     # 偽の br が断る形と対になる、本物が通す形 (偽物が断っていた 4 つ。偽物は通すようにした)。後ろに --json を付けて試す。
@@ -1132,6 +1137,57 @@ class SnoozeWrites:
 
 # ---- 偽の br の断る分岐と REFUSED の突き合わせ ------------------------------------------------------------
 
+class OverviewReads:
+    """見通しの読み (状態別の件数と ready。backend の status_counts / ready) を、偽物と本物に同じ assertion で当てる。
+    数える範囲 (閉じたものを数えない) と ready に出るもの (open だけ・human / answered の付いたものも出る・labels を持つ) は、
+    偽物の癖として固定してある。本物の bd の ready / count の範囲と行の形は測っていないので、本物の bd で回すとここが最初の実測になる。"""
+
+    def overview_backend(self):
+        """この CLI (偽物か本物) を 1 回ずつ打つ backend (bd は -C でプロジェクトを指し、br はプロジェクトの dir で打つ)。"""
+        def run(repo: str, *args: str) -> str:
+            argv = ("-C", repo, *args) if self.kind == "bd" else args
+            p = self.run_cli(*argv, cwd=repo)
+            if p.returncode != 0:
+                raise backend.CliExit((p.stderr or p.stdout).strip()[:800] or f"exit {p.returncode}", p.returncode)
+            return p.stdout
+        return backend.BdBackend(run=run) if self.kind == "bd" else backend.BrBackend(run=run)
+
+    def overview_read(self, proj: str, what: str, quirk: str):
+        try:
+            return getattr(self.overview_backend(), what)(proj)
+        except backend.BdError as e:
+            self.fail(f"{self.m(quirk)}: {what} が失敗: {e}")
+
+    def test_overview_reads_have_the_shapes_the_backend_reads(self):
+        q = "見通しの読み (count の groups と ready の行)"
+        type(self).n += 1
+        proj = self.new_project(f"overview-{type(self).n}")
+        plain = self.create("plain", labels="plugin:x,human", prio=2, cwd=proj)
+        answered = self.create("answered", labels="answered", prio=1, cwd=proj)
+        busy = self.create("busy", prio=0, cwd=proj)
+        self.ok(q, "update", busy, "--status", "in_progress", cwd=proj)
+        done = self.create("done", prio=0, cwd=proj)
+        self.ok(q, "close", done, cwd=proj)
+        count_args = ("count", "--by-status") if self.kind == "bd" else ("count", "--by", "status")
+        raw = self.jok(q, *count_args, cwd=proj)
+        self.assertIsInstance(raw, dict, self.m(q))
+        self.assertIsInstance(raw.get("total"), int, self.m(q))
+        counts = dict(self.overview_read(proj, "status_counts", q))
+        self.assertEqual(counts, {"open": 2, "in_progress": 1}, f"{self.m(q)}: 既定の範囲 (閉じたものを数えない)")
+        self.assertEqual(raw["total"], sum(counts.values()), self.m(q))
+        rows = {r["id"]: r for r in self.overview_read(proj, "ready", q)}
+        self.assertEqual(sorted(rows), sorted([plain, answered]), f"{self.m(q)}: ready は open だけ (answered の付いたものも出る)")
+        self.assertIsInstance(rows[plain]["labels"], list, f"{self.m(q)}: ready の行が labels を持たない")
+        self.assertEqual(sorted(rows[plain]["labels"]), ["human", "plugin:x"], self.m(q))
+        self.assertEqual((rows[plain]["title"], rows[plain]["priority"], rows[plain]["status"]), ("plain", 2, "open"), self.m(q))
+        self.assertIsInstance(rows[plain]["created_at"], str, self.m(q))
+
+    def test_overview_reads_on_an_empty_project(self):
+        q = "見通しの読みが空のプロジェクトで空"
+        self.assertEqual(self.overview_read(self.empty, "status_counts", q), [], self.m(q))
+        self.assertEqual(self.overview_read(self.empty, "ready", q), [], self.m(q))
+
+
 class FakeBrUsageBranches(unittest.TestCase):
     """偽の br (tests/fake_beads.py) の usage エラーの分岐 (`raise Usage(` と `raise br_usage_unexpected(`) の全部を、
     BrQuirks.REFUSED の形のどれかが踏むこと。分岐を足したのに REFUSED へ形を足し忘れると、その分岐は本物の br と
@@ -1214,7 +1270,7 @@ class FakeBrUsageBranches(unittest.TestCase):
 for _subject in SUBJECTS:
     _mixin = BdQuirks if _subject.endswith("bd") else BrQuirks
     _name = _mixin.__name__ + "_" + _subject.replace("-", "_")
-    globals()[_name] = type(_name, (_mixin, SnoozeWrites, ContractBase), {"SUBJECT": _subject})
+    globals()[_name] = type(_name, (_mixin, SnoozeWrites, OverviewReads, ContractBase), {"SUBJECT": _subject})
 del _subject, _mixin, _name
 
 

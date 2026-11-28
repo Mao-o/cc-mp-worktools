@@ -67,6 +67,15 @@ WARM_GAP_SEC = 0.05
 # 同じ回答の送り直しとみなす間隔。これより前の同じ本文のコメントは、前の問いへの回答かもしれないので数えない
 RESEND_SEC = 600
 TOKEN_FILE = "token"
+# 見通し (README の「画面の見通し」。読むだけ)。判断待ちの読み (/api/items・/api/summary・hook) とは別の API (/api/overview) で、
+# 画面が見通しのタブを開いたときだけ読む。読みは 1 プロジェクトあたり 2 プロセス (状態別の件数と ready)。キャッシュは判断待ちとは
+# 別に OVERVIEW_CACHE_SEC (書き込みの後は判断待ちのキャッシュと一緒に捨てる: 回答で answered が付いたものを ready から外す)
+OVERVIEW_CACHE_SEC = 60.0
+READY_TOP = 5
+# 状態別の件数の並び: 組み込みの status を作業の順に → ほかの status (名前の順) → 終わった status。並べるのは status の名前だけで、
+# ラベル (plugin: や lane: など) は並びに使わない
+STATUS_ORDER = ("open", "in_progress", "blocked", "hooked", "deferred", "draft", "pinned")
+DONE_STATUSES = ("closed", "tombstone")
 
 
 class WriteError(BdError):
@@ -306,6 +315,42 @@ def unreadable(reason: str) -> dict:
             "error": f"bd と br のどちらで読むか決められない ({reason})。{registry.CLI_ENV} で指定してください"}
 
 
+# ---- 見通し (読むだけ) ----
+
+def _status_key(name: str) -> tuple:
+    if name in STATUS_ORDER:
+        return (0, STATUS_ORDER.index(name), "")
+    if name in DONE_STATUSES:
+        return (2, DONE_STATUSES.index(name), "")
+    return (1, 0, name)
+
+
+def overview_of(raw: dict, pending: set, answered: set) -> dict:
+    """読んだ見通し (raw: {ok, cli, counts, ready} か {ok: false, error, cli}) を、画面に出す形にする。
+    pending と answered は判断待ちの読みのキャッシュにある id (判断待ち・保留中と、回答済み。CLI は打たない)。
+    ready は answered のラベルの付いたもの (と、回答済みの一覧にあるもの) を除き、優先度 (数でなければ 9) → 作成日 → id の順に
+    並べて上位 READY_TOP 件。human のラベルの付いたもの (と、判断待ちの一覧にあるもの) は human: true (画面は判断待ちのカードへの
+    リンクにする)。ほかのラベルは解釈せず、文字列のものをそのまま渡す。ready_total は除いた後の件数。"""
+    if not raw.get("ok"):
+        return {"ok": False, "error": raw.get("error"), "cli": raw.get("cli"),
+                "counts": [], "total": 0, "ready": [], "ready_total": 0}
+    counts = sorted(raw["counts"], key=lambda c: _status_key(c[0]))
+    rows = [r for r in raw["ready"] if not backend.labeled(r, "answered") and r["id"] not in answered]
+    rows.sort(key=lambda r: (r["priority"] if type(r["priority"]) is int else 9, str(r["created_at"] or ""), r["id"]))
+    return {"ok": True, "cli": raw.get("cli"),
+            "counts": [{"status": s, "count": n} for s, n in counts], "total": sum(n for _, n in counts),
+            "ready": [_ready_item(r, pending) for r in rows[:READY_TOP]], "ready_total": len(rows)}
+
+
+def _ready_item(r: dict, pending: set) -> dict:
+    labels = [x for x in r["labels"] if isinstance(x, str)] if isinstance(r["labels"], list) else []
+    return {"id": r["id"], "title": r["title"] if isinstance(r["title"], str) else "",
+            "priority": r["priority"] if type(r["priority"]) is int else None,
+            "status": r["status"] if isinstance(r["status"], str) else "",
+            "labels": labels, "created_at": str(r["created_at"] or "")[:10],
+            "human": "human" in labels or r["id"] in pending}
+
+
 class Store:
     """プロジェクトごとの読みの直列化とキャッシュ。書き込みは git の repo (worktree を含む) ごと、git の外ならプロジェクトごとに 1 本ずつ。
     repo は組の代表のパス (Store.resolve)。answer / undo は一員のパスを渡されても代表のパスにしてから書く。"""
@@ -322,6 +367,8 @@ class Store:
         self._threads = backend.ThreadMemo(THREAD_MEMO_SEC, SNOOZE_READ_SEC)
         self._warming: set[str] = set()
         self._warm_pool = ThreadPoolExecutor(max_workers=1)     # 画面の読み (_pool) の枠を裏の読みで埋めない
+        # 見通しの読み (状態別の件数と ready) のキャッシュ。判断待ちのキャッシュ (_cache) とは別で、長め (OVERVIEW_CACHE_SEC)
+        self._ocache: dict[str, tuple[float, dict, tuple[str, str]]] = {}
 
     def _lock(self, table: dict, repo: str) -> threading.Lock:
         with self._guard:
@@ -429,8 +476,10 @@ class Store:
                 self._refreshing.discard(repo)
 
     def invalidate(self, repo: str) -> None:
+        """書き込みの後に、判断待ちと見通しのキャッシュを捨てる。"""
         with self._lock(self._locks, repo):
             self._cache.pop(repo, None)
+            self._ocache.pop(repo, None)
 
     def all(self) -> list[dict]:
         # 組は 1 回だけ読む (プロジェクトごとに読み直すと、登録の数の 2 乗のファイルの読みになる)
@@ -438,6 +487,53 @@ class Store:
         repos = [g["root"] for g in groups]
         datas = list(self._pool.map(lambda r: self.project(r, groups=groups), repos))  # DB が別なので並べて読める
         return [{"path": r, "name": Path(r).name, **d} for r, d in zip(repos, datas)]
+
+    # ---- 見通し (読むだけ。/api/overview だけが呼ぶ。/api/items・/api/summary・hook は呼ばない) ----
+
+    def overviews(self) -> list[dict]:
+        """登録したプロジェクトごとの見通し (並びは all と同じ)。"""
+        groups = registry.project_groups(self.state_dir)
+        repos = [g["root"] for g in groups]
+        datas = list(self._pool.map(lambda r: self.overview(r, groups=groups), repos))
+        return [{"path": r, "name": Path(r).name, **d} for r, d in zip(repos, datas)]
+
+    def overview(self, repo: str, groups: list[dict] | None = None) -> dict:
+        """1 プロジェクトの見通し (overview_of の形)。読み (状態別の件数 → ready) は判断待ちの読みと同じロックの下で 1 本ずつ行い
+        (bd の埋め込み Dolt を同時に開かない)、OVERVIEW_CACHE_SEC の間は同じ読みを使う。設定や印が変わったら読み直す。
+        ready から回答済みを除き、判断待ちに印を付けるのは毎回 (判断待ちの読みのキャッシュの id も使う。CLI は打たない)。"""
+        with self._lock(self._locks, repo):
+            route = self.route(repo, groups)
+            hit = self._ocache.get(repo)
+            if hit and hit[2] == route and time.monotonic() - hit[0] < OVERVIEW_CACHE_SEC:
+                raw = hit[1]
+            else:
+                raw = self._read_overview(repo, route)
+                self._ocache[repo] = (time.monotonic(), raw, route)
+        return overview_of(raw, *self._known(repo))
+
+    def _read_overview(self, repo: str, route: tuple[str, str]) -> dict:
+        kind, reason = route
+        be = BACKENDS.get(kind)
+        if be is None:
+            return unreadable(reason)
+        try:
+            raw = {"ok": True, "counts": be.status_counts(repo), "ready": be.ready(repo)}
+        except BdError as e:
+            raw = {"ok": False, "error": str(e)}
+        except Exception as e:  # noqa: BLE001  想定外の形の出力でも、そのプロジェクトの見通しだけを読めないことにする
+            raw = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        raw["cli"] = kind
+        return raw
+
+    def _known(self, repo: str) -> tuple[set, set]:
+        """判断待ちの読みのキャッシュ (古くてもよい。CLI は打たない) にある (判断待ちと保留中の id, 回答済みの id)。
+        ready の行にラベルが無い CLI でも、判断待ちのリンクと回答済みの除外を効かせるため。キャッシュが無ければ空 (読めなかった
+        プロジェクトのキャッシュは、どの一覧も空)。"""
+        hit = self._cache.get(repo)
+        if hit is None:
+            return set(), set()
+        d = hit[1]
+        return {x["id"] for x in d["human"] + d["snoozed"]}, {x["id"] for x in d["answered"]}
 
     def writer(self, repo: str):
         """回答・取り消し・保留・保留の解除を書き込む backend。bd と br のどちらで書くか決められないプロジェクトは、CLI を打たずに ReadOnly。"""
@@ -717,9 +813,19 @@ def make_handler(store: Store, port: int, token: str, page: str, version: str):
             elif path == "/api/items":
                 # today はサーバーの今日 (保留の戻る日と比べる日)。画面は期間の選択と日付の下限をこれで数える
                 self._json(200, {"projects": store.all(), "today": today().isoformat()})
+            elif path == "/api/overview":
+                # 見通し (読むだけ)。画面が見通しのタブを開いたときだけ読む。/api/items (15 秒ごとのポーリング)・/api/summary
+                # (hook) とは別で、どちらも見通しを読まない。project を付けると、そのプロジェクト (代表のパス) だけ
+                q = _query(query)
+                if "project" not in q:
+                    return self._json(200, {"projects": store.overviews()})
+                repo = store.resolve(q["project"])
+                if repo is None:
+                    return self._json(404, {"error": "未登録のプロジェクト"})
+                self._json(200, {"projects": [{"path": repo, "name": Path(repo).name, **store.overview(repo)}]})
             elif path == "/api/summary":
                 # hook 用。既定はキャッシュを待たずに返す (UserPromptSubmit を遅くしない)。fresh=1 は読み直す
-                q = {k: _unquote(v) for k, v in (p.split("=", 1) for p in query.split("&") if "=" in p)}
+                q = _query(query)
                 # hook は自分の登録のパスで問い合わせる。worktree などで別のパスにまとめた組なら、代表のパスで読む
                 repo = store.resolve(q.get("project", ""))
                 if repo is None:
@@ -796,6 +902,11 @@ def make_handler(store: Store, port: int, token: str, page: str, version: str):
 def _unquote(s: str) -> str:
     from urllib.parse import unquote
     return unquote(s)
+
+
+def _query(query: str) -> dict[str, str]:
+    """URL の query を {key: 値} にする (値は % を戻す。= の無い項目は捨てる。同じ key は後の値)。"""
+    return {k: _unquote(v) for k, v in (p.split("=", 1) for p in query.split("&") if "=" in p)}
 
 
 def load_token(state_dir: str) -> str:

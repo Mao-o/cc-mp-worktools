@@ -117,6 +117,10 @@ class Script {
     };
     this.snoozes = [];
     this.unsnoozes = [];
+    // 見通し (GET /api/overview)。返すデータと、読まれた回数。overviewFail の間は 500 を返す
+    this.overview = { projects: [] };
+    this.overviewCount = 0;
+    this.overviewFail = false;
     // 既定の保留の応答も、サーバーと同じく、問いの署名が違えば 409 changed、判断待ちに無ければ 400 gone
     this.snoozeResult = body => {
       const cur = (this.project(body.project) || { human: [] }).human.find(i => i.id === body.id);
@@ -193,6 +197,13 @@ async function withPage(script, fn, ctxOptions = {}, setup = null, b = browser) 
     if (script.itemsFail) return json(route, 500, { error: "down" });    // サーバーに届かない・応答が壊れた状態
     const snap = script.queue.length ? script.queue.shift() : script.snapshot();   // 要求を受けた時点のデータ
     if (script.gates.items) await script.gates.items;
+    await json(route, 200, snap);
+  });
+  await page.route("**/api/overview", async route => {
+    script.overviewCount++;
+    if (script.overviewFail) return json(route, 500, { error: "overview down" });
+    const snap = JSON.parse(JSON.stringify(script.overview));
+    if (script.gates.overview) await script.gates.overview;
     await json(route, 200, snap);
   });
   await page.route("**/api/answer", async route => {
@@ -1909,10 +1920,12 @@ test("目次の帯: 判断待ちか回答済みがあるプロジェクトごと
     // 読み上げの名前は「名前: 判断待ち N 件」(P0 があれば「、P0 あり」)
     assert.equal(await page.getByRole("button", { name: "beta: 判断待ち 2 件、P0 あり", exact: true }).count(), 1);
     assert.equal(await page.getByRole("button", { name: "alpha: 判断待ち 2 件", exact: true }).count(), 1);
-    // 帯はヘッダーのすぐ下 (案内が出ていないとき) で、最初のプロジェクトの見出しより上
+    // 帯はヘッダーの下のタブ (判断待ち / 見通し) のすぐ下 (案内が出ていないとき。タブはヘッダーのすぐ下) で、最初のプロジェクトの見出しより上
     const pos = await page.evaluate(() => ({ head: document.querySelector("header").getBoundingClientRect().bottom,
+      tabs: document.getElementById("tabs").getBoundingClientRect().toJSON(),
       toc: document.getElementById("toc").getBoundingClientRect().toJSON(), h2: document.querySelector("h2").getBoundingClientRect().top }));
-    assert.ok(Math.abs(pos.toc.top - pos.head) <= 1 && pos.toc.height > 10 && pos.toc.bottom <= pos.h2, `帯の位置 ${JSON.stringify(pos)}`);
+    assert.ok(Math.abs(pos.tabs.top - pos.head) <= 1 && pos.tabs.height > 10 && Math.abs(pos.toc.top - pos.tabs.bottom) <= 1
+      && pos.toc.height > 10 && pos.toc.bottom <= pos.h2, `帯の位置 ${JSON.stringify(pos)}`);
     // P0 の印の色は --p0
     const colors = await page.evaluate(() => {
       const m = [...document.querySelectorAll("#toc .tocp0")].find(e => getComputedStyle(e).display !== "none");
@@ -4089,4 +4102,207 @@ test("保留中の節: 畳んだ節の中に解除に失敗したカードがあ
       assert.equal(await colorOf(), normal, "見出しの文字の色が元に戻らない");
     });
   }
+});
+
+// ---- 見通し (読むだけのタブ) ----------------------------------------------------------------------
+
+const ovProj = (p, o = {}) => ({ path: p, name: p.split("/").pop(), ok: true, cli: "bd",
+  counts: [{ status: "open", count: 7 }, { status: "in_progress", count: 2 }], total: 9, ready: [], ready_total: 0, ...o });
+const ovRow = (id, o = {}) => ({ id, title: `title ${id}`, priority: 2, status: "open", labels: [], created_at: "2026-11-20", human: false, ...o });
+const ovPanel = page => page.locator("#panel-overview");
+const ovBox = (page, p) => page.locator(`#ovlist .ovproj[data-path="${p}"]`);
+const selected = page => page.evaluate(() => ["human", "overview"].filter(k => document.getElementById("tab-" + k).getAttribute("aria-selected") === "true"));
+const isActive = loc => loc.evaluate(e => e === document.activeElement);
+async function openOverview(page, s, reads) {
+  await page.locator("#tab-overview").click();
+  await until(async () => s.overviewCount === reads && /に読みました/.test(await page.locator("#ovstatus").textContent()), 3000,
+    `見通しの ${reads} 回目の読みと描画`);
+}
+
+test("見通し: 既定は判断待ちのタブ。15 秒ごとの読み込み (load) では /api/overview を読まず、見通しのタブを開いたときだけ読む。状態別の件数と次に着手できる上位を出し、ヘッダーの件数・タイトル・上部の件数は判断待ちだけを数える", async () => {
+  const s = new Script([withSnoozed(proj(P1, [item("t-A1"), item("t-A2")]), [snoozedItem("t-A8", "2999-12-31")]), proj(P2, [], [answeredItem("t-B9")])]);
+  // 形の崩れた要素 (null・path の無いプロジェクト・数でない件数) は飛ばす
+  s.overview = { projects: [
+    ovProj(P1, { counts: [{ status: "open", count: 7 }, null, { status: "weird", count: "3" }, { status: "in_progress", count: 2 }],
+      ready: [ovRow("t-A1", { priority: 1, human: true, labels: ["human", "plugin:x"] }), null, ovRow("r-2", { labels: ["lane:y", "answered", "snoozed"] }),
+        ovRow("r-3", { priority: null }), ovRow("r-4", { title: "" }), ovRow("r-5")], ready_total: 7 }),
+    null, { name: "nopath", ok: true },
+    { path: P2, name: "beta", ok: false, error: "bd down", cli: "bd", counts: [], total: 0, ready: [], ready_total: 0 },
+  ] };
+  await withPage(s, async page => {
+    assert.deepEqual(await selected(page), ["human"], "既定で開くのは判断待ち");
+    assert.equal(await page.locator("#panel-human").isVisible(), true);
+    assert.equal(await ovPanel(page).isVisible(), false);
+    assert.equal(await page.locator("#tab-overview").getAttribute("tabindex"), "-1");
+    for (let i = 0; i < 3; i++) await page.evaluate(() => load());
+    assert.ok(s.itemsCount >= 4, `読み込みが回っていない (${s.itemsCount})`);
+    assert.equal(s.overviewCount, 0, "15 秒ごとの読み込みで見通しを読んだ");
+    await openOverview(page, s, 1);
+    assert.deepEqual(await selected(page), ["overview"]);
+    assert.equal(await page.locator("#panel-human").isVisible(), false, "見通しを開いても判断待ちの画面が出たまま");
+    const alpha = ovBox(page, P1);
+    assert.deepEqual(await alpha.locator("h2 .pname").allTextContents(), ["alpha"]);
+    assert.deepEqual(await alpha.locator("h3").allTextContents(), ["状態別の件数 (計 9)", "次に着手できる (7 件のうち上位 5 件)"]);
+    assert.deepEqual(await alpha.locator(".ovstat li").allTextContents(), ["open 7", "in_progress 2"]);
+    assert.equal(await page.locator("#ovlist .ovproj").count(), 2, "形の崩れたプロジェクトを描いた");
+    assert.deepEqual(await alpha.locator(".ovrow .ovid").allTextContents(), ["t-A1", "r-2", "r-3", "r-4", "r-5"], "サーバーの並びのまま");
+    assert.deepEqual(await alpha.locator(".ovrow .ovt").allTextContents(), ["title t-A1", "title r-2", "title r-3", "r-4", "title r-5"], "題が空なら id");
+    // ラベルは文字列のまま (humanq 自身の human / answered / snoozed は出さない)。判断待ちのものには印。優先度が数でなければ P9
+    assert.deepEqual(await alpha.locator(".ovrow").nth(0).locator(".head span").allTextContents(), ["P1", "t-A1", "open", "判断待ち", "plugin:x"]);
+    assert.deepEqual(await alpha.locator(".ovrow").nth(1).locator(".head span").allTextContents(), ["P2", "r-2", "open", "lane:y"]);
+    assert.deepEqual(await alpha.locator(".ovrow").nth(2).locator(".head span").allTextContents(), ["P9", "r-3", "open"]);
+    assert.deepEqual(await ovBox(page, P2).locator(".banner").allTextContents(), ["読めませんでした: bd down"]);   // 待たない読み (無ければ assertion で落ちる)
+    assert.equal(await ovBox(page, P2).locator("h3, .ovrow").count(), 0, "読めなかったプロジェクトに件数や ready を描いた");
+    // 判断待ちの件数は判断待ちだけ (保留中・回答済み・見通しの ready は数えない)。上部にも同じ件数と判断待ちへのリンク
+    assert.equal(await page.locator("#count").textContent(), "2 件");
+    assert.equal(await page.title(), "(2) 判断待ち");
+    assert.equal(await page.locator("#ovcount").textContent(), "2 件");
+    s.projects[0].human.push(item("t-A3"));
+    await page.evaluate(() => load());
+    await until(async () => (await page.locator("#ovcount").textContent()) === "3 件", 3000, "上部の件数が判断待ちの読み込みで変わらない");
+    assert.equal(s.overviewCount, 1, "見通しを開いている間の読み込みで見通しを読み直した");
+    await page.locator("#tab-overview").click();                        // 開いているタブをもう一度押しても読み直さない
+    await page.waitForTimeout(100);
+    assert.equal(s.overviewCount, 1, "開いている見通しのタブを押して読み直した");
+    // 上部のリンクで判断待ちに戻る (フォーカスは判断待ちのタブ。URL は変えない)。開き直すと読み直す
+    const back = ovPanel(page).getByRole("link", { name: "判断待ちを開く" });
+    assert.equal(await back.count(), 1);
+    const url = page.url();
+    await back.click();
+    assert.deepEqual(await selected(page), ["human"]);
+    assert.equal(await page.locator("#panel-human").isVisible(), true);
+    assert.equal(await ovPanel(page).isVisible(), false);
+    assert.equal(await isActive(page.locator("#tab-human")), true);
+    assert.equal(page.url(), url, "リンクで URL が変わった");
+    await openOverview(page, s, 2);
+  });
+});
+
+test("見通し: 書き込みの部品が無い (ボタン・入力・フォームが無く、操作しても POST を送らない)。判断待ち (human) の ready は判断待ちのカードへのリンクで、押すとそのカードにフォーカスが移る (保留中なら畳んだ節を開き、絞り込みで隠れていれば絞り込みを解く)。ほかの ready はリンクでない", async () => {
+  const s = new Script([withSnoozed(proj(P1, [item("t-A1"), item("t-A2")]), [snoozedItem("t-A8", "2999-12-31")])]);
+  s.overview = { projects: [ovProj(P1, { ready: [ovRow("t-A2", { human: true, labels: ["human"] }), ovRow("t-A8", { human: true, labels: ["human", "snoozed"] }),
+    ovRow("r-3"), ovRow("gone-1", { human: true })], ready_total: 4 })] };
+  const inView = loc => loc.evaluate(e => { const r = e.getBoundingClientRect(); return r.top >= -1 && r.top < innerHeight; });
+  await withPage(s, async page => {
+    await until(async () => (await qcard(page, "t-A2").count()) === 1, 3000, "判断待ちの描画");
+    assert.equal(await inView(qcard(page, "t-A2")), false, "前提: t-A2 のカードが画面の外");
+    await openOverview(page, s, 1);
+    const panel = ovPanel(page);
+    assert.equal(await panel.locator("button, input, select, textarea, form, [contenteditable]").count(), 0, "見通しに書き込みの部品がある");
+    assert.deepEqual(await panel.getByRole("link").allTextContents(), ["判断待ちを開く", "title t-A2", "title t-A8", "title gone-1"]);
+    assert.equal(await ovBox(page, P1).locator('.ovrow[data-id="r-3"] a').count(), 0, "判断待ちでない ready がリンクになっている");
+    // 判断待ちのカードへ (URL は変えない)
+    const url = page.url();
+    await panel.getByRole("link", { name: "title t-A2" }).click();
+    assert.deepEqual(await selected(page), ["human"]);
+    assert.equal(page.url(), url, "リンクで URL が変わった");
+    await until(async () => isActive(qcard(page, "t-A2")), 3000, "t-A2 のカードにフォーカスが移らない");
+    await until(async () => inView(qcard(page, "t-A2")), 3000, "t-A2 のカードまでスクロールしない");
+    // 保留中のカードへ (畳んだ節を開く)
+    await openOverview(page, s, 2);
+    assert.equal(await snzSection(page).evaluate(d => d.open), false, "保留中の節は初め畳んである");
+    await panel.getByRole("link", { name: "title t-A8" }).click();
+    await until(async () => isActive(scard(page, "t-A8")), 3000, "保留中の t-A8 のカードにフォーカスが移らない");
+    assert.equal(await snzSection(page).evaluate(d => d.open), true, "保留中の節が開かない");
+    // 絞り込みで隠れたカードへ: 絞り込みを解いて飛ぶ
+    await page.locator("#fq").fill("t-A1");
+    await until(async () => (await qcard(page, "t-A2").count()) === 0, 3000, "絞り込みで t-A2 が隠れない");
+    await openOverview(page, s, 3);
+    await panel.getByRole("link", { name: "title t-A2" }).click();
+    await until(async () => isActive(qcard(page, "t-A2")), 3000, "絞り込みで隠れた t-A2 のカードにフォーカスが移らない");
+    assert.equal(await page.locator("#fq").inputValue(), "", "絞り込みが解けていない");
+    // 判断待ちに無いもの: 知らせて読み直す
+    const before = s.itemsCount;
+    await openOverview(page, s, 4);
+    await panel.getByRole("link", { name: "title gone-1" }).click();
+    await until(async () => (await page.locator("#toasts .toast").allTextContents()).some(t => t.includes("「gone-1」は判断待ちに見つかりませんでした")), 3000, "見つからない知らせ");
+    await until(async () => s.itemsCount > before, 3000, "読み直さない");
+    assert.deepEqual([s.answers.length, s.undos.length, s.snoozes.length, s.unsnoozes.length], [0, 0, 0, 0], "見通しの操作で書き込みを送った");
+  }, { viewport: { width: 900, height: 320 } });
+});
+
+test("見通し: 読み込めなければ (描けなければ) 案内を出し、開き直すと読み直す。タブは矢印・Home・End で移れる (ページはスクロールさせない)。形の崩れた項目は既定の表示にする。幅 375 でもページは横にスクロールしない", async () => {
+  const long = "/work/" + "very-long-project-name-".repeat(6) + "tail";
+  const s = new Script([proj(P1, [item("t-A1")])]);
+  s.overview = { projects: [ovProj(long, { ready: [ovRow("r-1", { title: "とても長い題 ".repeat(30), labels: ["plugin:" + "x".repeat(60), "lane:1", "a", "b", "c"] })], ready_total: 1 }),
+    ovProj(P2, { name: "", counts: [], total: 0 }), { path: "/work/gamma", ok: false },
+    ovProj("/work/delta", { ready: [1, 2, 3, 4, 5].map(i => ovRow(`d-${i}`, { title: "長い題 ".repeat(40) })), ready_total: 5 })] };
+  s.overviewFail = true;
+  await withPage(s, async page => {
+    await page.locator("#tab-overview").click();
+    await until(async () => /見通しを読み込めませんでした/.test(await page.locator("#ovstatus").textContent()), 3000, "読めない案内");
+    assert.equal(s.overviewCount, 1);
+    s.overviewFail = false;
+    const human = page.locator("#tab-human"), ov = page.locator("#tab-overview");
+    await ov.focus();
+    await page.keyboard.press("ArrowLeft");
+    assert.deepEqual(await selected(page), ["human"]);
+    assert.equal(await isActive(human), true);
+    assert.deepEqual([await human.getAttribute("tabindex"), await ov.getAttribute("tabindex")], ["0", "-1"]);
+    await page.keyboard.press("ArrowRight");
+    assert.deepEqual(await selected(page), ["overview"]);
+    assert.equal(await isActive(ov), true);
+    await until(async () => s.overviewCount === 2 && (await ovBox(page, long).count()) === 1, 3000, "開き直して読み直す");
+    await page.keyboard.press("Home");
+    assert.deepEqual(await selected(page), ["human"]);
+    await page.keyboard.press("End");
+    assert.deepEqual(await selected(page), ["overview"]);
+    await until(async () => s.overviewCount === 3, 3000, "End で開いて読み直す");
+    await until(async () => (await ovBox(page, long).locator(".ovrow").count()) === 1, 3000, "描画");
+    assert.deepEqual(await ovBox(page, long).locator(".ovrow .head span").allTextContents(),
+      ["P2", "r-1", "open", "plugin:" + "x".repeat(60), "lane:1", "a", "b", "+1"], "ラベルが多いときは先頭 4 つと +N");
+    assert.deepEqual(await ovBox(page, long).locator("h3").allTextContents(), ["状態別の件数 (計 9)", "次に着手できる (1)"], "上位が全件なら件数だけ");
+    assert.deepEqual(await ovBox(page, P2).locator("h3, .ovnone").allTextContents(),
+      ["状態別の件数 (計 0)", "数えるチケットはありません", "次に着手できる (0)", "次に着手できるチケットはありません"]);
+    assert.deepEqual(await ovBox(page, P2).locator("h2 .pname").allTextContents(), ["beta"], "名前が空ならパスの末尾");
+    assert.deepEqual(await ovBox(page, "/work/gamma").locator(".banner").allTextContents(), ["読めませんでした: 理由が分からない"]);
+    // タブの上の矢印・Home・End はタブを移るだけで、ページをスクロールさせない
+    assert.ok(await page.evaluate(() => document.documentElement.scrollHeight > innerHeight + 200), "前提: ページが縦に長い");
+    assert.equal(await isActive(ov), true);
+    await page.keyboard.press("End");
+    await page.waitForTimeout(300);
+    assert.equal(await page.evaluate(() => scrollY), 0, "End でページがスクロールした");
+    assert.equal(s.overviewCount, 3, "開いている見通しのタブで End を押して読み直した");
+    const sw = await page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
+    assert.ok(sw[0] <= sw[1], `ページが横にスクロールする (${sw})`);
+    // 登録したプロジェクトが無い
+    s.overview = { projects: [] };
+    await page.keyboard.press("Home");
+    await page.keyboard.press("End");
+    await until(async () => s.overviewCount === 4 && /に読みました/.test(await page.locator("#ovstatus").textContent()), 3000, "4 回目の読み");
+    assert.deepEqual(await page.locator("#ovlist").locator("p").allTextContents(), ["登録したプロジェクトはありません"]);
+    // projects が配列でない応答は、読めなかったことにする
+    s.overview = { projects: "x" };
+    await page.keyboard.press("Home");
+    await page.keyboard.press("End");
+    await until(async () => s.overviewCount === 5 && /見通しを読み込めませんでした: 想定外のデータ/.test(await page.locator("#ovstatus").textContent()), 3000, "配列でない projects");
+    // 描けなければ (描画の不具合) 案内を出す (読み込み中のまま止めない)
+    s.overview = { projects: [] };
+    await page.evaluate(() => { renderOverview = () => { throw new Error("boom"); }; });
+    await page.keyboard.press("Home");
+    await page.keyboard.press("End");
+    await until(async () => s.overviewCount === 6 && (await page.locator("#ovstatus").textContent()) === "見通しを描けませんでした: boom", 3000, "描けない案内");
+  }, { viewport: { width: 375, height: 812 } });
+});
+
+test("見通し: 開き直した後に、前の読みの応答が遅れて届いても、新しい読みの内容のまま (古い応答で描き直さない)", async () => {
+  const s = new Script([proj(P1, [item("t-A1")])]);
+  s.overview = { projects: [ovProj(P1, { ready: [ovRow("old-1")], ready_total: 1 })] };
+  await withPage(s, async page => {
+    const first = s.hold("overview");
+    await page.locator("#tab-overview").click();
+    await until(async () => s.overviewCount === 1, 3000, "1 回目の読み");
+    assert.equal(await page.locator("#ovstatus").textContent(), "読み込み中…", "読んでいる間の案内");
+    s.overview = { projects: [ovProj(P1, { ready: [ovRow("new-1")], ready_total: 1 })] };
+    const second = s.hold("overview");
+    await page.locator("#tab-human").click();
+    await page.locator("#tab-overview").click();
+    await until(async () => s.overviewCount === 2, 3000, "2 回目の読み");
+    second();
+    await until(async () => (await ovBox(page, P1).locator(".ovid").allTextContents()).join() === "new-1", 3000, "2 回目の読みの描画");
+    first();
+    await page.waitForTimeout(200);
+    assert.deepEqual(await ovBox(page, P1).locator(".ovid").allTextContents(), ["new-1"], "遅れて届いた古い読みで描き直した");
+    assert.match(await page.locator("#ovstatus").textContent(), /に読みました/);
+  });
 });

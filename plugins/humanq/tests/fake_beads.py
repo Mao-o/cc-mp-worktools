@@ -29,6 +29,9 @@
   - `.beads/metadata.json` の database が beads.db で embeddeddolt/ が無いと、
     `Error: historical SQLite workspace detected; ...` で exit 1 (embeddeddolt/ があれば本物も database の値を見ない)
   - `-C <dir>` に .beads/ が無ければ `Error: cannot use -C directory "<dir>": no beads project found` で exit 1
+  - 見通しの読み: `count --by-status --json` は {total, groups: [{group, count}], schema_version} (形は実測。数える範囲と
+    groups の並びは測っていないので、偽物は list の既定と同じ範囲を名前の順で返す)。`ready --json` は list の要素と同じ形の
+    配列 (偽物は status が open のものだけ。本物の既定の上限・依存・in_progress の扱いは測っていない。humanq は --limit 0 で読む)
 - br 0.7.6 で実測した癖を持つ (名前が br のとき。詳しくは tests/test_fake_beads.py が 1 件ずつ押さえる):
   - -C・human サブコマンド・list --flat・list -n・update --metadata/--set-metadata は usage エラーで exit 2。
     起動した cwd から上へ .beads を探す
@@ -59,6 +62,10 @@
     保存する。半分未満・空にする書き換えは (詰めた後の長さで) --force が無いと非 0。偽物は JSON でない値も、そのまま保存する
     (本物は exit 7 で断る。偽物が寛容な側の食い違い)
   - database が dolt の dir で打つと、エラーにせず .beads/dolt・dolt-wal・dolt-shm を作って空の結果を返す
+  - 見通しの読み: `ready --json` は素の配列 (labels を必ず持つ。human・answered の付いたチケットも出る)。出るのは status が
+    open のものだけ (本物は依存で止まっているものも除くが、偽物は依存を持たない)。--limit の既定は 0 (上限なし)、並びは
+    P0/P1 を created_at の順に先に、残りを created_at の順に (hybrid)。`count --by status --json` (--by-status も同じ) は
+    {total, groups: [{group, count}]} で groups は名前の順、0 件は groups が []。既定は closed・deferred・tombstone を数えない
 依存は標準ライブラリだけ (fcntl を使うので macOS / Linux)。
 """
 from __future__ import annotations
@@ -504,6 +511,52 @@ def bd_list(p: Project, args: list[str], as_json: bool) -> None:
         print("\n".join(f"{i['id']} {i['title']}" for i in items))
 
 
+def hybrid_order(items: list[dict]) -> list[dict]:
+    """ready の既定の並び (br 0.7.6 の `--sort hybrid` の説明と実測: P0/P1 を created_at の順に先に、残りを created_at の順に)。
+    偽の bd も同じ並びにする (bd の既定の並びは測っていない。humanq は並べ直すので、優先度の順でない並びを返すことに意味がある)。"""
+    return sorted(items, key=lambda i: (0 if isinstance(i["priority"], int) and i["priority"] <= 1 else 1, i["created_at"]))
+
+
+def bd_ready(p: Project, args: list[str], as_json: bool) -> None:
+    """次に着手できるチケット。偽物は status が open のものだけを出す (依存は持たない)。--limit (-n) の 0 は上限なし。
+    本物の bd 1.3.4 の既定の上限・in_progress を出すか・依存の扱いは測っていない (humanq は --limit 0 で読む)。
+    要素は list と同じ形 (metadata・labels を含む。human の付いたチケットも出る)。"""
+    opts, pos = take(args, {"--limit": True, "-n": True})
+    want(pos, 0, "ready [flags]")
+    raw = opts.get("--limit") or opts.get("-n") or "10"
+    try:
+        limit = int(str(raw))
+    except ValueError:
+        raise Fail(f'Error: invalid argument "{raw}" for "-n, --limit" flag: strconv.ParseInt: parsing "{raw}": invalid syntax') from None
+    items = hybrid_order([i for i in p.state["issues"].values() if i["status"] == "open"])
+    if limit > 0:
+        items = items[:limit]
+    if as_json:
+        emit([view(i) for i in items])                               # 0 件は []
+    else:
+        print("\n".join(f"{i['id']} {i['title']}" for i in items) or "No ready work found")
+
+
+def bd_count(p: Project, args: list[str], as_json: bool) -> None:
+    """件数。--by-status で status ごと ({total, groups: [{group, count}], schema_version}。groups は status の名前の順)。
+    数える範囲は list の既定と同じ (closed・pinned などを除く)。本物の bd 1.3.4 の範囲と groups の並びは測っていない
+    (形は {total, groups, schema_version} を実測)。--by-status が無ければ {count, schema_version}。"""
+    opts, pos = take(args, {"--by-status": False})
+    want(pos, 0, "count [flags]")
+    items = [i for i in p.state["issues"].values() if shown_by_default(p.state, i["status"])]
+    if not opts.get("--by-status"):
+        out = {"count": len(items), "schema_version": 1}
+    else:
+        groups: dict[str, int] = {}
+        for i in items:
+            groups[i["status"]] = groups.get(i["status"], 0) + 1
+        out = {"total": len(items), "groups": [{"group": k, "count": groups[k]} for k in sorted(groups)], "schema_version": 1}
+    if as_json:
+        emit(out)
+    else:
+        print(f"Total: {len(items)}")
+
+
 def run_bd(argv: list[str]) -> None:
     cdir, actor, as_json, rest = split_globals(argv)
     root = os.path.abspath(cdir) if cdir else os.getcwd()
@@ -544,6 +597,10 @@ def run_bd(argv: list[str]) -> None:
             bd_human(p, args, as_json)
         elif cmd == "list":
             bd_list(p, args, as_json)
+        elif cmd == "ready":
+            bd_ready(p, args, as_json)
+        elif cmd == "count":
+            bd_count(p, args, as_json)
         else:
             raise Fail(f'Error: unknown command "{cmd}" for "bd"')
 
@@ -975,7 +1032,71 @@ def br_dolt_accident(beads: str, cmd: str, as_json: bool) -> None:
         emit({"issues": [], "total": 0, "limit": 0, "offset": 0, "has_more": False})
 
 
-BR_COMMANDS = ("init", "create", "update", "close", "delete", "list", "show", "label", "comments")
+def br_int_value(name: str, raw: str) -> int:
+    """clap の数の値。読めなければ本物と同じ usage エラー (exit 2)。"""
+    try:
+        return int(raw)
+    except ValueError:
+        raise Usage(f"error: invalid value '{raw}' for '{name} <LIMIT>': invalid digit found in string") from None
+
+
+def br_ready(p: Project, args: list[str], as_json: bool) -> None:
+    """次に着手できるチケット (status が open のもの。本物は依存で止まっているものも除くが、偽物は依存を持たない)。
+    素の配列で、要素は list の要素と同じ形 (labels を必ず持つ。human・answered の付いたものも出る)。--limit の既定は 0 (上限なし)。
+    並びは本物の既定 (hybrid) と同じ。in_progress・blocked・deferred・draft・pinned・独自の status は出ない (br 0.7.6 で実測)。"""
+    opts, pos = br_take(args, {"--limit": True})
+    if pos:
+        raise br_usage_unexpected(pos[0])
+    limit = br_int_value("--limit", br_one(opts, "--limit") or "0")
+    items = hybrid_order([i for i in p.state["issues"].values() if i["status"] == "open"])
+    if limit > 0:
+        items = items[:limit]
+    if as_json:
+        emit([br_row(i) for i in items])                                # 0 件は []
+    else:
+        print("\n".join(f"{i['id']} {i['title']}" for i in items))
+
+
+# count の --by に書ける値 (本物の 0.7.6 の help)。偽物が数えられるのは status だけ (ほかは humanq が使わないので Fail で断る)
+BR_COUNT_BY = ("status", "priority", "type", "assignee", "label")
+
+
+def br_count(p: Project, args: list[str], as_json: bool) -> None:
+    """件数。--by status (--by-status) で {"total", "groups": [{"group", "count"}]} (groups は名前の順。0 件は [])、--by 無しは
+    {"count"}。既定は closed・deferred・tombstone を数えない (--include-closed で closed と deferred も数える。--status は
+    繰り返しかカンマ区切りで、all は tombstone 以外の全部)。br 0.7.6 で実測。"""
+    opts, pos = br_take(args, {"--by": True, "--by-status": False, "--status": True, "--include-closed": False})
+    if pos:
+        raise br_usage_unexpected(pos[0])
+    by = br_one(opts, "--by") or ("status" if opts.get("--by-status") else None)
+    if by is not None and by not in BR_COUNT_BY:
+        raise Usage(f"error: invalid value '{by}' for '--by <BY>'\n  [possible values: {', '.join(BR_COUNT_BY)}]")
+    if by not in (None, "status"):
+        raise Fail(f"fake-beads: count --by {by} は偽物に無い (humanq は status だけを使う)")
+    given = [s.strip() for raw in opts.get("--status", []) for s in raw.split(",") if s.strip()]
+
+    def counted(st: str) -> bool:
+        if given:
+            return st in given or ("all" in given and st != "tombstone")
+        if opts.get("--include-closed"):
+            return st != "tombstone"
+        return st not in ("closed", "deferred", "tombstone")
+
+    items = [i for i in p.state["issues"].values() if counted(i["status"])]
+    if by is None:
+        out = {"count": len(items)}
+    else:
+        groups: dict[str, int] = {}
+        for i in items:
+            groups[i["status"]] = groups.get(i["status"], 0) + 1
+        out = {"total": len(items), "groups": [{"group": k, "count": groups[k]} for k in sorted(groups)]}
+    if as_json:
+        emit(out)
+    else:
+        print(f"Total: {len(items)}")
+
+
+BR_COMMANDS = ("init", "create", "update", "close", "delete", "list", "show", "label", "comments", "ready", "count")
 
 
 def run_br(argv: list[str]) -> None:
@@ -1016,6 +1137,10 @@ def run_br(argv: list[str]) -> None:
             br_show(p, args, as_json)
         elif cmd == "label":
             br_label(p, args, as_json)
+        elif cmd == "ready":
+            br_ready(p, args, as_json)
+        elif cmd == "count":
+            br_count(p, args, as_json)
         else:
             br_comments(p, args, as_json, who)
 
