@@ -6,7 +6,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from core import budget, shell_word
+from core import budget, cli_config, shell_word
 
 # `\b` はハイフンも語境界扱いするため `aws-vault exec prod -- aws s3 rm` のような
 # **別コマンド**まで aws として拾ってしまう (aws-vault は hook の既定 profile で
@@ -245,6 +245,11 @@ def profiles_for_account(account_id: str, env=None) -> list[str]:
     `role_arn = arn:aws:iam::<id>:role/...` (assume-role) の 2 形式を見る。
     `[default]` は "default" として返す。ファイルが無い / 読めない / 該当なしは
     空 list。profile 名以外の内容 (sso_start_url 等) は返さず、メッセージにも出さない。
+
+    通常のファイルでないもの (FIFO・デバイスなど) は開いても読まずに空 list
+    (`cli_config.read_regular_bytes`)。0.36.2 までは普通に開いていたので、書き手のいない FIFO
+    (`AWS_CONFIG_FILE=<FIFO> aws ...`) だと、CLI が答えなかったときの deny の案内を作る途中で
+    読みが止まり、hook timeout で検証が飛んでいた (v0.36.3)。大きさの上限は置かない (0.36.2 と同じ)。
     """
     if not account_id:
         return []
@@ -252,7 +257,7 @@ def profiles_for_account(account_id: str, env=None) -> list[str]:
     if path is None:
         return []
     try:
-        text = path.read_text(encoding="utf-8")
+        text = cli_config.read_regular_bytes(path).decode("utf-8")
     except (OSError, ValueError):
         return []
     found: list[str] = []

@@ -466,7 +466,9 @@ def _from_configstore(root: str, env=None) -> str | None:
     切替先が無いときは ""。configstore が大きすぎる (`cli_config.MAX_FILE_BYTES` を超える) ときは
     None (切替先の有無を確かめられない)。"" にすると、`firebase use` で別の project に切り替えて
     いても `.firebaserc` の `default` で照合して allow してしまう (v0.25.0)。読めない・壊れた
-    configstore は従来どおり ""。
+    configstore は従来どおり ""。FIFO も読めないのと同じで、開いても読まずに ""
+    (`cli_config.read_bounded_text`。0.36.2 までは書き手のいない FIFO で読みが止まり、hook timeout で
+    検証が飛んでいた。v0.36.3)。
 
     firebase-tools の configstoreProject と同じく root から親方向にだけ探索する。このファイルには
     認証トークンも含まれるため、JSON として読んだ後 activeProjects 以外は使わず、内容をメッセージに
