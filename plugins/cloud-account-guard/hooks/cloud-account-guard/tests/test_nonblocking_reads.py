@@ -257,7 +257,9 @@ class TestAwsConfigRead(unittest.TestCase):
                 self.assertEqual(self._profiles(), ["prod"])
 
     def test_undecodable_is_empty(self):
-        self.cfg.write_bytes(b"\xff\xfe[profile x]\nsso_account_id = " + _ACCOUNT.encode() + b"\n")
+        # 不正なバイトは解析に効かないコメント行に置く (見出しに置くと、置換して読んでも profile に
+        # ならず、strict な decode と区別できない)
+        self.cfg.write_bytes(b"# \xff\xfe\n[profile x]\nsso_account_id = " + _ACCOUNT.encode() + b"\n")
         self.assertEqual(self._profiles(), [])
 
 

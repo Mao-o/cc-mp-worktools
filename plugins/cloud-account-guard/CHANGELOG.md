@@ -21,7 +21,8 @@
 - 判定は変えていない: 旧新に同じ入力 (通常のファイル・無い・ディレクトリ・symlink・行き先の無い symlink・
   権限の無いファイル・`/dev/null`・`/dev/zero`・大きすぎる・UTF-8 でない・CRLF / CR の改行) を流した 132 件で、
   結果 (configstore の切替先・固定の判定・ローカル設定の解決、aws の profile、accounts.local.json の探索) が
-  違ったのは FIFO と端末 (旧は止まる) と、aws の config の `/dev/zero` (旧は大きさの上限なしで読み続ける。新は
+  違ったのは FIFO と端末 (旧は、書き手のいない FIFO とデータの無い端末で止まる。書き手のいる FIFO は、
+  旧は書き手が出した中身を読んでいたが、新は読まない = FIFO に置いた設定は読まれなくなった) と、aws の config の `/dev/zero` (旧は大きさの上限なしで読み続ける。新は
   profile なし) だけ。gitdir / commondir の `/dev/zero` は、読む関数の値は変わるが探索の結果は同じ (境界)。
   configstore のデバイスは 0.36.2 と同じく大きさの上限まで読む (`/dev/zero` は大きすぎて切替先を確かめられない、
   のまま)。aws の config に大きさの上限は足していない

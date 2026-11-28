@@ -479,7 +479,9 @@ timeout も deny に倒している以上、ここだけ無音で通るのは判
   `read_regular_bytes` (通常のファイルだけ。aws の config・linked worktree の gitdir と commondir)、
   `read_text` (同じ。gh / gcloud の設定)、`read_bounded_text` (FIFO だけを読まず、デバイスは大きさの
   上限まで読む。firebase の configstore・`.firebaserc`・firebase.json・accounts.local.json・成功 cache)。
-  0.35.0 で gh / gcloud、0.36.3 で残りの読みを揃えた。`tests/test_nonblocking_reads.py` は別プロセスで
+  0.35.0 で gh / gcloud、0.36.3 で残りの読みを揃えた。例外は linked worktree の判定で読む `.git` ファイル
+  (`paths._inspect_dot_git`) だけで、`is_file()` (symlink を辿る) で通常のファイルと確かめてから普通に開く
+  (FIFO・デバイスは `.git` が無いのと同じ扱いで開かない。確かめてから開くまでに FIFO に差し替えられたときだけ止まりうる)。`tests/test_nonblocking_reads.py` は別プロセスで
   timeout を付けて読む (止まる退行でも suite を止めない)
 
 **並列化 (ThreadPoolExecutor) を採らなかった理由**: `concurrent.futures` の worker
