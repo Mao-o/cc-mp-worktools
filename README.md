@@ -9,6 +9,11 @@ Work-related Claude Code plugins.
 - **Python 3.11+** (PATH 上の `python3`) — hook の実行に必要
 - **git**
 
+対象 OS は macOS / Linux です。**Windows は対象外**です。hook の起動は PATH 上の `python3` を前提にしており、
+Windows での起動は確かめておらず、保証もしません (Windows の公式インストーラは `python3.exe` を作らないことがあります)。
+下の「Development」にある `windows-latest` の CI は Python 側の判定と入出力の回帰検出のためのもので、
+Windows での hook の起動や対話動作の保証ではありません。
+
 ## Install
 
 ```bash
@@ -212,7 +217,8 @@ CI (`.github/workflows/validate.yml`) は `make validate` 相当のチェック�
 (リリース tag の付与もこの job の green を待ちます)。cloud-account-guard は、Windows の
 設定 dir の決め方を確かめる 1 モジュール (`tests.test_windows_config_dir`) だけをこの job で回します
 (suite 全体は FIFO などを使うため Windows には未対応です)。それ以外の plugin の Windows 対応は
-未検証です。hook の起動には、どの plugin も PATH 上の `python3` が必要です。
+未検証です。この job は Python 側の判定と入出力の回帰を検出するためのもので、Windows での hook の起動や
+対話動作は確かめていません (Windows は対象外です。[Requirements](#requirements) を参照)。hook の起動には、どの plugin も PATH 上の `python3` が必要です。
 
 開発フロー・テスト規約・version と CHANGELOG の運用は
 [CONTRIBUTING.md](CONTRIBUTING.md)、この repo 固有の設計上の注意点は
