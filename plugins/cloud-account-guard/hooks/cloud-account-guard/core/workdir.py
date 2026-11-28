@@ -197,6 +197,10 @@ _UNREADABLE_NAME_CHARS = frozenset("$`*?[{")
 _ARRAY_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]\s]*\])?\+?=\(")
 # リダイレクトの語 (`>f` / `2>&1` / `&>f` / `<<<x`)。演算子だけの語は、次の語が行き先。
 _REDIRECT_WORD = re.compile(r"[0-9]*(?:<<<|<<-|<<|<>|<&|>>|>&|>\||<|>)|&>>?")
+# `read` の引数の語で、名前の終わり (zsh の `名前?プロンプト` の `?` と、空白なしで続けたリダイレクト)。
+_READ_NAME_END = re.compile(r"[?<>&]")
+# `printf -v` の値の名前の形 (`名前` / `名前[添字]`。後ろは終わりか、空白なしで続けたリダイレクトだけ)。
+_PRINTF_TARGET = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]*\])?(?=[<>&]|\Z)")
 
 
 def _env_names_changed(segment: str) -> set[str]:
@@ -289,6 +293,9 @@ def _shell_words(segment: str) -> list[str]:
                     i = end
                     continue
                 arrays = False
+        if c == '"':
+            i = _double_quote_end(segment, i)
+            continue
         end = _skip_opaque(segment, i)
         i = end if end is not None and end > i else i + 1
     if start is not None:
@@ -296,17 +303,44 @@ def _shell_words(segment: str) -> list[str]:
     return words
 
 
+def _double_quote_end(text: str, i: int) -> int:
+    """`text[i]` の `"` の閉じの直後。閉じなければ末尾 (v0.36.7)。
+
+    中の `$(...)` / `${...}` / backtick は `_skip_opaque` で 1 つの塊として飛ばす (シェルは置換の中を新しい引用の
+    文脈として読むので、`"$(printf "%s %s" "$A")"` は 1 語)。`_skip_opaque` の `"` は中の次の `"` で閉じるので、
+    それで語を分けると置換の中の引用符の中の空白で語を切り、`%s" "$A")"` を名前を読めない語と読む。
+    `$$` は PID で、後ろの `(` / `{` を置換の始まりと読まない (`_skip_opaque` と同じ。`"$$(" a ")"` を zsh -f は
+    ここで語に分け、bash 3.2 は 1 語に読む。語を多く分ける側 = 名前を読めない語を見落とさない側に倒す)。
+    """
+    j, n = i + 1, len(text)
+    while j < n:
+        ch = text[j]
+        if ch == "\\" or (ch == "$" and text[j + 1:j + 2] == "$"):
+            j += 2
+            continue
+        if ch == '"':
+            return j + 1
+        if ch == "`" or (ch == "$" and text[j + 1:j + 2] in ("(", "{")):
+            end = _skip_opaque(text, j)
+            if end is not None and end > j:
+                j = end
+                continue
+        j += 1
+    return n
+
+
 def _read_names(args: list[str]) -> set[str]:
     """`read` が値を入れる変数の名前 (v0.36.7。`args` は shlex で分けた引数)。
 
     名前の形の語を全部数える (option の値 (`-p プロンプト`) やリダイレクトの行き先も、名前の形なら数える。多めに
     数える側。bash の `-a 配列名` と、値を取らない zsh の `-p` の後ろの名前を落とさない)。zsh の
-    `名前?プロンプト` は `?` の前を名前とする。名前を静的に読めない語 (`read "$V"`) は数えない (option の値と
-    区別しない。名前を変数で渡す形は稀)。
+    `名前?プロンプト` は `?` の前を名前とする。空白なしで続けたリダイレクト (`read -r NAME<f` / `NAME<<<x` /
+    `NAME>/dev/null` / `NAME&>/dev/null`。shlex は `<` / `>` / `&` で語を切らない) も、その前を名前とする。
+    名前を静的に読めない語 (`read "$V"`) は数えない (option の値と区別しない。名前を変数で渡す形は稀)。
     """
     names = set()
     for word in args:
-        name = word.split("?", 1)[0]
+        name = _READ_NAME_END.split(word, maxsplit=1)[0]
         if _SHELL_NAME.fullmatch(name):
             names.add(name)
     return names
@@ -315,18 +349,21 @@ def _read_names(args: list[str]) -> set[str]:
 def _printf_names(args: list[str]) -> set[str]:
     """`printf -v 名前` が値を入れる変数の名前 (v0.36.7。`args` は shlex で分けた引数)。
 
-    `-v名前` の結合形も読む。`--` か option でない語 (書式) から後ろは見ない。`名前[添字]` は名前の部分。
-    名前を静的に読めない語 (`printf -v "$V" x`) は、どの env を変えたか決められないので {ANY_ENV}。
+    `-v名前` の結合形も読む。`--` か option でない語 (書式) から後ろは見ない。値が名前の形 (`名前` / `名前[添字]`。
+    後ろに空白なしのリダイレクト (`名前>/dev/null`) が続いてもよい) なら、その名前。名前を静的に読めない値
+    (`printf -v "$V" x` / `A$N` / `"GOOGLE_$k"`。名前の頭の後ろに展開が続く形と、glob・brace 展開の
+    `AWS_PROFIL?` / `AWS_*` / `{AWS_PROFILE,X}` を含む。代入の組み込みと同じ文字) は、どの env を変えたか
+    決められないので {ANY_ENV}。それ以外の名前の形でない値 (`printf -v "a b" x`) はシェルが名前でないとして失敗する。
     """
     for i, word in enumerate(args):
         if word == "--" or not word.startswith("-"):
             return set()
         if word.startswith("-v"):
             target = word[2:] or (args[i + 1] if i + 1 < len(args) else "")
-            name = _SHELL_NAME.match(target)
+            name = _PRINTF_TARGET.match(target)
             if name:
-                return {name.group()}
-            return {ANY_ENV} if "$" in target or "`" in target else set()
+                return {name.group(1)}
+            return {ANY_ENV} if any(c in _UNREADABLE_NAME_CHARS for c in target) else set()
     return set()
 
 

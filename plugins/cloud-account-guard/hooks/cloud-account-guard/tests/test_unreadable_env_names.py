@@ -72,6 +72,10 @@ UNREADABLE_ASSIGN = [
     "export FOO=1\t$(cat .env)",
     "export FOO=1 > /dev/null $(cat .env)",
     "export -- $(cat .env)",
+    # 二重引用符の中の置換に引用符がある語の後ろ。`"$$("` は zsh が語を分ける (`$$` は PID。後ろの `(` は置換の
+    # 始まりではない。bash 3.2 は 1 語に読む)
+    'export FOO="$(echo "a b")" $(cat .env)',
+    'export FOO="$$(" $(cat .env) ")"',
 ]
 
 # 名前を読める (0.36.6 と同じ結果の) 代入の組み込みと、identity env を変えない read / printf
@@ -84,9 +88,36 @@ READABLE = [
     "export FOO=1 >$LOG",
     "export FOO=1 2> $LOG",
     "export FOO=1 2>$LOG",
+    # リダイレクトの演算子ごと (演算子だけの語は、次の語が行き先)
+    "export FOO=1 >> $LOG",
+    "export FOO=1 &> $LOG",
+    "export FOO=1 &>$LOG",
+    "export FOO=1 &>> $LOG",
+    "export FOO=1 >& $LOG",
+    "export FOO=1 <& $FD",
+    "export FOO=1 <> $F",
+    "export FOO=1 >| $F",
+    "export FOO=1 < $F",
+    'export FOO=1 <<< "$X"',
+    "export FOO=1 << $X",
+    "export FOO=1 <<- $X",
     "declare -a arr=(1 $(cat f))",
     "declare arr[1]=x",
     "declare arr[$i]=x",
+    # 追記 (bash 4 以降。bash 3.2 / zsh は配列の追記の一部をエラーにする)
+    "declare arr[$i]+=x",
+    "declare -a arr+=(1 $(cat f))",
+    # 二重引用符の中の置換に引用符・空白がある (シェルは置換の中を新しい引用の文脈として読むので 1 語)
+    'export BODY="$(printf "Fixes %s" "$ISSUE")"',
+    'export FOO="$(printf "%s %s" "$A" "$B")"',
+    'export FOO="$(echo "a $B")"',
+    'export FOO="`echo "a $B"`"',
+    'export FOO="${X:-"a $B"}"',
+    'readonly MSG="$(echo "Deploying $SERVICE")"',
+    'local out="$(echo "$a $b")"',
+    'export FOO="\\" $(cat .env)"',
+    # 閉じない `${` (bash は構文エラー) は置換として読まず、二重引用符の閉じを探し続ける
+    'export FOO="${X" BAR=1',
     "declare -x FOO=1",
     "export -p",
     "read -r X < f",
@@ -109,6 +140,15 @@ READ_PRINTF = [
     ("printf -v AWS_PROFILE '%s' \"$(cat f)\"", "AWS_PROFILE"),
     ("printf -vAWS_PROFILE prod", "AWS_PROFILE"),
     ("printf -v 'AWS_PROFILE[0]' prod", "AWS_PROFILE"),
+    # 空白なしで続けたリダイレクト (shlex は `<` / `>` / `&` で語を切らない)
+    ("read -r AWS_PROFILE<f", "AWS_PROFILE"),
+    ("read AWS_PROFILE<<<prod", "AWS_PROFILE"),
+    ("read -r AWS_PROFILE>/dev/null <f", "AWS_PROFILE"),
+    ("read -r AWS_PROFILE&>/dev/null <f", "AWS_PROFILE"),
+    ("read -r X CLOUDSDK_CORE_ACCOUNT<.env", "CLOUDSDK_CORE_ACCOUNT"),
+    ("printf -v AWS_PROFILE>/dev/null prod", "AWS_PROFILE"),
+    ("printf -v AWS_PROFILE</dev/null prod", "AWS_PROFILE"),
+    ("printf -v AWS_PROFILE&>/dev/null prod", "AWS_PROFILE"),
 ]
 
 # 固定のある世界 (AWS_PROFILE=dev / CLOUDSDK_CORE_ACCOUNT=a@example.com) で、固定とみなさなくなる形
@@ -118,6 +158,10 @@ OVERRIDES = (
     + [
         f"export $(cat .env | xargs) && {GCLOUD}",
         f"read -r CLOUDSDK_CORE_ACCOUNT < f && {GCLOUD}",
+        f"read -r CLOUDSDK_CORE_ACCOUNT<.env && {GCLOUD}",
+        f"N=WS_PROFILE; printf -v A$N prod; {AWS}",
+        f'printf -v "GOOGLE_$k" x; {GCLOUD}',
+        f"printf -v AWS_PROFIL? prod; {AWS}",
         f"while IFS='=' read -r k v; do export \"$k=$v\"; done < .env; {AWS}",
         f"IFS= read -r AWS_PROFILE < f; {AWS}",
         # bash ではパイプの中の read は後ろに効かないが、zsh では最後の段がシェル自身で走るので効く
@@ -166,7 +210,21 @@ class EnvNamesTests(unittest.TestCase):
                 self.assertIn(name, names)
 
     def test_printf_unreadable_name_is_any(self):
-        for segment in ('printf -v "$N" prod', "printf -v `echo N` prod", 'printf -v"$N" prod'):
+        for segment in (
+            'printf -v "$N" prod',
+            "printf -v `echo N` prod",
+            'printf -v"$N" prod',
+            # 名前の頭の後ろに展開が続く (頭だけを名前と読まない)
+            "printf -v A$N prod",
+            'printf -v "GOOGLE_$k" x',
+            "printf -v HOM$N /tmp",
+            "printf -v HOM$N>/dev/null /tmp",
+            # glob と brace 展開 (cwd に `AWS_PROFILE` という名前のファイルがあれば一致する)
+            "printf -v AWS_PROFIL? prod",
+            "printf -v AWS_* prod",
+            "printf -v [A]WS_PROFILE prod",
+            "printf -v {AWS_PROFILE,X} prod",
+        ):
             with self.subTest(segment=segment):
                 self.assertEqual(self._names(segment), {ANY})
 
@@ -175,6 +233,8 @@ class EnvNamesTests(unittest.TestCase):
 
         閉じない配列代入の語が並ぶ形 (`declare a=( a=( ...`) は、語ごとに閉じを末尾まで探すと語の数の 2 乗になる
         (手元で 4.6 秒)。閉じない配列代入を一度見たら、後ろの語の配列代入の値は読まない。
+        閉じない `((` が並ぶ形 (`export (( (( ...`) は、分割器と同じく算術評価の閉じを末尾まで読み直すので 2 乗に
+        なる (この関数の外の課題。分割器が先に同じ時間をかける)。
         """
         for head, unit in (
             ("declare ", "a=( "),
@@ -182,6 +242,8 @@ class EnvNamesTests(unittest.TestCase):
             ("export ", "A=$(b c) "),
             ("export ", '"a b" '),
             ("export ", "> f "),
+            ("export ", 'A="$(printf "%s %s" "$x")" '),
+            ('export "', "${x "),
         ):
             segment = head + unit * 4000
             with self.subTest(unit=unit):

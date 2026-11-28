@@ -1793,9 +1793,11 @@ CLI ごとに 1 回。deny はせず、deny したコマンドには足さない
 
 - **前段で環境変数に値を入れる形のうち、ディレクトリ単位の固定の判定が数えないものがある** (v0.36.7)。数えるのは
   `export` / `declare` / `typeset` / `readonly` / `local` / `unset` / 代入 / `read` / `printf -v` と、内容を読めない
-  `source` / `.` / `eval` / `set`。名前を変数で渡す `read "$V"`、`for AWS_PROFILE in ...` のループ変数、`getopts` /
-  `let` / `mapfile` / zsh の `print -v` / `vared` は数えないので、期待値が未登録で固定のある世界では、その後ろの
-  CLI を固定の値で通す (CLI は入れ直した値で走る)
+  `source` / `.` / `eval` / `set`。名前を変数で渡す `read "$V"` / `unset $V` (`unset $(env | grep ^AWS_ | cut -d= -f1)`
+  を含む)、値の置換に空白がある代入だけのセグメント (`AWS_PROFILE=$(cat f); aws ...`。引用符で包んだ
+  `AWS_PROFILE="$(cat f)"` は数える)、`for AWS_PROFILE in ...` のループ変数、`getopts` / `let` / `mapfile` / zsh の
+  `print -v` / `vared` は数えないので、期待値が未登録で固定のある世界では、その後ろの CLI を固定の値で通す (CLI は
+  入れ直した値で走る)
 - **`pnpm <CLI 名>` / `yarn <CLI 名>` は、同じ名前の package.json の script でも CLI として照合する** (v0.32.0)。
   pnpm / yarn は同名の script があればそちらを走らせる (pnpm 11 / yarn 1.22 で実測) が、hook は package.json を
   読まない。止まる条件は直接 `firebase deploy` と打ったときと同じで、期待値との不一致が確定したときに加えて、
