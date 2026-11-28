@@ -1606,7 +1606,11 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
   (`bunx --bun firebase ...` / `npm exec --yes -- firebase ...` / `npm exec -c '...'`) と、`--` の無い
   `npm exec` で CLI 名の後ろに `-` で始まる語を置いた形 (`npm exec firebase deploy --project p`) の後ろの
   クラウド CLI。後者は npm がその語を自分の option として読んで CLI に渡さない (npm 11 で実測) ので、CLI が
-  受け取る引数を決められない。どれも候補にならず検証されない (`npm exec -- firebase deploy --project p` は守る範囲)
+  受け取る引数を決められない。どれも候補にならず検証されない (`npm exec -- firebase deploy --project p` は守る範囲)。
+  `--` の無い `npm exec` で、その option 名を引用符か `\` で包んだ形 (`npm exec firebase deploy '--project' p`) は
+  hook が引用符を外して `--project p` と読み、`p` で照合する。npm は引用符を外した後の `--project` を自分の option として
+  読むので、CLI が受け取る引数と食い違う。`--` を置く (`npm exec -- firebase deploy --project p`) か、wrapper を使わずに
+  直接書くと検証される
 - `yarn exec` で CLI 名の後ろに `-` で始まる語を置いた形 (`yarn exec firebase deploy --project p` /
   `yarn exec firebase deploy -- --project p` / `yarn exec firebase deploy '-P' p` / `yarn exec gh -h`) と、
   `yarn exec -- firebase deploy` / `yarn exec --silent gh ...` の後ろのクラウド CLI。yarn 1 はその語 (`--project p` は
@@ -1712,6 +1716,29 @@ hook は `hooks/hooks.json` の `timeout` (20 秒) を超えると Claude Code �
 - gcloud の設定ディレクトリを指す環境変数 `CLOUDSDK_CONFIG` (と、deny 文面の profile 案内に使う
   `AWS_CONFIG_FILE`) の相対パス (`cd sub && CLOUDSDK_CONFIG=./c gcloud ...`)。hook は自分のカレント
   ディレクトリで読むので、コマンドの `cd` の行き先の側のファイルを読むとは限らない。絶対パスで書く
+- 引用符を隣り合わせて 1 つの語にした形 (`'--''project'` / `'--' --project p`) を、wrapper に引用符で包んで渡す
+  コマンドの中に置いた形 (`watch 'firebase deploy '--' --project p'`)。外側の引用符が最初の内側の引用符で閉じるので、
+  `watch` に渡すコマンドは 1 つの引用符の塊にならず、候補にならず検証されない。`npx -c '...'` は最初の閉じ引用符で
+  切れ、`firebase deploy` までを既定の文脈で照合し、その後ろの `--project p` は読まない。wrapper を使わずに直接書いた
+  `firebase deploy '--''project' p` は引用符を連結して `--project p` と読むので検証される。内側に引用符を重ねず、
+  コマンドを分けて書くと検証される
+- wrapper (`npx` / `nohup` / `command` など) の後ろに置いた `NAME=値` を、前置きの代入と読む形
+  (`npx AWS_PROFILE=prod aws s3 rm ...`)。実際のシェルでは wrapper の後ろの `NAME=値` は代入にならない (wrapper が
+  その語を起動しようとして止まる) が、hook は `AWS_PROFILE=prod` を効く代入として読んで aws を `prod` で照合する。
+  シェル経由の wrapper に引用符で渡す複合コマンドでは、この代入を後ろの段にも継ぐ
+  (`watch 'npx AWS_PROFILE=prod aws s3 rm s3://b/x && aws s3 rm s3://b/y'` は、2 段目の aws も `prod` で照合する)。
+  代入は wrapper の前に置く (`AWS_PROFILE=prod npx aws ...`)
+- 外部のプログラムとして起動する `cd` (`nohup cd sub` / `env cd sub` / `npx cd sub` / `yarn exec cd sub`)。
+  このときシェルの作業ディレクトリは変わらないが、hook は通常の `cd sub` と同じく移動したと読み、後ろの
+  クラウド CLI を `sub` の文脈 (repo の内外の判定を含む) で照合する。`cd` を wrapper に渡さず、`cd sub && <CLI>` と
+  直接書くと照合が揃う
+- 値が空の `HOME=` を前置きした形 (`HOME= gh pr create` / `HOME= gcloud ...`)。hook は `HOME` が空のとき hook プロセスの
+  `HOME` から変わったと見なさず、hook プロセスの `HOME` の下の gh / gcloud の設定を読む。実行される CLI は空の `HOME` で
+  別の設定を読むので、ローカル読取と設定の指紋が CLI と別のファイルを見る (値のある `HOME=/other` は、変わったと見て
+  CLI に委ねる)。`HOME=` を前置きしない形に書く
+- gh の設定ディレクトリを指す環境変数 `GH_CONFIG_DIR` / `XDG_CONFIG_HOME` の相対パス (`cd sub && GH_CONFIG_DIR=./c gh ...`)。
+  gcloud の `CLOUDSDK_CONFIG` と同じく、hook は自分のカレントディレクトリで読み、`cd` の行き先の側のファイルを読む
+  とは限らない。絶対パスで書く
 - gh のサブコマンドの後ろの `--help` を読み取りにする表 (gh 2.105 の組み込みのコマンドのパス) にあって、
   手元の gh では組み込みでない名前の alias / extension (gh 2.105 より古い gh で、後の版で組み込みになった
   名前を alias にしている形など)。組み込みのヘルプとみなして読み取りにするので、alias の中身は照合されない

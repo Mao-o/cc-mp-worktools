@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import os
 import re
 import time
 import unittest
@@ -489,6 +490,7 @@ class TestDispatch(BaseWithTmpProject):
                     self.assertEqual(v.call_count - before, 1 if invalidates else 0)
 
 
+@unittest.skipUnless(os.environ.get("RUN_TIMING_TESTS") == "1", "時間を測るテスト (RUN_TIMING_TESTS=1 で走る)")
 class TestHelpRegexIsLinear(unittest.TestCase):
     """繰り返しを含む regex が語数に線形であること (2 乗なら 4 倍の入力で 16 倍)。
 

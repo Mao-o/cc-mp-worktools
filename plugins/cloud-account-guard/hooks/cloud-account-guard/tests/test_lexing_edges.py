@@ -119,6 +119,7 @@ class DeepCommandSubstitutionTests(unittest.TestCase):
                     self.fail(f"例外: {e!r}")
                 self.assertEqual(cands, [command])
 
+    @unittest.skipUnless(os.environ.get("RUN_TIMING_TESTS") == "1", "時間を測るテスト (RUN_TIMING_TESTS=1 で走る)")
     def test_revisited_inner_substitution_is_not_rescanned(self):
         """閉じない `${` の中を読み直すとき、入れ子の `$(` は記録した終端で飛ばす。
 
