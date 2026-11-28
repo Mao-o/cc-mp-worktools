@@ -76,6 +76,8 @@ def parse_bd_list(out: str) -> list:
         if re.fullmatch(r"No [^\n]*", out):  # 該当 0 件のとき案内文 1 行だけを返す版がある
             return []
         raise BdError(f"bd の出力が JSON ではない: {out[:200]}") from None
+    except ValueError:                  # JSONDecodeError でない ValueError (桁の多すぎる整数など。_loads と同じ扱い)
+        raise BdError(f"bd の出力が JSON ではない: {out[:200]}") from None
     if v is None:
         return []  # 0 件の list は null を返す
     if not isinstance(v, list):

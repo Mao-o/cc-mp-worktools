@@ -29,8 +29,9 @@ pyc にして読む起動の script を、その名前で置く)、その dir �
   - `.beads/metadata.json` の database が beads.db で embeddeddolt/ が無いと、
     `Error: historical SQLite workspace detected; ...` で exit 1 (embeddeddolt/ があれば本物も database の値を見ない)
   - `-C <dir>` に .beads/ が無ければ `Error: cannot use -C directory "<dir>": no beads project found` で exit 1
-  - 見通しの読み: `count --by-status --json` は {total, groups: [{group, count}], schema_version} (形は実測。数える範囲と
-    groups の並びは測っていないので、偽物は list の既定と同じ範囲を名前の順で返す)。`ready --json` は list の要素と同じ形の
+  - 見通しの読み: `count --by-status --json` は {total, groups: [{group, count}], schema_version} (形と範囲は bd 1.3.4 で実測: closed も数える。
+    ほかの status (deferred・pinned・独自の status) を数えるかと groups の並びは測っていないので、偽物は list の既定の範囲に
+    closed を足して名前の順で返す)。`ready --json` は list の要素と同じ形の
     配列 (偽物は status が open のものだけ。本物の既定の上限・依存・in_progress の扱いは測っていない。humanq は --limit 0 で読む)
 - br 0.7.6 で実測した癖を持つ (名前が br のとき。詳しくは tests/test_fake_beads.py が 1 件ずつ押さえる):
   - -C・human サブコマンド・list --flat・list -n・update --metadata/--set-metadata は usage エラーで exit 2。
@@ -542,7 +543,7 @@ def bd_count(p: Project, args: list[str], as_json: bool) -> None:
     (形は {total, groups, schema_version} を実測)。--by-status が無ければ {count, schema_version}。"""
     opts, pos = take(args, {"--by-status": False})
     want(pos, 0, "count [flags]")
-    items = [i for i in p.state["issues"].values() if shown_by_default(p.state, i["status"])]
+    items = [i for i in p.state["issues"].values() if i["status"] == "closed" or shown_by_default(p.state, i["status"])]
     if not opts.get("--by-status"):
         out = {"count": len(items), "schema_version": 1}
     else:

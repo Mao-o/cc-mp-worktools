@@ -151,7 +151,8 @@ class BackendReads(unittest.TestCase):
                 self.assertEqual(self.call(cls(run=Recorder(json.dumps(rows))).ready, "/r"), want)
 
     def test_ready_that_cannot_be_read_is_a_bd_error(self):
-        for name, out in {"JSON でない": "oops", "envelope": '{"issues": []}', "数": "3", "深い入れ子": "[" * 100000}.items():
+        for name, out in {"JSON でない": "oops", "envelope": '{"issues": []}', "数": "3", "深い入れ子": "[" * 100000,
+                     "桁の多い数": "[" + "1" * 5000 + "]"}.items():
             for cls in (backend.BdBackend, backend.BrBackend):
                 with self.subTest(cls=cls.__name__, form=name):
                     self.refused(cls(run=Recorder(out)).ready, "/r")
@@ -387,10 +388,15 @@ class FakeCliOverview(FakeCliProject):
         d = self.overview()
         self.assertTrue(d.get("ok"), d)
         self.assertEqual(d["cli"], self.PROG)
-        self.assertEqual({c["status"]: c["count"] for c in d["counts"]}, {"open": 7, "in_progress": 1, "blocked": 1},
-                         "閉じたものは数えない (CLI の既定の範囲)")
-        self.assertEqual([c["status"] for c in d["counts"]], ["open", "in_progress", "blocked"])
-        self.assertEqual(d["total"], 9)
+        # CLI の既定の範囲をそのまま出す: bd は closed も数え (bd 1.3.4 の実測)、br は数えない (br 0.7.6 の実測)
+        want = {"open": 7, "in_progress": 1, "blocked": 1}
+        order = ["open", "in_progress", "blocked"]
+        if self.PROG == "bd":
+            want["closed"] = 1
+            order.append("closed")
+        self.assertEqual({c["status"]: c["count"] for c in d["counts"]}, want, f"{self.PROG} の既定の範囲")
+        self.assertEqual([c["status"] for c in d["counts"]], order)
+        self.assertEqual(d["total"], sum(want.values()))
         by = {v: k for k, v in ids.items()}
         self.assertEqual([by.get(r["id"]) for r in d["ready"]], ["p1-human", "p1-plain", "p2-plugin", "p2-plain", "p3-plain"],
                          "回答済みを除き、優先度 → 作成日の上位 5 件 (in_progress・blocked・closed は ready に出ない)")

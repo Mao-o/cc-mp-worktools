@@ -4213,10 +4213,12 @@ test("見通し: 書き込みの部品が無い (ボタン・入力・フォー�
     assert.equal(await page.locator("#fq").inputValue(), "", "絞り込みが解けていない");
     // 判断待ちに無いもの: 知らせて読み直す
     const before = s.itemsCount;
+    await page.locator("#fq").fill("t-A1");
     await openOverview(page, s, 4);
     await panel.getByRole("link", { name: "title gone-1" }).click();
     await until(async () => (await page.locator("#toasts .toast").allTextContents()).some(t => t.includes("「gone-1」は判断待ちに見つかりませんでした")), 3000, "見つからない知らせ");
     await until(async () => s.itemsCount > before, 3000, "読み直さない");
+    assert.equal(await page.locator("#fq").inputValue(), "t-A1", "判断待ちに無いチケットのリンクで絞り込みを解いた");
     assert.deepEqual([s.answers.length, s.undos.length, s.snoozes.length, s.unsnoozes.length], [0, 0, 0, 0], "見通しの操作で書き込みを送った");
   }, { viewport: { width: 900, height: 320 } });
 });
@@ -4235,6 +4237,13 @@ test("見通し: 読み込めなければ (描けなければ) 案内を出し�
     s.overviewFail = false;
     const human = page.locator("#tab-human"), ov = page.locator("#tab-overview");
     await ov.focus();
+    for (const mod of ["Alt", "Control", "Meta"]) {
+      for (const key of ["ArrowLeft", "ArrowRight", "Home", "End"]) {
+        await page.keyboard.press(`${mod}+${key}`);
+        assert.deepEqual(await selected(page), ["overview"], `${mod}+${key} でタブを移った`);
+      }
+    }
+    assert.equal(s.overviewCount, 1, "修飾キー付きのキーで読み直した");
     await page.keyboard.press("ArrowLeft");
     assert.deepEqual(await selected(page), ["human"]);
     assert.equal(await isActive(human), true);

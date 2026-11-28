@@ -1169,7 +1169,9 @@ class OverviewReads:
         self.assertIsInstance(raw, dict, self.m(q))
         self.assertIsInstance(raw.get("total"), int, self.m(q))
         counts = dict(self.overview_read(proj, "status_counts", q))
-        self.assertEqual(counts, {"open": 2, "in_progress": 1}, f"{self.m(q)}: 既定の範囲 (閉じたものを数えない)")
+        # 既定の範囲は CLI ごと: bd 1.3.4 は closed も数え、br 0.7.6 は数えない
+        want = {"open": 2, "in_progress": 1, **({"closed": 1} if self.kind == "bd" else {})}
+        self.assertEqual(counts, want, f"{self.m(q)}: 既定の範囲 ({self.kind} は閉じたものを{'数える' if self.kind == 'bd' else '数えない'})")
         self.assertEqual(raw["total"], sum(counts.values()), self.m(q))
         rows = {r["id"]: r for r in self.overview_read(proj, "ready", q)}
         self.assertEqual(sorted(rows), sorted([plain, answered]), f"{self.m(q)}: ready は open だけ (answered の付いたものも出る)")

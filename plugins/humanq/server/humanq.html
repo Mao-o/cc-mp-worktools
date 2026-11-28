@@ -1520,6 +1520,7 @@ for (const k of TABS) {
   tabBtns[k].addEventListener("click", () => showTab(k));
   // 矢印・Home・End でタブを移る (移った先を開く)
   tabBtns[k].addEventListener("keydown", e => {
+    if (e.altKey || e.ctrlKey || e.metaKey) return;      // ブラウザの戻る (Alt+← / Cmd+←) などは横取りしない (カードの数字キーと同じ)
     const i = TABS.indexOf(k);
     const to = e.key === "ArrowRight" ? TABS[(i + 1) % TABS.length] : e.key === "ArrowLeft" ? TABS[(i + TABS.length - 1) % TABS.length]
       : e.key === "Home" ? TABS[0] : e.key === "End" ? TABS[TABS.length - 1] : null;
@@ -1607,7 +1608,10 @@ const liveCard = (path, id) => {
 function openCard(path, id) {
   showTab("human");
   let c = liveCard(path, id);
-  if (!c && filterActive()) {
+  // 絞り込みを解くのは、今の一覧 (判断待ち・保留中) にあるのに絞り込みで隠れているときだけ (無いものを探して利用者の絞り込みを消さない)
+  const proj = lastData && lastData.projects.find(p => p.path === path);
+  const listed = !!proj && [...proj.human, ...proj.snoozed].some(i => i.id === id);
+  if (!c && listed && filterActive()) {
     for (const k of FILTER_KEYS) flt[k] = "";
     fq.value = "";
     applyFilter();
