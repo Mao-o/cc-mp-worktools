@@ -107,6 +107,9 @@ class TestPredicates(unittest.TestCase):
         self.assertTrue(aws.is_pinned(env, "/p"))
         # 固定が無ければ option が同じ値でも固定ではない
         self.assertFalse(aws.is_pinned({"AWS_PROFILE": ""}, "/p", context={"profile": ""}))
+        # 空白だけの AWS_PROFILE は固定ではない (0.36.5 からの守り。option の有無によらない)
+        self.assertFalse(aws.is_pinned({"AWS_PROFILE": "  "}, "/p"))
+        self.assertFalse(aws.is_pinned({"AWS_PROFILE": "  "}, "/p", context={"profile": "  "}))
 
     def test_gcloud_account_option_with_env_pin(self):
         env = {"CLOUDSDK_CORE_ACCOUNT": "a@example.com"}
@@ -346,6 +349,34 @@ class TestFirebaseProjectOption(_Base):
         self._firebaserc(json.dumps({"projects": {"s": "other-id"}}))
         self._firebaserc(json.dumps({"projects": {"s": "sub-proj"}}), base=self.project_dir / "sub")
         self.assert_allowed(["firebase --config sub/firebase.json --project s deploy"])
+
+
+class TestWithoutAccountsFile(_Base):
+    """accounts.local.json がどこにも無い世界 (dispatcher の別の経路) でも、固定と違う値を指す option を固定とみなさない。"""
+
+    def setUp(self):
+        super().setUp()
+        (self.project_dir / ".claude" / "cloud-account-guard" / "accounts.local.json").unlink()
+        self._drop_env("CLOUDSDK_CORE_PROJECT", "CLOUDSDK_ACTIVE_CONFIG_NAME")
+        self._env(AWS_PROFILE="dev", CLOUDSDK_CORE_ACCOUNT="a@example.com")
+
+    def test_option_other_than_the_pin_is_not_pinned(self):
+        for command in ("aws --profile prod s3 rm s3://b/k", "gcloud --account b@example.com run deploy s"):
+            with self.subTest(command=command):
+                result = self._dispatch(command)
+                self.assertEqual(_decision(result), "deny")
+                self.assertIn(
+                    "accounts.local.json が未設定です",
+                    result["hookSpecificOutput"].get("permissionDecisionReason", ""),
+                )
+        self.assert_allowed(
+            [
+                "aws --profile dev s3 rm s3://b/k",
+                "aws s3 rm s3://b/k",
+                "gcloud --account a@example.com run deploy s",
+                "gcloud run deploy s",
+            ]
+        )
 
 
 if __name__ == "__main__":

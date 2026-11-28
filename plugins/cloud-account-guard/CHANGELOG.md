@@ -22,6 +22,11 @@
   `firebase --project <alias>` など) は固定のまま。違うと確定しない形も固定のまま (解析で決められない形は deny
   しない): 値を静的に読めない option (`--profile $P`)、`--configuration` の構成が無いか account が無い、
   `.firebaserc` を firebase-tools と同じ内容に読めると確かめられない、短い option の結合形 (`firebase -jP x`)
+- gcloud の `--project` を比べるのは `CLOUDSDK_CORE_PROJECT` で project を固定しているときだけ。構成名
+  (`CLOUDSDK_ACTIVE_CONFIG_NAME`) で固定した世界では構成の project を固定の値に数えないので、その世界の `--project` と、
+  account が同じで project が違う構成を指す `--configuration` は固定のまま通る (0.36.5 までと同じ)
+- 固定のある世界で、`firebase emulators:start` / `emulators:exec` に `--project demo-*` を付けた形は、allow から deny に
+  変わる (固定と違う project 名を指すため。期待値を登録した世界では以前から deny)
 - 期待値を登録した service の照合と、context option の無いコマンドの判定は変えていない。kubectl / gh は固定の
   仕組みが無いので変わらない
 

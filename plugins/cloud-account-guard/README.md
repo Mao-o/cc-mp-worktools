@@ -433,6 +433,9 @@ v0.19.0 から、その CLI に**ディレクトリ単位でアカウントを�
     account) と違う。`--configuration` の構成の account が固定のアカウントと違う (`CLOUDSDK_CORE_ACCOUNT` で固定して
     いるときは環境変数が構成より勝つので見ない)。`--project` が `CLOUDSDK_CORE_PROJECT` と違う (project を固定して
     いなければ `--project` は見ない)
+    `--project` を比べるのは `CLOUDSDK_CORE_PROJECT` で project を固定しているときだけ。構成名
+    (`CLOUDSDK_ACTIVE_CONFIG_NAME`) で固定した世界では、構成の project を固定の値に数えないので、その世界の
+    `--project` と、account が同じで project が違う構成を指す `--configuration` は固定のまま通る (0.36.5 までと同じ)
   - firebase: `--project` / `-P` の行き先が `firebase use` の記録の行き先と違う (どちらも `.firebaserc` の alias を
     解決してから比べる)
   - 違うと確定しない形は固定のまま: 値を静的に読めない option (`--profile $P`)、`--configuration` の構成が無いか
@@ -1077,6 +1080,8 @@ flag** は、その値を検証に反映する。従来は hook の既定コン�
   先頭の文字が `-P` / `-c` の形は値の連結形として読む。短い形の context option を持つのは
   Firebase だけ (aws / gcloud / kubectl の context option は long option だけ) なので、ほかの
   service には当たらない
+  (これは期待値を登録した service の照合の話。期待値が未登録でディレクトリ単位の固定で通す場合は、
+  結合形は固定のまま通る: [固定の節](#期待値の代わりにディレクトリ単位の固定を使う--v0190))
 - 同じ option が複数あれば**最後が有効** (各 CLI の実装と同じ)
 - サブコマンドの**後ろ**に書かれた形 (`aws s3 ls --profile prod`) も拾う
 - **GCP は key ごとに独立**して上書きする。`gcloud --project ok run deploy` でも
