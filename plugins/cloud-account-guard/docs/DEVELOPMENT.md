@@ -365,7 +365,11 @@ QUERY が緩めるのは「アカウントが期待値と違う」「期待値�
 - **値を読めない代入の印** (v0.30.3): 剥がした代入のうち値を収集 env に入れなかったもの (`$(` / backtick /
   `$VAR` / 配列 / 追記 / 要素の代入) のキーを、候補ごとに `unread_env_candidates` が返す。後ろの静的な
   代入が同じキーにあれば外し、sudo の env scrub で捨てる (収集 env と同じ規則)。照合の env には入れない
-  (hook の env で照合する) が、上書きしたことは確かなので `dispatcher._pinned` は上書きに数える
+  (hook の env で照合する) が、上書きしたことは確かなので `dispatcher._pinned` は上書きに数える。
+  例外 (v0.36.5): 同じキーの素の参照だけの代入 (`AWS_PROFILE=${AWS_PROFILE:-dev}` / `$AWS_PROFILE` など) は、
+  値が起動時の値のままと決められる形 (`_keeps_launch_value`) に限って印を付けない。コマンドのほかの場所で
+  そのキーを使う形・既定の語に特殊な文字を含む形・env を scrub する `sudo` の後ろのシェル経由 wrapper の中身は
+  従来どおり印を付ける
 - **分割し直した段への前置きの代入の継ぎ方** (v0.30.3): 正規化した結果をもう一度分割する段
   (`_segment_candidates`) は、外側の前置きの代入 (env と印) を由来ごとに継ぐ。heredoc の本文を落とした行
   (`AWS_PROFILE=prod cat <<EOF | aws ...`) は先頭の段だけ (前置きの代入はそのコマンドにだけ効く)。
@@ -479,10 +483,15 @@ timeout も deny に倒している以上、ここだけ無音で通るのは判
   `read_regular_bytes` (通常のファイルだけ。aws の config・linked worktree の gitdir と commondir)、
   `read_text` (同じ。gh / gcloud の設定)、`read_bounded_text` (FIFO だけを読まず、デバイスは大きさの
   上限まで読む。firebase の configstore・`.firebaserc`・firebase.json・accounts.local.json・成功 cache)。
-  0.35.0 で gh / gcloud、0.36.3 で残りの読みを揃えた。例外は linked worktree の判定で読む `.git` ファイル
+  0.35.0 で gh / gcloud、0.36.3 で残りの読みを揃えた。ファイルを読む例外は linked worktree の判定で読む `.git` ファイル
   (`paths._inspect_dot_git`) だけで、`is_file()` (symlink を辿る) で通常のファイルと確かめてから普通に開く
   (FIFO・デバイスは `.git` が無いのと同じ扱いで開かない。確かめてから開くまでに FIFO に差し替えられたときだけ止まりうる)。`tests/test_nonblocking_reads.py` は別プロセスで
-  timeout を付けて読む (止まる退行でも suite を止めない)
+  timeout を付けて読む (止まる退行でも suite を止めない)。
+  迂回は `tests/test_read_bypass_scan.py` が AST で見張る (v0.36.4): `core/` と `services/` で、ファイルを開く呼び出し
+  (`open` / `os.open` / `os.fdopen` / `io.open` / `.open(` / `.read_text(` / `.read_bytes(`。受け手が `cli_config` のものは除く) は、
+  同テストの許可の表 `_ALLOWED` ((相対パス, 外側の関数名) ごとに回数まで固定。上の `.git` の open のほか、
+  止まらない読みの本体・firebase のディレクトリの `os.open`・unverified の記録の書き込み) にあるものだけ。
+  例外を足すときは表と、この記述を揃える (表に実在しない項目・回数の違いは落ちる)
 
 **並列化 (ThreadPoolExecutor) を採らなかった理由**: `concurrent.futures` の worker
 は非 daemon スレッドで、インタプリタ終了時に atexit で join される。ハングした

@@ -1381,7 +1381,7 @@ def _inner_path_command(word: str) -> bool:
     return opener >= 0 and ")" not in head[opener + 2:]
 
 
-# 同じキーの素の参照だけの代入の値 (v0.36.4。`_keeps_launch_value`)。`$KEY` / `${KEY}` / `${KEY:-語}` /
+# 同じキーの素の参照だけの代入の値 (v0.36.5。`_keeps_launch_value`)。`$KEY` / `${KEY}` / `${KEY:-語}` /
 # `${KEY-語}` と、それを 1 組の `"` で包んだ形。既定の語は英数字と `_.,:/@%+=~-` と、名前の頭の文字が続く `$`
 # (`$NAME`) だけ (引用符・`\`・backtick・`{`・`}`・`(`・空白を含む語は、展開の閉じの読みが bash と zsh で割れうる
 # ので当てない)。1 文字ずつどちらか一方の選択肢にしか当たらない形にしてある (`$NAME` を 1 つの選択肢にすると、
@@ -1401,7 +1401,7 @@ _NAME_RUN = re.compile(r"[A-Za-z0-9_]+")
 
 
 def _self_reference_env(command: str) -> dict[str, str]:
-    """自己参照の代入を、値が hook の env の値のままと読んでよいキーと、その hook の env の値 (v0.36.4)。
+    """自己参照の代入を、値が hook の env の値のままと読んでよいキーと、その hook の env の値 (v0.36.5)。
 
     コマンドの中のそのキーの名前 (名前の文字に挟まれていない綴り) が、全部自己参照の代入の語
     (`_SELF_ASSIGNMENT`。1 語に左辺と参照の 2 つ) の中にあり、hook の env にキーがあるものだけを返す。ほかの場所に
@@ -1427,7 +1427,7 @@ def _self_reference_env(command: str) -> dict[str, str]:
 
 
 def _keeps_launch_value(key: str, raw: str, launch_env) -> bool:
-    """代入の値 `raw` (引用符を外す前) が同じキーの素の参照だけで、値が `launch_env` の値のままか (v0.36.4)。
+    """代入の値 `raw` (引用符を外す前) が同じキーの素の参照だけで、値が `launch_env` の値のままか (v0.36.5)。
 
     `AWS_PROFILE=${AWS_PROFILE:-dev} aws ...` / `AWS_PROFILE=$AWS_PROFILE aws ...` /
     `AWS_PROFILE="$AWS_PROFILE" aws ...` は、シェルがその時点の `AWS_PROFILE` を代入し直すだけで、値は変わらない
@@ -1482,7 +1482,7 @@ def _parse_leading_env(
 
     `launch_env` (`_self_reference_env` の結果。代入の値を Bash のシェルが展開するときに呼び出し側が渡す) を渡すと、
     値が同じキーの素の参照だけで値が `launch_env` の値のままの代入 (`AWS_PROFILE=${AWS_PROFILE:-dev} aws ...`。
-    `_keeps_launch_value`) には印を付けない (v0.36.4)。印を外しもしない (値は前の状態のまま)。None なら全部に印を
+    `_keeps_launch_value`) には印を付けない (v0.36.5)。印を外しもしない (値は前の状態のまま)。None なら全部に印を
     付ける (0.36.3 まで)。
     """
     global _LEGACY_VALUE_SEEN, _GH_UNREAD_SEEN
@@ -2317,13 +2317,13 @@ def _normalize_segment_chdir(
     6 つ目は、剥がした代入のうち値を静的に読めず収集 env に入れなかったもののキー (v0.30.3。
     `_parse_leading_env` の `unread`)。内側 (後に出現) の静的な代入が同じキーにあれば外し、
     収集 env と同じく sudo の env scrub で捨てる。同じキーの素の参照だけの代入
-    (`AWS_PROFILE=${AWS_PROFILE:-dev}`) は、値が hook の env の値のままなら含めない (v0.36.4。
+    (`AWS_PROFILE=${AWS_PROFILE:-dev}`) は、値が hook の env の値のままなら含めない (v0.36.5。
     `_keeps_launch_value`)。7 つ目は、heredoc の本文と宣言を落としたか
     (`_strip_heredoc_bodies` で文字列が変わったか。v0.30.3)。落とした行は区切りを含んだまま返る
     (`cat <<EOF && kubectl ...`) ので、呼び出し側 (`_segment_candidates`) が分割し直す。
 
     8 つ目は、env を scrub する sudo (`_sudo_preserves_env` が偽) を剥がした後に、シェル経由 wrapper の中身を
-    取り出したか (v0.36.4)。その中身の代入の値は scrub した env のシェルが展開する
+    取り出したか (v0.36.5)。その中身の代入の値は scrub した env のシェルが展開する
     (`sudo watch 'AWS_PROFILE=${AWS_PROFILE:-dev} aws ...'` は dev。実測) ので、自己参照の代入にも印を付ける。
     sudo の引数の代入 (`sudo AWS_PROFILE=$AWS_PROFILE aws ...`) は Bash のシェルが展開するので当てない。
     `launch_shell` が False (呼び出し側が分割し直した、そういう中身の段) なら最初から当てる。
@@ -2685,7 +2685,7 @@ def _segment_candidates(
             # 外の区切りの無い行は head_parts が段の数になるので当たらない)
             outer = k >= head_parts
             # env を scrub した sudo の後ろのシェル経由 wrapper の中身の段は、そのシェルが代入を展開する
-            # (v0.36.4。`_normalize_segment_chdir` の 8 つ目)。外の段は Bash のシェルが展開する
+            # (v0.36.5。`_normalize_segment_chdir` の 8 つ目)。外の段は Bash のシェルが展開する
             (
                 inner, inner_env, inner_chdir, inner_external, inner_reread, inner_unread, _heredoc,
                 _scrubbed,
@@ -2729,7 +2729,7 @@ def unread_env_candidates(command: str) -> dict[str, frozenset[str]]:
     動くので、hook の env の値をディレクトリ単位の固定とみなせない (`core/dispatcher.py` の `_pinned`)。
     後ろに同じキーへの静的な代入があれば外す (`AWS_PROFILE=$(z) env AWS_PROFILE=dev aws ...`)。
     同じキーの素の参照だけで、値が hook の env の値のままの代入 (`AWS_PROFILE=${AWS_PROFILE:-dev} aws ...`) は
-    含めない (v0.36.4。`_keeps_launch_value`。コマンドのほかの場所でそのキーの名前を使わないときだけ。
+    含めない (v0.36.5。`_keeps_launch_value`。コマンドのほかの場所でそのキーの名前を使わないときだけ。
     `_self_reference_env`)。キーは identity env に絞らない (呼び出し側が service ごとに絞る)。
     値が読めた代入・代入の無い候補は含めない。同じ文字列の候補が別の前置きで現れるときはキーの和を返す (呼び出し側は上書きされた側に
     倒す)。読みは `extract_candidate_readings` と同じ。

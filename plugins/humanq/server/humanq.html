@@ -78,6 +78,29 @@ header { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bot
 #fclear[hidden] { display: none; }
 @media (max-width: 640px) { .fld.fsearch { flex: 1 1 100%; } .fld.fsearch input { width: 100%; } }
 main { max-width: 860px; margin: 0 auto; padding: 8px 16px 64px; }
+/* タブ (判断待ち / 見通し)。ヘッダーの下 (sticky にはしない)。既定は判断待ち (開くたびに判断待ち。選んだタブは覚えない) */
+#tabs .inner { max-width: 860px; margin: 0 auto; padding: 8px 16px 0; display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
+.tab { font: inherit; font-size: 14px; line-height: 1.6; padding: 4px 14px; margin-bottom: -1px; background: none; color: var(--muted);
+  border: 0; border-bottom: 3px solid transparent; cursor: pointer; }
+.tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 700; }
+.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* 見通し (読むだけ。書き込みの部品は置かない。ボタンも置かず、移るのはリンク) */
+.ov { max-width: 860px; margin: 0 auto; padding: 8px 16px 64px; }
+.ovtop { margin: 12px 0 0; font-size: 15px; }
+.ovtop b { color: var(--accent); }
+.ovnote { margin: 4px 0 0; font-size: 13px; color: var(--muted); }
+.ov a { color: var(--accent); }
+.ov a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ovstat { list-style: none; padding: 0; margin: 6px 0 0; display: flex; flex-wrap: wrap; gap: 6px 8px; }
+.ovstat li { background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 1px 10px; font-size: 13px; }
+.ovstat .ovs { font-family: ui-monospace, Menlo, monospace; color: var(--muted); }
+.ovready { list-style: none; padding: 0; margin: 6px 0 0; display: grid; gap: 8px; }
+.ovrow { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 14px; min-width: 0; }
+.ovrow .ovt { margin: 4px 0 0; overflow-wrap: anywhere; }
+.ovid { font-family: ui-monospace, Menlo, monospace; }
+.ovrow .head > span { min-width: 0; overflow-wrap: anywhere; }   /* 長い ID・ラベルで、幅の狭い画面のページを横にスクロールさせない */
+.ovhuman { font-weight: 700; color: var(--accent); }
+.ovnone { color: var(--muted); font-size: 13px; margin: 6px 0 0; }
 h3, h2.sec { font-size: 14px; color: var(--muted); font-weight: 600; margin: 28px 0 10px; letter-spacing: .02em; }
 /* 全体を優先度順の表示の節の見出し (判断待ち / 回答済み・反映待ち)。プロジェクトの見出しが無いので h2 にし、見た目は節の見出し (h3) と同じ。止めない */
 h2.sec { display: block; position: static; padding: 0; line-height: inherit; background: none; z-index: auto; }
@@ -236,6 +259,10 @@ details.snz > summary.hasfail, details.snz > summary.hasfail h2.sec { color: var
   <button class="ghost" id="notify" type="button">通知をオン</button>
 </div></header>
 <div id="notice" role="alert" hidden></div>
+<nav id="tabs" aria-label="画面の切り替え"><div class="inner" role="tablist">
+  <button class="tab" id="tab-human" type="button" role="tab" aria-selected="true" aria-controls="panel-human">判断待ち</button><button class="tab" id="tab-overview" type="button" role="tab" aria-selected="false" aria-controls="panel-overview" tabindex="-1">見通し</button>
+</div></nav>
+<div id="panel-human" role="tabpanel" aria-labelledby="tab-human">
 <nav id="toc" aria-label="プロジェクトの目次" hidden><div class="inner">
   <div class="view" role="group" aria-label="並び"><button class="viewbtn" type="button" data-view="proj" aria-pressed="true">プロジェクトごと</button><button class="viewbtn" type="button" data-view="prio" aria-pressed="false">全体を優先度順</button></div>
   <div id="tocin"></div>
@@ -251,6 +278,12 @@ details.snz > summary.hasfail, details.snz > summary.hasfail h2.sec { color: var
   <button class="ghost" id="fclear" type="button" hidden>解除</button>
 </div></form>
 <main id="main"></main>
+</div>
+<div id="panel-overview" role="tabpanel" aria-labelledby="tab-overview" hidden><div class="ov">
+  <p class="ovtop">判断待ち <b id="ovcount">…</b> · <a href="#" id="ovback">判断待ちを開く</a></p>
+  <p class="ovnote" id="ovstatus" aria-live="polite"></p>
+  <div id="ovlist"></div>
+</div></div>
 <div id="toasts" aria-live="polite"></div>
 <script>
 const TOKEN = "__TOKEN__";
@@ -1342,6 +1375,7 @@ function render() {
   if (!instantRender) for (const e of entering) enter(e);
   if (active && active !== document.body && active.isConnected && document.activeElement === document.body) active.focus({ preventScroll: true });
   document.getElementById("count").textContent = `${total} 件`;
+  document.getElementById("ovcount").textContent = `${total} 件`;   // 見通しの上部の件数も同じ数 (判断待ちだけを数える)
   document.title = total ? `(${total}) 判断待ち` : "判断待ち";
   staleCount = stale;
   rendered = true;
@@ -1459,6 +1493,139 @@ async function failed(key, it, e, op) {
   pending.delete(key);
   render();
   toast(`${label}: ${missingNote(e, op, proj, it)}`);
+}
+
+// ---- タブ (判断待ち / 見通し) と見通し ----------------------------------------------------------------
+// 既定で開くのは判断待ち (ページを開くたび。選んだタブは覚えない)。見通しは読むだけ: タブを開いたときだけ /api/overview を読み
+// (15 秒ごとの読み込みは /api/items だけ)、書き込みの部品もボタンも置かない (移るのはリンク)。見通しのデータは、ヘッダーの件数・
+// タブのタイトル・通知に入れない (上部の件数は判断待ちの件数で、render が書く)
+
+let tab = "human";
+const TABS = ["human", "overview"];
+const tabBtns = { human: document.getElementById("tab-human"), overview: document.getElementById("tab-overview") };
+const panels = { human: document.getElementById("panel-human"), overview: document.getElementById("panel-overview") };
+function showTab(name, focus) {
+  const opened = name !== tab;
+  tab = name;
+  for (const k of TABS) {
+    const on = k === name;
+    tabBtns[k].setAttribute("aria-selected", String(on));
+    tabBtns[k].tabIndex = on ? 0 : -1;
+    panels[k].hidden = !on;
+  }
+  if (focus) tabBtns[name].focus();
+  if (name === "overview" && opened) loadOverview();
+}
+for (const k of TABS) {
+  tabBtns[k].addEventListener("click", () => showTab(k));
+  // 矢印・Home・End でタブを移る (移った先を開く)
+  tabBtns[k].addEventListener("keydown", e => {
+    if (e.altKey || e.ctrlKey || e.metaKey) return;      // ブラウザの戻る (Alt+← / Cmd+←) などは横取りしない (カードの数字キーと同じ)
+    const i = TABS.indexOf(k);
+    const to = e.key === "ArrowRight" ? TABS[(i + 1) % TABS.length] : e.key === "ArrowLeft" ? TABS[(i + TABS.length - 1) % TABS.length]
+      : e.key === "Home" ? TABS[0] : e.key === "End" ? TABS[TABS.length - 1] : null;
+    if (!to) return;
+    e.preventDefault();
+    showTab(to, true);
+  });
+}
+document.getElementById("ovback").addEventListener("click", e => { e.preventDefault(); showTab("human", true); });
+
+// 見通しの読み。開くたびに読む (サーバーは 60 秒の間は同じ読みを返す)。後から始めた読みがあれば、前の読みの結果は捨てる
+const ovStatus = document.getElementById("ovstatus"), ovList = document.getElementById("ovlist");
+let ovSeq = 0;
+async function loadOverview() {
+  const seq = ++ovSeq;
+  ovStatus.textContent = "読み込み中…";
+  let data;
+  try {
+    data = await api("/api/overview");
+    if (!Array.isArray(data.projects)) throw new Error("想定外のデータ (projects が配列でない)");
+  } catch (e) {
+    if (seq === ovSeq) ovStatus.textContent = `見通しを読み込めませんでした: ${summarize(e.message)} (タブを開き直すと読み直します)`;
+    return;
+  }
+  if (seq !== ovSeq) return;
+  try {
+    renderOverview(data.projects);
+  } catch (e) {
+    console.error(e);
+    ovStatus.textContent = `見通しを描けませんでした: ${summarize(e.message)}`;
+    return;
+  }
+  ovStatus.textContent = `${hhmm(Date.now())} に読みました (読むだけの一覧です。タブを開くたびに読み直し、60 秒以内は同じ内容です)`;
+}
+
+// 見通しの描き直し (入力の部品が無いので、毎回作り直す)。プロジェクトごとに、状態別の件数と、次に着手できるチケットの上位
+function renderOverview(projects) {
+  const boxes = projects.filter(p => p && typeof p.path === "string").map(p => {
+    const name = typeof p.name === "string" && p.name ? p.name : p.path.split("/").pop();
+    const h = el("h2", {}, el("span", { class: "pname" }, name), el("span", { class: "path", title: p.path }, p.path));
+    if (p.ok !== true) return el("div", { class: "ovproj", "data-path": p.path }, h, el("div", { class: "banner" }, `読めませんでした: ${p.error || "理由が分からない"}`));
+    const counts = (Array.isArray(p.counts) ? p.counts : []).filter(c => c && typeof c.status === "string" && typeof c.count === "number");
+    const total = counts.reduce((n, c) => n + c.count, 0);
+    const ready = (Array.isArray(p.ready) ? p.ready : []).filter(r => r && typeof r.id === "string");
+    const all = typeof p.ready_total === "number" ? p.ready_total : ready.length;
+    return el("div", { class: "ovproj", "data-path": p.path }, h,
+      el("h3", {}, `状態別の件数 (計 ${total})`),
+      counts.length ? el("ul", { class: "ovstat" }, counts.map(c => el("li", {}, el("span", { class: "ovs" }, c.status), " ", el("b", {}, String(c.count)))))
+        : el("p", { class: "ovnone" }, "数えるチケットはありません"),
+      el("h3", {}, all > ready.length ? `次に着手できる (${all} 件のうち上位 ${ready.length} 件)` : `次に着手できる (${all})`),
+      ready.length ? el("ol", { class: "ovready" }, ready.map(r => readyRow(p.path, r))) : el("p", { class: "ovnone" }, "次に着手できるチケットはありません"));
+  });
+  ovList.replaceChildren(...(boxes.length ? boxes : [el("p", { class: "empty" }, "登録したプロジェクトはありません")]));
+}
+
+// 次に着手できるチケットの 1 行。human の付いたもの (判断待ち) は、題を判断待ちのカードへのリンクにする。ラベルは解釈せず、
+// humanq 自身のもの (human / answered / snoozed) を除いて文字列のまま出す
+function readyRow(path, r) {
+  const p = typeof r.priority === "number" ? r.priority : 9;
+  const labels = shownLabels(r);
+  const title = typeof r.title === "string" && r.title ? r.title : r.id;
+  const human = r.human === true;
+  const t = human ? el("a", { class: "ovlink", href: "#", title: "判断待ちのカードを開く", onclick: e => { e.preventDefault(); openCard(path, r.id); } }, title)
+    : el("span", {}, title);
+  return el("li", { class: "ovrow", "data-id": r.id },
+    el("div", { class: "head" },
+      el("span", { class: `prio p${p}` }, `P${p}`),
+      el("span", { class: "ovid" }, r.id),
+      typeof r.status === "string" && r.status ? el("span", {}, r.status) : null,
+      human ? el("span", { class: "ovhuman" }, "判断待ち") : null,
+      ...labels.slice(0, MAX_LABELS).map(l => el("span", {}, l)),
+      labels.length > MAX_LABELS ? el("span", { title: labels.join("\n") }, `+${labels.length - MAX_LABELS}`) : null),
+    el("p", { class: "ovt" }, t));
+}
+
+// 判断待ちのタブへ移り、そのチケットのカード (判断待ちか保留中) へ飛ぶ。畳んだ節の中なら開き、絞り込みで隠れていれば絞り込みを
+// 解いてから飛ぶ。カードが無ければ (判断待ちから外れた・まだ読み込んでいない) 知らせて読み直す
+const liveCard = (path, id) => {
+  for (const key of [qKey(path, id), sKey(path, id)]) {
+    const c = cards.get(key);
+    if (c && c.el.isConnected && !c.el._leave) return c.el;
+  }
+  return null;
+};
+function openCard(path, id) {
+  showTab("human");
+  let c = liveCard(path, id);
+  // 絞り込みを解くのは、今の一覧 (判断待ち・保留中) にあるのに絞り込みで隠れているときだけ (無いものを探して利用者の絞り込みを消さない)
+  const proj = lastData && lastData.projects.find(p => p.path === path);
+  const listed = !!proj && [...proj.human, ...proj.snoozed].some(i => i.id === id);
+  if (!c && listed && filterActive()) {
+    for (const k of FILTER_KEYS) flt[k] = "";
+    fq.value = "";
+    applyFilter();
+    c = liveCard(path, id);
+  }
+  if (!c) {
+    toast(`「${id}」は判断待ちに見つかりませんでした (読み直します)`);
+    load();
+    return;
+  }
+  const d = c.closest("details:not([open])");
+  if (d) d.open = true;
+  c.focus({ preventScroll: true });
+  c.scrollIntoView({ block: "start", behavior: REDUCED ? "auto" : "smooth" });
 }
 
 // ---- 読み込み -------------------------------------------------------------------------------
