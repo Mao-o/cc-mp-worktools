@@ -1381,8 +1381,78 @@ def _inner_path_command(word: str) -> bool:
     return opener >= 0 and ")" not in head[opener + 2:]
 
 
+# 同じキーの素の参照だけの代入の値 (v0.36.4。`_keeps_launch_value`)。`$KEY` / `${KEY}` / `${KEY:-語}` /
+# `${KEY-語}` と、それを 1 組の `"` で包んだ形。既定の語は英数字と `_.,:/@%+=~-` と、名前の頭の文字が続く `$`
+# (`$NAME`) だけ (引用符・`\`・backtick・`{`・`}`・`(`・空白を含む語は、展開の閉じの読みが bash と zsh で割れうる
+# ので当てない)。1 文字ずつどちらか一方の選択肢にしか当たらない形にしてある (`$NAME` を 1 つの選択肢にすると、
+# 閉じの無い長い `$AAAA...` で分け方の数だけ後戻りする)。
+_SELF_DEFAULT_WORD = r"(?:[A-Za-z0-9_.,:/@%+=~-]|\$(?=[A-Za-z_]))*"
+_SELF_REFERENCE = re.compile(
+    r"\$(?P<bare>[A-Za-z_][A-Za-z0-9_]*)"
+    r"|\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+    r"(?:(?P<op>:?-)" + _SELF_DEFAULT_WORD + r")?\}"
+)
+# コマンド全体の中の、自己参照の代入の語 (`_self_reference_env`)。左辺の名前の前は名前の文字でない。
+_SELF_ASSIGNMENT = re.compile(
+    r"(?<![A-Za-z0-9_])(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<q>\"?)"
+    r"\$(?:(?P=key)(?![A-Za-z0-9_])|\{(?P=key)(?::?-" + _SELF_DEFAULT_WORD + r")?\})(?P=q)"
+)
+_NAME_RUN = re.compile(r"[A-Za-z0-9_]+")
+
+
+def _self_reference_env(command: str) -> dict[str, str]:
+    """自己参照の代入を、値が hook の env の値のままと読んでよいキーと、その hook の env の値 (v0.36.4)。
+
+    コマンドの中のそのキーの名前 (名前の文字に挟まれていない綴り) が、全部自己参照の代入の語
+    (`_SELF_ASSIGNMENT`。1 語に左辺と参照の 2 つ) の中にあり、hook の env にキーがあるものだけを返す。ほかの場所に
+    名前があれば、値を変えうるので返さない (`AWS_PROFILE=$(echo q); AWS_PROFILE=$AWS_PROFILE aws ...` の aws は q で
+    走る。前の代入だけのセグメントの `$(echo q)` は `core/workdir.py` の `env_changes` が数えていない形)。
+    同じ前置きの前の代入 (`AWS_PROFILE=dev AWS_PROFILE=$AWS_PROFILE aws ...`。bash 3.2 は起動時の値、zsh -f は dev)・
+    `export` / `unset` / `read` などの名前もここで外れる。名前は多めに数える側 (引用符の中・heredoc の本文・
+    `$AWS_PROFILE` を表示するだけの `echo` も数える。別の名前の一部の `X_AWS_PROFILE` は数えない) で、多く数えると
+    0.36.3 と同じ印に戻るだけ。
+    """
+    words: dict[str, int] = {}
+    for m in _SELF_ASSIGNMENT.finditer(command):
+        if m.group("key") in os.environ:
+            words[m.group("key")] = words.get(m.group("key"), 0) + 1
+    if not words:
+        return {}
+    # 名前の文字の続き (最長) ごとに数える (1 回の走査。キーごとに走査し直さない)
+    names = dict.fromkeys(words, 0)
+    for m in _NAME_RUN.finditer(command):
+        if m.group() in names:
+            names[m.group()] += 1
+    return {key: os.environ[key] for key, n in words.items() if names[key] == 2 * n}
+
+
+def _keeps_launch_value(key: str, raw: str, launch_env) -> bool:
+    """代入の値 `raw` (引用符を外す前) が同じキーの素の参照だけで、値が `launch_env` の値のままか (v0.36.4)。
+
+    `AWS_PROFILE=${AWS_PROFILE:-dev} aws ...` / `AWS_PROFILE=$AWS_PROFILE aws ...` /
+    `AWS_PROFILE="$AWS_PROFILE" aws ...` は、シェルがその時点の `AWS_PROFILE` を代入し直すだけで、値は変わらない
+    (bash 3.2 / zsh -f で実測)。値が起動時の値と同じになる条件は形ごとに違う: `$KEY` / `${KEY}` / `${KEY-語}` は
+    `launch_env` にキーがあるとき (無ければ空文字か既定の語になる)、`${KEY:-語}` は値が空でないとき。
+    `launch_env` は `_self_reference_env` (コマンドのほかの場所で名前を使わないキーだけ) で、None なら全部 False
+    (値を読めない代入として印を付ける)。前段のコマンドが値を変えた形 (`source x; KEY=$KEY aws ...`) は、
+    `core/workdir.py` の `env_changes` が別に数える (代入の無い `aws ...` と同じ)。違うキーの参照 (`KEY=${OTHER}`)・
+    参照の後ろに文字が続く形 (`KEY=${KEY}-x`)・ほかの展開 (`${KEY:+x}` / `${KEY:=x}` / `${KEY#x}` など)・
+    単引用符の `'$KEY'` は当たらない。
+    """
+    if launch_env is None:
+        return False
+    inner = raw[1:-1] if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"' else raw
+    m = _SELF_REFERENCE.fullmatch(inner)
+    if m is None or (m.group("bare") or m.group("name")) != key:
+        return False
+    launch = launch_env.get(key)
+    if m.group("op") == ":-":
+        return bool(launch)
+    return launch is not None
+
+
 def _parse_leading_env(
-    cmd: str, home: str | None = None, unread: set[str] | None = None
+    cmd: str, home: str | None = None, unread: set[str] | None = None, launch_env=None
 ) -> tuple[str, dict[str, str]]:
     """先頭の `KEY=VALUE` 群を剥がし (残りコマンド, 収集 env dict) を返す。
 
@@ -1409,6 +1479,11 @@ def _parse_leading_env(
     (実際の値は後ろの読めない値)。最初に値を飛ばした代入から後ろを返すとき (代入だけのセグメント) は、
     その代入より前の状態に戻す。値で照合するのではなく、上書きされたことだけを伝える印
     (`unread_env_candidates`)。
+
+    `launch_env` (`_self_reference_env` の結果。代入の値を Bash のシェルが展開するときに呼び出し側が渡す) を渡すと、
+    値が同じキーの素の参照だけで値が `launch_env` の値のままの代入 (`AWS_PROFILE=${AWS_PROFILE:-dev} aws ...`。
+    `_keeps_launch_value`) には印を付けない (v0.36.4)。印を外しもしない (値は前の状態のまま)。None なら全部に印を
+    付ける (0.36.3 まで)。
     """
     global _LEGACY_VALUE_SEEN, _GH_UNREAD_SEEN
     collected: dict[str, str] = {}
@@ -1469,7 +1544,8 @@ def _parse_leading_env(
         # (静的な文字列の値として検証に渡せない)。0.29.1 までは剥がさず、`a=(1 2) aws ...` /
         # `a+=(x) aws ...` の aws を検証していなかった (bash 3.2 / zsh とも aws は走る)。
         plain = not m.group(2) and not m.group(3) and not cmd.startswith("(", m.end()) and not dynamic
-        raw = cmd[m.end():end]
+        written = cmd[m.end():end]
+        raw = written
         if plain and home is not None:
             raw = _expand_assignment_tilde(raw, home)
         value = _unquote_env_value(raw) if plain else None
@@ -1482,7 +1558,7 @@ def _parse_leading_env(
             collected[key] = value
             if unread is not None:
                 unread.discard(key)
-        elif unread is not None:
+        elif unread is not None and not (plain and _keeps_launch_value(key, written, launch_env)):
             unread.add(key)
         cmd = rest.lstrip()
 
@@ -2232,17 +2308,25 @@ def _normalize_segment(cmd: str, max_iter: int = 8) -> tuple[str, dict[str, str]
 
 
 def _normalize_segment_chdir(
-    cmd: str, max_iter: int = 8, home: str | None = None
-) -> tuple[str, dict[str, str], bool, bool, bool, frozenset[str], bool]:
+    cmd: str, max_iter: int = 8, home: str | None = None, launch_shell: bool = True
+) -> tuple[str, dict[str, str], bool, bool, bool, frozenset[str], bool, bool]:
     """wrapper と先頭 env を剥がし (正規化コマンド, 収集 env, 作業ディレクトリを変えたか,
     外部プログラムを剥がしたか, シェル経由 wrapper の中身を取り出したか, 値を読めなかった代入の
-    キー, heredoc の本文を落としたか) を返す。
+    キー, heredoc の本文を落としたか, 中身を env を scrub したシェルが読むか) を返す。
 
     6 つ目は、剥がした代入のうち値を静的に読めず収集 env に入れなかったもののキー (v0.30.3。
     `_parse_leading_env` の `unread`)。内側 (後に出現) の静的な代入が同じキーにあれば外し、
-    収集 env と同じく sudo の env scrub で捨てる。7 つ目は、heredoc の本文と宣言を落としたか
+    収集 env と同じく sudo の env scrub で捨てる。同じキーの素の参照だけの代入
+    (`AWS_PROFILE=${AWS_PROFILE:-dev}`) は、値が hook の env の値のままなら含めない (v0.36.4。
+    `_keeps_launch_value`)。7 つ目は、heredoc の本文と宣言を落としたか
     (`_strip_heredoc_bodies` で文字列が変わったか。v0.30.3)。落とした行は区切りを含んだまま返る
     (`cat <<EOF && kubectl ...`) ので、呼び出し側 (`_segment_candidates`) が分割し直す。
+
+    8 つ目は、env を scrub する sudo (`_sudo_preserves_env` が偽) を剥がした後に、シェル経由 wrapper の中身を
+    取り出したか (v0.36.4)。その中身の代入の値は scrub した env のシェルが展開する
+    (`sudo watch 'AWS_PROFILE=${AWS_PROFILE:-dev} aws ...'` は dev。実測) ので、自己参照の代入にも印を付ける。
+    sudo の引数の代入 (`sudo AWS_PROFILE=$AWS_PROFILE aws ...`) は Bash のシェルが展開するので当てない。
+    `launch_shell` が False (呼び出し側が分割し直した、そういう中身の段) なら最初から当てる。
 
     5 つ目は、シェル経由で実行する wrapper (`_WRAPPER_SHELL_EXEC`。`watch '...'` / `sudo -i` /
     `npx -c '...'`) の中身を取り出したか (v0.29.6)。引用符で包んだ中身は wrapper が起動するシェルが
@@ -2294,6 +2378,9 @@ def _normalize_segment_chdir(
     chdir = False
     external = False
     reread = False
+    # env を scrub する sudo を剥がしたか / その後でシェル経由 wrapper の中身を取り出したか (docstring の 8 つ目)
+    scrubbed = False
+    scrubbed_shell = not launch_shell
     # heredoc 本文はデータであってコマンドラインではない。先に落としておかないと
     # 後段の option 走査が本文の行を引数として読む (`_strip_heredoc_bodies` 参照)。
     raw = cmd
@@ -2310,7 +2397,9 @@ def _normalize_segment_chdir(
         cmd = _strip_leading_syntax(cmd)
         round_unread: set[str] = set()
         assigned = cmd
-        cmd, env = _parse_leading_env(cmd, home, round_unread)
+        cmd, env = _parse_leading_env(
+            cmd, home, round_unread, None if scrubbed_shell else _SELF_REFERENCE_ENV
+        )
         if cmd != assigned:
             reserved_position = False  # `X=1 time ...` の time は外部の time
         collected.update(env)  # 内側 (後段) が外側を上書きする
@@ -2331,12 +2420,15 @@ def _normalize_segment_chdir(
             if not _sudo_preserves_env(rest_after_sudo):
                 collected.clear()
                 unread.clear()
+                scrubbed = True
             if _has_flag(rest_after_sudo, "sudo", _SUDO_CHDIR_FLAGS):
                 chdir = True
         stripped, via_shell = _strip_one_wrapper_kind(cmd)
         if stripped is not None:
             if via_shell:
                 reread = True
+                if scrubbed:
+                    scrubbed_shell = True
             # option 付きの `time -p` / `time --` / `builtin --` は、zsh では後ろの cd を走らせない
             # (bash も `time --` は走らせない)。シェル内の wrapper とみなさず外部側に倒す
             optioned = len(toks) > 1 and toks[1].startswith("-")
@@ -2353,7 +2445,8 @@ def _normalize_segment_chdir(
         if cmd == before:
             break
     return (
-        _strip_trailing_syntax(cmd), collected, chdir, external, reread, frozenset(unread), heredoc
+        _strip_trailing_syntax(cmd), collected, chdir, external, reread, frozenset(unread), heredoc,
+        scrubbed_shell,
     )
 
 
@@ -2545,9 +2638,9 @@ def _segment_candidates(
 ) -> list[tuple[str, dict[str, str], str, bool, bool, bool, frozenset[str]]]:
     """1 つのセグメントの候補 (候補, env, 区切り, chdir, external, reread, 値を読めなかった代入のキー)
     の列 (`extract_candidates_with_separators` の 1 セグメント分。最後の 4 つは `_note_chdir` に渡す)。"""
-    normalized, env, chdir, external, reread, unread, heredoc = _normalize_segment_chdir(
-        seg, home=home
-    )
+    (
+        normalized, env, chdir, external, reread, unread, heredoc, scrubbed_shell
+    ) = _normalize_segment_chdir(seg, home=home)
     if not normalized:
         return []
     # シェル経由 wrapper のクォートを剥がすと、中身が複合コマンドのことがある
@@ -2591,9 +2684,14 @@ def _segment_candidates(
             # heredoc の本文を落とした行の、引用符の外の区切りの後ろの段 (先頭の段の外。heredoc の無い行と、
             # 外の区切りの無い行は head_parts が段の数になるので当たらない)
             outer = k >= head_parts
+            # env を scrub した sudo の後ろのシェル経由 wrapper の中身の段は、そのシェルが代入を展開する
+            # (v0.36.4。`_normalize_segment_chdir` の 8 つ目)。外の段は Bash のシェルが展開する
             (
-                inner, inner_env, inner_chdir, inner_external, inner_reread, inner_unread, _heredoc
-            ) = _normalize_segment_chdir(part, home=home if outer else part_home)
+                inner, inner_env, inner_chdir, inner_external, inner_reread, inner_unread, _heredoc,
+                _scrubbed,
+            ) = _normalize_segment_chdir(
+                part, home=home if outer else part_home, launch_shell=outer or not scrubbed_shell
+            )
             if inner:
                 # 分割し直した段の語を Bash のシェルが読むかは、段を取り出した経路で決まる。シェル経由
                 # wrapper の中身 (外側の `reread`) と、段自身がシェル経由 wrapper の形 (`inner_reread`) は
@@ -2618,6 +2716,9 @@ def _segment_candidates(
 
 # `unread_env_candidates` が分解の間だけ立てる記録先 (候補の文字列 → キーの集合)。None なら記録しない。
 _UNREAD_ENV_SEEN: dict[str, set[str]] | None = None
+# 同じく分解の間だけ立てる、自己参照の代入の値を hook の env の値のままと読むキーと値 (`_self_reference_env`)。
+# None なら自己参照の代入にも印を付ける (`_parse_leading_env` の `launch_env`)。
+_SELF_REFERENCE_ENV: dict[str, str] | None = None
 
 
 def unread_env_candidates(command: str) -> dict[str, frozenset[str]]:
@@ -2627,18 +2728,21 @@ def unread_env_candidates(command: str) -> dict[str, frozenset[str]]:
     この代入は値を検証の env に入れない (hook の env で照合する。0.29.10) が、実際の CLI は代入した値で
     動くので、hook の env の値をディレクトリ単位の固定とみなせない (`core/dispatcher.py` の `_pinned`)。
     後ろに同じキーへの静的な代入があれば外す (`AWS_PROFILE=$(z) env AWS_PROFILE=dev aws ...`)。
-    キーは identity env に絞らない (呼び出し側が service ごとに絞る)。値が読めた代入・代入の無い候補は
-    含めない。同じ文字列の候補が別の前置きで現れるときはキーの和を返す (呼び出し側は上書きされた側に
+    同じキーの素の参照だけで、値が hook の env の値のままの代入 (`AWS_PROFILE=${AWS_PROFILE:-dev} aws ...`) は
+    含めない (v0.36.4。`_keeps_launch_value`。コマンドのほかの場所でそのキーの名前を使わないときだけ。
+    `_self_reference_env`)。キーは identity env に絞らない (呼び出し側が service ごとに絞る)。
+    値が読めた代入・代入の無い候補は含めない。同じ文字列の候補が別の前置きで現れるときはキーの和を返す (呼び出し側は上書きされた側に
     倒す)。読みは `extract_candidate_readings` と同じ。
     """
-    global _UNREAD_ENV_SEEN
-    saved = _UNREAD_ENV_SEEN
+    global _UNREAD_ENV_SEEN, _SELF_REFERENCE_ENV
+    saved = _UNREAD_ENV_SEEN, _SELF_REFERENCE_ENV
     seen: dict[str, set[str]] = {}
     _UNREAD_ENV_SEEN = seen
+    _SELF_REFERENCE_ENV = _self_reference_env(command)
     try:
         extract_candidate_readings(command)
     finally:
-        _UNREAD_ENV_SEEN = saved
+        _UNREAD_ENV_SEEN, _SELF_REFERENCE_ENV = saved
     return {cand: frozenset(keys) for cand, keys in seen.items()}
 
 

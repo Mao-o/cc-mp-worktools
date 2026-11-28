@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.36.4
+
+### Fixed: 同じキーの自己参照 (`AWS_PROFILE=${AWS_PROFILE:-dev} aws ...`) を、固定の上書きに数えていた
+
+- 0.30.3 は、前置きの代入の値を読めない形 (`AWS_PROFILE=$(cmd) aws ...`) に印を付け、期待値が未登録の aws / gcloud /
+  firebase のディレクトリ単位の固定の判定で上書きとして数える。同じキーの素の参照だけの値
+  (`AWS_PROFILE=${AWS_PROFILE:-dev}` / `AWS_PROFILE=${AWS_PROFILE}` / `AWS_PROFILE="$AWS_PROFILE"` /
+  `AWS_PROFILE=$AWS_PROFILE` / `${AWS_PROFILE-dev}`。スクリプトでよく書く形) にも印が付き、固定のある世界と期待値
+  ファイルの無い世界で 0.30.2 の allow が deny になっていた。シェルはその時点の値を代入し直すだけなので、値は
+  hook の env の値のまま決まる (「解析で決められない形は deny しない」の原則と合わない)
+- 0.36.4 は、値が hook の env の値のままと決められる自己参照の代入には印を付けない。条件は bash 3.2 / zsh -f の実測
+  から決めた: `$KEY` / `${KEY}` / `${KEY-語}` は hook の env にキーがあるとき、`${KEY:-語}` は値が空でないとき
+  (空・無いときは既定の語か空文字になり、起動時と違う)。1 組の `"` で包んだ形も同じ。固定の判定に使う変数が
+  hook の env に無い世界 (gcloud を `CLOUDSDK_ACTIVE_CONFIG_NAME` の構成で固定していて `CLOUDSDK_CORE_ACCOUNT` が無い、
+  firebase の記録が `~/.config` にあって `XDG_CONFIG_HOME` が無い) の
+  `CLOUDSDK_CORE_ACCOUNT=${CLOUDSDK_CORE_ACCOUNT:-other} gcloud ...` / `XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-/x} firebase ...`
+  は既定の語で上書きするので、従来どおり固定とみなさない
+- 従来どおり印を付ける形: 違うキーの参照 (`AWS_PROFILE=${OTHER}`)、参照の後ろに文字が続く形
+  (`AWS_PROFILE=${AWS_PROFILE}-x`)、ほかの展開 (`${AWS_PROFILE:+x}` / `${AWS_PROFILE:=x}` / `${AWS_PROFILE#x}` など)、
+  単引用符の `'$AWS_PROFILE'`、追記 (`+=`)・要素の代入。値は起動時の値のままでも、次の形は保守側に倒して印を残す:
+  既定の語に `$(` / backtick / 空白 / 引用符 / `{` / `}` / `\` を含む形 (展開の閉じの読みが bash と zsh で割れうる)、
+  コマンドのほかの場所でそのキーの名前を使う形 (`AWS_PROFILE=dev AWS_PROFILE=$AWS_PROFILE aws ...` は bash 3.2 が
+  起動時の値、zsh -f が dev を使う。`AWS_PROFILE=$(echo q); AWS_PROFILE=$AWS_PROFILE aws ...` の aws は q で走る)、
+  env を scrub する `sudo` の後ろのシェル経由 wrapper の中身 (`sudo watch 'AWS_PROFILE=${AWS_PROFILE:-dev} aws ...'`
+  の aws は dev で走る)
+- 期待値を登録した service の照合は変えていない (印は固定の判定でだけ使う)
+
+### 比較
+
+- 判定の比較 (verify を env で答える偽物にして、期待値を登録した 2 世界と、固定のある世界・期待値ファイルの無い世界・
+  gcloud を構成で固定した世界・firebase の記録が `~/.config` / `XDG_CONFIG_HOME` にある世界・`AWS_PROFILE` が空の
+  世界で dispatch): 自己参照の形と印が残るべき形 19 種 × キーと CLI の組 12 種 × 前置き・wrapper・区切り 77 種と、
+  0.30.3 の比較の 4,106 形を合わせた 22,277 形で、期待値を登録した世界の判定は全形で同じ。ほかの世界の
+  deny → allow / 警告 → allow は全部自己参照の形 (固定のある世界で 917 / 297 形)、非deny → deny は 0 形。動いた判定は
+  全部、同じコマンドから自己参照の代入を除いた形の 0.36.3 の判定と一致した
+- 判定が緩んだ 2,105 形を bash 3.2 と zsh -f で走らせ (CLI は偽物)、CLI が受け取った値が起動時の値と違う形は 0 形
+  (`xargs` の 56 形は空の入力では CLI が走らないので、うち 32 形に入力を与えて確かめた)
+- 候補の文字列 (読みごと) は、上の形と文法型の生成器の 3 万形、それに自己参照の代入を差し込んだ 3 万形で、全形
+  0.36.3 と同じ。値を読めない代入の印は、自己参照のキーが外れただけ (足された印は 0)
+
 ## 0.36.3
 
 ### Fixed: firebase の configstore・aws の config・linked worktree の gitdir と commondir が FIFO でも、読みが止まらない
@@ -432,8 +472,8 @@
   からではない。上書きしたことはコマンドの字面で確定していて、確定しているのは「hook の env の値では動かない」こと
   なので、固定 (hook の env の値が期待値の代わりになる) の前提が成り立たない。止める理由は未登録の判定
   (期待値が無いと照合できない) で、静的な上書きと同じ。値が起動時の値と同じかもしれない形
-  (`AWS_PROFILE=$AWS_PROFILE aws ...`) も、値を読まない以上は上書きとして数える (固定で通すには値を読む読みを足す
-  ことになる。docs/DEVELOPMENT.md の実装の規則)
+  (`AWS_PROFILE=$AWS_PROFILE aws ...`) も上書きとして数えていた (同じキーの自己参照の値は 0.36.4 から読み、
+  起動時の値のままと決められる形は上書きに数えない)
 - 期待値を登録した service の照合は変えていない (値を読めない代入は hook の env で照合する。0.29.10)
 
 ### 比較
