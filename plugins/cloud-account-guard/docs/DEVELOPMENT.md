@@ -2068,8 +2068,10 @@ cache の状態ファイルのうち成功 cache の entry と epoch は、hook 
 - firebase の `is_pinned` は `context` (解決前の context option) を受け取り、`--config` があれば
   そのファイルのあるディレクトリから configstore を探す (`_pin_root`)。相対パスは dispatcher が
   渡すディレクトリの `_physical_dir` から `..` を字句的に畳んで解決する (`resolve_context` と同じ)。
-  dispatcher は `PIN_USES_CONTEXT` を宣言した service にだけ `context=` を渡す (aws / gcloud の
-  `is_pinned` は 2 引数のまま)。ファイルが見つからないときは 0.29.3 と同じ起点 (`_project_root`) で
+  dispatcher は `PIN_USES_CONTEXT` を宣言した service にだけ `context=` を渡す (0.36.5 までの aws / gcloud の
+  `is_pinned` は 2 引数のまま。0.36.6 から 3 つとも宣言し、固定と違う値を指す context option のコマンドを固定と
+  みなさない。違うと確定しない形 (読めない値・構成が無い・`.firebaserc` を確かめられない) は固定のまま)。
+  ファイルが見つからないときは 0.29.3 と同じ起点 (`_project_root`) で
   判定する。決められないことを理由に「固定されていない」(未登録の deny) には倒さない (上の原則)
 - kubectl の verify() は、env (hook の env + インライン env) の `KUBECONFIG` が hook の env と違えば
   インラインの指定とみなし (`_inline_kubeconfig`)、同じ値を前置きした切替を案内する

@@ -158,10 +158,26 @@ PIN_HINT = (
 )
 
 
-def is_pinned(env, project_dir: str) -> bool:
-    """profile が環境変数で固定されているか (期待値が未登録のときの判定)。"""
+# 固定の判定に、候補コマンドの context option (`--profile`) を使う (v0.36.6。firebase と同じ契約。
+# dispatcher が `context=` を渡す)。
+PIN_USES_CONTEXT = True
+
+
+def is_pinned(env, project_dir: str, context=None) -> bool:
+    """profile が環境変数で固定されているか (期待値が未登録のときの判定)。
+
+    context の `--profile` が固定の値と違う profile を指すコマンドは固定されていない (v0.36.6)。
+    aws は `--profile` を `AWS_PROFILE` より優先するので、そのコマンドは固定の profile では動かない。
+    0.36.5 までは context を見ず、`aws --profile prod s3 rm ...` を `AWS_PROFILE=dev` の固定で通した。
+    固定の値と同じ profile を指す `--profile` は固定のまま。値を静的に読めない `--profile` (`$P` など)
+    は context に入らない (`cli_options.find_context_options`) ので、固定のまま (違うと確定しない)。
+    """
     e = os.environ if env is None else env
-    return bool(e.get("AWS_PROFILE", "").strip())
+    pinned = e.get("AWS_PROFILE", "")
+    if not pinned.strip():
+        return False
+    profile = (context or {}).get("profile")
+    return profile is None or profile == pinned
 
 
 _ROLE_ARN_ACCOUNT_RE = re.compile(r"^arn:aws[\w-]*:iam::(\d{12}):")

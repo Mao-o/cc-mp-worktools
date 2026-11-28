@@ -266,7 +266,10 @@ class IsPinnedUnitTests(BaseWithTmpProject):
         cases = [
             (None, True),
             ({}, True),
-            ({"project": "x"}, True),
+            # `--project` は project root を動かさない。記録 (p) と違う project を指すと固定ではない
+            # (v0.36.6。0.36.5 までは `{"project": "x"}` も True だった。test_pin_context_options)
+            ({"project": "p"}, True),
+            ({"project": "x"}, False),
             ({"config": "../b/firebase.json"}, False),
             ({"config": str(self.real / "b" / "firebase.json")}, False),
             ({"config": "firebase.json"}, True),

@@ -656,8 +656,8 @@ PIN_HINT = (
 # ディレクトリで `is_pinned` を確かめ、決められないディレクトリがあれば固定されていない側に倒す。
 # 宣言の無い service (aws / gcloud の環境変数の固定) はディレクトリを見ない。
 PIN_DEPENDS_ON_DIR = True
-# 固定の判定に、候補コマンドの context option (`--config`) を使う (v0.29.4)。宣言した service にだけ
-# dispatcher が `context=` を渡す (aws / gcloud の `is_pinned` は context を受け取らない)。
+# 固定の判定に、候補コマンドの context option (`--config` (v0.29.4) と `--project` / `-P` (v0.36.6)) を使う。
+# 宣言した service にだけ dispatcher が `context=` を渡す (aws / gcloud も v0.36.6 から宣言する)。
 PIN_USES_CONTEXT = True
 
 
@@ -689,8 +689,26 @@ def is_pinned(env, project_dir: str, context=None) -> bool:
     firebase-tools と同じく project root から親方向に configstore を探す。CLI は呼ばない。
     context に `--config` があれば、そのファイルのあるディレクトリを project root にする (`_pin_root`。
     0.29.3 までは `--config` を見ず、走るディレクトリの記録で固定とみなしていた)。
+
+    context の `--project` / `-P` が記録と違う project を指すコマンドは固定されていない (v0.36.6。
+    0.36.5 までは見ず、`firebase --project other deploy` を記録の固定で通した)。firebase-tools は
+    `--project` を記録より優先し、どちらも `.firebaserc` の alias として解決する (`_resolve_alias`)。
+    記録と同じ名前か、同じ project に解決される名前なら固定のまま。`.firebaserc` を firebase-tools と
+    同じ内容に読めると確かめられないとき (`_read_firebaserc` が None) は、違う project と確定しないので
+    固定のまま。値を静的に読めない `--project` と短い option の結合形 (`-jP x`) も context に値が
+    入らないので固定のまま。
     """
-    return bool(_from_configstore(_pin_root(project_dir, context), env))
+    root = _pin_root(project_dir, context)
+    recorded = _from_configstore(root, env)
+    if not recorded:
+        return False
+    project = (context or {}).get("project")
+    if project is None:
+        return True
+    projects = _read_firebaserc(root)
+    if projects is None:
+        return True
+    return _resolve_alias(projects, project) == _resolve_alias(projects, recorded)
 
 
 def get_active_account(project_dir: str) -> str | None:

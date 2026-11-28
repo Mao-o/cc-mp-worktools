@@ -542,32 +542,83 @@ PIN_HINT = (
 )
 
 
-def is_pinned(env, project_dir: str) -> bool:
-    """アカウントが環境変数で固定されているか (期待値が未登録のときの判定)。
+# 固定の判定に、候補コマンドの context option (`--account` / `--configuration` / `--project`) を使う
+# (v0.36.6。firebase と同じ契約。dispatcher が `context=` を渡す)。
+PIN_USES_CONTEXT = True
 
-    `CLOUDSDK_CORE_ACCOUNT` が空でない、または `CLOUDSDK_ACTIVE_CONFIG_NAME` が
-    account を持つ構成を指している。空文字の `CLOUDSDK_CORE_ACCOUNT` は gcloud が
-    未設定として扱う (実測) ので固定とみなさない。
+
+def _configuration_account(env, name) -> str | None:
+    """構成 `name` の `[core]` の account。読めない・無い・空白だけのときは None。
+
+    値の前後の空白は INI の parser (`cli_config.parse_ini_sections`) が除く。
     """
-    e = os.environ if env is None else env
-    if e.get("CLOUDSDK_CORE_ACCOUNT", "").strip():
-        return True
-    if "CLOUDSDK_CORE_ACCOUNT" in e:
-        return False  # 空文字が構成の account を打ち消している
-    name = e.get(_ACTIVE_CONFIG_ENV_VAR, "")
-    if not name or not _CONFIG_NAME_RE.match(name) or cli_config.home_overridden(e):
-        return False
-    config_dir = _config_dir(e)
+    if not isinstance(name, str) or not _CONFIG_NAME_RE.match(name) or cli_config.home_overridden(env):
+        return None
+    config_dir = _config_dir(env)
     if config_dir is None:
-        return False
+        return None
     text = cli_config.read_text(
         config_dir / _CONFIGURATIONS_DIR / f"{_CONFIG_FILE_PREFIX}{name}"
     )
     sections = cli_config.parse_ini_sections(text) if text is not None else None
     if not sections:
-        return False
+        return None
     account = sections.get(_CORE_SECTION, {}).get("account")
-    return isinstance(account, str) and bool(account.strip())
+    return account if isinstance(account, str) and account.strip() else None
+
+
+def _pinned_account(env) -> str | None:
+    """固定されたアカウント。固定されていなければ None。
+
+    `CLOUDSDK_CORE_ACCOUNT` が空でなければその値 (前後の空白を除く。ローカル読取
+    `_local_core_properties` と同じ読み)、無ければ `CLOUDSDK_ACTIVE_CONFIG_NAME` が指す構成の account。
+    空文字の `CLOUDSDK_CORE_ACCOUNT` は gcloud が未設定として扱い (実測)、構成の account も打ち消すので
+    固定とみなさない。
+    """
+    value = env.get("CLOUDSDK_CORE_ACCOUNT", "")
+    if value.strip():
+        return value.strip()
+    if "CLOUDSDK_CORE_ACCOUNT" in env:
+        return None  # 空文字が構成の account を打ち消している
+    return _configuration_account(env, env.get(_ACTIVE_CONFIG_ENV_VAR, ""))
+
+
+def is_pinned(env, project_dir: str, context=None) -> bool:
+    """アカウントが環境変数で固定されているか (期待値が未登録のときの判定)。
+
+    `CLOUDSDK_CORE_ACCOUNT` が空でない、または `CLOUDSDK_ACTIVE_CONFIG_NAME` が
+    account を持つ構成を指している。空文字の `CLOUDSDK_CORE_ACCOUNT` は gcloud が
+    未設定として扱う (実測) ので固定とみなさない。
+
+    context option が固定と違う値を指すコマンドは固定されていない (v0.36.6。0.36.5 までは context を
+    見ず、`gcloud --account b@example.com run deploy` を a@example.com の固定で通した)。gcloud は
+    `--account` / `--project` を環境変数と設定ファイルのどちらよりも優先する:
+
+    - `--account` が固定のアカウントと違う
+    - `--configuration` の構成の account が固定のアカウントと違う (`CLOUDSDK_CORE_ACCOUNT` で固定して
+      いるときは env が構成より勝つので見ない。構成を読めない・account が無いときは違うと確定しない)
+    - `--project` が `CLOUDSDK_CORE_PROJECT` (project の固定) と違う。project を固定していなければ
+      見ない (固定の条件は project を問わない)
+
+    値を静的に読めない option (`$X` など) は context に入らない (`cli_options.find_context_options`)
+    ので、固定のまま (違うと確定しない)。
+    """
+    e = os.environ if env is None else env
+    account = _pinned_account(e)
+    if account is None:
+        return False
+    ctx = context or {}
+    flag_account = ctx.get("account")
+    if flag_account is not None:
+        if flag_account != account:
+            return False
+    elif ctx.get("configuration") is not None and not e.get("CLOUDSDK_CORE_ACCOUNT", "").strip():
+        other = _configuration_account(e, ctx["configuration"])
+        if other is not None and other != account:
+            return False
+    pinned_project = e.get(_CORE_PROPERTY_ENV_VARS["project"], "").strip()
+    flag_project = ctx.get("project")
+    return not (pinned_project and flag_project is not None and flag_project != pinned_project)
 
 
 def pin_fields(expected) -> dict[str, str] | None:

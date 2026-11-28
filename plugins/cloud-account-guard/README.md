@@ -425,6 +425,19 @@ v0.19.0 から、その CLI に**ディレクトリ単位でアカウントを�
   `declare -x` / `unset` / 代入、内容を読めない `source` / `.` / `eval` / `set` の後。
   これを固定とみなすと、未登録の deny を行頭の 1 語で抜けられる (その値でアカウントが
   決まるのに、何とも照合しない)
+- コマンドの [context option](#コンテキスト指定-flag-の反映-v090) が固定と違う値を指すときも固定とみなさない
+  (v0.36.6。0.36.5 までは option を見ず、`aws --profile prod s3 rm ...` を `AWS_PROFILE=dev` の固定で通していた。
+  CLI は option の値で動く)。固定と同じ値を指す option は固定のまま。違うとみなす条件:
+  - aws: `--profile` が `AWS_PROFILE` と違う
+  - gcloud: `--account` が固定のアカウント (`CLOUDSDK_CORE_ACCOUNT`、無ければ `CLOUDSDK_ACTIVE_CONFIG_NAME` の構成の
+    account) と違う。`--configuration` の構成の account が固定のアカウントと違う (`CLOUDSDK_CORE_ACCOUNT` で固定して
+    いるときは環境変数が構成より勝つので見ない)。`--project` が `CLOUDSDK_CORE_PROJECT` と違う (project を固定して
+    いなければ `--project` は見ない)
+  - firebase: `--project` / `-P` の行き先が `firebase use` の記録の行き先と違う (どちらも `.firebaserc` の alias を
+    解決してから比べる)
+  - 違うと確定しない形は固定のまま: 値を静的に読めない option (`--profile $P`)、`--configuration` の構成が無いか
+    account が無い、`.firebaserc` を firebase-tools と同じ内容に読めると確かめられない、短い option の結合形
+    (`firebase -jP x`)
 - gcloud の `CLOUDSDK_ACTIVE_CONFIG_NAME` が指す構成は、gcloud の設定ディレクトリ (macOS / Linux は
   `~/.config/gcloud`、Windows は `%APPDATA%\gcloud`。v0.35.1) の下で読む。Windows では行頭の `APPDATA=...` も
   設定ディレクトリを変えるので、その場だけ指定した値として固定とみなさない (名前をこの綴りで書いたとき。
