@@ -149,6 +149,7 @@ class WordsTogetherStopTest(unittest.TestCase):
                 with self.subTest(tail=tail, run=run[:8]):
                     self.assertIn(_REASON, _verdict(_sized("", _READ_LIMIT + 1, f"gh{run} {tail}")) or "")
 
+    @_testutil.timing_test
     def test_repo_run_is_not_quadratic_to_look_for(self):
         for unit in ("--repo=", "-R a ", "-R ", " -R a/b"):
             script = (

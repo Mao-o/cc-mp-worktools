@@ -52,6 +52,10 @@ NO_BACKGROUND_GIT_SETTINGS = (
 # 止まるだけ)。同じプロセスで読む形 (上限を超えるもの・CHILD_FROM 未満) には期限が効かないので、この秒数を使わない
 ENDS_AFTER_DEADLINE = 5
 
+# 時間を測るテスト (入力を大きくして線形か・制限時間内に終わるかを確かめるもの) は、1 件で数秒の CPU を使うので、
+# 環境変数 RUN_TIMING_TESTS=1 のときだけ走らせる (全体検査と CI は立てる)
+timing_test = unittest.skipUnless(os.environ.get("RUN_TIMING_TESTS") == "1", "時間を測るテスト (RUN_TIMING_TESTS=1 で走る)")
+
 
 # 別プロセスで走らせる時間の測定。hook が時間切れになるとコマンドは素通しになるので、固まっても suite を止めない
 _SCALING_SCRIPT = """\
