@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.36.7
+
+### Fixed: 固定のある世界で、前段の `export $(cat .env | xargs)` / `read` / `printf -v` の後ろの CLI を固定で通していた
+
+- 期待値が未登録の aws / gcloud / firebase は、ディレクトリ単位の固定 (環境変数 / `firebase use` の記録) があれば照合
+  せずに通し、同じコマンドの前段で identity の環境変数を変えた後ろの CLI は固定とみなさない (v0.19.0)。その判定が
+  `export` などの引数を shlex で分けた語の `=` の前を名前として数えていたので、名前を読めない引数
+  (`export $(cat .env | xargs)` / `export $V` / `` export `cat f` `` / `declare -x $(...)`) では `$(cat` などの断片を
+  名前と読み、identity の環境変数を変えていないとして固定で通していた。`read -r AWS_PROFILE < f` /
+  `printf -v AWS_PROFILE x` は環境変数を変える形として数えていなかった。実際の CLI は入れ直した値で走る
+  (bash 3.2 / zsh -f で、偽の aws / gcloud が `.env` の値を受け取ることを実測)。README の「前段で環境変数を変えたら
+  固定とみなさない」とも食い違っていた
+- 0.36.7 は、`export` / `declare` / `typeset` / `readonly` / `local` の引数に名前を読めない語 (最初の `=` より前が
+  名前の形でなく、`$`・backtick・glob や brace 展開の文字を含む語。`export {AWS_PROFILE,X}=prod` / `export [A]WS_PROFILE=prod`
+  も含む) があれば、どの環境変数を変えたか決められないとして、どの service も固定とみなさない (未登録の deny。
+  リモート read は警告)。`read` の引数の名前 (zsh の `名前?プロンプト` と、空白なしでリダイレクトを続けた
+  `read -r AWS_PROFILE<f` / `read AWS_PROFILE<<<prod` を含む) と `printf -v` の名前 (`-v名前` の結合形と、空白なしで
+  リダイレクトを続けた `printf -v AWS_PROFILE>/dev/null x` を含む) は変えた名前に数える。名前を読めない `printf -v`
+  (`printf -v "$N"` / 名前の頭の後ろに展開が続く `printf -v A$N` / glob や brace 展開の `printf -v AWS_PROFIL?`) は
+  決められない扱い、`read "$V"` は数えない (既知の制限に追記)
+- 名前を読める `export` (`export FOO=$(cat f)` / `export "FOO=$X"` / `export FOO=1 >$LOG` / `declare -a arr=(1 $(x))` /
+  二重引用符の中の置換に引用符がある `export BODY="$(printf "Fixes %s" "$ISSUE")"`) の結果は変えていない。前段の
+  `export AWS_PROFILE=${AWS_PROFILE:-dev}` (値は起動時の値のまま) は 0.36.6 と同じく固定とみなさない (行頭の代入の
+  自己参照 (v0.36.5) の読みを前段の `export` には当てない)。期待値を登録した service の照合と、候補の分解は変えて
+  いない
+
+### 比較
+
+- 旧新比較 (dispatch を 5 つの世界 (全 service を登録・環境変数の固定・sub だけの `firebase use` の記録・起動 repo の
+  外・自動切替) で流す。CLI は起動しない): 代入の組み込み 13 種 × 引数 56 種 × CLI 5 種 × 区切り 3 種、`read` /
+  `printf` / `unset` / `source` などの前段 52 種 × CLI 8 種 × 区切り 6 種、括弧・波括弧・条件・wrapper・heredoc・`cd`
+  (別の repo への `cd` を含む) の中に置いた形を合わせた 14,163 形。deny → 非deny は全世界で 0 形、自動切替の回数の
+  違いも 0 形。全 service を登録した世界と自動切替の世界は全形で判定が同じ。候補の分解は全形で同じ
+- 判定が締まった形 (環境変数の固定の世界と起動 repo の外の世界で各 2,552 形 (allow → deny 1,310 / allow → 警告 1,242。
+  起動 repo の外の世界で変わるのは、固定の世界と同じ形で、別の repo への `cd` を含まない (起動 repo の中で走る) 形
+  だけ)、sub だけの記録の世界で 3 形 (allow → deny)) は全部、前段に名前を読めない代入の組み込み・`printf -v` か、
+  identity の環境変数の名前の `read` / `printf -v` があるもの
+
 ## 0.36.6
 
 ### Fixed: 固定のある世界で、固定と違う値を指す context option のコマンドを固定で通していた
