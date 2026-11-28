@@ -395,6 +395,7 @@ class AssignmentValueTest(_Base):
         # 入れ子の値は安全網が数える
         self.assert_stops("true $'x'; V=$(a $(b)) gh pr create --base m1")
 
+    @_testutil.timing_test
     def test_time_is_linear(self):
         # 走査を 1 回で終わらせる。`${` は安全網の正規表現の、gh の前のパスの読みも通る
         units = {

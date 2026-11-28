@@ -136,6 +136,7 @@ class GateTest(HermeticGitTestCase):
         self.assertEqual(st["tests[alpha]"], gate.PASS)
         self.assertEqual(st["tests[beta]"], gate.FAIL)
 
+    @_testutil.timing_test
     def test_failed_job_stops_the_others_without_waiting(self):
         # 1 本が起動に失敗したら、長く走る別の suite を待たずに例外を上げる
         # (待つと hook の timeout を超え、Claude Code がコマンドを通してしまう)

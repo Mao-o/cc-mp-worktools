@@ -325,6 +325,7 @@ class HeredocBodyTest(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIsNotNone(unresolved_reason(cmd, find_invocations(cmd)))
 
+    @_testutil.timing_test
     def test_redirect_runs_do_not_take_exponential_time(self):
         # 実行位置の前置きの繰り返しは、1 つのリダイレクトの読み方が 1 通りでないと、一致しないときの
         # 後戻りが個数に対して指数時間になる (0.3.3 の初版は 24 個で 5 秒)。hook が時間切れになると
@@ -348,6 +349,7 @@ class HeredocBodyTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertLess(float(r.stdout), 1.0)
 
+    @_testutil.timing_test
     def test_prefix_runs_with_start_characters_take_linear_time(self):
         # `&>f&>f ...` は前置きの中に実行位置の始まり (`&`) が並ぶ。前置きの繰り返しに上限が無いと、始まりごとに
         # 残り全部を読み直して個数の 2 乗の時間になる (8000 個で 10 秒)。リダイレクトの対象・代入の値・gh の
@@ -360,6 +362,7 @@ class HeredocBodyTest(unittest.TestCase):
             {tok: ("gh pr create; ", tok, " make gh pr") for tok in tokens},
         )
 
+    @_testutil.timing_test
     def test_opener_runs_take_linear_time(self):
         # 実行位置の始まり (`(` `{` backtick) が語の中に並ぶと、gh の前のパスと代入の値の読みが始まりごとに語の残りを読み直す
         tokens = (
@@ -373,6 +376,7 @@ class HeredocBodyTest(unittest.TestCase):
             {tok: ("gh pr create; ", tok, " gh pr create") for tok in tokens},
         )
 
+    @_testutil.timing_test
     def test_openers_split_inside_quotes_take_linear_time(self):
         # 代入の値は引用符・`\ `・`$(b c)`・backtick の中をまたいで読むので、空白や `;` で語を割っても読み直しの長さは縮まない
         tokens = ('$(a=" "', "(a=' '", "(a=\\ ", '(a=";"', "(a=$(b c)", "(a=`b c`", "{a=$'\\ '", '(>" "', '(2>" "', '(&>" "')
@@ -413,6 +417,7 @@ class HeredocBodyTest(unittest.TestCase):
         self.assertEqual(find_invocations(cmd), [])
         self.assertIn("解析できない", unresolved_reason(cmd, []) or "")
 
+    @_testutil.timing_test
     def test_opener_runs_in_a_nested_shell_take_linear_time(self):
         _testutil.assert_linear(
             self,
@@ -501,6 +506,7 @@ class HeredocBodyTest(unittest.TestCase):
                 self.assertNotIn("(?>", pattern)
                 self.assertIsNone(re.search(r"(?<!\\)[*+?}]\+", pattern))
 
+    @_testutil.timing_test
     def test_ambiguous_prefix_items_are_read_one_way(self):
         # `<<-x` (`<<` + `-x` とも読める)、`>a2>a2` (`2` を前の対象とも次の fd とも読める)、`$(x)` / backtick
         # (置換とも文字の並びとも読める) は、前置き 1 つの読み方を固定しないと、一致しないときの後戻りが

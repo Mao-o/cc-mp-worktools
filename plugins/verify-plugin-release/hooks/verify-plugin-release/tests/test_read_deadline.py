@@ -148,6 +148,7 @@ class ReadDeadlineTest(unittest.TestCase):
         self.assertIn("--body-file", reason or "")
         self.assertEqual(found, [])
 
+    @_testutil.timing_test
     def test_worst_form_at_the_limit_ends_by_the_read_deadline(self):
         # 読み終えるか止まるかは速度しだいだが、期限 + 余裕の中で必ず決まる。子で読む形の最悪の実時間の上限はこの 1 本が持つ
         # (同じプロセスで読む形の上限は、test_size_limit の TimeTest と test_heredoc_and_cd の指数時間のテストが持つ)
@@ -210,6 +211,7 @@ class ReadDeadlineTest(unittest.TestCase):
                 _, reason = read_command(_padded("gh pr create"), Deadline(60))
         self.assertIn("exit 3", reason or "")
 
+    @_testutil.timing_test
     def test_child_ends_itself_when_the_parent_is_gone(self):
         # 正規表現の途中でも見張りが終わらせる (親が kill できなくても残らない)
         t = time.monotonic()
@@ -293,6 +295,7 @@ class ChildOutputTypeTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
+@_testutil.timing_test
 class HookBudgetTest(unittest.TestCase):
     """読み取り・repo の確認・設定の読み・ゲートは 1 つの予算を分け合う。"""
 
