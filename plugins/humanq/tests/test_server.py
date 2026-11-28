@@ -452,6 +452,30 @@ class HookInstructionsByCli(unittest.TestCase):
                     self.assertEqual(self.snooze_lines(ctx), [line])
                     self.assertIn("判断待ち 2 件", ctx, "判断待ちの件数は summary の human のまま (保留はサーバーが除いてある)")
 
+    UNREAD = "判断待ちの件数のうち {} 件は、保留かどうかを確認中 (サーバーの起動直後の読み残し。保留中のものが混じっていて、次の読みで減る。保留中かもしれないチケットに取りかかったり、答えを推測して進めたりしない)"
+
+    def test_session_start_says_how_many_waiting_are_still_being_checked_for_a_snooze(self):
+        for cli in ("bd", "br"):
+            base = {"ok": True, "cli": cli, "writable": True, "human": 20, "answered": []}
+            cases = {
+                "読み残しだけ": ({"unread": 16}, f"humanq: {self.UNREAD.format(16)}。"),
+                "保留と読み残し": ({"snoozed": 5, "unread": 16}, f"humanq: {self.SNOOZED.format(5)}。{self.UNREAD.format(16)}。"),
+                "全部": ({"snoozed": 5, "returned": 1, "unread": 16},
+                         f"humanq: {self.SNOOZED.format(5)}。{self.RETURNED.format(1)}。{self.UNREAD.format(16)}。"),
+            }
+            for what, (extra, line) in cases.items():
+                with self.subTest(cli=cli, what=what):
+                    ctx = self.run_hook("session_start", {**base, **extra})
+                    self.assertEqual(self.snooze_lines(ctx), [line])
+                    self.assertIn("判断待ち 20 件", ctx, "判断待ちの件数は summary の human のまま")
+
+    def test_unread_that_is_not_a_positive_number_adds_no_line(self):
+        base = {"ok": True, "cli": "bd", "writable": True, "human": 3, "answered": []}
+        for what, extra in {"0 件": {"unread": 0}, "古いサーバー (key が無い)": {}, "文字列": {"unread": "3"}, "真偽値": {"unread": True},
+                            "負の数": {"unread": -1}, "小数": {"unread": 1.5}, "入れ子": {"unread": [2]}}.items():
+            with self.subTest(what):
+                self.assertEqual(self.snooze_lines(self.run_hook("session_start", {**base, **extra})), [])
+
     def test_no_snooze_line_without_snoozes_or_from_an_old_server(self):
         base = {"ok": True, "cli": "bd", "writable": True, "human": 1, "answered": []}
         for what, extra in {"0 件": {"snoozed": 0, "returned": 0}, "古いサーバー (key が無い)": {},
@@ -1488,6 +1512,35 @@ class BdOnly:
         self.assertEqual(sorted(self.ids(cached, "snoozed", ids)), sorted(ids), "裏で読んだ後も、キャッシュの古い結果 (判断待ちに出したもの) を返した")
         self.assertEqual(sorted(self.ids(self.read(store), "snoozed", ids)), sorted(ids), "裏で読んだ覚えを次の読みが使っていない")
         self.assertEqual(self.comment_reads(ids), n)
+
+    def test_summary_counts_the_snoozes_left_unread_and_the_hook_says_so(self):
+        store = self.store()
+        port = self.serve(store)
+        base = self.summary(port, fresh=True)               # 共有のプロジェクトでは、前のテストの保留が残る
+        self.assertEqual(base.get("unread"), 0, "読み残しが無いのに unread を数えた")
+        stale = self.new_question()                         # 保留のラベルだけ残った (コメントは読めて、保留ではない) 判断待ち
+        self.label(stale, "add", "snoozed")
+        base = self.summary(port, fresh=True)               # stale を読んで覚えさせる。読めているので unread に数えない
+        self.assertEqual(base.get("unread"), 0, "コメントを読めていて保留でないものを読み残しに数えた")
+        ids = [self.new_question() for _ in range(3)]
+        for i in ids:
+            self.write(store.snooze, {"id": i, "until": None})
+        self.new_question()                                 # 保留でない判断待ちは、コメントを読まないので読み残しに数えない
+        store._threads.budget = 0.0                         # 時間の上限に当たって、書いた 3 件のコメントを読めない読み
+        s = self.summary(port, fresh=True)
+        self.assertEqual((s.get("unread"), s.get("human") - base["human"], s.get("snoozed") - base["snoozed"]),
+                         (3, 4, 0), "読み残した保留は判断待ちに出して、unread に数える")
+        spec = importlib.util.spec_from_file_location("humanq_hook_unread_test", HOOK_PATH)
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        self.assertIn("判断待ちの件数のうち 3 件は、保留かどうかを確認中", hook.snooze_line(s) or "", "summary の件数が hook の文面に出ない")
+        key = store.resolve(self.repo) or self.repo
+        deadline = time.monotonic() + 30                    # 裏の読みが読み終えるのを待つ
+        while time.monotonic() < deadline and (store._warming or not all(store._threads.get(key, i)[1] for i in ids)):
+            time.sleep(0.05)
+        s = self.summary(port, fresh=True)
+        self.assertEqual((s.get("unread"), s.get("snoozed") - base["snoozed"], s.get("human")), (0, 3, base["human"] + 1),
+                         "読み終えた後も unread が残った")
 
     def test_a_read_behind_racing_a_resnooze_does_not_memorise_the_old_comment(self):
         ids = [self.new_question() for _ in range(2)]

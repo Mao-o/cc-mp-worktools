@@ -271,12 +271,18 @@ def load_project(repo: str, be=None, memo: backend.ThreadMemo | None = None) -> 
     # 保留: ラベルが付いていて、最後の [humanq] コメントが保留で、戻る日が来ておらず、保留したときの問いが今の問いと同じ
     # (問いの署名が同じ) ものだけを判断待ちから外す。戻る日が来たもの・問いが書き換わったものは、判断待ちに戻して出す
     # (ラベルは次の回答で外す)
-    waiting, snoozed = [], []
+    waiting, snoozed, unread = [], [], 0
     for s, r in human:
         if s["id"] in both and s["id"] not in undone:
             continue
-        sn = snooze_of(r.get("thread")) if backend.labeled(r, SNOOZE_LABEL) else None
+        labeled = backend.labeled(r, SNOOZE_LABEL)
+        sn = snooze_of(r.get("thread")) if labeled else None
         if sn is None:
+            # 保留のラベルが付いているのにコメントを読めていない (thread が None: 1 回の読みの時間の上限に間に合わなかった・
+            # 読めなかった) 判断待ちは、保留かどうか確かめられないので判断待ちに出している。その件数を unread に数える
+            # (読めていて保留でなくなったものは数えない)
+            if labeled and not isinstance(r.get("thread"), list):
+                unread += 1
             waiting.append({**s, "snooze": None})
             continue
         why = {"until": sn["until"], "note": sn["note"], "expired": _expired(sn), "changed": sn["qsig"] != s["qsig"]}
@@ -285,7 +291,7 @@ def load_project(repo: str, be=None, memo: backend.ThreadMemo | None = None) -> 
         else:
             snoozed.append({**s, "snooze": why})
     snoozed.sort(key=_snooze_order)
-    return {"human": waiting, "answered": answered, "snoozed": snoozed}
+    return {"human": waiting, "answered": answered, "snoozed": snoozed, "unread": unread}
 
 
 def empty() -> dict:
@@ -724,10 +730,13 @@ def make_handler(store: Store, port: int, token: str, page: str, version: str):
                 # ok:false (読めないプロジェクト) の human は 0 でも「0 件」ではない。hook はこれを見て「読めない」と伝える。
                 # cli は hook が案内の文を選ぶため (br のプロジェクトには bd のコマンドを案内しない)。
                 # human は保留中を数えない。snoozed は保留中の件数、returned は保留から判断待ちに戻った件数 (戻る日が来た・
-                # 問いが書き換わった。human に入っている。判断待ちの snooze が null でないもの)
+                # 問いが書き換わった。human に入っている。判断待ちの snooze が null でないもの)。
+                # unread は、保留のラベルが付いているのにコメントを読めておらず判断待ちに出している件数 (human に入っている。
+                # サーバーの起動直後の読み残し)。hook は「うち N 件は保留の確認中」と伝える
                 self._json(200, {"human": len(d["human"]), "answered": [x["id"] for x in d["answered"]],
                                  "snoozed": len(d.get("snoozed") or []),
                                  "returned": sum(1 for x in d["human"] if x.get("snooze")),
+                                 "unread": d.get("unread") or 0,
                                  "ok": d.get("ok", True), "error": d.get("error"),
                                  "cli": d.get("cli"), "writable": d.get("writable")})
             else:
