@@ -380,7 +380,10 @@ class HookInstructionsByCli(unittest.TestCase):
         with mock.patch.object(self.hook, "ensure_server", lambda sd: "running"), \
                 mock.patch.object(self.hook, "summary", lambda *a, **kw: dict(summary)), \
                 contextlib.redirect_stdout(buf):
-            getattr(self.hook, fn)({"cwd": self.root, "session_id": session})
+            try:
+                getattr(self.hook, fn)({"cwd": self.root, "session_id": session})
+            except Exception as e:  # noqa: BLE001  崩れた summary で hook が止まるのを、走っていない ERROR でなく失敗にする
+                self.fail(f"hook が例外を出した: {type(e).__name__}: {e} (summary: {summary!r:.200})")
         out = buf.getvalue()
         self.assertTrue(out.strip(), "hook の出力が無い")
         return json.loads(out)
@@ -448,7 +451,7 @@ class HookInstructionsByCli(unittest.TestCase):
                     self.assertEqual(self.snooze_lines(ctx), [line])
                     self.assertIn("判断待ち 2 件", ctx, "判断待ちの件数は summary の human のまま (保留はサーバーが除いてある)")
 
-    UNREAD = "判断待ちの件数のうち {} 件は、保留かどうかを確認中 (サーバーの起動直後の読み残し。保留中のものが混じっていて、次の読みで減る。保留中かもしれないチケットに取りかかったり、答えを推測して進めたりしない)"
+    UNREAD = "判断待ちの件数のうち {} 件は、保留中か情報待ちかを確認中 (サーバーの起動直後の読み残し。保留中・情報待ちのものが混じっていて、次の読みで減る。保留中かもしれないチケットに取りかかったり、答えを推測して進めたりしない)"
 
     def test_session_start_says_how_many_waiting_are_still_being_checked_for_a_snooze(self):
         for cli in ("bd", "br"):
@@ -480,6 +483,39 @@ class HookInstructionsByCli(unittest.TestCase):
                             "入れ子": {"snoozed": [3], "returned": {"n": 1}}}.items():
             with self.subTest(what):
                 self.assertEqual(self.snooze_lines(self.run_hook("session_start", {**base, **extra})), [])
+
+    def needinfo_lines(self, ctx: str) -> list[str]:
+        return [ln for ln in ctx.splitlines() if "情報待ち" in ln and "エージェントの番" in ln]
+
+    def test_session_start_adds_one_needinfo_line_with_the_ids_and_the_commands_of_the_cli(self):
+        own = {"bd": ("`bd comments <id>` の最後の `[humanq] 情報待ち`", "`bd label remove <id> needs-info`"),
+               "br": ("`br comments <id> --json` を (created_at, id) の昇順に並べ直した最後の `[humanq] 情報待ち`",
+                      "`br label remove <id> needs-info`")}
+        for cli, other in (("bd", self.BR_CMDS), ("br", self.BD_CMDS)):
+            with self.subTest(cli=cli):
+                ctx = self.run_hook("session_start", {"ok": True, "cli": cli, "writable": True, "human": 2, "answered": [],
+                                                      "snoozed": 1, "needinfo": ["x-1", "x-2"]})
+                lines = self.needinfo_lines(ctx)
+                self.assertEqual(len(lines), 1, ctx)
+                self.assertTrue(lines[0].startswith("humanq: 情報待ち 2 件 (エージェントの番): x-1, x-2。"), lines[0])
+                for w in own[cli]:
+                    self.assertIn(w, lines[0])
+                for o in other:
+                    self.assertNotIn(o, ctx, f"別の CLI のコマンド ({o}) が入っている")
+                self.assertIn("問いを書き直してから", lines[0])
+                self.assertIn("問いの無いチケットは問いを書く", lines[0])
+                self.assertIn("判断待ち 2 件", ctx, "判断待ちの件数は summary の human のまま (情報待ちはサーバーが除いてある)")
+                self.assertEqual(len(self.snooze_lines(ctx)), 1, "保留の行と情報待ちの行が混ざった")
+                self.assertNotIn("情報待ち", self.snooze_lines(ctx)[0])
+
+    def test_no_needinfo_line_without_ids_or_from_an_old_server(self):
+        base = {"ok": True, "cli": "bd", "writable": True, "human": 1, "answered": []}
+        for what, extra in {"0 件": {"needinfo": []}, "古いサーバー (key が無い)": {}, "文字列": {"needinfo": "x-1"},
+                            "数": {"needinfo": 2}, "object": {"needinfo": {"x-1": 1}}, "文字列でない要素だけ": {"needinfo": [5, None, "", ["x"]]}}.items():
+            with self.subTest(what):
+                self.assertEqual(self.needinfo_lines(self.run_hook("session_start", {**base, **extra})), [])
+        ctx = self.run_hook("session_start", {**base, "needinfo": [5, "x-3", None]})
+        self.assertEqual([ln.split("。")[0] for ln in self.needinfo_lines(ctx)], ["humanq: 情報待ち 1 件 (エージェントの番): x-3"])
 
     def test_the_user_message_does_not_count_snoozes(self):
         o = self.run_raw("session_start", {"ok": True, "cli": "bd", "writable": True, "human": 0, "answered": [], "snoozed": 4})
@@ -1422,6 +1458,292 @@ class BdScenarios:
                 self.assertEqual(code, 200, raw)
                 self.assertEqual(json.loads(raw).get("today"), day.isoformat())
 
+    # ---- 情報待ち (needinfo): コメント 1 件 + needs-info のラベル。human・status・担当は変えない ----
+    # エージェントは足りない情報をチケットに足し、問いを書き直してから needs-info を外す (README の「回答を拾う」)
+
+    HQ_LABELS = {"human", "answered", "snoozed", "needs-info"}
+
+    def test_needinfo_moves_the_question_out_of_the_pending_list(self):
+        iid, other = self.new_question(), self.new_question()
+        self.set_status(iid, "in_progress")                  # エージェントが担当中の問い (status を変えると担当が崩れる)
+        self.set_assignee(iid, "agent-x")
+        before = self.state(iid)
+        store = self.store()
+        q = self.item(iid)["qsig"]
+        self.write(store.needinfo, {"id": iid, "note": " どの環境の話か\n本番か検証か \n", "qsig": q})
+        self.assertEqual(self.state(iid), before, "情報待ちで status か担当が変わった")
+        self.assertEqual(self.labels(iid) & self.HQ_LABELS, {"human", "needs-info"})
+        self.assertEqual(self.marks(iid), [f"[humanq] 情報待ち (qsig: {q})\n\nどの環境の話か\n本番か検証か"])
+        for data in (self.load(), self.read(store)):
+            mine = (iid, other)
+            self.assertEqual([self.ids(data, k, mine) for k in ("human", "needinfo", "snoozed", "answered")], [[other], [iid], [], []],
+                             "情報待ちにした問いが判断待ちに残った")
+            got = self.pick(data, "needinfo", iid)
+            self.assertEqual((got["needinfo"], got["qsig"]), ({"note": "どの環境の話か\n本番か検証か"}, q))
+            self.assertIsNotNone(got["q"], "情報待ちのチケットも問いを持つ")
+
+    def test_after_the_agent_adds_the_information_and_rewrites_the_question_it_is_pending_again(self):
+        iid = self.new_question()
+        store = self.store()
+        port = self.serve(store)
+        self.write(store.needinfo, {"id": iid, "note": "見積もりの根拠"})
+        old = self.pick(self.read(store), "needinfo", iid)["qsig"]
+        # エージェント: 足りない情報を背景に足して問いを書き直し、needs-info を外す
+        self.set_question(iid, context="見積もりの根拠: 過去 3 件の実績から 2 日")
+        self.label(iid, "remove", "needs-info")
+        for data in (self.load(), self.read(store)):
+            self.assertEqual((self.ids(data, "human", (iid,)), self.ids(data, "needinfo", (iid,))), ([iid], []),
+                             "書き直した問いが判断待ちに戻らない")
+            now = self.pick(data, "human", iid)
+            self.assertNotEqual(now["qsig"], old)
+            self.assertIsNone(now["snooze"])
+        code, j = self.post_json(port, "/api/answer", {"project": self.repo, "id": iid, "option": "a", "qsig": now["qsig"]})
+        self.assertEqual(code, 200, j)
+        self.assertEqual(self.labels(iid) & self.HQ_LABELS, {"answered"})
+
+    def test_a_rewritten_question_whose_label_was_left_comes_back_and_the_answer_removes_the_label(self):
+        iid, kept = self.new_question(), self.new_question()
+        store = self.store()
+        port = self.serve(store)
+        for i in (iid, kept):
+            self.write(store.needinfo, {"id": i, "note": "n"})
+        s0 = self.summary(port, fresh=True)
+        opts = json.loads(json.dumps(QUESTION))["humanq"]["options"]
+        opts[0]["desc"] = "言い回しだけ直した"
+        self.set_question(kept, options=opts)                # 選択肢の説明 (desc) だけの直しは問いの署名に入らない: 情報待ちのまま
+        self.set_question(iid, context="足した情報")          # 問いを書き直したが、needs-info を外し忘れた
+        data = self.read(store)
+        self.assertEqual((self.ids(data, "human", (iid, kept)), self.ids(data, "needinfo", (iid, kept))), ([iid], [kept]))
+        self.assertIn("needs-info", self.labels(iid), "読むだけでラベルを外した (ラベルは次の回答で外す)")
+        s1 = self.summary(port, fresh=True)
+        self.assertEqual((s1["human"] - s0["human"], [x for x in s1["needinfo"] if x in (iid, kept)]), (1, [kept]))
+        self.write(store.answer, {"id": iid, "option": "a"})
+        self.assertEqual(self.labels(iid) & self.HQ_LABELS, {"answered"}, "humanq が付けた needs-info を回答で外していない")
+
+    def test_answer_whose_needs_info_removal_failed_is_resent(self):
+        iid = self.new_question()
+        store = self.store()
+        self.write(store.needinfo, {"id": iid, "note": "n"})
+        self.set_question(iid, context="足した情報")          # 書き直したが、ラベルを外し忘れた
+        restore = self.failing("label remove needs-info")
+        try:
+            e = self.write(store.answer, {"id": iid, "option": "a"}, raises=humanq.WriteError)
+        finally:
+            restore()
+        self.assertEqual((e.stage, e.written), ("label", True))
+        self.assertEqual(self.labels(iid) & self.HQ_LABELS, {"human", "needs-info"}, "情報待ちのラベルを外す前に、ラベルを付け替えた")
+        data = self.read(store)
+        self.assertEqual((self.ids(data, "human", (iid,)), self.ids(data, "needinfo", (iid,))), ([iid], []),
+                         "回答のコメントの後のチケットを情報待ちとして隠した")
+        self.write(store.answer, {"id": iid, "option": "a"})                       # 送り直しで残りを済ませる
+        self.assertEqual(self.labels(iid) & self.HQ_LABELS, {"answered"})
+        self.assertEqual(len([m for m in self.marks(iid) if m.startswith("[humanq] 回答")]), 1, "送り直しで回答が二重になった")
+
+    def test_answer_removes_only_a_needs_info_label_that_humanq_put(self):
+        # 利用者が自分の意味で付けた needs-info (humanq の情報待ちのコメントが無い) は、情報待ちに出さず、回答で外さない
+        own = self.new_question(labels=("human", "needs-info"))
+        store = self.store()
+        self.assertEqual(self.ids(self.load(), "human", (own,)), [own], "コメントの無い needs-info を情報待ちに出した")
+        self.write(store.answer, {"id": own, "option": "a"})
+        self.assertEqual(self.labels(own) & self.HQ_LABELS, {"answered", "needs-info"}, "humanq が付けていない needs-info を外した")
+        # 取り消して答え直した (最後の [humanq] コメントが取り消し) チケットに後から付いた needs-info も、humanq のものではない
+        again = self.new_question()
+        self.write(store.answer, {"id": again, "option": "a"})
+        self.write(store.undo, {"id": again})
+        self.label(again, "add", "needs-info")
+        self.write(store.answer, {"id": again, "option": "b"})
+        self.assertIn("needs-info", self.labels(again))
+
+    def test_the_last_humanq_comment_decides_between_a_snooze_and_needinfo(self):
+        # 保留した後に (前の画面から) 情報待ちにした: 最後の [humanq] コメントは情報待ちなので、情報待ちに出す。保留の解除は何も書かない
+        iid = self.new_question()
+        store = self.store()
+        self.write(store.snooze, {"id": iid, "until": None})
+        self.write(store.needinfo, {"id": iid, "note": "n"})
+        data = self.read(store)
+        self.assertEqual([self.ids(data, k, (iid,)) for k in ("human", "snoozed", "needinfo")], [[], [], [iid]])
+        adds = self.calls("comments add")
+        self.write(store.unsnooze, {"id": iid})
+        self.assertEqual(self.calls("comments add"), adds, "保留でないチケットの解除で、解除のコメントを書いた")
+        self.assertEqual(self.ids(self.read(store), "needinfo", (iid,)), [iid])
+
+    # 保留と情報待ちは続けて書かれうる (戻る日が来たカードを情報待ちにする・情報待ちのカードを前の画面から保留する)。
+    # どの順で経由しても、回答の後に humanq が付けたラベル (snoozed・needs-info) は残らない
+    # S 保留 (明日まで) / D 戻る日が来る / U 保留の解除 / N 情報待ち / R 問いを書き直して needs-info を外す
+    # L 問いを書き直したが needs-info を外し忘れる / A 回答 / K 取り消し
+    HQ_ORDERS = {
+        "保留 → 戻る → 情報待ち → 書き直して外す": "SDNR", "保留 → 戻る → 情報待ち → 外し忘れ": "SDNL",
+        "情報待ち → 保留 → 戻る": "NSD", "情報待ち → 外し忘れ → 保留 → 解除": "NLSU", "情報待ち → 外し忘れ → 保留 → 戻る": "NLSD",
+        "情報待ち → 書き直して外す → 保留 → 解除": "NRSU", "保留 → 情報待ち": "SN", "保留 → 情報待ち → 保留": "SNS",
+        "保留 → 解除": "SU", "情報待ち": "N", "保留 → 戻る": "SD", "保留 → 解除 → 情報待ち": "SUN",
+        "回答 → 取り消し → 保留 → 戻る": "AKSD", "回答 → 取り消し → 情報待ち": "AKN", "回答 → 取り消し → 情報待ち → 保留 → 戻る": "AKNSD",
+    }
+
+    def run_hq_order(self, order: str) -> str:
+        """order の順に状態を経由させ、まだ回答していないチケットの ID を返す (時計は D で進める)。"""
+        iid = self.new_question()
+        store = self.store()
+        clock = [humanq.today()]
+        n = 0
+        with mock.patch.object(humanq, "today", lambda: clock[0]):
+            for step in order:
+                n += 1
+                if step == "S":
+                    self.write(store.snooze, {"id": iid, "until": self.day(1)})
+                elif step == "D":
+                    clock[0] = clock[0] + timedelta(days=2)
+                elif step == "U":
+                    self.write(store.unsnooze, {"id": iid})
+                elif step == "N":
+                    self.write(store.needinfo, {"id": iid, "note": "n"})
+                elif step in "RL":
+                    self.set_question(iid, context=f"足した情報 {n}")
+                    if step == "R" and "needs-info" in self.labels(iid):
+                        self.label(iid, "remove", "needs-info")
+                elif step == "A":
+                    self.write(store.answer, {"id": iid, "option": "a"})
+                elif step == "K":
+                    self.write(store.undo, {"id": iid})
+                else:
+                    self.fail(f"知らない段 {step}")
+        self.hq_clock = clock[0]
+        return iid
+
+    def test_answer_removes_the_labels_humanq_put_whatever_order_the_states_were_passed(self):
+        for name, order in self.HQ_ORDERS.items():
+            with self.subTest(order=name):
+                iid = self.run_hq_order(order)
+                with mock.patch.object(humanq, "today", lambda: self.hq_clock):
+                    self.write(self.store().answer, {"id": iid, "option": "b"})
+                self.assertEqual(self.labels(iid) & self.HQ_LABELS, {"answered"}, f"回答の後に humanq のラベルが残った ({order})")
+
+    def test_resent_answer_removes_both_labels_humanq_put(self):
+        # 回答のラベルの段階が失敗して送り直す (最後のコメントがこの回答) ときも、前の回答より後の保留・情報待ちを両方見る
+        for rule, order in (("label remove snoozed", "SDNR"), ("label remove needs-info", "SDNL"), ("label remove needs-info", "NSD")):
+            with self.subTest(rule=rule, order=order):
+                iid = self.run_hq_order(order)
+                store = self.store()
+                with mock.patch.object(humanq, "today", lambda: self.hq_clock):
+                    restore = self.failing(rule)
+                    try:
+                        e = self.write(store.answer, {"id": iid, "option": "a"}, raises=humanq.WriteError)
+                    finally:
+                        restore()
+                    self.assertEqual((e.stage, e.written), ("label", True))
+                    self.write(store.answer, {"id": iid, "option": "a"})
+                self.assertEqual(self.labels(iid) & self.HQ_LABELS, {"answered"})
+                self.assertEqual(len([m for m in self.marks(iid) if m.startswith("[humanq] 回答")]), 1, "送り直しで回答が二重になった")
+
+    def test_answer_keeps_a_label_the_user_put_after_the_previous_answer_whatever_order(self):
+        # 前の回答より前の保留・情報待ちは見ない: 回答 → 取り消し の後に利用者が付けたラベルは、保留や情報待ちを経由した後でも外さない
+        for order in ("SNAK", "NSAK", "SDNLAK"):
+            with self.subTest(order=order):
+                iid = self.run_hq_order(order)
+                self.label(iid, "add", "snoozed")
+                self.label(iid, "add", "needs-info")
+                self.write(self.store().answer, {"id": iid, "option": "b"})
+                self.assertEqual(self.labels(iid) & self.HQ_LABELS, {"answered", "snoozed", "needs-info"})
+
+    BAD_NEEDINFO = {
+        "note が無い": {}, "note が空": {"note": ""}, "note が空白だけ": {"note": " \n\t "}, "note が数": {"note": 5},
+        "note が null": {"note": None}, "note が list": {"note": ["x"]}, "note が object": {"note": {"a": 1}},
+        "note が真偽値": {"note": True},
+        "id が無い": {"id": None, "note": "n"}, "id が数": {"id": 5, "note": "n"}, "id が空": {"id": "", "note": "n"},
+        "id が list": {"id": ["x"], "note": "n"},
+    }
+
+    def test_needinfo_rejects_a_broken_body_without_writing(self):
+        iid = self.new_question()
+        store = self.store()
+        port = self.serve(store)
+        writes = (self.calls("comments add"), self.calls("label"))
+        for name, extra in self.BAD_NEEDINFO.items():
+            with self.subTest(body=name):
+                code, j = self.post_json(port, "/api/needinfo", {"project": self.repo, "id": iid, **extra})
+                self.assertEqual((code, j.get("op")), (400, "needinfo"), j)
+                self.assertNotIn("code", j, f"形の誤りを gone などと取り違えた: {j}")
+        # 文字列でないものと、空 (空白だけを含む) は別の文で断る
+        for note, head in ((5, "note (足りない情報) を文字列で"), ("", "note (足りない情報) が空"), ("  \n", "note (足りない情報) が空")):
+            with self.subTest(note=note):
+                code, j = self.post_json(port, "/api/needinfo", {"project": self.repo, "id": iid, "note": note})
+                self.assertEqual(code, 400, j)
+                self.assertTrue(str(j.get("error")).startswith(head), j)
+        self.assertEqual((self.calls("comments add"), self.calls("label")), writes, "壊れた body で書き込んだ")
+        self.assertEqual(self.comments(iid), [])
+
+    def test_needinfo_for_a_changed_question_an_answered_or_a_missing_ticket_is_not_recorded(self):
+        iid = self.new_question()
+        store = self.store()
+        port = self.serve(store)
+        seen = self.item(iid)["qsig"]
+        self.set_question(iid, ask="書き直した問い")
+        code, j = self.post_json(port, "/api/needinfo", {"project": self.repo, "id": iid, "note": "n", "qsig": seen})
+        self.assertEqual((code, j.get("code"), j.get("op")), (409, "changed", "needinfo"), j)
+        self.assertEqual(self.comments(iid), [])
+        self.assertNotIn("needs-info", self.labels(iid))
+        answered = self.new_question(labels=("answered",))
+        both = self.new_question(labels=("human", "answered"))          # 画面には回答済みとして出る
+        for i in (answered, both, "hq-nothing"):
+            with self.subTest(iid=i):
+                code, j = self.post_json(port, "/api/needinfo", {"project": self.repo, "id": i, "note": "n"})
+                self.assertEqual((code, j.get("code"), j.get("op")), (400, "gone", "needinfo"), j)
+        for i in (answered, both):
+            self.assertEqual(self.comments(i), [], "回答済みのチケットに情報待ちを書いた")
+            self.assertNotIn("needs-info", self.labels(i))
+        code, j = self.post_json(port, "/api/needinfo", {"project": self.repo, "id": iid, "note": "n", "qsig": self.item(iid)["qsig"]})
+        self.assertEqual((code, j), (200, {"ok": True}))
+
+    def test_a_needinfo_whose_label_step_failed_is_resent_and_pressing_twice_writes_one_comment(self):
+        iid = self.new_question()
+        store = self.store()
+        body = {"id": iid, "note": "2 回押した"}
+        restore = self.failing("label add needs-info")
+        try:
+            e = self.write(store.needinfo, body, raises=humanq.WriteError)
+        finally:
+            restore()
+        self.assertEqual((e.stage, e.written), ("label", True))
+        self.assertEqual(self.calls("label add needs-info"), 2, "ラベルの段階を 1 回だけ再試行していない")
+        self.assertNotIn("needs-info", self.labels(iid))
+        self.assertEqual(self.ids(self.load(), "human", (iid,)), [iid], "ラベルの無い情報待ちを情報待ちに出した (ラベルが読む印)")
+        self.write(store.needinfo, body)                               # 送り直し
+        self.write(store.needinfo, dict(body))                         # 2 回押し
+        self.assertEqual(len(self.marks(iid)), 1, "送り直し・2 回押しで情報待ちのコメントが二重になった")
+        self.assertEqual(self.ids(self.load(), "needinfo", (iid,)), [iid])
+
+    def test_needinfo_over_http_and_the_summary(self):
+        port = self.serve(self.store())
+        base = self.summary(port, fresh=True)               # 共有のプロジェクト (WithBd) では前のテストのチケットが残る
+        a, b = self.new_question(), self.new_question()
+        code, j = self.post_json(port, "/api/needinfo", {"project": self.repo, "id": a, "note": "n"})
+        self.assertEqual((code, j), (200, {"ok": True}))
+        s = self.summary(port, fresh=True)
+        self.assertEqual((s["human"] - base["human"], s["snoozed"] - base["snoozed"]), (1, 0), "情報待ちを判断待ちか保留中に数えた")
+        self.assertEqual([x for x in s["needinfo"] if x in (a, b)], [a])
+        p = self.http_project(port)
+        self.assertEqual((self.ids(p, "human", (a, b)), self.ids(p, "needinfo", (a, b))), ([b], [a]))
+        self.assertEqual(self.pick(p, "needinfo", a)["needinfo"], {"note": "n"})
+        restore = self.failing("label add needs-info")
+        try:
+            code, j = self.post_json(port, "/api/needinfo", {"project": self.repo, "id": b, "note": "n"})
+        finally:
+            restore()
+        self.assertEqual((code, j.get("op"), j.get("stage"), j.get("written")), (502, "needinfo", "label", True), j)
+
+    def test_a_needinfo_ticket_whose_comments_cannot_be_read_is_shown_as_pending(self):
+        iid = self.new_question()
+        store = self.store()
+        self.write(store.needinfo, {"id": iid, "note": "n"})
+        restore = self.comments_unreadable_once(iid)
+        try:
+            data = self.load()
+        finally:
+            restore()
+        self.assertEqual((self.ids(data, "human", (iid,)), self.ids(data, "needinfo", (iid,))), ([iid], []),
+                         "足りない情報を読めない情報待ちを判断待ちから隠した")
+        self.assertEqual(data["unread"], 1, "読めない情報待ちを読み残しに数えていない")
+        self.assertEqual(self.ids(self.load(), "needinfo", (iid,)), [iid], "読めるようになったら情報待ちに戻る")
+
 
 class BdOnly:
     """bd のプロジェクトだけのシナリオ (WithBd と WithFakeBd。br には bd の --json の形が無い)。"""
@@ -1529,7 +1851,7 @@ class BdOnly:
         spec = importlib.util.spec_from_file_location("humanq_hook_unread_test", HOOK_PATH)
         hook = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(hook)
-        self.assertIn("判断待ちの件数のうち 3 件は、保留かどうかを確認中", hook.snooze_line(s) or "", "summary の件数が hook の文面に出ない")
+        self.assertIn("判断待ちの件数のうち 3 件は、保留中か情報待ちかを確認中", hook.snooze_line(s) or "", "summary の件数が hook の文面に出ない")
         key = store.resolve(self.repo) or self.repo
         deadline = time.monotonic() + 30                    # 裏の読みが読み終えるのを待つ
         while time.monotonic() < deadline and (store._warming or not all(store._threads.get(key, i)[1] for i in ids)):
@@ -1864,6 +2186,29 @@ class WithFakeBd(FakeLog, BdScenarios, BdOnly, unittest.TestCase):
         self.assertEqual(code, 200, j)
         self.assertEqual([i["id"] for i in self.http_project(port)["human"]], [iid])
         self.assertEqual(self.normalized_argv(self.log_entries()[start:], iid), self.GOLDEN_SNOOZE)
+
+    ADD_NEEDINFO = ["-C", "<repo>", "--actor", "user/humanq", "label", "add", "<id>", "needs-info"]
+    # 情報待ち → 読み (情報待ちのラベルの付いた判断待ちのコメントを読む)。human を外す・status を変える呼び出しは無い。
+    # エージェントが問いを書き直してラベルを外した後の読みは、コメントを読まない
+    GOLDEN_NEEDINFO = [HUMAN_LIST, COMMENTS, COMMENT_ADD, ADD_NEEDINFO, HUMAN_LIST, ANSWERED_LIST, COMMENTS]
+    GOLDEN_NEEDINFO_BACK = [HUMAN_LIST, ANSWERED_LIST]
+
+    def test_golden_argv_of_needinfo(self):
+        iid = self.new_question()
+        port = self.serve(self.store())
+        cache = mock.patch.object(humanq, "CACHE_SEC", 0.0)                    # どの読みもキャッシュの切れた読みにする
+        cache.start()
+        self.addCleanup(cache.stop)
+        start = len(self.log_entries())
+        code, j = self.post_json(port, "/api/needinfo", {"project": self.repo, "id": iid, "note": "n"})
+        self.assertEqual(code, 200, j)
+        self.assertEqual([i["id"] for i in self.http_project(port)["needinfo"]], [iid])
+        self.assertEqual(self.normalized_argv(self.log_entries()[start:], iid), self.GOLDEN_NEEDINFO)
+        self.set_question(iid, context="足した情報")
+        self.label(iid, "remove", "needs-info")
+        start = len(self.log_entries())
+        self.assertEqual([i["id"] for i in self.http_project(port)["human"]], [iid])
+        self.assertEqual(self.normalized_argv(self.log_entries()[start:], iid), self.GOLDEN_NEEDINFO_BACK)
 
     def normalized_argv(self, entries: list[dict], iid: str) -> list[list[str]]:
         self.assertEqual({e["prog"] for e in entries}, {"bd"})
@@ -2252,6 +2597,28 @@ class WithFakeBr(FakeLog, BdScenarios, unittest.TestCase):
         self.assertEqual(code, 200, j)
         self.assertEqual([i["id"] for i in self.http_project(port)["human"]], [iid])
         self.assertEqual(self.normalized_argv(self.log_entries()[start:], iid), self.GOLDEN_SNOOZE)
+
+    ADD_NEEDINFO = ["--actor", "user/humanq", "label", "add", "<id>", "needs-info"]
+    # 情報待ち → 読み。足りない情報のコメントは、読みの show (1 回) から取る (プロセスは増えない)。human を外す・status を変える呼び出しは無い
+    GOLDEN_NEEDINFO = [LIST_HUMAN, SHOW, COMMENT_ADD, ADD_NEEDINFO, LIST_HUMAN, LIST_ANSWERED, SHOW]
+    GOLDEN_NEEDINFO_BACK = [LIST_HUMAN, LIST_ANSWERED, SHOW]
+
+    def test_golden_argv_of_needinfo(self):
+        iid = self.new_question()
+        port = self.serve(self.store())
+        cache = mock.patch.object(humanq, "CACHE_SEC", 0.0)
+        cache.start()
+        self.addCleanup(cache.stop)
+        start = len(self.log_entries())
+        code, j = self.post_json(port, "/api/needinfo", {"project": self.repo, "id": iid, "note": "n"})
+        self.assertEqual(code, 200, j)
+        self.assertEqual([i["id"] for i in self.http_project(port)["needinfo"]], [iid])
+        self.assertEqual(self.normalized_argv(self.log_entries()[start:], iid), self.GOLDEN_NEEDINFO)
+        self.set_question(iid, context="足した情報")
+        self.label(iid, "remove", "needs-info")
+        start = len(self.log_entries())
+        self.assertEqual([i["id"] for i in self.http_project(port)["human"]], [iid])
+        self.assertEqual(self.normalized_argv(self.log_entries()[start:], iid), self.GOLDEN_NEEDINFO_BACK)
 
     def test_a_stale_undo_only_reads(self):
         # 署名の違う取り消しは、回答済みの一覧とそのチケットの show を読むだけで、br に何も書かない

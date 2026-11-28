@@ -8,11 +8,11 @@ humanq.py は、ここが返す CLI に依らない形の値だけを読む:
   (本文の無いコメントとして数えない)
 - comments() は**必ず古い順で返す**。送り直しの判定・両ラベルの向き・表示する回答の本文は、最後の要素を最新として読む
 - load(repo, memo=None) は画面の読み 1 回分: (判断待ちの Row の list, 回答済みの Row の list)。回答済みの Row と、判断待ちの
-  Row のうち保留のラベル (SNOOZE_LABEL) の付いたものには thread (そのチケットの Comment の list。古い順。読めなければ None) が付く
-  (保留の戻る日はコメントが正本で、ラベルはコメントを読むチケットを絞るための印。ラベルの無い判断待ちのコメントは読まない)。
-  memo (ThreadMemo) を渡すと、回答済みと保留の thread を覚えから使い、CLI で読むのは覚えの無い・古いもの (保留は時間の上限まで)
-  だけ (bd だけ)
-- 書き込み (回答・取り消し・保留・保留の解除) の読み直しは pending(repo, iid) (判断待ちの Row の list。iid の問いを照合に使う) と
+  Row のうち保留か情報待ちのラベル (THREAD_LABELS) の付いたものには thread (そのチケットの Comment の list。古い順。読めなければ
+  None) が付く (保留の戻る日と情報待ちの足りない情報はコメントが正本で、ラベルはコメントを読むチケットを絞るための印。ラベルの無い
+  判断待ちのコメントは読まない)。memo (ThreadMemo) を渡すと、回答済みと保留・情報待ちの thread を覚えから使い、CLI で読むのは
+  覚えの無い・古いもの (保留・情報待ちは時間の上限まで) だけ (bd だけ)
+- 書き込み (回答・取り消し・保留・保留の解除・情報待ち) の読み直しは pending(repo, iid) (判断待ちの Row の list。iid の問いを照合に使う) と
   list_answered(repo) と comments(repo, iid)。pending の Row に thread が付いていれば、送り直しの判定と署名の照合は
   その thread で行う (comments を打たない)。書き込みは add_comment と label (op は add | remove)
 - 見通し (読むだけ。判断待ちの読みとは別に、画面が見通しのタブを開いたときだけ読む) は status_counts(repo) と ready(repo)。
@@ -38,6 +38,10 @@ from typing import Callable
 ACTOR = "user/humanq"
 # 保留のラベル (README の「回答の形」)。付いた判断待ちだけ、読みのときにコメントを読む
 SNOOZE_LABEL = "snoozed"
+# 情報待ちのラベル (README の「回答の形」)。保留のラベルと同じく、付いた判断待ちだけ読みのときにコメントを読む
+NEEDINFO_LABEL = "needs-info"
+# 読みのときにコメントを読む判断待ちの印 (どちらも、正本はコメントで、ラベルは読むチケットを絞る印)
+THREAD_LABELS = (SNOOZE_LABEL, NEEDINFO_LABEL)
 
 
 class BdError(RuntimeError):
@@ -98,20 +102,25 @@ def labeled(row, name: str) -> bool:
     return isinstance(labels, list) and name in labels
 
 
+def watched(row) -> bool:
+    """判断待ちの Row に、読みのときにコメントを読む印 (THREAD_LABELS: 保留か情報待ちのラベル) が付いているか。"""
+    return any(labeled(row, name) for name in THREAD_LABELS)
+
+
 class ThreadMemo:
-    """回答済みと、保留のラベルの付いた判断待ちの thread (bd では 1 件ごとに `bd comments` を 1 プロセス) の覚え。key は
+    """回答済みと、保留か情報待ちのラベルの付いた判断待ちの thread (bd では 1 件ごとに `bd comments` を 1 プロセス) の覚え。key は
     (repo, id)。サーバー (humanq.Store) が 1 つ持ち、BdBackend.load に渡す。読むたびに打つと、回答済みと保留の件数に比例して
     読み (画面の 15 秒ごとの読み・回答の後の読み) が遅くなり、SessionStart の hook の件数の読み (8 秒) が時間切れになる
     (本物の bd 1.3.4 で 1 件あたり約 0.2 秒)。
 
     - 覚えた thread は ttl 秒の間、CLI を打たずに使う。読みが thread から読むもの (回答済みのカードの回答の本文と署名・
-      両方のラベルの向き・保留の判定) はどれも [humanq] のコメントだけで決まり、[humanq] のコメントはこのサーバーだけが
-      書くので、サーバー自身の書き込み (回答・取り消し・保留・保留の解除) がそのチケットの覚えを捨てれば (drop)、変化は拾える。
+      両方のラベルの向き・保留と情報待ちの判定) はどれも [humanq] のコメントだけで決まり、[humanq] のコメントはこのサーバーだけが
+      書くので、サーバー自身の書き込み (回答・取り消し・保留・保留の解除・情報待ち) がそのチケットの覚えを捨てれば (drop)、変化は拾える。
       ttl は、ほかで書かれたコメント (別の端末からの同期など) を拾い直すまでの上限。ラベルと問いは毎回の一覧で読む
       (エージェントがラベルを外す・問いを書き換えるのは、thread を読まなくても分かる)。書き込みの照合 (送り直しの判定・
       取り消しの署名) は覚えを使わず、書き込みのロックの下で読み直す
-    - 保留は、1 回の読みで CLI を打つのは budget 秒まで (覚えの無いものから先に読む)。間に合わなかったものは、古い覚えが
-      あればそれを使い、無ければ thread を None (戻る日を読めない = 判断待ちに出す) にして、left に残す (サーバーが裏で読む)。
+    - 保留・情報待ちは、1 回の読みで CLI を打つのは budget 秒まで (覚えの無いものから先に読む)。間に合わなかったものは、古い覚えが
+      あればそれを使い、無ければ thread を None (戻る日・足りない情報を読めない = 判断待ちに出す) にして、left に残す (サーバーが裏で読む)。
       回答済みには上限を当てない (覚えの無い・古いものは全部読む)
     - 読みの途中で書き込みが覚えを捨てたら、その読みが読んだ古い thread で覚え直さない (repo ごとの世代で照合する)"""
 
@@ -150,7 +159,7 @@ class ThreadMemo:
                 self._gen[r] = self._gen.get(r, 0) + 1
 
     def keep(self, repo: str, ids) -> None:
-        """repo の覚えを ids (今の回答済みと、保留のラベルの付いた判断待ち) だけにする。どちらの一覧からも外れたチケットの
+        """repo の覚えを ids (今の回答済みと、保留か情報待ちのラベルの付いた判断待ち) だけにする。どちらの一覧からも外れたチケットの
         覚えは捨てる (もう一度回答済みか保留になったら読み直す。ほかで取り消して答え直されたものも、間の読みで外れていれば拾う)。"""
         ids = set(ids)
         with self._lock:
@@ -218,25 +227,25 @@ class BdBackend:
         return [comment_of(c) for c in self.json(repo, "comments", iid)]
 
     def load(self, repo: str, memo: ThreadMemo | None = None) -> tuple[list[dict], list[dict]]:
-        """判断待ちの一覧 → 回答済みの一覧 → 回答済みごとのコメント → 保留のラベルの付いた判断待ちごとのコメント、の順に打つ
-        (サーバーが打つ bd の argv の列の固定。保留が無ければ、保留のコメントは打たない)。
-        コメントを読めないチケットの thread は None (回答済みはそのチケットだけ回答の本文と署名が空になり、保留は戻る日を
-        読めないので判断待ちに出す)。bd の引数に渡せない id (_passable) の保留は、打たずに None。
-        memo を渡すと、回答済みと保留の thread は覚え (ThreadMemo) から使い、覚えの内のものは打たない (打つ列からそのチケットの
-        コメントの読みが抜ける)。回答済みは覚えの無い・古いものを全部読み、保留は覚えの無い・古いものだけを memo.budget 秒まで
-        読む。両方のラベルのチケットは、回答済みの読みで覚えたものを保留でも使う (同じ読みで 2 回は打たない)。"""
+        """判断待ちの一覧 → 回答済みの一覧 → 回答済みごとのコメント → 保留か情報待ちのラベルの付いた判断待ちごとのコメント、の順に
+        打つ (サーバーが打つ bd の argv の列の固定。どちらのラベルも無ければ、判断待ちのコメントは打たない)。
+        コメントを読めないチケットの thread は None (回答済みはそのチケットだけ回答の本文と署名が空になり、保留・情報待ちは戻る日・
+        足りない情報を読めないので判断待ちに出す)。bd の引数に渡せない id (_passable) の判断待ちは、打たずに None。
+        memo を渡すと、回答済みと保留・情報待ちの thread は覚え (ThreadMemo) から使い、覚えの内のものは打たない (打つ列からそのチケットの
+        コメントの読みが抜ける)。回答済みは覚えの無い・古いものを全部読み、保留・情報待ちは覚えの無い・古いものだけを memo.budget 秒まで
+        読む。両方のラベルのチケットは、回答済みの読みで覚えたものを判断待ちの側でも使う (同じ読みで 2 回は打たない)。"""
         human = self.list_human(repo)
         listed = self.list_answered(repo)
-        snoozed = [r for r in human if labeled(r, SNOOZE_LABEL)]
+        marked_rows = [r for r in human if watched(r)]
         if memo is not None:
-            memo.keep(repo, [r["id"] for r in listed] + [r["id"] for r in snoozed if _passable(r["id"])])
+            memo.keep(repo, [r["id"] for r in listed] + [r["id"] for r in marked_rows if _passable(r["id"])])
         answered = [{**r, "thread": self._answered_thread(repo, r["id"], memo)} for r in listed]
         if memo is None:
-            for r in snoozed:
+            for r in marked_rows:
                 r["thread"] = self._thread(repo, r["id"])
             return human, answered
         todo = []
-        for r in snoozed:
+        for r in marked_rows:
             if not _passable(r["id"]):
                 r["thread"] = None
                 continue
@@ -277,7 +286,7 @@ class BdBackend:
         return thread
 
     def _thread(self, repo: str, iid) -> list[dict] | None:
-        """保留の thread を 1 件読む。渡せない id は打たずに None、読めなければ None。"""
+        """保留・情報待ちの thread を 1 件読む。渡せない id は打たずに None、読めなければ None。"""
         if not _passable(iid):
             return None
         try:
@@ -450,14 +459,15 @@ class BrBackend:
 
     1 プロジェクトの読みは 3 プロセス: 判断待ちの list → 回答済みの list → 両方の id をまとめた show。問い
     (agent_context) とコメントは show から取る (br の schema の文書は agent_context を「list には出ない」としている)。
-    保留のラベルの付いた判断待ちの thread も、同じ show のコメントから作る (プロセスは増えない)。
+    保留か情報待ちのラベルの付いた判断待ちの thread も、同じ show のコメントから作る (プロセスは増えない)。
     読みの flag は br の既定のまま (JSONL の方が新しければ DB へ取り込む auto-import も、利用者が打ったときと同じに効かせる)。
 
     回答は 5 プロセス: 判断待ちの list → そのチケットの show (問いと署名の照合・送り直しの判定のコメント) →
     comments add → label add answered → label remove human。取り消しは回答済みの list → show → comments add →
     label add human → label remove answered。保留は判断待ちの list → show → comments add → label add snoozed、保留の
     解除は判断待ちの list → show → comments add (最後の [humanq] コメントが保留のときだけ) → label remove snoozed
-    (付いているときだけ)。書き込みの形 (--actor の位置・comments add -f・label の位置引数) は bd と
+    (付いているときだけ)、情報待ちは判断待ちの list → show → comments add → label add needs-info。
+    書き込みの形 (--actor の位置・comments add -f・label の位置引数) は bd と
     同じで、label は付いている / 付いていないときも exit 0 (冪等。br 0.7.6 で実測)。"""
 
     def __init__(self, run: Callable[..., str] = run_br):
@@ -528,7 +538,7 @@ class BrBackend:
         rows = []
         for i in human:
             r = self.row(i, by[i["id"]])
-            if labeled(r, SNOOZE_LABEL):        # 保留の戻る日はコメントにある (show はもう読んであるので、打ち足さない)
+            if watched(r):                      # 保留の戻る日・情報待ちの足りない情報はコメントにある (show はもう読んであるので、打ち足さない)
                 r["thread"] = br_thread(by[i["id"]].get("comments"))
             rows.append(r)
         return rows, [self.row(i, by[i["id"]], thread=True) for i in answered]

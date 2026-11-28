@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """humanq: この端末の beads (bd / br) のプロジェクトの判断待ち (human ラベル) を 1 つの localhost の画面に集め、
-回答 (と保留) を各プロジェクトの bd / br に書き戻す。
+回答 (と保留・情報待ち) を各プロジェクトの bd / br に書き戻す。
 
 usage: python3 humanq.py --state-dir DIR [--port 8765]
 
@@ -48,16 +48,23 @@ UNSNOOZE_HEAD = f"{MARK} 保留の解除"
 SNOOZE_LABEL = backend.SNOOZE_LABEL
 _SNOOZE_LINE = re.compile(re.escape(SNOOZE_HEAD) + r"(?:([0-9]{4}-[0-9]{2}-[0-9]{2}) に戻る|" + SNOOZE_NO_DATE
                           + r") \(qsig: ([0-9a-f]{16})\)")
-# 判断待ちの側で書く [humanq] コメント (取り消し・保留・保留の解除)。両方のラベルのチケットの最後の [humanq] コメントが
+# 情報待ち (README の「回答の形」): ユーザーが「回答に必要な情報が足りない」とエージェントに返したもの。1 行目が
+# `[humanq] 情報待ち (qsig: <問いの署名>)` で、空行の後に足りない情報 (必須) が続く。問いの署名は返したときの問いのもので、今の問いの
+# 署名と違えば (エージェントが情報を足して問いを書き直した) 情報待ちとは読まない。正本はコメントで、ラベル (NEEDINFO_LABEL) は
+# コメントを読むチケットを絞る印。human・status・担当は変えない。ラベルは、問いを書き直したエージェントが外す
+NEEDINFO_HEAD = f"{MARK} 情報待ち"
+NEEDINFO_LABEL = backend.NEEDINFO_LABEL
+_NEEDINFO_LINE = re.compile(re.escape(NEEDINFO_HEAD) + r" \(qsig: ([0-9a-f]{16})\)")
+# 判断待ちの側で書く [humanq] コメント (取り消し・保留・保留の解除・情報待ち)。両方のラベルのチケットの最後の [humanq] コメントが
 # これなら判断待ちに出す (回答かコメント無しなら回答済み)
-PENDING_SIDE = (UNDO_HEAD, SNOOZE_HEAD, UNSNOOZE_HEAD)
+PENDING_SIDE = (UNDO_HEAD, SNOOZE_HEAD, UNSNOOZE_HEAD, NEEDINFO_HEAD)
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 MAX_BODY = 64 * 1024
 # bd (埋め込み Dolt) は同時に開くと直列化して遅くなり、そのプロジェクトのセッションの書き込みとも競る。
 # プロジェクトごとに読みを 1 本にまとめ、CACHE_SEC の間は同じ結果を返す。書いたら捨てる
 CACHE_SEC = 8.0
-# 回答済みと保留の thread の覚え (backend.ThreadMemo)。THREAD_MEMO_SEC は覚えを使う上限 (このサーバーの書き込みは、その場で
-# 捨てる)、SNOOZE_READ_SEC は 1 回の読みで保留の thread を CLI で読む時間の上限 (回答済みには当てない)。SessionStart の hook は
+# 回答済みと保留・情報待ちの thread の覚え (backend.ThreadMemo)。THREAD_MEMO_SEC は覚えを使う上限 (このサーバーの書き込みは、その場で
+# 捨てる)、SNOOZE_READ_SEC は 1 回の読みで保留・情報待ちの thread を CLI で読む時間の上限 (回答済みには当てない)。SessionStart の hook は
 # 件数の読みを 8 秒で打ち切る。画面の読みの最中なら、その読みの結果を受け取る (Store.project の fresh)。上限は一覧と回答済みの
 # コメントの読みの後に数え始めるので、1 回の読みはその分だけ 2 秒より長い (回答済みのコメントを読むのは、覚えの無い・古いものだけ)
 THREAD_MEMO_SEC = 600.0
@@ -178,7 +185,7 @@ def shape(r: dict) -> dict:
 
 
 def marked(cs: list) -> list[dict]:
-    """[humanq] のコメント (回答・取り消し・保留・保留の解除) を、backend が返した順 (古い順) に。本文が文字列でないコメントは数えない
+    """[humanq] のコメント (回答・取り消し・保留・保留の解除・情報待ち) を、backend が返した順 (古い順) に。本文が文字列でないコメントは数えない
     (回答の書き込みは全部のコメントを数えるので、想定外の形の 1 件で回答を止めない)。"""
     return [c for c in cs if isinstance(c, dict) and isinstance(c.get("text"), str) and c["text"].startswith(MARK)]
 
@@ -242,6 +249,28 @@ def snooze_of(thread) -> dict | None:
     return {"until": until, "note": rest.strip(), "qsig": m.group(2)}
 
 
+def needinfo_line(sig: str) -> str:
+    """情報待ちのコメントの 1 行目。sig は今の問いの署名。"""
+    return f"{NEEDINFO_HEAD} (qsig: {sig})"
+
+
+def needinfo_of(thread) -> dict | None:
+    """thread (古い順の Comment) の最後の [humanq] コメントが情報待ちなら {note, qsig}。note は足りない情報 (空行の後の本文。
+    無ければ "")、qsig は情報待ちにしたときの問いの署名。最後の [humanq] コメントが情報待ちでない (回答・取り消し・保留など)・
+    1 行目の形が崩れている (問いの署名が無いものを含む)・thread を読めない (None) ときは None (情報待ちと確かめられないものは、
+    判断待ちに出す側に倒す)。"""
+    if not isinstance(thread, list):
+        return None
+    ms = marked(thread)
+    if not ms:
+        return None
+    first, _, rest = ms[-1]["text"].partition("\n")
+    m = _NEEDINFO_LINE.fullmatch(first.rstrip())
+    if m is None:
+        return None
+    return {"note": rest.strip(), "qsig": m.group(1)}
+
+
 def _expired(sn: dict) -> bool:
     """保留の戻る日が来たか (戻る日の当日から判断待ちに出す。前の日まで保留)。期限なしは来ない。"""
     return sn["until"] is not None and date.fromisoformat(sn["until"]) <= today()
@@ -258,10 +287,11 @@ def _snooze_order(x: dict):
 
 
 def load_project(repo: str, be=None, memo: backend.ThreadMemo | None = None) -> dict:
-    """be は読む backend (省略は bd)、memo は回答済みと保留の thread の覚え (Store が渡す。省略は覚えずに全部読む)。
-    判断待ち (human)・回答済み (answered)・保留中 (snoozed) を返す。判断待ちと保留中の各チケットには snooze が付く:
+    """be は読む backend (省略は bd)、memo は回答済みと保留・情報待ちの thread の覚え (Store が渡す。省略は覚えずに全部読む)。
+    判断待ち (human)・回答済み (answered)・保留中 (snoozed)・情報待ち (needinfo) を返す。判断待ちと保留中の各チケットには snooze が付く:
     判断待ちは None か、保留から戻ったもの ({until, note, expired, changed}。expired は戻る日が来た、changed は保留の後に
-    問いが書き換わった。少なくとも一方が true)。保留中は {until, note, expired: false, changed: false}。"""
+    問いが書き換わった。少なくとも一方が true)。保留中は {until, note, expired: false, changed: false}。情報待ちの各チケットには
+    needinfo ({note}。note は足りない情報) が付く (並びは判断待ちと同じ優先度 → 作成日)。"""
     human_rows, answered_rows = (be or _BD).load(repo, memo)
     human = sorted(((shape(r), r) for r in human_rows), key=lambda x: _prio(x[0]))
     answered = []
@@ -277,20 +307,27 @@ def load_project(repo: str, be=None, memo: backend.ThreadMemo | None = None) -> 
     both = {s["id"] for s, _ in human} & {s["id"] for s in answered}
     undone = {s["id"] for s in answered if s["id"] in both and s["answer"].startswith(PENDING_SIDE)}
     answered = [s for s in answered if s["id"] not in undone]
+    # 情報待ち: ラベルが付いていて、最後の [humanq] コメントが情報待ちで、情報待ちにしたときの問いが今の問いと同じものだけを
+    # 判断待ちから外す。エージェントが情報を足して問いを書き直したもの (問いの署名が違う) は、ラベルが残っていても判断待ちに出す。
     # 保留: ラベルが付いていて、最後の [humanq] コメントが保留で、戻る日が来ておらず、保留したときの問いが今の問いと同じ
     # (問いの署名が同じ) ものだけを判断待ちから外す。戻る日が来たもの・問いが書き換わったものは、判断待ちに戻して出す
-    # (ラベルは次の回答で外す)
-    waiting, snoozed, unread = [], [], 0
+    # (ラベルは次の回答で外す)。どちらも最後の [humanq] コメントで決めるので、1 件が両方になることは無い
+    waiting, snoozed, needinfo, unread = [], [], [], 0
     for s, r in human:
         if s["id"] in both and s["id"] not in undone:
             continue
+        thread = r.get("thread")
+        ni = needinfo_of(thread) if backend.labeled(r, NEEDINFO_LABEL) else None
+        if ni is not None and ni["qsig"] == s["qsig"]:
+            needinfo.append({**s, "needinfo": {"note": ni["note"]}})
+            continue
         labeled = backend.labeled(r, SNOOZE_LABEL)
-        sn = snooze_of(r.get("thread")) if labeled else None
+        sn = snooze_of(thread) if labeled else None
         if sn is None:
-            # 保留のラベルが付いているのにコメントを読めていない (thread が None: 1 回の読みの時間の上限に間に合わなかった・
-            # 読めなかった) 判断待ちは、保留かどうか確かめられないので判断待ちに出している。その件数を unread に数える
-            # (読めていて保留でなくなったものは数えない)
-            if labeled and not isinstance(r.get("thread"), list):
+            # 保留か情報待ちのラベルが付いているのにコメントを読めていない (thread が None: 1 回の読みの時間の上限に間に合わなかった・
+            # 読めなかった) 判断待ちは、保留か情報待ちか確かめられないので判断待ちに出している。その件数を unread に数える
+            # (読めていて保留・情報待ちでなくなったものは数えない)
+            if backend.watched(r) and not isinstance(thread, list):
                 unread += 1
             waiting.append({**s, "snooze": None})
             continue
@@ -300,12 +337,12 @@ def load_project(repo: str, be=None, memo: backend.ThreadMemo | None = None) -> 
         else:
             snoozed.append({**s, "snooze": why})
     snoozed.sort(key=_snooze_order)
-    return {"human": waiting, "answered": answered, "snoozed": snoozed, "unread": unread}
+    return {"human": waiting, "answered": answered, "snoozed": snoozed, "needinfo": needinfo, "unread": unread}
 
 
 def empty() -> dict:
     """読めなかったプロジェクトの一覧 (どれも空の list。呼ぶたびに新しい list)。"""
-    return {"human": [], "answered": [], "snoozed": []}
+    return {"human": [], "answered": [], "snoozed": [], "needinfo": []}
 
 
 def unreadable(reason: str) -> dict:
@@ -327,7 +364,7 @@ def _status_key(name: str) -> tuple:
 
 def overview_of(raw: dict, pending: set, answered: set) -> dict:
     """読んだ見通し (raw: {ok, cli, counts, ready} か {ok: false, error, cli}) を、画面に出す形にする。
-    pending と answered は判断待ちの読みのキャッシュにある id (判断待ち・保留中と、回答済み。CLI は打たない)。
+    pending と answered は判断待ちの読みのキャッシュにある id (判断待ち・保留中・情報待ちと、回答済み。CLI は打たない)。
     ready は answered のラベルの付いたもの (と、回答済みの一覧にあるもの) を除き、優先度 (数でなければ 9) → 作成日 → id の順に
     並べて上位 READY_TOP 件。human のラベルの付いたもの (と、判断待ちの一覧にあるもの) は human: true (画面は判断待ちのカードへの
     リンクにする)。ほかのラベルは解釈せず、文字列のものをそのまま渡す。ready_total は除いた後の件数。"""
@@ -363,7 +400,7 @@ class Store:
         self._guard = threading.Lock()
         self._refreshing: set[str] = set()
         self._pool = ThreadPoolExecutor(max_workers=4)
-        # 回答済みと保留の thread の覚え。書き込み (answer / undo / snooze / unsnooze) はそのチケットの覚えを捨てる
+        # 回答済みと保留・情報待ちの thread の覚え。書き込み (answer / undo / snooze / unsnooze / needinfo) はそのチケットの覚えを捨てる
         self._threads = backend.ThreadMemo(THREAD_MEMO_SEC, SNOOZE_READ_SEC)
         self._warming: set[str] = set()
         self._warm_pool = ThreadPoolExecutor(max_workers=1)     # 画面の読み (_pool) の枠を裏の読みで埋めない
@@ -423,7 +460,7 @@ class Store:
             return data
 
     def _warm_later(self, repo: str, be, ids: list[str]) -> None:
-        """時間の上限で読めなかった保留の thread を裏で読む (プロジェクトごとに 1 本)。読み終えたら、キャッシュを古い扱いに
+        """時間の上限で読めなかった保留・情報待ちの thread を裏で読む (プロジェクトごとに 1 本)。読み終えたら、キャッシュを古い扱いに
         して、次の読みが覚えで作り直すようにする。"""
         if not ids:
             return
@@ -452,7 +489,7 @@ class Store:
                 if hit:
                     self._cache[repo] = (float("-inf"), *hit[1:])
         except Exception as e:  # noqa: BLE001  裏の読みの失敗で、サーバーを止めない (次の表の読みが読み直す)
-            print(f"humanq: 保留のコメントを裏で読めなかった: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            print(f"humanq: 保留・情報待ちのコメントを裏で読めなかった: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         finally:
             with self._guard:
                 self._warming.discard(repo)
@@ -526,17 +563,17 @@ class Store:
         return raw
 
     def _known(self, repo: str) -> tuple[set, set]:
-        """判断待ちの読みのキャッシュ (古くてもよい。CLI は打たない) にある (判断待ちと保留中の id, 回答済みの id)。
+        """判断待ちの読みのキャッシュ (古くてもよい。CLI は打たない) にある (判断待ち・保留中・情報待ちの id, 回答済みの id)。
         ready の行にラベルが無い CLI でも、判断待ちのリンクと回答済みの除外を効かせるため。キャッシュが無ければ空 (読めなかった
         プロジェクトのキャッシュは、どの一覧も空)。"""
         hit = self._cache.get(repo)
         if hit is None:
             return set(), set()
         d = hit[1]
-        return {x["id"] for x in d["human"] + d["snoozed"]}, {x["id"] for x in d["answered"]}
+        return {x["id"] for x in d["human"] + d["snoozed"] + d["needinfo"]}, {x["id"] for x in d["answered"]}
 
     def writer(self, repo: str):
-        """回答・取り消し・保留・保留の解除を書き込む backend。bd と br のどちらで書くか決められないプロジェクトは、CLI を打たずに ReadOnly。"""
+        """回答・取り消し・保留・保留の解除・情報待ちを書き込む backend。bd と br のどちらで書くか決められないプロジェクトは、CLI を打たずに ReadOnly。"""
         kind, reason = self.route(repo)
         be = BACKENDS.get(kind)
         if be is None:
@@ -545,7 +582,7 @@ class Store:
 
     @contextlib.contextmanager
     def _writing(self, repo: str, iid: str):
-        """書き込みのロックの下で書き、終わったら (失敗しても) そのチケットの thread の覚え (回答済み・保留) を捨てる。
+        """書き込みのロックの下で書き、終わったら (失敗しても) そのチケットの thread の覚え (回答済み・保留・情報待ち) を捨てる。
         断った書き込み (Gone・Stale など) も捨てる: 古い覚えの署名で断られたカードが、次の読みで読み直した署名で出直す。"""
         with self._write_lock(repo):
             try:
@@ -581,16 +618,22 @@ class Store:
             row = next(r for r in rows if r["id"] == iid)
             cs = row.get("thread")
             snoozed = backend.labeled(row, SNOOZE_LABEL)
-            if snoozed and cs is None:
-                cs = _comments(be, repo, iid)          # 保留のラベルを humanq が付けたかを、回答の前のコメントで見る
-            # 保留のラベルを外すのは、この回答の前の最後の [humanq] コメントが保留か保留の解除のとき (humanq が付けた
-            # ラベル) だけ。利用者が自分の意味で付けた snoozed は外さない
-            drop_label = snoozed and _snoozed_by_humanq(cs, body_text)
+            asked = backend.labeled(row, NEEDINFO_LABEL)
+            if (snoozed or asked) and cs is None:
+                cs = _comments(be, repo, iid)          # 保留・情報待ちのラベルを humanq が付けたかを、回答の前のコメントで見る
+            # 保留のラベルを外すのは、前の回答より後に保留か保留の解除の [humanq] コメントがあるとき、情報待ちのラベルを外すのは
+            # 情報待ちのコメントがあるとき (humanq が付けたラベル) だけ。2 つの状態を続けて経由していても、それぞれ見る。
+            # 利用者が自分の意味で付けた snoozed・needs-info は外さない
+            # (情報待ちのラベルが残ったまま回答できるのは、エージェントが問いを書き直してラベルを外し忘れたとき)
+            drop_label = snoozed and _put_by_humanq(cs, body_text, (SNOOZE_HEAD, UNSNOOZE_HEAD))
+            drop_ask = asked and _put_by_humanq(cs, body_text, (NEEDINFO_HEAD,))
             sig = _record(be, repo, iid, body_text, cs=cs)
-            # 保留のラベルは付け替えより先に外す: 外し損ねてもチケットは判断待ちに残り (回答のコメントが最後の [humanq]
-            # コメントなので保留とは読まない)、画面からの送り直しで、回答を書かずに残りを済ませる
+            # 保留・情報待ちのラベルは付け替えより先に外す: 外し損ねてもチケットは判断待ちに残り (回答のコメントが最後の [humanq]
+            # コメントなので保留・情報待ちとは読まない)、画面からの送り直しで、回答を書かずに残りを済ませる
             if drop_label:
                 _label(be, repo, iid, "remove", SNOOZE_LABEL)
+            if drop_ask:
+                _label(be, repo, iid, "remove", NEEDINFO_LABEL)
             _swap(be, repo, iid, add="answered", remove="human")
             return sig
 
@@ -607,7 +650,7 @@ class Store:
             _swap(be, repo, iid, add="human", remove="answered")
 
     def _pending_row(self, be, repo: str, iid: str) -> tuple[dict, dict, list]:
-        """保留・保留の解除が書く前の読み直し: (判断待ちの Row, その問いの shape, コメント (古い順))。判断待ちに無ければ Gone。
+        """保留・保留の解除・情報待ちが書く前の読み直し: (判断待ちの Row, その問いの shape, コメント (古い順))。判断待ちに無ければ Gone。
         コメントは pending が読んでいればそれ (br)、無ければ comments で読む (読めなければ comment の段階の WriteError)。"""
         rows = be.pending(repo, iid)
         row = next((r for r in rows if r["id"] == iid), None)
@@ -658,6 +701,27 @@ class Store:
             if backend.labeled(row, SNOOZE_LABEL):
                 _label(be, repo, iid, "remove", SNOOZE_LABEL)
 
+    def needinfo(self, repo: str, body: dict) -> None:
+        """判断待ちを情報待ちにする (回答に必要な情報が足りないと、エージェントに返す): `[humanq] 情報待ち (qsig: <問いの署名>)` と
+        空行の後の足りない情報のコメントと、情報待ちのラベル。human・status・担当は変えない。body の note は足りない情報 (必須。
+        空白だけは断る)、qsig は画面が見ていた問いの署名 (違えば Changed)。コメントには今の問いの署名を書く (エージェントが問いを
+        書き直したら、情報待ちとは読まない)。回答済み (answered。両ラベルで最後が取り消しなどのものを除く) は Gone。同じ本文の
+        コメントが最後にあれば書かない (送り直し・2 回押し)。"""
+        iid = _body_id(body)
+        note = _body_note(body)
+        repo = self.resolve(repo) or repo
+        with self._writing(repo, iid):
+            be = self.writer(repo)
+            row, cur, cs = self._pending_row(be, repo, iid)
+            seen = body.get("qsig")
+            if seen is not None and seen != cur["qsig"]:
+                raise Changed("問いが書き換わっている (画面を更新して、見直してから送ってください)")
+            # 回答済み (answered のラベル) は情報待ちにしない。向きは保留と同じ (load_project と同じ)
+            if backend.labeled(row, "answered") and not last_of(cs)[0].startswith(PENDING_SIDE):
+                raise Gone("回答済みのチケットは情報待ちにできない (画面を更新してください)")
+            _record(be, repo, iid, needinfo_line(cur["qsig"]) + "\n\n" + note + "\n", cs=cs)
+            _label(be, repo, iid, "add", NEEDINFO_LABEL)
+
 
 def _body_id(body: dict) -> str:
     iid = body.get("id")
@@ -685,6 +749,18 @@ def _body_until(body: dict) -> str | None:
     return d.isoformat()
 
 
+def _body_note(body: dict) -> str:
+    """情報待ちの足りない情報。key note が必須で、前後の空白を除いて空でない文字列 (何が足りないかが無いと、エージェントが
+    調べられない)。返すのは前後の空白を除いたもの。"""
+    note = body.get("note")
+    if not isinstance(note, str):
+        raise ValueError("note (足りない情報) を文字列で送ってください")
+    note = note.strip()
+    if not note:
+        raise ValueError("note (足りない情報) が空 (何が足りないかを書いてください)")
+    return note
+
+
 def _comments(be, repo: str, iid: str) -> list:
     """書き込みの前の読み直しでコメントを読む。読めなければ comment の段階の WriteError (何も書いていない)。"""
     try:
@@ -700,13 +776,20 @@ def _resent(cs: list, text: str) -> bool:
     return isinstance(lt, str) and lt.strip() == text.strip() and _recent(last)
 
 
-def _snoozed_by_humanq(cs: list, text: str) -> bool:
-    """回答 (本文 text) の前の最後の [humanq] コメントが、保留か保留の解除か (保留のラベルを humanq が付けた)。
-    送り直しのとき (最後のコメントがこの回答) は、その前の [humanq] コメントを見る。"""
+def _put_by_humanq(cs: list, text: str, heads: tuple[str, ...]) -> bool:
+    """回答 (本文 text) の前の、前の回答より後の [humanq] コメントに heads のどれかで始まるものがあるか (そのラベルを humanq が
+    付けた)。保留のラベルは保留か保留の解除、情報待ちのラベルは情報待ちを渡す。最後の 1 件では決めない: 保留と情報待ちは続けて
+    書かれうる (戻る日が来たカードを情報待ちにする・書き直した問いを保留する) ので、もう一方の状態を挟んでも先のラベルを見落とさない。
+    前の回答より前は見ない (そこで外したか、回答の後に利用者が付けたもの)。送り直しのとき (最後のコメントがこの回答) は、その前から見る。"""
     ms = marked(cs)
     if _resent(cs, text):
         ms = ms[:-1]
-    return bool(ms) and ms[-1]["text"].startswith((SNOOZE_HEAD, UNSNOOZE_HEAD))
+    for m in reversed(ms):
+        if m["text"].startswith(heads):
+            return True
+        if not m["text"].startswith(PENDING_SIDE):     # 前の回答に当たった: これより前のラベルはそこで外している
+            return False
+    return False
 
 
 def _recent(comment: dict) -> bool:
@@ -769,7 +852,8 @@ def _comment(be, repo: str, iid: str, text: str) -> None:
 
 
 # 書き込みの API のパスと、それを書く Store のメソッドの名前 (失敗の応答の op にも入れる)
-WRITE_OPS = {"/api/answer": "answer", "/api/undo": "undo", "/api/snooze": "snooze", "/api/unsnooze": "unsnooze"}
+WRITE_OPS = {"/api/answer": "answer", "/api/undo": "undo", "/api/snooze": "snooze", "/api/unsnooze": "unsnooze",
+             "/api/needinfo": "needinfo"}
 
 
 def make_handler(store: Store, port: int, token: str, page: str, version: str):
@@ -835,14 +919,16 @@ def make_handler(store: Store, port: int, token: str, page: str, version: str):
                     return self._json(200, {"pending": True})
                 # ok:false (読めないプロジェクト) の human は 0 でも「0 件」ではない。hook はこれを見て「読めない」と伝える。
                 # cli は hook が案内の文を選ぶため (br のプロジェクトには bd のコマンドを案内しない)。
-                # human は保留中を数えない。snoozed は保留中の件数、returned は保留から判断待ちに戻った件数 (戻る日が来た・
+                # human は保留中・情報待ちを数えない。snoozed は保留中の件数、returned は保留から判断待ちに戻った件数 (戻る日が来た・
                 # 問いが書き換わった。human に入っている。判断待ちの snooze が null でないもの)。
-                # unread は、保留のラベルが付いているのにコメントを読めておらず判断待ちに出している件数 (human に入っている。
-                # サーバーの起動直後の読み残し)。hook は「うち N 件は保留の確認中」と伝える
+                # unread は、保留か情報待ちのラベルが付いているのにコメントを読めておらず判断待ちに出している件数 (human に入っている。
+                # サーバーの起動直後の読み残し)。hook は「うち N 件は保留中か情報待ちかを確認中」と伝える。
+                # needinfo は情報待ち (エージェントの番) のチケットの ID (human には入っていない)。hook はエージェントに調べさせる
                 self._json(200, {"human": len(d["human"]), "answered": [x["id"] for x in d["answered"]],
                                  "snoozed": len(d.get("snoozed") or []),
                                  "returned": sum(1 for x in d["human"] if x.get("snooze")),
                                  "unread": d.get("unread") or 0,
+                                 "needinfo": [x["id"] for x in d.get("needinfo") or []],
                                  "ok": d.get("ok", True), "error": d.get("error"),
                                  "cli": d.get("cli"), "writable": d.get("writable")})
             else:
@@ -878,7 +964,7 @@ def make_handler(store: Store, port: int, token: str, page: str, version: str):
                     sig = fn(repo, body)
                 finally:
                     store.invalidate(repo)
-                # 回答の成功には回答の署名 (asig) を入れる。取り消し・保留・保留の解除の成功は {ok: true} だけ
+                # 回答の成功には回答の署名 (asig) を入れる。取り消し・保留・保留の解除・情報待ちの成功は {ok: true} だけ
                 self._json(200, {"ok": True} if sig is None else {"ok": True, "asig": sig})
             except ReadOnly as e:
                 self._json(400, {"error": str(e), "code": "readonly", "op": op})

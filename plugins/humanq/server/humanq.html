@@ -185,35 +185,42 @@ details pre { white-space: pre-wrap; word-break: break-word; font: 13px/1.6 ui-m
 .ans { white-space: pre-wrap; margin: 8px 0 0; padding: 8px 12px; border-left: 3px solid var(--accent); background: var(--bg); border-radius: 0 8px 8px 0; }
 /* 保留: 判断待ちのカードの「保留」で開く欄 (期間の選択・日付・補足・「保留する」)。押した期間は aria-pressed で示す。
    欄のボタンは .row の外に置く (.row のボタンはトーストと重ならない位置に並べる約束で、「回答する」と「保留」だけを置く) */
-.snzbox { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); display: grid; gap: 8px; }
-.snzbox[hidden] { display: none; }
+.snzbox, .nibox { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); display: grid; gap: 8px; }
+.snzbox[hidden], .nibox[hidden] { display: none; }
 .snzopts { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
 .snzopt { font: inherit; font-size: 13px; line-height: 1.6; padding: 2px 12px; border-radius: 999px; border: 1px solid var(--control-line);
   background: var(--panel); color: var(--ink); cursor: pointer; }
 .snzopt[aria-pressed="true"], .snzdate.sel input { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 700; }
 .snzdate, .snzlead { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); }
-.snzdate input, input.snznote { font: inherit; font-size: 13px; color: var(--ink); background: var(--panel); border: 1px solid var(--control-line);
+.snzdate input, input.snznote, input.ninote { font: inherit; font-size: 13px; color: var(--ink); background: var(--panel); border: 1px solid var(--control-line);
   border-radius: 8px; padding: 2px 8px; }
-input.snznote { width: 100%; }
+input.snznote, input.ninote { width: 100%; }
 .snzrow { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-button.snzgo { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 8px; padding: 6px 16px; font: inherit; font-weight: 700; cursor: pointer; }
-button.snzgo:disabled { opacity: .45; cursor: default; }
+button.snzgo, button.nigo { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 8px; padding: 6px 16px; font: inherit; font-weight: 700; cursor: pointer; }
+button.snzgo:disabled, button.nigo:disabled { opacity: .45; cursor: default; }
+/* 情報待ち: 判断待ちのカードの「情報が足りない」(.row の下の 1 行。.row には「回答する」と「保留」だけを置く約束なので、外に置く。
+   左端から並べ、右下のトーストに横から掛からない幅に収める) と、押すと開く欄 (足りない情報・「情報待ちにする」) */
+.nirow { margin-top: 8px; }
+.nilead, .nistate { margin: 0; font-size: 13px; color: var(--muted); }
+.niask { margin: 8px 0 0; font-weight: 600; overflow-wrap: anywhere; }
+.niinfo { margin: 8px 0 0; font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; padding-left: 10px; border-left: 3px solid var(--accent); }
+.nistate { margin-top: 6px; }
 .snzinfo { margin: 8px 0 0; font-size: 14px; font-weight: 600; }
 .snznotetext, .snzback { margin: 6px 0 0; font-size: 13px; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
 .snzback { margin: 8px 0 0; padding-left: 10px; border-left: 3px solid var(--control-line); }
 /* 保留中の節 (ページの下。既定は畳む) と、回答済み・反映待ちの節 (各プロジェクトの下・全体の表示の下。既定は畳む)。
    見出し (保留中と全体の表示は h2.sec、プロジェクトごとの表示の回答済みは h3) は節の見出しと同じ見た目で、summary の行に収める。
    子孫ではなく子の結合子で書く: 節の中のカードも details (チケット本文・失敗の全文) を持つ */
-details.snz, details.ansgrp { margin-top: 28px; }
-details.snz > summary, details.ansgrp > summary { font-size: 14px; }
-details.snz > summary h2.sec, details.ansgrp > summary h2.sec, details.ansgrp > summary h3 { display: inline; margin: 0; }
-details.snz[open] > summary, details.ansgrp[open] > summary { margin-bottom: 10px; }
+details.snz, details.ni, details.ansgrp { margin-top: 28px; }
+details.snz > summary, details.ni > summary, details.ansgrp > summary { font-size: 14px; }
+details.snz > summary h2.sec, details.ni > summary h2.sec, details.ansgrp > summary h2.sec, details.ansgrp > summary h3 { display: inline; margin: 0; }
+details.snz[open] > summary, details.ni[open] > summary, details.ansgrp[open] > summary { margin-bottom: 10px; }
 /* 回答の後のフォーカスは、見えるカードが他に無いとき、畳んだ節の summary へ移る (moveFocusAway) */
-details.snz > summary:focus-visible, details.ansgrp > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+details.snz > summary:focus-visible, details.ni > summary:focus-visible, details.ansgrp > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* 畳んだままでも、中に取り消しの失敗で戻ったカードがあると分かるよう、見出しの行に失敗の件数を出して警告の色にする (syncAnsHead)。保留中の節も同じ (syncSnzHead) */
 details.ansgrp > summary.hasfail, details.ansgrp > summary.hasfail h2.sec, details.ansgrp > summary.hasfail h3,
 details.snz > summary.hasfail, details.snz > summary.hasfail h2.sec { color: var(--warn); }
-.snz .head .pj { display: block; }
+.snz .head .pj, .ni .head .pj { display: block; }
 .empty { color: var(--muted); padding: 24px 0; text-align: center; }
 .banner { background: var(--panel); border: 1px solid var(--warn); color: var(--warn); border-radius: var(--radius); padding: 10px 14px; margin-top: 14px; overflow-wrap: anywhere; }
 /* 消える: 高さを畳みながら薄くして横へ。現れる: 高さを 0 から広げながら上から下りてくる。
@@ -301,6 +308,7 @@ const pending = new Map();
 const errors = new Map();          // カードの key -> {summary, full} (送信の失敗。戻したカードに出す)
 let seen = null;                   // 前回までに見た判断待ち (通知用)
 let prevSnz = new Set();           // 前回の読みで保留中だった判断待ち (通知用)
+let prevNi = new Map();            // 前回の読みで情報待ちだった判断待ち (project + id -> 問いの署名。通知用)
 let lastData = null;               // 最後に受け取ったデータ (正規化済み。書き換えない)
 let loadSeq = 0;                   // load の通し番号
 let failStreak = 0;                // 読み込みが続けて失敗した回数 (成功で 0)
@@ -323,18 +331,20 @@ function el(tag, attrs, ...kids) {
 // ---- 通信 ----------------------------------------------------------------------------
 
 // written: 回答のコメントが書き込まれたか。サーバーが言ったときだけ true / false、分からなければ null (通信が切れた・内部エラーなど)。
-// op: 送信の種類 (answer | undo | snooze | unsnooze)。サーバーが返さなくても、送ったパスから分かる
+// op: 送信の種類 (answer | undo | snooze | unsnooze | needinfo)。サーバーが返さなくても、送ったパスから分かる
 class ApiError extends Error {
   constructor(message, info) { super(message); Object.assign(this, { status: 0, code: null, stage: null, written: null, op: null }, info); }
 }
 
 // 書き込みの API のパスと送信の種類。OPS は種類ごとの、チケットの出どころ (src) と行き先 (dst) の一覧と、知らせの言い方
-const OP_OF = { "/api/answer": "answer", "/api/undo": "undo", "/api/snooze": "snooze", "/api/unsnooze": "unsnooze" };
+const OP_OF = { "/api/answer": "answer", "/api/undo": "undo", "/api/snooze": "snooze", "/api/unsnooze": "unsnooze",
+  "/api/needinfo": "needinfo" };
 const OPS = {
   answer: { src: "human", dst: "answered", srcName: "判断待ち", dstName: "回答済み", what: "回答" },
   undo: { src: "answered", dst: "human", srcName: "回答済み", dstName: "判断待ち", what: "取り消し" },
   snooze: { src: "human", dst: "snoozed", srcName: "判断待ち", dstName: "保留中", what: "保留" },
   unsnooze: { src: "snoozed", dst: "human", srcName: "保留中", dstName: "判断待ち", what: "保留の解除" },
+  needinfo: { src: "human", dst: "needinfo", srcName: "判断待ち", dstName: "情報待ち", what: "情報待ち" },
 };
 // 知らない種類 (サーバーが返した想定外の op を含む) は回答として扱う (今までの文言と同じ)
 const opInfo = op => (Object.prototype.hasOwnProperty.call(OPS, op) ? OPS[op] : OPS.answer);
@@ -465,6 +475,12 @@ function snoozedToast(it, until) {
   toast(msg, { kind: "ok", key: ["snz", it.project, it.id, msg].join("\n"), action: { label: "解除", run: () => unsnoozeIt(it) } });
 }
 
+// 情報待ちにした知らせ。戻すボタンは無い (エージェントが情報を足して問いを書き直すと、判断待ちに戻る)
+function needinfoToast(it) {
+  toast(`「${summarize(it.title, 24)}」を情報待ちにしました (エージェントが調べて問いを書き直すと、判断待ちに戻ります)`,
+    { kind: "ok", key: ["ni", it.project, it.id].join("\n") });
+}
+
 // 消えない案内 (サーバーが入れ替わった、など)
 // 1 枠を種類 (kind) で共有する。token の案内 (再読み込みを求める) は、ほかの種類に上書きされず、成功でも消えない
 let noticeKind = null;
@@ -526,7 +542,7 @@ function enter(e) {
 // ボタンや選択肢には移さない: 「回答する」を押した Enter のリピートや押し直しが、移った先の
 // 「取り消して判断待ちに戻す」や選択肢をそのまま押してしまうため。Tab を押せば中へ入れる
 function moveFocusAway(card) {
-  // 畳んだ節 (保留中・回答済み・反映待ち。閉じた details) の中のカードは見えずフォーカスできないので、移り先にしない
+  // 畳んだ節 (保留中・情報待ち・回答済み・反映待ち。閉じた details) の中のカードは見えずフォーカスできないので、移り先にしない
   const all = [...document.querySelectorAll("#main .card")].filter(c => c === card
     || (!c.inert && !c.classList.contains("leaving") && !c.closest("details:not([open])")));
   const i = all.indexOf(card);
@@ -534,7 +550,7 @@ function moveFocusAway(card) {
   if (next) { next.focus(); return; }
   // 見えるカードがほかに無い (残りは畳んだ節の中だけ): フォーカスを捨てずに、畳んだ節の見出しの行 (summary) へ移す。
   // カードの後ろにある節を先に、無ければ前の節。カードの中の details (チケット本文など) の summary は含めない
-  const sums = [...document.querySelectorAll("#main details.snz:not([open]) > summary, #main details.ansgrp:not([open]) > summary")];
+  const sums = [...document.querySelectorAll("#main details.snz:not([open]) > summary, #main details.ni:not([open]) > summary, #main details.ansgrp:not([open]) > summary")];
   const to = sums.find(s => card.compareDocumentPosition(s) & Node.DOCUMENT_POSITION_FOLLOWING) || sums[sums.length - 1];
   if (to) to.focus();
 }
@@ -634,10 +650,11 @@ function optLabel(label) {
 const qKey = (path, id) => "q\n" + path + "\n" + id;
 const aKey = (path, id) => "a\n" + path + "\n" + id;
 const sKey = (path, id) => "s\n" + path + "\n" + id;     // 保留中のカード
-const KEY_OF = { q: qKey, a: aKey, s: sKey };
-// head に出すラベル: humanq 自身のもの (human / answered / snoozed) を除いた全部。接頭辞では選ばない
-// (snoozed は保留中の節と「保留中」の絞り込みで出すので、ラベルの印と「ラベル」の絞り込みには出さない)
-const HUMANQ_LABELS = new Set(["human", "answered", "snoozed"]);
+const nKey = (path, id) => "n\n" + path + "\n" + id;     // 情報待ちのカード
+const KEY_OF = { q: qKey, a: aKey, s: sKey, n: nKey };
+// head に出すラベル: humanq 自身のもの (human / answered / snoozed / needs-info) を除いた全部。接頭辞では選ばない
+// (snoozed は保留中の節と「保留中」の絞り込みで、needs-info は情報待ちの節で出すので、ラベルの印と「ラベル」の絞り込みには出さない)
+const HUMANQ_LABELS = new Set(["human", "answered", "snoozed", "needs-info"]);
 const shownLabels = it => (Array.isArray(it.labels) ? it.labels : []).filter(l => typeof l === "string" && !HUMANQ_LABELS.has(l));
 const MAX_LABELS = 4;
 // 作成日からの経過日数の表示 (暦の日数。当日は「今日」)。日付が読めない・未来のときは出さない
@@ -657,6 +674,8 @@ function ageText(created) {
 const sigQ = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, ageText(it.created_at), shownLabels(it), it.q, it.description, it.notes, it.writable, it.cli, it.pname, snoozeOf(it)]);
 const sigA = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, ageText(it.created_at), shownLabels(it), it.answer, it.asig, it.writable, it.cli, it.pname]);
 const sigS = it => { const sn = snoozeOf(it); return JSON.stringify([it.id, it.title, it.priority, it.created_at, ageText(it.created_at), shownLabels(it), it.q && it.q.ask, sn, sn && sn.until ? untilText(sn.until) : "", it.writable, it.cli, it.pname]); };
+// 情報待ちのカードは、問い (ask) と足りない情報を出す
+const sigN = it => JSON.stringify([it.id, it.title, it.priority, it.created_at, ageText(it.created_at), shownLabels(it), it.q && it.q.ask, needinfoOf(it).note, it.writable, it.cli, it.pname]);
 
 // ---- 保留 (snooze) の日付 ----
 // 保留の日付は「判断待ちに戻る日」(サーバーはその日の読みから判断待ちに出す)。今日はサーバーの今日 (/api/items の today)
@@ -690,6 +709,9 @@ function snoozeOf(it) {
 // 期間の選び方 (「日付を選ぶ」は別の入力)。days は判断待ちに戻るまでの日数 (その日に戻る)。null は期限なし
 const SNOOZE_PRESETS = [["d1", "明日", 1], ["d3", "3 日後", 3], ["d7", "1 週間後", 7], ["none", "期限なし", null]];
 const snzDrafts = new Map();       // 下書きの key -> {open, kind, date, note}。保留の欄の状態 (カードが作り直されても保つ。メモリだけ)
+// サーバーが付けた情報待ちの情報 ({note})。形が崩れていれば、足りない情報は空
+const needinfoOf = it => { const n = it && it.needinfo; return { note: n && typeof n === "object" && typeof n.note === "string" ? n.note : "" }; };
+const niDrafts = new Map();        // 下書きの key -> {open, note}。情報待ちの欄の状態 (カードが作り直されても保つ。メモリだけ)
 // 書き込めないプロジェクト (writable:false。br を読みだけで返す 0.13〜0.14 のサーバー) のカードに、回答の部品の代わりに出す 1 行
 const readonlyNote = it => el("p", { class: "ro" }, `このプロジェクト${it.cli ? ` (${it.cli}) ` : ""}は画面からはまだ回答できません`);
 
@@ -833,6 +855,45 @@ function snoozePanel(it, key) {
   return { toggle, box };
 }
 
+// 判断待ちのカードの「情報が足りない」と、押すと開く欄。回答に必要な情報が足りないとき、何が足りないかを書いて (必須)
+// 「情報待ちにする」で送る (エージェントが調べてチケットに足し、問いを書き直すと判断待ちに戻る)。Enter でも送り、Escape と
+// 「やめる」で閉じる。欄の状態は niDrafts に置き、カードが作り直されても保つ。返り値は {toggle (「情報が足りない」のボタン), box (欄)}
+function needinfoPanel(it, key) {
+  const dk = dkOf(it);
+  const st = niDrafts.get(dk) || { open: false, note: "" };
+  niDrafts.set(dk, st);
+  const toggle = el("button", { class: "ghost niopen", type: "button", "aria-expanded": String(st.open) }, "情報が足りない");
+  const note = el("input", { type: "text", class: "ninote", "aria-label": "足りない情報", maxlength: "2000", required: "",
+    placeholder: "何が足りないか (必須)。例: 見積もりの根拠・どの環境の話か" });
+  const go = el("button", { class: "nigo", type: "button" }, "情報待ちにする");
+  const cancel = el("button", { class: "ghost nicancel", type: "button" }, "やめる");
+  const box = el("div", { class: "nibox", role: "group", "aria-label": "回答に足りない情報" },
+    el("p", { class: "nilead" }, "エージェントが調べてチケットに足し、問いを書き直すと判断待ちに戻ります"), note, el("div", { class: "snzrow" }, go, cancel));
+  note.value = st.note;
+  const sync = () => {
+    box.hidden = !st.open;
+    toggle.setAttribute("aria-expanded", String(st.open));
+    go.disabled = !note.value.trim();
+  };
+  const setOpen = open => { st.open = open; sync(); };
+  toggle.addEventListener("click", () => { setOpen(!st.open); if (st.open) note.focus(); });
+  cancel.addEventListener("click", () => { setOpen(false); toggle.focus(); });
+  note.addEventListener("input", () => { st.note = note.value; sync(); });
+  box.addEventListener("keydown", e => {
+    if (e.isComposing || e.keyCode === 229) return;
+    if (e.key === "Escape") { e.stopPropagation(); setOpen(false); toggle.focus(); }
+    else if (e.key === "Enter" && e.target === note && !e.shiftKey && !e.altKey) { e.preventDefault(); go.click(); }
+  });
+  go.addEventListener("click", () => {
+    if (go.disabled || pending.has(key)) return;
+    if (questionChanged(it)) { reviewChanged(key, it); return; }
+    submit(key, it, "/api/needinfo", { project: it.project, id: it.id, qsig: it.qsig, note: note.value },
+      () => { niDrafts.delete(dk); needinfoToast(it); });
+  });
+  sync();
+  return { toggle, box };
+}
+
 function buildQuestion(it) {
   if (it.writable === false) return buildReadonlyQuestion(it);
   const key = qKey(it.project, it.id);
@@ -876,13 +937,15 @@ function buildQuestion(it) {
   const ask = md("p", "ask", q ? q.ask : it.title);
   ask.id = nextLabelId();                                   // カードの名前 (aria-labelledby)
   const snz = snoozePanel(it, key);
+  const ni = needinfoPanel(it, key);
   const sn = snoozeOf(it);
   // 保留から戻ったカードには、戻った理由 (保留の後に問いが書き換わった / 戻る日が来た) と保留したときの補足を出す
   // (何を待っていたかを思い出せる)
   const why = !sn ? null : sn.changed ? "保留の後に問いが書き換わったので、判断待ちに戻りました"
     : sn.expired ? `保留の戻る日${sn.until ? ` (${sn.until}) ` : ""}が来たので、判断待ちに戻りました` : null;
   const back = why ? el("p", { class: "snzback" }, why + (sn.note ? `。補足: ${sn.note}` : "")) : null;
-  // 「保留」は「回答する」の隣 (キーのヒントより前): .row のボタンは、右下のトーストに横から掛からない幅に収める
+  // 「保留」は「回答する」の隣 (キーのヒントより前): .row のボタンは、右下のトーストに横から掛からない幅に収める。
+  // 「情報が足りない」は .row に並べると幅を超えるので、保留の欄の下の 1 行に置く
   const card = el("section", { class: "card", "data-id": it.id, tabindex: "-1", "aria-labelledby": ask.id },
     head(it), back,
     q ? el("p", { class: "title" }, it.title) : null,      // 問いが無いときは、ask の位置にタイトルを出すので重ねない
@@ -890,7 +953,7 @@ function buildQuestion(it) {
     q && q.context ? context(it, q.context) : null,
     !q ? el("p", { class: "ctx" }, "問いがまだ整理されていません。本文を読んで自由に答えてください。") : null,
     opts, area, el("div", { class: "row" }, send, snz.toggle, el("span", { class: "keyhint", "aria-hidden": "true" }, "⌘↵ / Ctrl+↵ で送信")),
-    snz.box, el("div", { class: "errbox" }), body(it));
+    snz.box, el("div", { class: "nirow" }, ni.toggle), ni.box, el("div", { class: "errbox" }), body(it));
   // キー操作。Cmd+Enter / Ctrl+Enter は、補足欄か選択肢にフォーカスがあれば「回答する」を押したのと同じ (送れない状態の
   // click() は何もしない)。カードそのもの (tabindex="-1") にフォーカスがあるときは、数字でその番の選択肢を選ぶ (送らない)。
   // カードそのものでの Cmd/Ctrl+Enter は、そこで数字を押して選んだ後だけ効く (picked。カードからフォーカスが離れたら解く)。
@@ -971,6 +1034,16 @@ function buildSnoozed(it) {
     ctrl, el("div", { class: "errbox" }));
 }
 
+// 情報待ちのカード (ページの下の畳んだ節に出す)。題・問い・足りない情報と、エージェントの番である旨。回答の部品も操作のボタンも
+// 出さない (エージェントが情報を足して問いを書き直すと、新しい問いとして判断待ちに戻る)
+function buildNeedinfo(it) {
+  const title = el("p", { class: "title", id: nextLabelId() }, it.title);
+  return el("section", { class: "card nicard", "data-id": it.id, tabindex: "-1", "aria-labelledby": title.id }, head(it), title,
+    it.q && it.q.ask ? md("p", "niask", it.q.ask) : null,
+    el("p", { class: "niinfo" }, "足りない情報: " + (needinfoOf(it).note || "(書かれていません)")),
+    el("p", { class: "nistate" }, "エージェントの番です。調べてチケットに足し、問いを書き直すと判断待ちに戻ります"));
+}
+
 // 保留を解除して判断待ちに戻す (保留中のカードの「保留を解除」と、保留の成功のトーストの「解除」)。送り先は project と id だけで
 // 決まるので、保留中のカードがまだ作られていなくても送れる。自分で戻したものは「判断待ちが増えました」の通知に数えない
 function unsnoozeIt(it) {
@@ -1047,6 +1120,13 @@ function makeSnzBox() {
   const h = el("h2", { class: "sec" });
   const sum = el("summary", {}, h);
   return { el: el("details", { class: "snz" }, sum), sum, h };
+}
+// 情報待ちの節 {el (details。既定は閉じる), sum (summary), h (見出し h2)}。保留中の節の上 (ページの下) に、優先度 → 作成日の順で出す
+let niBox = null;
+function makeNiBox() {
+  const h = el("h2", { class: "sec" });
+  const sum = el("summary", {}, h);
+  return { el: el("details", { class: "ni" }, sum), sum, h };
 }
 // 保留中の並び: 戻る日の早いもの (期限なし・読めない戻る日は最後) → 優先度 → 作成日
 const untilOf = it => { const s = snoozeOf(it); return s && s.until && DATE_RE.test(s.until) ? s.until : null; };
@@ -1168,7 +1248,7 @@ function syncFilterBar(total, visible) {
   const projects = [], kinds = new Set(), prios = new Set(), labels = new Set();
   let any = false, anySnoozed = false;
   for (const p of lastData.projects) {
-    const items = [...p.human, ...p.answered, ...p.snoozed];
+    const items = [...p.human, ...p.answered, ...p.snoozed, ...p.needinfo];
     if (items.length || !p.ok) projects.push(p);      // 読めなかったプロジェクトも選べる (バナーだけを見られる)
     if (p.snoozed.length) anySnoozed = true;
     for (const i of items) { any = true; kinds.add(kindOf(i)); prios.add(prioOf(i)); for (const l of shownLabels(i)) labels.add(l); }
@@ -1216,10 +1296,11 @@ function render() {
   const hiddenKeys = new Set();      // 絞り込みで隠しているカード (畳まずに外す。失敗の表示は残す)
   const flatQ = [], flatA = [], flatBad = [];   // 全体の表示: 判断待ち・回答済み (プロジェクトの順) と、バナーを出すプロジェクト
   const allS = [];                   // 保留中 (どちらの表示でも、ページの下の 1 つの畳んだ節に出す)
+  const allN = [];                   // 情報待ち (保留中と同じく、ページの下の 1 つの畳んだ節に出す)
   let total = 0, visible = 0, idle = 0, stale = 0, anyItems = false, shownProjects = 0;
 
   const ensureCard = (it, kind) => {
-    const key = (kind === "ans" ? aKey : kind === "snz" ? sKey : qKey)(it.project, it.id);
+    const key = (kind === "ans" ? aKey : kind === "snz" ? sKey : kind === "ni" ? nKey : qKey)(it.project, it.id);
     seenKeys.add(key);
     let c = cards.get(key);
     if (c && c.el._leave) unleave(c.el);
@@ -1230,7 +1311,7 @@ function render() {
     }
     if (!c || rebuild) {
       const fresh = !c;
-      c = { el: kind === "ans" ? buildAnswered(it) : kind === "snz" ? buildSnoozed(it) : buildQuestion(it), sig: it._sig };
+      c = { el: kind === "ans" ? buildAnswered(it) : kind === "snz" ? buildSnoozed(it) : kind === "ni" ? buildNeedinfo(it) : buildQuestion(it), sig: it._sig };
       cards.set(key, c);
       if (fresh && rendered) entering.push(c.el);
     }
@@ -1244,9 +1325,10 @@ function render() {
     const q0 = p.human.filter(i => !pending.has(qKey(p.path, i.id)));
     const a0 = p.answered.filter(i => !pending.has(aKey(p.path, i.id)));
     const s0 = p.snoozed.filter(i => !pending.has(sKey(p.path, i.id)));
-    total += q0.length;                // ヘッダーの件数は絞り込みに関係なく全件 (保留中は数えない)
-    // 保留中は、判断待ちの無いプロジェクトのものも集める (節はプロジェクトの入れ物の外にある)
+    total += q0.length;                // ヘッダーの件数は絞り込みに関係なく全件 (保留中・情報待ちは数えない)
+    // 保留中と情報待ちは、判断待ちの無いプロジェクトのものも集める (節はプロジェクトの入れ物の外にある)
     for (const i of s0) { if (flt.snoozed !== "hide" && matchesFilter(i)) allS.push(i); else hiddenKeys.add(sKey(p.path, i.id)); }
+    for (const i of p.needinfo) { if (matchesFilter(i)) allN.push(i); else hiddenKeys.add(nKey(p.path, i.id)); }
     if (!q0.length && !a0.length && p.ok) { idle++; continue; }
     if (q0.length || a0.length) anyItems = true;
     const q = q0.filter(matchesFilter), a = a0.filter(matchesFilter);
@@ -1325,6 +1407,14 @@ function render() {
     syncSnzHead(sb, allS);
     snzEls = [sb.sum, ...allS.sort(bySnooze).map(i => ensureCard(i, "snz"))];
   }
+  // 情報待ちの節: 優先度 → 作成日 (全プロジェクトを通して)。開いたかどうかは入れ物 (details) が持つ (作り直さない)
+  let niEls = null;
+  if (allN.length) {
+    const nb = niBox || (niBox = makeNiBox());
+    if (nb.el._leave) unleave(nb.el);
+    nb.h.textContent = `情報待ち (${allN.length})`;
+    niEls = [nb.sum, ...allN.sort(byPrio).map(i => ensureCard(i, "ni"))];
+  }
 
   // 2. データに無い (送信中・サーバー側の理由で消えた) カードは畳む。畳んでいるカードには触らない。
   //    place が外してしまわないよう、並べる前に済ませる
@@ -1358,13 +1448,16 @@ function render() {
   if (flatBox && !flatPlan) { const fb = flatBox; retire(fb.el, () => { if (flatBox === fb) flatBox = null; }); }
   if (snzEls) place(snzBox.el, snzEls);
   else if (snzBox) { const sb = snzBox; retire(sb.el, () => { if (snzBox === sb) snzBox = null; }); }
+  if (niEls) place(niBox.el, niEls);
+  else if (niBox) { const nb = niBox; retire(nb.el, () => { if (niBox === nb) niBox = null; }); }
 
   emptyNote = emptyNote || el("p", { class: "empty" });
   idleNote = idleNote || el("p", { class: "empty" });
   emptyNote.textContent = filterActive() && anyItems ? "絞り込みに合うものはありません (解除すると全件に戻ります)" : `判断待ちはありません (登録 ${lastData.projects.length} プロジェクト)`;
   idleNote.textContent = `ほか ${idle} プロジェクトは判断待ちなし`;
   const busy = projEls.length > 0;
-  place(main, [busy ? null : emptyNote, ...projEls, busy && idle && !filterActive() ? idleNote : null, snzEls ? snzBox.el : null]);
+  place(main, [busy ? null : emptyNote, ...projEls, busy && idle && !filterActive() ? idleNote : null, niEls ? niBox.el : null,
+    snzEls ? snzBox.el : null]);
   syncFilterBar(total, visible);
   // 目次の帯: 判断待ち・回答済みが無くなった (送信中を除いて)・データから消えたプロジェクトのチップは、見出しを畳み終わるのを待たずに外す。
   // 帯 (並びの切り替え) は、判断待ちか回答済みを出しているプロジェクトがあれば、どちらの表示でも出す
@@ -1448,10 +1541,11 @@ function missingNote(e, op, proj, it) {
     : `書けたかどうか分かりません。チケットは今は${src}にありません。${dst}の一覧を確認してください`;
 }
 
-// op は送信の種類 (answer | undo | snooze | unsnooze)。省略は key の頭 (q は回答、a は取り消し) から決める
+// op は送信の種類 (answer | undo | snooze | unsnooze | needinfo)。省略は key の頭 (q は回答、a は取り消し) から決める
 async function failed(key, it, e, op) {
   op = op || (key[0] === "a" ? "undo" : key[0] === "s" ? "unsnooze" : "answer");
   const snz = op === "snooze" || op === "unsnooze";
+  const aside = snz || op === "needinfo";               // 判断待ちから脇へ置く (戻す) 書き込み。gone は「もう判断待ちに無い」と言う
   const info = explain(e);
   const label = `「${summarize(it.title, 24)}」(${it.id})`;
   if (e.status === 403 && e.message === "token") {      // サーバーが入れ替わった (書き込みは何も起きていない)。下書きは再読み込みの後も使う
@@ -1467,7 +1561,7 @@ async function failed(key, it, e, op) {
     // 前の知らせの「取り消す」「解除」は、ほかで反映された今の状態に合わない
     if (snz) dropToasts("snz", it); else dropAnsweredToasts(it);
     cards.delete(key);
-    toast(`${label}: ${e.code === "stale" ? STALE_MSG : snz ? "もう判断待ちにありませんでした (ほかで回答・反映済み)" : "ほかで回答・反映済みでした"}`);
+    toast(`${label}: ${e.code === "stale" ? STALE_MSG : aside ? "もう判断待ちにありませんでした (ほかで回答・反映済み)" : "ほかで回答・反映済みでした"}`);
     load();
     return;
   }
@@ -1486,8 +1580,8 @@ async function failed(key, it, e, op) {
     toast(`${label}: ${changed ? info.summary : info.summary + "。カードを戻しました"}`);
     return;
   }
-  // 取り消し・保留の解除の失敗では、問い直された新しい問いの下書きを消さない。保留の失敗で判断待ちから消えていたら、
-  // 保留中か回答済みに居る (下書きは判断待ちに戻ったときに使う) ので消さない
+  // 取り消し・保留の解除の失敗では、問い直された新しい問いの下書きを消さない。保留・情報待ちの失敗で判断待ちから消えていたら、
+  // 保留中・情報待ちか回答済みに居る (下書きは判断待ちに戻ったときに使う) ので消さない
   if (op === "answer") dropDraft(it);
   cards.delete(key);
   pending.delete(key);
@@ -1577,7 +1671,7 @@ function renderOverview(projects) {
 }
 
 // 次に着手できるチケットの 1 行。human の付いたもの (判断待ち) は、題を判断待ちのカードへのリンクにする。ラベルは解釈せず、
-// humanq 自身のもの (human / answered / snoozed) を除いて文字列のまま出す
+// humanq 自身のもの (human / answered / snoozed / needs-info) を除いて文字列のまま出す
 function readyRow(path, r) {
   const p = typeof r.priority === "number" ? r.priority : 9;
   const labels = shownLabels(r);
@@ -1596,10 +1690,10 @@ function readyRow(path, r) {
     el("p", { class: "ovt" }, t));
 }
 
-// 判断待ちのタブへ移り、そのチケットのカード (判断待ちか保留中) へ飛ぶ。畳んだ節の中なら開き、絞り込みで隠れていれば絞り込みを
-// 解いてから飛ぶ。カードが無ければ (判断待ちから外れた・まだ読み込んでいない) 知らせて読み直す
+// 判断待ちのタブへ移り、そのチケットのカード (判断待ち・保留中・情報待ち) へ飛ぶ。畳んだ節の中なら開き、絞り込みで隠れていれば
+// 絞り込みを解いてから飛ぶ。カードが無ければ (判断待ちから外れた・まだ読み込んでいない) 知らせて読み直す
 const liveCard = (path, id) => {
-  for (const key of [qKey(path, id), sKey(path, id)]) {
+  for (const key of [qKey(path, id), sKey(path, id), nKey(path, id)]) {
     const c = cards.get(key);
     if (c && c.el.isConnected && !c.el._leave) return c.el;
   }
@@ -1608,9 +1702,9 @@ const liveCard = (path, id) => {
 function openCard(path, id) {
   showTab("human");
   let c = liveCard(path, id);
-  // 絞り込みを解くのは、今の一覧 (判断待ち・保留中) にあるのに絞り込みで隠れているときだけ (無いものを探して利用者の絞り込みを消さない)
+  // 絞り込みを解くのは、今の一覧 (判断待ち・保留中・情報待ち) にあるのに絞り込みで隠れているときだけ (無いものを探して利用者の絞り込みを消さない)
   const proj = lastData && lastData.projects.find(p => p.path === path);
-  const listed = !!proj && [...proj.human, ...proj.snoozed].some(i => i.id === id);
+  const listed = !!proj && [...proj.human, ...proj.snoozed, ...proj.needinfo].some(i => i.id === id);
   if (!c && listed && filterActive()) {
     for (const k of FILTER_KEYS) flt[k] = "";
     fq.value = "";
@@ -1635,8 +1729,12 @@ function notifyNew(projects) {
   const ids = projects.flatMap(p => p.human.map(i => keyOf(p, i)));
   // 前の読みで保留中だったものが、保留の情報なし (snooze: null) で判断待ちに出たのは、戻る日を読めなかった読み (サーバーの
   // 入れ替え直後の読み残しなど)。増えたとは数えない (戻る日が来た・問いが書き換わったものは snooze が付くので数える)
-  const quiet = new Set(projects.flatMap(p => p.human.filter(i => !i.snooze && prevSnz.has(keyOf(p, i))).map(i => keyOf(p, i))));
+  // 前の読みで情報待ちだったものが、同じ問い (問いの署名が同じ) のまま判断待ちに出たのも、増えたとは数えない (サーバーの入れ替え
+  // 直後の読み残し・問いを書き直さずにラベルだけ外したもの)。エージェントが問いを書き直して戻したもの (署名が違う) は数える
+  const quiet = new Set(projects.flatMap(p => p.human.filter(i => (!i.snooze && prevSnz.has(keyOf(p, i))) || prevNi.get(keyOf(p, i)) === i.qsig)
+    .map(i => keyOf(p, i))));
   prevSnz = new Set(projects.flatMap(p => (p.snoozed || []).map(i => keyOf(p, i))));
+  prevNi = new Map(projects.flatMap(p => (p.needinfo || []).map(i => [keyOf(p, i), i.qsig])));
   if (seen === null) { seen = new Set(ids); return; }
   const fresh = ids.filter(i => !seen.has(i) && !quiet.has(i));
   seen = new Set(ids);
@@ -1654,6 +1752,8 @@ function normalize(raw, prev) {
     if (!p || typeof p.path !== "string" || !Array.isArray(p.human) || !Array.isArray(p.answered)) throw new Error("想定外のデータ (プロジェクトの形)");
     // 保留中 (snoozed) を返さない (古い) サーバーは、保留中が無い。返すなら配列でなければならない
     if (p.snoozed !== undefined && p.snoozed !== null && !Array.isArray(p.snoozed)) throw new Error("想定外のデータ (プロジェクトの形)");
+    // 情報待ち (needinfo) も同じ (返さない古いサーバーは、情報待ちが無い)
+    if (p.needinfo !== undefined && p.needinfo !== null && !Array.isArray(p.needinfo)) throw new Error("想定外のデータ (プロジェクトの形)");
     const old = prev && prev.projects.find(x => x.path === p.path);
     // writable を返さない (古い) サーバーは、どのプロジェクトにも書き込める
     const writable = p.writable !== false, cli = typeof p.cli === "string" ? p.cli : null;
@@ -1668,7 +1768,8 @@ function normalize(raw, prev) {
     return { path: p.path, name, ok: !!p.ok, error: p.error,
       okAt: p.ok ? Date.now() : (old && old.okAt) || null,         // このプロジェクトを最後に読めた時刻 (一度も読めていなければ null)
       human: keep ? old.human : p.human.map(conv(sigQ)), answered: keep ? old.answered : p.answered.map(conv(sigA)),
-      snoozed: keep ? old.snoozed : (p.snoozed || []).map(conv(sigS)) };
+      snoozed: keep ? old.snoozed : (p.snoozed || []).map(conv(sigS)),
+      needinfo: keep ? old.needinfo : (p.needinfo || []).map(conv(sigN)) };
   });
   return { projects };
 }

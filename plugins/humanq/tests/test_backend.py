@@ -31,6 +31,7 @@ Q = {"v": 1, "kind": "decision", "ask": "Q?", "context": "c", "recommended": "a"
 ANS_A = "[humanq] 回答: 案A (a)\n"
 QSIG = humanq.qsig(humanq.question({"humanq": Q}))                      # Q の問いの署名 (保留のコメントに書く)
 SNZ_NONE = f"[humanq] 保留: 期限なし (qsig: {QSIG})\n"                 # Q を期限なしで保留したコメント
+NI_NOTE = f"[humanq] 情報待ち (qsig: {QSIG})\n\n見積もりの根拠\n"         # Q を情報待ちにしたコメント
 ROW_KEYS = {"id", "title", "priority", "labels", "created_at", "description", "notes", "question_raw"}
 ANSWERED_LIST = ("list", "--label", "answered", "--flat", "-n", "0", "--json")      # status では絞らない
 
@@ -132,9 +133,32 @@ class HumanqSwapPoint(unittest.TestCase):
             (*w, "comments", "add", "hq-3", "-f", "<tmp>"), (*w, "label", "remove", "hq-3", "snoozed"),
         ])
 
+    def test_needinfo_goes_through_humanq_bd(self):
+        # 読みでコメントを打つのは情報待ちのラベルの付いた判断待ち (hq-4) だけ。情報待ちは human・status・担当に触れない
+        # (update も label remove human も打たない)
+        rec = Script(human=json.dumps([issue("hq-1"), issue("hq-4", labels=["human", "needs-info"])]),
+                     comments={"hq-4": json.dumps([{"text": NI_NOTE, "created_at": "2026-11-20T10:00:00Z"}])})
+        with mock.patch.object(humanq, "bd", rec):
+            try:
+                data = humanq.load_project("/r")
+                humanq.Store(self.tmp).needinfo("/r", {"id": "hq-1", "note": "x"})
+            except AssertionError:
+                raise
+            except Exception as e:  # noqa: BLE001  実装の変異で漏れた例外を、走っていない ERROR にしない
+                self.fail(f"想定外の例外: {type(e).__name__}: {e} (呼び出し: {rec.calls})")
+        self.assertEqual(([i["id"] for i in data["human"]], [i["id"] for i in data["needinfo"]]), (["hq-1"], ["hq-4"]))
+        self.assertEqual(data["needinfo"][0]["needinfo"], {"note": "見積もりの根拠"})
+        w = ("/r", "--actor", "user/humanq")
+        self.assertEqual(rec.calls, [
+            ("/r", "human", "list", "--json"), ("/r", *ANSWERED_LIST), ("/r", "comments", "hq-4", "--json"),
+            ("/r", "human", "list", "--json"), ("/r", "comments", "hq-1", "--json"),
+            (*w, "comments", "add", "hq-1", "-f", "<tmp>"), (*w, "label", "add", "hq-1", "needs-info"),
+        ])
+
     def test_a_snooze_whose_comments_cannot_be_read_fails_as_the_comment_stage(self):
-        # bd の pending は thread を持たないので、保留の書き込みは comments で読む。読めなければ何も書かずに comment の段階
-        for fn, body in (("snooze", {"id": "hq-1", "until": None}), ("unsnooze", {"id": "hq-1"})):
+        # bd の pending は thread を持たないので、保留・情報待ちの書き込みは comments で読む。読めなければ何も書かずに comment の段階
+        for fn, body in (("snooze", {"id": "hq-1", "until": None}), ("unsnooze", {"id": "hq-1"}),
+                         ("needinfo", {"id": "hq-1", "note": "x"})):
             with self.subTest(fn):
                 rec = Script(human=json.dumps([issue("hq-1", labels=["human", "snoozed"])]), comments={"hq-1": "oops"})
                 with mock.patch.object(humanq, "bd", rec):
@@ -157,8 +181,10 @@ class HumanqSwapPoint(unittest.TestCase):
                      comments={"hq-1": json.dumps([{"text": SNZ_NONE}]), "hq-2": json.dumps([{"text": ANS_A}])})
         cases = (("answer", {"id": "hq-1", "option": "a"}, None), ("undo", {"id": "hq-2"}, None),
                  ("snooze", {"id": "hq-1", "until": None}, None), ("unsnooze", {"id": "hq-1"}, None),
+                 ("needinfo", {"id": "hq-1", "note": "x"}, None),
                  ("answer", {"id": "hq-9", "option": "a"}, humanq.Gone), ("undo", {"id": "hq-9"}, humanq.Gone),
-                 ("snooze", {"id": "hq-9", "until": None}, humanq.Gone), ("unsnooze", {"id": "hq-9"}, humanq.Gone))
+                 ("snooze", {"id": "hq-9", "until": None}, humanq.Gone), ("unsnooze", {"id": "hq-9"}, humanq.Gone),
+                 ("needinfo", {"id": "hq-9", "note": "x"}, humanq.Gone))
         for fn, body, raises in cases:
             with self.subTest(fn=fn, id=body["id"]), mock.patch.object(humanq, "bd", rec):
                 store = humanq.Store(self.tmp)
@@ -312,6 +338,27 @@ class BackendSnoozedThread(unittest.TestCase):
                 self.assertIsNone(by[iid]["thread"], "渡せない id・読めないコメントは None (期日を読めない)")
         self.assertEqual([c[1:] for c in s.calls if c[1] == "comments"],
                          [("comments", "hq-2", "--json"), ("comments", "hq-4", "--json")], "渡せない id で bd を打った")
+
+    def test_needs_info_rows_get_a_thread_like_snoozed_rows(self):
+        # 情報待ちのラベル (needs-info) も、保留のラベルと同じく読む印。ラベルの文字列の部分一致・似た名前は印にしない
+        ni = [{"text": NI_NOTE, "created_at": "2026-11-20T10:00:00Z"}]
+        s = Script(human=json.dumps([issue("hq-1"), issue("hq-5", labels=["human", "needs-info"]),
+                                     issue("hq-6", labels=["human", "needs-info", "snoozed"]), issue("hq-7", labels="human needs-info"),
+                                     issue("hq-8", labels=["human", "needs_info", "needs-info-x"])]),
+                   comments={"hq-5": json.dumps(ni), "hq-6": json.dumps(ni)})
+        try:
+            human, _ = backend.BdBackend(run=s).load("/r")
+        except Exception as e:  # noqa: BLE001  実装の変異で漏れた例外を、走っていない ERROR にしない
+            self.fail(f"想定外の例外: {type(e).__name__}: {e} (呼び出し: {s.calls})")
+        by = {r["id"]: r for r in human}
+        self.assertEqual(len(by), 5, human)
+        self.assertEqual((by["hq-5"].get("thread"), by["hq-6"].get("thread")), (ni, ni))
+        for iid in ("hq-1", "hq-7", "hq-8"):
+            with self.subTest(iid=iid):
+                self.assertNotIn("thread", by[iid], "情報待ちのラベルの無い判断待ちに thread を付けた")
+        self.assertEqual([c[1:] for c in s.calls if c[1] == "comments"],
+                         [("comments", "hq-5", "--json"), ("comments", "hq-6", "--json")], "両方のラベルのチケットを 2 回読んだ")
+        self.assertEqual(backend.THREAD_LABELS, ("snoozed", "needs-info"))
 
 
 class Clock:
@@ -625,8 +672,111 @@ class LoadProjectSnoozeGate(unittest.TestCase):
             "書き換わって当日": want("human", "書き換わって当日", True, True)})
 
 
+class LoadProjectNeedinfoGate(unittest.TestCase):
+    """humanq.load_project の情報待ち: needs-info のラベルが付き、最後の [humanq] コメントが情報待ちで、その問いの署名が今の問いの
+    署名と同じものだけを情報待ちに出す。ほかは判断待ち (backend が thread を付けすぎても、ラベルの無いチケットを隠さない)。"""
+
+    def load(self, rows: dict) -> dict:
+        """rows は {id: (labels, thread)}。thread を付けたまま返す backend で読む。"""
+        class Rows:
+            def load(self, repo, memo=None):
+                return ([{**backend.BdBackend.row(issue(i, labels=lab)), "thread": th} for i, (lab, th) in rows.items()], [])
+        try:
+            return humanq.load_project("/r", Rows())
+        except Exception as e:  # noqa: BLE001
+            self.fail(f"想定外の例外: {type(e).__name__}: {e}")
+
+    def test_only_a_labeled_needinfo_for_the_current_question_is_needinfo(self):
+        ni, other = [{"text": NI_NOTE}], [{"text": humanq.needinfo_line("0" * 16) + "\n\nn\n"}]
+        lab, both = ["human", "needs-info"], ["human", "needs-info", "snoozed"]
+        data = self.load({
+            "ラベルなし": (["human"], ni), "情報待ち": (lab, ni), "書き直した": (lab, other),
+            "保留の後に情報待ち": (both, [{"text": SNZ_NONE}, {"text": NI_NOTE}]),
+            "情報待ちの後に保留": (both, [{"text": NI_NOTE}, {"text": SNZ_NONE}]),
+            "情報待ちの後に回答": (lab, [{"text": NI_NOTE}, {"text": ANS_A}]),
+            "読めない": (lab, None), "後ろにエージェントのコメント": (lab, ni + [{"text": "調べています"}]),
+        })
+        where = {i["id"]: k for k in ("human", "snoozed", "needinfo") for i in data[k]}
+        self.assertEqual(where, {"ラベルなし": "human", "情報待ち": "needinfo", "書き直した": "human", "保留の後に情報待ち": "needinfo",
+                                 "情報待ちの後に保留": "snoozed", "情報待ちの後に回答": "human", "読めない": "human",
+                                 "後ろにエージェントのコメント": "needinfo"})
+        self.assertEqual([i["needinfo"] for i in data["needinfo"]], [{"note": "見積もりの根拠"}] * 3)
+        self.assertEqual(data["unread"], 1, "読めない情報待ちを読み残しに数えていない")
+        for i in data["human"]:
+            self.assertIsNone(i["snooze"], i["id"])
+
+    def test_a_ticket_with_both_labels_whose_last_humanq_comment_is_a_needinfo_is_needinfo(self):
+        # 取り消しのラベルの付け替えに失敗して human と answered が両方付いたまま、情報待ちにしたもの。最後の [humanq] コメント
+        # (情報待ち) は判断待ちの側なので、回答済みには出さず、情報待ちに出す
+        thread = [{"text": ANS_A}, {"text": humanq.UNDO_HEAD + "\n"}, {"text": NI_NOTE}]
+
+        class Rows:
+            def load(self, repo, memo=None):
+                row = {**backend.BdBackend.row(issue("両方", labels=["human", "answered", "needs-info"])), "thread": thread}
+                return ([row], [dict(row)])
+        try:
+            data = humanq.load_project("/r", Rows())
+        except Exception as e:  # noqa: BLE001
+            self.fail(f"想定外の例外: {type(e).__name__}: {e}")
+        self.assertEqual([i["id"] for i in data["needinfo"]], ["両方"], "両ラベルの情報待ちを情報待ちに出さない")
+        self.assertEqual([i["id"] for i in data["answered"]], [], "最後が情報待ちの両ラベルのチケットを回答済みに出した")
+        self.assertEqual([i["id"] for i in data["human"]], [])
+
+    def test_needinfo_comes_in_the_order_of_the_pending_list(self):
+        # 判断待ちと同じ並び (優先度 → 作成日)
+        class Rows:
+            def load(self, repo, memo=None):
+                return ([{**backend.BdBackend.row(issue(i, labels=["human", "needs-info"], priority=p, created_at=c)), "thread": [{"text": NI_NOTE}]}
+                         for i, p, c in (("c", 2, "2026-11-01"), ("a", 0, "2026-11-03"), ("b", 2, "2026-10-01"))], [])
+        try:
+            data = humanq.load_project("/r", Rows())
+        except Exception as e:  # noqa: BLE001
+            self.fail(f"想定外の例外: {type(e).__name__}: {e}")
+        self.assertEqual([i["id"] for i in data["needinfo"]], ["a", "b", "c"])
+
+
+class NeedinfoOf(unittest.TestCase):
+    """情報待ちの読み (humanq.needinfo_of): 最後の [humanq] コメントの 1 行目が情報待ちの形のときだけ {note, qsig}。"""
+
+    S = "0123456789abcdef"
+
+    def of(self, thread):
+        try:
+            return humanq.needinfo_of(thread)
+        except Exception as e:  # noqa: BLE001  例外が漏れる変異を、走っていない ERROR にしない
+            self.fail(f"例外が漏れた: {type(e).__name__}: {e} (thread: {thread!r:.200})")
+
+    def test_the_forms_that_are_needinfo(self):
+        s = self.S
+        cases = {
+            "足りない情報 (複数行)": (f"[humanq] 情報待ち (qsig: {s})\n\nどの環境か\n本番か\n", {"note": "どの環境か\n本番か", "qsig": s}),
+            "足りない情報なし": (f"[humanq] 情報待ち (qsig: {s})\n", {"note": "", "qsig": s}),
+            "1 行目の末尾の空白と CR": (f"[humanq] 情報待ち (qsig: {s}) \r\n\nx", {"note": "x", "qsig": s}),
+        }
+        for what, (text, want) in cases.items():
+            with self.subTest(what):
+                self.assertEqual(self.of([{"text": "エージェントの問い"}, {"text": text}]), want)
+        self.assertEqual(self.of([{"text": humanq.needinfo_line(s) + "\n\nn\n"}]), {"note": "n", "qsig": s}, "サーバーが書く 1 行目を読めない")
+
+    def test_broken_or_other_texts_are_not_needinfo(self):
+        s = self.S
+        texts = {
+            "回答": ANS_A, "取り消し": humanq.UNDO_HEAD + "\n", "保留": SNZ_NONE, "保留の解除": humanq.UNSNOOZE_HEAD + "\n",
+            "署名が無い": "[humanq] 情報待ち\n\nx", "署名が短い": f"[humanq] 情報待ち (qsig: {s[:-1]})\n", "署名が大文字": f"[humanq] 情報待ち (qsig: {s.upper()})\n",
+            "署名の後に文字": f"[humanq] 情報待ち (qsig: {s}) x\n", "コロン付き": f"[humanq] 情報待ち: (qsig: {s})\n",
+            "署名が 2 行目": f"[humanq] 情報待ち\n(qsig: {s})\n", "NUL": f"[humanq] 情報待ち (qsig: {s})\x00\n",
+        }
+        for what, text in texts.items():
+            with self.subTest(what):
+                self.assertIsNone(self.of([{"text": NI_NOTE}, {"text": text}]), "最後の [humanq] コメントで決めていない")
+        for thread in (None, "x", 5, [], [{"text": "エージェントの問い"}], [None], [{"text": " " + NI_NOTE}]):
+            with self.subTest(thread=thread):
+                self.assertIsNone(self.of(thread))
+        self.assertEqual(self.of([{"text": NI_NOTE}, {"text": "エージェントの追記"}, {"text": None}, "odd"]), {"note": "見積もりの根拠", "qsig": QSIG})
+
+
 class UnreadableProjects(unittest.TestCase):
-    """読めないプロジェクトの data も、読めたときと同じ一覧の key (human・answered・snoozed) を持つ (画面と /api/summary が引く)。"""
+    """読めないプロジェクトの data も、読めたときと同じ一覧の key (human・answered・snoozed・needinfo) を持つ (画面と /api/summary が引く)。"""
 
     def setUp(self):
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="humanq-unreadable-"))
@@ -651,7 +801,7 @@ class UnreadableProjects(unittest.TestCase):
         def odd(repo, *args):
             raise KeyError("odd")
 
-        want = {"human": [], "answered": [], "snoozed": []}
+        want = {"human": [], "answered": [], "snoozed": [], "needinfo": []}
         for what, run in {"BdError": bd_down, "想定外の例外": odd}.items():
             with self.subTest(what):
                 data = self.project(run)
@@ -1082,6 +1232,19 @@ class BrLoad(unittest.TestCase):
         self.assertEqual((by["p-3"].get("thread", "key が無い"), by["p-4"].get("thread", "key が無い")), ([], None),
                          "comments の key が無い show は 0 件、list でなければ読めない (None)")
 
+    def test_needs_info_pending_rows_take_the_thread_from_the_same_show(self):
+        ni = ["human", "needs-info"]
+        cs = [bc(2, NI_NOTE, "2026-11-26T17:40:00Z", "user/humanq"), bc(1, "a")]                       # 新しい順で返る
+        s = BrScript(human=[br_issue("p-1"), br_issue("p-2", labels=ni)],
+                     shows=[[br_shown("p-1", comments=[bc(1, "x")]), br_shown("p-2", Q_OTHER, comments=cs, labels=ni)]])
+        human, _ = self.ok(s)
+        self.assertEqual(s.calls, [("/r", *BR_HUMAN), ("/r", *BR_ANSWERED), ("/r", "show", "p-1", "p-2", "--json")],
+                         "情報待ちがあっても show は 1 回")
+        by = {r["id"]: r for r in human}
+        self.assertEqual(len(by), 2, human)
+        self.assertEqual(set(by["p-1"]), ROW_KEYS, "情報待ちのラベルの無い判断待ちに thread を付けた")
+        self.assertEqual([c["text"] for c in by["p-2"].get("thread") or []], ["a", NI_NOTE], "thread は古い順")
+
     def test_empty_lists_do_not_run_show(self):
         s = BrScript(shows=[AssertionError("show を打った")])
         self.assertEqual(self.ok(s), ([], []))
@@ -1464,6 +1627,21 @@ class BrStore(unittest.TestCase):
         s = BrScript(human=[br_issue("p-1")], shows=[[br_shown("p-1", Q_OTHER, comments=[bc(1, "メモ")])]])
         self.assertIsNone(self.run_store(s, "unsnooze", {"id": "p-1"}))
         self.assertEqual(s.calls, [(r, *BR_HUMAN), (r, "show", "p-1", "--json")], "保留でないチケットの解除で書いた")
+
+    def test_needinfo_and_the_answer_after_a_rewritten_question_go_through_humanq_br(self):
+        r, w, ni = self.repo, (self.repo, "--actor", "user/humanq"), ["human", "needs-info"]
+        q = humanq.qsig(humanq.question({"humanq": Q}))
+        s = BrScript(human=[br_issue("p-1")], shows=[[br_shown("p-1", Q_OTHER, comments=[bc(1, "メモ")])]])
+        self.assertIsNone(self.run_store(s, "needinfo", {"id": "p-1", "note": "x", "qsig": q}))
+        self.assertEqual(s.calls, [(r, *BR_HUMAN), (r, "show", "p-1", "--json"), (*w, "comments", "add", "p-1", "-f", "<tmp>"),
+                                   (*w, "label", "add", "p-1", "needs-info")], "コメントは pending の show から読む。human・status は触らない")
+        # 問いを書き直したエージェントが needs-info を外し忘れた: 回答は、付け替えの前に needs-info を外す (コメントは show から読む)
+        old = bc(2, humanq.needinfo_line("0123456789abcdef") + "\n\nx\n", "2026-11-26T17:40:00Z", "user/humanq")
+        s = BrScript(human=[br_issue("p-1", labels=ni)], shows=[[br_shown("p-1", Q_OTHER, comments=[old, bc(1, "メモ")], labels=ni)]])
+        self.run_store(s, "answer", {"id": "p-1", "option": "a"})
+        self.assertEqual(s.calls, [(r, *BR_HUMAN), (r, "show", "p-1", "--json"), (*w, "comments", "add", "p-1", "-f", "<tmp>"),
+                                   (*w, "label", "remove", "p-1", "needs-info"), (*w, "label", "add", "p-1", "answered"),
+                                   (*w, "label", "remove", "p-1", "human")])
 
     def test_a_last_comment_whose_text_is_not_a_string_does_not_stop_the_write(self):
         # 送り直しの判定は、本文が文字列でない最後のコメントを同じ本文とみなさず、書く (例外で書き込みを止めない)
