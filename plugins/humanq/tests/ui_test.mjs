@@ -4005,3 +4005,39 @@ test("回答済みの節: 畳んだ節の中のカードでも、トーストの
     }, opts);
   }
 });
+
+test("回答済みの節: 畳んだ節の中に取り消しに失敗したカードがあると、節を開かなくても見出しに「(失敗 n 件)」が出る。失敗が無いときの見出しと開閉は変わらない (プロジェクトごとの表示・全体の表示)", async () => {
+  for (const flat of [false, true]) {
+    const s = new Script([proj(P1, [item("t-A1")], [answeredItem("t-A9")])]);
+    const okUndo = s.undoResult;
+    await withPage(s, async page => {
+      if (flat) { await page.locator('#toc .viewbtn[data-view="prio"]').click(); await until(async () => (await page.locator(".flat details.ansgrp").count()) === 1, 3000, "全体の表示"); }
+      const sec = ansSections(page);
+      const sum = () => sec.locator(":scope > summary");
+      assert.equal(await ansText(page), "回答済み・反映待ち (1)");
+      assert.equal(await sum().evaluate(e => e.classList.contains("hasfail")), false, "失敗が無いのに警告の色");
+      await answerVisible(page, "t-A1");
+      await until(async () => (await acard(page, "t-A1").count()) === 1, 3000, "回答済みに出る");
+      assert.equal(await ansText(page), "回答済み・反映待ち (2)", "失敗が無いのに見出しが変わった");
+      // 畳んだまま、トーストの「取り消す」を、サーバーが断る (ラベルの付け替えの失敗)
+      s.undoResult = () => ({ status: 502, body: { error: "label add boom", stage: "label", written: true, op: "undo" } });
+      assert.equal(await isOpen(sec, "回答済みの節"), false, "前提: 節が開いている");
+      await undoInToast(page).click({ timeout: 3000 });
+      await until(() => s.undos.length === 1, 3000, "取り消しの POST");
+      await until(async () => (await sec.locator("section.card.failed").count()) === 1, 3000, "失敗したカードが戻る");
+      assert.equal(await isOpen(sec, "回答済みの節"), false, "失敗で節が開いた (開閉の覚えは変えない)");
+      assert.equal(await ansText(page), "回答済み・反映待ち (2) (失敗 1 件)", "節を開かずに失敗が分からない");
+      assert.equal(await sum().evaluate(e => e.classList.contains("hasfail")), true, "警告の色が付かない");
+      // 開いても、見出しは同じ。開閉は押したとおり
+      await openAnswered(page);
+      assert.equal(await isOpen(sec, "回答済みの節"), true);
+      assert.equal(await ansText(page), "回答済み・反映待ち (2) (失敗 1 件)");
+      // 取り消しをやり直して成功すると、失敗の表示は消え、見出しは元の形に戻る
+      s.undoResult = okUndo;
+      await acard(page, "t-A1").getByRole("button", { name: "取り消して判断待ちに戻す" }).click();
+      await until(async () => (await qcard(page, "t-A1").count()) === 1, 3000, "判断待ちに戻る");
+      assert.equal(await ansText(page), "回答済み・反映待ち (1)", "成功した後も失敗の表示が残る");
+      assert.equal(await sum().evaluate(e => e.classList.contains("hasfail")), false, "警告の色が残る");
+    });
+  }
+});
