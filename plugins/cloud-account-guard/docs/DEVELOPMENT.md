@@ -356,9 +356,14 @@ QUERY が緩めるのは「アカウントが期待値と違う」「期待値�
   `X=${Y:- aws s3 rm x} gh ...`) は、0.29.9 の読みでも分解して候補の和集合を取る
   (`_LEGACY_VALUE_READING`)。値の終端は分割と同じ `_skip_opaque` で求める。
   0.29.9 の読みはシェルの読み方ではないので、`sure_chdirs` の読みの数には数えない
-  (`extract_candidate_readings(..., legacy_values=False)`)。値を飛ばした代入の後ろが代入だけの
-  セグメントは、0.29.9 と同じ候補 (最初に値を飛ばした代入から後ろ) を返す (`_env_names_changed` が
-  候補の文字列から変えた env の名前を読むため)。gh の token / host の env (`_GH_IDENTITY_ENV`) に
+  (`extract_candidate_readings(..., legacy_values=False)`)。代入だけのセグメントは、先頭の代入から後ろを
+  basename に揃えずに候補として返す (v0.36.8。`_env_names_changed` が候補の文字列から変えた env の名前を読むため。
+  0.36.7 までは 0.29.9 と同じく最後の代入か、最初に値を飛ばした代入から後ろを返していて、その前の代入の名前を
+  落としていた。先頭の語の置換の中にパスがある形 (`AWS_PROFILE=$(/bin/cat .p)`) は basename の `cat .p)` になり、
+  名前を読めなかった)。0.36.7 までの候補の先頭の語を `_strip_command_path` が basename に揃えていた形
+  (`X=1 Y=$(/usr/bin/firebase deploy)` / `X=$(/usr/bin/firebase deploy)`) は、0.36.7 までの読み
+  (`_ASSIGNMENT_TAIL_READING`) を足して置換の中の CLI を候補に残す (0.29.9 の読みと同じく `sure_chdirs` の読みの数
+  には数えない)。gh の token / host の env (`_GH_IDENTITY_ENV`) に
   読めない値を代入したセグメントの gh は、セグメントごと 0.29.9 の読みで分解し直す
   (書き込むアカウントを hook から決められない。`GH_TOKEN=$(cmd) gh ...` は 0.29.9 と同じく照合も
   自動切替もしない)
@@ -402,10 +407,13 @@ QUERY が緩めるのは「アカウントが期待値と違う」「期待値�
   含む) があれば `ANY_ENV` (v0.36.7。`export $(cat .env | xargs)` は 0.36.6 まで shlex の断片 `$(cat` を名前と読み、
   固定で通していた)。語は `_shell_words` で分け (引用符・置換・配列代入の値の空白で切らない。二重引用符の中の置換は、
   中に引用符があっても 1 つの塊として読む (`_double_quote_end`))、リダイレクトの語は飛ばす。名前を読める語は
-  0.36.6 と同じ shlex の読み (結果を変えない)。`read` は名前の形の引数を全部 (zsh の `名前?プロンプト` と、空白なしで
-  続けたリダイレクト `NAME<f` は、その前)、`printf` は `-v` の名前 (名前の形の値だけ。後ろは添字か空白なしの
-  リダイレクトだけ) を数える。名前を読めない `printf -v` (`"$N"` / `A$N`) は `ANY_ENV`、`read "$V"` は数えない
-  (option の値と区別しない)
+  0.36.6 と同じ shlex の読みに、追記・要素の代入の名前の本体 (`export HOME+=/x` の HOME) を足す (v0.36.8。`_base_names`)。
+  `unset` も名前を読めない語 (`unset $V` / `unset {A,B}`) があれば `ANY_ENV` (v0.36.8)。代入だけのセグメントは、
+  `_shell_words` の語の頭を `_ASSIGNMENT_HEAD` で読んだ名前 (添字と `+` を除いた本体。リダイレクトの語は飛ばす。
+  `_assignment_names`) と、0.36.7 までの shlex の読みの和 (v0.36.8)。`read` は名前の形の引数を全部 (zsh の
+  `名前?プロンプト` と、空白なしで続けたリダイレクト `NAME<f` は、その前)、`printf` は `-v` の名前 (名前の形の値だけ。
+  後ろは添字か空白なしのリダイレクトだけ) を数える。名前を読めない `printf -v` (`"$N"` / `A$N`) は `ANY_ENV`、
+  `read "$V"` は数えない (option の値と区別しない)
 
 wrapper ごとの env 伝播クラス (passthrough / scrub / opaque) の完全な表・実機根拠・
 **wrapper を追加するときのチェックリスト**は
