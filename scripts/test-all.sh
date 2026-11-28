@@ -13,6 +13,19 @@ cd "$ROOT"
 # 例: PYTHON=python3.12 scripts/test-all.sh
 PYTHON="${PYTHON:-python3}"
 
+# 時間を測るテスト (入力を大きくして処理が線形か・制限時間内に終わるかを確かめるもの) は
+# 1 件で数秒の CPU を使うので、既定の suite では走らせず、RUN_TIMING_TESTS=1 のときだけ
+# 走らせる。このスクリプト (make test) と CI は全 suite をまとめて確かめる検査なので、既定で立てる。
+# 外から RUN_TIMING_TESTS=0 を渡したときだけ飛ばす (手元で飛ばしたいとき用)。
+# それ以外の値 (未設定・空・true など) は 1 に揃える (値の綴りの違いで検査が黙って消えないように)。
+if [ "${RUN_TIMING_TESTS:-}" = "0" ]; then
+  export RUN_TIMING_TESTS=0
+  echo "時間を測るテストは走らせない (RUN_TIMING_TESTS=0)"
+else
+  export RUN_TIMING_TESTS=1
+  echo "時間を測るテストも走らせる (RUN_TIMING_TESTS=1)"
+fi
+
 count=0
 while IFS= read -r tdir; do
   count=$((count + 1))

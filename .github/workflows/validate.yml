@@ -146,7 +146,7 @@ jobs:
         run: scripts/test-all.sh
 
   tests-windows:
-    # Windows での動作を保証すると決めた suite (matrix の include) だけを Windows で回す job。
+    # Windows での動作を保証すると決めた suite と 1 モジュール (matrix の include) だけを Windows で回す job。
     #
     # 背景: 0.34.0 で「SIGALRM が無い環境では全 tool 呼出を deny」という実質
     # Windows 無効化ゲートを撤去し、非 UNIX でも通常のパイプラインを通すように
@@ -163,8 +163,8 @@ jobs:
     # scripts/test-all.sh (bash + find) で全 plugin を列挙する作りで、同じ
     # 列挙を Windows に通すとスクリプトの移植が本題より大きくなる。ここで
     # 知りたいのは「対象の suite が Windows でどう落ちるか」なので、
-    # 各 suite の package root で unittest discover を直接呼ぶ (test-all.sh が
-    # 各 suite に対して行うのと同じ呼び方)。
+    # 各 suite の package root で unittest を直接呼ぶ (suite 全体を回す entry は、test-all.sh が
+    # 各 suite に対して行うのと同じ `discover tests`)。
     # tests job の matrix に windows-latest を足す形へは統合しない: あちらは
     # scripts/test-all.sh (bash + find) で全 plugin を列挙する作りで、SFG 以外の
     # plugin の Windows 対応は未着手 (対象を広げるときに改めて判断する)。
@@ -175,11 +175,14 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     strategy:
-      # 片方が落ちてももう片方を最後まで走らせる。目的が失敗の洗い出しなので、
-      # 1 回の run で両 suite 分の失敗一覧が欲しい (ubuntu 側 matrix と同趣旨)。
+      # どれかが落ちても残りを最後まで走らせる。目的が失敗の洗い出しなので、
+      # 1 回の run で全 entry 分の失敗一覧が欲しい (ubuntu 側 matrix と同趣旨)。
       fail-fast: false
-      # suite = job 名に出る識別子 / dir = unittest discover を走らせる package root。
-      # 対象は「Windows での動作を保証する」と決めた suite だけ (全 plugin ではない)。
+      # suite = job 名に出る識別子 / dir = unittest を走らせる package root /
+      # target = `python -m unittest` に渡す対象 (suite 全体は `discover tests`、1 モジュールだけなら
+      # `tests.<module>`)。
+      # 対象は「Windows での動作を保証する」と決めた suite と、Windows の実物で確かめたい
+      # 1 モジュール (cloud-account-guard) だけ (全 plugin ではない)。
       # verify-plugin-release は hook の入出力を UTF-8 に固定しており、Windows の既定
       # codec (cp1252 等) で fail-open しないことをここで実機確認する (2026-09-25 追加)。
       # worktree-cwd-guard は Windows のパス (大文字小文字・区切り・8.3 短縮名) で checkout の
@@ -191,12 +194,24 @@ jobs:
         include:
           - suite: check-sensitive-files
             dir: plugins/sensitive-files-guardrail/hooks/check-sensitive-files
+            target: discover tests
           - suite: redact-sensitive-reads
             dir: plugins/sensitive-files-guardrail/hooks/redact-sensitive-reads
+            target: discover tests
           - suite: verify-plugin-release
             dir: plugins/verify-plugin-release/hooks/verify-plugin-release
+            target: discover tests
           - suite: worktree-cwd-guard
             dir: plugins/worktree-cwd-guard/hooks/worktree-cwd-guard
+            target: discover tests
+          # cloud-account-guard は suite 全体が FIFO などで Windows に未対応なので、
+          # Windows の設定 dir (APPDATA など) の決め方を確かめる 1 モジュールだけを回す。
+          # os.name を差し替えるだけでは再現できない Windows の実物の性質のうち、本物の os.name で
+          # import したときの定数 (gcloud の IDENTITY_ENV_VARS など) と WindowsPath の結合をここで見る
+          # (名前の大文字小文字を区別しない os.environ を直接確かめるケースはまだ無い)。
+          - suite: cloud-account-guard
+            dir: plugins/cloud-account-guard/hooks/cloud-account-guard
+            target: tests.test_windows_config_dir
     steps:
       # GH の Windows runner は Git for Windows 既定で core.autocrlf=true。この repo に
       # .gitattributes は無いため、放置すると tests/fixtures/** が CRLF で展開され、
@@ -227,9 +242,13 @@ jobs:
       # `python3` ではなく `python` を使う: setup-python が Windows で PATH に
       # 置くのは `python` で、`python3` があるとは限らない (あっても Microsoft
       # Store の shim を掴む可能性がある)。
+      # 時間を測るテストは RUN_TIMING_TESTS=1 のときだけ走る。ubuntu 側は test-all.sh が立てるので、
+      # こちらも同じに揃える。
       - name: Run ${{ matrix.suite }} unit tests
         working-directory: ${{ matrix.dir }}
-        run: python -m unittest discover tests
+        env:
+          RUN_TIMING_TESTS: '1'
+        run: python -m unittest ${{ matrix.target }}
 
   tag-plugin-releases:
     # main へ入った commit に対して、各 plugin の plugin.json の version に対応する
