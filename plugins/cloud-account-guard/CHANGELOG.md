@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.36.6
+
+### Fixed: 固定のある世界で、固定と違う値を指す context option のコマンドを固定で通していた
+
+- 期待値が未登録の aws / gcloud / firebase は、ディレクトリ単位の固定 (環境変数 / `firebase use` の記録) があれば
+  照合せずに通す (v0.19.0)。その判定がコマンドの context option を見ず、`aws --profile prod s3 rm ...`
+  (`AWS_PROFILE=dev` で固定) / `gcloud --account b@example.com run deploy ...` (a@example.com で固定) /
+  `firebase --project other deploy` (記録は別の project) を固定で通していた。CLI は option の値で動くので、
+  そのコマンドは固定の値では動かない。固定の無い世界では同じコマンドが未登録の deny になる。README の
+  「コマンドの中でその場だけ指定した値は固定とみなさない」とも食い違っていた
+- 0.36.6 は、固定と違う値を指す context option があれば固定とみなさない (未登録の deny。リモート read は警告):
+  - aws: `--profile` が `AWS_PROFILE` と違う
+  - gcloud: `--account` が固定のアカウント (`CLOUDSDK_CORE_ACCOUNT`、無ければ `CLOUDSDK_ACTIVE_CONFIG_NAME` の
+    構成の account) と違う。`--configuration` の構成の account が固定のアカウントと違う (`CLOUDSDK_CORE_ACCOUNT` で
+    固定しているときは環境変数が構成より勝つので見ない)。`--project` が `CLOUDSDK_CORE_PROJECT` と違う (project を
+    固定していなければ見ない)
+  - firebase: `--project` / `-P` の行き先が記録の行き先と違う (どちらも project root の `.firebaserc` の alias を
+    解決してから比べる)
+- 固定と同じ値を指す option (`AWS_PROFILE=dev` の固定での `aws --profile dev ...`、記録と同じ project に解決される
+  `firebase --project <alias>` など) は固定のまま。違うと確定しない形も固定のまま (解析で決められない形は deny
+  しない): 値を静的に読めない option (`--profile $P`)、`--configuration` の構成が無いか account が無い、
+  `.firebaserc` を firebase-tools と同じ内容に読めると確かめられない、短い option の結合形 (`firebase -jP x`)
+- gcloud の `--project` を比べるのは `CLOUDSDK_CORE_PROJECT` で project を固定しているときだけ。構成名
+  (`CLOUDSDK_ACTIVE_CONFIG_NAME`) で固定した世界では構成の project を固定の値に数えないので、その世界の `--project` と、
+  account が同じで project が違う構成を指す `--configuration` は固定のまま通る (0.36.5 までと同じ)
+- 固定のある世界で、`firebase emulators:start` / `emulators:exec` に `--project demo-*` を付けた形は、allow から deny に
+  変わる (固定と違う project 名を指すため。期待値を登録した世界では以前から deny)
+- 期待値を登録した service の照合と、context option の無いコマンドの判定は変えていない。kubectl / gh は固定の
+  仕組みが無いので変わらない
+
+### 比較
+
+- 旧新比較 (verify を不一致を返す偽物にして dispatch。CLI は起動しない): service ごとの代表のコマンド × context
+  option の形 (固定と違う値・同じ値・`=` 形・値の連結形・後置・読めない値・繰り返し・`--` の後ろ) × 置き場所、
+  代表形 × 前置き 59 種 (wrapper・option 付きの wrapper・`cd`・前置きの代入・heredoc・`export`・括弧) × 後置き 8 種、
+  2 段の連結、比較器の境界の入力 1,441 形を合わせた 10,233 形を、10 の世界 (全 service を登録・環境変数の固定
+  (固定の値を変えた 2 世界)・project も固定・gcloud の構成の固定・構成と環境変数の両方・firebase の記録が alias・sub だけの記録・起動 repo の
+  外・自動切替) で流した。deny → 非deny は全世界で 0 形、自動切替の回数の違いも 0 形。全 service を登録した世界と
+  自動切替の世界は全形で判定が同じ
+- 判定が締まった形 (固定のある世界ごとに 949〜2,810 形。allow → deny / allow → 警告 / 警告 → deny) は全部
+  context option を含み、最後に効く値が固定と違う (`cd sub && firebase --project <alias> deploy` は、sub の
+  `.firebaserc` に alias が無く別の project 名として解決されるもの)
+
 ## 0.36.5
 
 ### Fixed: 同じキーの自己参照 (`AWS_PROFILE=${AWS_PROFILE:-dev} aws ...`) を、固定の上書きに数えていた

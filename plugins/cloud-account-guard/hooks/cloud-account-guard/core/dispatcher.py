@@ -891,8 +891,11 @@ def _pinned(
     sudo の設定次第で、起動時の env と同じとは限らない)。
 
     context は target の context option (解決前。相対パスは書かれたまま)。`PIN_USES_CONTEXT` を
-    宣言した service (firebase) にだけ `is_pinned(env, d, context=...)` で渡す (v0.29.4。firebase は
-    `--config` のファイルのあるディレクトリの記録で固定を判定する)。
+    宣言した service にだけ `is_pinned(env, d, context=...)` で渡す (v0.29.4。firebase は
+    `--config` のファイルのあるディレクトリの記録で固定を判定する)。v0.36.6 から aws / gcloud も宣言し、
+    3 つとも、固定と違う値を指す context option (`aws --profile prod` / `gcloud --account b@example.com` /
+    `firebase --project other` など) のコマンドを固定とみなさない。0.36.5 までは aws / gcloud の固定が
+    context を見ず、firebase も `--project` を見ずに、option の値で動くコマンドを固定で通していた。
 
     unread_env (`command_parser.unread_env_candidates` の結果) は、候補の前置きの代入のうち値を
     静的に読めなかったもの (`AWS_PROFILE=$(echo prod) aws ...` / `AWS_PROFILE=$P aws ...`) のキーで、
