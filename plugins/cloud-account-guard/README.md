@@ -414,7 +414,14 @@ v0.19.0 から、その CLI に**ディレクトリ単位でアカウントを�
 - コマンドの中でその場だけ指定した値は固定とみなさない: 行頭のインライン env
   (`AWS_PROFILE=x aws ...`。起動時の値と同じなら可。値を静的に読めない代入
   (`AWS_PROFILE=$(cmd) aws ...` / `AWS_PROFILE=$VAR aws ...` / 追記 `AWS_PROFILE+=x`) は、値によらず
-  固定とみなさない。v0.30.3)、同じコマンドの前段の `export` /
+  固定とみなさない。v0.30.3。ただし同じキーの素の参照だけの代入 (`AWS_PROFILE=${AWS_PROFILE:-dev}` /
+  `AWS_PROFILE=$AWS_PROFILE` / `AWS_PROFILE="$AWS_PROFILE"` / `${AWS_PROFILE-dev}`) は、値が起動時の値のままに
+  なるときは固定のまま。`:-` は起動時の値が空でないとき、ほかは起動時に変数があるとき。既定の語に `$(` や空白・
+  引用符・`{` を含む形、コマンドのほかの場所でもそのキーの名前を使う形 (自己参照で始まって後ろに文字が続く語
+  `AWS_PROFILE=${AWS_PROFILE}-x` も、ほかの場所の名前に数える) と、env を scrub する `sudo` (`-E` /
+  `--preserve-env` を単独の語で書いていない形 (`-nE` のように束ねた形も含む)。`--preserve-env=LIST` も LIST の外を scrub するので含める) の後ろの
+  シェル経由 wrapper の中身は、従来どおり固定とみなさない。
+  v0.36.5)、同じコマンドの前段の `export` /
   `declare -x` / `unset` / 代入、内容を読めない `source` / `.` / `eval` / `set` の後。
   これを固定とみなすと、未登録の deny を行頭の 1 語で抜けられる (その値でアカウントが
   決まるのに、何とも照合しない)

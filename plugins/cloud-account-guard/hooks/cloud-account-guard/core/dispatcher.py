@@ -898,7 +898,8 @@ def _pinned(
     静的に読めなかったもの (`AWS_PROFILE=$(echo prod) aws ...` / `AWS_PROFILE=$P aws ...`) のキーで、
     値が読めないだけで上書きしたことは確かなので、行頭のインライン env の上書きと同じく数える
     (v0.30.3。0.30.2 までは inline_env に入らないこの代入を上書きと見ず、hook の env の値を固定として
-    通していた。実際の aws は代入した値で動く)。
+    通していた。実際の aws は代入した値で動く)。同じキーの素の参照だけで値が hook の env の値のままの代入
+    (`AWS_PROFILE=${AWS_PROFILE:-dev} aws ...`) は、印が付かないので上書きに数えない (v0.36.5)。
     """
     fn = getattr(svc, "is_pinned", None)
     if fn is None:

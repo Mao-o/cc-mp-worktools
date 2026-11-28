@@ -365,7 +365,16 @@ QUERY が緩めるのは「アカウントが期待値と違う」「期待値�
 - **値を読めない代入の印** (v0.30.3): 剥がした代入のうち値を収集 env に入れなかったもの (`$(` / backtick /
   `$VAR` / 配列 / 追記 / 要素の代入) のキーを、候補ごとに `unread_env_candidates` が返す。後ろの静的な
   代入が同じキーにあれば外し、sudo の env scrub で捨てる (収集 env と同じ規則)。照合の env には入れない
-  (hook の env で照合する) が、上書きしたことは確かなので `dispatcher._pinned` は上書きに数える
+  (hook の env で照合する) が、上書きしたことは確かなので `dispatcher._pinned` は上書きに数える。
+  例外 (v0.36.5): 同じキーの素の参照だけの代入 (`AWS_PROFILE=${AWS_PROFILE:-dev}` / `$AWS_PROFILE` など) は、
+  値が起動時の値のままと決められる形 (`_keeps_launch_value`) に限って印を付けない。コマンドのほかの場所で
+  そのキーを使う形 (`_self_reference_env` の名前の数。自己参照の語に数えるのは、語の全体がその形で、空白・
+  `;` `&` `|` `<` `>` `)`・末尾で終わるときだけ (`<(` / `>(` と zsh の `<N-M>` は語の続き)。
+  `K=${K}-x` / `K=$K(x)` の頭は数えない)・既定の語に特殊な文字を
+  含む形・env を scrub する `sudo` (`-E` / `--preserve-env` を単独の語で書いていない形 (`-nE` のように束ねた形も含む)と `--preserve-env=LIST`。
+  `_sudo_preserves_env(..., whole_env=True)` が偽) の後ろのシェル経由 wrapper の中身は従来どおり印を付ける。
+  収集 env と前置きの印の破棄では、`--preserve-env=LIST` は従来どおり保持に倒す (安全な向きが逆なので
+  `whole_env` で切り替える)
 - **分割し直した段への前置きの代入の継ぎ方** (v0.30.3): 正規化した結果をもう一度分割する段
   (`_segment_candidates`) は、外側の前置きの代入 (env と印) を由来ごとに継ぐ。heredoc の本文を落とした行
   (`AWS_PROFILE=prod cat <<EOF | aws ...`) は先頭の段だけ (前置きの代入はそのコマンドにだけ効く)。

@@ -142,6 +142,10 @@ option 表を取り違えた場合の劣化方向は**片側だけ**である点
 `env_keep` / `env_reset` まで静的には不可知なので、**preserve 指定があれば保守的に
 伝播を許す** (保持しすぎ方向は誤 deny を増やすだけで安全側)。
 
+例外 (v0.36.5): 同じキーの自己参照の代入 (`AWS_PROFILE=${AWS_PROFILE:-dev}`) を起動時の値のままと読むかの
+判定では、保持と読むと印が外れる側になり、安全な向きが逆になる。そこでは `--preserve-env=LIST` を scrub に
+数える (`_sudo_preserves_env(..., whole_env=True)`。LIST の外は scrub される。LIST の中身は読まない)。
+
 ### 3. env のリセット系 — wrapper として剥がさない (opaque)
 
 `env -i` / `env -u NAME` / `env --` は **透過 wrapper として剥がさない**。剥がして
