@@ -430,6 +430,123 @@ class BdLoadMemo(unittest.TestCase):
         self.assertEqual(self.memo.take_left("/r"), [])
 
 
+class BdLoadAnsweredMemo(unittest.TestCase):
+    """BdBackend.load に覚え (backend.ThreadMemo) を渡したときの回答済みの thread: 覚えの内は bd comments を打たない (回答済みの
+    件数に比例して増えない)・捨てた (サーバーが書いた) チケット・ttl を過ぎたもの・一覧から外れて戻ったものだけ読み直す・
+    読めなければ None (古い覚えは使わない)・時間の上限は当てない・両方のラベルのチケットは 1 回の読みで 1 回だけ打つ。"""
+
+    N = 5
+
+    @staticmethod
+    def c(text: str) -> dict:
+        return {"text": text, "created_at": "2026-11-20T10:00:00Z"}
+
+    def setUp(self):
+        self.clock = Clock()
+        self.memo = backend.ThreadMemo(ttl=600.0, budget=2.0, clock=self.clock)
+        self.step = 0.0                       # bd comments 1 回で進む時間
+        self.during = None                    # bd comments の最中に呼ぶ関数 (書き込みが割り込んだ読み)
+        self.threads = {f"hq-{i}": [self.c(f"[humanq] 回答: 案A (a)\n\nn{i}\n")] for i in range(1, self.N + 1)}
+        self.answered = list(self.threads)    # 回答済みの一覧に出る id
+        self.human: dict = {}                 # 判断待ちの一覧に出る id とラベル
+
+    def load(self) -> tuple[dict, dict, list]:
+        """1 回読み、({回答済みの id: thread}, {判断待ちの id: thread}, 打った bd comments の id の列)。"""
+        s = Script(human=json.dumps([issue(i, labels=lab) for i, lab in self.human.items()]),
+                   answered=json.dumps([issue(i, labels=["answered"]) for i in self.answered]),
+                   comments={i: (t if isinstance(t, str) else json.dumps(t)) for i, t in self.threads.items()})
+
+        def run(repo, *args):
+            if args[:1] == ("comments",):
+                self.clock.t += self.step
+                if self.during:
+                    self.during(args[1])
+            return s(repo, *args)
+        try:
+            human, answered = backend.BdBackend(run=run).load("/r", self.memo)
+        except Exception as e:  # noqa: BLE001  実装の変異で漏れた例外を、走っていない ERROR にしない
+            self.fail(f"想定外の例外: {type(e).__name__}: {e} (呼び出し: {s.calls})")
+        self.assertEqual(len(answered), len(self.answered), answered)
+        self.assertEqual(len(human), len(self.human), human)
+        read = [c[2] for c in s.calls if c[1:2] == ("comments",)]
+        return ({r["id"]: r.get("thread", "key が無い") for r in answered},
+                {r["id"]: r.get("thread", "key が無い") for r in human}, read)
+
+    def test_the_second_read_runs_no_comments_whatever_the_number_of_answered(self):
+        for n in (0, 5, 20):
+            with self.subTest(answered=n):
+                self.memo = backend.ThreadMemo(ttl=600.0, budget=2.0, clock=self.clock)
+                self.threads = {f"hq-{i}": [self.c(f"[humanq] 回答: 案A (a)\n\nn{i}\n")] for i in range(1, n + 1)}
+                self.answered = list(self.threads)
+                first, _, read = self.load()
+                self.assertEqual(read, self.answered, "最初の読みで回答済みのコメントを全部読んでいない")
+                self.assertEqual(first, self.threads)
+                second, _, read = self.load()
+                self.assertEqual(read, [], "覚えの内なのに回答済みの bd comments を打った")
+                self.assertEqual(second, first, "覚えから作った thread が、読んだ thread と違う")
+
+    def test_only_a_dropped_ticket_an_old_memo_and_a_ticket_back_in_the_list_are_read_again(self):
+        self.load()
+        self.memo.drop("/r", "hq-2")                         # サーバーが hq-2 に書いた (取り消して答え直した、など)
+        self.threads["hq-2"] = [self.c(ANS_A), self.c("[humanq] 取り消し\n"), self.c("[humanq] 回答: 案B (b)\n")]
+        got, _, read = self.load()
+        self.assertEqual(read, ["hq-2"], "書いたチケットだけを読み直していない")
+        self.assertEqual(got["hq-2"], self.threads["hq-2"])
+        self.answered.remove("hq-3")                         # エージェントが反映した (answered を外した・閉じた)
+        self.assertEqual(self.load()[2], [], "一覧から外れたチケットのコメントを読んだ")
+        self.assertEqual(self.memo.get("/r", "hq-3"), (None, False), "回答済みから外れたチケットを覚えたまま")
+        self.answered.append("hq-3")                         # ほかで答え直されて戻った: 前の覚えを使わずに読み直す
+        self.threads["hq-3"] = [self.c("[humanq] 回答: 案B (b)\n")]
+        got, _, read = self.load()
+        self.assertEqual((read, got["hq-3"]), (["hq-3"], self.threads["hq-3"]))
+        self.clock.t += 599
+        self.assertEqual(self.load()[2], [], "ttl の内に読み直した")
+        self.clock.t += 2
+        self.assertEqual(sorted(self.load()[2]), sorted(self.answered), "ttl を過ぎた覚えを読み直していない")
+
+    def test_a_failed_read_is_none_and_neither_uses_nor_keeps_up_the_old_memo(self):
+        self.load()
+        self.clock.t += 601
+        self.threads["hq-1"] = "oops"                        # 古い覚えのあるチケットが読めない
+        self.threads["hq-9"] = "oops"                        # 覚えの無いチケットが読めない
+        self.answered.append("hq-9")
+        got, _, read = self.load()
+        self.assertIn("hq-1", read)
+        self.assertIn("hq-9", read)
+        self.assertIsNone(got["hq-1"], "読めなかった回答済みに古い覚えを使った (覚えずに読んだときは None)")
+        self.assertIsNone(got["hq-9"])
+        self.assertFalse(self.memo.get("/r", "hq-1")[1], "読めなかったのに覚えを新しくした")
+        self.assertEqual(self.memo.get("/r", "hq-9"), (None, False), "読めなかったものを覚えた")
+        self.threads["hq-1"] = [self.c(ANS_A)]
+        got, _, read = self.load()
+        self.assertEqual((read, got["hq-1"]), (["hq-1", "hq-9"], [self.c(ANS_A)]), "読めなかったものを次の読みで読み直していない")
+
+    def test_the_time_limit_is_not_applied_to_the_answered(self):
+        self.step = 1.0                                      # 1 件 1 秒。保留なら budget 2 秒で 2 件まで
+        got, _, read = self.load()
+        self.assertEqual(read, self.answered, "回答済みの読みを時間の上限で止めた")
+        self.assertEqual(got, self.threads)
+        self.assertEqual(self.memo.take_left("/r"), [], "回答済みを裏の読みに回した")
+
+    def test_a_ticket_with_both_labels_is_read_once_per_read(self):
+        # 判断待ちの側の保留のラベルも付いたまま回答済みにも出るチケット (書き込みの途中の失敗など)。コメントは 1 回だけ打ち、
+        # 回答済みの側と保留の側に同じ thread を付ける
+        self.human = {"hq-1": ["answered", "human", "snoozed"]}
+        ans, hum, read = self.load()
+        self.assertEqual(read, self.answered, "両方のラベルのチケットのコメントを、同じ読みで 2 回打った")
+        self.assertEqual((ans["hq-1"], hum["hq-1"]), (self.threads["hq-1"], self.threads["hq-1"]))
+        self.assertEqual(self.load()[2], [])
+
+    def test_a_read_raced_by_a_write_is_not_memorised(self):
+        # 回答済みのコメントを読んでいる最中に、サーバーが同じ repo に書いて覚えを捨てた: その読みの古い thread で覚え直さない
+        self.during = lambda iid: self.memo.drop("/r", "hq-9") if iid == "hq-2" else None
+        got, _, read = self.load()
+        self.assertEqual(got, self.threads, "その読みの結果には、読んだ thread を使う")
+        self.during = None
+        self.assertEqual(self.memo.get("/r", "hq-2"), (None, False), "書き込みが割り込んだ読みの thread を覚えた")
+        self.assertEqual(self.load()[2], ["hq-2"], "割り込まれた読みのチケットを次の読みで読み直していない")
+
+
 class ThreadMemoGen(unittest.TestCase):
     """ThreadMemo: 読みの途中でサーバーが書いて覚えを捨てたら、その読みの古い thread で覚え直さない (repo ごとの世代)。"""
 
