@@ -4005,3 +4005,88 @@ test("回答済みの節: 畳んだ節の中のカードでも、トーストの
     }, opts);
   }
 });
+
+test("回答済みの節: 畳んだ節の中に取り消しに失敗したカードがあると、節を開かなくても見出しに「(失敗 n 件)」が出る。失敗が無いときの見出しと開閉は変わらない (プロジェクトごとの表示・全体の表示)", async () => {
+  for (const flat of [false, true]) {
+    const s = new Script([proj(P1, [item("t-A1")], [answeredItem("t-A9")])]);
+    const okUndo = s.undoResult;
+    await withPage(s, async page => {
+      if (flat) { await page.locator('#toc .viewbtn[data-view="prio"]').click(); await until(async () => (await page.locator(".flat details.ansgrp").count()) === 1, 3000, "全体の表示"); }
+      const sec = ansSections(page);
+      const sum = () => sec.locator(":scope > summary");
+      assert.equal(await ansText(page), "回答済み・反映待ち (1)");
+      assert.equal(await sum().evaluate(e => e.classList.contains("hasfail")), false, "失敗が無いのに警告の色");
+      await answerVisible(page, "t-A1");
+      await until(async () => (await acard(page, "t-A1").count()) === 1, 3000, "回答済みに出る");
+      assert.equal(await ansText(page), "回答済み・反映待ち (2)", "失敗が無いのに見出しが変わった");
+      // 畳んだまま、トーストの「取り消す」を、サーバーが断る (ラベルの付け替えの失敗)
+      s.undoResult = () => ({ status: 502, body: { error: "label add boom", stage: "label", written: true, op: "undo" } });
+      assert.equal(await isOpen(sec, "回答済みの節"), false, "前提: 節が開いている");
+      await undoInToast(page).click({ timeout: 3000 });
+      await until(() => s.undos.length === 1, 3000, "取り消しの POST");
+      await until(async () => (await sec.locator("section.card.failed").count()) === 1, 3000, "失敗したカードが戻る");
+      assert.equal(await isOpen(sec, "回答済みの節"), false, "失敗で節が開いた (開閉の覚えは変えない)");
+      assert.equal(await ansText(page), "回答済み・反映待ち (2) (失敗 1 件)", "節を開かずに失敗が分からない");
+      assert.equal(await sum().evaluate(e => e.classList.contains("hasfail")), true, "警告の色が付かない");
+      // 開いても、見出しは同じ。開閉は押したとおり
+      await openAnswered(page);
+      assert.equal(await isOpen(sec, "回答済みの節"), true);
+      assert.equal(await ansText(page), "回答済み・反映待ち (2) (失敗 1 件)");
+      // 取り消しをやり直して成功すると、失敗の表示は消え、見出しは元の形に戻る
+      s.undoResult = okUndo;
+      await acard(page, "t-A1").getByRole("button", { name: "取り消して判断待ちに戻す" }).click();
+      await until(async () => (await qcard(page, "t-A1").count()) === 1, 3000, "判断待ちに戻る");
+      assert.equal(await ansText(page), "回答済み・反映待ち (1)", "成功した後も失敗の表示が残る");
+      assert.equal(await sum().evaluate(e => e.classList.contains("hasfail")), false, "警告の色が残る");
+    });
+  }
+});
+
+test("保留中の節: 畳んだ節の中に解除に失敗したカードがあると、節を開かなくても見出しに「(失敗 n 件)」が出て警告の色になる。失敗が無いときの見出しと開閉は変わらない (プロジェクトごとの表示・全体の表示)", async () => {
+  for (const flat of [false, true]) {
+    const s = new Script([withSnoozed(proj(P1, [item("t-A1")]), [snoozedItem("t-S1", "2999-12-31"), snoozedItem("t-S2", "2999-12-31"), snoozedItem("t-S3", "2999-12-31")])]);
+    const okUnsnooze = s.unsnoozeResult;
+    await withPage(s, async page => {
+      if (flat) { await page.locator('#toc .viewbtn[data-view="prio"]').click(); await until(async () => (await page.locator(".flat").count()) === 1, 3000, "全体の表示"); }
+      const sumEl = snzSection(page).locator(":scope > summary");
+      const head = async () => (await sumEl.innerText()).trim();
+      const hasfail = () => sumEl.evaluate(e => e.classList.contains("hasfail"));
+      assert.equal(await snzSection(page).count(), 1);
+      assert.equal(await head(), "保留中 (3)");
+      assert.equal(await hasfail(), false, "失敗が無いのに警告の色");
+      const colorOf = () => sumEl.locator("h2").evaluate(e => getComputedStyle(e).color);
+      const normal = await colorOf();
+      const warn = await page.evaluate(() => { const d = document.createElement("i"); d.style.color = "var(--warn)"; document.body.append(d); const c = getComputedStyle(d).color; d.remove(); return c; });
+      assert.notEqual(normal, warn, "前提: 通常の色と警告の色が同じ");
+      assert.equal(await snzSection(page).evaluate(d => d.open), false, "前提: 節が畳んである");
+      // 畳んだまま、t-S1 の解除をサーバーが断る (保留中のカードに戻る)
+      s.unsnoozeResult = () => ({ status: 502, body: { error: "unsnooze boom", stage: "label", written: false, op: "unsnooze" } });
+      await page.evaluate(it => unsnoozeIt(it), { project: P1, id: "t-S1", title: "t-S1" });
+      await until(() => s.unsnoozes.length === 1, 3000, "解除の POST");
+      await until(async () => (await head()) === "保留中 (3) (失敗 1 件)", 3000, "節を開かずに失敗が分からない");
+      assert.equal(await hasfail(), true, "警告の色が付かない");
+      assert.equal(await colorOf(), warn, "見出しの文字が警告の色にならない");
+      assert.equal(await snzSection(page).evaluate(d => d.open), false, "失敗で節が開いた (開閉の覚えは変えない)");
+      // 開いても、見出しは同じ。開閉は押したとおり
+      await sumEl.click();                      // 失敗したカードは詳細の summary も持つので、節の見出しだけを押す
+      assert.equal(await snzSection(page).evaluate(d => d.open), true, "保留中の節が開かない");
+      assert.equal(await scard(page, "t-S1").evaluate(e => e.classList.contains("failed")), true, "失敗したカードに .failed が無い");
+      assert.equal(await head(), "保留中 (3) (失敗 1 件)");
+      // 失敗が 2 件になれば件数も 2
+      await page.evaluate(it => unsnoozeIt(it), { project: P1, id: "t-S2", title: "t-S2" });
+      await until(async () => (await head()) === "保留中 (3) (失敗 2 件)", 3000, "失敗の件数が 2 にならない");
+      // やり直して成功したものから、失敗の数は減る。全部成功すると、失敗の表示は消える
+      s.unsnoozeResult = okUnsnooze;
+      await scard(page, "t-S1").getByRole("button", { name: "保留を解除" }).click();
+      await until(async () => (await qcard(page, "t-S1").count()) === 1, 3000, "判断待ちに戻る");
+      assert.equal(await head(), "保留中 (2) (失敗 1 件)", "成功したものの失敗が数えられたまま");
+      assert.equal(await hasfail(), true, "まだ失敗が残るのに警告の色が消えた");
+      assert.equal(await colorOf(), warn);
+      await scard(page, "t-S2").getByRole("button", { name: "保留を解除" }).click();
+      await until(async () => (await qcard(page, "t-S2").count()) === 1, 3000, "判断待ちに戻る");
+      assert.equal(await head(), "保留中 (1)", "成功した後も失敗の表示が残る");
+      assert.equal(await hasfail(), false, "警告の色が残る");
+      assert.equal(await colorOf(), normal, "見出しの文字の色が元に戻らない");
+    });
+  }
+});

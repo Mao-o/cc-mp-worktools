@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.36.2
+
+### Docs: README の「守る範囲と守らない範囲」に、検証しない形を足す
+
+- `--` の無い `npm exec` で option 名を引用符で包んだ形、引用符を隣り合わせた語を wrapper に渡す形、wrapper の後ろの
+  `NAME=値` を代入と読む形、外部のプログラムとして起動する `cd`、空の `HOME=` の前置き、gh の設定ディレクトリの相対パスを
+  足した。判定のコードは変えていない (文書だけ)
+
+## 0.36.1
+
+### テスト整理 (挙動の変更なし): 時間を測るテストは `RUN_TIMING_TESTS=1` のときだけ走らせる
+
+- 経過時間や制限時間を assert するテスト 6 件 (`TestHelpRegexIsLinear` の 3 件、`test_background_ampersand` の線形性 2 件、
+  `test_lexing_edges` の読み直しの 1 件) に `skipUnless(RUN_TIMING_TESTS == "1")` を付けた。1 件で数秒の CPU を使い、
+  suite を並べて流すと負荷になるため。テストの中身と件数は変えない。全体検査 (`scripts/test-all.sh`) と CI は env を立てるので、
+  そこでは今までどおり走る
+
 ## 0.36.0
 
 ### Added: デバッグ trace に、成功 cache を使わなかった理由 (`cache_state`) を出す

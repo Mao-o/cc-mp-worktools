@@ -15,6 +15,10 @@ _PKG_DIR = Path(__file__).resolve().parent.parent
 if str(_PKG_DIR) not in sys.path:
     sys.path.insert(0, str(_PKG_DIR))
 
+# 時間を測るテスト (入力を大きくして処理が線形か・制限時間内に終わるかを確かめるもの) の印。1 件で数秒の CPU を使うので、
+# 環境変数 RUN_TIMING_TESTS=1 のときだけ走らせる (全体検査 `make test` と CI は立てる)。判定 (allow / deny) を確かめるテストには付けない。
+timing_test = unittest.skipUnless(os.environ.get("RUN_TIMING_TESTS") == "1", "時間を測るテスト (RUN_TIMING_TESTS=1 で走る)")
+
 # テストの repo で git に自動 gc / maintenance を起こさせない設定 (key, value)。
 #
 # `git commit` は終わりに `git maintenance run --auto --detach` を起動する (起動そのものは

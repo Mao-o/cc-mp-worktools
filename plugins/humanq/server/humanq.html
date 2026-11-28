@@ -187,6 +187,9 @@ details.snz > summary h2.sec, details.ansgrp > summary h2.sec, details.ansgrp > 
 details.snz[open] > summary, details.ansgrp[open] > summary { margin-bottom: 10px; }
 /* 回答の後のフォーカスは、見えるカードが他に無いとき、畳んだ節の summary へ移る (moveFocusAway) */
 details.snz > summary:focus-visible, details.ansgrp > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* 畳んだままでも、中に取り消しの失敗で戻ったカードがあると分かるよう、見出しの行に失敗の件数を出して警告の色にする (syncAnsHead)。保留中の節も同じ (syncSnzHead) */
+details.ansgrp > summary.hasfail, details.ansgrp > summary.hasfail h2.sec, details.ansgrp > summary.hasfail h3,
+details.snz > summary.hasfail, details.snz > summary.hasfail h2.sec { color: var(--warn); }
 .snz .head .pj { display: block; }
 .empty { color: var(--muted); padding: 24px 0; text-align: center; }
 .banner { background: var(--panel); border: 1px solid var(--warn); color: var(--warn); border-radius: var(--radius); padding: 10px 14px; margin-top: 14px; overflow-wrap: anywhere; }
@@ -983,6 +986,13 @@ let emptyNote = null, idleNote = null;
 // 作り直さないが、節が空になって外れた後や表示を切り替えた後に作り直しても、開いていた節は開いたまま出る (ページを読み直すと畳んだ状態に戻る)
 const FLAT_ANS_KEY = "\nflat";
 const openAns = new Set();
+// 回答済みの節の見出しの文。失敗 (取り消しの失敗で戻ったカードの赤い枠) が中にあるときだけ「(失敗 n 件)」を足し、行を警告の色にする:
+// 節は畳んだままなので、トーストが消えた後も、失敗したカードがあると見出しで分かる
+function syncAnsHead(g, title, list) {
+  const f = list.filter(i => errors.has(aKey(i.project, i.id))).length;
+  g.h3.textContent = `${title} (${list.length})` + (f ? ` (失敗 ${f} 件)` : "");
+  g.top.classList.toggle("hasfail", f > 0);
+}
 function makeGroup(kind, tag, cls, openKey) {
   const h3 = el(tag, cls ? { class: cls } : {});
   if (kind !== "ans") return { el: el("div", { class: "grp", "data-kind": kind }), h3, top: h3 };
@@ -990,6 +1000,13 @@ function makeGroup(kind, tag, cls, openKey) {
   const d = el("details", { class: "grp ansgrp", "data-kind": kind, open: openAns.has(openKey) }, top);
   d.addEventListener("toggle", () => { d.open ? openAns.add(openKey) : openAns.delete(openKey); });
   return { el: d, h3, top };
+}
+// 保留中の節の見出しの文。解除に失敗して戻ったカード (赤い枠) が中にあるときだけ「(失敗 n 件)」を足し、行を警告の色にする
+// (回答済みの節の syncAnsHead と同じ。節は畳んだままで、開閉の覚えも変えない)
+function syncSnzHead(sb, list) {
+  const f = list.filter(i => errors.has(sKey(i.project, i.id))).length;
+  sb.h.textContent = `保留中 (${list.length})` + (f ? ` (失敗 ${f} 件)` : "");
+  sb.sum.classList.toggle("hasfail", f > 0);
 }
 // 保留中の節 {el (details。既定は閉じる), sum (summary), h (見出し h2)}。判断待ちの一覧から外したものを、ページの下にまとめる
 let snzBox = null;
@@ -1236,7 +1253,8 @@ function render() {
       let g = pr.groups.get(kind);
       if (g) { if (g.el._leave) unleave(g.el); }
       else { g = makeGroup(kind, "h3", "", p.path); pr.groups.set(kind, g); }
-      g.h3.textContent = `${TITLES[kind]} (${lists[kind].length})`;
+      if (kind === "ans") syncAnsHead(g, TITLES[kind], lists[kind]);
+      else g.h3.textContent = `${TITLES[kind]} (${lists[kind].length})`;
       groups.push({ kind, g, els: [g.top, ...lists[kind].map(i => ensureCard(i, kind))] });
     }
     plan.push({ pr, groups });
@@ -1253,7 +1271,8 @@ function render() {
       let g = fb.groups.get(kind);
       if (g) { if (g.el._leave) unleave(g.el); }
       else { g = makeGroup(kind, "h2", "sec", FLAT_ANS_KEY); fb.groups.set(kind, g); }
-      g.h3.textContent = `${FLAT_TITLES[kind]} (${lists[kind].length})`;
+      if (kind === "ans") syncAnsHead(g, FLAT_TITLES[kind], lists[kind]);
+      else g.h3.textContent = `${FLAT_TITLES[kind]} (${lists[kind].length})`;
       groups.push({ kind, g, els: [g.top, ...lists[kind].map(i => ensureCard(i, kind))] });
     }
     const banners = flatBad.map(p => {
@@ -1270,7 +1289,7 @@ function render() {
   if (allS.length) {
     const sb = snzBox || (snzBox = makeSnzBox());
     if (sb.el._leave) unleave(sb.el);
-    sb.h.textContent = `保留中 (${allS.length})`;
+    syncSnzHead(sb, allS);
     snzEls = [sb.sum, ...allS.sort(bySnooze).map(i => ensureCard(i, "snz"))];
   }
 

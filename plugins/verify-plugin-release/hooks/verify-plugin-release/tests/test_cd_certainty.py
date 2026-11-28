@@ -608,6 +608,7 @@ class QuotedPunctuationTest(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(self._mask(text), want)
 
+    @_testutil.timing_test
     def test_many_words_take_linear_time(self):
         tokens = ("')' ", "')'", "''", "\\( ", "\\(", '"$(', '$("', "${x#(} ", "${", "$'", '`"', '"(', "')'x ", '"$(a ";" b)" ')
         _testutil.assert_linear(
@@ -697,6 +698,7 @@ class ExpansionCommandWordTest(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(unresolved_reason(cmd, find_invocations(cmd)))
 
+    @_testutil.timing_test
     def test_many_expansions_take_linear_time(self):
         tokens = ("$x ", "${x} ", "$x$x", "`a` ", "a$x", "$(a)", "$x;", "$x&", '"$x"')
         _testutil.assert_linear(
