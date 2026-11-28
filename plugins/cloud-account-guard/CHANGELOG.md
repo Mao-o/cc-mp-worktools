@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.36.4
+
+### Changed: hook の経路で、止まらない読みを迂回したファイルの読みを AST の走査で落とすテストを追加 (テストのみ。挙動の変更なし)
+
+- 対象が FIFO だと戻らない読みが 0.35.0 で 2 か所、0.36.3 で 3 か所、人の grep の棚卸しで見つかっていた。
+  「hook の経路の読みは `cli_config` を通す」は文書だけで、守られているかを確かめるものが無かった
+- `tests/test_read_bypass_scan.py` を追加: `core/` と `services/` を AST で走査し、ファイルを開く呼び出し
+  (`open` / `os.open` / `os.fdopen` / `io.open` / `.open(` / `.read_text(` / `.read_bytes(`) のうち、受け手が
+  `cli_config` でないものを数える。例外は (相対パス, 外側の関数名) ごとの許可の表で、回数まで固定する
+  (許可した関数に足された新しい読みを素通しにしない)。表に実在しない項目・回数の違いも落ちる。走査そのものも
+  テストする (走査の空振りで本体のテストが green のままにならない)
+- docs/DEVELOPMENT.md の例外の記述を、表と食い違わないように揃えた
+
 ## 0.36.3
 
 ### Fixed: firebase の configstore・aws の config・linked worktree の gitdir と commondir が FIFO でも、読みが止まらない
