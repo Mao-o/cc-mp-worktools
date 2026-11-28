@@ -37,6 +37,8 @@ from core.command_parser import (
     BACKGROUND,
     LIST_TERMINATORS,
     _ansi_c_quote_end,
+    _array_value_end,
+    _skip_opaque,
     extract_candidate_readings,
     extract_candidates,
     external_chdir_candidates,
@@ -185,10 +187,28 @@ _UNSET_BUILTINS = frozenset({"unset"})
 # 何を変えるか静的に読めないもの (ファイルや文字列を評価する)。
 _OPAQUE_ENV_BUILTINS = frozenset({"source", ".", "eval", "set"})
 ANY_ENV = "*"
+# シェルの変数名。
+_SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# 代入の組み込みの引数の名前の形 (`NAME` / `NAME[添字]` / 追記の `NAME+`)。
+_ASSIGNED_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?")
+# 名前の位置にあると、シェルが展開して別の名前を作りうる文字 (置換・展開と glob・brace 展開)。
+_UNREADABLE_NAME_CHARS = frozenset("$`*?[{")
+# 語の頭の配列代入 (`arr=(1 2)`)。値の中の空白で語を切らない。
+_ARRAY_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]\s]*\])?\+?=\(")
+# リダイレクトの語 (`>f` / `2>&1` / `&>f` / `<<<x`)。演算子だけの語は、次の語が行き先。
+_REDIRECT_WORD = re.compile(r"[0-9]*(?:<<<|<<-|<<|<>|<&|>>|>&|>\||<|>)|&>>?")
 
 
 def _env_names_changed(segment: str) -> set[str]:
-    """セグメントが (後続のセグメントに対して) 変える環境変数の名前。読めなければ {ANY_ENV}。"""
+    """セグメントが (後続のセグメントに対して) 変える環境変数の名前。読めなければ {ANY_ENV}。
+
+    代入の組み込み (`export` / `declare` / `typeset` / `readonly` / `local`) の引数に名前を静的に読めない語
+    (`export $(cat .env | xargs)` / `export $V` / `declare -x `...``) があれば、どの env を変えたか決められない
+    ので {ANY_ENV} (v0.36.7。`_has_unreadable_name`)。0.36.6 までは shlex で分けた語の `=` の前を名前として
+    数え、`$(cat` などの断片を名前と読んでいた (実際の CLI は展開した名前の値で走る。bash 3.2 / zsh -f で実測)。
+    名前を読める語 (`export FOO=$(cat f)` の FOO) は 0.36.6 と同じ読み。
+    `read` は引数の名前、`printf` は `-v` の名前に値を入れる (v0.36.7。`_read_names` / `_printf_names`)。
+    """
     try:
         words = shlex.split(segment)
     except ValueError:
@@ -201,11 +221,112 @@ def _env_names_changed(segment: str) -> set[str]:
     if head in _UNSET_BUILTINS:
         return {w for w in words[1:] if not w.startswith("-")} or set()
     if head in _ASSIGN_BUILTINS:
+        if _has_unreadable_name(segment):
+            return {ANY_ENV}
         return {w.split("=", 1)[0] for w in words[1:] if not w.startswith("-")}
+    if head == "read":
+        return _read_names(words[1:])
+    if head == "printf":
+        return _printf_names(words[1:])
     # 代入だけのセグメント (`X=1; cmd` の `X=1`)。export されていなくても、すでに
     # export 済みの変数なら後続の子プロセスに効く。
     if all("=" in w and w.split("=", 1)[0].isidentifier() for w in words):
         return {w.split("=", 1)[0] for w in words}
+    return set()
+
+
+def _has_unreadable_name(segment: str) -> bool:
+    """代入の組み込みのセグメントの引数に、名前を静的に読めない語があるか (v0.36.7)。
+
+    語の最初の `=` より前 (`=` が無ければ語の全体) が名前の形 (`NAME` / `NAME[添字]` / `NAME+`) でなく、`$`・
+    backtick・glob・brace 展開の文字 (`*` `?` `[` `{`) を含む語 (`$(cat .env | xargs)` / `$V` / `${N}=x` /
+    `"$K=$V"` / `` `cat f` `` / `{AWS_PROFILE,X}=prod`) は、シェルが展開した結果の名前に値が入る (bash 3.2 /
+    zsh -f で実測)。値を作る展開は、どれも名前より後ろか、名前の前の `$` / backtick から始まるので、最初の
+    `=` で切ってよい (`"FOO=$X"` / `FOO=$(cat f)` の名前は FOO)。リダイレクトの語 (`>f` / `2>/dev/null`。
+    演算子だけの語は次の語も) は名前に数えない。引用符の中の記号も数える (多めに数える側。名前の形にならない
+    語は、シェルが名前でないとして失敗する)。
+    """
+    skip = False
+    for word in _shell_words(segment)[1:]:
+        if skip:
+            skip = False
+            continue
+        redirect = _REDIRECT_WORD.match(word)
+        if redirect:
+            skip = redirect.end() == len(word)
+            continue
+        head = word.split("=", 1)[0]
+        if not _ASSIGNED_NAME.fullmatch(head) and any(c in _UNREADABLE_NAME_CHARS for c in head):
+            return True
+    return False
+
+
+def _shell_words(segment: str) -> list[str]:
+    """`segment` をシェルの語 (引用符を外す前) に分ける (v0.36.7)。
+
+    引用符・置換 (`_skip_opaque`)・語の頭の配列代入の値 (`arr=(1 2)`) の中の空白では切らない。閉じない配列代入
+    (`a=(1 2`) を一度見たら、後ろの語の配列代入の値は読まない (閉じを探す走査は末尾まで進むので、
+    `a=( a=( a=( ...` の語ごとに走査し直すと語の数の 2 乗になる)。
+    """
+    words: list[str] = []
+    start = None
+    arrays = True
+    i, n = 0, len(segment)
+    while i < n:
+        c = segment[i]
+        if c in " \t\n":
+            if start is not None:
+                words.append(segment[start:i])
+                start = None
+            i += 1
+            continue
+        if start is None:
+            start = i
+            array = _ARRAY_WORD.match(segment, i) if arrays else None
+            if array:
+                end = _array_value_end(segment, array.end() - 1)
+                if end is not None:
+                    i = end
+                    continue
+                arrays = False
+        end = _skip_opaque(segment, i)
+        i = end if end is not None and end > i else i + 1
+    if start is not None:
+        words.append(segment[start:])
+    return words
+
+
+def _read_names(args: list[str]) -> set[str]:
+    """`read` が値を入れる変数の名前 (v0.36.7。`args` は shlex で分けた引数)。
+
+    名前の形の語を全部数える (option の値 (`-p プロンプト`) やリダイレクトの行き先も、名前の形なら数える。多めに
+    数える側。bash の `-a 配列名` と、値を取らない zsh の `-p` の後ろの名前を落とさない)。zsh の
+    `名前?プロンプト` は `?` の前を名前とする。名前を静的に読めない語 (`read "$V"`) は数えない (option の値と
+    区別しない。名前を変数で渡す形は稀)。
+    """
+    names = set()
+    for word in args:
+        name = word.split("?", 1)[0]
+        if _SHELL_NAME.fullmatch(name):
+            names.add(name)
+    return names
+
+
+def _printf_names(args: list[str]) -> set[str]:
+    """`printf -v 名前` が値を入れる変数の名前 (v0.36.7。`args` は shlex で分けた引数)。
+
+    `-v名前` の結合形も読む。`--` か option でない語 (書式) から後ろは見ない。`名前[添字]` は名前の部分。
+    名前を静的に読めない語 (`printf -v "$V" x`) は、どの env を変えたか決められないので {ANY_ENV}。
+    """
+    for i, word in enumerate(args):
+        if word == "--" or not word.startswith("-"):
+            return set()
+        if word.startswith("-v"):
+            target = word[2:] or (args[i + 1] if i + 1 < len(args) else "")
+            name = _SHELL_NAME.match(target)
+            if name:
+                return {name.group()}
+            return {ANY_ENV} if "$" in target or "`" in target else set()
     return set()
 
 

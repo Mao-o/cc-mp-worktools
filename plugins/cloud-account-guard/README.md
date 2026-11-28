@@ -424,7 +424,11 @@ v0.19.0 から、その CLI に**ディレクトリ単位でアカウントを�
   v0.36.5)、同じコマンドの前段の `export` /
   `declare -x` / `unset` / 代入、内容を読めない `source` / `.` / `eval` / `set` の後。
   これを固定とみなすと、未登録の deny を行頭の 1 語で抜けられる (その値でアカウントが
-  決まるのに、何とも照合しない)
+  決まるのに、何とも照合しない)。前段の `export` / `declare` / `typeset` などの引数に名前を読めない語がある形
+  (`export $(cat .env | xargs)` / `export $V` / `` export `cat f` `` / `export {A,B}=x`) は、どの環境変数を変えたか
+  決められないので、どの service も固定とみなさない。前段の `read` / `printf -v` で identity の環境変数に値を
+  入れた後 (`read -r AWS_PROFILE < f`) も同じ (v0.36.7。0.36.6 までは、名前を読めない引数を変えた名前に数えず、
+  `read` / `printf -v` も数えていなかった)
 - コマンドの [context option](#コンテキスト指定-flag-の反映-v090) が固定と違う値を指すときも固定とみなさない
   (v0.36.6。0.36.5 までは option を見ず、`aws --profile prod s3 rm ...` を `AWS_PROFILE=dev` の固定で通していた。
   CLI は option の値で動く)。固定と同じ値を指す option は固定のまま。違うとみなす条件:
@@ -1787,6 +1791,11 @@ CLI ごとに 1 回。deny はせず、deny したコマンドには足さない
 
 ## 既知の制限
 
+- **前段で環境変数に値を入れる形のうち、ディレクトリ単位の固定の判定が数えないものがある** (v0.36.7)。数えるのは
+  `export` / `declare` / `typeset` / `readonly` / `local` / `unset` / 代入 / `read` / `printf -v` と、内容を読めない
+  `source` / `.` / `eval` / `set`。名前を変数で渡す `read "$V"`、`for AWS_PROFILE in ...` のループ変数、`getopts` /
+  `let` / `mapfile` / zsh の `print -v` / `vared` は数えないので、期待値が未登録で固定のある世界では、その後ろの
+  CLI を固定の値で通す (CLI は入れ直した値で走る)
 - **`pnpm <CLI 名>` / `yarn <CLI 名>` は、同じ名前の package.json の script でも CLI として照合する** (v0.32.0)。
   pnpm / yarn は同名の script があればそちらを走らせる (pnpm 11 / yarn 1.22 で実測) が、hook は package.json を
   読まない。止まる条件は直接 `firebase deploy` と打ったときと同じで、期待値との不一致が確定したときに加えて、
