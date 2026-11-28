@@ -191,12 +191,23 @@ jobs:
         include:
           - suite: check-sensitive-files
             dir: plugins/sensitive-files-guardrail/hooks/check-sensitive-files
+            target: discover tests
           - suite: redact-sensitive-reads
             dir: plugins/sensitive-files-guardrail/hooks/redact-sensitive-reads
+            target: discover tests
           - suite: verify-plugin-release
             dir: plugins/verify-plugin-release/hooks/verify-plugin-release
+            target: discover tests
           - suite: worktree-cwd-guard
             dir: plugins/worktree-cwd-guard/hooks/worktree-cwd-guard
+            target: discover tests
+          # cloud-account-guard は suite 全体が FIFO などで Windows に未対応なので、
+          # Windows の設定 dir (APPDATA など) の決め方を確かめる 1 モジュールだけを回す。
+          # os.name を差し替えるだけでは再現できない Windows の実物の性質
+          # (名前の大文字小文字を区別しない os.environ・WindowsPath の結合) をここで見る。
+          - suite: cloud-account-guard
+            dir: plugins/cloud-account-guard/hooks/cloud-account-guard
+            target: tests.test_windows_config_dir
     steps:
       # GH の Windows runner は Git for Windows 既定で core.autocrlf=true。この repo に
       # .gitattributes は無いため、放置すると tests/fixtures/** が CRLF で展開され、
@@ -227,9 +238,13 @@ jobs:
       # `python3` ではなく `python` を使う: setup-python が Windows で PATH に
       # 置くのは `python` で、`python3` があるとは限らない (あっても Microsoft
       # Store の shim を掴む可能性がある)。
+      # 時間を測るテストは RUN_TIMING_TESTS=1 のときだけ走る。ubuntu 側は test-all.sh が立てるので、
+      # こちらも同じに揃える。
       - name: Run ${{ matrix.suite }} unit tests
         working-directory: ${{ matrix.dir }}
-        run: python -m unittest discover tests
+        env:
+          RUN_TIMING_TESTS: '1'
+        run: python -m unittest ${{ matrix.target }}
 
   tag-plugin-releases:
     # main へ入った commit に対して、各 plugin の plugin.json の version に対応する

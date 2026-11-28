@@ -199,11 +199,17 @@ make lint
 make test
 ```
 
+時間を測るテスト (入力を大きくして処理が線形か・制限時間内に終わるかを確かめるもの) は、
+CPU を多く使うため、各 plugin の既定の suite では飛ばします。`RUN_TIMING_TESTS=1` を立てると走ります。
+`make test` (`scripts/test-all.sh`) と CI は常に立てて走らせます (外から `RUN_TIMING_TESTS=0` を渡したときだけ飛ばします)。
+
 CI (`.github/workflows/validate.yml`) は `make validate` 相当のチェックに加え、
 `ruff check` と、**Python 3.11 / 3.12 / 3.13 の matrix** でのユニットテストを回します。
 加えて、sensitive-files-guardrail の 2 suite と verify-plugin-release / worktree-cwd-guard を
 `windows-latest` で回す `tests-windows` job が **PR / main push のゲート**に入っています
-(リリース tag の付与もこの job の green を待ちます)。それ以外の plugin の Windows 対応は
+(リリース tag の付与もこの job の green を待ちます)。cloud-account-guard は、Windows の
+設定 dir の決め方を確かめる 1 モジュール (`tests.test_windows_config_dir`) だけをこの job で回します
+(suite 全体は FIFO などを使うため Windows には未対応です)。それ以外の plugin の Windows 対応は
 未検証です。hook の起動には、どの plugin も PATH 上の `python3` が必要です。
 
 開発フロー・テスト規約・version と CHANGELOG の運用は
