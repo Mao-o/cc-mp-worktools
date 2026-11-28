@@ -82,6 +82,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence, Union
 
@@ -393,14 +394,51 @@ _GIT_POINTER_READ_LIMIT = 4096
 def _read_git_pointer_file(path: str) -> Optional[str]:
     """``.git`` / ``commondir`` のような 1 行テキストを先頭だけ読む。
 
-    読めない (OSError) / 空なら None。デコード不能バイトは置換して読む
-    (path 文字列の判定にしか使わないため、例外で落とすより退行しない)。
+    読めない (OSError) / 空 / 通常のファイルでないなら None。デコード不能
+    バイトは置換して読む (path 文字列の判定にしか使わないため、例外で落とす
+    より退行しない)。
+
+    **開くときにも読むときにも止まらない** (0.36.5)。書き手のいない FIFO を
+    普通に開くと open が書き手を待って戻らず、hook が Claude Code の hook
+    timeout で打ち切られる (打ち切られた hook の出力は捨てられ、ツール呼出は
+    検証されずに通る)。``load_patterns`` は ``[project:]`` の第 1 候補が
+    worktree 自身のとき (``$CLAUDE_PROJECT_DIR`` が worktree) 毎回
+    ``_project_section_keys`` → ``_main_repo_root`` で linked worktree の
+    ``commondir`` を読むので、そこが FIFO だとその形では全ツール呼出で止まって
+    いた (main repo を指すときは worktree のファイルを評価する呼出だけ)。そこで ``O_NONBLOCK`` で開き (FIFO の
+    open がすぐ戻る)、``fstat`` で通常のファイルと確かめてから読む。通常の
+    ファイルでないもの (FIFO・デバイス・ディレクトリ) は読まずに None
+    (= 今までの「読めない pointer」と同じ扱い)。通常のファイルの読みは
+    ``O_NONBLOCK`` の影響を受けない。``O_NONBLOCK`` / ``O_BINARY`` の無い OS
+    では 0 として扱う (Windows に FIFO のパスは無く、``O_BINARY`` は
+    ``open()`` と同じく C ランタイムに改行を変換させないため)。
+
+    読みは 0.36.4 までの ``open(path, "r", ...)`` と同じテキストモードの
+    wrapper を fd に被せて行う (改行の読み替えと「先頭 N **文字**」の上限を
+    変えないため)。path に NUL があるときの ValueError は 0.36.4 と同じく
+    そのまま投げる。
     """
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
+        fd = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with os.fdopen(
+            fd, "r", encoding="utf-8", errors="replace", closefd=False
+        ) as f:
             head = f.read(_GIT_POINTER_READ_LIMIT)
     except OSError:
         return None
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass  # close の失敗で、読めた中身や None を例外に変えない (0.36.4 は None)
     return head or None
 
 
@@ -440,7 +478,9 @@ def _main_repo_root(dir_path: str) -> Optional[str]:
     - ``gitdir:`` 行が無い / 空
     - gitdir に ``worktrees`` 要素が無い (submodule の
       ``<super>/.git/modules/<name>`` を worktree と誤認しないため)
-    - ``commondir`` が読めない / 共有 git dir の basename が ``.git`` でない
+    - ``commondir`` が読めない (FIFO などの通常のファイルでないものを含む。
+      0.36.5 からは中身を読まずにそう扱う) / 共有 git dir の basename が
+      ``.git`` でない
       (bare repo の worktree には「main repo の working tree」が存在しない)。
       **submodule の worktree** (``<super>/.git/modules/<name>/worktrees/<wt>``)
       も同じ判定で None になる — commondir が
@@ -515,7 +555,9 @@ def _git_common_dir(top: str) -> Optional[str]:
     - ``.git`` がディレクトリ → それ自身 (main checkout)
     - ``.git`` がファイル → ``gitdir:`` の参照先。``commondir`` があればその解決
       結果 (linked worktree の管理領域から共有 git dir を指す)、無ければ gitdir
-      自身 (submodule / ``--separate-git-dir`` の checkout)
+      自身 (submodule / ``--separate-git-dir`` の checkout)。``commondir`` が
+      読めない (FIFO などの通常のファイルでないものを含む。0.36.5) ときも
+      無いのと同じに扱う
 
     「同じ repository の別 checkout か」の判定 (``_same_repository``) にだけ使う。
     値は字面 (``normpath``) のまま返す。参照先が無い (prune 前の stale な
