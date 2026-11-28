@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.36.1
+
+### テスト整理 (挙動の変更なし): 時間を測るテストは `RUN_TIMING_TESTS=1` のときだけ走らせる
+
+- 経過時間や制限時間を assert するテスト 6 件 (`TestHelpRegexIsLinear` の 3 件、`test_background_ampersand` の線形性 2 件、
+  `test_lexing_edges` の読み直しの 1 件) に `skipUnless(RUN_TIMING_TESTS == "1")` を付けた。1 件で数秒の CPU を使い、
+  suite を並べて流すと負荷になるため。テストの中身と件数は変えない。全体検査 (`scripts/test-all.sh`) と CI は env を立てるので、
+  そこでは今までどおり走る
+
 ## 0.36.0
 
 ### Added: デバッグ trace に、成功 cache を使わなかった理由 (`cache_state`) を出す

@@ -183,6 +183,7 @@ class SplitTests(unittest.TestCase):
     def _cands_within(self, seconds, command):
         return self._within(seconds, lambda: [c for c, _e in extract_candidates(command)])
 
+    @unittest.skipUnless(os.environ.get("RUN_TIMING_TESTS") == "1", "時間を測るテスト (RUN_TIMING_TESTS=1 で走る)")
     def test_unclosed_command_substitution_inside_expansion_is_linear(self):
         """閉じない `$(` を含む `${` の連なりで、入れ子 1 段ごとに走査が倍にならない。"""
         command = "aws s3 rm s3://b/x\necho " + "${x:-$(echo " * 40
@@ -191,6 +192,7 @@ class SplitTests(unittest.TestCase):
         command = "aws s3 rm s3://b/x\necho " + "${x $(echo " * 40 + ")" * 40
         self.assertIn("aws s3 rm s3://b/x", self._cands_within(2, command))
 
+    @unittest.skipUnless(os.environ.get("RUN_TIMING_TESTS") == "1", "時間を測るテスト (RUN_TIMING_TESTS=1 で走る)")
     def test_many_unclosed_parameter_expansions(self):
         command = "aws s3 rm s3://b/x\necho " + "${" * 20000
         self.assertIn("aws s3 rm s3://b/x", self._cands_within(1, command))
