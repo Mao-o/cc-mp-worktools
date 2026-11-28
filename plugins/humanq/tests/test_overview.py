@@ -178,9 +178,11 @@ def rr(iid, prio=2, labels=(), created="2026-11-01T00:00:00Z", status="open", ti
 
 
 class OverviewShape(unittest.TestCase):
-    def shape(self, raw, pending=(), answered=()):
+    def shape(self, raw, pending=(), answered=(), needinfo=None):
         try:
-            return humanq.overview_of(raw, set(pending), set(answered))
+            if needinfo is None:                     # 情報待ちを渡さない呼び方 (前の版の呼び出し) も通る
+                return humanq.overview_of(raw, set(pending), set(answered))
+            return humanq.overview_of(raw, set(pending), set(answered), set(needinfo))
         except Exception as e:  # noqa: BLE001
             self.fail(f"overview_of が例外を上げた: {type(e).__name__}: {e}")
 
@@ -201,6 +203,17 @@ class OverviewShape(unittest.TestCase):
         d = self.shape(self.ok(ready=[rr("a", 1, ["human"]), rr("b", 1), rr("c", 1, ["human", "snoozed"]), rr("d", 1)]),
                        pending={"b"})
         self.assertEqual([(r["id"], r["human"]) for r in d["ready"]], [("a", True), ("b", True), ("c", True), ("d", False)])
+
+    def test_needinfo_is_marked_by_the_items_cache_and_not_as_human(self):
+        # 情報待ち (エージェントの番) は human のラベルも残っているが、判断待ち (ユーザーの番) の印は付けない。情報待ちと読むのは
+        # 判断待ちの読みの情報待ちの一覧だけで、needs-info のラベルでは決めない (ラベルだけのものは判断待ちに出ている)
+        ready = [rr("a", 1, ["human", "needs-info"]), rr("b", 1, ["human", "needs-info"]), rr("c", 1), rr("d", 1, ["human"]),
+                 rr("e", 1)]
+        d = self.shape(self.ok(ready=ready), pending={"a", "b", "c", "d"}, needinfo={"a", "c"})
+        self.assertEqual([(r["id"], r["human"], r["needinfo"]) for r in d["ready"]],
+                         [("a", False, True), ("b", True, False), ("c", False, True), ("d", True, False), ("e", False, False)])
+        d = self.shape(self.ok(ready=ready), pending={"a"})                  # 情報待ちを渡さない: どれも情報待ちではない
+        self.assertEqual([r["needinfo"] for r in d["ready"]], [False] * 5)
 
     def test_top_five_by_priority_then_created_then_id(self):
         ready = [rr("p2-old", 2, created="2026-01-01T00:00:00Z"), rr("p3", 3), rr("none", None), rr("bool", True),
@@ -228,7 +241,7 @@ class OverviewShape(unittest.TestCase):
         d = self.shape(self.ok(ready=[{"id": "a", "title": None, "priority": 1, "status": None, "labels": None,
                                        "created_at": "2026-11-20T12:34:56.789Z"}]))
         self.assertEqual(d["ready"], [{"id": "a", "title": "", "priority": 1, "status": "", "labels": [],
-                                       "created_at": "2026-11-20", "human": False}])
+                                       "created_at": "2026-11-20", "human": False, "needinfo": False}])
 
     def test_counts_are_ordered_by_status_and_summed(self):
         counts = [("review", 1), ("open", 5), ("closed", 9), ("blocked", 2), ("in_progress", 3), ("alpha", 1), ("tombstone", 1),
@@ -552,7 +565,10 @@ class FakeCliOverview(FakeCliProject):
         self.assertNotIn(ids["p0-answered"], ready, "回答済みの一覧にあるチケットを ready に出した")
         self.assertTrue(ready.get(ids["p1-human"], {}).get("human"), "判断待ちの一覧にあるチケットに印が付かない")
         self.assertTrue(ready.get(snoozed, {}).get("human"), "保留中の一覧にあるチケットに印が付かない")
-        self.assertTrue(ready.get(asked, {}).get("human"), "情報待ちの一覧にあるチケットに印が付かない")
+        self.assertEqual((ready.get(snoozed, {}).get("needinfo"), ready.get(ids["p1-human"], {}).get("needinfo")), (False, False))
+        # 情報待ちの一覧にあるチケットは、判断待ちの印ではなく情報待ちの印 (エージェントの番)
+        self.assertEqual((ready.get(asked, {}).get("needinfo"), ready.get(asked, {}).get("human")), (True, False),
+                         "情報待ちの一覧にあるチケットに情報待ちの印が付かない、か判断待ちの印が付いた")
         self.assertEqual(ready.get(ids["p1-plain"], {}).get("human"), False, "判断待ちでないチケットに印が付いた")
         self.assertEqual(len(self.argvs(start)), 2, "判断待ちの id を知るために CLI を打ち足した")
 
