@@ -1572,8 +1572,9 @@ def _parse_leading_env(
             # 呼び出し側は basename に揃えない (`_ASSIGNMENT_ONLY_RETURNED`)。
             # 0.36.7 までの候補 (最初に値を飛ばした代入から後ろ) の先頭の語を `_strip_command_path` が basename に
             # 揃えていた形 (置換の中のパス付き CLI) は、0.36.7 までの読みを足して候補に残す (docstring)。値を飛ばした
-            # 代入が無い行の 0.36.7 の候補 (最後の代入) は揃わない (値を `_scan_value_end` で読めるので、
-            # `_strip_command_path` がそのまま返す)。
+            # 代入が無い行の 0.36.7 の候補 (最後の代入) は、`NAME=` の形なら揃わない (値を `_scan_value_end` で読めるので、
+            # `_strip_command_path` がそのまま返す)。追記・要素の代入 (`X+=/x/gh` / `a[1]=/x/aws`) は 0.36.7 が値の
+            # basename (`gh` / `aws`) に揃えて CLI の候補にしていたが、シェルはその CLI を走らせないので残さない。
             if first_dynamic is not None and _strip_command_path(first_dynamic[0]) != first_dynamic[0]:
                 if _ASSIGNMENT_TAIL_READING:
                     if unread is not None:

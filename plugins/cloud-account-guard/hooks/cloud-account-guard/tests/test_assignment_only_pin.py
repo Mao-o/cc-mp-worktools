@@ -326,6 +326,10 @@ class CandidateTests(_Case):
             ("X=$P Y=$(/usr/bin/aws s3 rm s3://b/k)", {"aws s3 rm s3://b/k": frozenset({"X"})}),
             ("X=$P Y=$(/usr/bin/aws s3 rm s3://b/k) Z=$Q W=1",
              {"aws s3 rm s3://b/k) Z=$Q W=1": frozenset({"X"})}),
+            # 0.29.9 の読みが `${B:- x y}` の空白で値を終え、同じ候補を作らない形 (この読みの印だけが残る)
+            ("X=$P A=${B:- x y} C=$(/usr/bin/aws s3 rm s3://b/k)",
+             {"aws s3 rm s3://b/k": frozenset({"X", "A"}),
+              "x y} C=$(/usr/bin/aws s3 rm s3://b/k)": frozenset({"X", "A"})}),
         ):
             with self.subTest(command=command):
                 self.assertEqual(self.call(command_parser.unread_env_candidates, command), want)
