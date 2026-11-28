@@ -602,7 +602,10 @@ worktree セッションでは tier が消える** — main repo 側を探しに
 submodule (`gitdir: <super>/.git/modules/<name>`)・bare repo の worktree・
 **submodule の worktree** (`<super>/.git/modules/<name>/worktrees/<wt>` —
 commondir が `.git` でないディレクトリに解決する)・`$HOME` 自身は `None`。
-`git` コマンドは呼ばない (PreToolUse の latency 目標)。
+`git` コマンドは呼ばない (PreToolUse の latency 目標)。`.git` ファイルと `commondir` は
+通常のファイルだけを読む (`O_NONBLOCK` で開いて `fstat` で確かめる。FIFO・デバイスは
+開いても読まずに「読めない」= `None`。0.36.4 までは書き手のいない FIFO で読みが止まり、
+hook timeout で検証が飛んでいた)。
 
 ### `_parse_local_patterns_text(text, project_key) -> list[tuple[str, bool]]` (0.15.0)
 

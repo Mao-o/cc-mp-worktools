@@ -33,6 +33,31 @@ commit 52113a1 で完了)。
 - 上記完了後に `.claude-plugin/plugin.json` を 1.0.0 に bump し、本セクションを
   `## 1.0.0` として cut する
 
+## 0.36.5
+
+**linked worktree の `commondir` が FIFO でも、hook が止まらずに判定を返す (patch bump)。**
+
+- git の pointer (`.git` ファイルと linked worktree の `commondir`) を読む `_shared/patterns.py` の
+  `_read_git_pointer_file` は、0.36.4 まで普通に開いていたので、書き手のいない FIFO だと open が
+  書き手を待って戻らなかった。`load_patterns` は毎回 `[project:]` セクションの key を解決する途中で
+  worktree の `commondir` を読み、Bash operand ごとの path 形 rule の基準 root (`resolve_path_rule_root`)
+  も同じ読みを通るので、`commondir` (またはそれが指す symlink の先) が FIFO の worktree では、Read /
+  Edit / Write / Grep / Bash の hook が全部止まり、Claude Code の hook timeout で打ち切られていた
+  (打ち切られた hook の出力は捨てられ、ツール呼出は検証されずに通る)
+- `O_NONBLOCK` で開き (FIFO の open がすぐ戻る)、`fstat` で通常のファイルと確かめてから読む。
+  通常のファイルでないもの (FIFO・デバイス・ディレクトリ) は読まずに「読めない pointer」として扱う
+  (今までの読めないときと同じ: main repo root を第 2 候補に足さない / 共有 git dir は `commondir` が
+  無いのと同じく gitdir 自身)。通常のファイルの読みは 0.36.4 と同じテキストモードで、改行の読み替えと
+  先頭 4096 文字の上限は変わらない
+- 0.36.4 と結果が変わる入力: 書き手のいる FIFO (0.36.4 は書かれた中身を読んで main repo を辿って
+  いた。0.36.5 は読めないものとして扱うので、worktree で main repo のパスの `[project:]` セクションが
+  効かず、path 形 rule の基準 root も読み替えない。どちらも保護を外さない側)、`commondir` を
+  `/dev/zero` などのデバイスに向けた形 (関数の戻り値だけが変わり、判定は同じ)。`.git` 自体が FIFO の
+  形は呼出側の `isfile` で 0.36.4 から弾かれており、判定は変わらない
+- テスト: `tests/test_git_pointer_nonblocking.py` (13 件) を足した。FIFO を読む呼出は別プロセスで
+  timeout を付けて流し、止まったら FAIL にする (0.36.4 の読みに戻すと FIFO の 4 件が落ちる)。
+  redact 1,221 → **1,234**
+
 ## 0.36.4
 
 **テスト整理 (挙動の変更なし)。redact-sensitive-reads の `test_bash_handler.py` 以外のファイルで、入力 1 つ → 結果 1 つを見る同型のテストを表と subTest に畳んだ (patch bump)。**
