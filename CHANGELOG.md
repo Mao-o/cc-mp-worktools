@@ -21,8 +21,8 @@
 
 - 時間を測るテスト (入力を大きくして処理が線形か・制限時間内に終わるかを確かめるもの) の共通の
   切り替え `RUN_TIMING_TESTS` を足した。1 のときだけ走らせる前提で、`scripts/test-all.sh` は
-  既定で 1 を立てて表示し (外から 0 を渡したときは上書きしない)、CI の Windows の job も 1 を立てる。
-  README の Development に説明を足した。plugin のテストはまだ切り替えを読まないので、結果は変わらない
+  既定で 1 を立てて表示し (外から 0 を渡したときだけ飛ばす。ほかの値は 1 に揃える)、CI の Windows の job も 1 を立てる。
+  README の Development と CONTRIBUTING の検証に説明を足した。plugin のテストはまだ切り替えを読まないので、結果は変わらない
 - CI の `tests-windows` に cloud-account-guard の `tests.test_windows_config_dir` の 1 モジュールだけを
   足した (Windows の設定 dir の決め方。suite 全体は FIFO などで Windows に未対応なので流さない)。
   matrix の各 entry に実行の対象 (`target`) を持たせた

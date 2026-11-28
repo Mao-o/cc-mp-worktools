@@ -200,8 +200,10 @@ make test
 ```
 
 時間を測るテスト (入力を大きくして処理が線形か・制限時間内に終わるかを確かめるもの) は、
-CPU を多く使うため、各 plugin の既定の suite では飛ばします。`RUN_TIMING_TESTS=1` を立てると走ります。
-`make test` (`scripts/test-all.sh`) と CI は常に立てて走らせます (外から `RUN_TIMING_TESTS=0` を渡したときだけ飛ばします)。
+CPU を多く使うため、切り替え `RUN_TIMING_TESTS` に対応した plugin では、既定の suite で飛ばし、
+`RUN_TIMING_TESTS=1` を立てたときだけ走らせます。
+`make test` (`scripts/test-all.sh`) と CI は立てて走らせます (外から `RUN_TIMING_TESTS=0` を渡したときだけ飛ばし、
+ほかの値は 1 に揃えます)。
 
 CI (`.github/workflows/validate.yml`) は `make validate` 相当のチェックに加え、
 `ruff check` と、**Python 3.11 / 3.12 / 3.13 の matrix** でのユニットテストを回します。

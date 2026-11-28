@@ -71,6 +71,10 @@ cd plugins/<plugin-name>/hooks/<hook-name>
 python3 -m unittest discover tests
 ```
 
+時間を測るテスト (入力を大きくして処理が線形か・制限時間内に終わるかを確かめるもの) は、
+切り替え `RUN_TIMING_TESTS` に対応した plugin では、この形では飛びます。走らせるときは
+`RUN_TIMING_TESTS=1 python3 -m unittest discover tests` とします (`make test` と CI は立てて走らせます)。
+
 CI は unit test を **Python 3.11 / 3.12 / 3.13 の matrix** で回します
 (`fail-fast: false` なので「3.11 だけ落ちた」のか「全部落ちた」のかが 1 回の run で
 分かります)。
