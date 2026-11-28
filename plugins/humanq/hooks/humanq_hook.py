@@ -118,14 +118,17 @@ def _count(v) -> int:
 
 def snooze_line(s: dict) -> str | None:
     """保留の件数の 1 行。保留中 (判断待ちの件数に入れていない) と、保留から判断待ちに戻ったもの (戻る日が来た・問いが
-    書き換わった。入っている)。どちらも 0 なら None。"""
-    n, m = _count(s.get("snoozed")), _count(s.get("returned"))
+    書き換わった。入っている)、保留かどうかを読み残している判断待ち (unread。入っている)。どれも 0 なら None。"""
+    n, m, u = _count(s.get("snoozed")), _count(s.get("returned")), _count(s.get("unread"))
     parts = []
     if n:
         parts.append(f"ユーザーが保留にした判断待ち {n} 件 (判断待ちの件数に入れていない。回答待ちのままなので、"
                      "問いを取り下げたり、答えを推測して進めたりしない)")
     if m:
         parts.append(f"保留から判断待ちに戻ったもの {m} 件 (戻る日が来たか、保留の後に問いが書き換わった。判断待ちの件数に入っている)")
+    if u:
+        parts.append(f"判断待ちの件数のうち {u} 件は、保留かどうかを確認中 (サーバーの起動直後の読み残し。保留中のものが混じっていて、"
+                     "次の読みで減る。保留中かもしれないチケットに取りかかったり、答えを推測して進めたりしない)")
     return "humanq: " + "。".join(parts) + "。" if parts else None
 
 
