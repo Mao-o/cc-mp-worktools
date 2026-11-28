@@ -503,6 +503,7 @@ class HookInstructionsByCli(unittest.TestCase):
                 for o in other:
                     self.assertNotIn(o, ctx, f"別の CLI のコマンド ({o}) が入っている")
                 self.assertIn("問いを書き直してから", lines[0])
+                self.assertIn("問いの無いチケットは問いを書く", lines[0])
                 self.assertIn("判断待ち 2 件", ctx, "判断待ちの件数は summary の human のまま (情報待ちはサーバーが除いてある)")
                 self.assertEqual(len(self.snooze_lines(ctx)), 1, "保留の行と情報待ちの行が混ざった")
                 self.assertNotIn("情報待ち", self.snooze_lines(ctx)[0])
@@ -1565,6 +1566,83 @@ class BdScenarios:
         self.write(store.unsnooze, {"id": iid})
         self.assertEqual(self.calls("comments add"), adds, "保留でないチケットの解除で、解除のコメントを書いた")
         self.assertEqual(self.ids(self.read(store), "needinfo", (iid,)), [iid])
+
+    # 保留と情報待ちは続けて書かれうる (戻る日が来たカードを情報待ちにする・情報待ちのカードを前の画面から保留する)。
+    # どの順で経由しても、回答の後に humanq が付けたラベル (snoozed・needs-info) は残らない
+    # S 保留 (明日まで) / D 戻る日が来る / U 保留の解除 / N 情報待ち / R 問いを書き直して needs-info を外す
+    # L 問いを書き直したが needs-info を外し忘れる / A 回答 / K 取り消し
+    HQ_ORDERS = {
+        "保留 → 戻る → 情報待ち → 書き直して外す": "SDNR", "保留 → 戻る → 情報待ち → 外し忘れ": "SDNL",
+        "情報待ち → 保留 → 戻る": "NSD", "情報待ち → 外し忘れ → 保留 → 解除": "NLSU", "情報待ち → 外し忘れ → 保留 → 戻る": "NLSD",
+        "情報待ち → 書き直して外す → 保留 → 解除": "NRSU", "保留 → 情報待ち": "SN", "保留 → 情報待ち → 保留": "SNS",
+        "保留 → 解除": "SU", "情報待ち": "N", "保留 → 戻る": "SD", "保留 → 解除 → 情報待ち": "SUN",
+        "回答 → 取り消し → 保留 → 戻る": "AKSD", "回答 → 取り消し → 情報待ち": "AKN", "回答 → 取り消し → 情報待ち → 保留 → 戻る": "AKNSD",
+    }
+
+    def run_hq_order(self, order: str) -> str:
+        """order の順に状態を経由させ、まだ回答していないチケットの ID を返す (時計は D で進める)。"""
+        iid = self.new_question()
+        store = self.store()
+        clock = [humanq.today()]
+        n = 0
+        with mock.patch.object(humanq, "today", lambda: clock[0]):
+            for step in order:
+                n += 1
+                if step == "S":
+                    self.write(store.snooze, {"id": iid, "until": self.day(1)})
+                elif step == "D":
+                    clock[0] = clock[0] + timedelta(days=2)
+                elif step == "U":
+                    self.write(store.unsnooze, {"id": iid})
+                elif step == "N":
+                    self.write(store.needinfo, {"id": iid, "note": "n"})
+                elif step in "RL":
+                    self.set_question(iid, context=f"足した情報 {n}")
+                    if step == "R" and "needs-info" in self.labels(iid):
+                        self.label(iid, "remove", "needs-info")
+                elif step == "A":
+                    self.write(store.answer, {"id": iid, "option": "a"})
+                elif step == "K":
+                    self.write(store.undo, {"id": iid})
+                else:
+                    self.fail(f"知らない段 {step}")
+        self.hq_clock = clock[0]
+        return iid
+
+    def test_answer_removes_the_labels_humanq_put_whatever_order_the_states_were_passed(self):
+        for name, order in self.HQ_ORDERS.items():
+            with self.subTest(order=name):
+                iid = self.run_hq_order(order)
+                with mock.patch.object(humanq, "today", lambda: self.hq_clock):
+                    self.write(self.store().answer, {"id": iid, "option": "b"})
+                self.assertEqual(self.labels(iid) & self.HQ_LABELS, {"answered"}, f"回答の後に humanq のラベルが残った ({order})")
+
+    def test_resent_answer_removes_both_labels_humanq_put(self):
+        # 回答のラベルの段階が失敗して送り直す (最後のコメントがこの回答) ときも、前の回答より後の保留・情報待ちを両方見る
+        for rule, order in (("label remove snoozed", "SDNR"), ("label remove needs-info", "SDNL"), ("label remove needs-info", "NSD")):
+            with self.subTest(rule=rule, order=order):
+                iid = self.run_hq_order(order)
+                store = self.store()
+                with mock.patch.object(humanq, "today", lambda: self.hq_clock):
+                    restore = self.failing(rule)
+                    try:
+                        e = self.write(store.answer, {"id": iid, "option": "a"}, raises=humanq.WriteError)
+                    finally:
+                        restore()
+                    self.assertEqual((e.stage, e.written), ("label", True))
+                    self.write(store.answer, {"id": iid, "option": "a"})
+                self.assertEqual(self.labels(iid) & self.HQ_LABELS, {"answered"})
+                self.assertEqual(len([m for m in self.marks(iid) if m.startswith("[humanq] 回答")]), 1, "送り直しで回答が二重になった")
+
+    def test_answer_keeps_a_label_the_user_put_after_the_previous_answer_whatever_order(self):
+        # 前の回答より前の保留・情報待ちは見ない: 回答 → 取り消し の後に利用者が付けたラベルは、保留や情報待ちを経由した後でも外さない
+        for order in ("SNAK", "NSAK", "SDNLAK"):
+            with self.subTest(order=order):
+                iid = self.run_hq_order(order)
+                self.label(iid, "add", "snoozed")
+                self.label(iid, "add", "needs-info")
+                self.write(self.store().answer, {"id": iid, "option": "b"})
+                self.assertEqual(self.labels(iid) & self.HQ_LABELS, {"answered", "snoozed", "needs-info"})
 
     BAD_NEEDINFO = {
         "note が無い": {}, "note が空": {"note": ""}, "note が空白だけ": {"note": " \n\t "}, "note が数": {"note": 5},

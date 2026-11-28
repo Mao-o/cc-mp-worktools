@@ -621,8 +621,9 @@ class Store:
             asked = backend.labeled(row, NEEDINFO_LABEL)
             if (snoozed or asked) and cs is None:
                 cs = _comments(be, repo, iid)          # 保留・情報待ちのラベルを humanq が付けたかを、回答の前のコメントで見る
-            # 保留のラベルを外すのは、この回答の前の最後の [humanq] コメントが保留か保留の解除のとき、情報待ちのラベルを外すのは
-            # 情報待ちのとき (humanq が付けたラベル) だけ。利用者が自分の意味で付けた snoozed・needs-info は外さない
+            # 保留のラベルを外すのは、前の回答より後に保留か保留の解除の [humanq] コメントがあるとき、情報待ちのラベルを外すのは
+            # 情報待ちのコメントがあるとき (humanq が付けたラベル) だけ。2 つの状態を続けて経由していても、それぞれ見る。
+            # 利用者が自分の意味で付けた snoozed・needs-info は外さない
             # (情報待ちのラベルが残ったまま回答できるのは、エージェントが問いを書き直してラベルを外し忘れたとき)
             drop_label = snoozed and _put_by_humanq(cs, body_text, (SNOOZE_HEAD, UNSNOOZE_HEAD))
             drop_ask = asked and _put_by_humanq(cs, body_text, (NEEDINFO_HEAD,))
@@ -776,12 +777,19 @@ def _resent(cs: list, text: str) -> bool:
 
 
 def _put_by_humanq(cs: list, text: str, heads: tuple[str, ...]) -> bool:
-    """回答 (本文 text) の前の最後の [humanq] コメントが heads のどれかで始まるか (そのラベルを humanq が付けた)。保留のラベルは
-    保留か保留の解除、情報待ちのラベルは情報待ちを渡す。送り直しのとき (最後のコメントがこの回答) は、その前の [humanq] コメントを見る。"""
+    """回答 (本文 text) の前の、前の回答より後の [humanq] コメントに heads のどれかで始まるものがあるか (そのラベルを humanq が
+    付けた)。保留のラベルは保留か保留の解除、情報待ちのラベルは情報待ちを渡す。最後の 1 件では決めない: 保留と情報待ちは続けて
+    書かれうる (戻る日が来たカードを情報待ちにする・書き直した問いを保留する) ので、もう一方の状態を挟んでも先のラベルを見落とさない。
+    前の回答より前は見ない (そこで外したか、回答の後に利用者が付けたもの)。送り直しのとき (最後のコメントがこの回答) は、その前から見る。"""
     ms = marked(cs)
     if _resent(cs, text):
         ms = ms[:-1]
-    return bool(ms) and ms[-1]["text"].startswith(heads)
+    for m in reversed(ms):
+        if m["text"].startswith(heads):
+            return True
+        if not m["text"].startswith(PENDING_SIDE):     # 前の回答に当たった: これより前のラベルはそこで外している
+            return False
+    return False
 
 
 def _recent(comment: dict) -> bool:
