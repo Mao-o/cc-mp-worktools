@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.23.1
+
+### テスト整理 (挙動の変更なし。製品コード (`server/`・`hooks/`) は変えていない)
+
+suite (`python3 -m unittest discover tests`) の待ちを縮めた。負荷のある手元 (load 4〜5) で、実時間が約 58 秒から約 34 秒になった (前後を交互に 3 回ずつ)。テストを足すたびに、リリース前検査のテストの制限 (90 秒) に近づいていた。ケースと assertion は減らしていない。経過時間そのものを assert するテストは無かったので、`RUN_TIMING_TESTS` の切り替えの対象にしたものは無い。
+
+- `tests/test_server.py`・`tests/bd_parallel.py`: discover のとき、bd のシナリオ (`BdScenarios`) を回す worker を、test_server を読み込んだ時点で起こす。今までは test_server の suite を走らせる時点で起こしていたので、名前の順で手前にあるほかのモジュールを親が直列に回している間、worker が動いていなかった。モジュールを名前で指したとき (`-m unittest tests.test_server`) と `HUMANQ_TEST_JOBS=1` は今までどおり。読み込んだまま走らせずに終わったとき (failfast で手前のモジュールで止まったときなど) も、配っていない名前を捨てて worker を回収する (atexit)。`Pool.start` は 2 度目に呼ばれても worker を増やさない。並列の道具の自己検査 (`ParallelRunner`) に 2 件足した (読み込みで起こすのは pattern が渡ったときの並列の suite だけで、atexit で回収する / 先に起こした worker を run で増やさず、その結果をそのまま報告する)
+- `tests/test_cli_contract.py`: 時刻をずらして書く 3 か所の `time.sleep(1.1)` を `later()` にした。本物は今までどおり 1.1 秒待ち、偽物は次の秒の頭まで待つ (平均 0.5 秒。偽物の時計は進めない: 進めると、その後のテストで偽物の書く時刻が今より先になり、今と比べる読み (送り直しの判定) が本物では起きない形で通る)。後に書いたものが後の秒になることを確かめるテスト (`Later`) を、偽物と本物に同じ assertion で足した。今までの 3 か所は、時刻がずれたこと自体は assert していないので、待ちを外しても落ちない
+- `tests/test_server.py`: `ParallelRunner.test_a_result_that_never_comes_is_an_error` の偽の worker が黙る時間を 3 秒から 1 秒に、待つ上限を 0.5 秒から 0.2 秒にした
+- `tests/test_fake_beads.py`: `BrList.test_default_and_limit_zero_are_unlimited` の 60 件の create を、4 本ずつ重ねて起動する (偽物は flock で 1 本ずつ書き、id も連番)
+- `tests/test_project_kind.py`: `ProjectKindTable` の、`.beads/` に置くファイル 1 つだけで決まる 6 件 (br の印 4 件と、印にならない `.gitignore` 2 件) を、表と subTest にまとめた。元のテスト名を subTest のラベルに残す (ケースは 6 のまま。テストのメソッドは 5 件減る)
+
 ## 0.23.0
 
 ### 追加
