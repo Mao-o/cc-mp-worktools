@@ -17,7 +17,7 @@ import re
 import stat
 from pathlib import Path
 
-from core import shell_word
+from core import cli_config, shell_word
 
 ACCOUNTS_FILE_NEW = Path(".claude") / "cloud-account-guard" / "accounts.local.json"
 ACCOUNTS_FILE_DEPRECATED = Path(".claude") / "accounts.local.json"
@@ -282,10 +282,15 @@ _WORKTREE_META_MAX_BYTES = _GITDIR_FILE_MAX_BYTES
 
 
 def _read_worktree_meta(gitdir: Path, name: str) -> str | None:
-    """linked worktree の gitdir 内メタファイルを 1 行の値として読む。"""
+    """linked worktree の gitdir 内メタファイルを 1 行の値として読む。
+
+    通常のファイルでないもの (FIFO・デバイスなど) は開いても読まずに None (読めないメタファイルと
+    同じ = 裏付けが取れない = 境界。`cli_config.read_regular_bytes`)。0.36.2 までは普通に開いていたので、
+    書き手のいない FIFO だと accounts.local.json の探索の途中で読みが止まり、hook timeout で検証が
+    飛んでいた (v0.36.3)。
+    """
     try:
-        with (gitdir / name).open("rb") as handle:
-            raw = handle.read(_WORKTREE_META_MAX_BYTES)
+        raw = cli_config.read_regular_bytes(gitdir / name, _WORKTREE_META_MAX_BYTES)
     except OSError:
         return None
     value = raw.decode("utf-8", errors="replace").strip()

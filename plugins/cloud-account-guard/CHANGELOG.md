@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.36.3
+
+### Fixed: firebase の configstore・aws の config・linked worktree の gitdir と commondir が FIFO でも、読みが止まらない
+
+- 0.35.0 で gh / gcloud の設定の読みを止まらない読み方にしたのと同じ型の読みが 3 か所残っていた。読む対象が
+  書き手のいない FIFO だと open が戻らず、hook が timeout で打ち切られて検証が飛んでいた (Claude Code はコマンドを
+  そのまま実行する)。手元で 3 か所とも、関数の単位と hook の単位で止まることを確かめた:
+  - firebase の configstore (`$XDG_CONFIG_HOME/configstore/firebase-tools.json`)。期待値が未登録のときの
+    `firebase use` の固定の判定と、CLI が現在の project を答えないときのローカル設定の解決で読む
+  - aws の config (`AWS_CONFIG_FILE` か `~/.aws/config`)。CLI が答えないとき・不一致のときの deny の案内で、
+    期待 Account ID の profile を探すときに読む (aws CLI は通常のファイルでない config を無いものとして読むので、
+    CLI は止まらずに答え、hook の読みだけが止まっていた)
+  - linked worktree の gitdir の中の `gitdir` (back-pointer) と `commondir`。accounts.local.json を親の
+    ディレクトリへ探すときに読む (どの service の検証の前にも走る)
+- どれも `O_NONBLOCK` で開き、fstat で種類を確かめてから読む (0.35.0 の gh / gcloud と同じ読み方。共通の関数
+  `cli_config.read_regular_bytes` にまとめ、gh / gcloud の読みもそれを使う)。FIFO は読めない設定として扱う:
+  configstore は切替先なし (読めない configstore と同じ)、aws は profile なし (`<profile>` の案内)、gitdir /
+  commondir は裏付けが取れない (境界。読めないメタファイルと同じ)。データの無い端末も待たずに同じ扱いになる
+- 判定は変えていない: 旧新に同じ入力 (通常のファイル・無い・ディレクトリ・symlink・行き先の無い symlink・
+  権限の無いファイル・`/dev/null`・`/dev/zero`・大きすぎる・UTF-8 でない・CRLF / CR の改行) を流した 132 件で、
+  結果 (configstore の切替先・固定の判定・ローカル設定の解決、aws の profile、accounts.local.json の探索) が
+  違ったのは FIFO と端末 (旧は止まる) と、aws の config の `/dev/zero` (旧は大きさの上限なしで読み続ける。新は
+  profile なし) だけ。gitdir / commondir の `/dev/zero` は、読む関数の値は変わるが探索の結果は同じ (境界)。
+  configstore のデバイスは 0.36.2 と同じく大きさの上限まで読む (`/dev/zero` は大きすぎて切替先を確かめられない、
+  のまま)。aws の config に大きさの上限は足していない
+
 ## 0.36.2
 
 ### Docs: README の「守る範囲と守らない範囲」に、検証しない形を足す

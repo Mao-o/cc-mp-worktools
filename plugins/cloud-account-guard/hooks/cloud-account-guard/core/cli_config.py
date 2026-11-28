@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import configparser
+import errno
 import os
 import stat
 import sys
@@ -37,6 +38,14 @@ MAX_FILE_BYTES = 256 * 1024
 
 class FileTooLargeError(ValueError):
     """`read_bounded_text` が上限 (既定 `MAX_FILE_BYTES`) を超えるファイルを見つけた。"""
+
+
+class NotRegularFileError(OSError):
+    """読むと止まりうるので読まなかった (`read_regular_bytes` は通常のファイルでないもの、
+    `read_bounded_text` は FIFO)。
+
+    OSError の子なので、呼び出し側は「読めない」と同じ except で受けられる。
+    """
 
 # 値の先頭に現れたら解釈を諦める YAML の記法 (ブロックスカラー / anchor / alias /
 # tag / flow collection)。単純な `key: value` 以外は扱わない。
@@ -156,15 +165,67 @@ def state_files_when_dir_unknown() -> list[Path] | None:
     return [] if config_dir_rule() == POSIX else None
 
 
+def _read_without_blocking(path: Path, limit: int | None, *, regular_only: bool) -> bytes:
+    """開くときにも読むときにも止まらずに、limit バイトまで読む (None なら全部)。
+
+    FIFO (書き手のいない名前付きパイプ) を普通に開くと open が書き手を待って戻らない (デバイスも
+    読みが終わらないものがある)。hook の中の読み取りには subprocess の timeout (検証時間の予算) が
+    効かず、Claude Code の hook timeout で打ち切られると出力が捨てられて検証が飛ぶ (公式仕様上の
+    fail-open)。そこで `O_NONBLOCK` で開き (FIFO の open がすぐ戻る)、fstat で種類を確かめてから
+    読む。FIFO は読まずに `NotRegularFileError` (OSError の子)。regular_only なら、通常のファイルで
+    ないもの (デバイス・ディレクトリなど) も同じ。通常のファイルの読みは `O_NONBLOCK` の影響を
+    受けない。デバイスは `O_NONBLOCK` のまま読むので、データの無い端末などは待たずに
+    `BlockingIOError` (OSError の子) になる。`O_NONBLOCK` / `O_BINARY` の無い OS では 0 として扱う
+    (Windows に FIFO のパスは無く、`O_BINARY` は Windows で改行の変換をさせないため)。
+
+    開けない・読めないときは OSError、パスに NUL があるときは ValueError (どちらもそのまま投げる)。
+    """
+    fd = os.open(
+        path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        mode = os.fstat(fd).st_mode
+        if stat.S_ISFIFO(mode) or (regular_only and not stat.S_ISREG(mode)):
+            raise NotRegularFileError("FIFO などの通常のファイルでないものは読みません")
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            raw = handle.read() if limit is None else handle.read(limit)
+    finally:
+        os.close(fd)
+    if raw is None:
+        # O_NONBLOCK のデバイスに、まだ読めるデータが無い (BufferedReader は None を返す)
+        raise BlockingIOError(errno.EAGAIN, "読めるデータがありません")
+    return raw
+
+
+def read_regular_bytes(path: Path, limit: int | None = None) -> bytes:
+    """通常のファイルを、開くときにも読むときにも止まらずに読む (limit バイトまで。None なら全部)。
+
+    通常のファイルでないもの (FIFO・デバイス・ディレクトリなど) は開いても読まずに
+    `NotRegularFileError` (OSError の子。`_read_without_blocking`)。gh / gcloud の設定 (`read_text`。
+    v0.35.0)、aws の config (`aws.profiles_for_account`)、linked worktree の gitdir と commondir
+    (`paths._read_worktree_meta`) がこれで読む (後の 2 つは v0.36.3。それまでは普通に開いていたので、
+    書き手のいない FIFO で読みが止まり、hook timeout で検証が飛んでいた)。
+    """
+    return _read_without_blocking(path, limit, regular_only=True)
+
+
 def read_bounded_text(path: Path, limit: int = MAX_FILE_BYTES) -> str:
     """limit (既定 `MAX_FILE_BYTES`) を超えない範囲で UTF-8 の文字列として読む (parse の前の大きさの確認)。
 
     超えるときは `FileTooLargeError`、読めないときは OSError、UTF-8 でないときは
     UnicodeDecodeError (どちらも ValueError / OSError の子で、呼び出し側が JSON の失敗と
     同じ except で受けられる)。
+
+    FIFO は開いても読まずに `NotRegularFileError` (OSError の子。`_read_without_blocking`)。
+    0.36.2 までは普通に開いていたので、firebase の configstore (`isfile` で確かめずに読む) が書き手の
+    いない FIFO だと読みが止まり、hook timeout で検証が飛んでいた (v0.36.3)。
+
+    デバイスは 0.36.2 と同じく読む (`/dev/zero` は大きすぎる、`/dev/null` は空。データの無い端末などは
+    待たずに OSError)。`read_regular_bytes` のように読めない側にまとめないのは、configstore では
+    「大きすぎる」(切替先を確かめられない) と「読めない」で結果が違い、まとめると `/dev/zero` の
+    configstore で、照合を止めていたのが `.firebaserc` の `default` で照合するように変わるため。
     """
-    with Path(path).open("rb") as handle:
-        raw = handle.read(limit + 1)
+    raw = _read_without_blocking(path, limit + 1, regular_only=False)
     if len(raw) > limit:
         raise FileTooLargeError(f"{limit} バイトを超えています")
     return raw.decode("utf-8")
@@ -173,32 +234,15 @@ def read_bounded_text(path: Path, limit: int = MAX_FILE_BYTES) -> str:
 def read_text(path: Path) -> str | None:
     """設定ファイルを文字列で読む。読めない / 大きすぎる / UTF-8 でない / 通常のファイルでないなら None。
 
-    **開くときにも読むときにも止まらない**: FIFO (書き手のいない名前付きパイプ) を普通に開くと
-    open が書き手を待って戻らない (デバイスも読みが終わらないものがある)。hook の中の読み取りには
-    subprocess の timeout (検証時間の予算) が効かず、Claude Code の hook timeout で打ち切られると
-    出力が捨てられて検証が飛ぶ (公式仕様上の fail-open)。成功 cache の指紋のパスを決める読み
-    (gcloud の `state_files`) は cache を見る前に毎回走るので、cache hit の経路も止まる。
-    そこで `O_NONBLOCK` で開き (FIFO の open がすぐ戻る)、fstat で通常のファイルと確かめてから
-    読む。通常のファイルでなければ読まずに None (呼び出し側は CLI に委ねる)。通常のファイルの
-    読みは `O_NONBLOCK` の影響を受けない。`O_NONBLOCK` / `O_BINARY` の無い OS では 0 として
-    扱う (Windows に FIFO のパスは無く、`O_BINARY` は Windows で改行の変換をさせないため)。
-    パスに NUL があるときの ValueError も読めないのと同じに扱う。
+    **開くときにも読むときにも止まらない** (`read_regular_bytes`)。成功 cache の指紋のパスを決める
+    読み (gcloud の `state_files`) は cache を見る前に毎回走るので、止まると cache hit の経路も
+    止まる。通常のファイルでなければ読まずに None (呼び出し側は CLI に委ねる)。パスに NUL が
+    あるときの ValueError も読めないのと同じに扱う。
     """
     try:
-        fd = os.open(
-            path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
-        )
+        raw = read_regular_bytes(path, MAX_FILE_BYTES + 1)
     except (OSError, ValueError):
         return None
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None
-        with os.fdopen(fd, "rb", closefd=False) as handle:
-            raw = handle.read(MAX_FILE_BYTES + 1)
-    except OSError:
-        return None
-    finally:
-        os.close(fd)
     if len(raw) > MAX_FILE_BYTES:
         return None
     try:
