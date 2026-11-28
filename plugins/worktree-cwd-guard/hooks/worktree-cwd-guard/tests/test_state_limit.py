@@ -339,6 +339,7 @@ class StateLimitTest(BoundedBase):
         self.assertIn(f"上限 ({command._STATE_LIMIT})", (root / "AGENTS.md").read_text(encoding="utf-8"))
 
     @mock.patch.object(command, "_READ_SECONDS", None)  # 読み切る時間を測る (期限で打ち切ると伸び方を測れない)
+    @_testutil.timing_test
     def test_time_grows_linearly(self):
         # 上限に張り付いた形は、繰り返しの数に比例して時間が伸びる (倍々にならない)。小さい側も上限に届いていることを確かめる
         small, large = 300, 1200
@@ -413,6 +414,7 @@ class HookTimeTest(test_guard.GuardBase):
         out = json.loads(r.stdout.decode("utf-8")) if r.stdout.strip() else None
         return elapsed, test_guard.decision(out)
 
+    @_testutil.timing_test
     def test_branching_shapes_finish_well_within_the_timeout(self):
         hooks = json.loads(_HOOKS_JSON.read_text(encoding="utf-8"))
         entries = hooks["hooks"]["PreToolUse"]

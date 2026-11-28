@@ -159,6 +159,7 @@ class DeepRelativePathTest(test_state_limit.BoundedBase):
             ("cd a 2000 + main", cd_a(2000) + f'cd "{MAIN}"; {GIT}'),
         )
 
+    @_testutil.timing_test
     def test_deep_relative_moves_end_with_a_note(self):
         note = command._Deadline(self.SECONDS).finding()
         for name, cmd in self._shapes():
@@ -171,6 +172,7 @@ class DeepRelativePathTest(test_state_limit.BoundedBase):
                 # 期限を過ぎた後に読むのは、1 つの状態の 1 回の読みまで
                 self.assertLess(elapsed, self.SECONDS + 1.0)
 
+    @_testutil.timing_test
     def test_shortest_shape_takes_three_times_the_deadline(self):
         # 上のテストは、どの形も期限に届くことを前提にする。読みが速くなると余裕が黙って縮み、速い機械で期限の手前に読み終えて
         # 落ちる (0.10.5 で realpath の覚えを読みの間で共有して、最も短い形が 14 秒ほどから 0.5 秒ほどになった)。
@@ -229,6 +231,7 @@ class DeepStackTest(test_state_limit.BoundedBase):
                 self.assertEqual(self.peak, command._STATE_LIMIT)
 
     @mock.patch.object(command, "_READ_SECONDS", None)  # 読み切る時間を測る (期限で打ち切ると伸び方を測れない)
+    @_testutil.timing_test
     def test_time_grows_linearly_with_the_depth(self):
         # 8 倍の深さで、線形なら約 8 倍、2 乗なら約 64 倍。小さい側も大きい側も、状態が上限ちょうどの同じ経路を通る
         k = test_state_limit._limit_exponent()
@@ -647,6 +650,7 @@ class ReadTimeHookTest(test_guard.GuardBase):
         self.assertEqual(len(entries[0]["hooks"]), 1)
         return entries[0]["hooks"][0]["timeout"]
 
+    @_testutil.timing_test
     def test_deep_relative_paths(self):
         timeout = self._timeout()
         for name, cmd in (
@@ -662,6 +666,7 @@ class ReadTimeHookTest(test_guard.GuardBase):
                 if out is not None:
                     self.assertIn(f"期限 ({command._READ_SECONDS:g} 秒)", out["hookSpecificOutput"]["additionalContext"])
 
+    @_testutil.timing_test
     def test_shape_past_the_deadline_returns_a_note(self):
         # 期限が無ければ hook の timeout を大きく超える形 (状態の数 × 相対パスの深さの 2 乗。期限なしで 15 秒ほど (macOS の
         # Python 3.14)。realpath の覚えは上限 (`command._NORMS_CHARS`) を超えた先を覚えないので、覚えの共有ではほとんど速くならない)
