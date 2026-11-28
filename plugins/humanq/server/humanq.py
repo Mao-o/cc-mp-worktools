@@ -55,9 +55,13 @@ _SNOOZE_LINE = re.compile(re.escape(SNOOZE_HEAD) + r"(?:([0-9]{4}-[0-9]{2}-[0-9]
 NEEDINFO_HEAD = f"{MARK} 情報待ち"
 NEEDINFO_LABEL = backend.NEEDINFO_LABEL
 _NEEDINFO_LINE = re.compile(re.escape(NEEDINFO_HEAD) + r" \(qsig: ([0-9a-f]{16})\)")
-# 判断待ちの側で書く [humanq] コメント (取り消し・保留・保留の解除・情報待ち)。両方のラベルのチケットの最後の [humanq] コメントが
-# これなら判断待ちに出す (回答かコメント無しなら回答済み)
-PENDING_SIDE = (UNDO_HEAD, SNOOZE_HEAD, UNSNOOZE_HEAD, NEEDINFO_HEAD)
+# 情報待ちの取り下げ (画面から判断待ちに戻す。押し間違えた・ユーザーが自分で情報を見つけた): `[humanq] 取り下げ: 情報待ち` を書き、
+# 情報待ちのラベルを外す (保留の解除と同じ形)。頭を `[humanq] 情報待ち` で始めない: 最後の `[humanq] 情報待ち` を読むエージェントが
+# 取り下げを情報待ちと読み違えないため
+UNNEEDINFO_HEAD = f"{MARK} 取り下げ: 情報待ち"
+# 判断待ちの側で書く [humanq] コメント (取り消し・保留・保留の解除・情報待ち・情報待ちの取り下げ)。両方のラベルのチケットの最後の
+# [humanq] コメントがこれなら判断待ちに出す (回答かコメント無しなら回答済み)
+PENDING_SIDE = (UNDO_HEAD, SNOOZE_HEAD, UNSNOOZE_HEAD, NEEDINFO_HEAD, UNNEEDINFO_HEAD)
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 MAX_BODY = 64 * 1024
 # bd (埋め込み Dolt) は同時に開くと直列化して遅くなり、そのプロジェクトのセッションの書き込みとも競る。
@@ -185,7 +189,7 @@ def shape(r: dict) -> dict:
 
 
 def marked(cs: list) -> list[dict]:
-    """[humanq] のコメント (回答・取り消し・保留・保留の解除・情報待ち) を、backend が返した順 (古い順) に。本文が文字列でないコメントは数えない
+    """[humanq] のコメント (回答・取り消し・保留・保留の解除・情報待ち・情報待ちの取り下げ) を、backend が返した順 (古い順) に。本文が文字列でないコメントは数えない
     (回答の書き込みは全部のコメントを数えるので、想定外の形の 1 件で回答を止めない)。"""
     return [c for c in cs if isinstance(c, dict) and isinstance(c.get("text"), str) and c["text"].startswith(MARK)]
 
@@ -362,12 +366,14 @@ def _status_key(name: str) -> tuple:
     return (1, 0, name)
 
 
-def overview_of(raw: dict, pending: set, answered: set) -> dict:
+def overview_of(raw: dict, pending: set, answered: set, needinfo: set | frozenset = frozenset()) -> dict:
     """読んだ見通し (raw: {ok, cli, counts, ready} か {ok: false, error, cli}) を、画面に出す形にする。
-    pending と answered は判断待ちの読みのキャッシュにある id (判断待ち・保留中・情報待ちと、回答済み。CLI は打たない)。
+    pending・answered・needinfo は判断待ちの読みのキャッシュにある id (判断待ち・保留中・情報待ちと、回答済みと、情報待ち。CLI は打たない)。
     ready は answered のラベルの付いたもの (と、回答済みの一覧にあるもの) を除き、優先度 (数でなければ 9) → 作成日 → id の順に
-    並べて上位 READY_TOP 件。human のラベルの付いたもの (と、判断待ちの一覧にあるもの) は human: true (画面は判断待ちのカードへの
-    リンクにする)。ほかのラベルは解釈せず、文字列のものをそのまま渡す。ready_total は除いた後の件数。"""
+    並べて上位 READY_TOP 件。情報待ちの一覧にあるものは needinfo: true (エージェントの番。画面は情報待ちのカードへのリンクにする)。
+    それ以外で human のラベルの付いたもの (と、判断待ちの一覧にあるもの) は human: true (画面は判断待ちのカードへのリンクにする)。
+    情報待ちと読むのは判断待ちの読みの一覧だけで、needs-info のラベルでは決めない (ラベルだけの情報待ちは判断待ちに出ている)。
+    ほかのラベルは解釈せず、文字列のものをそのまま渡す。ready_total は除いた後の件数。"""
     if not raw.get("ok"):
         return {"ok": False, "error": raw.get("error"), "cli": raw.get("cli"),
                 "counts": [], "total": 0, "ready": [], "ready_total": 0}
@@ -376,16 +382,18 @@ def overview_of(raw: dict, pending: set, answered: set) -> dict:
     rows.sort(key=lambda r: (r["priority"] if type(r["priority"]) is int else 9, str(r["created_at"] or ""), r["id"]))
     return {"ok": True, "cli": raw.get("cli"),
             "counts": [{"status": s, "count": n} for s, n in counts], "total": sum(n for _, n in counts),
-            "ready": [_ready_item(r, pending) for r in rows[:READY_TOP]], "ready_total": len(rows)}
+            "ready": [_ready_item(r, pending, needinfo) for r in rows[:READY_TOP]], "ready_total": len(rows)}
 
 
-def _ready_item(r: dict, pending: set) -> dict:
+def _ready_item(r: dict, pending: set, needinfo: set | frozenset) -> dict:
     labels = [x for x in r["labels"] if isinstance(x, str)] if isinstance(r["labels"], list) else []
+    asked = r["id"] in needinfo
     return {"id": r["id"], "title": r["title"] if isinstance(r["title"], str) else "",
             "priority": r["priority"] if type(r["priority"]) is int else None,
             "status": r["status"] if isinstance(r["status"], str) else "",
             "labels": labels, "created_at": str(r["created_at"] or "")[:10],
-            "human": "human" in labels or r["id"] in pending}
+            # 情報待ちは human のラベルも残っているが、判断待ち (ユーザーの番) の印は付けない
+            "human": not asked and ("human" in labels or r["id"] in pending), "needinfo": asked}
 
 
 class Store:
@@ -400,7 +408,7 @@ class Store:
         self._guard = threading.Lock()
         self._refreshing: set[str] = set()
         self._pool = ThreadPoolExecutor(max_workers=4)
-        # 回答済みと保留・情報待ちの thread の覚え。書き込み (answer / undo / snooze / unsnooze / needinfo) はそのチケットの覚えを捨てる
+        # 回答済みと保留・情報待ちの thread の覚え。書き込み (answer / undo / snooze / unsnooze / needinfo / unneedinfo) はそのチケットの覚えを捨てる
         self._threads = backend.ThreadMemo(THREAD_MEMO_SEC, SNOOZE_READ_SEC)
         self._warming: set[str] = set()
         self._warm_pool = ThreadPoolExecutor(max_workers=1)     # 画面の読み (_pool) の枠を裏の読みで埋めない
@@ -562,18 +570,19 @@ class Store:
         raw["cli"] = kind
         return raw
 
-    def _known(self, repo: str) -> tuple[set, set]:
-        """判断待ちの読みのキャッシュ (古くてもよい。CLI は打たない) にある (判断待ち・保留中・情報待ちの id, 回答済みの id)。
-        ready の行にラベルが無い CLI でも、判断待ちのリンクと回答済みの除外を効かせるため。キャッシュが無ければ空 (読めなかった
-        プロジェクトのキャッシュは、どの一覧も空)。"""
+    def _known(self, repo: str) -> tuple[set, set, set]:
+        """判断待ちの読みのキャッシュ (古くてもよい。CLI は打たない) にある (判断待ち・保留中・情報待ちの id, 回答済みの id,
+        情報待ちの id)。ready の行にラベルが無い CLI でも、判断待ち・情報待ちのリンクと回答済みの除外を効かせるため。キャッシュが
+        無ければ空 (読めなかったプロジェクトのキャッシュは、どの一覧も空)。"""
         hit = self._cache.get(repo)
         if hit is None:
-            return set(), set()
+            return set(), set(), set()
         d = hit[1]
-        return {x["id"] for x in d["human"] + d["snoozed"] + d["needinfo"]}, {x["id"] for x in d["answered"]}
+        return ({x["id"] for x in d["human"] + d["snoozed"] + d["needinfo"]}, {x["id"] for x in d["answered"]},
+                {x["id"] for x in d["needinfo"]})
 
     def writer(self, repo: str):
-        """回答・取り消し・保留・保留の解除・情報待ちを書き込む backend。bd と br のどちらで書くか決められないプロジェクトは、CLI を打たずに ReadOnly。"""
+        """回答・取り消し・保留・保留の解除・情報待ち・情報待ちの取り下げを書き込む backend。bd と br のどちらで書くか決められないプロジェクトは、CLI を打たずに ReadOnly。"""
         kind, reason = self.route(repo)
         be = BACKENDS.get(kind)
         if be is None:
@@ -650,7 +659,7 @@ class Store:
             _swap(be, repo, iid, add="human", remove="answered")
 
     def _pending_row(self, be, repo: str, iid: str) -> tuple[dict, dict, list]:
-        """保留・保留の解除・情報待ちが書く前の読み直し: (判断待ちの Row, その問いの shape, コメント (古い順))。判断待ちに無ければ Gone。
+        """保留・保留の解除・情報待ち・情報待ちの取り下げが書く前の読み直し: (判断待ちの Row, その問いの shape, コメント (古い順))。判断待ちに無ければ Gone。
         コメントは pending が読んでいればそれ (br)、無ければ comments で読む (読めなければ comment の段階の WriteError)。"""
         rows = be.pending(repo, iid)
         row = next((r for r in rows if r["id"] == iid), None)
@@ -721,6 +730,22 @@ class Store:
                 raise Gone("回答済みのチケットは情報待ちにできない (画面を更新してください)")
             _record(be, repo, iid, needinfo_line(cur["qsig"]) + "\n\n" + note + "\n", cs=cs)
             _label(be, repo, iid, "add", NEEDINFO_LABEL)
+
+    def unneedinfo(self, repo: str, body: dict) -> None:
+        """情報待ちを取り下げて判断待ちに戻す (押し間違えた・ユーザーが自分で情報を見つけた): 最後の [humanq] コメントが情報待ち
+        (問いが書き換わったものを含む) なら `[humanq] 取り下げ: 情報待ち` を書き、情報待ちのラベルが付いていれば外す。どちらでも
+        なければ何も書かない (送り直し・ほかで取り下げ済み)。形は保留の解除と同じで、問いの署名は照合しない (取り下げは問いの意味に
+        依らない)。判断待ち (human のラベル) に無ければ Gone。ラベルの段階で失敗しても、取り下げのコメントが最後の [humanq] コメント
+        なので、次の読みから判断待ちに出る (ラベルは次の回答で外す)。"""
+        iid = _body_id(body)
+        repo = self.resolve(repo) or repo
+        with self._writing(repo, iid):
+            be = self.writer(repo)
+            row, _, cs = self._pending_row(be, repo, iid)
+            if needinfo_of(cs) is not None:
+                _record(be, repo, iid, UNNEEDINFO_HEAD + "\n", cs=cs)
+            if backend.labeled(row, NEEDINFO_LABEL):
+                _label(be, repo, iid, "remove", NEEDINFO_LABEL)
 
 
 def _body_id(body: dict) -> str:
@@ -853,7 +878,7 @@ def _comment(be, repo: str, iid: str, text: str) -> None:
 
 # 書き込みの API のパスと、それを書く Store のメソッドの名前 (失敗の応答の op にも入れる)
 WRITE_OPS = {"/api/answer": "answer", "/api/undo": "undo", "/api/snooze": "snooze", "/api/unsnooze": "unsnooze",
-             "/api/needinfo": "needinfo"}
+             "/api/needinfo": "needinfo", "/api/unneedinfo": "unneedinfo"}
 
 
 def make_handler(store: Store, port: int, token: str, page: str, version: str):
@@ -964,7 +989,7 @@ def make_handler(store: Store, port: int, token: str, page: str, version: str):
                     sig = fn(repo, body)
                 finally:
                     store.invalidate(repo)
-                # 回答の成功には回答の署名 (asig) を入れる。取り消し・保留・保留の解除・情報待ちの成功は {ok: true} だけ
+                # 回答の成功には回答の署名 (asig) を入れる。取り消し・保留・保留の解除・情報待ち・その取り下げの成功は {ok: true} だけ
                 self._json(200, {"ok": True} if sig is None else {"ok": True, "asig": sig})
             except ReadOnly as e:
                 self._json(400, {"error": str(e), "code": "readonly", "op": op})

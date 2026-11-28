@@ -6,7 +6,7 @@
         判断待ちと、画面で回答済みの件数を Claude に伝える (保留中は判断待ちに数えず、保留中と保留から戻った件数を 1 行で添える。
         情報待ち (ユーザーが回答に必要な情報が足りないと返したもの) も判断待ちに数えず、エージェントの番として ID と手順を 1 行で添える)
     humanq_hook.py prompt-submit   (UserPromptSubmit)
-        このセッションで前に伝えた後に画面で回答されたものがあれば、Claude に伝える。
+        このセッションで前に伝えた後に画面で回答されたもの・情報待ちになったものがあれば、Claude に伝える。
         サーバーのキャッシュを見るだけで bd は読まない (応答を遅くしない)
 
 どちらも失敗してもセッションを止めない (exit 0)。サーバーは 1 台を全プロジェクト・全セッションで共有し、
@@ -128,24 +128,34 @@ def snooze_line(s: dict) -> str | None:
     if m:
         parts.append(f"保留から判断待ちに戻ったもの {m} 件 (戻る日が来たか、保留の後に問いが書き換わった。判断待ちの件数に入っている)")
     if u:
+        # 読み残しの間は、情報待ちの ID も summary の needinfo から抜ける。読み終えた後の UserPromptSubmit が、増えた ID として伝える
         parts.append(f"判断待ちの件数のうち {u} 件は、保留中か情報待ちかを確認中 (サーバーの起動直後の読み残し。保留中・情報待ちのものが"
-                     "混じっていて、次の読みで減る。保留中かもしれないチケットに取りかかったり、答えを推測して進めたりしない)")
+                     "混じっていて、次の読みで減る。保留中かもしれないチケットに取りかかったり、答えを推測して進めたりしない。"
+                     "情報待ち (エージェントの番) と分かったものは、読み終えた後のプロンプトで ID を伝える)")
     return "humanq: " + "。".join(parts) + "。" if parts else None
 
 
-def needinfo_line(s: dict) -> str | None:
-    """情報待ち (エージェントの番) の 1 行。summary の needinfo は情報待ちのチケットの ID の list (判断待ちの件数に入っていない。
-    古いサーバーは返さない)。空でない文字列の ID だけを数え、0 件なら None。コマンドはプロジェクトの CLI のものだけを出す。"""
+def needinfo_ids(s: dict) -> list[str] | None:
+    """summary の needinfo (情報待ちのチケットの ID の list。判断待ちの件数に入っていない) の、空でない文字列の ID。
+    list でなければ (古いサーバーは返さない・形が崩れている) None (情報待ちが無いのか分からない)。"""
     v = s.get("needinfo")
-    ids = [x for x in v if isinstance(x, str) and x] if isinstance(v, list) else []
+    return [x for x in v if isinstance(x, str) and x] if isinstance(v, list) else None
+
+
+def _needinfo_cmds(s: dict) -> tuple[str, str]:
+    """(足りない情報の読み方, ラベルの外し方)。プロジェクトの CLI のコマンドだけを出す。"""
+    if _is_br(s):
+        return ("`br comments <id> --json` を (created_at, id) の昇順に並べ直した最後の `[humanq] 情報待ち`",
+                "`br label remove <id> needs-info`")
+    return "`bd comments <id>` の最後の `[humanq] 情報待ち`", "`bd label remove <id> needs-info`"
+
+
+def needinfo_line(s: dict) -> str | None:
+    """情報待ち (エージェントの番) の 1 行。needinfo_ids が 0 件 (か読めない) なら None。"""
+    ids = needinfo_ids(s)
     if not ids:
         return None
-    if _is_br(s):
-        read = "`br comments <id> --json` を (created_at, id) の昇順に並べ直した最後の `[humanq] 情報待ち`"
-        drop = "`br label remove <id> needs-info`"
-    else:
-        read = "`bd comments <id>` の最後の `[humanq] 情報待ち`"
-        drop = "`bd label remove <id> needs-info`"
+    read, drop = _needinfo_cmds(s)
     return (f"humanq: 情報待ち {len(ids)} 件 (エージェントの番): {', '.join(ids)}。ユーザーが判断待ちの画面で、回答に必要な情報が"
             f"足りないと返した問い (判断待ちの件数に入れていない)。{read} (作者 user/humanq) の補足が足りない情報。調べてチケット (本文・"
             f"notes・問いの背景) に足し、問いを書き直してから {drop} で外す (書き直した問いは判断待ちに戻る。問いの無いチケットは問いを書く。本文や notes に足すだけでは問いが変わらず、同じ問いのまま戻って画面は知らせない)。調べても分からないときも、"
@@ -153,24 +163,41 @@ def needinfo_line(s: dict) -> str | None:
             f"手順は {README} の「回答を拾う」")
 
 
-def _seen_path(sd: str, session_id: str) -> str:
+def needinfo_added_line(s: dict, ids: list[str]) -> str:
+    """UserPromptSubmit で伝える、前に伝えた後で情報待ちになったもの (ids) の 1 行。読み残しが解けて情報待ちと分かったものも含む。"""
+    read, drop = _needinfo_cmds(s)
+    return (f"humanq: 前に伝えた後で、情報待ち (エージェントの番) になったものが {len(ids)} 件ある: {', '.join(ids)}。ユーザーが"
+            f"回答に必要な情報が足りないと返した問い (判断待ちの件数に入れていない)。{read} (作者 user/humanq) の補足が足りない情報。"
+            f"今の作業に関わるなら、調べてチケットに足し、問いを書き直してから {drop} で外す (問いは取り下げない。手順は {README} の"
+            f"「回答を拾う」)")
+
+
+# セッションごとの覚え (sessions/<session>.json は回答済み、sessions/<session>.needinfo.json は情報待ち)。session の ID は
+# 英数字と - _ だけに直すので、"." を含む覚えの名前は、別のセッションの回答済みの覚えと重ならない
+NEEDINFO_SEEN = ".needinfo"
+
+
+def _seen_path(sd: str, session_id: str, kind: str = "") -> str:
     d = os.path.join(sd, "sessions")
     os.makedirs(d, exist_ok=True)
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in session_id)[:80] or "unknown"
-    return os.path.join(d, safe + ".json")
+    return os.path.join(d, safe + kind + ".json")
 
 
-def _remember(sd: str, session_id: str, answered: list[str]) -> list[str]:
-    """前に伝えた回答済みの集合と比べて、新しいものを返し、今の集合を覚える。"""
-    path = _seen_path(sd, session_id)
+def _remember(sd: str, session_id: str, now: list[str], kind: str = "", keep: bool = False) -> list[str]:
+    """前に伝えた集合と比べて、新しいもの (now の並びのまま) を返し、今の集合を覚える。kind は覚えの種類 ("" は回答済み・
+    NEEDINFO_SEEN は情報待ち)。keep なら前に伝えたものも覚えに残す (今の集合が欠けているかもしれない読み: 読み残しの間の情報待ち。
+    欠けたものを忘れると、読み終えた後に同じ ID を「増えた」と伝え直す)。"""
+    path = _seen_path(sd, session_id, kind)
     try:
         with open(path, encoding="utf-8") as f:
             seen = set(json.load(f))
-    except (OSError, ValueError, RecursionError):   # RecursionError は深い入れ子の記憶のファイル。壊れたファイルと同じに空として読む
+    except (OSError, ValueError, TypeError, RecursionError):   # RecursionError は深い入れ子、TypeError は数などの記憶のファイル。壊れたファイルと同じに空として読む
         seen = set()
+    # 文字列でない要素 (壊れた記憶のファイル) は覚え直さない (sorted が型の混在で落ちる)
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(sorted(answered), f)
-    return [a for a in answered if a not in seen]
+        json.dump(sorted(set(now) | ({x for x in seen if isinstance(x, str)} if keep else set())), f)
+    return [a for a in now if a not in seen]
 
 
 def _out(event: str, context: str, system: str | None = None) -> None:
@@ -200,7 +227,12 @@ def session_start(inp: dict) -> None:
         _out("SessionStart", "\n".join([f"humanq: このプロジェクトの判断待ちを読めない: {s.get('error')}", *warn]))
         return
     answered = s.get("answered") or []
-    _remember(sd, inp.get("session_id") or "unknown", answered)
+    session = inp.get("session_id") or "unknown"
+    _remember(sd, session, answered)
+    ni = needinfo_ids(s)
+    if ni is not None:
+        # 下の情報待ちの 1 行で全部を伝える。読み残しの間に抜けた ID は覚えないので、読み終えた後の UserPromptSubmit が伝える
+        _remember(sd, session, ni, NEEDINFO_SEEN)
     ids = f" ({', '.join(answered)})" if answered else ""
     if _is_br(s) and s.get("writable"):
         # br のプロジェクト。br のコマンドで案内する (bd のコマンドは出さない)
@@ -247,14 +279,22 @@ def prompt_submit(inp: dict) -> None:
     s = summary(root, 1.5)
     if not s or s.get("ok") is False:     # 読めなかったときの answered は [] でも「無い」ではない。覚えた集合を消さない
         return
-    new = _remember(registry.state_dir(), inp.get("session_id") or "unknown", s.get("answered") or [])
+    sd, session = registry.state_dir(), inp.get("session_id") or "unknown"
+    new = _remember(sd, session, s.get("answered") or [])
+    lines = []
     if new and _is_br(s):
-        _out("UserPromptSubmit", f"humanq: 前に伝えた後で、answered ラベルの付いたチケットが {len(new)} 件増えた: {', '.join(new)}。"
-                                 + BR_PICKUP)
+        lines.append(f"humanq: 前に伝えた後で、answered ラベルの付いたチケットが {len(new)} 件増えた: {', '.join(new)}。" + BR_PICKUP)
     elif new:
-        _out("UserPromptSubmit",
-             f"humanq: 前に伝えた後で、ユーザーが判断待ちの画面で {len(new)} 件に回答した: {', '.join(new)}。"
-             f"`bd comments <id>` の最後の `[humanq] 回答` を読み、今の作業に関わるなら反映する (手順は {README})。")
+        lines.append(f"humanq: 前に伝えた後で、ユーザーが判断待ちの画面で {len(new)} 件に回答した: {', '.join(new)}。"
+                     f"`bd comments <id>` の最後の `[humanq] 回答` を読み、今の作業に関わるなら反映する (手順は {README})。")
+    ni = needinfo_ids(s)
+    if ni is not None:                    # needinfo を返さない古いサーバーでは、覚えた集合を消さない
+        # 読み残し (unread) の間は情報待ちの ID が抜けうるので、前に伝えたものを忘れない (読み終えた後に伝え直さない)
+        added = _remember(sd, session, ni, NEEDINFO_SEEN, keep=_count(s.get("unread")) > 0)
+        if added:
+            lines.append(needinfo_added_line(s, added))
+    if lines:
+        _out("UserPromptSubmit", "\n".join(lines))
 
 
 def main() -> None:

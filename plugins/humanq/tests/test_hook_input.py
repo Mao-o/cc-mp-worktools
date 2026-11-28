@@ -164,27 +164,54 @@ class HookBrokenInputs(unittest.TestCase):
                 self.assertEqual(self.outcome(body), base)
 
     # ---- 記憶のファイル (_remember) ----
-    def remembered(self, content: str | None) -> tuple[list[str], str]:
+    # 回答済みの覚え (kind "") と、情報待ちの覚え (kind NEEDINFO_SEEN) は同じ読み方
+    KINDS = {"回答済み": "", "情報待ち": None}
+
+    def kind(self, name: str) -> str:
+        return self.hook.NEEDINFO_SEEN if self.KINDS[name] is None else self.KINDS[name]
+
+    def remembered(self, content: str | None, kind: str = "", keep: bool = False) -> tuple[list[str], str]:
         """記憶のファイルに content を置いて (None は置かない) _remember(["a", "b"]) を呼ぶ。(返り値, 呼んだ後のファイルの中身)。"""
         self.n += 1
         sid = f"s{self.n}"
-        path = self.hook._seen_path(self.sd, sid)
+        path = self.hook._seen_path(self.sd, sid, kind)
         if content is not None:
             Path(path).write_text(content, encoding="utf-8")
-        new = self.quietly("_remember", lambda: self.hook._remember(self.sd, sid, ["a", "b"]))
+        new = self.quietly("_remember", lambda: self.hook._remember(self.sd, sid, ["a", "b"], kind, keep))
         return new, Path(path).read_text(encoding="utf-8")
 
+    # 読めない・形の崩れた記憶: 壊れた JSON・深い入れ子と、JSON としては読めるが集合にならないもの (数・null・入れ子の list)
+    SHAPELESS = {"数": "5", "null": "null", "真偽値": "true", "入れ子の list": "[[1], [2]]"}
+
     def test_remember_reads_an_unreadable_file_as_empty(self):
-        for what, content in {**DEEP, **BROKEN, "ファイルが無い": None}.items():
-            with self.subTest(what):
-                new, after = self.remembered(content)
-                self.assertEqual(new, ["a", "b"], "読めない記憶は空 (全部が新しい)")
-                self.assertEqual(after, '["a", "b"]', "今の集合を覚え直す")
+        for name in self.KINDS:
+            for keep in (False, True):
+                for what, content in {**DEEP, **BROKEN, **self.SHAPELESS, "ファイルが無い": None}.items():
+                    with self.subTest(kind=name, keep=keep, what=what):
+                        new, after = self.remembered(content, self.kind(name), keep)
+                        self.assertEqual(new, ["a", "b"], "読めない記憶は空 (全部が新しい)")
+                        self.assertEqual(after, '["a", "b"]', "今の集合を覚え直す")
 
     def test_remember_still_reads_a_valid_file(self):
-        new, after = self.remembered('["a"]')
-        self.assertEqual(new, ["b"])
-        self.assertEqual(after, '["a", "b"]')
+        for name in self.KINDS:
+            with self.subTest(kind=name):
+                new, after = self.remembered('["a"]', self.kind(name))
+                self.assertEqual(new, ["b"])
+                self.assertEqual(after, '["a", "b"]')
+                # keep (読み残しの間の情報待ち) は、前に伝えたもののうち今の集合に無いものも残す。文字列でない要素は覚え直さない
+                new, after = self.remembered('["c", "a", 3, null]', self.kind(name), keep=True)
+                self.assertEqual(new, ["b"])
+                self.assertEqual(after, '["a", "b", "c"]')
+                new, after = self.remembered('["c", "a"]', self.kind(name), keep=False)
+                self.assertEqual((new, after), (["b"], '["a", "b"]'), "keep でないのに、今の集合に無いものを残した")
+
+    def test_the_two_memories_are_separate_files_that_no_session_name_reaches(self):
+        # 回答済みの覚えと情報待ちの覚えは別のファイル。session の ID を直した名前は "." を含まないので、別のセッションの
+        # 回答済みの覚えが、あるセッションの情報待ちの覚えと同じファイルにならない
+        a = self.hook._seen_path(self.sd, "s.needinfo")
+        n = self.hook._seen_path(self.sd, "s", self.hook.NEEDINFO_SEEN)
+        self.assertEqual(os.path.dirname(a), os.path.dirname(n))
+        self.assertEqual((os.path.basename(a), os.path.basename(n)), ("s_needinfo.json", "s.needinfo.json"))
 
     # ---- stdin (main) ----
     def run_main(self, event: str, stdin) -> list:

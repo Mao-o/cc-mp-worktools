@@ -100,6 +100,7 @@ main { max-width: 860px; margin: 0 auto; padding: 8px 16px 64px; }
 .ovid { font-family: ui-monospace, Menlo, monospace; }
 .ovrow .head > span { min-width: 0; overflow-wrap: anywhere; }   /* 長い ID・ラベルで、幅の狭い画面のページを横にスクロールさせない */
 .ovhuman { font-weight: 700; color: var(--accent); }
+.ovni { font-weight: 700; color: var(--muted); }    /* 情報待ち (エージェントの番)。判断待ち (ユーザーの番) の印と色で分ける */
 .ovnone { color: var(--muted); font-size: 13px; margin: 6px 0 0; }
 h3, h2.sec { font-size: 14px; color: var(--muted); font-weight: 600; margin: 28px 0 10px; letter-spacing: .02em; }
 /* 全体を優先度順の表示の節の見出し (判断待ち / 回答済み・反映待ち)。プロジェクトの見出しが無いので h2 にし、見た目は節の見出し (h3) と同じ。止めない */
@@ -217,9 +218,9 @@ details.snz > summary h2.sec, details.ni > summary h2.sec, details.ansgrp > summ
 details.snz[open] > summary, details.ni[open] > summary, details.ansgrp[open] > summary { margin-bottom: 10px; }
 /* 回答の後のフォーカスは、見えるカードが他に無いとき、畳んだ節の summary へ移る (moveFocusAway) */
 details.snz > summary:focus-visible, details.ni > summary:focus-visible, details.ansgrp > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-/* 畳んだままでも、中に取り消しの失敗で戻ったカードがあると分かるよう、見出しの行に失敗の件数を出して警告の色にする (syncAnsHead)。保留中の節も同じ (syncSnzHead) */
+/* 畳んだままでも、中に取り消しの失敗で戻ったカードがあると分かるよう、見出しの行に失敗の件数を出して警告の色にする (syncAnsHead)。保留中・情報待ちの節も同じ (syncSnzHead・syncNiHead) */
 details.ansgrp > summary.hasfail, details.ansgrp > summary.hasfail h2.sec, details.ansgrp > summary.hasfail h3,
-details.snz > summary.hasfail, details.snz > summary.hasfail h2.sec { color: var(--warn); }
+details.snz > summary.hasfail, details.snz > summary.hasfail h2.sec, details.ni > summary.hasfail, details.ni > summary.hasfail h2.sec { color: var(--warn); }
 .snz .head .pj, .ni .head .pj { display: block; }
 .empty { color: var(--muted); padding: 24px 0; text-align: center; }
 .banner { background: var(--panel); border: 1px solid var(--warn); color: var(--warn); border-radius: var(--radius); padding: 10px 14px; margin-top: 14px; overflow-wrap: anywhere; }
@@ -331,20 +332,21 @@ function el(tag, attrs, ...kids) {
 // ---- 通信 ----------------------------------------------------------------------------
 
 // written: 回答のコメントが書き込まれたか。サーバーが言ったときだけ true / false、分からなければ null (通信が切れた・内部エラーなど)。
-// op: 送信の種類 (answer | undo | snooze | unsnooze | needinfo)。サーバーが返さなくても、送ったパスから分かる
+// op: 送信の種類 (answer | undo | snooze | unsnooze | needinfo | unneedinfo)。サーバーが返さなくても、送ったパスから分かる
 class ApiError extends Error {
   constructor(message, info) { super(message); Object.assign(this, { status: 0, code: null, stage: null, written: null, op: null }, info); }
 }
 
 // 書き込みの API のパスと送信の種類。OPS は種類ごとの、チケットの出どころ (src) と行き先 (dst) の一覧と、知らせの言い方
 const OP_OF = { "/api/answer": "answer", "/api/undo": "undo", "/api/snooze": "snooze", "/api/unsnooze": "unsnooze",
-  "/api/needinfo": "needinfo" };
+  "/api/needinfo": "needinfo", "/api/unneedinfo": "unneedinfo" };
 const OPS = {
   answer: { src: "human", dst: "answered", srcName: "判断待ち", dstName: "回答済み", what: "回答" },
   undo: { src: "answered", dst: "human", srcName: "回答済み", dstName: "判断待ち", what: "取り消し" },
   snooze: { src: "human", dst: "snoozed", srcName: "判断待ち", dstName: "保留中", what: "保留" },
   unsnooze: { src: "snoozed", dst: "human", srcName: "保留中", dstName: "判断待ち", what: "保留の解除" },
   needinfo: { src: "human", dst: "needinfo", srcName: "判断待ち", dstName: "情報待ち", what: "情報待ち" },
+  unneedinfo: { src: "needinfo", dst: "human", srcName: "情報待ち", dstName: "判断待ち", what: "情報待ちの取り下げ" },
 };
 // 知らない種類 (サーバーが返した想定外の op を含む) は回答として扱う (今までの文言と同じ)
 const opInfo = op => (Object.prototype.hasOwnProperty.call(OPS, op) ? OPS[op] : OPS.answer);
@@ -475,10 +477,12 @@ function snoozedToast(it, until) {
   toast(msg, { kind: "ok", key: ["snz", it.project, it.id, msg].join("\n"), action: { label: "解除", run: () => unsnoozeIt(it) } });
 }
 
-// 情報待ちにした知らせ。戻すボタンは無い (エージェントが情報を足して問いを書き直すと、判断待ちに戻る)
+// 情報待ちにした知らせ。エージェントが情報を足して問いを書き直すと判断待ちに戻る。押し間違えたときは「取り下げる」で判断待ちに
+// 戻せる (情報待ちの節は畳んであり、ページの下にある)。key と閉じ方は保留の知らせと同じ形
 function needinfoToast(it) {
-  toast(`「${summarize(it.title, 24)}」を情報待ちにしました (エージェントが調べて問いを書き直すと、判断待ちに戻ります)`,
-    { kind: "ok", key: ["ni", it.project, it.id].join("\n") });
+  const msg = `「${summarize(it.title, 24)}」を情報待ちにしました (エージェントが調べて問いを書き直すと、判断待ちに戻ります)`;
+  dropToasts("ni", it);
+  toast(msg, { kind: "ok", key: ["ni", it.project, it.id, msg].join("\n"), action: { label: "取り下げる", run: () => unneedinfoIt(it) } });
 }
 
 // 消えない案内 (サーバーが入れ替わった、など)
@@ -1034,14 +1038,23 @@ function buildSnoozed(it) {
     ctrl, el("div", { class: "errbox" }));
 }
 
-// 情報待ちのカード (ページの下の畳んだ節に出す)。題・問い・足りない情報と、エージェントの番である旨。回答の部品も操作のボタンも
-// 出さない (エージェントが情報を足して問いを書き直すと、新しい問いとして判断待ちに戻る)
+// 情報待ちのカード (ページの下の畳んだ節に出す)。題・問い・足りない情報と、エージェントの番である旨と「取り下げる」。回答の部品は
+// 出さない (エージェントが情報を足して問いを書き直すと、新しい問いとして判断待ちに戻る。押し間違えた・自分で情報を見つけたときは、
+// 「取り下げる」で同じ問いのまま判断待ちに戻す)。書き込めないプロジェクトには「取り下げる」を出さない
 function buildNeedinfo(it) {
+  let ctrl;
+  if (it.writable === false) ctrl = readonlyNote(it);
+  else {
+    const b = el("button", { class: "ghost", type: "button", title: "情報待ちを取り下げて、判断待ちに戻す" }, "取り下げる");
+    b.addEventListener("click", () => unneedinfoIt(it));
+    ctrl = el("div", { class: "row" }, b);
+  }
   const title = el("p", { class: "title", id: nextLabelId() }, it.title);
   return el("section", { class: "card nicard", "data-id": it.id, tabindex: "-1", "aria-labelledby": title.id }, head(it), title,
     it.q && it.q.ask ? md("p", "niask", it.q.ask) : null,
     el("p", { class: "niinfo" }, "足りない情報: " + (needinfoOf(it).note || "(書かれていません)")),
-    el("p", { class: "nistate" }, "エージェントの番です。調べてチケットに足し、問いを書き直すと判断待ちに戻ります"));
+    el("p", { class: "nistate" }, "エージェントの番です。調べてチケットに足し、問いを書き直すと判断待ちに戻ります"),
+    ctrl, el("div", { class: "errbox" }));
 }
 
 // 保留を解除して判断待ちに戻す (保留中のカードの「保留を解除」と、保留の成功のトーストの「解除」)。送り先は project と id だけで
@@ -1053,6 +1066,18 @@ function unsnoozeIt(it) {
   submit(key, it, "/api/unsnooze", { project: it.project, id: it.id }, () => {
     if (seen) seen.add(it.project + "\n" + it.id);
     toast(`「${summarize(it.title, 24)}」の保留を解除しました`, { kind: "ok", key: ["unsnz", it.project, it.id].join("\n") });
+  });
+}
+
+// 情報待ちを取り下げて判断待ちに戻す (情報待ちのカードの「取り下げる」と、情報待ちの成功のトーストの「取り下げる」)。形は保留の解除と
+// 同じ: 送り先は project と id だけで決まるので、情報待ちのカードがまだ作られていなくても送れる。戻ったものは同じ問い (問いの
+// 署名が同じ) のまま判断待ちに出るので、「判断待ちが増えました」の通知には数えない (notifyNew)
+function unneedinfoIt(it) {
+  const key = nKey(it.project, it.id);
+  dropToasts("ni", it);
+  if (pending.has(key)) return;
+  submit(key, it, "/api/unneedinfo", { project: it.project, id: it.id }, () => {
+    toast(`「${summarize(it.title, 24)}」の情報待ちを取り下げました (判断待ちに戻しました)`, { kind: "ok", key: ["unni", it.project, it.id].join("\n") });
   });
 }
 
@@ -1120,6 +1145,13 @@ function makeSnzBox() {
   const h = el("h2", { class: "sec" });
   const sum = el("summary", {}, h);
   return { el: el("details", { class: "snz" }, sum), sum, h };
+}
+// 情報待ちの節の見出しの文。取り下げに失敗して戻ったカード (赤い枠) が中にあるときだけ「(失敗 n 件)」を足し、行を警告の色にする
+// (保留中の節の syncSnzHead と同じ。節は畳んだままで、開閉の覚えも変えない)
+function syncNiHead(nb, list) {
+  const f = list.filter(i => errors.has(nKey(i.project, i.id))).length;
+  nb.h.textContent = `情報待ち (${list.length})` + (f ? ` (失敗 ${f} 件)` : "");
+  nb.sum.classList.toggle("hasfail", f > 0);
 }
 // 情報待ちの節 {el (details。既定は閉じる), sum (summary), h (見出し h2)}。保留中の節の上 (ページの下) に、優先度 → 作成日の順で出す
 let niBox = null;
@@ -1325,10 +1357,11 @@ function render() {
     const q0 = p.human.filter(i => !pending.has(qKey(p.path, i.id)));
     const a0 = p.answered.filter(i => !pending.has(aKey(p.path, i.id)));
     const s0 = p.snoozed.filter(i => !pending.has(sKey(p.path, i.id)));
+    const n0 = p.needinfo.filter(i => !pending.has(nKey(p.path, i.id)));     // 取り下げの送信中・成功の後は隠す
     total += q0.length;                // ヘッダーの件数は絞り込みに関係なく全件 (保留中・情報待ちは数えない)
     // 保留中と情報待ちは、判断待ちの無いプロジェクトのものも集める (節はプロジェクトの入れ物の外にある)
     for (const i of s0) { if (flt.snoozed !== "hide" && matchesFilter(i)) allS.push(i); else hiddenKeys.add(sKey(p.path, i.id)); }
-    for (const i of p.needinfo) { if (matchesFilter(i)) allN.push(i); else hiddenKeys.add(nKey(p.path, i.id)); }
+    for (const i of n0) { if (matchesFilter(i)) allN.push(i); else hiddenKeys.add(nKey(p.path, i.id)); }
     if (!q0.length && !a0.length && p.ok) { idle++; continue; }
     if (q0.length || a0.length) anyItems = true;
     const q = q0.filter(matchesFilter), a = a0.filter(matchesFilter);
@@ -1412,7 +1445,7 @@ function render() {
   if (allN.length) {
     const nb = niBox || (niBox = makeNiBox());
     if (nb.el._leave) unleave(nb.el);
-    nb.h.textContent = `情報待ち (${allN.length})`;
+    syncNiHead(nb, allN);
     niEls = [nb.sum, ...allN.sort(byPrio).map(i => ensureCard(i, "ni"))];
   }
 
@@ -1541,11 +1574,12 @@ function missingNote(e, op, proj, it) {
     : `書けたかどうか分かりません。チケットは今は${src}にありません。${dst}の一覧を確認してください`;
 }
 
-// op は送信の種類 (answer | undo | snooze | unsnooze | needinfo)。省略は key の頭 (q は回答、a は取り消し) から決める
+// op は送信の種類 (answer | undo | snooze | unsnooze | needinfo | unneedinfo)。省略は key の頭 (q は回答、a は取り消し) から決める
 async function failed(key, it, e, op) {
   op = op || (key[0] === "a" ? "undo" : key[0] === "s" ? "unsnooze" : "answer");
   const snz = op === "snooze" || op === "unsnooze";
-  const aside = snz || op === "needinfo";               // 判断待ちから脇へ置く (戻す) 書き込み。gone は「もう判断待ちに無い」と言う
+  // 判断待ちから脇へ置く (戻す) 書き込み。gone は「もう判断待ちに無い」と言う
+  const aside = snz || op === "needinfo" || op === "unneedinfo";
   const info = explain(e);
   const label = `「${summarize(it.title, 24)}」(${it.id})`;
   if (e.status === 403 && e.message === "token") {      // サーバーが入れ替わった (書き込みは何も起きていない)。下書きは再読み込みの後も使う
@@ -1580,7 +1614,7 @@ async function failed(key, it, e, op) {
     toast(`${label}: ${changed ? info.summary : info.summary + "。カードを戻しました"}`);
     return;
   }
-  // 取り消し・保留の解除の失敗では、問い直された新しい問いの下書きを消さない。保留・情報待ちの失敗で判断待ちから消えていたら、
+  // 取り消し・保留の解除・情報待ちの取り下げの失敗では、問い直された新しい問いの下書きを消さない。保留・情報待ちの失敗で判断待ちから消えていたら、
   // 保留中・情報待ちか回答済みに居る (下書きは判断待ちに戻ったときに使う) ので消さない
   if (op === "answer") dropDraft(it);
   cards.delete(key);
@@ -1670,14 +1704,18 @@ function renderOverview(projects) {
   ovList.replaceChildren(...(boxes.length ? boxes : [el("p", { class: "empty" }, "登録したプロジェクトはありません")]));
 }
 
-// 次に着手できるチケットの 1 行。human の付いたもの (判断待ち) は、題を判断待ちのカードへのリンクにする。ラベルは解釈せず、
-// humanq 自身のもの (human / answered / snoozed / needs-info) を除いて文字列のまま出す
+// 次に着手できるチケットの 1 行。human の付いたもの (判断待ち) は「判断待ち」の印を付け、題を判断待ちのカードへのリンクにする。
+// 情報待ち (サーバーが needinfo: true を付けたもの。エージェントの番) は「情報待ち」の印を付け、題を情報待ちのカードへのリンクにする
+// (human のラベルも残っているが、判断待ちの印は付けない。needinfo を返さない古いサーバーでは、今までどおり判断待ちの印)。
+// ラベルは解釈せず、humanq 自身のもの (human / answered / snoozed / needs-info) を除いて文字列のまま出す
 function readyRow(path, r) {
   const p = typeof r.priority === "number" ? r.priority : 9;
   const labels = shownLabels(r);
   const title = typeof r.title === "string" && r.title ? r.title : r.id;
-  const human = r.human === true;
-  const t = human ? el("a", { class: "ovlink", href: "#", title: "判断待ちのカードを開く", onclick: e => { e.preventDefault(); openCard(path, r.id); } }, title)
+  const asked = r.needinfo === true;
+  const human = !asked && r.human === true;
+  const t = human || asked ? el("a", { class: "ovlink", href: "#", title: asked ? "情報待ちのカードを開く" : "判断待ちのカードを開く",
+    onclick: e => { e.preventDefault(); openCard(path, r.id); } }, title)
     : el("span", {}, title);
   return el("li", { class: "ovrow", "data-id": r.id },
     el("div", { class: "head" },
@@ -1685,6 +1723,7 @@ function readyRow(path, r) {
       el("span", { class: "ovid" }, r.id),
       typeof r.status === "string" && r.status ? el("span", {}, r.status) : null,
       human ? el("span", { class: "ovhuman" }, "判断待ち") : null,
+      asked ? el("span", { class: "ovni" }, "情報待ち") : null,
       ...labels.slice(0, MAX_LABELS).map(l => el("span", {}, l)),
       labels.length > MAX_LABELS ? el("span", { title: labels.join("\n") }, `+${labels.length - MAX_LABELS}`) : null),
     el("p", { class: "ovt" }, t));
