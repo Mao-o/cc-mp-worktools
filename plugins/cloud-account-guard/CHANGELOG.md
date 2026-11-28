@@ -34,6 +34,8 @@
   世界で 3 形 (allow → deny)) は全部、前段に名前を読めない代入の組み込み・`printf -v` か、identity の環境変数の
   名前の `read` / `printf -v` があるもの
 
+## 0.36.6
+
 ### Fixed: 固定のある世界で、固定と違う値を指す context option のコマンドを固定で通していた
 
 - 期待値が未登録の aws / gcloud / firebase は、ディレクトリ単位の固定 (環境変数 / `firebase use` の記録) があれば
