@@ -78,6 +78,9 @@ class Pool:
         self.events[name].set()
 
     def start(self) -> None:
+        """worker を起こす。起こしてあれば何もしない (discover は読み込みの時点で起こし、ParallelSuite.run がもう一度呼ぶ)。"""
+        if self.procs:
+            return
         for _ in range(self.jobs):
             to_w_r, to_w_w = os.pipe()
             from_w_r, from_w_w = os.pipe()
@@ -207,7 +210,7 @@ class RemoteTest(unittest.TestCase):
 
 
 class ParallelSuite(unittest.TestSuite):
-    """先に worker を起こし、親では並列にしないテストを走らせ、最後に worker の結果を順に報告する。"""
+    """先に worker を起こし (起こしてあればそのまま)、親では並列にしないテストを走らせ、最後に worker の結果を順に報告する。"""
 
     def __init__(self, tests, pool: Pool):
         super().__init__(tests)

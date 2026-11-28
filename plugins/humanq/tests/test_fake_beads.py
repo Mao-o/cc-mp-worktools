@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -196,8 +197,10 @@ class BrList(FakeBrCase):
         self.assertIsInstance(out["issues"], list)
 
     def test_default_and_limit_zero_are_unlimited(self):
-        for n in range(60):                       # bd の既定 (50) を超える
-            self.create(f"q{n}")
+        # bd の既定 (50) を超える数。偽物は flock で 1 本ずつ書く (id も連番) ので、起動だけを 4 本ずつ重ねる。
+        # create の失敗 (assertion) は map の戻りを読むときに、このテストの失敗として上がる
+        with ThreadPoolExecutor(4) as ex:
+            list(ex.map(lambda n: self.create(f"q{n}"), range(60)))
         self.assertEqual(len(self.jok("list")["issues"]), 60)
         out = self.jok("list", "--limit", "0")
         self.assertEqual((len(out["issues"]), out["total"]), (60, 60))

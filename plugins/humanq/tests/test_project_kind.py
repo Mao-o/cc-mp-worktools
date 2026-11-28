@@ -72,21 +72,24 @@ class ProjectKindTable(unittest.TestCase):
     def test_br_mark_gitignore_br_history(self):
         self.assertKind("br", self.kind({".gitignore": "*.log\n.br_history/\n", "metadata.json": SQLITE_META}))
 
-    def test_br_mark_gitignore_fsqlite(self):
-        self.assertKind("br", self.kind({".gitignore": "beads.db-fsqlite-ns-*\n"}))
-
     def test_br_mark_br_history_dir(self):
         self.assertKind("br", self.kind(dirs=(".br_history",)))
 
-    def test_br_mark_fsqlite_ns_file(self):
-        self.assertKind("br", self.kind({"beads.db-fsqlite-ns-1234": ""}))
+    # .beads/ に置くファイル 1 つだけで決まるもの: br の印と、印にならない .gitignore (bd になる)。
+    # 1 件ずつのテストだったものをまとめた表。元のテスト名を subTest のラベルに残す
+    ONE_FILE = (
+        ("test_br_mark_gitignore_fsqlite", {".gitignore": "beads.db-fsqlite-ns-*\n"}, "br"),
+        ("test_br_mark_fsqlite_ns_file", {"beads.db-fsqlite-ns-1234": ""}, "br"),
+        ("test_br_mark_db_lock_file", {".br-db-openers-1.lock": ""}, "br"),
+        ("test_br_mark_alone_without_metadata", {".br-db-x.lock": ""}, "br"),      # metadata.json が無くても、印だけで決まる
+        ("test_comment_line_in_gitignore_is_not_a_mark", {".gitignore": "# .br_history と fsqlite は br のもの\n*.tmp\n"}, "bd"),
+        ("test_unrelated_gitignore_is_not_a_mark", {".gitignore": "*.db\ndolt/\n"}, "bd"),
+    )
 
-    def test_br_mark_db_lock_file(self):
-        self.assertKind("br", self.kind({".br-db-openers-1.lock": ""}))
-
-    def test_br_mark_alone_without_metadata(self):
-        # metadata.json が無くても、印だけで決まる
-        self.assertKind("br", self.kind({".br-db-x.lock": ""}))
+    def test_one_file_decides_the_kind(self):
+        for name, files, want in self.ONE_FILE:
+            with self.subTest(name):
+                self.assertKind(want, self.kind(files))
 
     # ---- bd の印 ----
     def test_bd_mark_metadata_database_dolt(self):
@@ -124,12 +127,6 @@ class ProjectKindTable(unittest.TestCase):
     def test_issues_jsonl_is_not_a_mark(self):
         self.assertKind("bd", self.kind({"issues.jsonl": "", "metadata.json": {"jsonl_export": "issues.jsonl"}}))
         self.assertKind("unknown", self.kind({"issues.jsonl": "", "metadata.json": SQLITE_META}))
-
-    def test_comment_line_in_gitignore_is_not_a_mark(self):
-        self.assertKind("bd", self.kind({".gitignore": "# .br_history と fsqlite は br のもの\n*.tmp\n"}))
-
-    def test_unrelated_gitignore_is_not_a_mark(self):
-        self.assertKind("bd", self.kind({".gitignore": "*.db\ndolt/\n"}))
 
     # ---- 明示の設定 ----
     def test_explicit_agrees_with_marks(self):

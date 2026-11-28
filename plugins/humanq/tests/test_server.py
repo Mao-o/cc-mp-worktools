@@ -18,6 +18,7 @@ HUMANQ_SERVER_DIR で別の server/ を試せる。
 """
 from __future__ import annotations
 
+import atexit
 import contextlib
 import importlib.util
 import io
@@ -3031,6 +3032,9 @@ class WithFakeBr(FakeLog, BdScenarios, unittest.TestCase):
 # に限り、このファイルを --bd-worker で起動した worker で並列に回す。各 worker は自分の setUpClass (bd init した一時の
 # プロジェクト・偽の bd を置いた dir) を持つ。テストを名前で指したとき (`-m unittest test_server.WithBd` など) と
 # HUMANQ_TEST_JOBS=1 のときは今までどおり直列。
+# discover (load_tests に pattern が渡る) では、worker を読み込みの時点で起こす。test_server は discover の並び (名前の順) で
+# 最後のモジュールなので、run の時点で起こすと、親がほかのモジュールを直列に回している間 worker が動かない。
+# モジュールを名前で指したとき (`-m unittest tests.test_server`。pattern は None) は、今までどおり run の時点で起こす。
 
 JOBS_ENV = "HUMANQ_TEST_JOBS"
 DEFAULT_JOBS = 3
@@ -3056,7 +3060,13 @@ def module_suite(tests, jobs: int):
 
 
 def load_tests(loader, tests, pattern):
-    return module_suite(tests, jobs_from_env())
+    suite = module_suite(tests, jobs_from_env())
+    if pattern is not None and isinstance(suite, bd_parallel.ParallelSuite):
+        suite.pool.start()
+        # 読み込んだまま走らせずに終わったとき (failfast で手前のモジュールで止まった・一覧だけを取る道具) も、
+        # 配っていない名前を捨てて worker を回収する (走らせたときは ParallelSuite.run が先に回収している)
+        atexit.register(suite.pool.close)
+    return suite
 
 
 if os.environ.get(POOL_DUMMY_ENV) == "1":
@@ -3156,7 +3166,7 @@ class ParallelRunner(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="humanq-pool-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
 
-    def run_remote(self, names: list[str], jobs: int = 2, script: str = SCRIPT) -> unittest.TestResult:
+    def run_remote(self, names: list[str], jobs: int = 2, script: str = SCRIPT, prestart: bool = False) -> unittest.TestResult:
         class Stub(unittest.TestCase):               # 親の側の元のテスト (id と表示だけ借りる)
             def runTest(self):
                 pass
@@ -3171,8 +3181,11 @@ class ParallelRunner(unittest.TestCase):
                                            {POOL_DUMMY_ENV: "1", "HUMANQ_TEST_POOL_MARK": self.tmp},
                                            name_of=lambda t: stubs[id(t)])
         self.assertIsInstance(suite, bd_parallel.ParallelSuite)
+        self.pool = suite.pool
         remotes = [t for t in bd_parallel.flatten(suite) if isinstance(t, bd_parallel.RemoteTest)]
         self.assertEqual(sorted(t.name for t in remotes), sorted(names))
+        if prestart:                                 # discover と同じく、読み込みの時点で起こしてから run する (load_tests)
+            suite.pool.start()
         result = unittest.TestResult()
         suite.run(result)
         self.assertEqual(result.testsRun, len(names))
@@ -3251,8 +3264,10 @@ class ParallelRunner(unittest.TestCase):
         self.assertEqual((r.errors, r.skipped), ([], []))
 
     def test_a_result_that_never_comes_is_an_error(self):
-        body = "import time\nrd.readline()\ntime.sleep(3)\n"           # 名前を受け取ったまま答えない
-        with mock.patch.object(bd_parallel, "RESULT_WAIT", 0.5):
+        # 名前を受け取ったまま、待つ上限 (RESULT_WAIT) より長く答えない。close は worker が終わるのを待つので、黙る時間が
+        # そのまま所要に乗る。上限との差 (0.8 秒) に worker の起動の分が加わる
+        body = "import time\nrd.readline()\ntime.sleep(1)\n"
+        with mock.patch.object(bd_parallel, "RESULT_WAIT", 0.2):
             r = self.run_remote(["PoolDummy.test_ok"], jobs=1, script=self.fake_worker(body))
         self.assertEqual((self.names_of(r.errors), r.failures, r.skipped), (["PoolDummy.test_ok"], [], []))
         self.assertIn("待っても結果が来ない", r.errors[0][1])
@@ -3330,6 +3345,39 @@ class ParallelRunner(unittest.TestCase):
                 self.assertEqual(t.name, f"{type(t.orig).__name__}.{t.orig._testMethodName}")
                 self.assertTrue(t.id().endswith("." + t.name), t.id())
                 self.assertEqual((t.id(), str(t)), (t.orig.id(), str(t.orig)))
+
+    def test_discover_starts_the_workers_while_loading(self):
+        # discover は load_tests に pattern を渡す。そのときだけ読み込みの時点で worker を起こし (親がほかのモジュールを
+        # 回している間に回す)、走らせずに終わっても atexit で回収する。モジュールを名前で指したとき (pattern は None) は
+        # run の時点で起こす。直列 (HUMANQ_TEST_JOBS=1) では起こさず、suite もそのまま返す
+        mod = sys.modules[__name__]
+        for jobs, pattern, started in (("3", "test*.py", True), ("3", None, False), ("1", "test*.py", False)):
+            with self.subTest(jobs=jobs, pattern=pattern):
+                loader = unittest.TestLoader()
+                with mock.patch.dict(os.environ, {JOBS_ENV: jobs}), \
+                        mock.patch.object(bd_parallel.Pool, "start", autospec=True) as start, \
+                        mock.patch.object(atexit, "register") as register:
+                    suite = loader.loadTestsFromModule(mod, pattern=pattern)
+                self.assertEqual(loader.errors, [], "load_tests が例外を上げた")
+                classes = {type(t.orig if isinstance(t, bd_parallel.RemoteTest) else t).__name__ for t in bd_parallel.flatten(suite)}
+                self.assertIn("WithFakeBd", classes)
+                if jobs == "1":
+                    self.assertNotIsInstance(suite, bd_parallel.ParallelSuite)
+                    self.assertEqual((start.call_args_list, register.call_args_list), ([], []))
+                    continue
+                self.assertIsInstance(suite, bd_parallel.ParallelSuite)
+                self.assertEqual(start.call_args_list, [mock.call(suite.pool)] if started else [],
+                                 "読み込みの時点で worker を起こすかが、pattern の有無と合わない")
+                self.assertEqual(register.call_args_list, [mock.call(suite.pool.close)] if started else [],
+                                 "読み込みの時点で起こした worker を、走らせずに終わったときに回収しない")
+
+    def test_workers_started_while_loading_are_not_started_again(self):
+        # discover は読み込みの時点で worker を起こし、ParallelSuite.run がもう一度 start を呼ぶ。2 度目で worker を
+        # 増やさず、先に起こした worker の結果をそのまま報告する
+        r = self.run_remote(["PoolDummy.test_ok", "PoolDummy.test_fail", "PoolDummy.test_skip"], jobs=2, prestart=True)
+        self.assertEqual(len(self.pool.procs), 2, "2 度目の start で worker を増やした")
+        self.assertEqual(self.names_of(r.failures), ["PoolDummy.test_fail"])
+        self.assertEqual((r.errors, sorted(t.name for t, _ in r.skipped)), ([], ["PoolDummy.test_skip"]))
 
     def test_a_skipped_scenario_class_stays_in_the_parent(self):
         @unittest.skip("bd が無い")

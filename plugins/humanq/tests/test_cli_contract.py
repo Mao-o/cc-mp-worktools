@@ -32,6 +32,8 @@ humanq は CLI の出力の形に強く依る。偽物は実測した癖を写�
   判定 (registry._br_home) が同じ dir を返すことも確かめる。bd の worktree の解決は測っていないので、bd の側には無い
 - 保留と保留の解除の書き込み (humanq.Store.snooze / unsnooze) を 4 通りに通し、差し替え口 (humanq.bd / humanq.br) から
   ラベルの段階の失敗を注入した送り直しで、コメントが二重にならず・ラベルが付く (外れる)・status と担当が変わらないことを確かめる
+- 時刻をずらして書くところは later() を通す。本物は 1.1 秒待ち、偽物は次の秒の頭まで待つ (偽物の時計は進めない)。後に
+  書いたものが後の秒になることは Later が偽物と本物に同じ assertion で確かめる
 """
 from __future__ import annotations
 
@@ -114,6 +116,20 @@ class ContractBase(unittest.TestCase):
         cls.proj = cls.new_project("proj")
         cls._empty: str | None = None
         cls.n = 0
+
+    @staticmethod
+    def next_second() -> None:
+        """次の秒の頭まで待つ (平均 0.5 秒)。"""
+        time.sleep(1.02 - time.time() % 1)
+
+    def later(self) -> None:
+        """これから書くものの時刻を、今までに書いたものより後の秒にする。本物は 1.1 秒待つ。偽物は次の秒の頭まで待つ。
+        偽物の時計は進めない: 進めると、その後のテストで偽物の書く時刻が今より先になり、今と比べる読み (humanq._recent。
+        送り直しの判定) が本物では起きない形で通る (RESEND_SEC を 0 にする変異が契約テストで生き残った)。"""
+        if self.SUBJECT.startswith("fake"):
+            self.next_second()
+        else:
+            time.sleep(1.1)
 
     @classmethod
     def new_project(cls, name: str) -> str:
@@ -371,7 +387,7 @@ class BdQuirks:
                 same_second = True
                 break
         iid = next(reversed(written))
-        time.sleep(1.1)
+        self.later()
         late = self.write_file("late")
         be.add_comment(self.proj, iid, late)
         written[iid].append("late")
@@ -661,7 +677,7 @@ class BrQuirks:
         texts = ["one", "two"]
         for t in texts:
             self.add_comment(iid, t)
-        time.sleep(1.1)
+        self.later()
         texts.append("three")
         self.add_comment(iid, "three")
         rows = self.comment_rows(q, iid)
@@ -743,7 +759,7 @@ class BrQuirks:
             return [c.get("text") for c in thread]
 
         self.assertEqual(thread_of_load(), texts, note)
-        time.sleep(1.1)                         # 時刻をずらす
+        self.later()                            # 時刻をずらす
         texts.append("late")
         self.add_comment(iid, "late", cwd=proj)
         self.assertEqual(thread_of_load(), texts, note)
@@ -1265,10 +1281,34 @@ class FakeBrUsageBranches(unittest.TestCase):
                                       "REFUSED に、その分岐を踏む形を足す (本物の br も断ることを契約テストが確かめる)")
 
 
+# ---- 時刻をずらすテストの前提 (later) ---------------------------------------------------------------------------
+
+class Later:
+    """later() の後に run_cli と差し替え口の via_swap_point で書いたものが、前に書いたものより後の秒になること (時刻を
+    ずらして書くテストの前提)。later() が待たないと、時刻をずらすつもりのテストが同じ秒のまま通ってしまう。"""
+
+    def test_later_puts_what_is_written_next_in_a_later_second(self):
+        q = "later() の後に書いたコメントは、前に書いたものより後の秒"
+        iid = self.create("x")
+        self.next_second()                      # 書く 3 回が秒の境目をまたがないよう、秒の頭から始める (待たない later() を確実に落とす)
+        self.add_comment(iid, "before")
+        self.later()
+        self.add_comment(iid, "after-cli")
+        run = self.via_swap_point({})
+        run(self.proj, "--actor", "user/humanq", "comments", "add", iid, "-f", self.write_file("after-swap"))
+        rows = self.comment_rows(q, iid)
+        self.assertEqual(sorted(c.get("text") for c in rows), ["after-cli", "after-swap", "before"], self.m(q))
+        at = {c["text"]: str(c.get("created_at"))[:19] for c in rows}
+        for t in at.values():
+            self.assertRegex(t, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d$", self.m(q))
+        self.assertLess(at["before"], at["after-cli"], f"{self.m(q)}: run_cli で書いたもの")
+        self.assertLess(at["before"], at["after-swap"], f"{self.m(q)}: 差し替え口で書いたもの")
+
+
 for _subject in SUBJECTS:
     _mixin = BdQuirks if _subject.endswith("bd") else BrQuirks
     _name = _mixin.__name__ + "_" + _subject.replace("-", "_")
-    globals()[_name] = type(_name, (_mixin, SnoozeWrites, OverviewReads, ContractBase), {"SUBJECT": _subject})
+    globals()[_name] = type(_name, (_mixin, SnoozeWrites, OverviewReads, Later, ContractBase), {"SUBJECT": _subject})
 del _subject, _mixin, _name
 
 

@@ -184,7 +184,7 @@ HUMANQ_TEST_BD=bd python3 -m unittest discover -s tests   # 本物の bd の脚�
 PLAYWRIGHT_PATH=<playwright の index.mjs> node tests/ui_test.mjs   # 画面 (Playwright と chromium が要る)
 ```
 
-`tests/test_server.py` の bd を通すシナリオ (送り直し・ラベルの再試行・両ラベルの向きなど) は、`tests/fake_beads.py` (偽の bd) を一時の bin dir に置いて回すので、本物の bd が無い環境でも skip されない。偽物は bd 1.3.4 で実測した癖 (0 件の `human list --json` は `null` など) を持ち、失敗は env (`FAKE_BEADS_FAIL`) で注入する。サーバーが打つ bd の argv の列 (読み・回答・取り消し) と、回答・取り消し・読みあたりの bd の起動の数 (回答済みが 0 件・5 件・20 件で同じ) も、このテストで固定している。discover で流すと、このシナリオは別のプロセスで並列に回る (`HUMANQ_TEST_JOBS`、既定 3。`HUMANQ_TEST_JOBS=1` で直列。クラスやテストを名前で指したとき (`python3 -m unittest test_server.WithFakeBd` など) も直列)。
+`tests/test_server.py` の bd を通すシナリオ (送り直し・ラベルの再試行・両ラベルの向きなど) は、`tests/fake_beads.py` (偽の bd) を一時の bin dir に置いて回すので、本物の bd が無い環境でも skip されない。偽物は bd 1.3.4 で実測した癖 (0 件の `human list --json` は `null` など) を持ち、失敗は env (`FAKE_BEADS_FAIL`) で注入する。サーバーが打つ bd の argv の列 (読み・回答・取り消し) と、回答・取り消し・読みあたりの bd の起動の数 (回答済みが 0 件・5 件・20 件で同じ) も、このテストで固定している。discover で流すと、このシナリオは別のプロセスで並列に回る (`HUMANQ_TEST_JOBS`、既定 3。`HUMANQ_TEST_JOBS=1` で直列。クラスやテストを名前で指したとき (`python3 -m unittest test_server.WithFakeBd` など) も直列)。discover では、そのプロセスを test_server を読み込んだ時点で起こし、親がほかのモジュールを回している間にも回す。
 
 br のプロジェクトの読み (一覧と `show` の argv・終わっていない status のチケットが全部出ること・コメントの並べ替え・両ラベルの向き・bd を打たないこと・hook の案内) は、`tests/test_br_read.py` が同じ偽物を br の名前で置いて回す (偽の br はコメントを新しい順で返す)。回答・取り消しは、`tests/test_server.py` の `WithFakeBr` が bd と同じシナリオを偽の br で回し、サーバーが打つ br の argv の列も固定している。
 
