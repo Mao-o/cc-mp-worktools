@@ -1551,6 +1551,50 @@ class BdOnly:
         self.assertEqual(len(lists), 1, "fresh の読みが、待っていた間に終わった読みの後に、もう一度読んだ")
         self.assertIs(fresh, got["poll"], "fresh の読みが、待っていた間に終わった読みの結果を返していない")
 
+    # ---- 回答・取り消し・読みあたりの bd の起動の数: 回答済みの件数に比例して増えない ----
+    # 回答済みのコメントは覚え (ThreadMemo) から読む。0.18.1 までは読みのたびに回答済み 1 件ごとに bd comments を打ち
+    # (N+1)、回答済みが 20 件なら回答の後の読みは 23 回、取り消しの後と普段の読みは 22 回だった (bd は 1 回 0.2〜0.3 秒)
+    CLI_RUNS = {"回答": 5, "回答の後の読み": 3, "取り消し": 5, "取り消しの後の読み": 2, "普段の読み": 2}
+
+    def test_cli_runs_per_answer_undo_and_read_do_not_grow_with_the_answered(self):
+        made = 0
+        for n in (0, 5, 20):
+            for _ in range(n - made):
+                self.new_question(labels=("answered",))     # 回答済み (コメントの中身は打つ数に効かない)
+            made = n
+            with self.subTest(answered=n):
+                store = self.store()
+                iid = self.new_question()
+                self.read(store)                            # 最初の読み (回答済みのコメントを読んで覚える。ここは件数に比例する)
+                steps = (("回答", lambda: self.write(store.answer, {"id": iid, "option": "a"})),
+                         ("回答の後の読み", lambda: self.read(store)),
+                         ("取り消し", lambda: self.write(store.undo, {"id": iid})),
+                         ("取り消しの後の読み", lambda: self.read(store)),
+                         ("普段の読み", lambda: self.read(store)))
+                got = {}
+                for name, step in steps:
+                    before = self.calls("")                 # 空の規則は全部の呼び出しに当たる
+                    step()
+                    got[name] = self.calls("") - before
+                self.assertEqual(got, self.CLI_RUNS, f"回答済みが {n} 件のときの bd の起動の数")
+
+    def test_an_answer_rewritten_elsewhere_is_picked_up_after_a_refused_undo(self):
+        # 回答済みのコメントは覚えから読むので、ほかで書かれた [humanq] のコメント (別の端末で取り消して答え直した、など) は
+        # 最大 10 分遅れて出る。遅れて出た古いカードからの取り消しは照合で断られ、覚えを捨てるので、次の読みで今の回答が出る
+        iid = self.new_question()
+        store = self.store()
+        self.write(store.answer, {"id": iid, "option": "a"})
+        old = self.pick(self.read(store), "answered", iid)
+        self.add_comment(iid, "[humanq] 取り消し\n")             # ほかの端末の humanq (ラベルは回答済みに戻っている)
+        self.add_comment(iid, "[humanq] 回答: 案B (b)\n")
+        self.assertEqual(self.pick(self.read(store), "answered", iid)["asig"], old["asig"], "覚えの内なのにコメントを読み直した")
+        self.write(store.undo, {"id": iid, "asig": old["asig"]}, raises=humanq.Stale)
+        now = self.pick(self.read(store), "answered", iid)
+        self.assertTrue(now["answer"].startswith("[humanq] 回答: 案B (b)"), f"断った取り消しの後も古い覚えを使った: {now}")
+        self.assertNotEqual(now["asig"], old["asig"])
+        self.write(store.undo, {"id": iid, "asig": now["asig"]})
+        self.assertEqual(self.labels(iid) & {"human", "answered"}, {"human"})
+
     def test_bd_json_rejects_non_list(self):
         def listed(*args):
             try:
@@ -1693,8 +1737,9 @@ class WithFakeBd(FakeLog, BdScenarios, BdOnly, unittest.TestCase):
         os.makedirs(self.repo)
         bdc(self.repo, "init", "--non-interactive", "--quiet", "--skip-agents", "--skip-hooks", "-p", "hq")
 
-    # 今のサーバーが打つ bd の argv の 6 形を、読み → 回答 → 読み → 取り消しの順に並べたもの。
-    # bd を利用している人の挙動を、後で呼び出しを作り直しても変えないための固定 (<repo> <id> <tmp> は置き換えて比べる)
+    # 今のサーバーが打つ bd の argv の 8 形を、読み → 回答 → 読み → 読み → 取り消し → 読みの順に並べたもの。
+    # bd を利用している人の挙動を、後で呼び出しを作り直しても変えないための固定 (<repo> <id> <tmp> は置き換えて比べる)。
+    # 読みはどれもキャッシュの切れた読み (画面は 15 秒ごとに読み、キャッシュは 8 秒)
     HUMAN_LIST = ["-C", "<repo>", "human", "list", "--json"]
     ANSWERED_LIST = ["-C", "<repo>", "list", "--label", "answered", "--flat", "-n", "0", "--json"]    # status では絞らない
     COMMENTS = ["-C", "<repo>", "comments", "<id>", "--json"]
@@ -1706,13 +1751,19 @@ class WithFakeBd(FakeLog, BdScenarios, BdOnly, unittest.TestCase):
     GOLDEN = [
         HUMAN_LIST, ANSWERED_LIST,                                              # 読み (回答済みは 0 件)
         HUMAN_LIST, COMMENTS, COMMENT_ADD, ADD_ANSWERED, REMOVE_HUMAN,          # 回答
-        HUMAN_LIST, ANSWERED_LIST, COMMENTS,                                    # 読み (回答済みの本文を読む)
+        HUMAN_LIST, ANSWERED_LIST, COMMENTS,                                    # 読み (回答したチケットの覚えは捨ててあるので、本文を読む)
+        HUMAN_LIST, ANSWERED_LIST,                                              # 次の読み: 回答済みの本文は覚えから読み、COMMENTS を
+                                                                                # 打たない (0.18.1 までは打ち、回答済み 1 件ごとに 1 回増えた)
         ANSWERED_LIST, COMMENTS, COMMENT_ADD, ADD_HUMAN, REMOVE_ANSWERED,       # 取り消し
+        HUMAN_LIST, ANSWERED_LIST,                                              # 読み (取り消したチケットは回答済みに無い)
     ]
 
     def test_golden_argv(self):
         iid = self.new_question()
         port = self.serve(self.store())
+        cache = mock.patch.object(humanq, "CACHE_SEC", 0.0)                    # どの読みもキャッシュの切れた読みにする
+        cache.start()
+        self.addCleanup(cache.stop)
         start = len(self.log_entries())
         items = f"http://127.0.0.1:{port}/api/items"
 
@@ -1733,8 +1784,12 @@ class WithFakeBd(FakeLog, BdScenarios, BdOnly, unittest.TestCase):
         self.assertTrue(p["answered"][0]["answer"].startswith("[humanq] 回答: 案A (a)"), p["answered"][0])
         # 取り消しは画面と同じく回答の署名を付けて送る。照合は回答の応答・一覧・取り消しの読みに相乗りし、bd の呼び出しを増やさない
         self.assertEqual(p["answered"][0].get("asig"), j.get("asig"), (p["answered"][0], j))
+        again = project()                                                     # 覚えから作った回答済みのカードも同じ
+        self.assertEqual(again["answered"], p["answered"], "覚えから作った回答済みのカードが、読んで作ったものと違う")
         code, j = self.undo_http(port, iid, asig=j.get("asig"))
         self.assertEqual(code, 200, j)
+        p = project()
+        self.assertEqual(([i["id"] for i in p["human"]], [i["id"] for i in p["answered"]]), ([iid], []))
 
         self.assertEqual(self.normalized_argv(self.log_entries()[start:], iid), self.GOLDEN)
 

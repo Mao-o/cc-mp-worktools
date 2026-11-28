@@ -56,11 +56,11 @@ MAX_BODY = 64 * 1024
 # bd (埋め込み Dolt) は同時に開くと直列化して遅くなり、そのプロジェクトのセッションの書き込みとも競る。
 # プロジェクトごとに読みを 1 本にまとめ、CACHE_SEC の間は同じ結果を返す。書いたら捨てる
 CACHE_SEC = 8.0
-# 保留の thread の覚え (backend.ThreadMemo)。SNOOZE_MEMO_SEC は覚えを使う上限 (このサーバーの書き込みは、その場で捨てる)、
-# SNOOZE_READ_SEC は 1 回の読みで保留の thread を CLI で読む時間の上限。SessionStart の hook は件数の読みを 8 秒で
-# 打ち切る。画面の読みの最中なら、その読みの結果を受け取る (Store.project の fresh)。上限は一覧と回答済みのコメントの読みの
-# 後に数え始めるので、1 回の読みはその分だけ 2 秒より長い
-SNOOZE_MEMO_SEC = 600.0
+# 回答済みと保留の thread の覚え (backend.ThreadMemo)。THREAD_MEMO_SEC は覚えを使う上限 (このサーバーの書き込みは、その場で
+# 捨てる)、SNOOZE_READ_SEC は 1 回の読みで保留の thread を CLI で読む時間の上限 (回答済みには当てない)。SessionStart の hook は
+# 件数の読みを 8 秒で打ち切る。画面の読みの最中なら、その読みの結果を受け取る (Store.project の fresh)。上限は一覧と回答済みの
+# コメントの読みの後に数え始めるので、1 回の読みはその分だけ 2 秒より長い (回答済みのコメントを読むのは、覚えの無い・古いものだけ)
+THREAD_MEMO_SEC = 600.0
 SNOOZE_READ_SEC = 2.0
 # 時間の上限で読めなかった保留の thread を裏で読むとき、1 件ごとに読みのロックを放す間 (待っている読みを先に通す)
 WARM_GAP_SEC = 0.05
@@ -249,7 +249,7 @@ def _snooze_order(x: dict):
 
 
 def load_project(repo: str, be=None, memo: backend.ThreadMemo | None = None) -> dict:
-    """be は読む backend (省略は bd)、memo は保留の thread の覚え (Store が渡す。省略は覚えずに全部読む)。
+    """be は読む backend (省略は bd)、memo は回答済みと保留の thread の覚え (Store が渡す。省略は覚えずに全部読む)。
     判断待ち (human)・回答済み (answered)・保留中 (snoozed) を返す。判断待ちと保留中の各チケットには snooze が付く:
     判断待ちは None か、保留から戻ったもの ({until, note, expired, changed}。expired は戻る日が来た、changed は保留の後に
     問いが書き換わった。少なくとも一方が true)。保留中は {until, note, expired: false, changed: false}。"""
@@ -312,8 +312,8 @@ class Store:
         self._guard = threading.Lock()
         self._refreshing: set[str] = set()
         self._pool = ThreadPoolExecutor(max_workers=4)
-        # 保留の thread の覚え。書き込み (answer / undo / snooze / unsnooze) はそのチケットの覚えを捨てる
-        self._threads = backend.ThreadMemo(SNOOZE_MEMO_SEC, SNOOZE_READ_SEC)
+        # 回答済みと保留の thread の覚え。書き込み (answer / undo / snooze / unsnooze) はそのチケットの覚えを捨てる
+        self._threads = backend.ThreadMemo(THREAD_MEMO_SEC, SNOOZE_READ_SEC)
         self._warming: set[str] = set()
         self._warm_pool = ThreadPoolExecutor(max_workers=1)     # 画面の読み (_pool) の枠を裏の読みで埋めない
 
@@ -340,8 +340,8 @@ class Store:
 
     def project(self, repo: str, fresh: bool = False, groups: list[dict] | None = None) -> dict:
         """fresh なら、キャッシュが有効な間でも CLI で読み直す (/api/summary?fresh=1)。ただし問い合わせの後に終わった読み
-        (このロックを待っていた間に終わった画面の読み) の結果はそのまま返す。fresh でも、保留の thread は覚え (ThreadMemo)
-        から使う (読み直すのは一覧と回答済みのコメント)。"""
+        (このロックを待っていた間に終わった画面の読み) の結果はそのまま返す。fresh でも、回答済みと保留の thread は覚え
+        (ThreadMemo) から使う (読み直すのは一覧と、覚えの無い・古いコメント)。"""
         asked = time.monotonic()
         with self._lock(self._locks, repo):
             route = self.route(repo, groups)
@@ -443,7 +443,8 @@ class Store:
 
     @contextlib.contextmanager
     def _writing(self, repo: str, iid: str):
-        """書き込みのロックの下で書き、終わったら (失敗しても) そのチケットの保留の thread の覚えを捨てる。"""
+        """書き込みのロックの下で書き、終わったら (失敗しても) そのチケットの thread の覚え (回答済み・保留) を捨てる。
+        断った書き込み (Gone・Stale など) も捨てる: 古い覚えの署名で断られたカードが、次の読みで読み直した署名で出直す。"""
         with self._write_lock(repo):
             try:
                 yield
