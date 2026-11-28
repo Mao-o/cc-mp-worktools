@@ -187,8 +187,9 @@ details.snz > summary h2.sec, details.ansgrp > summary h2.sec, details.ansgrp > 
 details.snz[open] > summary, details.ansgrp[open] > summary { margin-bottom: 10px; }
 /* 回答の後のフォーカスは、見えるカードが他に無いとき、畳んだ節の summary へ移る (moveFocusAway) */
 details.snz > summary:focus-visible, details.ansgrp > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-/* 畳んだままでも、中に取り消しの失敗で戻ったカードがあると分かるよう、見出しの行に失敗の件数を出して警告の色にする (syncAnsHead) */
-details.ansgrp > summary.hasfail, details.ansgrp > summary.hasfail h2.sec, details.ansgrp > summary.hasfail h3 { color: var(--warn); }
+/* 畳んだままでも、中に取り消しの失敗で戻ったカードがあると分かるよう、見出しの行に失敗の件数を出して警告の色にする (syncAnsHead)。保留中の節も同じ (syncSnzHead) */
+details.ansgrp > summary.hasfail, details.ansgrp > summary.hasfail h2.sec, details.ansgrp > summary.hasfail h3,
+details.snz > summary.hasfail, details.snz > summary.hasfail h2.sec { color: var(--warn); }
 .snz .head .pj { display: block; }
 .empty { color: var(--muted); padding: 24px 0; text-align: center; }
 .banner { background: var(--panel); border: 1px solid var(--warn); color: var(--warn); border-radius: var(--radius); padding: 10px 14px; margin-top: 14px; overflow-wrap: anywhere; }
@@ -1000,6 +1001,13 @@ function makeGroup(kind, tag, cls, openKey) {
   d.addEventListener("toggle", () => { d.open ? openAns.add(openKey) : openAns.delete(openKey); });
   return { el: d, h3, top };
 }
+// 保留中の節の見出しの文。解除に失敗して戻ったカード (赤い枠) が中にあるときだけ「(失敗 n 件)」を足し、行を警告の色にする
+// (回答済みの節の syncAnsHead と同じ。節は畳んだままで、開閉の覚えも変えない)
+function syncSnzHead(sb, list) {
+  const f = list.filter(i => errors.has(sKey(i.project, i.id))).length;
+  sb.h.textContent = `保留中 (${list.length})` + (f ? ` (失敗 ${f} 件)` : "");
+  sb.sum.classList.toggle("hasfail", f > 0);
+}
 // 保留中の節 {el (details。既定は閉じる), sum (summary), h (見出し h2)}。判断待ちの一覧から外したものを、ページの下にまとめる
 let snzBox = null;
 function makeSnzBox() {
@@ -1281,7 +1289,7 @@ function render() {
   if (allS.length) {
     const sb = snzBox || (snzBox = makeSnzBox());
     if (sb.el._leave) unleave(sb.el);
-    sb.h.textContent = `保留中 (${allS.length})`;
+    syncSnzHead(sb, allS);
     snzEls = [sb.sum, ...allS.sort(bySnooze).map(i => ensureCard(i, "snz"))];
   }
 
