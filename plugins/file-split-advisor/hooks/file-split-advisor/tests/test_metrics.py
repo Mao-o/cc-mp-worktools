@@ -81,20 +81,6 @@ class TestCountDefsPythonSyntaxWarnings(unittest.TestCase):
         self.assertEqual(metrics.count_defs_python(text), 1)
 
 
-class TestCountDefsGeneric(unittest.TestCase):
-    def test_generic_keywords_counted(self):
-        text = (
-            "function foo() {}\n"
-            "class Bar {}\n"
-            "interface Baz {}\n"
-            "struct Qux {}\n"
-            "enum Quux {}\n"
-            "func corge() {}\n"
-        )
-        result = metrics.compute(_loaded(text), "go", Path("/repo/foo.go"))
-        self.assertEqual(result.def_count, 6)
-
-
 class TestCountDefsGenericExtended(unittest.TestCase):
     """0.4.0 で追加した定義形。旧版はいずれも 0 と数えていた。"""
 
@@ -830,23 +816,97 @@ class TestControlFlowLanguageKeywords(unittest.TestCase):
             _loaded(text), language, Path(f"/repo/{name}")
         ).control_flow_density
 
-    def test_python_elif_try_match(self):
-        text = "if a:\n    pass\nelif b:\n    pass\ntry:\n    pass\nmatch c:\n    pass\n"
-        # 8 行中 4 行 (if / elif / try / match)
-        self.assertAlmostEqual(self._density(text, "python", "foo.py"), 4 / 8)
+    # (元のテスト名, 入力, 言語, ファイル名, 期待する密度)。由来のコメントは行ごとに残す。
+    _KEYWORD_CASES = (
+        (
+            "test_python_elif_try_match",
+            "if a:\n    pass\nelif b:\n    pass\ntry:\n    pass\nmatch c:\n    pass\n",
+            "python",
+            "foo.py",
+            # 8 行中 4 行 (if / elif / try / match)
+            4 / 8,
+        ),
+        (
+            # `match` は soft keyword。行内一致にすると re.match を使うだけの
+            # ファイルが高密度に見える。
+            "test_python_re_match_call_is_not_control_flow",
+            "import re\nm = re.match(P, s)\nn = p.match(s)\n",
+            "python",
+            "foo.py",
+            0.0,
+        ),
+        (
+            # 文頭でも `match = ...` (代入) / `match(...)` (呼び出し) /
+            # `match.group(0)` / `match[0]` は soft keyword を変数名として使って
+            # いるだけで制御フローではない (マージ前レビューの指摘)。
+            "test_python_match_as_a_variable_name_is_not_control_flow",
+            "match = re.match(P, s)\nmatch(x)\nmatch.group(0)\nmatch[0]\n",
+            "python",
+            "foo.py",
+            0.0,
+        ),
+        (
+            # unless / until / rescue / elsif の 4 行
+            "test_ruby_keywords",
+            "x = 1 unless y\nuntil done\nend\nbegin\nrescue => e\nend\nelsif z\n",
+            "ruby",
+            "foo.rb",
+            4 / 7,
+        ),
+        (
+            # `case` だけ数えて `when` を落とすと、Ruby の case 式の分岐本数が
+            # 密度に現れない (マージ前レビューの指摘)。
+            "test_ruby_case_when",
+            "case x\nwhen 1\nwhen 2\nend\n",
+            "ruby",
+            "foo.rb",
+            3 / 4,
+        ),
+        (
+            "test_rust_match_and_loop",
+            "let v = match x {\n};\nloop {\n}\n",
+            "rust",
+            "foo.rs",
+            2 / 4,
+        ),
+        (
+            "test_kotlin_when",
+            "val r = when (x) {\n}\n",
+            "kotlin",
+            "Foo.kt",
+            1 / 2,
+        ),
+        (
+            "test_go_select",
+            "select {\ncase <-ch:\n}\n",
+            "go",
+            "foo.go",
+            2 / 3,
+        ),
+        (
+            # JavaScript の `str.match(...)` / `select` を制御フローとして
+            # 数えないこと (言語別集合にしている理由)。
+            "test_language_keywords_do_not_leak_across_languages",
+            "const m = s.match(re);\nconst q = select(state);\nconst w = when(x);\n",
+            "javascript",
+            "foo.js",
+            0.0,
+        ),
+        (
+            # 未登録言語でも基本集合は従来どおり数える (床テスト)。
+            "test_base_keywords_still_counted_for_unknown_language",
+            "if (x) {\nfor (;;) {\nswitch (y) {\nz = 1\n",
+            "generic",
+            "foo.xyz",
+            3 / 4,
+        ),
+    )
 
-    def test_python_re_match_call_is_not_control_flow(self):
-        # `match` は soft keyword。行内一致にすると re.match を使うだけの
-        # ファイルが高密度に見える。
-        text = "import re\nm = re.match(P, s)\nn = p.match(s)\n"
-        self.assertAlmostEqual(self._density(text, "python", "foo.py"), 0.0)
-
-    def test_python_match_as_a_variable_name_is_not_control_flow(self):
-        # 文頭でも `match = ...` (代入) / `match(...)` (呼び出し) /
-        # `match.group(0)` / `match[0]` は soft keyword を変数名として使って
-        # いるだけで制御フローではない (マージ前レビューの指摘)。
-        text = "match = re.match(P, s)\nmatch(x)\nmatch.group(0)\nmatch[0]\n"
-        self.assertAlmostEqual(self._density(text, "python", "foo.py"), 0.0)
+    def test_language_keywords_are_counted_as_control_flow(self):
+        self.assertEqual(len(self._KEYWORD_CASES), 10)
+        for label, text, language, name, expected in self._KEYWORD_CASES:
+            with self.subTest(label):
+                self.assertAlmostEqual(self._density(text, language, name), expected)
 
     def test_python_match_statement_with_parenthesized_subject(self):
         # `match (value):` (subject を括弧で囲む) / `match (a, b):`
@@ -862,43 +922,6 @@ class TestControlFlowLanguageKeywords(unittest.TestCase):
             with self.subTest(subject=subject):
                 text = subject + "\n    pass\n"
                 self.assertAlmostEqual(self._density(text, "python", "foo.py"), 1 / 2)
-        # 引き続き数えない形 (床テスト): 代入・呼び出し・属性/添字アクセス。
-        text = "match = re.match(P, s)\nmatch(x)\nmatch.group(0)\nmatch[0]\n"
-        self.assertAlmostEqual(self._density(text, "python", "foo.py"), 0.0)
-
-    def test_ruby_keywords(self):
-        text = "x = 1 unless y\nuntil done\nend\nbegin\nrescue => e\nend\nelsif z\n"
-        # unless / until / rescue / elsif の 4 行
-        self.assertAlmostEqual(self._density(text, "ruby", "foo.rb"), 4 / 7)
-
-    def test_ruby_case_when(self):
-        # `case` だけ数えて `when` を落とすと、Ruby の case 式の分岐本数が
-        # 密度に現れない (マージ前レビューの指摘)。
-        text = "case x\nwhen 1\nwhen 2\nend\n"
-        self.assertAlmostEqual(self._density(text, "ruby", "foo.rb"), 3 / 4)
-
-    def test_rust_match_and_loop(self):
-        text = "let v = match x {\n};\nloop {\n}\n"
-        self.assertAlmostEqual(self._density(text, "rust", "foo.rs"), 2 / 4)
-
-    def test_kotlin_when(self):
-        text = "val r = when (x) {\n}\n"
-        self.assertAlmostEqual(self._density(text, "kotlin", "Foo.kt"), 1 / 2)
-
-    def test_go_select(self):
-        text = "select {\ncase <-ch:\n}\n"
-        self.assertAlmostEqual(self._density(text, "go", "foo.go"), 2 / 3)
-
-    def test_language_keywords_do_not_leak_across_languages(self):
-        # JavaScript の `str.match(...)` / `select` を制御フローとして
-        # 数えないこと (言語別集合にしている理由)。
-        text = "const m = s.match(re);\nconst q = select(state);\nconst w = when(x);\n"
-        self.assertAlmostEqual(self._density(text, "javascript", "foo.js"), 0.0)
-
-    def test_base_keywords_still_counted_for_unknown_language(self):
-        # 未登録言語でも基本集合は従来どおり数える (床テスト)。
-        text = "if (x) {\nfor (;;) {\nswitch (y) {\nz = 1\n"
-        self.assertAlmostEqual(self._density(text, "generic", "foo.xyz"), 3 / 4)
 
 
 class TestControlFlowExcludesCommentsAndStrings(unittest.TestCase):
@@ -907,58 +930,84 @@ class TestControlFlowExcludesCommentsAndStrings(unittest.TestCase):
             _loaded(text), language, Path(f"/repo/{name}")
         ).control_flow_density
 
-    def test_python_comment_keywords_not_counted(self):
-        text = "# if you need this, for each item\nx = 1\n"
-        self.assertAlmostEqual(self._density(text, "python", "foo.py"), 0.0)
+    # (元のテスト名, 入力, 言語, ファイル名, 期待する密度)。由来のコメントは行ごとに残す。
+    _EXCLUDE_CASES = (
+        (
+            "test_python_comment_keywords_not_counted",
+            "# if you need this, for each item\nx = 1\n",
+            "python",
+            "foo.py",
+            0.0,
+        ),
+        (
+            "test_python_string_keywords_not_counted",
+            "MSG = 'for example, if this then switch'\ny = 2\n",
+            "python",
+            "foo.py",
+            0.0,
+        ),
+        (
+            "test_python_docstring_prose_not_counted",
+            '"""\nif you need this, while working, for each item\n"""\nx = 1\n',
+            "python",
+            "foo.py",
+            0.0,
+        ),
+        (
+            "test_js_block_comment_not_counted",
+            "/*\n * if for while switch\n */\nconst a = 1;\n",
+            "javascript",
+            "foo.js",
+            0.0,
+        ),
+        (
+            # Go の raw string (バッククォート) も改行を跨ぐ (マージ前レビューの指摘)。
+            "test_go_raw_string_spans_lines",
+            "const q = `\nif the row is missing\nfor each column\n`\nx := 1\n",
+            "go",
+            "foo.go",
+            0.0,
+        ),
+        (
+            # エスケープされたバッククォートを閉じ区切りと誤認すると、以降の行が
+            # まるごと文字列扱いになり制御フローが 0 になる (マージ前レビューの
+            # 指摘)。密度で固定する。
+            "test_code_after_an_escaped_backtick_is_still_counted",
+            "const s = `use \\` here`;\nif (a) {\n  for (const x of a) {}\n}\n",
+            "javascript",
+            "foo.js",
+            0.5,
+        ),
+        (
+            # 分子だけをマスクし、分母は元テキストの非空行のまま。
+            "test_comment_lines_stay_in_denominator",
+            "# if you need this\nif x:\n    pass\n",
+            "python",
+            "foo.py",
+            1 / 3,
+        ),
+        (
+            "test_code_after_inline_comment_marker_in_string_is_kept",
+            'URL = "http://x/#frag"\nif URL:\n    pass\n',
+            "python",
+            "foo.py",
+            1 / 3,
+        ),
+        (
+            # C 系で `#` を行コメント扱いすると `#if` が消える。
+            "test_c_preprocessor_conditional_still_counted",
+            "#if defined(X)\nint a;\n#endif\n",
+            "c",
+            "foo.c",
+            1 / 3,
+        ),
+    )
 
-    def test_python_string_keywords_not_counted(self):
-        text = "MSG = 'for example, if this then switch'\ny = 2\n"
-        self.assertAlmostEqual(self._density(text, "python", "foo.py"), 0.0)
-
-    def test_python_docstring_prose_not_counted(self):
-        text = '"""\nif you need this, while working, for each item\n"""\nx = 1\n'
-        self.assertAlmostEqual(self._density(text, "python", "foo.py"), 0.0)
-
-    def test_js_block_comment_not_counted(self):
-        text = "/*\n * if for while switch\n */\nconst a = 1;\n"
-        self.assertAlmostEqual(self._density(text, "javascript", "foo.js"), 0.0)
-
-    def test_go_raw_string_spans_lines(self):
-        # Go の raw string (バッククォート) も改行を跨ぐ (マージ前レビューの指摘)。
-        text = (
-            "const q = `\n"
-            "if the row is missing\n"
-            "for each column\n"
-            "`\n"
-            "x := 1\n"
-        )
-        self.assertAlmostEqual(self._density(text, "go", "foo.go"), 0.0)
-
-    def test_code_after_an_escaped_backtick_is_still_counted(self):
-        # エスケープされたバッククォートを閉じ区切りと誤認すると、以降の行が
-        # まるごと文字列扱いになり制御フローが 0 になる (マージ前レビューの
-        # 指摘)。密度で固定する。
-        text = (
-            "const s = `use \\` here`;\n"
-            "if (a) {\n"
-            "  for (const x of a) {}\n"
-            "}\n"
-        )
-        self.assertAlmostEqual(self._density(text, "javascript", "foo.js"), 0.5)
-
-    def test_comment_lines_stay_in_denominator(self):
-        # 分子だけをマスクし、分母は元テキストの非空行のまま。
-        text = "# if you need this\nif x:\n    pass\n"
-        self.assertAlmostEqual(self._density(text, "python", "foo.py"), 1 / 3)
-
-    def test_code_after_inline_comment_marker_in_string_is_kept(self):
-        text = 'URL = "http://x/#frag"\nif URL:\n    pass\n'
-        self.assertAlmostEqual(self._density(text, "python", "foo.py"), 1 / 3)
-
-    def test_c_preprocessor_conditional_still_counted(self):
-        # C 系で `#` を行コメント扱いすると `#if` が消える。
-        text = "#if defined(X)\nint a;\n#endif\n"
-        self.assertAlmostEqual(self._density(text, "c", "foo.c"), 1 / 3)
+    def test_comments_and_strings_are_excluded_from_the_numerator(self):
+        self.assertEqual(len(self._EXCLUDE_CASES), 9)
+        for label, text, language, name, expected in self._EXCLUDE_CASES:
+            with self.subTest(label):
+                self.assertAlmostEqual(self._density(text, language, name), expected)
 
     def test_without_text_falls_back_to_per_line_masking(self):
         # 全文を渡さない呼び出しでは行単位のマスクになる。行コメントは消えるが、

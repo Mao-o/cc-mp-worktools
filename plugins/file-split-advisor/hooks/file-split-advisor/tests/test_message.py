@@ -454,38 +454,50 @@ class TestPartialThresholds(unittest.TestCase):
 class TestDisplayTiers(unittest.TestCase):
     """目安は判定 tier + 隣接 tier を表示する (以前は review/warn 固定)。"""
 
-    def test_note_tier_shows_note_and_review(self):
-        v = _verdict(tier="note")
-        text = message.build(Path("foo.py"), "python", "normal", v, _metrics(line_count=200))
-        self.assertIn("note=150", text)
-        self.assertIn("review=300", text)
-        self.assertNotIn("warn=", text)
-        self.assertNotIn("strong=", text)
-
-    def test_review_tier_shows_review_and_warn(self):
-        v = _verdict(tier="review")
-        text = message.build(Path("foo.py"), "python", "normal", v, _metrics())
-        self.assertIn("review=300", text)
-        self.assertIn("warn=500", text)
-        self.assertNotIn("note=", text)
-        self.assertNotIn("strong=", text)
-
-    def test_warn_tier_shows_warn_and_strong(self):
-        v = _verdict(tier="warn")
-        text = message.build(Path("foo.py"), "python", "normal", v, _metrics(line_count=550))
-        self.assertIn("warn=500", text)
-        self.assertIn("strong=800", text)
-        self.assertNotIn("note=", text)
-        self.assertNotIn("review=", text)
-
-    def test_strong_tier_shows_warn_and_strong(self):
+    # (元のテスト名, tier, _metrics() の引数, 表示される目安, 表示されない目安)。
+    # review のケースは _metrics() の既定値のまま (引数なし)。
+    _CASES = (
+        (
+            "test_note_tier_shows_note_and_review",
+            "note",
+            {"line_count": 200},
+            ("note=150", "review=300"),
+            ("warn=", "strong="),
+        ),
+        (
+            "test_review_tier_shows_review_and_warn",
+            "review",
+            {},
+            ("review=300", "warn=500"),
+            ("note=", "strong="),
+        ),
+        (
+            "test_warn_tier_shows_warn_and_strong",
+            "warn",
+            {"line_count": 550},
+            ("warn=500", "strong=800"),
+            ("note=", "review="),
+        ),
         # strong には「1 つ上」が無いため、1 つ下 (warn) + 自身を表示する。
-        v = _verdict(tier="strong")
-        text = message.build(Path("foo.py"), "python", "normal", v, _metrics(line_count=900))
-        self.assertIn("warn=500", text)
-        self.assertIn("strong=800", text)
-        self.assertNotIn("note=", text)
-        self.assertNotIn("review=", text)
+        (
+            "test_strong_tier_shows_warn_and_strong",
+            "strong",
+            {"line_count": 900},
+            ("warn=500", "strong=800"),
+            ("note=", "review="),
+        ),
+    )
+
+    def test_each_tier_shows_itself_and_its_neighbour(self):
+        self.assertEqual(len(self._CASES), 4)
+        for label, tier, metrics_kwargs, shown, hidden in self._CASES:
+            with self.subTest(label):
+                v = _verdict(tier=tier)
+                text = message.build(Path("foo.py"), "python", "normal", v, _metrics(**metrics_kwargs))
+                for expected in shown:
+                    self.assertIn(expected, text)
+                for unexpected in hidden:
+                    self.assertNotIn(unexpected, text)
 
 
 class TestThresholdDisplayRounding(unittest.TestCase):

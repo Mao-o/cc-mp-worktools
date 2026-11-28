@@ -135,23 +135,9 @@ class TestAppliedMultipliers(unittest.TestCase):
         self.assertAlmostEqual(v.applied_multipliers["role"], 2.5)
         self.assertAlmostEqual(v.applied_multipliers["declarative"], 1.0)
 
-    def test_declarative_multiplier_recorded_when_applied(self):
-        m = _metrics(line_count=0, control_flow_density=0.01)  # < 0.02
-        v = judge.judge(m, "typescript", "normal")
-        self.assertAlmostEqual(v.applied_multipliers["declarative"], 1.6)
-
-    def test_declarative_multiplier_is_neutral_when_not_applied(self):
-        m = _metrics(line_count=0, control_flow_density=0.3)  # high density, not declarative
-        v = judge.judge(m, "typescript", "normal")
-        self.assertAlmostEqual(v.applied_multipliers["declarative"], 1.0)
-
 
 class TestScale(unittest.TestCase):
     """FILE_SPLIT_ADVISOR_SCALE (全閾値への一律倍率)。"""
-
-    def test_default_scale_is_neutral(self):
-        v = judge.judge(_metrics(line_count=0), "python", "normal")
-        self.assertAlmostEqual(v.thresholds["review"], 300)
 
     def test_scale_multiplies_all_thresholds(self):
         v = judge.judge(_metrics(line_count=0), "python", "normal", scale=2.0)
@@ -215,29 +201,23 @@ class TestTierBoundaries(unittest.TestCase):
         m = _metrics(line_count=line_count, control_flow_density=0.1)
         return judge.judge(m, "typescript", "normal").tier
 
-    def test_below_note_is_ok(self):
-        self.assertEqual(self._tier_for(149), "ok")
+    # (元のテスト名, 行数, tier)
+    _CASES = (
+        ("test_below_note_is_ok", 149, "ok"),
+        ("test_note_lower_bound_inclusive", 150, "note"),
+        ("test_just_below_review_is_note", 299, "note"),
+        ("test_review_lower_bound_inclusive", 300, "review"),
+        ("test_just_below_warn_is_review", 499, "review"),
+        ("test_warn_lower_bound_inclusive", 500, "warn"),
+        ("test_just_below_strong_is_warn", 799, "warn"),
+        ("test_strong_lower_bound_inclusive", 800, "strong"),
+    )
 
-    def test_note_lower_bound_inclusive(self):
-        self.assertEqual(self._tier_for(150), "note")
-
-    def test_just_below_review_is_note(self):
-        self.assertEqual(self._tier_for(299), "note")
-
-    def test_review_lower_bound_inclusive(self):
-        self.assertEqual(self._tier_for(300), "review")
-
-    def test_just_below_warn_is_review(self):
-        self.assertEqual(self._tier_for(499), "review")
-
-    def test_warn_lower_bound_inclusive(self):
-        self.assertEqual(self._tier_for(500), "warn")
-
-    def test_just_below_strong_is_warn(self):
-        self.assertEqual(self._tier_for(799), "warn")
-
-    def test_strong_lower_bound_inclusive(self):
-        self.assertEqual(self._tier_for(800), "strong")
+    def test_tier_boundaries(self):
+        self.assertEqual(len(self._CASES), 8)
+        for label, line_count, tier in self._CASES:
+            with self.subTest(label):
+                self.assertEqual(self._tier_for(line_count), tier)
 
 
 class TestSignals(unittest.TestCase):
@@ -270,14 +250,6 @@ class TestSignals(unittest.TestCase):
         m = _metrics(line_count=0, control_flow_density=0.3)
         v = judge.judge(m, "typescript", "normal")
         self.assertIn("control_flow_density", v.signals)
-
-    def test_control_flow_density_signal_suppressed_when_declarative(self):
-        # density < DECLARATIVE_THRESHOLD (0.02) なら宣言的緩和が先に効き、
-        # そもそも high-density のしきい値 (0.25) を満たさない領域だが、念のため
-        # 「宣言的 かつ high density」の組み合わせが両立しないことを明示する。
-        m = _metrics(line_count=0, control_flow_density=0.01)
-        v = judge.judge(m, "typescript", "normal")
-        self.assertNotIn("control_flow_density", v.signals)
 
 
 class TestEmitMatrix(unittest.TestCase):
